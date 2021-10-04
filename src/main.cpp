@@ -9,10 +9,9 @@ class lanDB {
 
         // Check if there's any existing database
         bool hasDB() {
-//            const char *dataStorePath = "dataStore";
-            std::experimental::filesystem::path dataStorePath = "../lanDB/dataStore";
-//            std::cout << "Directory: " << dataStorePath << " is " << std::experimental::filesystem::path(dataStorePath).empty() << std::endl;
-            std::cout << dataStorePath.parent_path() << std::endl;
+            // Path to dataStore -- Currently hard-coded | WILL NEED TO FIX SO IT IS DYNAMIC
+            const std::experimental::filesystem::path tmp_dir{ std::experimental::filesystem::path("/Users/user/CLionProjects/lanDB/dataStore")};
+            return !std::experimental::filesystem::is_empty(tmp_dir);
         }
 
         // INSERT time-series oriented values
@@ -28,4 +27,5 @@ int main(int argc, char *argv[]) {
     // Instantiate lanDB obj
     lanDB lanDbObj;
     lanDbObj.hasDB();
+    std::cout << bool(lanDbObj.hasDB()) << std::endl;
 }
