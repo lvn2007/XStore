@@ -3,6 +3,41 @@
 #include <filesystem>
 #include <iomanip>
 #include <time.h>
+#include <algorithm>
+
+class dataStruct {
+private:
+    std::time_t unixTime;
+    std::string data;
+public:
+    // Constructor
+    dataStruct(std::time_t unixTime, std::string data) {
+        this->unixTime = unixTime;
+
+        // Ensuring no WHITESPACE in data
+        data.erase(std::remove(data.begin(), data.end(), ' '), data.end());
+        this->data = data;
+
+    }
+
+    // Getter
+    std::time_t getUnixtime() {
+        return unixTime;
+    }
+
+    std::string getData() {
+        return data;
+    }
+
+    // Simply print out the data it holds in a formatted way
+    void printData (bool humanTime) {
+        if (humanTime) {
+            std::cout << "Timestamp: " << ctime(&unixTime) << " | Data: " << data << std::endl;
+            return;
+        }
+        std::cout << "Timestamp: " << unixTime << " | Data: " << data << std::endl;
+    }
+};
 
 // Time-series oriented database
 class xStore {
@@ -23,6 +58,9 @@ class xStore {
             std::cout << toHumanMonth(1514764800) << std::endl;
             std::cout << toHumanDay(1514764800) << std::endl;
             std::cout << getTimeResolution(1514764800) << std::endl;
+//            dataStruct currData(1514764800, "111,222,333,444,555,666,777,888");
+//            std::cout << currData.getData() << std::endl;
+//            std::cout << sizeof(currData.getData()) << std::endl;
         }
 
         // INSERT time-series oriented values
@@ -31,17 +69,54 @@ class xStore {
                 // IF no DB exists i.e., dbCount == 0
                 case 0:
                     //  -> Create new one
-                    std::filesystem::create_directories(baseDir + "/xStore/dataStore" + dbName);
+                    std::filesystem::create_directories(baseDir + "/xStore/dataStore/" + dbName);
 
                     // Read timeValue -- UNIX time
                     int inputYear = toHumanYear(unixTime);
 
-                    // Create a file with name of inputYear.XSTORE
-                    std::cout << is_regular_file(std::filesystem::path(baseDir + "/xStore/dataStore/tsla/2018.xstore")) << std::endl;
+                    // IF a DB contains no data
+                    if (std::filesystem::is_regular_file(std::filesystem::path(baseDir + "/xStore/dataStore/tsla/2018.XSTORE")) == 0) {
+                        std::ofstream currFile;
+                        // -> Create a file with name of inputYear.XSTORE
+                        currFile.open(baseDir + "/xStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE", std::ios::app|std::ios::binary);
 
+                        // Error handling
+                        if (!currFile) {
+                            std::cout << "Error creating file: " << std::to_string(inputYear) + ".XSTORE" << std::endl;
+                            break;
+                        }
+
+                        // IF no error
+                        // -> Organize timestamp & data into an object
+                        dataStruct currData{unixTime, value};
+
+                        // Write as binary file to disk
+                        currFile.write((char *) &currData, sizeof(currData));
+
+                        // Close file after write
+                        currFile.close();
+                        std::cout << "DONE" << std::endl;
+//
+//                        currFile.open(std::to_string(inputYear) + ".XSTORE", std::ios::in|std::ios::binary);
+//
+//                        if (currFile.read((char*) &currData, sizeof(currData))) {
+//                            currData.printData(true);
+//                        }
+                    }
                     break;
             }
         }
+
+        void readData() {
+//            std::fstream currFile;
+//            dataStruct currData = {};
+//
+//            currFile.open(baseDir + "/xStore/dataStore/" + "tsla" + "/" + std::to_string(2018) + ".XSTORE", std::ios::in|std::ios::binary);
+//
+//            currFile.read((char*) &currData, sizeof(dataStruct));
+//
+        }
+
 
     private:
         // Check if there's any existing database
@@ -124,6 +199,7 @@ class xStore {
 int main(int argc, char *argv[]) {
     // Instantiate lanDB obj
     xStore myStore;
+    myStore.insert(1514764800, "111,222,333,444,555,666,777,888", "tsla");
 
 //    std::time_t unixTime = 1504224002;
 //    std::cout << ctime(&unixTime) << std::endl;
