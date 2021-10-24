@@ -18,10 +18,15 @@ class xStore {
 
             //  First, check if there's any existing data exists
             hasDB();
+
+            std::cout << toHumanYear(1514764800) << std::endl;
+            std::cout << toHumanMonth(1514764800) << std::endl;
+            std::cout << toHumanDay(1514764800) << std::endl;
+            std::cout << getTimeResolution(1514764800) << std::endl;
         }
 
         // INSERT time-series oriented values
-        void insert(std::string timeValue, std::string value, std::string dbName) {
+        void insert(std::time_t unixTime, std::string value, std::string dbName) {
             switch (dbCount) {
                 // IF no DB exists i.e., dbCount == 0
                 case 0:
@@ -29,6 +34,11 @@ class xStore {
                     std::filesystem::create_directories(baseDir + "/xStore/dataStore" + dbName);
 
                     // Read timeValue -- UNIX time
+                    int inputYear = toHumanYear(unixTime);
+
+                    // Create a file with name of inputYear.XSTORE
+                    std::cout << is_regular_file(std::filesystem::path(baseDir + "/xStore/dataStore/tsla/2018.xstore")) << std::endl;
+
                     break;
             }
         }
@@ -66,17 +76,60 @@ class xStore {
                 dbNames.push_back(p.path().filename());
             }
         }
+
+        bool yearExists(int inputYear, std::string dbName) {
+            std::string path = baseDir + "/xStore/dataStore" + dbName;
+
+            for (const auto & entry : std::filesystem::directory_iterator(path)) {
+                std::cout << entry.path();
+            }
+        }
+
+        // Time extractor
+        std::string getTimeResolution(std::time_t unixTime) {
+            int count = 0;
+
+            while (unixTime != 0) {
+                unixTime /= 10;
+                ++count;
+            }
+
+            if (count >= 10 && count < 13) {
+                return "SECOND";
+            }
+            else if (count >= 13 && count < 16) {
+                return "MILLISECOND";
+            }
+            else if (count >= 16) {
+                return "MICROSECOND";
+            }
+        }
+
+        int toHumanYear(std::time_t unixTime) {
+            tm* timePtr = localtime(&unixTime);
+            return timePtr -> tm_year + 1900;
+        }
+
+        int toHumanMonth(std::time_t unixTime) {
+            tm* timePtr = localtime(&unixTime);
+            return timePtr -> tm_mon + 1;
+        }
+
+        int toHumanDay(std::time_t unixTime) {
+            tm* timePtr = localtime(&unixTime);
+            return timePtr -> tm_mday;
+        }
 };
 
 int main(int argc, char *argv[]) {
     // Instantiate lanDB obj
     xStore myStore;
 
-    std::time_t unixTime = 1504224002;
-    std::cout << ctime(&unixTime) << std::endl;
-    tm* timePtr = localtime(&unixTime);
-    std::cout << timePtr->tm_year + 1900 << std::endl;
-    std::cout << timePtr->tm_mon + 1 << std::endl;
+//    std::time_t unixTime = 1504224002;
+//    std::cout << ctime(&unixTime) << std::endl;
+//    tm* timePtr = localtime(&unixTime);
+//    std::cout << timePtr->tm_year + 1900 << std::endl;
+//    std::cout << timePtr->tm_mon + 1 << std::endl;
 //    std::cout << std::asctime(std::localtime(&result)) << std::endl;
 //    std::tm tm = {};
 //    std::stringstream ss("Jan 9 2014 12:35:34");
