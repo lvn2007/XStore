@@ -1,11 +1,16 @@
 #include <iostream>
 #include <fstream>
-#include <experimental/filesystem>
-#include <dirent.h>
+#include <filesystem>
+#include <iomanip>
+#include <time.h>
 
 // Time-series oriented database
 class xStore {
     public:
+        std::string baseDir = "/home/ubuntu";
+        int dbCount = 0;
+        std::vector<std::string> dbNames = { };
+
         // Initialization
         xStore() {
             // Initialized message
@@ -13,44 +18,68 @@ class xStore {
 
             //  First, check if there's any existing data exists
             hasDB();
-
-            // Second, count number of DB stored
-//            dbCount();
-
-
         }
 
         // INSERT time-series oriented values
-        void insert(std::string timeValue, std::string value) {
+        void insert(std::string timeValue, std::string value, std::string dbName) {
+            switch (dbCount) {
+                // IF no DB exists i.e., dbCount == 0
+                case 0:
+                    //  -> Create new one
+                    std::filesystem::create_directories(baseDir + "/xStore/dataStore" + dbName);
 
+                    // Read timeValue -- UNIX time
+                    break;
+            }
         }
 
     private:
         // Check if there's any existing database
         bool hasDB() {
             // Path to dataStore -- Currently hard-coded | WILL NEED TO FIX SO IT IS DYNAMIC
-            const std::experimental::filesystem::path tmp_dir{ std::experimental::filesystem::path("/home/ubuntu/xStore/dataStore")};
-            return !std::experimental::filesystem::is_empty(tmp_dir);
+            const std::filesystem::path tmp_dir{ std::filesystem::path(baseDir + "/xStore/dataStore")};
+            return !std::filesystem::is_empty(tmp_dir);
         }
 
         void initMsg() {
             std::cout << "---- xStore Initialized ----" << std::endl;
-            std::cout << " - DB Count: " << dbCount() << std::endl;
+            dbStats();
+            std::cout << " - DB Count: " <<  dbCount << std::endl;
+
+            std::cout << " - DB Names: [ ";
+            for (int i = 0; i < dbNames.size(); i++) {
+                if (i + 1 != dbNames.size()) {
+                    std::cout << dbNames.at(i) << ", ";
+                    continue;
+                }
+                std::cout << dbNames.at(i);
+            }
+            std::cout << " ]" << std::endl;
         }
 
-        int dbCount() {
-            int count = 0;
-            std::experimental::filesystem::path dbDir = "/home/ubuntu/xStore/dataStore";
+        void dbStats() {
+            std::filesystem::path dbDir = baseDir + "/xStore/dataStore";
 
-            for (auto& p : std::experimental::filesystem::directory_iterator(dbDir))
+            for (auto& p : std::filesystem::directory_iterator(dbDir))
             {
-                count++;
+                dbCount++;
+                dbNames.push_back(p.path().filename());
             }
-            return count;
         }
 };
 
 int main(int argc, char *argv[]) {
     // Instantiate lanDB obj
     xStore myStore;
+
+    std::time_t unixTime = 1504224002;
+    std::cout << ctime(&unixTime) << std::endl;
+    tm* timePtr = localtime(&unixTime);
+    std::cout << timePtr->tm_year + 1900 << std::endl;
+    std::cout << timePtr->tm_mon + 1 << std::endl;
+//    std::cout << std::asctime(std::localtime(&result)) << std::endl;
+//    std::tm tm = {};
+//    std::stringstream ss("Jan 9 2014 12:35:34");
+//    ss >> std::get_time(&tm, "%b %d %Y %H:%M:%S");
+//    auto tp = std::chrono::system_clock::from_time_t(std::mktime(&tm));
 }
