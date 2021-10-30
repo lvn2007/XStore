@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdio>
 
+// Every line of data == 100 bytes in size
 #define lineSize 100
 
 // Data structure to hold time-value together
