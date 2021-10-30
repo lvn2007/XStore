@@ -4,24 +4,29 @@
 #include <algorithm>
 #include <cstdio>
 
+#define lineSize 100
+
+// Data structure to hold time-value together
 struct dataStruct {
     std::time_t unixTime;
     std::string data;
 
+    // Constructor
     dataStruct(std::time_t unixTime, std::string data) {
             this->unixTime = unixTime;
             this->data = data;
 
             // Ensuring no WHITESPACE in data
             data.erase(std::remove(data.begin(), data.end(), ' '), data.end());
-
-//            allData = std::to_string(unixTime) + "," + data;
     }
 
+    // Returning a line
+    //  i.e., unixTime, values
     std::string getData() {
         return std::to_string(unixTime) + "," + data;
     }
 
+    // Printing out time-value
     void printData(bool humanTime) {
         if (humanTime) {
             std::cout << "Timestamp: " << ctime(&unixTime) << " | Data: " << data << std::endl;
@@ -77,19 +82,8 @@ class xStore {
                         // DEBUG: Printing data current size
                         std::cout << currData.getData().size() << std::endl;
 
-                        // Write as binary file to disk
-                        std::fwrite(currData.getData().data(), 100, 1, bFile);
-
-                        // Write new line at the end of data
-                        std::fwrite("\n", sizeof(char), 1, bFile);
-
-                        // ------
-                        // Write as binary file to disk
-                        std::fwrite(currData.getData().data(), 100, 1, bFile);
-
-                        // Write new line at the end of data
-                        std::fwrite("\n", sizeof(char), 1, bFile);
-                        // ------
+                        // Write as binary file to disk with new line indicates end of a line
+                        std::fwrite((currData.getData() + "\n").data(), lineSize + 1, 1, bFile);
 
                         // Close file after write
                         std::fclose(bFile);
@@ -103,8 +97,8 @@ class xStore {
             std::string dataDir = baseDir + "/xStore/dataStore/" + "tsla" + "/" + std::to_string(2018) + ".XSTORE";
             bFile = std::fopen(dataDir.c_str(), "rb");
             char *buff = new char[100];
-            std::fseek(bFile, 100, SEEK_SET);
-            std::fgets(buff, 1000, bFile);
+            std::fseek(bFile, 0, SEEK_SET);
+            std::fgets(buff, lineSize + 1, bFile);
             std::puts(buff);
         }
 
@@ -187,9 +181,9 @@ class xStore {
 };
 
 int main(int argc, char *argv[]) {
-    // Instantiate lanDB obj
+    // Instantiate xStore obj
     xStore myStore;
-//    myStore.insert(1514764800, "111,222,333,444,555,666,777,888,999", "tsla");
+    myStore.insert(1514764800, "111,222,333,444,555,666,777,888,999", "tsla");
     myStore.readData();
 
 //    std::time_t unixTime = 1504224002;
