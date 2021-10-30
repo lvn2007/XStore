@@ -2,48 +2,33 @@
 #include <fstream>
 #include <filesystem>
 #include <algorithm>
-//#include <stdio.h>
 #include <cstdio>
-//#include <stdlib.h>
 
-class dataStruct {
-    private:
-        std::time_t unixTime;
-        std::string data;
-        std::string allData;
-    public:
-        // Constructor
-        dataStruct(std::time_t unixTime, std::string data) {
+struct dataStruct {
+    std::time_t unixTime;
+    std::string data;
+
+    dataStruct(std::time_t unixTime, std::string data) {
             this->unixTime = unixTime;
             this->data = data;
 
             // Ensuring no WHITESPACE in data
             data.erase(std::remove(data.begin(), data.end(), ' '), data.end());
 
-            allData = std::to_string(unixTime) + "," + data;
-        }
+//            allData = std::to_string(unixTime) + "," + data;
+    }
 
-        // Getter
-        std::time_t getUnixtime() {
-            return unixTime;
-        }
+    std::string getData() {
+        return std::to_string(unixTime) + "," + data;
+    }
 
-        std::string getData() {
-            return data;
+    void printData(bool humanTime) {
+        if (humanTime) {
+            std::cout << "Timestamp: " << ctime(&unixTime) << " | Data: " << data << std::endl;
+            return;
         }
-
-        std::string getAll() {
-            return allData;
-        }
-
-        // Simply print out the data it holds in a formatted way
-        void printData (bool humanTime) {
-            if (humanTime) {
-                std::cout << "Timestamp: " << ctime(&unixTime) << " | Data: " << data << std::endl;
-                return;
-            }
-            std::cout << "Timestamp: " << unixTime << " | Data: " << data << std::endl;
-        }
+        std::cout << "Timestamp: " << unixTime << " | Data: " << data << std::endl;
+    }
 };
 
 // Time-series oriented database
@@ -65,21 +50,18 @@ class xStore {
             std::cout << toHumanMonth(1514764800) << std::endl;
             std::cout << toHumanDay(1514764800) << std::endl;
             std::cout << getTimeResolution(1514764800) << std::endl;
-//            dataStruct currData(1514764800, "111,222,333,444,555,666,777,888");
-//            std::cout << currData.getData() << std::endl;
-//            std::cout << sizeof(currData.getData()) << std::endl;
         }
 
         // INSERT time-series oriented values
         void insert(std::time_t unixTime, std::string value, std::string dbName) {
+            // Read timeValue -- UNIX time
+            int inputYear = toHumanYear(unixTime);
+
             switch (dbCount) {
                 // IF no DB exists i.e., dbCount == 0
                 case 0:
                     //  -> Create new one
                     std::filesystem::create_directories(baseDir + "/xStore/dataStore/" + dbName);
-
-                    // Read timeValue -- UNIX time
-                    int inputYear = toHumanYear(unixTime);
 
                     // IF a DB contains no data
                     if (std::filesystem::is_regular_file(std::filesystem::path(baseDir + "/xStore/dataStore/tsla/2018.XSTORE")) == 0) {
@@ -92,11 +74,22 @@ class xStore {
                         // -> Organize timestamp & data into an object
                         dataStruct currData{unixTime, value};
 
+                        // DEBUG: Printing data current size
+                        std::cout << currData.getData().size() << std::endl;
+
                         // Write as binary file to disk
-                        std::fwrite(currData.getAll().data(), currData.getAll().size(), 1, bFile);
+                        std::fwrite(currData.getData().data(), 100, 1, bFile);
 
                         // Write new line at the end of data
                         std::fwrite("\n", sizeof(char), 1, bFile);
+
+                        // ------
+                        // Write as binary file to disk
+                        std::fwrite(currData.getData().data(), 100, 1, bFile);
+
+                        // Write new line at the end of data
+                        std::fwrite("\n", sizeof(char), 1, bFile);
+                        // ------
 
                         // Close file after write
                         std::fclose(bFile);
@@ -110,13 +103,10 @@ class xStore {
             std::string dataDir = baseDir + "/xStore/dataStore/" + "tsla" + "/" + std::to_string(2018) + ".XSTORE";
             bFile = std::fopen(dataDir.c_str(), "rb");
             char *buff = new char[100];
-//            std::fread(buff, 1, 45, bFile);
+            std::fseek(bFile, 100, SEEK_SET);
             std::fgets(buff, 1000, bFile);
             std::puts(buff);
-//            std::string ret(buff, 45);
-//            std::cout << ret << std::endl;
         }
-
 
     private:
         // Check if there's any existing database
@@ -199,7 +189,7 @@ class xStore {
 int main(int argc, char *argv[]) {
     // Instantiate lanDB obj
     xStore myStore;
-    myStore.insert(1514764800, "111,222,333,444,555,666,777,888,999", "tsla");
+//    myStore.insert(1514764800, "111,222,333,444,555,666,777,888,999", "tsla");
     myStore.readData();
 
 //    std::time_t unixTime = 1504224002;
