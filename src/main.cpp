@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <cstdio>
+#include <map>
 
 // Every line of data == 100 bytes in size
 #define lineSize 100
@@ -43,6 +44,7 @@ class xStore {
         std::string baseDir = "/home/ubuntu";
         int dbCount = 0;
         std::vector<std::string> dbNames = { };
+        std::map<std::string, long int> resolutionMap { {"SECOND", 31536000}, {"MILLISECOND", 31536000000}, {"MICROSECOND", 31536000000000} };
 
         // Initialization
         xStore() {
@@ -62,6 +64,8 @@ class xStore {
         void insert(std::time_t unixTime, std::string value, std::string dbName) {
             // Read timeValue -- UNIX time
             int inputYear = toHumanYear(unixTime);
+            std::string currResolution = getTimeResolution(unixTime);
+            std::cout << resolutionMap["MICROSECOND"] << std::endl;
 
             switch (dbCount) {
                 // IF no DB exists i.e., dbCount == 0
