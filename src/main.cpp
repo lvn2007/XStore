@@ -58,6 +58,8 @@ class xStore {
             std::cout << toHumanMonth(1514764800) << std::endl;
             std::cout << toHumanDay(1514764800) << std::endl;
             std::cout << getTimeResolution(1514764800) << std::endl;
+
+
         }
 
         // INSERT time-series oriented values
@@ -65,7 +67,7 @@ class xStore {
             // Read timeValue -- UNIX time
             int inputYear = toHumanYear(unixTime);
             std::string currResolution = getTimeResolution(unixTime);
-            std::cout << resolutionMap["MICROSECOND"] << std::endl;
+            std::cout << resolutionMap[currResolution] << std::endl;
 
             switch (dbCount) {
                 // IF no DB exists i.e., dbCount == 0
@@ -73,26 +75,23 @@ class xStore {
                     //  -> Create new one
                     std::filesystem::create_directories(baseDir + "/xStore/dataStore/" + dbName);
 
-                    // IF a DB contains no data
-                    if (std::filesystem::is_regular_file(std::filesystem::path(baseDir + "/xStore/dataStore/tsla/2018.XSTORE")) == 0) {
-                        FILE *bFile;
-                        // -> Create a file with name of inputYear.XSTORE
-                        std::string dataDir = baseDir + "/xStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
-                        bFile = std::fopen(dataDir.c_str(), "wb");
+                    FILE *bFile;
+                    // -> Create a file with name of inputYear.XSTORE
+                    std::string dataDir = baseDir + "/xStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
+                    bFile = std::fopen(dataDir.c_str(), "wb");
 
-                        // IF no error
-                        // -> Organize timestamp & data into an object
-                        dataStruct currData{unixTime, value};
+                    // IF no error
+                    // -> Organize timestamp & data into an object
+                    dataStruct currData{unixTime, value};
 
-                        // DEBUG: Printing data current size
-                        std::cout << currData.getData().size() << std::endl;
+                    // DEBUG: Printing data current size
+                    std::cout << currData.getData().size() << std::endl;
 
-                        // Write as binary file to disk with new line indicates end of a line
-                        std::fwrite((currData.getData() + "\n").data(), lineSize + 1, 1, bFile);
+                    // Write as binary file to disk with new line indicates end of a line
+                    std::fwrite((currData.getData() + "\n").data(), lineSize + 1, 1, bFile);
 
-                        // Close file after write
-                        std::fclose(bFile);
-                    }
+                    // Close file after write
+                    std::fclose(bFile);
                     break;
             }
         }
@@ -149,6 +148,37 @@ class xStore {
             }
         }
 
+
+        // Returning epoch value of FIRST available datetime of a given year
+        long int getStartTimeInUnix(int yearInput, std::string timeResolution) {
+            std::map<std::string, int> resolutionMap { {"SECOND", 1}, {"MILLISECOND", 1000}, {"MICROSECOND", 1000000} };
+            struct tm epochConst = {0};
+            epochConst.tm_year = yearInput-1900;
+            epochConst.tm_mon = 0;
+            epochConst.tm_mday = 0;
+            epochConst.tm_hour = 24;
+            epochConst.tm_min = 0;
+            epochConst.tm_sec = 0;
+            time_t startTime = mktime(&epochConst);
+            long int startEpoch = static_cast<long int> (startTime);
+            return startEpoch * resolutionMap[timeResolution];
+        }
+
+        // Returning epoch value of LAST available datetime of a given year
+        long int getEndTimeInUnix(int yearInput, std::string timeResolution) {
+            std::map<std::string, int> resolutionMap { {"SECOND", 1}, {"MILLISECOND", 1000}, {"MICROSECOND", 1000000} };
+            struct tm epochConst = {0};
+            epochConst.tm_year = yearInput-1900;
+            epochConst.tm_mon = 12-1;
+            epochConst.tm_mday = 31;
+            epochConst.tm_hour = 23;
+            epochConst.tm_min = 59;
+            epochConst.tm_sec = 59;
+            time_t startTime = mktime(&epochConst);
+            long int startEpoch = static_cast<long int> (startTime);
+            return startEpoch * resolutionMap[timeResolution];
+        }
+
         // Time extractor
         std::string getTimeResolution(std::time_t unixTime) {
             int count = 0;
@@ -188,7 +218,7 @@ class xStore {
 int main(int argc, char *argv[]) {
     // Instantiate xStore obj
     xStore myStore;
-    myStore.insert(1514764800, "111,222,333,444,555,666,777,888,999", "tsla");
+    myStore.insert(1504224000, "NaN,NaN,NaN,NaN,NaN,NaN,NaN", "tsla");
     myStore.readData();
 
 //    std::time_t unixTime = 1504224002;
