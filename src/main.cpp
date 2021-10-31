@@ -127,6 +127,7 @@ class xStore {
             std::fseek(bFile, offSet, SEEK_SET);
             std::fgets(buff, lineSize + 1, bFile);
             std::puts(buff);
+            std::fclose(bFile);
         }
 
     private:
@@ -244,10 +245,17 @@ int main(int argc, char *argv[]) {
 //    myStore.insert(1504224000, "NaN,NaN,NaN,NaN,NaN,NaN,NaN", "tsla");
 
     // Microbench
-    std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
-    myStore.get(1504224000, "tsla");
-    std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+    srand(time(NULL));
+    long int randTime;
 
-    std::cout << "Time difference = " << std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count() << " [µs]" << std::endl;
-    std::cout << "Time difference = " << std::chrono::duration_cast<std::chrono::nanoseconds> (end - begin).count() << " [ns]" << std::endl;
+    for (int i = 0; i < 10; i++) {
+        randTime = rand() % 1000 + 1;
+        long unixTime = 1504224000 + randTime;
+        std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
+        myStore.get(unixTime, "tsla");
+        std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+
+        std::cout << "Time difference = " << std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count() << " [µs]" << std::endl;
+//        std::cout << "Time difference = " << std::chrono::duration_cast<std::chrono::nanoseconds> (end - begin).count() << " [ns]" << std::endl;
+    }
 }
