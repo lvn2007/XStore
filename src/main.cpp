@@ -248,17 +248,6 @@ int main(int argc, char *argv[]) {
     myStore.get(1504224000, "tsla");
     std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
 
-    std::cout << "Time difference = " << std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count() << "[µs]" << std::endl;
-    std::cout << "Time difference = " << std::chrono::duration_cast<std::chrono::nanoseconds> (end - begin).count() << "[ns]" << std::endl;
-
-//    std::time_t unixTime = 1504224002;
-//    std::cout << ctime(&unixTime) << std::endl;
-//    tm* timePtr = localtime(&unixTime);
-//    std::cout << timePtr->tm_year + 1900 << std::endl;
-//    std::cout << timePtr->tm_mon + 1 << std::endl;
-//    std::cout << std::asctime(std::localtime(&result)) << std::endl;
-//    std::tm tm = {};
-//    std::stringstream ss("Jan 9 2014 12:35:34");
-//    ss >> std::get_time(&tm, "%b %d %Y %H:%M:%S");
-//    auto tp = std::chrono::system_clock::from_time_t(std::mktime(&tm));
+    std::cout << "Time difference = " << std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count() << " [µs]" << std::endl;
+    std::cout << "Time difference = " << std::chrono::duration_cast<std::chrono::nanoseconds> (end - begin).count() << " [ns]" << std::endl;
 }
