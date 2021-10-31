@@ -117,8 +117,8 @@ class xStore {
             long int diff = unixTime - startEpoch;
             long int offSet = diff * (lineSize + 1);
 
-            std::cout << "Diff: " << diff << std::endl;
-            std::cout << "Offset: " << offSet << std::endl;
+//            std::cout << "Diff: " << diff << std::endl;
+//            std::cout << "Offset: " << offSet << std::endl;
 
             FILE *bFile;
             std::string dataDir = baseDir + "/xStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
