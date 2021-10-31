@@ -11,4 +11,4 @@ eXtreme performance in distributed tv-Store for time-series
 
 - Get target 1504224000 (Epoch time) took:
   * 96 µs
-  * 96895 ns
+  * 96,895 ns
