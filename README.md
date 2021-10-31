@@ -7,7 +7,7 @@ eXtreme performance in distributed tv-Store for time-series
 
 | N Elements | Size in GB | Bytes per row |
 | ----------:| ----------:| -------------:|
-| 31,535,999 | 3.0        |            100|
+| 31,535,999 | 3.1        |            100|
 
 - Get target 1504224000 (Epoch time) took:
   * 96 µs
