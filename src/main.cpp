@@ -112,9 +112,13 @@ class xStore {
             int inputYear = toHumanYear(unixTime);
             std::string currResolution = getTimeResolution(unixTime);
 
-            // Start a given year
+            // Start epoch time of a given year
             long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
+
+            // Epoch time difference between target & startEpoch
             long int diff = unixTime - startEpoch;
+
+            // Calculate offset -- Exact location of where a particular target row is stored
             long int offSet = diff * (lineSize + 1);
 
 //            std::cout << "Diff: " << diff << std::endl;
