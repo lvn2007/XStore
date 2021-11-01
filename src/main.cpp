@@ -107,7 +107,7 @@ class xStore {
             }
         }
 
-        void get(std::time_t unixTime, std::string dbName) {
+        std::string get(std::time_t unixTime, std::string dbName) {
             // Read timeValue -- UNIX time
             int inputYear = toHumanYear(unixTime);
             std::string currResolution = getTimeResolution(unixTime);
@@ -130,8 +130,10 @@ class xStore {
             char *buff = new char[100];
             std::fseek(bFile, offSet, SEEK_SET);
             std::fgets(buff, lineSize + 1, bFile);
-            std::puts(buff);
+//            std::puts(buff);
             std::fclose(bFile);
+            std::string toReturn(buff);
+            return toReturn;
         }
 
     private:
@@ -255,10 +257,11 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < 10; i++) {
         randTime = rand() % 1000 + 1;
         long unixTime = 1504224000 + randTime;
+        std::string currVal;
         std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
-        myStore.get(unixTime, "tsla");
+        currVal = myStore.get(unixTime, "tsla");
         std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
-
+        std::cout << currVal << std::endl;
         std::cout << "Time difference = " << std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count() << " [µs]" << std::endl;
 //        std::cout << "Time difference = " << std::chrono::duration_cast<std::chrono::nanoseconds> (end - begin).count() << " [ns]" << std::endl;
     }
