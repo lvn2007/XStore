@@ -246,6 +246,10 @@ class xStore {
 };
 
 int main(int argc, char *argv[]) {
+    // Clock init
+    std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
+    std::chrono::duration<double> diff;
+
     // Instantiate xStore obj
     xStore myStore;
 //    myStore.insert(1504224000, "NaN,NaN,NaN,NaN,NaN,NaN,NaN", "tsla");
@@ -258,11 +262,18 @@ int main(int argc, char *argv[]) {
         randTime = rand() % 1000 + 1;
         long unixTime = 1504224000 + randTime;
         std::string currVal;
-        std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
+        start = std::chrono::high_resolution_clock::now();
         currVal = myStore.get(unixTime, "tsla");
-        std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+        end = std::chrono::high_resolution_clock::now();
+        diff = end - start;
+
+        std::cout << "Execution time: " << std::chrono::duration<double, std::milli> (diff).count() << " [ms]" << std::endl;
+        std::cout << "Execution time: " << std::chrono::duration<double, std::micro> (diff).count() << " [µs]" << std::endl;
+        std::cout << "Execution time: " << std::chrono::duration<double, std::nano> (diff).count() << " [ns]" << std::endl;
+
+//        std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
         std::cout << currVal << std::endl;
-        std::cout << "Time difference = " << std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count() << " [µs]" << std::endl;
+//        std::cout << "Time difference = " << std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count() << " [µs]" << std::endl;
 //        std::cout << "Time difference = " << std::chrono::duration_cast<std::chrono::nanoseconds> (end - begin).count() << " [ns]" << std::endl;
     }
 }
