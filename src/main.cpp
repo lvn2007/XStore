@@ -4,9 +4,15 @@
 #include <algorithm>
 #include <cstdio>
 #include <map>
+#include <fcntl.h>
+#include <unistd.h>
+#include <cstring>
+#include <cmath>
 
 // Every line of data == 100 bytes in size
 #define lineSize 100
+#define ALIGNMENT 4096
+#define BUFSIZE 1024
 
 // Data structure to hold time-value together
 struct dataStruct {
@@ -76,7 +82,9 @@ class xStore {
                     FILE *bFile;
                     // -> Create a file with name of inputYear.XSTORE
                     std::string dataDir = baseDir + "/xStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
-                    bFile = std::fopen(dataDir.c_str(), "wb");
+//                    bFile = std::fopen(dataDir.c_str(), "wb");
+//                    bFile = open(dataDir, "wb");
+
 
                     // Start & End time of a given year
                     long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
@@ -121,9 +129,6 @@ class xStore {
             // Calculate offset -- Exact location of where a particular target row is stored
             long int offSet = diff * (lineSize + 1);
 
-//            std::cout << "Diff: " << diff << std::endl;
-//            std::cout << "Offset: " << offSet << std::endl;
-
             FILE *bFile;
             std::string dataDir = baseDir + "/xStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
             bFile = std::fopen(dataDir.c_str(), "rb");
@@ -134,6 +139,47 @@ class xStore {
             std::fclose(bFile);
             std::string toReturn(buff);
             return toReturn;
+        }
+
+        std::string getOdirect(std::time_t unixTime, std::string dbName) {
+            // Read timeValue -- UNIX time
+            int inputYear = toHumanYear(unixTime);
+            std::string currResolution = getTimeResolution(unixTime);
+
+            // Start epoch time of a given year
+            long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
+
+            // Epoch time difference between target & startEpoch
+            long int diff = unixTime - startEpoch;
+
+            // Calculate offset -- Exact location of where a particular target row is stored
+            long int offSet = diff * (lineSize + 1);
+
+            int bFile;
+            std::string dataDir = baseDir + "/xStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
+
+            char *buff;
+//            void *buff = NULL;
+
+            int rc = posix_memalign((void**) &buff, 512, (long) 100 * (long) 4096);
+            std::memset(buff, 'x', (long) 100);
+
+            bFile = open(dataDir.c_str(), O_RDONLY | O_DIRECT);
+
+            lseek(bFile, offSet, SEEK_SET);
+            int n = read(bFile, buff, 100);
+            std::cout << buff << std::endl;
+
+            free(buff);
+//            line[n] = '\0';
+//            std::cout << "Data read: " << buff << std::endl;
+
+//            std::fseek(bFile, offSet, SEEK_SET);
+//            std::fgets(buff, lineSize + 1, reinterpret_cast<FILE *>(bFile));
+//            std::puts(buff);
+//            std::fclose(bFile);
+//            std::string toReturn(buff);
+            return "asd";
         }
 
     private:
@@ -245,6 +291,57 @@ class xStore {
         }
 };
 
+double meanCalc(std::vector<double> inputVector) {
+    double totalSum = 0;
+
+    for (int i = 0; i < inputVector.size(); i++) {
+        totalSum += inputVector.at(i);
+    }
+
+    return totalSum / inputVector.size();
+}
+
+double stdCalc(std::vector<double> inputVector) {
+    double totalSum = 0;
+    double mean = 0;
+    double std = 0;
+
+    for (int i = 0; i < inputVector.size(); i++) {
+        totalSum += inputVector.at(i);
+    }
+
+    mean = totalSum / inputVector.size();
+
+    for (int i = 0; i < inputVector.size(); i++) {
+        std += pow(inputVector.at(i) - mean, 2);
+    }
+
+    return sqrt(std / inputVector.size());
+}
+
+double getMin(std::vector<double> inputVector) {
+    double minVal = inputVector.at(0);
+
+    for (int i = 1; i < inputVector.size(); i++) {
+        if (inputVector.at(i) < minVal) {
+            minVal = inputVector.at(0);
+        }
+    }
+
+    return minVal;
+}
+
+double getMax(std::vector<double> inputVector) {
+    double maxVal = inputVector.at(0);
+
+    for (int i = 1; i < inputVector.size(); i++) {
+        if (inputVector.at(i) > maxVal) {
+            maxVal = inputVector.at(i);
+        }
+    }
+    return maxVal;
+}
+
 int main(int argc, char *argv[]) {
     // Clock init
     std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
@@ -254,11 +351,20 @@ int main(int argc, char *argv[]) {
     xStore myStore;
 //    myStore.insert(1504224000, "NaN,NaN,NaN,NaN,NaN,NaN,NaN", "tsla");
 
+    std::vector<double> ms = { };
+    std::vector<double> us = { };
+    std::vector<double> ns = { };
+
     // Microbench
     srand(time(NULL));
     long int randTime;
-
-    for (int i = 0; i < 10; i++) {
+    int nIter = 10;
+    for (int i = 0; i < nIter; i++) {
+        system("free > /dev/null");
+        system("sync > /dev/null");
+        system("sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'");
+        system("free > /dev/null");
+//        system("free && sync && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free");
         randTime = rand() % 1000 + 1;
         long unixTime = 1504224000 + randTime;
         std::string currVal;
@@ -267,13 +373,37 @@ int main(int argc, char *argv[]) {
         end = std::chrono::high_resolution_clock::now();
         diff = end - start;
 
-        std::cout << "Execution time: " << std::chrono::duration<double, std::milli> (diff).count() << " [ms]" << std::endl;
-        std::cout << "Execution time: " << std::chrono::duration<double, std::micro> (diff).count() << " [µs]" << std::endl;
-        std::cout << "Execution time: " << std::chrono::duration<double, std::nano> (diff).count() << " [ns]" << std::endl;
+        ms.push_back(std::chrono::duration<double, std::milli> (diff).count());
+        us.push_back(std::chrono::duration<double, std::micro> (diff).count());
+        ns.push_back(std::chrono::duration<double, std::nano> (diff).count());
 
-//        std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
-        std::cout << currVal << std::endl;
-//        std::cout << "Time difference = " << std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count() << " [µs]" << std::endl;
-//        std::cout << "Time difference = " << std::chrono::duration_cast<std::chrono::nanoseconds> (end - begin).count() << " [ns]" << std::endl;
+//        std::cout << "Execution time: " << std::chrono::duration<double, std::milli> (diff).count() << " [ms]" << std::endl;
+//        std::cout << "Execution time: " << std::chrono::duration<double, std::micro> (diff).count() << " [µs]" << std::endl;
+//        std::cout << "Execution time: " << std::chrono::duration<double, std::nano> (diff).count() << " [ns]" << std::endl;
+
+//        std::cout << "Target: " << unixTime << " | Result: " <<  currVal << std::endl;
     }
+
+    std::cout << "\n--- EXECUTION TIME in [ms] ---" << std::endl;
+    std::cout << "  - Min: " << *std::min_element(ms.begin(), ms.end()) << std::endl;
+    std::cout << "  - Max: " << *std::max_element(ms.begin(), ms.end()) << std::endl;
+    std::cout << "  - Mean: " << meanCalc(ms) << std::endl;
+    std::cout << "  - Stdev: " << stdCalc(ms) << std::endl;
+
+    std::cout << "--- EXECUTION TIME in [µs] ---" << std::endl;
+    std::cout << "  - Min: " << *std::min_element(us.begin(), us.end()) << std::endl;
+    std::cout << "  - Max: " << *std::max_element(us.begin(), us.end()) << std::endl;
+    std::cout << "  - Mean: " << meanCalc(us) << std::endl;
+    std::cout << "  - Stdev: " << stdCalc(us) << std::endl;
+
+    std::cout << "--- EXECUTION TIME in [ns] ---" << std::endl;
+    std::cout << "  - Min: " << *std::min_element(ns.begin(), ns.end()) << std::endl;
+    std::cout << "  - Max: " << *std::max_element(ns.begin(), ns.end()) << std::endl;
+    std::cout << "  - Mean: " << meanCalc(ns) << std::endl;
+    std::cout << "  - Stdev: " << stdCalc(ns) <<std::endl;
+
+//    std::cout << "Execution time: " << std::chrono::duration<double, std::milli> (diff).count() / nIter << " [ms]" << std::endl;
+//    std::cout << "Execution time: " << std::chrono::duration<double, std::micro> (diff).count() / nIter << " [µs]" << std::endl;
+//    std::cout << "Execution time: " << std::chrono::duration<double, std::nano> (diff).count() / nIter << " [ns]" << std::endl;
+//    std::cout << currVal << std::endl;
 }
