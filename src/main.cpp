@@ -358,13 +358,12 @@ int main(int argc, char *argv[]) {
     // Microbench
     srand(time(NULL));
     long int randTime;
-    int nIter = 10;
+    int nIter = 1000;
     for (int i = 0; i < nIter; i++) {
         system("free > /dev/null");
         system("sync > /dev/null");
         system("sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'");
         system("free > /dev/null");
-//        system("free && sync && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free");
         randTime = rand() % 1000 + 1;
         long unixTime = 1504224000 + randTime;
         std::string currVal;
@@ -384,6 +383,7 @@ int main(int argc, char *argv[]) {
 //        std::cout << "Target: " << unixTime << " | Result: " <<  currVal << std::endl;
     }
 
+    std::cout << nIter << " queries experiments" << std::endl;
     std::cout << "\n--- EXECUTION TIME in [ms] ---" << std::endl;
     std::cout << "  - Min: " << *std::min_element(ms.begin(), ms.end()) << std::endl;
     std::cout << "  - Max: " << *std::max_element(ms.begin(), ms.end()) << std::endl;
@@ -401,9 +401,4 @@ int main(int argc, char *argv[]) {
     std::cout << "  - Max: " << *std::max_element(ns.begin(), ns.end()) << std::endl;
     std::cout << "  - Mean: " << meanCalc(ns) << std::endl;
     std::cout << "  - Stdev: " << stdCalc(ns) <<std::endl;
-
-//    std::cout << "Execution time: " << std::chrono::duration<double, std::milli> (diff).count() / nIter << " [ms]" << std::endl;
-//    std::cout << "Execution time: " << std::chrono::duration<double, std::micro> (diff).count() / nIter << " [µs]" << std::endl;
-//    std::cout << "Execution time: " << std::chrono::duration<double, std::nano> (diff).count() / nIter << " [ns]" << std::endl;
-//    std::cout << currVal << std::endl;
 }
