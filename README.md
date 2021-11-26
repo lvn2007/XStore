@@ -2,6 +2,17 @@
 
 eXtreme performance in distributed tv-Store for time-series
 
+# Testbed
+- Dual socket Intel® Xeon® Silver 4108 Processor @ 1.80GHz (16-cores, 32-hardware threads)
+- 8x 8GB (64 GB) of DIMM DDR4 ECC Registered RAM
+- 1x Micron 5100 MTFDDAK240TCB SATA SSD (223.5GB)
+- Networking:
+  - Mellanox Technologies MT27800 Family
+  - Intel Corporation Ethernet Controller 10G X550T
+- Ubuntu 18.04.4 LTS 
+- g++ 8.4.0
+- C++17
+
 # Microbenchmark
 - Dataset: 1-second granularity
 
