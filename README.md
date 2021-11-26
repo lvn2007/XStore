@@ -29,8 +29,8 @@ eXtreme performance in distributed tv-Store for time-series
 |:--------------------:| -----------------------:| ----------------:| ---------------:|
 | Min                  |                0.020403 |           20.403 |          20,403 |
 | Max                  |                0.104566 |          104.566 |         104,566 |
-| Mean                 |               0.0229269 |          22.9269 |         22,926.9 |
-| Stdev                |              0.00599272 |          5.99272 |         5,992.72 |
+| Mean                 |               0.0229269 |          22.9269 |        22,926.9 |
+| Stdev                |              0.00599272 |          5.99272 |        5,992.72 |
 
 - **Benchmark II: Caches cleared**
   - Throughout 1,000 queries, caches are cleared prior to each query
