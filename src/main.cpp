@@ -82,9 +82,7 @@ class xStore {
                     FILE *bFile;
                     // -> Create a file with name of inputYear.XSTORE
                     std::string dataDir = baseDir + "/xStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
-//                    bFile = std::fopen(dataDir.c_str(), "wb");
-//                    bFile = open(dataDir, "wb");
-
+                    bFile = std::fopen(dataDir.c_str(), "wb");
 
                     // Start & End time of a given year
                     long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
@@ -99,15 +97,15 @@ class xStore {
                         std::fwrite((dummyData.getData() + "\n").data(), lineSize + 1, 1, bFile);
                     }
 
-//                    // IF no error
-//                    // -> Organize timestamp & data into an object
-//                    dataStruct currData{unixTime, value};
-//
-//                    // DEBUG: Printing data current size
-//                    std::cout << currData.getData().size() << std::endl;
-//
-//                    // Write as binary file to disk with new line indicates EOL
-//                    std::fwrite((currData.getData() + "\n").data(), lineSize + 1, 1, bFile);
+                    // IF no error
+                    // -> Organize timestamp & data into an object
+                    dataStruct currData{unixTime, value};
+
+                    // DEBUG: Printing data current size
+                    std::cout << currData.getData().size() << std::endl;
+
+                    // Write as binary file to disk with new line indicates EOL
+                    std::fwrite((currData.getData() + "\n").data(), lineSize + 1, 1, bFile);
 
                     // Close file after write
                     std::fclose(bFile);
@@ -139,47 +137,6 @@ class xStore {
             std::fclose(bFile);
             std::string toReturn(buff);
             return toReturn;
-        }
-
-        std::string getOdirect(std::time_t unixTime, std::string dbName) {
-            // Read timeValue -- UNIX time
-            int inputYear = toHumanYear(unixTime);
-            std::string currResolution = getTimeResolution(unixTime);
-
-            // Start epoch time of a given year
-            long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
-
-            // Epoch time difference between target & startEpoch
-            long int diff = unixTime - startEpoch;
-
-            // Calculate offset -- Exact location of where a particular target row is stored
-            long int offSet = diff * (lineSize + 1);
-
-            int bFile;
-            std::string dataDir = baseDir + "/xStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
-
-            char *buff;
-//            void *buff = NULL;
-
-            int rc = posix_memalign((void**) &buff, 512, (long) 100 * (long) 4096);
-            std::memset(buff, 'x', (long) 100);
-
-            bFile = open(dataDir.c_str(), O_RDONLY | O_DIRECT);
-
-            lseek(bFile, offSet, SEEK_SET);
-            int n = read(bFile, buff, 100);
-            std::cout << buff << std::endl;
-
-            free(buff);
-//            line[n] = '\0';
-//            std::cout << "Data read: " << buff << std::endl;
-
-//            std::fseek(bFile, offSet, SEEK_SET);
-//            std::fgets(buff, lineSize + 1, reinterpret_cast<FILE *>(bFile));
-//            std::puts(buff);
-//            std::fclose(bFile);
-//            std::string toReturn(buff);
-            return "asd";
         }
 
     private:
