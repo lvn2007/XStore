@@ -161,6 +161,7 @@ class xStore {
                 std::cout << dbNames.at(i);
             }
             std::cout << " ]" << std::endl;
+            std::cout << "----------------------------" << std::endl;
         }
 
         void dbStats() {
@@ -341,7 +342,7 @@ int main(int argc, char *argv[]) {
     }
 
     std::cout << nIter << " queries experiments" << std::endl;
-    std::cout << "\n--- EXECUTION TIME in [ms] ---" << std::endl;
+    std::cout << "--- EXECUTION TIME in [ms] ---" << std::endl;
     std::cout << "  - Min: " << *std::min_element(ms.begin(), ms.end()) << std::endl;
     std::cout << "  - Max: " << *std::max_element(ms.begin(), ms.end()) << std::endl;
     std::cout << "  - Mean: " << meanCalc(ms) << std::endl;
