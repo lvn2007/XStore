@@ -5,14 +5,11 @@
 #include <cstdio>
 #include <map>
 #include <fcntl.h>
-#include <unistd.h>
 #include <cstring>
 #include <cmath>
 
 // Every line of data == 100 bytes in size
 #define lineSize 100
-#define ALIGNMENT 4096
-#define BUFSIZE 1024
 
 // Data structure to hold time-value together
 struct dataStruct {
