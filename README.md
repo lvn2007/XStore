@@ -22,7 +22,7 @@ eXtreme performance in distributed tv-Store for time-series
 | 31,535,999 | 3.1        |            100|
 
 <details>
-<summary>XStore</summary>
+<summary><b>XStore</b></summary>
 
 **Benchmark I: Retaining caches**
   - Throughout 1,000 queries, caches are retained from start to finish
