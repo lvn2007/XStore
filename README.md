@@ -23,7 +23,8 @@ eXtreme performance in distributed tv-Store for time-series
 
 <details>
 <summary>XStore</summary>
-- **Benchmark I: Retaining caches**
+
+**Benchmark I: Retaining caches**
   - Throughout 1,000 queries, caches are retained from start to finish
   - Single-threaded
   - Open/Close file on each query
