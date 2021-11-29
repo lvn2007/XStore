@@ -13,7 +13,9 @@ eXtreme performance in distributed tv-Store for time-series
 - g++ 8.4.0
 - C++17
 
-# Microbenchmark
+# Benchmark
+<details>
+<summary>XStore</summary>
 - Dataset: 1-second granularity
 
 | N Elements | Size in GB | Bytes per row |
@@ -52,3 +54,4 @@ system("sync > /dev/null");
 system("sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'");
 system("free > /dev/null");
 ```
+</details>
