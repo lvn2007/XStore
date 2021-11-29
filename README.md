@@ -14,14 +14,15 @@ eXtreme performance in distributed tv-Store for time-series
 - C++17
 
 # Benchmark
-<details>
-<summary>XStore</summary>
+
 - Dataset: 1-second granularity
 
 | N Elements | Size in GB | Bytes per row |
 | ----------:| ----------:| -------------:|
 | 31,535,999 | 3.1        |            100|
 
+<details>
+<summary>XStore</summary>
 - **Benchmark I: Retaining caches**
   - Throughout 1,000 queries, caches are retained from start to finish
   - Single-threaded
