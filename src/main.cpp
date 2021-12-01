@@ -48,6 +48,7 @@ class xStore {
         int dbCount = 0;
         std::vector<std::string> dbNames = { };
         std::map<std::string, long int> resolutionMap { {"SECOND", 31536000}, {"MILLISECOND", 31536000000}, {"MICROSECOND", 31536000000000} };
+        FILE *bFile;
 
         // Initialization
         xStore() {
@@ -61,6 +62,9 @@ class xStore {
             std::cout << toHumanMonth(1514764800) << std::endl;
             std::cout << toHumanDay(1514764800) << std::endl;
             std::cout << getTimeResolution(1514764800) << std::endl;
+
+            std::string dataDir = baseDir + "/xStore/dataStore/" + "tsla" + "/" + std::to_string(2017) + ".XSTORE";
+            bFile = std::fopen(dataDir.c_str(), "rb");
         }
 
         // INSERT time-series oriented values
@@ -135,6 +139,35 @@ class xStore {
             std::string toReturn(buff);
             return toReturn;
         }
+
+    std::string getSingleOpenClose(std::time_t unixTime, std::string dbName) {
+        // Read timeValue -- UNIX time
+        int inputYear = toHumanYear(unixTime);
+        std::string currResolution = getTimeResolution(unixTime);
+
+        // Start epoch time of a given year
+        long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
+
+        // Epoch time difference between target & startEpoch
+        long int diff = unixTime - startEpoch;
+
+        // Calculate offset -- Exact location of where a particular target row is stored
+        long int offSet = diff * (lineSize + 1);
+
+//        FILE *bFile;
+//        std::string dataDir = baseDir + "/xStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
+        char *buff = new char[100];
+        std::fseek(bFile, offSet, SEEK_SET);
+        std::fgets(buff, lineSize + 1, bFile);
+//        std::puts(buff);
+//        std::fclose(bFile);
+        std::string toReturn(buff);
+        return toReturn;
+    }
+
+    void closeFile() {
+        std::fclose(bFile);
+    }
 
     private:
         // Check if there's any existing database
@@ -315,15 +348,16 @@ int main(int argc, char *argv[]) {
     long int randTime;
     int nIter = 1000;
     for (int i = 0; i < nIter; i++) {
-        system("free > /dev/null");
-        system("sync > /dev/null");
-        system("sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'");
-        system("free > /dev/null");
+//        system("free > /dev/null");
+//        system("sync > /dev/null");
+//        system("sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'");
+//        system("free > /dev/null");
         randTime = rand() % 1000 + 1;
         long unixTime = 1504224000 + randTime;
         std::string currVal;
         start = std::chrono::high_resolution_clock::now();
-        currVal = myStore.get(unixTime, "tsla");
+//        currVal = myStore.get(unixTime, "tsla");
+        currVal = myStore.getSingleOpenClose(unixTime, "tsla");
         end = std::chrono::high_resolution_clock::now();
         diff = end - start;
 
@@ -337,6 +371,7 @@ int main(int argc, char *argv[]) {
 
 //        std::cout << "Target: " << unixTime << " | Result: " <<  currVal << std::endl;
     }
+    myStore.closeFile();
 
     std::cout << nIter << " queries experiments" << std::endl;
     std::cout << "--- EXECUTION TIME in [ms] ---" << std::endl;

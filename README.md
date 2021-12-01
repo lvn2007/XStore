@@ -48,8 +48,33 @@ eXtreme performance in distributed tv-Store for time-series
 | Mean                 |           0.0146491 |                 14.6491 |         14,649.1 |      14,649,100 |
 | Stdev                |          0.00220903 |                 2.20903 |         2,209.03 |       2,209,030 |
 
+**Benchmark III: Retaining caches**
+- Throughout 1,000 queries, caches are retained from start to finish
+- Single-threaded
+- Single Open/Close
+
+| Query Execution Time |          Second [s] |        Millisecond [ms] | Microsecond [µs] | Nanosecond [ns] |
+|:--------------------:| -------------------:| -----------------------:| ----------------:| ---------------:|
+| Min                  |         0.000011016 |                0.011016 |           11.016 |          11,016 |
+| Max                  |         0.000077135 |                0.077135 |           77.135 |          77,135 |
+| Mean                 |        0.0000133988 |               0.0133988 |          13.3988 |        13,398.8 |
+| Stdev                |       0.00000432255 |              0.00432255 |         4.432255 |        4,322.55 |
+
+- **Benchmark IV: Caches cleared**
+  - Throughout 1,000 queries, caches are cleared prior to each query
+  - Single-threaded
+  - Single Open/Close
+
+| Query Execution Time |          Second [s] |        Millisecond [ms] | Microsecond [µs] | Nanosecond [ns] |
+|:--------------------:| -------------------:| -----------------------:| ----------------:| ---------------:|
+| Min                  |          0.00035584 |                 0.35584 |           355.84 |         355,840 |
+| Max                  |           0.0195211 |                 19.5211 |         19,521.1 |      19,521,100 |
+| Mean                 |           0.0114994 |                 11.4994 |         11,499.4 |      11,499,400 |
+| Stdev                |          0.00179292 |                 1.79292 |         1,792.92 |       1,792,920 |
+
 **Note:** 
 - Caches cleared using:
+
 ```c++
 system("free > /dev/null");
 system("sync > /dev/null");
