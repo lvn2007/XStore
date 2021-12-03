@@ -128,8 +128,6 @@ eXtreme performance in distributed tv-Store for time-series
 
 **Benchmark I: Retaining caches**
 - Throughout 1,000 queries, caches are retained from start to finish
-- Single-threaded
-- Open/Close file on each query
 
 | Query Execution Time |  Second [s] |  Millisecond [ms] | Microsecond [µs] | Nanosecond [ns] |
 |:--------------------:| -----------:| -----------------:| ----------------:| ---------------:|
@@ -140,8 +138,6 @@ eXtreme performance in distributed tv-Store for time-series
 
 - **Benchmark II: Caches cleared**
   - Throughout 1,000 queries, caches are cleared prior to each query
-  - Single-threaded
-  - Open/Close file on each query
 
 | Query Execution Time | Second [s] | Millisecond [ms] | Microsecond [µs] | Nanosecond [ns] |
 |:--------------------:| ----------:| ----------------:| ----------------:| ---------------:|
