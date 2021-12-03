@@ -1,5 +1,9 @@
 from pymongo import MongoClient
+from datetime import datetime
 import time
+from os import system
+import random
+from statistics import stdev
 
 client = MongoClient('localhost', 27017)
 allDB = client.list_database_names()
@@ -28,9 +32,49 @@ lastDate = 0
 #currData = {'Timestamp': '1504224000', 'Open': 1, 'High': 1, 'Low': 1, 'Close': 1}
 #row = benchCol.insert_one(currData)
 
-startTime = time.time()
-thisGet = benchCol.find_one({'Timestamp': 1505718000})
-endTime = time.time()
+searchTime = []
 
-print(thisGet)
-print(f'Query took: {endTime - startTime} (s)')
+for i in range(10):
+	system("free > /dev/null")
+	system("sync > /dev/null")
+	system("sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'")
+	system("free > /dev/null")
+
+	target = random.randint(startDate, endDate)
+	startTime = time.time()
+	thisGet = benchCol.find_one({'Timestamp': target})
+	endTime = time.time()
+
+	searchTime.append(endTime - startTime)
+
+# print(thisGet)
+# print(f'Query took: {endTime - startTime} (s)')
+
+myMin = min(searchTime)
+myMax = max(searchTime)
+myAvg = sum(searchTime) / len(searchTime)
+myStdev = stdev(searchTime)
+
+print('--- EXECUTION TIME in [s] ---')
+print(f'  -Min: {myMin:,.2f}')
+print(f'  -Max: {myMax:,.2f}')
+print(f'  -Mean: {myAvg:,.2f}')
+print(f'  -Stdev: {myStdev:,.2f}')
+
+print('\n--- EXECUTION TIME in [ms] ---')
+print(f'  -Min: {myMin * 1000:,.2f}')
+print(f'  -Max: {myMax * 1000:,.2f}')
+print(f'  -Mean: {myAvg * 1000:,.2f}')
+print(f'  -Stdev: {myStdev * 1000:,.2f}')
+
+print('\n--- EXECUTION TIME in [µs] ---')
+print(f'  -Min: {myMin * 1000000:,.2f}')
+print(f'  -Max: {myMax * 1000000:,.2f}')
+print(f'  -Mean: {myAvg * 1000000:,.2f}')
+print(f'  -Stdev: {myStdev * 1000000:,.2f}')
+
+print('\n--- EXECUTION TIME in [ns] ---')
+print(f'  -Min: {myMin * 1000000000:,.2f}')
+print(f'  -Max: {myMax * 1000000000:,.2f}')
+print(f'  -Mean: {myAvg * 1000000000:,.2f}')
+print(f'  -Stdev: {myStdev * 1000000000:,.2f}')
