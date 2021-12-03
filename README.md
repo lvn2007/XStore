@@ -123,6 +123,35 @@ eXtreme performance in distributed tv-Store for time-series
 
 </details>
 
+<details>
+<summary><b>InfluxDB</b></summary>
+
+**Benchmark I: Retaining caches**
+- Throughout 1,000 queries, caches are retained from start to finish
+- Single-threaded
+- Open/Close file on each query
+
+| Query Execution Time |  Second [s] |  Millisecond [ms] | Microsecond [µs] | Nanosecond [ns] |
+|:--------------------:| -----------:| -----------------:| ----------------:| ---------------:|
+| Min                  |      0.0031 |            3.1054 |       3,105.4020 |  3,105,401.9928 |
+| Max                  |      0.0159 |           15.9323 |      15,932.3215 | 15,932,321.5485 |
+| Mean                 |      0.0062 |            6.2258 |       6,225.7578 |  6,225,757.8373 |
+| Stdev                |      0.0014 |            1.3772 |       1,377.1913 |  1,377,191.2586 |
+
+- **Benchmark II: Caches cleared**
+  - Throughout 1,000 queries, caches are cleared prior to each query
+  - Single-threaded
+  - Open/Close file on each query
+
+| Query Execution Time | Second [s] | Millisecond [ms] | Microsecond [µs] | Nanosecond [ns] |
+|:--------------------:| ----------:| ----------------:| ----------------:| ---------------:|
+| Min                  |     0.0060 |           5.9543 |       5,954.2656 |  5,954,265.5945 |
+| Max                  |     0.0389 |          38.8854 |      38,885.3550 | 38,885,354.9957 |
+| Mean                 |     0.0158 |          15.8299 |      15,829.8674 | 15,829,867.3630 |
+| Stdev                |     0.0073 |           7.2510 |       7,250.9836 |  7,250,983.5954 |
+
+</details>
+
 **Note:**
 - Caches cleared using:
 ```c++
