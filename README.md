@@ -72,13 +72,62 @@ eXtreme performance in distributed tv-Store for time-series
 | Mean                 |           0.0114994 |                 11.4994 |         11,499.4 |      11,499,400 |
 | Stdev                |          0.00179292 |                 1.79292 |         1,792.92 |       1,792,920 |
 
-**Note:** 
-- Caches cleared using:
+</details>
 
+<details>
+<summary><b>MongoDB</b></summary>
+
+**Benchmark I: Naiive Time Series Usage -- Retaining caches**
+  - Throughout 10 queries, caches are retained from start to finish
+  - Memory limit to 100MB
+
+| Query Execution Time |          Second [s] |        Millisecond [ms] |  Microsecond [µs] |               Nanosecond [ns] |
+|:--------------------:| -------------------:| -----------------------:| -----------------:| -----------------------------:|
+| Min                  |            1.415179 |            1,415.179491 |  1,415,179.491043 |          1,415,179,491.043091 |
+| Max                  |           16.399410 |           16,399.410486 | 16,399,410.486221 |         16,399,410,486.221313 |
+| Mean                 |            7.453857 |            7,453.856516 |  7,453,856.515884 |          7,453,856,515.884399 |
+| Stdev                |            5.602887 |            5,602.886918 |  5,602,886.918461 |          5,602,886,918.460853 |
+
+**Benchmark II: Naiive Time Series Usage -- Caches cleared**
+  - Throughout 10 queries, caches are cleared prior to each query
+  - Memory limit to 100MB
+
+| Query Execution Time |          Second [s] |        Millisecond [ms] |  Microsecond [µs] |       Nanosecond [ns] |
+|:--------------------:| -------------------:| -----------------------:| -----------------:| ---------------------:|
+| Min                  |            3.775367 |            3,775.367022 |  3,775,367.021561 |  3,775,367,021.560669 |
+| Max                  |           16.232248 |           16,232.248068 | 16,232,248.067856 | 16,232,248,067.855835 |
+| Mean                 |           10.923727 |           10,923.726726 | 10,923,726.725578 | 10,923,726,725.578308 |
+| Stdev                |            4.459642 |            4,459.642280 |  4,459,642.279600 |  4,459,642,279.600293 |
+
+**Benchmark III: Optimal Time Series Usage -- Retaining caches**
+  - Throughout 1,000 queries, caches are cleared prior to each query
+  - Memory limit to 100MB
+
+| Query Execution Time |          Second [s] |        Millisecond [ms] | Microsecond [µs] |   Nanosecond [ns] |
+|:--------------------:| -------------------:| -----------------------:| ----------------:| -----------------:|
+| Min                  |            0.001389 |                1.389265 |     1,389.265060 |  1,389,265.060425 |
+| Max                  |            0.013977 |               13.976812 |    13,976.812363 | 13,976,812.362671 |
+| Mean                 |            0.005546 |                5.545500 |     5,545.500040 |  5,545,500.040054 |
+| Stdev                |            0.001347 |                1.346797 |     1,346.796918 |  1,346,796.917671 |
+
+- **Benchmark IV: Optimal Time Series Usage -- Caches cleared**
+  - Throughout 1,000 queries, caches are cleared prior to each query
+  - Memory limit to 100MB
+
+| Query Execution Time |          Second [s] |        Millisecond [ms] | Microsecond [µs] |   Nanosecond [ns] |
+|:--------------------:| -------------------:| -----------------------:| ----------------:| -----------------:|
+| Min                  |            0.004224 |                4.224062 |     4,224.061966 |  4,224,061.965942 |
+| Max                  |            0.021801 |               21.800518 |    21,800.518036 | 21,800,518.035889 |
+| Mean                 |            0.009436 |                9.435634 |     9,435.634136 |  9,435,634.136200 |
+| Stdev                |            0.001577 |                1.577059 |     1,577.058967 |  1,577,058.967323 |
+
+</details>
+
+**Note:**
+- Caches cleared using:
 ```c++
 system("free > /dev/null");
 system("sync > /dev/null");
 system("sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'");
 system("free > /dev/null");
 ```
-</details>
