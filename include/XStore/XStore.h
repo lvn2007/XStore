@@ -5,6 +5,13 @@
 #include <map>
 #include <iostream>
 #include <filesystem>
+
+#include <stdio.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+
 #include "include/dataStruct/dataStruct.h"
 
 class XStore {
@@ -13,6 +20,7 @@ class XStore {
         int dbCount = 0;
         std::vector<std::string> dbNames = { };
         std::map<std::string, long int> resolutionMap { {"SECOND", 31536000}, {"MILLISECOND", 31536000000}, {"MICROSECOND", 31536000000000} };
+        std::map<std::string, FILE> fMap { { } };
         FILE *bFile;
 
         // Initialization
@@ -21,9 +29,16 @@ class XStore {
         // INSERT time-series oriented values
         void insert(std::time_t unixTime, std::string value, std::string dbName);
 
+        void insertp(std::time_t unixTime, std::string value, std::string dbName);
+
         std::string get(std::time_t unixTime, std::string dbName);
 
+        std::string getp(std::time_t unixTime, std::string dbName);
+
         std::string getSingleOpenClose(std::time_t unixTime, std::string dbName);
+
+        // Switch DB
+        void switchDB(std::string dbName);
 
         void closeFile();
 

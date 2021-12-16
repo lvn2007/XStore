@@ -1,6 +1,4 @@
 #include "include/dataStruct/dataStruct.h"
-// Data structure to hold time-value together
-
 // Constructor
 dataStruct::dataStruct(std::time_t unixTime, std::string data) {
     this->unixTime = unixTime;
