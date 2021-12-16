@@ -66,6 +66,52 @@ void XStore::insert(std::time_t unixTime, std::string value, std::string dbName)
     }
 }
 
+void XStore::insertp(std::time_t unixTime, std::string value, std::string dbName) {
+    // Read timeValue -- UNIX time
+    int inputYear = toHumanYear(unixTime);
+    std::string currResolution = getTimeResolution(unixTime);
+    std::cout << resolutionMap[currResolution] << std::endl;
+
+    switch (dbCount) {
+        // IF no DB exists i.e., dbCount == 0
+        case 0:
+            //  -> Create new one
+            std::filesystem::create_directories(baseDir + "/XStore/dataStore/" + dbName);
+
+            FILE *bFile;
+            // -> Create a file with name of inputYear.XSTORE
+            std::string dataDir = baseDir + "/XStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
+            bFile = std::fopen(dataDir.c_str(), "wb");
+
+            // Start & End time of a given year
+            long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
+            long int endEpoch = getEndTimeEpoch(inputYear, currResolution);
+
+            // Staged area for XStore -- Writing dummy data prior to writing real data
+            for (long int i = startEpoch; i <= endEpoch; i++) {
+                // Preparing line of data with dummy variables based on passed input "value"
+                dataStruct dummyData{i, value};
+
+                // Write to binary file to disk with new line indicates EOL
+                std::fwrite((dummyData.getData() + "\n").data(), lineSize + 1, 1, bFile);
+            }
+
+            // IF no error
+            // -> Organize timestamp & data into an object
+            dataStruct currData{unixTime, value};
+
+            // DEBUG: Printing data current size
+            std::cout << currData.getData().size() << std::endl;
+
+            // Write as binary file to disk with new line indicates EOL
+            std::fwrite((currData.getData() + "\n").data(), lineSize + 1, 1, bFile);
+
+            // Close file after write
+            std::fclose(bFile);
+            break;
+    }
+}
+
 std::string XStore::get(std::time_t unixTime, std::string dbName) {
     // Read timeValue -- UNIX time
     int inputYear = toHumanYear(unixTime);
@@ -93,6 +139,41 @@ std::string XStore::get(std::time_t unixTime, std::string dbName) {
     return toReturn;
 }
 
+std::string XStore::getp(std::time_t unixTime, std::string dbName) {
+    // Read timeValue -- UNIX time
+    int inputYear = toHumanYear(unixTime);
+    std::string currResolution = getTimeResolution(unixTime);
+
+    // Start epoch time of a given year
+    long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
+
+    // Epoch time difference between target & startEpoch
+    long int diff = unixTime - startEpoch;
+
+    // Calculate offset -- Exact location of where a particular target row is stored
+    long int offSet = diff * (lineSize + 1);
+
+    int bFile;
+
+    // Target file directory
+    std::string dataDir = baseDir + "/XStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
+
+    // Opening binary file
+    bFile = open(dataDir.c_str(), O_RDONLY);
+
+    // A single line data will be read into here
+    char buff[100];
+
+    // Extract line of data from binary file
+    int ret = pread(bFile, &buff[0], lineSize, offSet);
+//    std::cout << buff << std::endl;
+
+    // Close file
+    close(bFile);
+    std::string toReturn(buff);
+    return toReturn;
+}
+
 std::string XStore::getSingleOpenClose(std::time_t unixTime, std::string dbName) {
     // Read timeValue -- UNIX time
     int inputYear = toHumanYear(unixTime);
@@ -116,6 +197,13 @@ std::string XStore::getSingleOpenClose(std::time_t unixTime, std::string dbName)
 //        std::fclose(bFile);
     std::string toReturn(buff);
     return toReturn;
+}
+
+void XStore::switchDB(std::string dbName) {
+    if (dbCount == 0 || std::find(dbNames.begin(), dbNames.end(), dbName) != dbNames.end()) {
+        std::cout << "Switched DB" << std::endl;
+        return;
+    }
 }
 
 void XStore::closeFile() {
