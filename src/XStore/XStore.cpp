@@ -1,6 +1,6 @@
 #include "include/XStore/XStore.h"
 
-#define lineSize 100
+#define lineSize 128
 
 // Initialization
 XStore::XStore() {
@@ -72,43 +72,83 @@ void XStore::insertp(std::time_t unixTime, std::string value, std::string dbName
     std::string currResolution = getTimeResolution(unixTime);
     std::cout << resolutionMap[currResolution] << std::endl;
 
-    switch (dbCount) {
-        // IF no DB exists i.e., dbCount == 0
-        case 0:
-            //  -> Create new one
-            std::filesystem::create_directories(baseDir + "/XStore/dataStore/" + dbName);
+    FILE *bFile;
 
-            FILE *bFile;
-            // -> Create a file with name of inputYear.XSTORE
-            std::string dataDir = baseDir + "/XStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
-            bFile = std::fopen(dataDir.c_str(), "wb");
+    // IF no DB exists i.e., dbCount == 0
+    if (dbCount == 0) {
+        //  -> Create new one
+        std::filesystem::create_directories(baseDir + "/XStore/dataStore/" + dbName);
 
-            // Start & End time of a given year
-            long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
-            long int endEpoch = getEndTimeEpoch(inputYear, currResolution);
+        // -> Create a file with name of inputYear.XSTORE
+        std::string dataDir = baseDir + "/XStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
+        bFile = std::fopen(dataDir.c_str(), "wb+");
 
-            // Staged area for XStore -- Writing dummy data prior to writing real data
-            for (long int i = startEpoch; i <= endEpoch; i++) {
-                // Preparing line of data with dummy variables based on passed input "value"
-                dataStruct dummyData{i, value};
+        // Start & End time of a given year
+        long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
+        long int endEpoch = getEndTimeEpoch(inputYear, currResolution);
 
-                // Write to binary file to disk with new line indicates EOL
-                std::fwrite((dummyData.getData() + "\n").data(), lineSize + 1, 1, bFile);
-            }
+        // Staged area for XStore -- Create an empty (0's filled) binary file to writing real data
+        dataStruct lastData{endEpoch, value};
 
-            // IF no error
-            // -> Organize timestamp & data into an object
-            dataStruct currData{unixTime, value};
+        long int endOffset = (endEpoch - startEpoch) * lineSize;
+        ftruncate(fileno(bFile), (endEpoch - startEpoch) * lineSize);
 
-            // DEBUG: Printing data current size
-            std::cout << currData.getData().size() << std::endl;
+        // IF no error
+        // -> Organize timestamp & data into an object
+        dataStruct currData{unixTime, value};
 
-            // Write as binary file to disk with new line indicates EOL
-            std::fwrite((currData.getData() + "\n").data(), lineSize + 1, 1, bFile);
+        // Epoch time difference between target & startEpoch
+        long int diff = unixTime - startEpoch;
 
-            // Close file after write
-            std::fclose(bFile);
-            break;
+        // Calculate offset -- Exact location of where a particular target row is stored
+        long int offSet = diff * (lineSize);
+        std::cout << "Offset: " << offSet << std::endl;
+
+        std::fseek(bFile, offSet, SEEK_SET);
+
+        // Write as binary file to disk with new line indicates EOL
+        std::fwrite((currData.getData()).data(), lineSize, 1, bFile);
+
+        // Close file after write
+        std::fclose(bFile);
+
+        // Updating dbStats
+        dbStats();
+    }
+    else {
+        // Making sure a DB's directory is there
+        std::filesystem::create_directories(baseDir + "/XStore/dataStore/" + dbName);
+
+        // -> Create a file with name of inputYear.XSTORE
+        std::string dataDir = baseDir + "/XStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
+        bFile = std::fopen(dataDir.c_str(), "r+b");
+
+        // Start & End time of a given year
+        long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
+
+        // IF no error
+        // -> Organize timestamp & data into an object
+        dataStruct currData{unixTime, value};
+
+        // Epoch time difference between target & startEpoch
+        long int diff = unixTime - startEpoch;
+
+        // Calculate offset -- Exact location of where a particular target row is stored
+        long int offSet = diff * (lineSize);
+        std::cout << "Offset: " << offSet << std::endl;
+
+        std::fseek(bFile, offSet, SEEK_SET);
+
+        std::cout << "Data: " << currData.getData() << std::endl;
+
+        // Write as binary file to disk with new line indicates EOL
+        std::fwrite((currData.getData()).data(), lineSize, 1, bFile);
+
+        // Close file after write
+        std::fclose(bFile);
+
+        // Updating dbStats
+        dbStats();
     }
 }
 
@@ -124,15 +164,16 @@ std::string XStore::get(std::time_t unixTime, std::string dbName) {
     long int diff = unixTime - startEpoch;
 
     // Calculate offset -- Exact location of where a particular target row is stored
-    long int offSet = diff * (lineSize + 1);
+    long int offSet = diff * lineSize;
 
     FILE *bFile;
     std::string dataDir = baseDir + "/XStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
     bFile = std::fopen(dataDir.c_str(), "rb");
 
-    char *buff = new char[100];
+    char *buff = new char[lineSize];
+
     std::fseek(bFile, offSet, SEEK_SET);
-    std::fgets(buff, lineSize + 1, bFile);
+    std::fgets(buff, lineSize, bFile);
 //            std::puts(buff);
     std::fclose(bFile);
     std::string toReturn(buff);
@@ -151,7 +192,7 @@ std::string XStore::getp(std::time_t unixTime, std::string dbName) {
     long int diff = unixTime - startEpoch;
 
     // Calculate offset -- Exact location of where a particular target row is stored
-    long int offSet = diff * (lineSize + 1);
+    long int offSet = diff * lineSize;
 
     int bFile;
 
@@ -162,11 +203,10 @@ std::string XStore::getp(std::time_t unixTime, std::string dbName) {
     bFile = open(dataDir.c_str(), O_RDONLY);
 
     // A single line data will be read into here
-    char buff[100];
+    char buff[lineSize];
 
     // Extract line of data from binary file
-    int ret = pread(bFile, &buff[0], lineSize, offSet);
-//    std::cout << buff << std::endl;
+    int ret = pread(bFile, &buff[0], lineSize , offSet);
 
     // Close file
     close(bFile);

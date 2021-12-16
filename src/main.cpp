@@ -64,14 +64,21 @@ int main(int argc, char *argv[]) {
 
     // Instantiate XStore obj
     XStore myStore;
-//    myStore.insert(1504224000, "NaN,NaN,NaN,NaN,NaN,NaN,NaN", "tsla");
+//    myStore.insertp(1451606400, "0,NaN,NaN,NaN,NaN,NaN,NaN", "tsla");
+//    myStore.insertp(1451606401, "NaN,1,NaN,NaN,NaN,NaN,NaN", "tsla");
+//    myStore.insertp(1451606402, "NaN,NaN,2,NaN,NaN,NaN,NaN", "tsla");
+//    myStore.insertp(1451676402, "NaN,NaN,7,NaN,NaN,NaN,NaN", "tsla");
 
     std::vector<double> ms = { };
     std::vector<double> us = { };
     std::vector<double> ns = { };
 
-    myStore.switchDB("tsla");
-//    myStore.getp(1504224000, "tsla");
+//    myStore.switchDB("tsla");
+    std::cout << myStore.getp(1451606400, "tsla") << std::endl;
+    std::cout << myStore.getp(1451606401, "tsla") << std::endl;
+    std::cout << myStore.getp(1451606402, "tsla") << std::endl;
+    std::cout << myStore.getp(1451606403, "tsla") << std::endl;
+    std::cout << myStore.getp(1451676402, "tsla") << std::endl;
 
     // Microbench
 //    srand(time(NULL));
@@ -83,8 +90,9 @@ int main(int argc, char *argv[]) {
 ////        system("sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'");
 ////        system("free > /dev/null");
 //        randTime = rand() % 1000 + 1;
-//        long unixTime = 1504224000 + randTime;
+//        long unixTime = 1451606400 + randTime;
 //        std::string currVal;
+//
 //        start = std::chrono::high_resolution_clock::now();
 ////        currVal = myStore.get(unixTime, "tsla");
 ////        currVal = myStore.getSingleOpenClose(unixTime, "tsla");
@@ -102,7 +110,6 @@ int main(int argc, char *argv[]) {
 //
 ////        std::cout << "Target: " << unixTime << " | Result: " <<  currVal << std::endl;
 //    }
-//    myStore.closeFile();
 //
 //    std::cout << nIter << " queries experiments" << std::endl;
 //    std::cout << "--- EXECUTION TIME in [ms] ---" << std::endl;
