@@ -29,8 +29,6 @@ class XStore {
         // INSERT time-series oriented values
         void insert(std::time_t unixTime, std::string value, std::string dbName);
 
-        void insertp(std::time_t unixTime, std::string value, std::string dbName);
-
         std::string get(std::time_t unixTime, std::string dbName);
 
         std::string getp(std::time_t unixTime, std::string dbName);
@@ -45,6 +43,8 @@ class XStore {
     private:
         // Check if there's any existing database
         bool hasDB();
+
+        bool hasDBFile(std::string filePath);
 
         void initMsg();
 
