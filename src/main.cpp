@@ -64,10 +64,12 @@ int main(int argc, char *argv[]) {
 
     // Instantiate XStore obj
     XStore myStore;
-//    myStore.insertp(1451606400, "0,NaN,NaN,NaN,NaN,NaN,NaN", "tsla");
-//    myStore.insertp(1451606401, "NaN,1,NaN,NaN,NaN,NaN,NaN", "tsla");
-//    myStore.insertp(1451606402, "NaN,NaN,2,NaN,NaN,NaN,NaN", "tsla");
-//    myStore.insertp(1451676402, "NaN,NaN,7,NaN,NaN,NaN,NaN", "tsla");
+
+//    myStore.insert(1483228801, "0,NaN,NaN,NaN,NaN,NaN,NaN", "tsla");
+//    myStore.insert(1451606400, "0,NaN,NaN,NaN,NaN,NaN,NaN", "tsla");
+//    myStore.insert(1451606401, "NaN,1,NaN,NaN,NaN,NaN,NaN", "tsla");
+//    myStore.insert(1451606402, "NaN,NaN,2,NaN,NaN,NaN,NaN", "tsla");
+//    myStore.insert(1451676402, "NaN,NaN,7,NaN,NaN,NaN,NaN", "tsla");
 
     std::vector<double> ms = { };
     std::vector<double> us = { };
@@ -79,6 +81,8 @@ int main(int argc, char *argv[]) {
     std::cout << myStore.getp(1451606402, "tsla") << std::endl;
     std::cout << myStore.getp(1451606403, "tsla") << std::endl;
     std::cout << myStore.getp(1451676402, "tsla") << std::endl;
+    std::cout << myStore.getp(1483228801, "tsla") << std::endl;
+
 
     // Microbench
 //    srand(time(NULL));

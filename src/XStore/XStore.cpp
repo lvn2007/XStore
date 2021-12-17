@@ -26,53 +26,11 @@ void XStore::insert(std::time_t unixTime, std::string value, std::string dbName)
     std::string currResolution = getTimeResolution(unixTime);
     std::cout << resolutionMap[currResolution] << std::endl;
 
-    switch (dbCount) {
-        // IF no DB exists i.e., dbCount == 0
-        case 0:
-            //  -> Create new one
-            std::filesystem::create_directories(baseDir + "/XStore/dataStore/" + dbName);
-
-            FILE *bFile;
-            // -> Create a file with name of inputYear.XSTORE
-            std::string dataDir = baseDir + "/XStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
-            bFile = std::fopen(dataDir.c_str(), "wb");
-
-            // Start & End time of a given year
-            long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
-            long int endEpoch = getEndTimeEpoch(inputYear, currResolution);
-
-            // Staged area for XStore -- Writing dummy data prior to writing real data
-            for (long int i = startEpoch; i <= endEpoch; i++) {
-                // Preparing line of data with dummy variables based on passed input "value"
-                dataStruct dummyData{i, value};
-
-                // Write to binary file to disk with new line indicates EOL
-                std::fwrite((dummyData.getData() + "\n").data(), lineSize + 1, 1, bFile);
-            }
-
-            // IF no error
-            // -> Organize timestamp & data into an object
-            dataStruct currData{unixTime, value};
-
-            // DEBUG: Printing data current size
-            std::cout << currData.getData().size() << std::endl;
-
-            // Write as binary file to disk with new line indicates EOL
-            std::fwrite((currData.getData() + "\n").data(), lineSize + 1, 1, bFile);
-
-            // Close file after write
-            std::fclose(bFile);
-            break;
-    }
-}
-
-void XStore::insertp(std::time_t unixTime, std::string value, std::string dbName) {
-    // Read timeValue -- UNIX time
-    int inputYear = toHumanYear(unixTime);
-    std::string currResolution = getTimeResolution(unixTime);
-    std::cout << resolutionMap[currResolution] << std::endl;
-
     FILE *bFile;
+
+    // Start & End time of a given year
+    long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
+    long int endEpoch = getEndTimeEpoch(inputYear, currResolution);
 
     // IF no DB exists i.e., dbCount == 0
     if (dbCount == 0) {
@@ -83,14 +41,7 @@ void XStore::insertp(std::time_t unixTime, std::string value, std::string dbName
         std::string dataDir = baseDir + "/XStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
         bFile = std::fopen(dataDir.c_str(), "wb+");
 
-        // Start & End time of a given year
-        long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
-        long int endEpoch = getEndTimeEpoch(inputYear, currResolution);
-
-        // Staged area for XStore -- Create an empty (0's filled) binary file to writing real data
-        dataStruct lastData{endEpoch, value};
-
-        long int endOffset = (endEpoch - startEpoch) * lineSize;
+        // Creating dummy file with n Size
         ftruncate(fileno(bFile), (endEpoch - startEpoch) * lineSize);
 
         // IF no error
@@ -102,8 +53,8 @@ void XStore::insertp(std::time_t unixTime, std::string value, std::string dbName
 
         // Calculate offset -- Exact location of where a particular target row is stored
         long int offSet = diff * (lineSize);
-        std::cout << "Offset: " << offSet << std::endl;
 
+        // Seek to target offset prior to write
         std::fseek(bFile, offSet, SEEK_SET);
 
         // Write as binary file to disk with new line indicates EOL
@@ -121,10 +72,21 @@ void XStore::insertp(std::time_t unixTime, std::string value, std::string dbName
 
         // -> Create a file with name of inputYear.XSTORE
         std::string dataDir = baseDir + "/XStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
-        bFile = std::fopen(dataDir.c_str(), "r+b");
 
-        // Start & End time of a given year
-        long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
+        // Check if year.XSTORE exists
+        //  IF year.XSTORE exists
+        if (hasDBFile(dataDir)) {
+            // Open in updating mode
+            bFile = std::fopen(dataDir.c_str(), "r+b");
+        }
+        //  IF year.XSTORE exists
+        else {
+            // Create & write mode
+            bFile = std::fopen(dataDir.c_str(), "wb");
+
+            // Creating dummy file with n Size
+            ftruncate(fileno(bFile), (endEpoch - startEpoch) * lineSize);
+        }
 
         // IF no error
         // -> Organize timestamp & data into an object
@@ -135,11 +97,9 @@ void XStore::insertp(std::time_t unixTime, std::string value, std::string dbName
 
         // Calculate offset -- Exact location of where a particular target row is stored
         long int offSet = diff * (lineSize);
-        std::cout << "Offset: " << offSet << std::endl;
 
+        // Seek to target offset prior to write
         std::fseek(bFile, offSet, SEEK_SET);
-
-        std::cout << "Data: " << currData.getData() << std::endl;
 
         // Write as binary file to disk with new line indicates EOL
         std::fwrite((currData.getData()).data(), lineSize, 1, bFile);
@@ -255,6 +215,11 @@ bool XStore::hasDB() {
     // Path to dataStore -- Currently hard-coded | WILL NEED TO FIX SO IT IS DYNAMIC
     const std::filesystem::path tmp_dir{ std::filesystem::path(baseDir + "/XStore/dataStore")};
     return !std::filesystem::is_empty(tmp_dir);
+}
+
+bool XStore::hasDBFile(std::string filePath) {
+    struct stat buffer;
+    return (stat(filePath.c_str(), &buffer) == 0);
 }
 
 void XStore::initMsg() {
