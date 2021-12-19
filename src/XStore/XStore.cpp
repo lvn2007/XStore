@@ -112,16 +112,16 @@ void XStore::insert(std::time_t unixTime, std::string value, std::string dbName)
     }
 }
 
-std::string XStore::get(std::time_t unixTime, std::string dbName) {
+std::string XStore::get(std::time_t epochTime, std::string dbName) {
     // Read timeValue -- UNIX time
-    int inputYear = toHumanYear(unixTime);
-    std::string currResolution = getTimeResolution(unixTime);
+    int inputYear = toHumanYear(epochTime);
+    std::string currResolution = getTimeResolution(epochTime);
 
     // Start epoch time of a given year
     long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
 
     // Epoch time difference between target & startEpoch
-    long int diff = unixTime - startEpoch;
+    long int diff = epochTime - startEpoch;
 
     // Calculate offset -- Exact location of where a particular target row is stored
     long int offSet = diff * lineSize;
@@ -134,22 +134,22 @@ std::string XStore::get(std::time_t unixTime, std::string dbName) {
 
     std::fseek(bFile, offSet, SEEK_SET);
     std::fgets(buff, lineSize, bFile);
-//            std::puts(buff);
+//    std::puts(buff);
     std::fclose(bFile);
     std::string toReturn(buff);
     return toReturn;
 }
 
-std::string XStore::getp(std::time_t unixTime, std::string dbName) {
+std::string XStore::getp(std::time_t epochTime, std::string dbName) {
     // Read timeValue -- UNIX time
-    int inputYear = toHumanYear(unixTime);
-    std::string currResolution = getTimeResolution(unixTime);
+    int inputYear = toHumanYear(epochTime);
+    std::string currResolution = getTimeResolution(epochTime);
 
     // Start epoch time of a given year
     long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
 
     // Epoch time difference between target & startEpoch
-    long int diff = unixTime - startEpoch;
+    long int diff = epochTime - startEpoch;
 
     // Calculate offset -- Exact location of where a particular target row is stored
     long int offSet = diff * lineSize;
@@ -171,6 +171,49 @@ std::string XStore::getp(std::time_t unixTime, std::string dbName) {
     // Close file
     close(bFile);
     std::string toReturn(buff);
+    return toReturn;
+}
+
+std::string XStore::getBatch(std::time_t startEpochT, std::time_t endEpochT, std::string dbName) {
+    std::string toReturn;
+
+    // Read timeValue -- UNIX time
+    int inputYear = toHumanYear(startEpochT);
+    std::string currResolution = getTimeResolution(startEpochT);
+
+    // Start epoch time of a given year
+    long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
+
+    // Epoch time difference between target & startEpoch
+    long int diff = startEpochT - startEpoch;
+    long int rangeDiff = endEpochT - startEpoch;
+
+    // Calculate offset -- Exact location of where a particular target row is stored
+    long int offSet = diff * lineSize;
+
+    int bFile, ret;
+
+    // Target file directory
+    std::string dataDir = baseDir + "/XStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
+
+    // Opening binary file
+    bFile = open(dataDir.c_str(), O_RDONLY);
+
+    // A single line data will be read into here
+    char buff[lineSize];
+
+    for (int i = offSet; i <= lineSize * rangeDiff; i += lineSize) {
+        // Extract line of data from binary file
+        ret = pread(bFile, &buff[0], lineSize, i);
+
+        // Cache data to return
+        toReturn += buff;
+    }
+
+    std::cout << "Batch: \n" << toReturn << std::endl;
+    // Close file
+    close(bFile);
+
     return toReturn;
 }
 

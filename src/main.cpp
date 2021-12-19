@@ -75,14 +75,14 @@ int main(int argc, char *argv[]) {
     std::vector<double> us = { };
     std::vector<double> ns = { };
 
+    myStore.getBatch(1451606400, 1451606403, "tsla");
 //    myStore.switchDB("tsla");
-    std::cout << myStore.getp(1451606400, "tsla") << std::endl;
-    std::cout << myStore.getp(1451606401, "tsla") << std::endl;
-    std::cout << myStore.getp(1451606402, "tsla") << std::endl;
-    std::cout << myStore.getp(1451606403, "tsla") << std::endl;
-    std::cout << myStore.getp(1451676402, "tsla") << std::endl;
-    std::cout << myStore.getp(1483228801, "tsla") << std::endl;
-
+//    std::cout << myStore.getp(1451606400, "tsla") << std::endl;
+//    std::cout << myStore.getp(1451606401, "tsla") << std::endl;
+//    std::cout << myStore.getp(1451606402, "tsla") << std::endl;
+//    std::cout << myStore.getp(1451606403, "tsla") << std::endl;
+//    std::cout << myStore.getp(1451676402, "tsla") << std::endl;
+//    std::cout << myStore.getp(1483228801, "tsla") << std::endl;
 
     // Microbench
 //    srand(time(NULL));
