@@ -13,6 +13,12 @@ eXtreme performance in distributed tv-Store for time-series
 - g++ 8.4.0
 - C++17
 
+# Note
+- To compile .proto for Protobuf & gRPC (Python):
+```shell
+python3 -m grpc_tools.protoc --proto_path=. ./mathtest.proto --python_out=. --grpc_python_out=.
+```
+
 # Benchmark
 
 - Dataset: 1-second granularity
