@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="9da08356-9782-439a-b7e5-21cafc4c39c5" name="GIGI-1">
+        <fileTransfer accessType="SFTP" host="64.131.114.23" port="22" sshConfigId="bd1209fc-8ade-45f1-9d22-5a506154191f" sshConfig="ubuntu@64.131.114.23:22 agent" authAgent="true">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" keepAliveTimeout="0" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+      <webServer id="527bdc62-9f86-4169-9067-c9288a031e12" name="InfluxDB">
+        <fileTransfer rootFolder="/home/ubuntu" accessType="SFTP" host="64.131.114.123" port="22" sshConfigId="1a602f45-c288-48e2-9e68-db68e5641ba5" sshConfig="ubuntu@64.131.114.123:22 key" keyPair="true">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" keepAliveTimeout="0" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+      <webServer id="7056acac-f42b-4b21-8362-be0f23dd453a" name="MongoDB">
+        <fileTransfer rootFolder="/home/ubuntu" accessType="SFTP" host="64.131.114.66" port="22" sshConfigId="df33caf9-0b9c-4177-9c15-a8165fcff64a" sshConfig="ubuntu@64.131.114.66:22 agent" authAgent="true">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" keepAliveTimeout="0" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>
