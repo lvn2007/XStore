@@ -1,13 +1,62 @@
+# Minimum CMake required
 cmake_minimum_required(VERSION 3.20)
-project(xStore)
 
+# Project
+project(XStore)
+
+# C++ standard
 set(CMAKE_CXX_STANDARD 17)
+message(STATUS "Using C++ Standard: ${CMAKE_CXX_STANDARD}")
+
+include(FetchContent)
+
+find_package(Protobuf REQUIRED)
+
+# Protobuf-compiler
+set(_PROTOBUF_PROTOC $<TARGET_FILE:protobuf::protoc>)
+message(STATUS "Using Protobuf ${Protobuf_VERSION}")
+
+# gRPC
+find_package(gRPC CONFIG REQUIRED)
+message(STATUS "Using gRPC ${gRPC_VERSION}")
+set(_GRPC_GRPCPP gRPC::grpc++)
+set(_GRPC_CPP_PLUGIN_EXECUTABLE $<TARGET_FILE:gRPC::grpc_cpp_plugin>)
+
+# Proto file
+get_filename_component(hw_proto "mathtest.proto" ABSOLUTE)
+get_filename_component(hw_proto_path "${hw_proto}" PATH)
+
+# Generated sources
+#set(hw_proto_srcs "${CMAKE_CURRENT_BINARY_DIR}/mathtest.pb.cc")
+#set(hw_proto_hdrs "${CMAKE_CURRENT_BINARY_DIR}/mathtest.pb.h")
+set(hw_grpc_srcs "${CMAKE_CURRENT_BINARY_DIR}/mathtest.grpc.pb.cc")
+set(hw_grpc_hdrs "${CMAKE_CURRENT_BINARY_DIR}/mathtest.grpc.pb.h")
+add_custom_command(
+        OUTPUT "${hw_grpc_srcs}" "${hw_grpc_hdrs}"
+        COMMAND ${_PROTOBUF_PROTOC}
+        ARGS --grpc_out "${CMAKE_CURRENT_BINARY_DIR}"
+        --cpp_out "${CMAKE_CURRENT_BINARY_DIR}"
+        -I "${hw_proto_path}"
+        --plugin=protoc-gen-grpc="${_GRPC_CPP_PLUGIN_EXECUTABLE}"
+        "${hw_proto}"
+        DEPENDS "${hw_proto}")
+
+include_directories(${Protobuf_INCLUDE_DIRS})
+include_directories(${CMAKE_CURRENT_BINARY_DIR})
+
+protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS mathtest.proto)
+
+# Include generated *.pb.h files
+include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 
 include_directories(.)
 include_directories(src)
 
-add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h src/dataStruct/dataStruct.cpp include/dataStruct/dataStruct.h)
+add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h src/dataStruct/dataStruct.cpp
+        include/dataStruct/dataStruct.h src/XStore_Networking/XStore_gRPC.cpp include/XStore_Networking/XStore_gRPC.h
+        ${PROTO_SRCS} ${PROTO_HDRS} ${hw_grpc_srcs})
 
 if(${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS 9)
-    target_link_libraries(XStore PUBLIC "stdc++fs")
+    target_link_libraries(XStore PUBLIC "stdc++fs" ${Protobuf_LIBRARIES} ${_GRPC_GRPCPP})
+#    target_link_libraries(XStore ${_GRPC_GRPCPP})
 endif()

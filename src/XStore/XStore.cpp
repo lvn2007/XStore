@@ -210,7 +210,6 @@ std::string XStore::getBatch(std::time_t startEpochT, std::time_t endEpochT, std
         toReturn += buff;
     }
 
-    std::cout << "Batch: \n" << toReturn << std::endl;
     // Close file
     close(bFile);
 

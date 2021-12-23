@@ -2,9 +2,13 @@
 #include <filesystem>
 #include <algorithm>
 #include <map>
-#include <cstring>
 #include <cmath>
 #include "include/XStore/XStore.h"
+
+//#include <string>
+#include <grpcpp/grpcpp.h>
+#include <mathtest.pb.h>
+#include <mathtest.grpc.pb.h>
 
 double meanCalc(std::vector<double> inputVector) {
     double totalSum = 0;
@@ -57,6 +61,36 @@ double getMax(std::vector<double> inputVector) {
     return maxVal;
 }
 
+class MathServiceImplementation final : public mathtest::MathTest::Service {
+    grpc::Status sendRequest(
+            grpc::ServerContext* context,
+            const mathtest::MathRequest* request,
+            mathtest::MathReply* reply
+    ) override {
+        int a = request->a();
+        int b = request->b();
+
+        reply->set_result(a * b);
+
+        return grpc::Status::OK;
+    }
+};
+
+void Run() {
+    std::string address("0.0.0.0:5000");
+    MathServiceImplementation service;
+
+    grpc::ServerBuilder builder;
+
+    builder.AddListeningPort(address, grpc::InsecureServerCredentials());
+    builder.RegisterService(&service);
+
+    std::unique_ptr<grpc::Server> server(builder.BuildAndStart());
+    std::cout << "Server listening on port: " << address << std::endl;
+
+    server->Wait();
+}
+
 int main(int argc, char *argv[]) {
     // Clock init
     std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
@@ -75,7 +109,11 @@ int main(int argc, char *argv[]) {
     std::vector<double> us = { };
     std::vector<double> ns = { };
 
-    myStore.getBatch(1451606400, 1451606403, "tsla");
+    Run();
+
+    return 0;
+
+//    myStore.getBatch(1451606400, 1451606403, "tsla");
 //    myStore.switchDB("tsla");
 //    std::cout << myStore.getp(1451606400, "tsla") << std::endl;
 //    std::cout << myStore.getp(1451606401, "tsla") << std::endl;
@@ -100,7 +138,8 @@ int main(int argc, char *argv[]) {
 //        start = std::chrono::high_resolution_clock::now();
 ////        currVal = myStore.get(unixTime, "tsla");
 ////        currVal = myStore.getSingleOpenClose(unixTime, "tsla");
-//        currVal = myStore.getp(unixTime, "tsla");
+////        currVal = myStore.getp(unixTime, "tsla");
+////        myStore.getBatch(1451606400, 1451607400, "tsla");
 //        end = std::chrono::high_resolution_clock::now();
 //        diff = end - start;
 //
