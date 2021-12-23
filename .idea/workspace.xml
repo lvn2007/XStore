@@ -1,0 +1,622 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="CMakeRunConfigurationManager" shouldGenerate="true" shouldDeleteObsolete="true">
+    <generated>
+      <config projectName="XStore" targetName="XStore" />
+    </generated>
+  </component>
+  <component name="CMakeSettings" AUTO_RELOAD="true">
+    <configurations>
+      <configuration PROFILE_NAME="Debug-Remote-xStore-Master" ENABLED="true" CONFIG_NAME="Debug" TOOLCHAIN_NAME="xStore-Master" />
+      <configuration PROFILE_NAME="Debug" ENABLED="true" CONFIG_NAME="Debug" />
+    </configurations>
+  </component>
+  <component name="ChangeListManager">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Including dependencies" />
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="ClangdSettings">
+    <option name="formatViaClangd" value="false" />
+  </component>
+  <component name="ExecutionTargetManager" SELECTED_TARGET="CMakeBuildProfile:Debug" />
+  <component name="FileTemplateManagerImpl">
+    <option name="RECENT_TEMPLATES">
+      <list>
+        <option value="Python Script" />
+      </list>
+    </option>
+  </component>
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="ProjectId" id="1zsiv7cuy9cXM9GSSwJkPS8Q3GL" />
+  <component name="ProjectLevelVcsManager" settingsEditedManually="true">
+    <ConfirmationsSetting value="2" id="Add" />
+  </component>
+  <component name="ProjectViewState">
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+    <option name="showMembers" value="true" />
+    <option name="showVisibilityIcons" value="true" />
+  </component>
+  <component name="PropertiesComponent">
+    <property name="RunOnceActivity.OpenProjectViewOnStart" value="true" />
+    <property name="RunOnceActivity.ShowReadmeOnStart" value="true" />
+    <property name="RunOnceActivity.cidr.known.project.marker" value="true" />
+    <property name="WebServerToolWindowFactoryState" value="true" />
+    <property name="WebServerToolWindowPanel.toolwindow.highlight.mappings" value="true" />
+    <property name="WebServerToolWindowPanel.toolwindow.highlight.symlinks" value="true" />
+    <property name="WebServerToolWindowPanel.toolwindow.show.date" value="false" />
+    <property name="WebServerToolWindowPanel.toolwindow.show.permissions" value="false" />
+    <property name="WebServerToolWindowPanel.toolwindow.show.size" value="false" />
+    <property name="cf.advertisement.text.has.clang-format" value="true" />
+    <property name="cf.first.check.clang-format" value="false" />
+    <property name="cidr.known.project.marker" value="true" />
+    <property name="cmake.loaded.for.project" value="true" />
+    <property name="com.intellij.ide.scratch.ScratchImplUtil$2/New Scratch File" value="ObjectiveC" />
+    <property name="last_opened_file_path" value="$PROJECT_DIR$" />
+    <property name="nodejs_package_manager_path" value="npm" />
+    <property name="settings.editor.selected.configurable" value="project.propVCSSupport.Mappings" />
+  </component>
+  <component name="RecentsManager">
+    <key name="CopyFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$" />
+    </key>
+    <key name="MoveFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/include/XStore_Networking" />
+      <recent name="$PROJECT_DIR$" />
+      <recent name="$PROJECT_DIR$/include/dataStruct" />
+      <recent name="$PROJECT_DIR$/include/dataStruct" />
+      <recent name="$PROJECT_DIR$/src/XStore" />
+    </key>
+  </component>
+  <component name="RunManager" selected="CMake Application.XStore">
+    <configuration name="Unnamed" type="CLion_Remote" version="1" remoteCommand="" symbolFile="" sysroot="">
+      <debugger toolchainName="xStore-Master" />
+      <method v="2" />
+    </configuration>
+    <configuration name="XStore (1)" type="CMakeRunConfiguration" factoryName="Application" temporary="true" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="XStore" TARGET_NAME="XStore" CONFIG_NAME="Debug" RUN_TARGET_PROJECT_NAME="XStore" RUN_TARGET_NAME="XStore">
+      <method v="2">
+        <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="XStore" type="CMakeRunConfiguration" factoryName="Application" temporary="true" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="XStore" TARGET_NAME="XStore" CONFIG_NAME="Debug" RUN_TARGET_PROJECT_NAME="XStore" RUN_TARGET_NAME="XStore">
+      <method v="2">
+        <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
+      </method>
+    </configuration>
+    <configuration default="true" type="GradleAppRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
+      <method v="2">
+        <option name="com.jetbrains.cidr.cpp.gradle.execution.GradleNativeBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="timeStuffs (1)" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
+      <module name="xStore" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="WORKING_DIRECTORY" value="/" />
+      <option name="IS_MODULE_SDK" value="false" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <option name="SCRIPT_NAME" value="&lt;bfdc2152-fb91-4d63-b567-ed994a8576b1&gt;/xStore/timeStuffs.py" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
+    <configuration name="timeStuffs" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
+      <module name="xStore" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
+      <option name="IS_MODULE_SDK" value="true" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/timeStuffs.py" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
+    <list>
+      <item itemvalue="CMake Application.XStore" />
+      <item itemvalue="CMake Application.XStore (1)" />
+      <item itemvalue="Python.timeStuffs" />
+      <item itemvalue="Python.timeStuffs (1)" />
+      <item itemvalue="Remote Debug.Unnamed" />
+    </list>
+    <recent_temporary>
+      <list>
+        <item itemvalue="CMake Application.XStore" />
+        <item itemvalue="CMake Application.XStore (1)" />
+        <item itemvalue="Python.timeStuffs" />
+        <item itemvalue="Python.timeStuffs (1)" />
+      </list>
+    </recent_temporary>
+  </component>
+  <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="application-level" UseSingleDictionary="true" transferred="true" />
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="Default task">
+      <changelist id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="" />
+      <created>1634943423867</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1634943423867</updated>
+      <workItem from="1634943425745" duration="49000" />
+      <workItem from="1634943490843" duration="193000" />
+      <workItem from="1634943685972" duration="522000" />
+      <workItem from="1634944359895" duration="176000" />
+      <workItem from="1634944538085" duration="167000" />
+      <workItem from="1634944707394" duration="160000" />
+      <workItem from="1634944869666" duration="477000" />
+      <workItem from="1634945349479" duration="4972000" />
+      <workItem from="1635019703146" duration="25504000" />
+      <workItem from="1635292815717" duration="254000" />
+      <workItem from="1635298317395" duration="517000" />
+      <workItem from="1635553035737" duration="29642000" />
+      <workItem from="1635962345103" duration="813000" />
+      <workItem from="1636123307435" duration="20000" />
+      <workItem from="1636404500308" duration="71070000" />
+      <workItem from="1639070906352" duration="582000" />
+      <workItem from="1639192963797" duration="1175000" />
+      <workItem from="1639599504260" duration="3410000" />
+      <workItem from="1639607243420" duration="392000" />
+      <workItem from="1639607676885" duration="70827000" />
+      <workItem from="1640192951215" duration="52000" />
+      <workItem from="1640193367298" duration="4041000" />
+      <workItem from="1640236082476" duration="1296000" />
+    </task>
+    <task id="LOCAL-00001" summary="Working on xStore interface">
+      <created>1634958073999</created>
+      <option name="number" value="00001" />
+      <option name="presentableId" value="LOCAL-00001" />
+      <option name="project" value="LOCAL" />
+      <updated>1634958073999</updated>
+    </task>
+    <task id="LOCAL-00002" summary="Working on xStore -- Time stuffs in insertion of data">
+      <created>1635033913710</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1635033913710</updated>
+    </task>
+    <task id="LOCAL-00003" summary="Working on xStore - Insert when no DB exists">
+      <created>1635043975216</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1635043975216</updated>
+    </task>
+    <task id="LOCAL-00004" summary="Updated README.md">
+      <created>1635044200767</created>
+      <option name="number" value="00004" />
+      <option name="presentableId" value="LOCAL-00004" />
+      <option name="project" value="LOCAL" />
+      <updated>1635044200767</updated>
+    </task>
+    <task id="LOCAL-00005" summary="Partially done un-ordered insert">
+      <created>1635118594109</created>
+      <option name="number" value="00005" />
+      <option name="presentableId" value="LOCAL-00005" />
+      <option name="project" value="LOCAL" />
+      <updated>1635118594109</updated>
+    </task>
+    <task id="LOCAL-00006" summary="Sample data">
+      <created>1635118782773</created>
+      <option name="number" value="00006" />
+      <option name="presentableId" value="LOCAL-00006" />
+      <option name="project" value="LOCAL" />
+      <updated>1635118782773</updated>
+    </task>
+    <task id="LOCAL-00007" summary="Experimenting fwrite/fread/fgets">
+      <created>1635564936832</created>
+      <option name="number" value="00007" />
+      <option name="presentableId" value="LOCAL-00007" />
+      <option name="project" value="LOCAL" />
+      <updated>1635564936832</updated>
+    </task>
+    <task id="LOCAL-00008" summary="Switch &quot;dataStruct&quot; from class to struct">
+      <created>1635619496926</created>
+      <option name="number" value="00008" />
+      <option name="presentableId" value="LOCAL-00008" />
+      <option name="project" value="LOCAL" />
+      <updated>1635619496926</updated>
+    </task>
+    <task id="LOCAL-00009" summary="Concat newLine with data. Set lineSize = 100 bytes">
+      <created>1635621899250</created>
+      <option name="number" value="00009" />
+      <option name="presentableId" value="LOCAL-00009" />
+      <option name="project" value="LOCAL" />
+      <updated>1635621899250</updated>
+    </task>
+    <task id="LOCAL-00010" summary="lineSize = Fixed 100 bytes in size">
+      <created>1635621942460</created>
+      <option name="number" value="00010" />
+      <option name="presentableId" value="LOCAL-00010" />
+      <option name="project" value="LOCAL" />
+      <updated>1635621942460</updated>
+    </task>
+    <task id="LOCAL-00011" summary="Added time resolution map">
+      <created>1635625804480</created>
+      <option name="number" value="00011" />
+      <option name="presentableId" value="LOCAL-00011" />
+      <option name="project" value="LOCAL" />
+      <updated>1635625804480</updated>
+    </task>
+    <task id="LOCAL-00012" summary="Added 2 funcs to compute first &amp; last datetime and return an EPOCH value">
+      <created>1635636801052</created>
+      <option name="number" value="00012" />
+      <option name="presentableId" value="LOCAL-00012" />
+      <option name="project" value="LOCAL" />
+      <updated>1635636801052</updated>
+    </task>
+    <task id="LOCAL-00013" summary="Finished rough-draft version of xStore -- Delivering 110 microsecs per query">
+      <created>1635639124763</created>
+      <option name="number" value="00013" />
+      <option name="presentableId" value="LOCAL-00013" />
+      <option name="project" value="LOCAL" />
+      <updated>1635639124763</updated>
+    </task>
+    <task id="LOCAL-00014" summary="Clean-up">
+      <created>1635640553921</created>
+      <option name="number" value="00014" />
+      <option name="presentableId" value="LOCAL-00014" />
+      <option name="project" value="LOCAL" />
+      <updated>1635640553921</updated>
+    </task>
+    <task id="LOCAL-00015" summary="Update README.md">
+      <created>1635654648106</created>
+      <option name="number" value="00015" />
+      <option name="presentableId" value="LOCAL-00015" />
+      <option name="project" value="LOCAL" />
+      <updated>1635654648106</updated>
+    </task>
+    <task id="LOCAL-00016" summary="Update README.md">
+      <created>1635655574009</created>
+      <option name="number" value="00016" />
+      <option name="presentableId" value="LOCAL-00016" />
+      <option name="project" value="LOCAL" />
+      <updated>1635655574009</updated>
+    </task>
+    <task id="LOCAL-00017" summary="Close bFile in get func. Benched of 10 random inputs">
+      <created>1635656118154</created>
+      <option name="number" value="00017" />
+      <option name="presentableId" value="LOCAL-00017" />
+      <option name="project" value="LOCAL" />
+      <updated>1635656118154</updated>
+    </task>
+    <task id="LOCAL-00018" summary="Furnishing touch">
+      <created>1635657037576</created>
+      <option name="number" value="00018" />
+      <option name="presentableId" value="LOCAL-00018" />
+      <option name="project" value="LOCAL" />
+      <updated>1635657037576</updated>
+    </task>
+    <task id="LOCAL-00019" summary="get() now returns proper string value i.e., 1 row of data">
+      <created>1635741654927</created>
+      <option name="number" value="00019" />
+      <option name="presentableId" value="LOCAL-00019" />
+      <option name="project" value="LOCAL" />
+      <updated>1635741654927</updated>
+    </task>
+    <task id="LOCAL-00020" summary="Added micro bench for mongoDB">
+      <created>1636931487942</created>
+      <option name="number" value="00020" />
+      <option name="presentableId" value="LOCAL-00020" />
+      <option name="project" value="LOCAL" />
+      <updated>1636931487943</updated>
+    </task>
+    <task id="LOCAL-00021" summary="Faster query &amp; Added clear caches for benchmarks">
+      <created>1637811858304</created>
+      <option name="number" value="00021" />
+      <option name="presentableId" value="LOCAL-00021" />
+      <option name="project" value="LOCAL" />
+      <updated>1637811858304</updated>
+    </task>
+    <task id="LOCAL-00022" summary="Added statistics calc &amp; Cleaned up comments">
+      <created>1637903148015</created>
+      <option name="number" value="00022" />
+      <option name="presentableId" value="LOCAL-00022" />
+      <option name="project" value="LOCAL" />
+      <updated>1637903148015</updated>
+    </task>
+    <task id="LOCAL-00023" summary="Updated README with benchmark data">
+      <created>1637904729084</created>
+      <option name="number" value="00023" />
+      <option name="presentableId" value="LOCAL-00023" />
+      <option name="project" value="LOCAL" />
+      <updated>1637904729084</updated>
+    </task>
+    <task id="LOCAL-00024" summary="Updated README with benchmark data">
+      <created>1637947828597</created>
+      <option name="number" value="00024" />
+      <option name="presentableId" value="LOCAL-00024" />
+      <option name="project" value="LOCAL" />
+      <updated>1637947828597</updated>
+    </task>
+    <task id="LOCAL-00025" summary="Updated README with testbed info">
+      <created>1637949625846</created>
+      <option name="number" value="00025" />
+      <option name="presentableId" value="LOCAL-00025" />
+      <option name="project" value="LOCAL" />
+      <updated>1637949625846</updated>
+    </task>
+    <task id="LOCAL-00026" summary="Code cleanup">
+      <created>1637950293467</created>
+      <option name="number" value="00026" />
+      <option name="presentableId" value="LOCAL-00026" />
+      <option name="project" value="LOCAL" />
+      <updated>1637950293467</updated>
+    </task>
+    <task id="LOCAL-00027" summary="Code cleanup">
+      <created>1637950405431</created>
+      <option name="number" value="00027" />
+      <option name="presentableId" value="LOCAL-00027" />
+      <option name="project" value="LOCAL" />
+      <updated>1637950405431</updated>
+    </task>
+    <task id="LOCAL-00028" summary="Modified mongoDB benches &amp; Added second timing for XStore">
+      <created>1638143288714</created>
+      <option name="number" value="00028" />
+      <option name="presentableId" value="LOCAL-00028" />
+      <option name="project" value="LOCAL" />
+      <updated>1638143288714</updated>
+    </task>
+    <task id="LOCAL-00029" summary="Modified README.md">
+      <created>1638148423631</created>
+      <option name="number" value="00029" />
+      <option name="presentableId" value="LOCAL-00029" />
+      <option name="project" value="LOCAL" />
+      <updated>1638148423631</updated>
+    </task>
+    <task id="LOCAL-00030" summary="Modified README.md">
+      <created>1638148484670</created>
+      <option name="number" value="00030" />
+      <option name="presentableId" value="LOCAL-00030" />
+      <option name="project" value="LOCAL" />
+      <updated>1638148484670</updated>
+    </task>
+    <task id="LOCAL-00031" summary="Modified README.md">
+      <created>1638148659013</created>
+      <option name="number" value="00031" />
+      <option name="presentableId" value="LOCAL-00031" />
+      <option name="project" value="LOCAL" />
+      <updated>1638148659013</updated>
+    </task>
+    <task id="LOCAL-00032" summary="Modified README.md">
+      <created>1638148695278</created>
+      <option name="number" value="00032" />
+      <option name="presentableId" value="LOCAL-00032" />
+      <option name="project" value="LOCAL" />
+      <updated>1638148695278</updated>
+    </task>
+    <task id="LOCAL-00033" summary="Bench script for InfluxDB">
+      <created>1638318541975</created>
+      <option name="number" value="00033" />
+      <option name="presentableId" value="LOCAL-00033" />
+      <option name="project" value="LOCAL" />
+      <updated>1638318541975</updated>
+    </task>
+    <task id="LOCAL-00034" summary="Benched single open/close &amp; Update README.md">
+      <created>1638324476004</created>
+      <option name="number" value="00034" />
+      <option name="presentableId" value="LOCAL-00034" />
+      <option name="project" value="LOCAL" />
+      <updated>1638324476004</updated>
+    </task>
+    <task id="LOCAL-00035" summary="Done benches for MongoDB">
+      <created>1638505035515</created>
+      <option name="number" value="00035" />
+      <option name="presentableId" value="LOCAL-00035" />
+      <option name="project" value="LOCAL" />
+      <updated>1638505035515</updated>
+    </task>
+    <task id="LOCAL-00036" summary="Done benches for InfluxDB">
+      <created>1638505664653</created>
+      <option name="number" value="00036" />
+      <option name="presentableId" value="LOCAL-00036" />
+      <option name="project" value="LOCAL" />
+      <updated>1638505664653</updated>
+    </task>
+    <task id="LOCAL-00037" summary="Done benches for InfluxDB">
+      <created>1638505726160</created>
+      <option name="number" value="00037" />
+      <option name="presentableId" value="LOCAL-00037" />
+      <option name="project" value="LOCAL" />
+      <updated>1638505726160</updated>
+    </task>
+    <task id="LOCAL-00038" summary="Organizing XStore's .hpp &amp; .cpp">
+      <created>1639608290619</created>
+      <option name="number" value="00038" />
+      <option name="presentableId" value="LOCAL-00038" />
+      <option name="project" value="LOCAL" />
+      <updated>1639608290620</updated>
+    </task>
+    <task id="LOCAL-00039" summary="Experimenting open &amp; pread">
+      <created>1639621110680</created>
+      <option name="number" value="00039" />
+      <option name="presentableId" value="LOCAL-00039" />
+      <option name="project" value="LOCAL" />
+      <updated>1639621110680</updated>
+    </task>
+    <task id="LOCAL-00040" summary="Implemented efficient 'insert' without writing dummy data &amp; pread()">
+      <created>1639696735907</created>
+      <option name="number" value="00040" />
+      <option name="presentableId" value="LOCAL-00040" />
+      <option name="project" value="LOCAL" />
+      <updated>1639696735907</updated>
+    </task>
+    <task id="LOCAL-00041" summary="Implemented 'insert' when there's DB existed">
+      <created>1639719864843</created>
+      <option name="number" value="00041" />
+      <option name="presentableId" value="LOCAL-00041" />
+      <option name="project" value="LOCAL" />
+      <updated>1639719864843</updated>
+    </task>
+    <task id="LOCAL-00042" summary="Implemented 'getBatch'">
+      <created>1639927378864</created>
+      <option name="number" value="00042" />
+      <option name="presentableId" value="LOCAL-00042" />
+      <option name="project" value="LOCAL" />
+      <updated>1639927378864</updated>
+    </task>
+    <task id="LOCAL-00043" summary="Experimenting Protobuf &amp; gRPC">
+      <created>1640236155962</created>
+      <option name="number" value="00043" />
+      <option name="presentableId" value="LOCAL-00043" />
+      <option name="project" value="LOCAL" />
+      <updated>1640236155962</updated>
+    </task>
+    <task id="LOCAL-00044" summary="Including dependencies">
+      <created>1640236300141</created>
+      <option name="number" value="00044" />
+      <option name="presentableId" value="LOCAL-00044" />
+      <option name="project" value="LOCAL" />
+      <updated>1640236300141</updated>
+    </task>
+    <option name="localTasksCounter" value="45" />
+    <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
+  </component>
+  <component name="Vcs.Log.Tabs.Properties">
+    <option name="TAB_STATES">
+      <map>
+        <entry key="44b59b07-9a9e-481f-95c2-80a9552e1f80">
+          <value>
+            <State>
+              <option name="SHOW_ONLY_AFFECTED_CHANGES" value="true" />
+              <option name="FILTERS">
+                <map>
+                  <entry key="branch">
+                    <value>
+                      <list>
+                        <option value="HEAD" />
+                      </list>
+                    </value>
+                  </entry>
+                  <entry key="structure">
+                    <value>
+                      <list>
+                        <option value="dir:/Users/gbn/CLionProjects/XStore/protobuf" />
+                      </list>
+                    </value>
+                  </entry>
+                </map>
+              </option>
+            </State>
+          </value>
+        </entry>
+        <entry key="MAIN">
+          <value>
+            <State />
+          </value>
+        </entry>
+      </map>
+    </option>
+    <option name="OPEN_GENERIC_TABS">
+      <map>
+        <entry key="44b59b07-9a9e-481f-95c2-80a9552e1f80" value="TOOL_WINDOW" />
+      </map>
+    </option>
+    <option name="oldMeFiltersMigrated" value="true" />
+  </component>
+  <component name="VcsManagerConfiguration">
+    <ignored-roots>
+      <path value="$PROJECT_DIR$/cmake-build-debug-remote-xstore-master/_deps/grpc-src" />
+      <path value="$PROJECT_DIR$/cmake-build-debug-remote-xstore-master/_deps/grpc-src/third_party/abseil-cpp" />
+      <path value="$PROJECT_DIR$/cmake-build-debug-remote-xstore-master/_deps/grpc-src/third_party/benchmark" />
+      <path value="$PROJECT_DIR$/cmake-build-debug-remote-xstore-master/_deps/grpc-src/third_party/bloaty" />
+      <path value="$PROJECT_DIR$/cmake-build-debug-remote-xstore-master/_deps/grpc-src/third_party/bloaty/third_party/googletest" />
+      <path value="$PROJECT_DIR$/cmake-build-debug-remote-xstore-master/_deps/grpc-src/third_party/bloaty/third_party/libFuzzer" />
+      <path value="$PROJECT_DIR$/cmake-build-debug-remote-xstore-master/_deps/grpc-src/third_party/bloaty/third_party/re2" />
+      <path value="$PROJECT_DIR$/cmake-build-debug-remote-xstore-master/_deps/grpc-src/third_party/boringssl-with-bazel" />
+      <path value="$PROJECT_DIR$/cmake-build-debug-remote-xstore-master/_deps/grpc-src/third_party/cares/cares" />
+      <path value="$PROJECT_DIR$/cmake-build-debug-remote-xstore-master/_deps/grpc-src/third_party/envoy-api" />
+      <path value="$PROJECT_DIR$/cmake-build-debug-remote-xstore-master/_deps/grpc-src/third_party/gflags" />
+      <path value="$PROJECT_DIR$/cmake-build-debug-remote-xstore-master/_deps/grpc-src/third_party/gflags/doc" />
+      <path value="$PROJECT_DIR$/cmake-build-debug-remote-xstore-master/_deps/grpc-src/third_party/googleapis" />
+      <path value="$PROJECT_DIR$/cmake-build-debug-remote-xstore-master/_deps/grpc-src/third_party/googletest" />
+      <path value="$PROJECT_DIR$/cmake-build-debug-remote-xstore-master/_deps/grpc-src/third_party/libuv" />
+      <path value="$PROJECT_DIR$/cmake-build-debug-remote-xstore-master/_deps/grpc-src/third_party/protobuf" />
+      <path value="$PROJECT_DIR$/cmake-build-debug-remote-xstore-master/_deps/grpc-src/third_party/protobuf/third_party/benchmark" />
+      <path value="$PROJECT_DIR$/cmake-build-debug-remote-xstore-master/_deps/grpc-src/third_party/protobuf/third_party/googletest" />
+      <path value="$PROJECT_DIR$/cmake-build-debug-remote-xstore-master/_deps/grpc-src/third_party/protoc-gen-validate" />
+      <path value="$PROJECT_DIR$/cmake-build-debug-remote-xstore-master/_deps/grpc-src/third_party/udpa" />
+      <path value="$PROJECT_DIR$/cmake-build-debug-remote-xstore-master/_deps/grpc-src/third_party/zlib" />
+      <path value="$PROJECT_DIR$/cmake-build-debug/_deps/grpc-src" />
+      <path value="$PROJECT_DIR$/cmake-build-debug/_deps/grpc-src/third_party/abseil-cpp" />
+      <path value="$PROJECT_DIR$/cmake-build-debug/_deps/grpc-src/third_party/benchmark" />
+      <path value="$PROJECT_DIR$/cmake-build-debug/_deps/grpc-src/third_party/bloaty" />
+      <path value="$PROJECT_DIR$/cmake-build-debug/_deps/grpc-src/third_party/bloaty/third_party/googletest" />
+      <path value="$PROJECT_DIR$/cmake-build-debug/_deps/grpc-src/third_party/bloaty/third_party/libFuzzer" />
+      <path value="$PROJECT_DIR$/cmake-build-debug/_deps/grpc-src/third_party/bloaty/third_party/re2" />
+      <path value="$PROJECT_DIR$/cmake-build-debug/_deps/grpc-src/third_party/boringssl-with-bazel" />
+      <path value="$PROJECT_DIR$/cmake-build-debug/_deps/grpc-src/third_party/cares/cares" />
+      <path value="$PROJECT_DIR$/cmake-build-debug/_deps/grpc-src/third_party/envoy-api" />
+      <path value="$PROJECT_DIR$/cmake-build-debug/_deps/grpc-src/third_party/gflags" />
+      <path value="$PROJECT_DIR$/cmake-build-debug/_deps/grpc-src/third_party/gflags/doc" />
+      <path value="$PROJECT_DIR$/cmake-build-debug/_deps/grpc-src/third_party/googleapis" />
+      <path value="$PROJECT_DIR$/cmake-build-debug/_deps/grpc-src/third_party/googletest" />
+      <path value="$PROJECT_DIR$/cmake-build-debug/_deps/grpc-src/third_party/libuv" />
+      <path value="$PROJECT_DIR$/cmake-build-debug/_deps/grpc-src/third_party/protobuf" />
+      <path value="$PROJECT_DIR$/cmake-build-debug/_deps/grpc-src/third_party/protobuf/third_party/benchmark" />
+      <path value="$PROJECT_DIR$/cmake-build-debug/_deps/grpc-src/third_party/protobuf/third_party/googletest" />
+      <path value="$PROJECT_DIR$/cmake-build-debug/_deps/grpc-src/third_party/protoc-gen-validate" />
+      <path value="$PROJECT_DIR$/cmake-build-debug/_deps/grpc-src/third_party/udpa" />
+      <path value="$PROJECT_DIR$/cmake-build-debug/_deps/grpc-src/third_party/zlib" />
+      <path value="$PROJECT_DIR$/grpc" />
+      <path value="$PROJECT_DIR$/grpc/third_party/benchmark" />
+      <path value="$PROJECT_DIR$/grpc/third_party/googleapis" />
+      <path value="$PROJECT_DIR$/grpc/third_party/googletest" />
+      <path value="$PROJECT_DIR$/grpc/third_party/libuv" />
+      <path value="$PROJECT_DIR$/grpc/third_party/opencensus-proto" />
+      <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
+      <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
+    </ignored-roots>
+    <MESSAGE value="Finished rough-draft version of xStore -- Delivering 110 microsecs per query" />
+    <MESSAGE value="Clean-up" />
+    <MESSAGE value="Update README.md" />
+    <MESSAGE value="Close bFile in get func. Benched of 10 random inputs" />
+    <MESSAGE value="Furnishing touch" />
+    <MESSAGE value="get() now returns proper string value i.e., 1 row of data" />
+    <MESSAGE value="Added micro bench for mongoDB" />
+    <MESSAGE value="Faster query &amp; Added clear caches for benchmarks" />
+    <MESSAGE value="Added statistics calc &amp; Cleaned up comments" />
+    <MESSAGE value="Updated README with benchmark data" />
+    <MESSAGE value="Updated README with testbed info" />
+    <MESSAGE value="Code cleanup" />
+    <MESSAGE value="Modified mongoDB benches &amp; Added second timing for XStore" />
+    <MESSAGE value="Modified README.md" />
+    <MESSAGE value="Bench script for InfluxDB" />
+    <MESSAGE value="Benched single open/close &amp; Update README.md" />
+    <MESSAGE value="Done benches for MongoDB" />
+    <MESSAGE value="Done benches for InfluxDB" />
+    <MESSAGE value="Organizing XStore's .hpp &amp; .cpp" />
+    <MESSAGE value="Experimenting open &amp; pread" />
+    <MESSAGE value="Implemented efficient 'insert' without writing dummy data &amp; pread()" />
+    <MESSAGE value="Implemented 'insert' when there's DB existed" />
+    <MESSAGE value="Implemented 'getBatch'" />
+    <MESSAGE value="Experimenting Protobuf &amp; gRPC" />
+    <MESSAGE value="Including dependencies" />
+    <option name="LAST_COMMIT_MESSAGE" value="Including dependencies" />
+  </component>
+</project>
