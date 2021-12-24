@@ -63,7 +63,7 @@ int main(int argc, char *argv[]) {
     std::chrono::duration<double> diff;
 
     // Instantiate XStore obj
-    XStore myStore;
+//    XStore myStore;
 
 //    myStore.insert(1483228801, "0,NaN,NaN,NaN,NaN,NaN,NaN", "tsla");
 //    myStore.insert(1451606400, "0,NaN,NaN,NaN,NaN,NaN,NaN", "tsla");

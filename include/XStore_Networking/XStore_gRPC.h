@@ -4,9 +4,14 @@
 #include <grpcpp/grpcpp.h>
 #include <mathtest.pb.h>
 #include <mathtest.grpc.pb.h>
+#include "include/XStore/XStore.h"
 
 class MathServiceImplementation final : public mathtest::MathTest::Service{
     public:
+        // Instantiate XStore obj
+        XStore myStore;
+
+        // gRPC
         grpc::Status sendRequest(::grpc::ServerContext *context, const ::mathtest::MathRequest *request, ::mathtest::MathReply *response) override;
         void Run();
 };

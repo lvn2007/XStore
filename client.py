@@ -30,7 +30,7 @@ def run():
         # response = stub.SayHello(helloworld_pb2.HelloRequest(name='you'))
     # print("Greeter client received: " + response.message)
         stub = mathtest_pb2_grpc.MathTestStub(channel)
-        response = stub.sendRequest(mathtest_pb2.MathRequest(timeStamp="123"))
+        response = stub.sendRequest(mathtest_pb2.MathRequest(timeStamp=1451606400))
     print("Response: " + str(response.dataset))
 
 
