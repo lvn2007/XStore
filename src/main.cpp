@@ -4,11 +4,7 @@
 #include <map>
 #include <cmath>
 #include "include/XStore/XStore.h"
-
-//#include <string>
-#include <grpcpp/grpcpp.h>
-#include <mathtest.pb.h>
-#include <mathtest.grpc.pb.h>
+#include "include/XStore_Networking/XStore_gRPC.h"
 
 double meanCalc(std::vector<double> inputVector) {
     double totalSum = 0;
@@ -61,36 +57,6 @@ double getMax(std::vector<double> inputVector) {
     return maxVal;
 }
 
-class MathServiceImplementation final : public mathtest::MathTest::Service {
-    grpc::Status sendRequest(
-            grpc::ServerContext* context,
-            const mathtest::MathRequest* request,
-            mathtest::MathReply* reply
-    ) override {
-        int a = request->a();
-        int b = request->b();
-
-        reply->set_result(a * b);
-
-        return grpc::Status::OK;
-    }
-};
-
-void Run() {
-    std::string address("0.0.0.0:5000");
-    MathServiceImplementation service;
-
-    grpc::ServerBuilder builder;
-
-    builder.AddListeningPort(address, grpc::InsecureServerCredentials());
-    builder.RegisterService(&service);
-
-    std::unique_ptr<grpc::Server> server(builder.BuildAndStart());
-    std::cout << "Server listening on port: " << address << std::endl;
-
-    server->Wait();
-}
-
 int main(int argc, char *argv[]) {
     // Clock init
     std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
@@ -109,7 +75,8 @@ int main(int argc, char *argv[]) {
     std::vector<double> us = { };
     std::vector<double> ns = { };
 
-    Run();
+    MathServiceImplementation mathServiceImplementation;
+    mathServiceImplementation.Run();
 
     return 0;
 
