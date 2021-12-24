@@ -19,7 +19,7 @@ DESCRIPTOR = _descriptor.FileDescriptor(
   syntax='proto3',
   serialized_options=b'\n\007ex.grpc',
   create_key=_descriptor._internal_create_key,
-  serialized_pb=b'\n\x0emathtest.proto\x12\x08mathtest\"#\n\x0bMathRequest\x12\t\n\x01\x61\x18\x01 \x01(\x05\x12\t\n\x01\x62\x18\x02 \x01(\x05\"\x1b\n\tMathReply\x12\x0e\n\x06result\x18\x01 \x01(\x05\x32G\n\x08MathTest\x12;\n\x0bsendRequest\x12\x15.mathtest.MathRequest\x1a\x13.mathtest.MathReply\"\x00\x42\t\n\x07\x65x.grpcb\x06proto3'
+  serialized_pb=b'\n\x0emathtest.proto\x12\x08mathtest\" \n\x0bMathRequest\x12\x11\n\ttimeStamp\x18\x01 \x01(\t\"\x1c\n\tMathReply\x12\x0f\n\x07\x64\x61taset\x18\x01 \x01(\t2G\n\x08MathTest\x12;\n\x0bsendRequest\x12\x15.mathtest.MathRequest\x1a\x13.mathtest.MathReply\"\x00\x42\t\n\x07\x65x.grpcb\x06proto3'
 )
 
 
@@ -34,16 +34,9 @@ _MATHREQUEST = _descriptor.Descriptor(
   create_key=_descriptor._internal_create_key,
   fields=[
     _descriptor.FieldDescriptor(
-      name='a', full_name='mathtest.MathRequest.a', index=0,
-      number=1, type=5, cpp_type=1, label=1,
-      has_default_value=False, default_value=0,
-      message_type=None, enum_type=None, containing_type=None,
-      is_extension=False, extension_scope=None,
-      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
-    _descriptor.FieldDescriptor(
-      name='b', full_name='mathtest.MathRequest.b', index=1,
-      number=2, type=5, cpp_type=1, label=1,
-      has_default_value=False, default_value=0,
+      name='timeStamp', full_name='mathtest.MathRequest.timeStamp', index=0,
+      number=1, type=9, cpp_type=9, label=1,
+      has_default_value=False, default_value=b"".decode('utf-8'),
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
@@ -60,7 +53,7 @@ _MATHREQUEST = _descriptor.Descriptor(
   oneofs=[
   ],
   serialized_start=28,
-  serialized_end=63,
+  serialized_end=60,
 )
 
 
@@ -73,9 +66,9 @@ _MATHREPLY = _descriptor.Descriptor(
   create_key=_descriptor._internal_create_key,
   fields=[
     _descriptor.FieldDescriptor(
-      name='result', full_name='mathtest.MathReply.result', index=0,
-      number=1, type=5, cpp_type=1, label=1,
-      has_default_value=False, default_value=0,
+      name='dataset', full_name='mathtest.MathReply.dataset', index=0,
+      number=1, type=9, cpp_type=9, label=1,
+      has_default_value=False, default_value=b"".decode('utf-8'),
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
@@ -91,8 +84,8 @@ _MATHREPLY = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=65,
-  serialized_end=92,
+  serialized_start=62,
+  serialized_end=90,
 )
 
 DESCRIPTOR.message_types_by_name['MathRequest'] = _MATHREQUEST
@@ -123,8 +116,8 @@ _MATHTEST = _descriptor.ServiceDescriptor(
   index=0,
   serialized_options=None,
   create_key=_descriptor._internal_create_key,
-  serialized_start=94,
-  serialized_end=165,
+  serialized_start=92,
+  serialized_end=163,
   methods=[
   _descriptor.MethodDescriptor(
     name='sendRequest',

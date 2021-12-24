@@ -12,11 +12,14 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Including dependencies">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Organized hpp &amp; cpp for gRPC">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/client.py" beforeDir="false" afterPath="$PROJECT_DIR$/client.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/include/XStore_Networking/XStore_gRPC.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore_Networking/XStore_gRPC.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/mathtest.proto" beforeDir="false" afterPath="$PROJECT_DIR$/mathtest.proto" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/mathtest_pb2.py" beforeDir="false" afterPath="$PROJECT_DIR$/mathtest_pb2.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_gRPC.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_gRPC.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -36,6 +39,14 @@
   </component>
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="GitSEFilterConfiguration">
+    <file-type-list>
+      <filtered-out-file-type name="LOCAL_BRANCH" />
+      <filtered-out-file-type name="REMOTE_BRANCH" />
+      <filtered-out-file-type name="TAG" />
+      <filtered-out-file-type name="COMMIT_BY_MESSAGE" />
+    </file-type-list>
   </component>
   <component name="ProjectId" id="1zsiv7cuy9cXM9GSSwJkPS8Q3GL" />
   <component name="ProjectLevelVcsManager" settingsEditedManually="true">
@@ -186,7 +197,7 @@
       <workItem from="1639607676885" duration="70827000" />
       <workItem from="1640192951215" duration="52000" />
       <workItem from="1640193367298" duration="4041000" />
-      <workItem from="1640236082476" duration="4726000" />
+      <workItem from="1640236082476" duration="7407000" />
     </task>
     <task id="LOCAL-00001" summary="Working on xStore interface">
       <created>1634958073999</created>
@@ -503,7 +514,14 @@
       <option name="project" value="LOCAL" />
       <updated>1640237415782</updated>
     </task>
-    <option name="localTasksCounter" value="46" />
+    <task id="LOCAL-00046" summary="Organized hpp &amp; cpp for gRPC">
+      <created>1640305937353</created>
+      <option name="number" value="00046" />
+      <option name="presentableId" value="LOCAL-00046" />
+      <option name="project" value="LOCAL" />
+      <updated>1640305937353</updated>
+    </task>
+    <option name="localTasksCounter" value="47" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -604,7 +622,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Finished rough-draft version of xStore -- Delivering 110 microsecs per query" />
     <MESSAGE value="Clean-up" />
     <MESSAGE value="Update README.md" />
     <MESSAGE value="Close bFile in get func. Benched of 10 random inputs" />
@@ -629,6 +646,7 @@
     <MESSAGE value="Implemented 'getBatch'" />
     <MESSAGE value="Experimenting Protobuf &amp; gRPC" />
     <MESSAGE value="Including dependencies" />
-    <option name="LAST_COMMIT_MESSAGE" value="Including dependencies" />
+    <MESSAGE value="Organized hpp &amp; cpp for gRPC" />
+    <option name="LAST_COMMIT_MESSAGE" value="Organized hpp &amp; cpp for gRPC" />
   </component>
 </project>
