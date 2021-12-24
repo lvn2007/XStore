@@ -1,6 +1,6 @@
 #include "include/XStore_Networking/XStore_gRPC.h"
 
-grpc::Status MathServiceImplementation::sendRequest(::grpc::ServerContext *context, const ::mathtest::MathRequest *request, ::mathtest::MathReply *response) {
+grpc::Status MathServiceImplementation::sendRequest(grpc::ServerContext *context, const mathtest::MathRequest *request, mathtest::MathReply *response) {
         std::string timeStamp = request->timestamp();
 
         response->set_dataset("ASD");

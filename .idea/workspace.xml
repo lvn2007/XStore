@@ -12,13 +12,8 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Organized hpp &amp; cpp for gRPC">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="WIP: Gradually implementing query for XStore">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/client.py" beforeDir="false" afterPath="$PROJECT_DIR$/client.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/XStore_Networking/XStore_gRPC.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore_Networking/XStore_gRPC.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/mathtest.proto" beforeDir="false" afterPath="$PROJECT_DIR$/mathtest.proto" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/mathtest_pb2.py" beforeDir="false" afterPath="$PROJECT_DIR$/mathtest_pb2.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_gRPC.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_gRPC.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -100,6 +95,11 @@
       </method>
     </configuration>
     <configuration name="XStore" type="CMakeRunConfiguration" factoryName="Application" temporary="true" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="XStore" TARGET_NAME="XStore" CONFIG_NAME="Debug" RUN_TARGET_PROJECT_NAME="XStore" RUN_TARGET_NAME="XStore">
+      <method v="2">
+        <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
+      </method>
+    </configuration>
+    <configuration default="true" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
       <method v="2">
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
       </method>
@@ -197,7 +197,7 @@
       <workItem from="1639607676885" duration="70827000" />
       <workItem from="1640192951215" duration="52000" />
       <workItem from="1640193367298" duration="4041000" />
-      <workItem from="1640236082476" duration="7407000" />
+      <workItem from="1640236082476" duration="8719000" />
     </task>
     <task id="LOCAL-00001" summary="Working on xStore interface">
       <created>1634958073999</created>
@@ -521,7 +521,14 @@
       <option name="project" value="LOCAL" />
       <updated>1640305937353</updated>
     </task>
-    <option name="localTasksCounter" value="47" />
+    <task id="LOCAL-00047" summary="WIP: Gradually implementing query for XStore">
+      <created>1640313998727</created>
+      <option name="number" value="00047" />
+      <option name="presentableId" value="LOCAL-00047" />
+      <option name="project" value="LOCAL" />
+      <updated>1640313998727</updated>
+    </task>
+    <option name="localTasksCounter" value="48" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -622,7 +629,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Clean-up" />
     <MESSAGE value="Update README.md" />
     <MESSAGE value="Close bFile in get func. Benched of 10 random inputs" />
     <MESSAGE value="Furnishing touch" />
@@ -647,6 +653,7 @@
     <MESSAGE value="Experimenting Protobuf &amp; gRPC" />
     <MESSAGE value="Including dependencies" />
     <MESSAGE value="Organized hpp &amp; cpp for gRPC" />
-    <option name="LAST_COMMIT_MESSAGE" value="Organized hpp &amp; cpp for gRPC" />
+    <MESSAGE value="WIP: Gradually implementing query for XStore" />
+    <option name="LAST_COMMIT_MESSAGE" value="WIP: Gradually implementing query for XStore" />
   </component>
 </project>
