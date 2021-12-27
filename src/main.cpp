@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <map>
 #include <cmath>
-#include "include/XStore/XStore.h"
+//#include "include/XStore/XStore.h"
 #include "include/XStore_Networking/XStore_gRPC.h"
 
 double meanCalc(std::vector<double> inputVector) {

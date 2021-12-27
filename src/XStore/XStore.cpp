@@ -112,6 +112,10 @@ void XStore::insert(std::time_t unixTime, std::string value, std::string dbName)
     }
 }
 
+void XStore::batchInsert(std::time_t epochTime, std::string value, std::string dbName) {
+
+}
+
 std::string XStore::get(std::time_t epochTime, std::string dbName) {
     // Read timeValue -- UNIX time
     int inputYear = toHumanYear(epochTime);

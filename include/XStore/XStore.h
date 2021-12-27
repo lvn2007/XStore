@@ -28,6 +28,8 @@ class XStore {
         // INSERT time-series oriented values
         void insert(std::time_t epochTime, std::string value, std::string dbName);
 
+        void batchInsert(std::time_t epochTime, std::string value, std::string dbName);
+
         std::string get(std::time_t epochTime, std::string dbName);
 
         std::string getp(std::time_t epochTime, std::string dbName);
