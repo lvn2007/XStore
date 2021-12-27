@@ -1,11 +1,10 @@
 #include "include/XStore_Networking/XStore_gRPC.h"
 
 grpc::Status MathServiceImplementation::sendRequest(grpc::ServerContext *context, const mathtest::MathRequest *request, mathtest::MathReply *response) {
-        long int timeStamp = request->timestamp();
+    long int timeStamp = request->timestamp();
         std::string queryResult = myStore.getp(timeStamp, "tsla");
 //        std::cout << "Query result: " << queryResult << std::endl;
         response->set_dataset(queryResult);
-
         return grpc::Status::OK;
 }
 
