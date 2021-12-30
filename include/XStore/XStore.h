@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 
 #include "include/dataStruct/dataStruct.h"
+#include <mathtest.grpc.pb.h>
 
 class XStore {
     public:
@@ -34,7 +35,7 @@ class XStore {
 
         std::string getp(std::time_t epochTime, std::string dbName);
 
-        std::string getBatch(std::time_t startEpochT, std::time_t endEpochT, std::string dbName);
+        std::vector<std::string> getBatch(std::time_t startEpochT, std::time_t endEpochT, std::string dbName);
 
         std::string getSingleOpenClose(std::time_t unixTime, std::string dbName);
 

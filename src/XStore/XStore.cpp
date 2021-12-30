@@ -178,8 +178,8 @@ std::string XStore::getp(std::time_t epochTime, std::string dbName) {
     return toReturn;
 }
 
-std::string XStore::getBatch(std::time_t startEpochT, std::time_t endEpochT, std::string dbName) {
-    std::string toReturn;
+std::vector<std::string> XStore::getBatch(std::time_t startEpochT, std::time_t endEpochT, std::string dbName) {
+    std::vector<std::string> toReturn;
 
     // Read timeValue -- UNIX time
     int inputYear = toHumanYear(startEpochT);
@@ -211,7 +211,8 @@ std::string XStore::getBatch(std::time_t startEpochT, std::time_t endEpochT, std
         ret = pread(bFile, &buff[0], lineSize, i);
 
         // Cache data to return
-        toReturn += buff;
+        toReturn.push_back(buff);
+//        toReturn += buff;
     }
 
     // Close file

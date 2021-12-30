@@ -77,6 +77,11 @@ int main(int argc, char *argv[]) {
 
     MathServiceImplementation mathServiceImplementation;
     mathServiceImplementation.Run();
+//    std::vector<std::string> myBatch = myStore.getBatch(1451606400, 1451606405, "tsla");
+
+//    for (int i = 0; i < myBatch.size(); i++) {
+//        std::cout << myBatch.at(i);
+//    }
 
     return 0;
 

@@ -13,16 +13,16 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="WIP: Gradually implementing query for XStore">
-      <change afterPath="$PROJECT_DIR$/include/XStore_Networking/XStore_tcpIPserver.h" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_tcpIPserver.cpp" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/protoFile/XStore.proto" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/CMakeLists.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/client.py" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/client.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/mathtest_pb2.py" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/mathtest_pb2.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/mathtest_pb2_grpc.py" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/mathtest_pb2_grpc.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/include/XStore_Networking/XStore_gRPC.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore_Networking/XStore_gRPC.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/include/XStore_Networking/XStore_tcpIPserver.h" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/mathtest.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/mathtest.proto" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_gRPC.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_gRPC.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_tcpIPserver.cpp" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -86,19 +86,14 @@
       <recent name="$PROJECT_DIR$" />
     </key>
     <key name="MoveFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/protoFile" />
       <recent name="$PROJECT_DIR$/benchmark/XStore" />
       <recent name="$PROJECT_DIR$/include/XStore_Networking" />
       <recent name="$PROJECT_DIR$/include/XStore_Networking" />
       <recent name="$PROJECT_DIR$" />
-      <recent name="$PROJECT_DIR$/include/dataStruct" />
     </key>
   </component>
   <component name="RunManager" selected="CMake Application.XStore">
-    <configuration default="true" type="CLionExternalRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
-      <method v="2">
-        <option name="CLION.EXTERNAL.BUILD" enabled="true" />
-      </method>
-    </configuration>
     <configuration name="Unnamed" type="CLion_Remote" version="1" remoteCommand="" symbolFile="" sysroot="">
       <debugger toolchainName="xStore-Master" />
       <method v="2" />
@@ -109,6 +104,11 @@
       </method>
     </configuration>
     <configuration name="XStore" type="CMakeRunConfiguration" factoryName="Application" temporary="true" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="XStore" TARGET_NAME="XStore" CONFIG_NAME="Debug" RUN_TARGET_PROJECT_NAME="XStore" RUN_TARGET_NAME="XStore">
+      <method v="2">
+        <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
+      </method>
+    </configuration>
+    <configuration default="true" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
       <method v="2">
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
       </method>
@@ -207,14 +207,8 @@
       <workItem from="1640192951215" duration="52000" />
       <workItem from="1640193367298" duration="4041000" />
       <workItem from="1640236082476" duration="9079000" />
-      <workItem from="1640387831896" duration="14711000" />
-    </task>
-    <task id="LOCAL-00002" summary="Working on xStore -- Time stuffs in insertion of data">
-      <created>1635033913710</created>
-      <option name="number" value="00002" />
-      <option name="presentableId" value="LOCAL-00002" />
-      <option name="project" value="LOCAL" />
-      <updated>1635033913710</updated>
+      <workItem from="1640387831896" duration="16751000" />
+      <workItem from="1640716291555" duration="17084000" />
     </task>
     <task id="LOCAL-00003" summary="Working on xStore - Insert when no DB exists">
       <created>1635043975216</created>
@@ -552,7 +546,14 @@
       <option name="project" value="LOCAL" />
       <updated>1640388579932</updated>
     </task>
-    <option name="localTasksCounter" value="51" />
+    <task id="LOCAL-00051" summary="WIP: Gradually implementing query for XStore">
+      <created>1640568867409</created>
+      <option name="number" value="00051" />
+      <option name="presentableId" value="LOCAL-00051" />
+      <option name="project" value="LOCAL" />
+      <updated>1640568867409</updated>
+    </task>
+    <option name="localTasksCounter" value="52" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
