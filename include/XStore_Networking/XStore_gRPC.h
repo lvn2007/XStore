@@ -16,7 +16,7 @@ class MathServiceImplementation final : public mathtest::MathTest::Service {
 
         // gRPC
         grpc::Status sendRequest(grpc::ServerContext *context, const mathtest::MathRequest *request, mathtest::MathReply *response);
-        grpc::Status batchRequest(grpc::ServerContext *context, const mathtest::MathRequest *request, grpc::ServerWriter<mathtest::MathReply>* writer);
+        grpc::Status batchRequest(grpc::ServerContext *context, const mathtest::rangeRequest *request, grpc::ServerWriter<mathtest::MathReply>* writer);
         void Run();
 };
 

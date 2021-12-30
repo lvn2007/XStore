@@ -50,6 +50,7 @@ protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS protoFile/mathtest.proto)
 include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 
 include_directories(.)
+include_directories(include)
 include_directories(src)
 
 add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h src/dataStruct/dataStruct.cpp
