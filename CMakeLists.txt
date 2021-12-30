@@ -23,7 +23,7 @@ set(_GRPC_GRPCPP gRPC::grpc++)
 set(_GRPC_CPP_PLUGIN_EXECUTABLE $<TARGET_FILE:gRPC::grpc_cpp_plugin>)
 
 # Proto file
-get_filename_component(hw_proto "mathtest.proto" ABSOLUTE)
+get_filename_component(hw_proto "protoFile/mathtest.proto" ABSOLUTE)
 get_filename_component(hw_proto_path "${hw_proto}" PATH)
 
 # Generated sources
@@ -44,7 +44,7 @@ add_custom_command(
 include_directories(${Protobuf_INCLUDE_DIRS})
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
-protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS mathtest.proto)
+protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS protoFile/mathtest.proto)
 
 # Include generated *.pb.h files
 include_directories("${CMAKE_CURRENT_BINARY_DIR}")
@@ -54,10 +54,8 @@ include_directories(src)
 
 add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h src/dataStruct/dataStruct.cpp
         include/dataStruct/dataStruct.h src/XStore_Networking/XStore_gRPC.cpp include/XStore_Networking/XStore_gRPC.h
-        src/XStore_Networking/XStore_tcpIPserver.cpp include/XStore_Networking/XStore_tcpIPserver.h
         ${PROTO_SRCS} ${PROTO_HDRS} ${hw_grpc_srcs})
 
 if(${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS 9)
-    target_link_libraries(XStore PUBLIC "stdc++fs" ${Protobuf_LIBRARIES} ${_GRPC_GRPCPP})
-#    target_link_libraries(XStore ${_GRPC_GRPCPP})
+    target_link_libraries(XStore PUBLIC "stdc++fs" ${Protobuf_LIBRARIES} ${_GRPC_GRPCPP} ${_REFLECTION})
 endif()

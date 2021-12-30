@@ -2,36 +2,22 @@
 #define XSTORE_XSTORE_GRPC_H
 
 #include <grpcpp/grpcpp.h>
-#include <mathtest.pb.h>
+//#include <grpcpp/server.h>
+//#include <grpcpp/server_builder.h>
+//#include <grpcpp/server_context.h>
+//#include <mathtest.pb.h>
 #include <mathtest.grpc.pb.h>
 #include "include/XStore/XStore.h"
 
-class MathServiceImplementation final : public mathtest::MathTest::Service{
+class MathServiceImplementation final : public mathtest::MathTest::Service {
     public:
         // Instantiate XStore obj
         XStore myStore;
 
         // gRPC
-        grpc::Status sendRequest(::grpc::ServerContext *context, const ::mathtest::MathRequest *request, ::mathtest::MathReply *response) override;
+        grpc::Status sendRequest(grpc::ServerContext *context, const mathtest::MathRequest *request, mathtest::MathReply *response);
+        grpc::Status batchRequest(grpc::ServerContext *context, const mathtest::MathRequest *request, grpc::ServerWriter<mathtest::MathReply>* writer);
         void Run();
 };
-
-
-//class MathServiceImplementation final : public mathtest::MathTest::Service {
-//    grpc::Status sendRequest(
-//            grpc::ServerContext* context,
-//            const mathtest::MathRequest* request,
-//            mathtest::MathReply* reply
-//    ) override {
-//        int a = request->a();
-//        int b = request->b();
-//
-//        reply->set_result(a * b);
-//
-//        return grpc::Status::OK;
-//    }
-//};
-//
-//    void Run();
 
 #endif //XSTORE_XSTORE_GRPC_H
