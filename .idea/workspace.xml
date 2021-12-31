@@ -12,22 +12,7 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Clean-up">
-      <change afterPath="$PROJECT_DIR$/protoFile/xStore_pb2.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/protoFile/xStore_pb2_grpc.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/CMakeLists.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/XStore/client.py" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/XStore_Client.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/XStore/mathtest_pb2.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/XStore/mathtest_pb2_grpc.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/XStore_Networking/XStore_gRPC.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore_Networking/XStore_gRPC.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/protoFile/XStore.proto" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/protoFile/mathtest.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/xStore.proto" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_gRPC.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_gRPC.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
-    </list>
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Rename proto &amp; modifying Python client" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -216,14 +201,7 @@
       <workItem from="1640905869985" duration="1624000" />
       <workItem from="1640909519124" duration="2886000" />
       <workItem from="1640926345220" duration="341000" />
-      <workItem from="1640926691902" duration="3085000" />
-    </task>
-    <task id="LOCAL-00006" summary="Sample data">
-      <created>1635118782773</created>
-      <option name="number" value="00006" />
-      <option name="presentableId" value="LOCAL-00006" />
-      <option name="project" value="LOCAL" />
-      <updated>1635118782773</updated>
+      <workItem from="1640926691902" duration="3414000" />
     </task>
     <task id="LOCAL-00007" summary="Experimenting fwrite/fread/fgets">
       <created>1635564936832</created>
@@ -561,7 +539,14 @@
       <option name="project" value="LOCAL" />
       <updated>1640910412775</updated>
     </task>
-    <option name="localTasksCounter" value="55" />
+    <task id="LOCAL-00055" summary="Rename proto &amp; modifying Python client">
+      <created>1640931950388</created>
+      <option name="number" value="00055" />
+      <option name="presentableId" value="LOCAL-00055" />
+      <option name="project" value="LOCAL" />
+      <updated>1640931950388</updated>
+    </task>
+    <option name="localTasksCounter" value="56" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -662,7 +647,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="get() now returns proper string value i.e., 1 row of data" />
     <MESSAGE value="Added micro bench for mongoDB" />
     <MESSAGE value="Faster query &amp; Added clear caches for benchmarks" />
     <MESSAGE value="Added statistics calc &amp; Cleaned up comments" />
@@ -687,6 +671,7 @@
     <MESSAGE value="Experimenting data stream" />
     <MESSAGE value="Done data streaming for rangeRequest" />
     <MESSAGE value="Clean-up" />
-    <option name="LAST_COMMIT_MESSAGE" value="Clean-up" />
+    <MESSAGE value="Rename proto &amp; modifying Python client" />
+    <option name="LAST_COMMIT_MESSAGE" value="Rename proto &amp; modifying Python client" />
   </component>
 </project>
