@@ -1,6 +1,6 @@
 #include "include/XStore_Networking/XStore_gRPC.h"
 
-grpc::Status MathServiceImplementation::sendRequest(grpc::ServerContext *context, const mathtest::unaryRequest *request, mathtest::responseData *response) {
+grpc::Status xStoreServiceImplementation::sendRequest(grpc::ServerContext *context, const xStoregRPC::unaryRequest *request, xStoregRPC::responseData *response) {
     // Extract query request from CLIENT
     long int timestamp = request->timestamp();
 
@@ -13,7 +13,7 @@ grpc::Status MathServiceImplementation::sendRequest(grpc::ServerContext *context
     return grpc::Status::OK;
 }
 
-grpc::Status MathServiceImplementation::batchRequest(grpc::ServerContext *context, const mathtest::rangeRequest *request, grpc::ServerWriter<mathtest::responseData> *writer) {
+grpc::Status xStoreServiceImplementation::batchRequest(grpc::ServerContext *context, const xStoregRPC::rangeRequest *request, grpc::ServerWriter<xStoregRPC::responseData> *writer) {
     // Extract query request from CLIENT
     long int startTime = request->starttime();
     long int endTime = request->endtime();
@@ -22,7 +22,7 @@ grpc::Status MathServiceImplementation::batchRequest(grpc::ServerContext *contex
     std::vector<std::string> returnData = myStore.getBatch(startTime, endTime, "tsla");
 
     // Placeholder for server's response
-    mathtest::responseData currResponse;
+    xStoregRPC::responseData currResponse;
 
     // Loop through each item in returnData
     //  On each loop, stream to CLIENT
@@ -37,9 +37,9 @@ grpc::Status MathServiceImplementation::batchRequest(grpc::ServerContext *contex
     return grpc::Status::OK;
 }
 
-void MathServiceImplementation::Run() {
+void xStoreServiceImplementation::Run() {
     std::string address("0.0.0.0:5000");
-    MathServiceImplementation service;
+    xStoreServiceImplementation service;
 
     grpc::ServerBuilder builder;
 
