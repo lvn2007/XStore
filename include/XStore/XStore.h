@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 
 #include "include/dataStruct/dataStruct.h"
-#include <mathtest.grpc.pb.h>
+#include <xStore.grpc.pb.h>
 
 class XStore {
     public:

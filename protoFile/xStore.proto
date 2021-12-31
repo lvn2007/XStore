@@ -2,10 +2,10 @@ syntax = "proto3";
 
 //option java_package = "ex.grpc";
 
-package mathtest;
+package xStoregRPC;
 
 // Defines the service
-service MathTest {
+service xStore {
   // Function invoked to send the request
   rpc sendRequest (unaryRequest) returns (responseData) {}
   rpc batchRequest (rangeRequest) returns (stream responseData) {}

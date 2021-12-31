@@ -12,12 +12,19 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Done data streaming for rangeRequest">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Clean-up">
+      <change afterPath="$PROJECT_DIR$/protoFile/xStore_pb2.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/protoFile/xStore_pb2_grpc.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/CMakeLists.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/XStore/client.py" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/XStore_Client.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/XStore/mathtest_pb2.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/XStore/mathtest_pb2_grpc.py" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/include/XStore_Networking/XStore_gRPC.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore_Networking/XStore_gRPC.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/protoFile/mathtest.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/mathtest.proto" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/protoFile/XStore.proto" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/protoFile/mathtest.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/xStore.proto" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_gRPC.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_gRPC.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
@@ -73,12 +80,13 @@
     <property name="cidr.known.project.marker" value="true" />
     <property name="cmake.loaded.for.project" value="true" />
     <property name="com.intellij.ide.scratch.ScratchImplUtil$2/New Scratch File" value="ObjectiveC" />
-    <property name="last_opened_file_path" value="$PROJECT_DIR$" />
+    <property name="last_opened_file_path" value="$PROJECT_DIR$/protoFile" />
     <property name="nodejs_package_manager_path" value="npm" />
     <property name="settings.editor.selected.configurable" value="com.jetbrains.python.configuration.PyActiveSdkModuleConfigurable" />
   </component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/protoFile" />
       <recent name="$PROJECT_DIR$" />
     </key>
     <key name="MoveFile.RECENT_KEYS">
@@ -107,11 +115,6 @@
     <configuration default="true" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
       <method v="2">
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
-      </method>
-    </configuration>
-    <configuration default="true" type="GradleAppRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
-      <method v="2">
-        <option name="com.jetbrains.cidr.cpp.gradle.execution.GradleNativeBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
       </method>
     </configuration>
     <configuration name="timeStuffs (1)" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
@@ -211,14 +214,9 @@
       <workItem from="1640903789565" duration="1579000" />
       <workItem from="1640905772260" duration="95000" />
       <workItem from="1640905869985" duration="1624000" />
-      <workItem from="1640909519124" duration="877000" />
-    </task>
-    <task id="LOCAL-00005" summary="Partially done un-ordered insert">
-      <created>1635118594109</created>
-      <option name="number" value="00005" />
-      <option name="presentableId" value="LOCAL-00005" />
-      <option name="project" value="LOCAL" />
-      <updated>1635118594109</updated>
+      <workItem from="1640909519124" duration="2886000" />
+      <workItem from="1640926345220" duration="341000" />
+      <workItem from="1640926691902" duration="3085000" />
     </task>
     <task id="LOCAL-00006" summary="Sample data">
       <created>1635118782773</created>
@@ -556,7 +554,14 @@
       <option name="project" value="LOCAL" />
       <updated>1640904589271</updated>
     </task>
-    <option name="localTasksCounter" value="54" />
+    <task id="LOCAL-00054" summary="Clean-up">
+      <created>1640910412775</created>
+      <option name="number" value="00054" />
+      <option name="presentableId" value="LOCAL-00054" />
+      <option name="project" value="LOCAL" />
+      <updated>1640910412775</updated>
+    </task>
+    <option name="localTasksCounter" value="55" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -657,7 +662,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Furnishing touch" />
     <MESSAGE value="get() now returns proper string value i.e., 1 row of data" />
     <MESSAGE value="Added micro bench for mongoDB" />
     <MESSAGE value="Faster query &amp; Added clear caches for benchmarks" />
@@ -682,6 +686,7 @@
     <MESSAGE value="WIP: Gradually implementing query for XStore" />
     <MESSAGE value="Experimenting data stream" />
     <MESSAGE value="Done data streaming for rangeRequest" />
-    <option name="LAST_COMMIT_MESSAGE" value="Done data streaming for rangeRequest" />
+    <MESSAGE value="Clean-up" />
+    <option name="LAST_COMMIT_MESSAGE" value="Clean-up" />
   </component>
 </project>
