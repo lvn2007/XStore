@@ -56,7 +56,6 @@ class XStore {
 
         bool yearExists(int inputYear, std::string dbName);
 
-
         // Returning epoch value of FIRST available datetime of a given year
         long int getStartTimeEpoch(int yearInput, std::string timeResolution);
 

@@ -1,14 +1,19 @@
 #include "include/XStore_Networking/XStore_gRPC.h"
 
-grpc::Status MathServiceImplementation::sendRequest(grpc::ServerContext *context, const mathtest::MathRequest *request, mathtest::MathReply *response) {
-    long int timeStamp = request->timestamp();
-        std::string queryResult = myStore.getp(timeStamp, "tsla");
-//        std::cout << "Query result: " << queryResult << std::endl;
-        response->set_dataset(queryResult);
-        return grpc::Status::OK;
+grpc::Status MathServiceImplementation::sendRequest(grpc::ServerContext *context, const mathtest::unaryRequest *request, mathtest::responseData *response) {
+    // Extract query request from CLIENT
+    long int timestamp = request->timestamp();
+
+    // Unary query result
+    std::string queryResult = myStore.getp(timestamp, "tsla");
+
+    // Response data to CLIENT
+    response->set_dataset(queryResult);
+
+    return grpc::Status::OK;
 }
 
-grpc::Status MathServiceImplementation::batchRequest(grpc::ServerContext *context, const mathtest::rangeRequest *request, grpc::ServerWriter<mathtest::MathReply> *writer) {
+grpc::Status MathServiceImplementation::batchRequest(grpc::ServerContext *context, const mathtest::rangeRequest *request, grpc::ServerWriter<mathtest::responseData> *writer) {
     // Extract query request from CLIENT
     long int startTime = request->starttime();
     long int endTime = request->endtime();
@@ -17,7 +22,7 @@ grpc::Status MathServiceImplementation::batchRequest(grpc::ServerContext *contex
     std::vector<std::string> returnData = myStore.getBatch(startTime, endTime, "tsla");
 
     // Placeholder for server's response
-    mathtest::MathReply currResponse;
+    mathtest::responseData currResponse;
 
     // Loop through each item in returnData
     //  On each loop, stream to CLIENT
@@ -29,7 +34,7 @@ grpc::Status MathServiceImplementation::batchRequest(grpc::ServerContext *contex
         writer->Write(currResponse);
     }
 
-    return grpc::Status();
+    return grpc::Status::OK;
 }
 
 void MathServiceImplementation::Run() {

@@ -7,13 +7,13 @@ package mathtest;
 // Defines the service
 service MathTest {
   // Function invoked to send the request
-  rpc sendRequest (MathRequest) returns (MathReply) {}
-  rpc batchRequest (rangeRequest) returns (stream MathReply) {}
+  rpc sendRequest (unaryRequest) returns (responseData) {}
+  rpc batchRequest (rangeRequest) returns (stream responseData) {}
 }
 
 // The request message containing requested numbers
-message MathRequest {
-  uint32 timeStamp = 1;
+message unaryRequest {
+  uint32 timestamp = 1;
 }
 
 message rangeRequest {
@@ -22,6 +22,6 @@ message rangeRequest {
 }
 
 // The response message containing response
-message MathReply {
+message responseData {
   string dataset = 1;
 }

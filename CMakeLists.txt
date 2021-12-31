@@ -52,11 +52,12 @@ include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 include_directories(.)
 include_directories(include)
 include_directories(src)
+include_directories(protoFile)
 
 add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h src/dataStruct/dataStruct.cpp
         include/dataStruct/dataStruct.h src/XStore_Networking/XStore_gRPC.cpp include/XStore_Networking/XStore_gRPC.h
         ${PROTO_SRCS} ${PROTO_HDRS} ${hw_grpc_srcs})
 
 if(${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS 9)
-    target_link_libraries(XStore PUBLIC "stdc++fs" ${Protobuf_LIBRARIES} ${_GRPC_GRPCPP} ${_REFLECTION})
+    target_link_libraries(XStore PUBLIC "stdc++fs" ${Protobuf_LIBRARIES} ${_GRPC_GRPCPP})
 endif()
