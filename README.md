@@ -16,7 +16,7 @@ eXtreme performance in distributed tv-Store for time-series
 - gRPC 1.42.0
 
 # Note
-- To compile .proto for Protobuf & gRPC (Python):
+- Python: Code generation for Protobuf & gRPC
 ```shell
 python3 -m grpc_tools.protoc --proto_path=. protoFile/xStore.proto --python_out=. --grpc_python_out=.
 ```
