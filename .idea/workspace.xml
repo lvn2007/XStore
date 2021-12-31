@@ -12,12 +12,14 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Experimenting data stream">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Done data streaming for rangeRequest">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/CMakeLists.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/include/XStore_Networking/XStore_gRPC.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore_Networking/XStore_gRPC.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/protoFile/mathtest.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/mathtest.proto" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_gRPC.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_gRPC.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -88,11 +90,6 @@
     </key>
   </component>
   <component name="RunManager" selected="CMake Application.XStore">
-    <configuration default="true" type="CLionExternalRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
-      <method v="2">
-        <option name="CLION.EXTERNAL.BUILD" enabled="true" />
-      </method>
-    </configuration>
     <configuration name="Unnamed" type="CLion_Remote" version="1" remoteCommand="" symbolFile="" sysroot="">
       <debugger toolchainName="xStore-Master" />
       <method v="2" />
@@ -110,6 +107,11 @@
     <configuration default="true" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
       <method v="2">
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
+      </method>
+    </configuration>
+    <configuration default="true" type="GradleAppRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
+      <method v="2">
+        <option name="com.jetbrains.cidr.cpp.gradle.execution.GradleNativeBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
       </method>
     </configuration>
     <configuration name="timeStuffs (1)" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
@@ -206,14 +208,10 @@
       <workItem from="1640879271483" duration="137000" />
       <workItem from="1640879560942" duration="566000" />
       <workItem from="1640903668478" duration="118000" />
-      <workItem from="1640903789565" duration="723000" />
-    </task>
-    <task id="LOCAL-00004" summary="Updated README.md">
-      <created>1635044200767</created>
-      <option name="number" value="00004" />
-      <option name="presentableId" value="LOCAL-00004" />
-      <option name="project" value="LOCAL" />
-      <updated>1635044200767</updated>
+      <workItem from="1640903789565" duration="1579000" />
+      <workItem from="1640905772260" duration="95000" />
+      <workItem from="1640905869985" duration="1624000" />
+      <workItem from="1640909519124" duration="877000" />
     </task>
     <task id="LOCAL-00005" summary="Partially done un-ordered insert">
       <created>1635118594109</created>
@@ -551,7 +549,14 @@
       <option name="project" value="LOCAL" />
       <updated>1640835781590</updated>
     </task>
-    <option name="localTasksCounter" value="53" />
+    <task id="LOCAL-00053" summary="Done data streaming for rangeRequest">
+      <created>1640904589270</created>
+      <option name="number" value="00053" />
+      <option name="presentableId" value="LOCAL-00053" />
+      <option name="project" value="LOCAL" />
+      <updated>1640904589271</updated>
+    </task>
+    <option name="localTasksCounter" value="54" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -652,7 +657,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Close bFile in get func. Benched of 10 random inputs" />
     <MESSAGE value="Furnishing touch" />
     <MESSAGE value="get() now returns proper string value i.e., 1 row of data" />
     <MESSAGE value="Added micro bench for mongoDB" />
@@ -677,6 +681,7 @@
     <MESSAGE value="Organized hpp &amp; cpp for gRPC" />
     <MESSAGE value="WIP: Gradually implementing query for XStore" />
     <MESSAGE value="Experimenting data stream" />
-    <option name="LAST_COMMIT_MESSAGE" value="Experimenting data stream" />
+    <MESSAGE value="Done data streaming for rangeRequest" />
+    <option name="LAST_COMMIT_MESSAGE" value="Done data streaming for rangeRequest" />
   </component>
 </project>
