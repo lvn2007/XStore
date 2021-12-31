@@ -12,6 +12,8 @@ eXtreme performance in distributed tv-Store for time-series
 - Ubuntu 18.04.4 LTS 
 - g++ 8.4.0
 - C++17
+- Protobuf 3.18.1
+- gRPC 1.42.0
 
 # Note
 - To compile .proto for Protobuf & gRPC (Python):
