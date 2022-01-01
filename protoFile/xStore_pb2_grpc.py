@@ -15,14 +15,14 @@ class xStoreStub(object):
         Args:
             channel: A grpc.Channel.
         """
-        self.sendRequest = channel.unary_unary(
-                '/xStoregRPC.xStore/sendRequest',
-                request_serializer=protoFile_dot_xStore__pb2.unaryRequest.SerializeToString,
+        self.unaryRequest = channel.unary_unary(
+                '/xStoregRPC.xStore/unaryRequest',
+                request_serializer=protoFile_dot_xStore__pb2.unaryRequestMsg.SerializeToString,
                 response_deserializer=protoFile_dot_xStore__pb2.responseData.FromString,
                 )
         self.batchRequest = channel.unary_stream(
                 '/xStoregRPC.xStore/batchRequest',
-                request_serializer=protoFile_dot_xStore__pb2.rangeRequest.SerializeToString,
+                request_serializer=protoFile_dot_xStore__pb2.rangeRequestMsg.SerializeToString,
                 response_deserializer=protoFile_dot_xStore__pb2.responseData.FromString,
                 )
 
@@ -31,7 +31,7 @@ class xStoreServicer(object):
     """Defines the service
     """
 
-    def sendRequest(self, request, context):
+    def unaryRequest(self, request, context):
         """Function invoked to send the request
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -47,14 +47,14 @@ class xStoreServicer(object):
 
 def add_xStoreServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'sendRequest': grpc.unary_unary_rpc_method_handler(
-                    servicer.sendRequest,
-                    request_deserializer=protoFile_dot_xStore__pb2.unaryRequest.FromString,
+            'unaryRequest': grpc.unary_unary_rpc_method_handler(
+                    servicer.unaryRequest,
+                    request_deserializer=protoFile_dot_xStore__pb2.unaryRequestMsg.FromString,
                     response_serializer=protoFile_dot_xStore__pb2.responseData.SerializeToString,
             ),
             'batchRequest': grpc.unary_stream_rpc_method_handler(
                     servicer.batchRequest,
-                    request_deserializer=protoFile_dot_xStore__pb2.rangeRequest.FromString,
+                    request_deserializer=protoFile_dot_xStore__pb2.rangeRequestMsg.FromString,
                     response_serializer=protoFile_dot_xStore__pb2.responseData.SerializeToString,
             ),
     }
@@ -69,7 +69,7 @@ class xStore(object):
     """
 
     @staticmethod
-    def sendRequest(request,
+    def unaryRequest(request,
             target,
             options=(),
             channel_credentials=None,
@@ -79,8 +79,8 @@ class xStore(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_unary(request, target, '/xStoregRPC.xStore/sendRequest',
-            protoFile_dot_xStore__pb2.unaryRequest.SerializeToString,
+        return grpc.experimental.unary_unary(request, target, '/xStoregRPC.xStore/unaryRequest',
+            protoFile_dot_xStore__pb2.unaryRequestMsg.SerializeToString,
             protoFile_dot_xStore__pb2.responseData.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
@@ -97,7 +97,7 @@ class xStore(object):
             timeout=None,
             metadata=None):
         return grpc.experimental.unary_stream(request, target, '/xStoregRPC.xStore/batchRequest',
-            protoFile_dot_xStore__pb2.rangeRequest.SerializeToString,
+            protoFile_dot_xStore__pb2.rangeRequestMsg.SerializeToString,
             protoFile_dot_xStore__pb2.responseData.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)

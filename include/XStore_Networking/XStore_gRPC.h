@@ -11,8 +11,8 @@ class xStoreServiceImplementation final : public xStoregRPC::xStore::Service {
         XStore myStore;
 
         // gRPC
-        grpc::Status sendRequest(grpc::ServerContext *context, const xStoregRPC::unaryRequest *request, xStoregRPC::responseData *response);
-        grpc::Status batchRequest(grpc::ServerContext *context, const xStoregRPC::rangeRequest *request, grpc::ServerWriter<xStoregRPC::responseData>* writer);
+        grpc::Status unaryRequest(grpc::ServerContext *context, const xStoregRPC::unaryRequestMsg *request, xStoregRPC::responseData *response);
+        grpc::Status batchRequest(grpc::ServerContext *context, const xStoregRPC::rangeRequestMsg *request, grpc::ServerWriter<xStoregRPC::responseData>* writer);
         void Run();
 };
 

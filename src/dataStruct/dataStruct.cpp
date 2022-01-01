@@ -1,4 +1,5 @@
 #include "include/dataStruct/dataStruct.h"
+
 // Constructor
 dataStruct::dataStruct(std::time_t unixTime, std::string data) {
     this->unixTime = unixTime;

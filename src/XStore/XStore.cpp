@@ -10,13 +10,17 @@ XStore::XStore() {
     //  First, check if there's any existing data exists
     hasDB();
 
-    std::cout << toHumanYear(1514764800) << std::endl;
-    std::cout << toHumanMonth(1514764800) << std::endl;
-    std::cout << toHumanDay(1514764800) << std::endl;
-    std::cout << getTimeResolution(1514764800) << std::endl;
-
-    std::string dataDir = baseDir + "/XStore/dataStore/" + "tsla" + "/" + std::to_string(2017) + ".XSTORE";
+    std::string dataDir = baseDir + "dataStore/" + "tsla" + "/" + std::to_string(2017) + ".XSTORE";
     bFile = std::fopen(dataDir.c_str(), "rb");
+    std::string ipStr = "ipv4:64.131.114.2:53617";
+//    fMap.insert({ ipStr, bFile});
+//    fMap[ipStr] = bFile;
+
+    fileStruct fStruct(ipStr, "tsla");
+//    std::cout << fStruct.getID() << std::endl;
+
+//    std::cout << fMap.find("172.20.3.118")->first << std::endl;
+//    std::cout << fMap.find("172.20.3.118")->second << std::endl;
 }
 
 // INSERT time-series oriented values
@@ -35,10 +39,10 @@ void XStore::insert(std::time_t unixTime, std::string value, std::string dbName)
     // IF no DB exists i.e., dbCount == 0
     if (dbCount == 0) {
         //  -> Create new one
-        std::filesystem::create_directories(baseDir + "/XStore/dataStore/" + dbName);
+        std::filesystem::create_directories(baseDir + "dataStore/" + dbName);
 
         // -> Create a file with name of inputYear.XSTORE
-        std::string dataDir = baseDir + "/XStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
+        std::string dataDir = baseDir + "dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
         bFile = std::fopen(dataDir.c_str(), "wb+");
 
         // Creating dummy file with n Size
@@ -52,7 +56,7 @@ void XStore::insert(std::time_t unixTime, std::string value, std::string dbName)
         long int diff = unixTime - startEpoch;
 
         // Calculate offset -- Exact location of where a particular target row is stored
-        long int offSet = diff * (lineSize);
+        long int offSet = diff * lineSize;
 
         // Seek to target offset prior to write
         std::fseek(bFile, offSet, SEEK_SET);
@@ -68,10 +72,10 @@ void XStore::insert(std::time_t unixTime, std::string value, std::string dbName)
     }
     else {
         // Making sure a DB's directory is there
-        std::filesystem::create_directories(baseDir + "/XStore/dataStore/" + dbName);
+        std::filesystem::create_directories(baseDir + "dataStore/" + dbName);
 
         // -> Create a file with name of inputYear.XSTORE
-        std::string dataDir = baseDir + "/XStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
+        std::string dataDir = baseDir + "dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
 
         // Check if year.XSTORE exists
         //  IF year.XSTORE exists
@@ -131,7 +135,7 @@ std::string XStore::get(std::time_t epochTime, std::string dbName) {
     long int offSet = diff * lineSize;
 
     FILE *bFile;
-    std::string dataDir = baseDir + "/XStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
+    std::string dataDir = baseDir + "dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
     bFile = std::fopen(dataDir.c_str(), "rb");
 
     char *buff = new char[lineSize];
@@ -161,7 +165,7 @@ std::string XStore::getp(std::time_t epochTime, std::string dbName) {
     int bFile;
 
     // Target file directory
-    std::string dataDir = baseDir + "/XStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
+    std::string dataDir = baseDir + "dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
 
     // Opening binary file
     bFile = open(dataDir.c_str(), O_RDONLY);
@@ -198,7 +202,7 @@ std::vector<std::string> XStore::getBatch(std::time_t startEpochT, std::time_t e
     int bFile, ret;
 
     // Target file directory
-    std::string dataDir = baseDir + "/XStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
+    std::string dataDir = baseDir + "dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
 
     // Opening binary file
     bFile = open(dataDir.c_str(), O_RDONLY);
@@ -236,7 +240,7 @@ std::string XStore::getSingleOpenClose(std::time_t unixTime, std::string dbName)
     long int offSet = diff * (lineSize + 1);
 
 //        FILE *bFile;
-//        std::string dataDir = baseDir + "/XStore/dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
+//        std::string dataDir = baseDir + "dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
     char *buff = new char[100];
     std::fseek(bFile, offSet, SEEK_SET);
     std::fgets(buff, lineSize + 1, bFile);
@@ -257,10 +261,22 @@ void XStore::closeFile() {
     std::fclose(bFile);
 }
 
+//
+std::string XStore::getBaseDir() {
+    std::string toReturn;
+
+    // Getting current path of XStore executable
+    toReturn = std::filesystem::current_path();
+
+    // Extract baseDir for XStore i.e., /home/ubuntu/XStore/
+    toReturn.erase(toReturn.find("XStore") + 7, toReturn.size());
+    return toReturn;
+}
+
 // Check if there's any existing database
 bool XStore::hasDB() {
     // Path to dataStore -- Currently hard-coded | WILL NEED TO FIX SO IT IS DYNAMIC
-    const std::filesystem::path tmp_dir{ std::filesystem::path(baseDir + "/XStore/dataStore")};
+    const std::filesystem::path tmp_dir{ std::filesystem::path(baseDir + "dataStore")};
     return !std::filesystem::is_empty(tmp_dir);
 }
 
@@ -287,7 +303,7 @@ void XStore::initMsg() {
 }
 
 void XStore::dbStats() {
-    std::filesystem::path dbDir = baseDir + "/XStore/dataStore";
+    std::filesystem::path dbDir = baseDir + "dataStore";
 
     for (auto& p : std::filesystem::directory_iterator(dbDir))
     {
@@ -297,7 +313,7 @@ void XStore::dbStats() {
 }
 
 bool XStore::yearExists(int inputYear, std::string dbName) {
-    std::string path = baseDir + "/XStore/dataStore" + dbName;
+    std::string path = baseDir + "dataStore" + dbName;
 
     for (const auto & entry : std::filesystem::directory_iterator(path)) {
         std::cout << entry.path();
