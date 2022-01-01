@@ -12,7 +12,22 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Rename proto &amp; modifying Python client" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Updated README.md">
+      <change afterPath="$PROJECT_DIR$/include/dataStruct/fileStruct.h" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dataStruct/fileStruct.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/CMakeLists.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/XStore/XStore_Client.py" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/XStore_Client.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/include/XStore_Networking/XStore_gRPC.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore_Networking/XStore_gRPC.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/protoFile/xStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/xStore.proto" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/protoFile/xStore_pb2.py" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/xStore_pb2.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/protoFile/xStore_pb2_grpc.py" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/xStore_pb2_grpc.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_gRPC.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_gRPC.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/dataStruct/dataStruct.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/dataStruct/dataStruct.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -75,14 +90,19 @@
       <recent name="$PROJECT_DIR$" />
     </key>
     <key name="MoveFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/include/dataStruct" />
       <recent name="$PROJECT_DIR$/protoFile" />
       <recent name="$PROJECT_DIR$/benchmark/XStore" />
       <recent name="$PROJECT_DIR$/include/XStore_Networking" />
       <recent name="$PROJECT_DIR$/include/XStore_Networking" />
-      <recent name="$PROJECT_DIR$" />
     </key>
   </component>
   <component name="RunManager" selected="CMake Application.XStore">
+    <configuration default="true" type="CLionExternalRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
+      <method v="2">
+        <option name="CLION.EXTERNAL.BUILD" enabled="true" />
+      </method>
+    </configuration>
     <configuration name="Unnamed" type="CLion_Remote" version="1" remoteCommand="" symbolFile="" sysroot="">
       <debugger toolchainName="xStore-Master" />
       <method v="2" />
@@ -201,21 +221,7 @@
       <workItem from="1640905869985" duration="1624000" />
       <workItem from="1640909519124" duration="2886000" />
       <workItem from="1640926345220" duration="341000" />
-      <workItem from="1640926691902" duration="3414000" />
-    </task>
-    <task id="LOCAL-00007" summary="Experimenting fwrite/fread/fgets">
-      <created>1635564936832</created>
-      <option name="number" value="00007" />
-      <option name="presentableId" value="LOCAL-00007" />
-      <option name="project" value="LOCAL" />
-      <updated>1635564936832</updated>
-    </task>
-    <task id="LOCAL-00008" summary="Switch &quot;dataStruct&quot; from class to struct">
-      <created>1635619496926</created>
-      <option name="number" value="00008" />
-      <option name="presentableId" value="LOCAL-00008" />
-      <option name="project" value="LOCAL" />
-      <updated>1635619496926</updated>
+      <workItem from="1640926691902" duration="18516000" />
     </task>
     <task id="LOCAL-00009" summary="Concat newLine with data. Set lineSize = 100 bytes">
       <created>1635621899250</created>
@@ -546,7 +552,21 @@
       <option name="project" value="LOCAL" />
       <updated>1640931950388</updated>
     </task>
-    <option name="localTasksCounter" value="56" />
+    <task id="LOCAL-00056" summary="Updated README.md">
+      <created>1640932412021</created>
+      <option name="number" value="00056" />
+      <option name="presentableId" value="LOCAL-00056" />
+      <option name="project" value="LOCAL" />
+      <updated>1640932412021</updated>
+    </task>
+    <task id="LOCAL-00057" summary="Updated README.md">
+      <created>1640932469698</created>
+      <option name="number" value="00057" />
+      <option name="presentableId" value="LOCAL-00057" />
+      <option name="project" value="LOCAL" />
+      <updated>1640932469698</updated>
+    </task>
+    <option name="localTasksCounter" value="58" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -647,7 +667,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Added micro bench for mongoDB" />
     <MESSAGE value="Faster query &amp; Added clear caches for benchmarks" />
     <MESSAGE value="Added statistics calc &amp; Cleaned up comments" />
     <MESSAGE value="Updated README with benchmark data" />
@@ -672,6 +691,7 @@
     <MESSAGE value="Done data streaming for rangeRequest" />
     <MESSAGE value="Clean-up" />
     <MESSAGE value="Rename proto &amp; modifying Python client" />
-    <option name="LAST_COMMIT_MESSAGE" value="Rename proto &amp; modifying Python client" />
+    <MESSAGE value="Updated README.md" />
+    <option name="LAST_COMMIT_MESSAGE" value="Updated README.md" />
   </component>
 </project>

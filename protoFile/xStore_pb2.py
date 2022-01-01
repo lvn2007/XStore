@@ -19,22 +19,22 @@ DESCRIPTOR = _descriptor.FileDescriptor(
   syntax='proto3',
   serialized_options=None,
   create_key=_descriptor._internal_create_key,
-  serialized_pb=b'\n\x16protoFile/xStore.proto\x12\nxStoregRPC\"!\n\x0cunaryRequest\x12\x11\n\ttimestamp\x18\x01 \x01(\r\"2\n\x0crangeRequest\x12\x11\n\tstartTime\x18\x01 \x01(\r\x12\x0f\n\x07\x65ndTime\x18\x02 \x01(\r\"\x1f\n\x0cresponseData\x12\x0f\n\x07\x64\x61taset\x18\x01 \x01(\t2\x95\x01\n\x06xStore\x12\x43\n\x0bsendRequest\x12\x18.xStoregRPC.unaryRequest\x1a\x18.xStoregRPC.responseData\"\x00\x12\x46\n\x0c\x62\x61tchRequest\x12\x18.xStoregRPC.rangeRequest\x1a\x18.xStoregRPC.responseData\"\x00\x30\x01\x62\x06proto3'
+  serialized_pb=b'\n\x16protoFile/xStore.proto\x12\nxStoregRPC\"$\n\x0funaryRequestMsg\x12\x11\n\ttimestamp\x18\x01 \x01(\r\"5\n\x0frangeRequestMsg\x12\x11\n\tstartTime\x18\x01 \x01(\r\x12\x0f\n\x07\x65ndTime\x18\x02 \x01(\r\"\x1f\n\x0cresponseData\x12\x0f\n\x07\x64\x61taset\x18\x01 \x01(\t2\x9c\x01\n\x06xStore\x12G\n\x0cunaryRequest\x12\x1b.xStoregRPC.unaryRequestMsg\x1a\x18.xStoregRPC.responseData\"\x00\x12I\n\x0c\x62\x61tchRequest\x12\x1b.xStoregRPC.rangeRequestMsg\x1a\x18.xStoregRPC.responseData\"\x00\x30\x01\x62\x06proto3'
 )
 
 
 
 
-_UNARYREQUEST = _descriptor.Descriptor(
-  name='unaryRequest',
-  full_name='xStoregRPC.unaryRequest',
+_UNARYREQUESTMSG = _descriptor.Descriptor(
+  name='unaryRequestMsg',
+  full_name='xStoregRPC.unaryRequestMsg',
   filename=None,
   file=DESCRIPTOR,
   containing_type=None,
   create_key=_descriptor._internal_create_key,
   fields=[
     _descriptor.FieldDescriptor(
-      name='timestamp', full_name='xStoregRPC.unaryRequest.timestamp', index=0,
+      name='timestamp', full_name='xStoregRPC.unaryRequestMsg.timestamp', index=0,
       number=1, type=13, cpp_type=3, label=1,
       has_default_value=False, default_value=0,
       message_type=None, enum_type=None, containing_type=None,
@@ -53,27 +53,27 @@ _UNARYREQUEST = _descriptor.Descriptor(
   oneofs=[
   ],
   serialized_start=38,
-  serialized_end=71,
+  serialized_end=74,
 )
 
 
-_RANGEREQUEST = _descriptor.Descriptor(
-  name='rangeRequest',
-  full_name='xStoregRPC.rangeRequest',
+_RANGEREQUESTMSG = _descriptor.Descriptor(
+  name='rangeRequestMsg',
+  full_name='xStoregRPC.rangeRequestMsg',
   filename=None,
   file=DESCRIPTOR,
   containing_type=None,
   create_key=_descriptor._internal_create_key,
   fields=[
     _descriptor.FieldDescriptor(
-      name='startTime', full_name='xStoregRPC.rangeRequest.startTime', index=0,
+      name='startTime', full_name='xStoregRPC.rangeRequestMsg.startTime', index=0,
       number=1, type=13, cpp_type=3, label=1,
       has_default_value=False, default_value=0,
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
     _descriptor.FieldDescriptor(
-      name='endTime', full_name='xStoregRPC.rangeRequest.endTime', index=1,
+      name='endTime', full_name='xStoregRPC.rangeRequestMsg.endTime', index=1,
       number=2, type=13, cpp_type=3, label=1,
       has_default_value=False, default_value=0,
       message_type=None, enum_type=None, containing_type=None,
@@ -91,8 +91,8 @@ _RANGEREQUEST = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=73,
-  serialized_end=123,
+  serialized_start=76,
+  serialized_end=129,
 )
 
 
@@ -123,28 +123,28 @@ _RESPONSEDATA = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=125,
-  serialized_end=156,
+  serialized_start=131,
+  serialized_end=162,
 )
 
-DESCRIPTOR.message_types_by_name['unaryRequest'] = _UNARYREQUEST
-DESCRIPTOR.message_types_by_name['rangeRequest'] = _RANGEREQUEST
+DESCRIPTOR.message_types_by_name['unaryRequestMsg'] = _UNARYREQUESTMSG
+DESCRIPTOR.message_types_by_name['rangeRequestMsg'] = _RANGEREQUESTMSG
 DESCRIPTOR.message_types_by_name['responseData'] = _RESPONSEDATA
 _sym_db.RegisterFileDescriptor(DESCRIPTOR)
 
-unaryRequest = _reflection.GeneratedProtocolMessageType('unaryRequest', (_message.Message,), {
-  'DESCRIPTOR' : _UNARYREQUEST,
+unaryRequestMsg = _reflection.GeneratedProtocolMessageType('unaryRequestMsg', (_message.Message,), {
+  'DESCRIPTOR' : _UNARYREQUESTMSG,
   '__module__' : 'protoFile.xStore_pb2'
-  # @@protoc_insertion_point(class_scope:xStoregRPC.unaryRequest)
+  # @@protoc_insertion_point(class_scope:xStoregRPC.unaryRequestMsg)
   })
-_sym_db.RegisterMessage(unaryRequest)
+_sym_db.RegisterMessage(unaryRequestMsg)
 
-rangeRequest = _reflection.GeneratedProtocolMessageType('rangeRequest', (_message.Message,), {
-  'DESCRIPTOR' : _RANGEREQUEST,
+rangeRequestMsg = _reflection.GeneratedProtocolMessageType('rangeRequestMsg', (_message.Message,), {
+  'DESCRIPTOR' : _RANGEREQUESTMSG,
   '__module__' : 'protoFile.xStore_pb2'
-  # @@protoc_insertion_point(class_scope:xStoregRPC.rangeRequest)
+  # @@protoc_insertion_point(class_scope:xStoregRPC.rangeRequestMsg)
   })
-_sym_db.RegisterMessage(rangeRequest)
+_sym_db.RegisterMessage(rangeRequestMsg)
 
 responseData = _reflection.GeneratedProtocolMessageType('responseData', (_message.Message,), {
   'DESCRIPTOR' : _RESPONSEDATA,
@@ -162,15 +162,15 @@ _XSTORE = _descriptor.ServiceDescriptor(
   index=0,
   serialized_options=None,
   create_key=_descriptor._internal_create_key,
-  serialized_start=159,
-  serialized_end=308,
+  serialized_start=165,
+  serialized_end=321,
   methods=[
   _descriptor.MethodDescriptor(
-    name='sendRequest',
-    full_name='xStoregRPC.xStore.sendRequest',
+    name='unaryRequest',
+    full_name='xStoregRPC.xStore.unaryRequest',
     index=0,
     containing_service=None,
-    input_type=_UNARYREQUEST,
+    input_type=_UNARYREQUESTMSG,
     output_type=_RESPONSEDATA,
     serialized_options=None,
     create_key=_descriptor._internal_create_key,
@@ -180,7 +180,7 @@ _XSTORE = _descriptor.ServiceDescriptor(
     full_name='xStoregRPC.xStore.batchRequest',
     index=1,
     containing_service=None,
-    input_type=_RANGEREQUEST,
+    input_type=_RANGEREQUESTMSG,
     output_type=_RESPONSEDATA,
     serialized_options=None,
     create_key=_descriptor._internal_create_key,

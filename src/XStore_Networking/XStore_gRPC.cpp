@@ -1,11 +1,15 @@
 #include "include/XStore_Networking/XStore_gRPC.h"
 
-grpc::Status xStoreServiceImplementation::sendRequest(grpc::ServerContext *context, const xStoregRPC::unaryRequest *request, xStoregRPC::responseData *response) {
+grpc::Status xStoreServiceImplementation::unaryRequest(grpc::ServerContext *context, const xStoregRPC::unaryRequestMsg *request, xStoregRPC::responseData *response) {
     // Extract query request from CLIENT
     long int timestamp = request->timestamp();
 
     // Unary query result
     std::string queryResult = myStore.getp(timestamp, "tsla");
+
+    std::string asd = context->peer();
+
+    std::cout << asd << std::endl;
 
     // Response data to CLIENT
     response->set_dataset(queryResult);
@@ -13,7 +17,7 @@ grpc::Status xStoreServiceImplementation::sendRequest(grpc::ServerContext *conte
     return grpc::Status::OK;
 }
 
-grpc::Status xStoreServiceImplementation::batchRequest(grpc::ServerContext *context, const xStoregRPC::rangeRequest *request, grpc::ServerWriter<xStoregRPC::responseData> *writer) {
+grpc::Status xStoreServiceImplementation::batchRequest(grpc::ServerContext *context, const xStoregRPC::rangeRequestMsg *request, grpc::ServerWriter<xStoregRPC::responseData> *writer) {
     // Extract query request from CLIENT
     long int startTime = request->starttime();
     long int endTime = request->endtime();

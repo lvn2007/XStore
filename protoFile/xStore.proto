@@ -7,16 +7,16 @@ package xStoregRPC;
 // Defines the service
 service xStore {
   // Function invoked to send the request
-  rpc sendRequest (unaryRequest) returns (responseData) {}
-  rpc batchRequest (rangeRequest) returns (stream responseData) {}
+  rpc unaryRequest (unaryRequestMsg) returns (responseData) {}
+  rpc batchRequest (rangeRequestMsg) returns (stream responseData) {}
 }
 
 // The request message containing requested numbers
-message unaryRequest {
+message unaryRequestMsg {
   uint32 timestamp = 1;
 }
 
-message rangeRequest {
+message rangeRequestMsg {
   uint32 startTime = 1;
   uint32 endTime = 2;
 }

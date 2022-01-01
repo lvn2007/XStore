@@ -12,15 +12,17 @@
 #include <sys/stat.h>
 
 #include "include/dataStruct/dataStruct.h"
+#include "include/dataStruct/fileStruct.h"
 #include <xStore.grpc.pb.h>
 
 class XStore {
     public:
-        std::string baseDir = "/home/ubuntu";
+        std::string baseDir = getBaseDir();
+
         int dbCount = 0;
         std::vector<std::string> dbNames = { };
         std::map<std::string, long int> resolutionMap { {"SECOND", 31536000}, {"MILLISECOND", 31536000000}, {"MICROSECOND", 31536000000000} };
-        std::map<std::string, FILE> fMap { { } };
+        std::map<std::string, FILE*> fMap;
         FILE *bFile;
 
         // Initialization
@@ -45,6 +47,9 @@ class XStore {
         void closeFile();
 
     private:
+        // Get current base directory
+        std::string getBaseDir();
+
         // Check if there's any existing database
         bool hasDB();
 

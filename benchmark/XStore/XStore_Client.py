@@ -28,7 +28,7 @@ def unaryRequest(epochTime):
     with grpc.insecure_channel('172.20.3.113:5000') as channel:
         stub = xStore_pb2_grpc.xStoreStub(channel)
         startTime = time.time()
-        response = stub.sendRequest(xStore_pb2.unaryRequest(timestamp=epochTime))
+        response = stub.unaryRequest(xStore_pb2.unaryRequestMsg(timestamp=epochTime))
         endTime = time.time()
     return endTime-startTime
 
@@ -36,7 +36,7 @@ def batchRequest(startEpoch, endEpoch):
     with grpc.insecure_channel('172.20.3.113:5000') as channel:
         stub = xStore_pb2_grpc.xStoreStub(channel)
         startExec = time.time()
-        reqMsg = xStore_pb2.rangeRequest(startTime=startEpoch, endTime=endEpoch)
+        reqMsg = xStore_pb2.rangeRequestMsg(startTime=startEpoch, endTime=endEpoch)
         batchResponses = stub.batchRequest(reqMsg)
 
         for i in batchResponses:
