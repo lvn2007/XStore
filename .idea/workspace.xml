@@ -12,14 +12,13 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Implemented single open via dbMap (Storing file descriptor in map)">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Clean up">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/dataStruct/fileStruct.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/dataStruct/fileStruct.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/XStore/XStore_Client.py" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/XStore_Client.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/protoFile/xStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/xStore.proto" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/protoFile/xStore_pb2.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/protoFile/xStore_pb2_grpc.py" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_gRPC.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_gRPC.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/dataStruct/fileStruct.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/dataStruct/fileStruct.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -214,14 +213,7 @@
       <workItem from="1640905869985" duration="1624000" />
       <workItem from="1640909519124" duration="2886000" />
       <workItem from="1640926345220" duration="341000" />
-      <workItem from="1640926691902" duration="37282000" />
-    </task>
-    <task id="LOCAL-00011" summary="Added time resolution map">
-      <created>1635625804480</created>
-      <option name="number" value="00011" />
-      <option name="presentableId" value="LOCAL-00011" />
-      <option name="project" value="LOCAL" />
-      <updated>1635625804480</updated>
+      <workItem from="1640926691902" duration="38057000" />
     </task>
     <task id="LOCAL-00012" summary="Added 2 funcs to compute first &amp; last datetime and return an EPOCH value">
       <created>1635636801052</created>
@@ -559,7 +551,14 @@
       <option name="project" value="LOCAL" />
       <updated>1641112326003</updated>
     </task>
-    <option name="localTasksCounter" value="60" />
+    <task id="LOCAL-00060" summary="Clean up">
+      <created>1641113183005</created>
+      <option name="number" value="00060" />
+      <option name="presentableId" value="LOCAL-00060" />
+      <option name="project" value="LOCAL" />
+      <updated>1641113183005</updated>
+    </task>
+    <option name="localTasksCounter" value="61" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -660,7 +659,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Updated README with benchmark data" />
     <MESSAGE value="Updated README with testbed info" />
     <MESSAGE value="Code cleanup" />
     <MESSAGE value="Modified mongoDB benches &amp; Added second timing for XStore" />
@@ -685,6 +683,7 @@
     <MESSAGE value="Updated README.md" />
     <MESSAGE value="Enhancing XStore -- Dynamically locate baseDir &amp; Staging fileStruct" />
     <MESSAGE value="Implemented single open via dbMap (Storing file descriptor in map)" />
-    <option name="LAST_COMMIT_MESSAGE" value="Implemented single open via dbMap (Storing file descriptor in map)" />
+    <MESSAGE value="Clean up" />
+    <option name="LAST_COMMIT_MESSAGE" value="Clean up" />
   </component>
 </project>

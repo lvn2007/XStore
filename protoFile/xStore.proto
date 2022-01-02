@@ -14,11 +14,13 @@ service xStore {
 // The request message containing requested numbers
 message unaryRequestMsg {
   uint32 timestamp = 1;
+  string dbName = 2;
 }
 
 message rangeRequestMsg {
   uint32 startTime = 1;
   uint32 endTime = 2;
+  string dbName = 3;
 }
 
 // The response message containing response

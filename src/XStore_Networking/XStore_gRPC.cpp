@@ -3,9 +3,10 @@
 grpc::Status xStoreServiceImplementation::unaryRequest(grpc::ServerContext *context, const xStoregRPC::unaryRequestMsg *request, xStoregRPC::responseData *response) {
     // Extract query request from CLIENT
     long int timestamp = request->timestamp();
+    std::string dbName = request->dbname();
 
     // Unary query result
-    std::string queryResult = myStore.getSingleOpenClose(timestamp, "tsla");
+    std::string queryResult = myStore.getSingleOpenClose(timestamp, dbName);
 
     // Response data to CLIENT
     response->set_dataset(queryResult);
@@ -17,9 +18,10 @@ grpc::Status xStoreServiceImplementation::batchRequest(grpc::ServerContext *cont
     // Extract query request from CLIENT
     long int startTime = request->starttime();
     long int endTime = request->endtime();
+    std::string dbName = request->dbname();
 
     // Vector holding results from batch query
-    std::vector<std::string> returnData = myStore.getBatch(startTime, endTime, "tsla");
+    std::vector<std::string> returnData = myStore.getBatch(startTime, endTime, dbName);
 
     // Placeholder for server's response
     xStoregRPC::responseData currResponse;
