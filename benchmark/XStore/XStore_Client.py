@@ -28,8 +28,8 @@ def run():
 def unaryRequest(epochTime):
     with grpc.insecure_channel('172.20.3.113:5000') as channel:
         stub = xStore_pb2_grpc.xStoreStub(channel)
-        startTime = time.time()
         reqMsg = xStore_pb2.unaryRequestMsg(timestamp=epochTime, dbName="tsla")
+        startTime = time.time()
         response = stub.unaryRequest(reqMsg)
         endTime = time.time()
     return endTime-startTime
