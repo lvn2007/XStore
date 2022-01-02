@@ -19,8 +19,6 @@ struct fileStruct {
     // Constructor
     fileStruct(std::string dbName, std::string baseDir);
 
-    // Returning an IP Address
-    //  This is used as an Identifier (ID)
     std::string getDBName();
     std::map<int, FILE*> getFfileMap();
     std::map<int, int> getBfileMap();

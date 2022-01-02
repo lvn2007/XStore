@@ -12,13 +12,14 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Enhancing XStore -- Dynamically locate baseDir &amp; Staging fileStruct">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Implemented single open via dbMap (Storing file descriptor in map)">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/include/dataStruct/fileStruct.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/dataStruct/fileStruct.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_gRPC.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_gRPC.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/dataStruct/fileStruct.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/dataStruct/fileStruct.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -213,14 +214,7 @@
       <workItem from="1640905869985" duration="1624000" />
       <workItem from="1640909519124" duration="2886000" />
       <workItem from="1640926345220" duration="341000" />
-      <workItem from="1640926691902" duration="36482000" />
-    </task>
-    <task id="LOCAL-00010" summary="lineSize = Fixed 100 bytes in size">
-      <created>1635621942460</created>
-      <option name="number" value="00010" />
-      <option name="presentableId" value="LOCAL-00010" />
-      <option name="project" value="LOCAL" />
-      <updated>1635621942460</updated>
+      <workItem from="1640926691902" duration="37282000" />
     </task>
     <task id="LOCAL-00011" summary="Added time resolution map">
       <created>1635625804480</created>
@@ -558,7 +552,14 @@
       <option name="project" value="LOCAL" />
       <updated>1641079488048</updated>
     </task>
-    <option name="localTasksCounter" value="59" />
+    <task id="LOCAL-00059" summary="Implemented single open via dbMap (Storing file descriptor in map)">
+      <created>1641112326003</created>
+      <option name="number" value="00059" />
+      <option name="presentableId" value="LOCAL-00059" />
+      <option name="project" value="LOCAL" />
+      <updated>1641112326003</updated>
+    </task>
+    <option name="localTasksCounter" value="60" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -659,7 +660,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Added statistics calc &amp; Cleaned up comments" />
     <MESSAGE value="Updated README with benchmark data" />
     <MESSAGE value="Updated README with testbed info" />
     <MESSAGE value="Code cleanup" />
@@ -684,6 +684,7 @@
     <MESSAGE value="Rename proto &amp; modifying Python client" />
     <MESSAGE value="Updated README.md" />
     <MESSAGE value="Enhancing XStore -- Dynamically locate baseDir &amp; Staging fileStruct" />
-    <option name="LAST_COMMIT_MESSAGE" value="Enhancing XStore -- Dynamically locate baseDir &amp; Staging fileStruct" />
+    <MESSAGE value="Implemented single open via dbMap (Storing file descriptor in map)" />
+    <option name="LAST_COMMIT_MESSAGE" value="Implemented single open via dbMap (Storing file descriptor in map)" />
   </component>
 </project>

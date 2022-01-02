@@ -12,8 +12,6 @@ XStore::XStore() {
 
     //  First, check if there's any existing data exists
     hasDB();
-
-    std::string dataDir = baseDir + "dataStore/" + "tsla" + "/" + std::to_string(2017) + ".XSTORE";
 }
 
 // INSERT time-series oriented values
@@ -282,11 +280,6 @@ void XStore::initDB() {
     }
 }
 
-//void XStore::closeFile() {
-//    std::fclose(bFile);
-//}
-
-//
 std::string XStore::getBaseDir() {
     std::string toReturn;
 
