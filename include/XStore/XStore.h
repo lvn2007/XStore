@@ -18,12 +18,11 @@
 class XStore {
     public:
         std::string baseDir = getBaseDir();
+        std::map<std::string, fileStruct> dbMap;
 
         int dbCount = 0;
         std::vector<std::string> dbNames = { };
         std::map<std::string, long int> resolutionMap { {"SECOND", 31536000}, {"MILLISECOND", 31536000000}, {"MICROSECOND", 31536000000000} };
-        std::map<std::string, FILE*> fMap;
-        FILE *bFile;
 
         // Initialization
         XStore();
@@ -39,10 +38,10 @@ class XStore {
 
         std::vector<std::string> getBatch(std::time_t startEpochT, std::time_t endEpochT, std::string dbName);
 
-        std::string getSingleOpenClose(std::time_t unixTime, std::string dbName);
+        std::string getSingleOpenClose(std::time_t epochTime, std::string dbName);
 
-        // Switch DB
-        void switchDB(std::string dbName);
+        // Initialize DB
+        void initDB();
 
         void closeFile();
 
