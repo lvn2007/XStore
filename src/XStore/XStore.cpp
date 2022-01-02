@@ -153,13 +153,11 @@ std::string XStore::getp(std::time_t epochTime, std::string dbName) {
     // Calculate offset -- Exact location of where a particular target row is stored
     long int offSet = diff * lineSize;
 
-    int bFile;
-
     // Target file directory
     std::string dataDir = baseDir + "dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
 
     // Opening binary file
-    bFile = open(dataDir.c_str(), O_RDONLY);
+    int bFile = open(dataDir.c_str(), O_RDONLY);
 
     // A single line data will be read into here
     char buff[lineSize];
@@ -207,7 +205,6 @@ std::vector<std::string> XStore::getBatch(std::time_t startEpochT, std::time_t e
 
         // Cache data to return
         toReturn.push_back(buff);
-//        toReturn += buff;
     }
 
     // Close file
