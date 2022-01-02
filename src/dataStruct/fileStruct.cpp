@@ -1,49 +1,90 @@
 #include "include/dataStruct/fileStruct.h"
 
 // Constructor
-fileStruct::fileStruct(std::string ipAddr, std::string dbName) {
-    this->ipAddr = parseIP(ipAddr);
+fileStruct::fileStruct(std::string dbName, std::string baseDir) {
     this->dbName = dbName;
-//    std::filesystem::current_path(
-//    std::cout << std::filesystem::current_path() << std::endl;
+    this->baseDir = baseDir;
+    openAllDBFiles();
 }
 
-std::string fileStruct::getID() {
-    return ipAddr;
+std::string fileStruct::getDBName() {
+    return this->dbName;
 }
 
-std::string fileStruct::parseIP(std::string ipAddr) {
-    // Remove first 5 characters i.e., ipv4:
-    ipAddr.erase(0, 5);
-
-    // Locate ":" in string
-    int colonIdx = ipAddr.find(":");
-
-    // Remove from ":" location to end-of-string
-    ipAddr.erase(colonIdx, ipAddr.size());
-
-    return ipAddr;
+std::map<int, FILE*> fileStruct::getFfileMap() {
+    return this->fFileMap;
 }
 
-//dataStruct::dataStruct(std::time_t unixTime, std::string data) {
-//    this->unixTime = unixTime;
-//    this->data = data;
+std::map<int, int> fileStruct::getBfileMap() {
+    return this->bFileMap;
+}
+
+bool fileStruct::hasYear(int inputYear) {
+    return (bFileMap.find(inputYear)->first == inputYear);
+}
+
+//std::string fileStruct::parseIP(std::string ipAddr) {
+//    // Remove first 5 characters i.e., ipv4:
+//    ipAddr.erase(0, 5);
 //
-//    // Ensuring no WHITESPACE in data
-//    data.erase(std::remove(data.begin(), data.end(), ' '), data.end());
-//}
+//    // Locate ":" in string
+//    int colonIdx = ipAddr.find(":");
 //
-//// Returning a line
-////  i.e., unixTime, values
-//std::string dataStruct::getData() {
-//    return std::to_string(unixTime) + "," + data + "\n";
-//}
+//    // Remove from ":" location to end-of-string
+//    ipAddr.erase(colonIdx, ipAddr.size());
 //
-//// Printing out time-value
-//void dataStruct::printData(bool humanTime) {
-//    if (humanTime) {
-//        std::cout << "Timestamp: " << ctime(&unixTime) << " | Data: " << data << std::endl;
-//        return;
-//    }
-//    std::cout << "Timestamp: " << unixTime << " | Data: " << data << std::endl;
+//    return ipAddr;
 //}
+
+void fileStruct::printSummary() {
+
+}
+
+void fileStruct::openAllDBFiles() {
+    // Placeholder
+    FILE *fFile;
+    int bFile;
+    std::map<FILE*, int> tempMap;
+    std::string currDataFilePath;
+    int currYear;
+
+    // Directory contains all data file for a specific DB
+    std::filesystem::path dataPath = baseDir + "dataStore/" + dbName + "/";
+
+    // Loop through each data file
+    for (auto& p : std::filesystem::directory_iterator(dataPath))
+    {
+        // File path as string
+        //  i.e., /home/ubuntu/XStore/dataStore/tsla/2017.XSTORE
+        currDataFilePath = p.path().string();
+
+        // Extracted file name from path
+        //  i.e., 2017
+        currYear = extractYear(currDataFilePath);
+
+        // Open each file
+        bFile = open(currDataFilePath.c_str(), O_RDONLY);
+        fFile = fopen(currDataFilePath.c_str(), "rb");
+
+        // Insert to appropriate map
+        bFileMap[currYear] = bFile;
+        fFileMap[currYear] = fFile;
+    }
+}
+
+int fileStruct::extractYear(std::string inputFileName) {
+    // Index of base path up to dbName
+    int dbNameIdx = inputFileName.find(dbName);
+
+    // Remove path up to dbName
+    inputFileName.erase(0, dbNameIdx + dbName.size() + 1);
+
+    // Index of substr with ".XSTORE"
+    int xstoreIdx = inputFileName.find(".XSTORE");
+
+    // Remove .XSTORE
+    inputFileName.erase(xstoreIdx, inputFileName.size());
+
+    // Returning year only i.e., 2017
+    return atoi(inputFileName.c_str());
+}

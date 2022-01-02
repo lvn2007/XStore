@@ -3,31 +3,35 @@
 
 #include <iostream>
 #include <filesystem>
+#include <fcntl.h>
+#include <unistd.h>
+#include <map>
 
 // Data structure to hold data for I/O
 struct fileStruct {
-    std::string ipAddr;
     std::string dbName;
-    FILE *fFile;
-    int bFile;
+    std::string baseDir;
+
+    // Map -- Stores file descriptor
+    std::map<int, FILE*> fFileMap;
+    std::map<int, int> bFileMap;
 
     // Constructor
-    fileStruct(std::string ipAddr, std::string dbName);
-
-    // Returning a line
-    //  i.e., unixTime, values
-    std::string getData();
+    fileStruct(std::string dbName, std::string baseDir);
 
     // Returning an IP Address
     //  This is used as an Identifier (ID)
-    std::string getID();
+    std::string getDBName();
+    std::map<int, FILE*> getFfileMap();
+    std::map<int, int> getBfileMap();
+    bool hasYear(int inputYear);
 
     // Printing out time-value
-    void printData(bool humanTime);
+    void printSummary();
+
     private:
-        // Parsing IP addr -- Format: ipv4:xx.xxx.xxx.x:xxxxx
-        //  Returning: xx.xxx.xxx.x
-        std::string parseIP(std::string ipAddr);
+        void openAllDBFiles();
+        int extractYear(std::string);
 };
 
 #endif //XSTORE_FILESTRUCT_H

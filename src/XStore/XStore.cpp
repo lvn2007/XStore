@@ -4,23 +4,16 @@
 
 // Initialization
 XStore::XStore() {
-    // Initialized message
+    // Initialize message
     initMsg();
+
+    // Initialize DB
+    initDB();
 
     //  First, check if there's any existing data exists
     hasDB();
 
     std::string dataDir = baseDir + "dataStore/" + "tsla" + "/" + std::to_string(2017) + ".XSTORE";
-    bFile = std::fopen(dataDir.c_str(), "rb");
-    std::string ipStr = "ipv4:64.131.114.2:53617";
-//    fMap.insert({ ipStr, bFile});
-//    fMap[ipStr] = bFile;
-
-    fileStruct fStruct(ipStr, "tsla");
-//    std::cout << fStruct.getID() << std::endl;
-
-//    std::cout << fMap.find("172.20.3.118")->first << std::endl;
-//    std::cout << fMap.find("172.20.3.118")->second << std::endl;
 }
 
 // INSERT time-series oriented values
@@ -225,41 +218,73 @@ std::vector<std::string> XStore::getBatch(std::time_t startEpochT, std::time_t e
     return toReturn;
 }
 
-std::string XStore::getSingleOpenClose(std::time_t unixTime, std::string dbName) {
+std::string XStore::getSingleOpenClose(std::time_t epochTime, std::string dbName) {
+    // Make sure dbName exists
+    //  IF given dbName is not available
+    //  Return "NULL" as string
+    if (dbMap.find(dbName) == dbMap.end()) {
+        return "NULL";
+    }
+
     // Read timeValue -- UNIX time
-    int inputYear = toHumanYear(unixTime);
-    std::string currResolution = getTimeResolution(unixTime);
+    int inputYear = toHumanYear(epochTime);
+
+    // Make sure inputYear is available in DB
+    //  IF inputYear is not available
+    //  Return "NULL" as string
+    if ((dbMap.find(dbName)->second.hasYear(inputYear)) != true) {
+        return "NULL";
+    }
+
+    // Otherwise, keep processing
+    std::string currResolution = getTimeResolution(epochTime);
 
     // Start epoch time of a given year
     long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
 
     // Epoch time difference between target & startEpoch
-    long int diff = unixTime - startEpoch;
+    long int diff = epochTime - startEpoch;
 
     // Calculate offset -- Exact location of where a particular target row is stored
-    long int offSet = diff * (lineSize + 1);
+    long int offSet = diff * lineSize;
 
-//        FILE *bFile;
-//        std::string dataDir = baseDir + "dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
-    char *buff = new char[100];
-    std::fseek(bFile, offSet, SEEK_SET);
-    std::fgets(buff, lineSize + 1, bFile);
-//        std::puts(buff);
-//        std::fclose(bFile);
+    // Look-up file descriptor in dbMap
+    int bFile = dbMap.find(dbName)->second.getBfileMap().find(inputYear)->second;
+
+    // A single line data will be read into here
+    char buff[lineSize];
+
+    // Extract line of data from binary file
+    int ret = pread(bFile, &buff[0], lineSize , offSet);
+
     std::string toReturn(buff);
     return toReturn;
 }
 
-void XStore::switchDB(std::string dbName) {
-    if (dbCount == 0 || std::find(dbNames.begin(), dbNames.end(), dbName) != dbNames.end()) {
-        std::cout << "Switched DB" << std::endl;
-        return;
+void XStore::initDB() {
+    // Directory contains all data file for a specific DB
+    std::filesystem::path dbNames = baseDir + "dataStore/";
+
+    // Loop through each dbName
+    for (auto& p : std::filesystem::directory_iterator(dbNames))
+    {
+        // Full path of each DB
+        std::string currDBName = p.path().string();
+
+        // Extract -- Getting only dbName
+        currDBName = currDBName.erase(0, dbNames.string().size());
+
+        // Initialize fileStruct -- Storing file descriptor
+        fileStruct fStruct(currDBName, baseDir);
+
+        // Insert fileStruct for each recognized dbName
+        dbMap.insert(std::make_pair(currDBName, fStruct));
     }
 }
 
-void XStore::closeFile() {
-    std::fclose(bFile);
-}
+//void XStore::closeFile() {
+//    std::fclose(bFile);
+//}
 
 //
 std::string XStore::getBaseDir() {

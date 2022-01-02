@@ -5,11 +5,7 @@ grpc::Status xStoreServiceImplementation::unaryRequest(grpc::ServerContext *cont
     long int timestamp = request->timestamp();
 
     // Unary query result
-    std::string queryResult = myStore.getp(timestamp, "tsla");
-
-    std::string asd = context->peer();
-
-    std::cout << asd << std::endl;
+    std::string queryResult = myStore.getSingleOpenClose(timestamp, "tsla");
 
     // Response data to CLIENT
     response->set_dataset(queryResult);
@@ -40,6 +36,30 @@ grpc::Status xStoreServiceImplementation::batchRequest(grpc::ServerContext *cont
 
     return grpc::Status::OK;
 }
+
+//--- EXECUTION TIME in [s] ---
+//-Min: 0.00
+//-Max: 0.00
+//-Mean: 0.00
+//-Stdev: 0.00
+//
+//--- EXECUTION TIME in [ms] ---
+//-Min: 1.57
+//-Max: 3.30
+//-Mean: 2.04
+//-Stdev: 0.13
+//
+//--- EXECUTION TIME in [µs] ---
+//-Min: 1,574.75
+//-Max: 3,300.19
+//-Mean: 2,036.18
+//-Stdev: 128.35
+//
+//--- EXECUTION TIME in [ns] ---
+//-Min: 1,574,754.71
+//-Max: 3,300,189.97
+//-Mean: 2,036,175.94
+//-Stdev: 128,350.64
 
 void xStoreServiceImplementation::Run() {
     std::string address("0.0.0.0:5000");
