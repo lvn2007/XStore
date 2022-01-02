@@ -23,19 +23,6 @@ bool fileStruct::hasYear(int inputYear) {
     return (bFileMap.find(inputYear)->first == inputYear);
 }
 
-//std::string fileStruct::parseIP(std::string ipAddr) {
-//    // Remove first 5 characters i.e., ipv4:
-//    ipAddr.erase(0, 5);
-//
-//    // Locate ":" in string
-//    int colonIdx = ipAddr.find(":");
-//
-//    // Remove from ":" location to end-of-string
-//    ipAddr.erase(colonIdx, ipAddr.size());
-//
-//    return ipAddr;
-//}
-
 void fileStruct::printSummary() {
 
 }

@@ -43,8 +43,6 @@ class XStore {
         // Initialize DB
         void initDB();
 
-        void closeFile();
-
     private:
         // Get current base directory
         std::string getBaseDir();
