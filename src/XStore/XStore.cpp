@@ -327,14 +327,13 @@ void XStore::dbStats() {
     }
 }
 
-bool XStore::yearExists(int inputYear, std::string dbName) {
-    std::string path = baseDir + "dataStore" + dbName;
-
-    for (const auto & entry : std::filesystem::directory_iterator(path)) {
-        std::cout << entry.path();
-    }
-}
-
+//bool XStore::yearExists(int inputYear, std::string dbName) {
+//    std::string path = baseDir + "dataStore" + dbName;
+//
+//    for (const auto & entry : std::filesystem::directory_iterator(path)) {
+//        std::cout << entry.path();
+//    }
+//}
 
 // Returning epoch value of FIRST available datetime of a given year
 long int XStore::getStartTimeEpoch(int yearInput, std::string timeResolution) {
@@ -384,6 +383,8 @@ std::string XStore::getTimeResolution(std::time_t unixTime) {
     else if (count >= 16) {
         return "MICROSECOND";
     }
+
+    return "NULL";
 }
 
 int XStore::toHumanYear(std::time_t unixTime) {

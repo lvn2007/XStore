@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="SELECTIVE" />
+  </component>
   <component name="CMakeRunConfigurationManager" shouldGenerate="true" shouldDeleteObsolete="true">
     <generated>
       <config projectName="XStore" targetName="XStore" />
@@ -7,13 +10,14 @@
   </component>
   <component name="CMakeSettings" AUTO_RELOAD="true">
     <configurations>
-      <configuration PROFILE_NAME="Debug-Remote-xStore-Master" ENABLED="true" CONFIG_NAME="Debug" TOOLCHAIN_NAME="xStore-Master" />
-      <configuration PROFILE_NAME="Debug" ENABLED="true" CONFIG_NAME="Debug" />
+      <configuration PROFILE_NAME="Debug-Remote-xStore-Master" ENABLED="true" CONFIG_NAME="Debug" TOOLCHAIN_NAME="xStore-Master" BUILD_OPTIONS="-- -j" />
+      <configuration PROFILE_NAME="Debug" ENABLED="true" CONFIG_NAME="Debug" BUILD_OPTIONS="-- -j" />
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Added argument &quot;dbName&quot; in gRPC requests">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Clean up">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -70,7 +74,7 @@
     <property name="com.intellij.ide.scratch.ScratchImplUtil$2/New Scratch File" value="ObjectiveC" />
     <property name="last_opened_file_path" value="$PROJECT_DIR$/protoFile" />
     <property name="nodejs_package_manager_path" value="npm" />
-    <property name="settings.editor.selected.configurable" value="com.jetbrains.python.configuration.PyActiveSdkModuleConfigurable" />
+    <property name="settings.editor.selected.configurable" value="CMakeSettings" />
   </component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
@@ -209,14 +213,7 @@
       <workItem from="1640905869985" duration="1624000" />
       <workItem from="1640909519124" duration="2886000" />
       <workItem from="1640926345220" duration="341000" />
-      <workItem from="1640926691902" duration="40061000" />
-    </task>
-    <task id="LOCAL-00013" summary="Finished rough-draft version of xStore -- Delivering 110 microsecs per query">
-      <created>1635639124763</created>
-      <option name="number" value="00013" />
-      <option name="presentableId" value="LOCAL-00013" />
-      <option name="project" value="LOCAL" />
-      <updated>1635639124763</updated>
+      <workItem from="1640926691902" duration="42054000" />
     </task>
     <task id="LOCAL-00014" summary="Clean-up">
       <created>1635640553921</created>
@@ -554,7 +551,14 @@
       <option name="project" value="LOCAL" />
       <updated>1641113913572</updated>
     </task>
-    <option name="localTasksCounter" value="62" />
+    <task id="LOCAL-00062" summary="Clean up">
+      <created>1641117284995</created>
+      <option name="number" value="00062" />
+      <option name="presentableId" value="LOCAL-00062" />
+      <option name="project" value="LOCAL" />
+      <updated>1641117284995</updated>
+    </task>
+    <option name="localTasksCounter" value="63" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -678,8 +682,8 @@
     <MESSAGE value="Updated README.md" />
     <MESSAGE value="Enhancing XStore -- Dynamically locate baseDir &amp; Staging fileStruct" />
     <MESSAGE value="Implemented single open via dbMap (Storing file descriptor in map)" />
-    <MESSAGE value="Clean up" />
     <MESSAGE value="Added argument &quot;dbName&quot; in gRPC requests" />
-    <option name="LAST_COMMIT_MESSAGE" value="Added argument &quot;dbName&quot; in gRPC requests" />
+    <MESSAGE value="Clean up" />
+    <option name="LAST_COMMIT_MESSAGE" value="Clean up" />
   </component>
 </project>
