@@ -1,6 +1,7 @@
 syntax = "proto3";
 
 //option java_package = "ex.grpc";
+option optimize_for = SPEED;
 
 package xStoregRPC;
 
