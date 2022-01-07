@@ -34,8 +34,6 @@ class XStore {
 
         std::string get(std::time_t epochTime, std::string dbName);
 
-        std::string getp(std::time_t epochTime, std::string dbName);
-
         std::vector<std::string> getBatch(std::time_t startEpochT, std::time_t endEpochT, std::string dbName);
 
         std::string getSingleOpenClose(std::time_t epochTime, std::string dbName);

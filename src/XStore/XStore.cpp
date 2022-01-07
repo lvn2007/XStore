@@ -139,43 +139,27 @@ std::string XStore::get(std::time_t epochTime, std::string dbName) {
     return toReturn;
 }
 
-std::string XStore::getp(std::time_t epochTime, std::string dbName) {
-    // Read timeValue -- UNIX time
-    int inputYear = toHumanYear(epochTime);
-    std::string currResolution = getTimeResolution(epochTime);
-
-    // Start epoch time of a given year
-    long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
-
-    // Epoch time difference between target & startEpoch
-    long int diff = epochTime - startEpoch;
-
-    // Calculate offset -- Exact location of where a particular target row is stored
-    long int offSet = diff * lineSize;
-
-    // Target file directory
-    std::string dataDir = baseDir + "dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
-
-    // Opening binary file
-    int bFile = open(dataDir.c_str(), O_RDONLY);
-
-    // A single line data will be read into here
-    char buff[lineSize];
-
-    // Extract line of data from binary file
-    int ret = pread(bFile, &buff[0], lineSize , offSet);
-
-    // Close file
-    close(bFile);
-    std::string toReturn(buff);
-    return toReturn;
-}
-
 std::vector<std::string> XStore::getBatch(std::time_t startEpochT, std::time_t endEpochT, std::string dbName) {
+    // Placeholder of queried data to return
     std::vector<std::string> toReturn;
+
+    // Make sure dbName exists
+    //  IF given dbName is not available
+    //  Return empty vector
+    if (dbMap.find(dbName) == dbMap.end()) {
+        return toReturn;
+    }
 
     // Read timeValue -- UNIX time
     int inputYear = toHumanYear(startEpochT);
+
+    // Make sure inputYear is available in DB
+    //  IF inputYear is not available
+    //  Return empty vector
+    if ((dbMap.find(dbName)->second.hasYear(inputYear)) != true) {
+        return toReturn;
+    }
+
     std::string currResolution = getTimeResolution(startEpochT);
 
     // Start epoch time of a given year
@@ -188,20 +172,17 @@ std::vector<std::string> XStore::getBatch(std::time_t startEpochT, std::time_t e
     // Calculate offset -- Exact location of where a particular target row is stored
     long int offSet = diff * lineSize;
 
-    int ret;
-
     // Target file directory
     std::string dataDir = baseDir + "dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
 
     // Look-up file descriptor in dbMap
-    FILE *bFile = dbMap.find(dbName)->second.getFfileMap().find(inputYear)->second;
+    int bFile = dbMap.find(dbName)->second.getBfileMap().find(inputYear)->second;
 
     // A single line data will be read into here
-    char *buff = new char[lineSize];
+    char buff[lineSize];
 
     for (int i = offSet; i <= lineSize * rangeDiff; i += lineSize) {
-        fseek(bFile, i, SEEK_SET);
-        std::fgets(buff, lineSize, bFile);
+        pread(bFile, &buff[0], lineSize, i);
         toReturn.push_back(buff);
     }
 
