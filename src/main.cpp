@@ -70,9 +70,9 @@ int main(int argc, char *argv[]) {
 //    myStore.insert(1451606402, "NaN,NaN,2,NaN,NaN,NaN,NaN", "tsla");
 //    myStore.insert(1451676402, "NaN,NaN,7,NaN,NaN,NaN,NaN", "tsla");
 
-    std::vector<double> ms = { };
-    std::vector<double> us = { };
-    std::vector<double> ns = { };
+//    std::vector<double> ms = { };
+//    std::vector<double> us = { };
+//    std::vector<double> ns = { };
 
     xStoreServiceImplementation xStoreServiceImplementation;
     xStoreServiceImplementation.Run();

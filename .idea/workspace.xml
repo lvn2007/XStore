@@ -15,9 +15,11 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Clean up">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Enabled &quot;SPEED&quot; mode in &quot;optimized_for&quot; in Protobuf">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/protoFile/xStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/xStore.proto" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/XStore/XStore_Client.py" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/XStore_Client.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_gRPC.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_gRPC.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -73,7 +75,7 @@
     <property name="com.intellij.ide.scratch.ScratchImplUtil$2/New Scratch File" value="ObjectiveC" />
     <property name="last_opened_file_path" value="$PROJECT_DIR$/protoFile" />
     <property name="nodejs_package_manager_path" value="npm" />
-    <property name="settings.editor.selected.configurable" value="CMakeSettings" />
+    <property name="settings.editor.selected.configurable" value="dynamic.analysis.tools.valgrind" />
   </component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
@@ -213,14 +215,7 @@
       <workItem from="1640909519124" duration="2886000" />
       <workItem from="1640926345220" duration="341000" />
       <workItem from="1640926691902" duration="42124000" />
-      <workItem from="1641139803506" duration="949000" />
-    </task>
-    <task id="LOCAL-00015" summary="Update README.md">
-      <created>1635654648106</created>
-      <option name="number" value="00015" />
-      <option name="presentableId" value="LOCAL-00015" />
-      <option name="project" value="LOCAL" />
-      <updated>1635654648106</updated>
+      <workItem from="1641139803506" duration="22079000" />
     </task>
     <task id="LOCAL-00016" summary="Update README.md">
       <created>1635655574009</created>
@@ -558,7 +553,14 @@
       <option name="project" value="LOCAL" />
       <updated>1641139657252</updated>
     </task>
-    <option name="localTasksCounter" value="64" />
+    <task id="LOCAL-00064" summary="Enabled &quot;SPEED&quot; mode in &quot;optimized_for&quot; in Protobuf">
+      <created>1641146847142</created>
+      <option name="number" value="00064" />
+      <option name="presentableId" value="LOCAL-00064" />
+      <option name="project" value="LOCAL" />
+      <updated>1641146847142</updated>
+    </task>
+    <option name="localTasksCounter" value="65" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -659,7 +661,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Code cleanup" />
     <MESSAGE value="Modified mongoDB benches &amp; Added second timing for XStore" />
     <MESSAGE value="Modified README.md" />
     <MESSAGE value="Bench script for InfluxDB" />
@@ -684,6 +685,7 @@
     <MESSAGE value="Implemented single open via dbMap (Storing file descriptor in map)" />
     <MESSAGE value="Added argument &quot;dbName&quot; in gRPC requests" />
     <MESSAGE value="Clean up" />
-    <option name="LAST_COMMIT_MESSAGE" value="Clean up" />
+    <MESSAGE value="Enabled &quot;SPEED&quot; mode in &quot;optimized_for&quot; in Protobuf" />
+    <option name="LAST_COMMIT_MESSAGE" value="Enabled &quot;SPEED&quot; mode in &quot;optimized_for&quot; in Protobuf" />
   </component>
 </project>
