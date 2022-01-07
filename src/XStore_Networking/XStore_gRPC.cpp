@@ -3,10 +3,10 @@
 grpc::Status xStoreServiceImplementation::unaryRequest(grpc::ServerContext *context, const xStoregRPC::unaryRequestMsg *request, xStoregRPC::responseData *response) {
     // Extract query request from CLIENT
     long int timestamp = request->timestamp();
-    std::string dbName = request->dbname();
+    std::string dbNameUnary = request->dbname();
 
     // Unary query result
-    std::string queryResult = myStore.getSingleOpenClose(timestamp, dbName);
+    std::string queryResult = myStore.getSingleOpenClose(timestamp, dbNameUnary);
 
     // Response data to CLIENT
     response->set_dataset(queryResult);
