@@ -183,6 +183,10 @@ std::vector<std::string> XStore::getBatch(std::time_t startEpochT, std::time_t e
 
     for (int i = offSet; i <= lineSize * rangeDiff; i += lineSize) {
         pread(bFile, &buff[0], lineSize, i);
+
+        // Remove newline at the end of char[]
+        buff[strlen(buff) - 1] = '\0';
+
         toReturn.push_back(buff);
     }
 
