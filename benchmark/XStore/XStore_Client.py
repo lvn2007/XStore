@@ -18,18 +18,23 @@ class xStoreClient:
         self.conn = xStore_pb2_grpc.xStoreStub(channel)
 
     def unaryRequest(self, epochTime, dbName):
+        startTime = time.time()
         reqMsg = xStore_pb2.unaryRequestMsg(timestamp=epochTime, dbName=dbName)
-        response = self.conn.unaryRequest(reqMsg)
+        response = self.conn.unaryRequest(reqMsg).dataset
+        endTime = time.time()
+        searchTime.append(endTime-startTime)
         return response
 
     def batchRequest(self, startEpoch, endEpoch, dbName):
         toReturn = []
+        startTime = time.time()
         reqMsg = xStore_pb2.rangeRequestMsg(startTime=startEpoch, endTime=endEpoch, dbName=dbName)
         batchResponse = self.conn.batchRequest(reqMsg)
 
         for i in batchResponse:
-            toReturn.append(i)
-
+            toReturn.append(i.dataset)
+        endTime = time.time()
+        searchTime.append(endTime-startTime)
         return toReturn
 
 
@@ -37,33 +42,31 @@ if __name__ == '__main__':
     # Init xStore client obj
     client = xStoreClient()
 
-    for i in range(1):
+    for i in range(2):
         target = random.randint(startDate, endDate)
-        # searchTime.append(batchRequest(1451606400, 1451616400))
-        # result = client.unaryRequest(1451606400, 'tsla')
-        result = client.batchRequest(1451606400, 1451616400, 'tsla')
-        # searchTime.append(unaryRequest(target))
-        # run()
+        result = client.unaryRequest(1451606400, 'tsla')
+        # result = client.batchRequest(1451606400, 1451616405, 'tsla')
+        print(result)
 
-    # myMin = min(searchTime)
-    # myMax = max(searchTime)
-    # myAvg = sum(searchTime) / len(searchTime)
-    # myStdev = stdev(searchTime)
-    #
-    # print('--- EXECUTION TIME in [ms] ---')
-    # print(f' -Min: {myMin * 1000:,.2f}')
-    # print(f' -Max: {myMax * 1000:,.2f}')
-    # print(f' -Mean: {myAvg * 1000:,.2f}')
-    # print(f' -Stdev: {myStdev * 1000:,.2f}')
-    #
-    # print('\n--- EXECUTION TIME in [µs] ---')
-    # print(f' -Min: {myMin * 1000000:,.2f}')
-    # print(f' -Max: {myMax * 1000000:,.2f}')
-    # print(f' -Mean: {myAvg * 1000000:,.2f}')
-    # print(f' -Stdev: {myStdev * 1000000:,.2f}')
-    #
-    # print('\n--- EXECUTION TIME in [ns] ---')
-    # print(f' -Min: {myMin * 1000000000:,.2f}')
-    # print(f' -Max: {myMax * 1000000000:,.2f}')
-    # print(f' -Mean: {myAvg * 1000000000:,.2f}')
-    # print(f' -Stdev: {myStdev * 1000000000:,.2f}')
+    myMin = min(searchTime)
+    myMax = max(searchTime)
+    myAvg = sum(searchTime) / len(searchTime)
+    myStdev = stdev(searchTime)
+
+    print('--- EXECUTION TIME in [ms] ---')
+    print(f' -Min: {myMin * 1000:,.2f}')
+    print(f' -Max: {myMax * 1000:,.2f}')
+    print(f' -Mean: {myAvg * 1000:,.2f}')
+    print(f' -Stdev: {myStdev * 1000:,.2f}')
+
+    print('\n--- EXECUTION TIME in [µs] ---')
+    print(f' -Min: {myMin * 1000000:,.2f}')
+    print(f' -Max: {myMax * 1000000:,.2f}')
+    print(f' -Mean: {myAvg * 1000000:,.2f}')
+    print(f' -Stdev: {myStdev * 1000000:,.2f}')
+
+    print('\n--- EXECUTION TIME in [ns] ---')
+    print(f' -Min: {myMin * 1000000000:,.2f}')
+    print(f' -Max: {myMax * 1000000000:,.2f}')
+    print(f' -Mean: {myAvg * 1000000000:,.2f}')
+    print(f' -Stdev: {myStdev * 1000000000:,.2f}')
