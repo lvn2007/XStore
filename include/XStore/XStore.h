@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <algorithm>
 
 #include "include/dataStruct/dataStruct.h"
 #include "include/dataStruct/fileStruct.h"

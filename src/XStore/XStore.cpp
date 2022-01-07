@@ -10,7 +10,7 @@ XStore::XStore() {
     // Initialize DB
     initDB();
 
-    //  First, check if there's any existing data exists
+    // First, check if there's any existing data exists
     hasDB();
 }
 
@@ -226,10 +226,12 @@ std::string XStore::getSingleOpenClose(std::time_t epochTime, std::string dbName
     char buff[lineSize];
 
     // Extract line of data from binary file
-    int ret = pread(bFile, &buff[0], lineSize , offSet);
+    pread(bFile, &buff[0], lineSize , offSet);
 
-    std::string toReturn(buff);
-    return toReturn;
+    // Remove newline at the end of char[]
+    buff[strlen(buff) - 1] = '\0';
+
+    return buff;
 }
 
 void XStore::initDB() {
