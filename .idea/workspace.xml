@@ -15,7 +15,7 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="getBatch is now open/close only once">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Faster getBatch() &amp; Deprecated getp()">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
@@ -215,14 +215,7 @@
       <workItem from="1640909519124" duration="2886000" />
       <workItem from="1640926345220" duration="341000" />
       <workItem from="1640926691902" duration="42124000" />
-      <workItem from="1641139803506" duration="26381000" />
-    </task>
-    <task id="LOCAL-00018" summary="Furnishing touch">
-      <created>1635657037576</created>
-      <option name="number" value="00018" />
-      <option name="presentableId" value="LOCAL-00018" />
-      <option name="project" value="LOCAL" />
-      <updated>1635657037576</updated>
+      <workItem from="1641139803506" duration="29253000" />
     </task>
     <task id="LOCAL-00019" summary="get() now returns proper string value i.e., 1 row of data">
       <created>1635741654927</created>
@@ -560,7 +553,14 @@
       <option name="project" value="LOCAL" />
       <updated>1641518110729</updated>
     </task>
-    <option name="localTasksCounter" value="67" />
+    <task id="LOCAL-00067" summary="Faster getBatch() &amp; Deprecated getp()">
+      <created>1641532311926</created>
+      <option name="number" value="00067" />
+      <option name="presentableId" value="LOCAL-00067" />
+      <option name="project" value="LOCAL" />
+      <updated>1641532311926</updated>
+    </task>
+    <option name="localTasksCounter" value="68" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -661,7 +661,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Bench script for InfluxDB" />
     <MESSAGE value="Benched single open/close &amp; Update README.md" />
     <MESSAGE value="Done benches for MongoDB" />
     <MESSAGE value="Done benches for InfluxDB" />
@@ -686,6 +685,7 @@
     <MESSAGE value="Enabled &quot;SPEED&quot; mode in &quot;optimized_for&quot; in Protobuf" />
     <MESSAGE value="Revamp XStore's Python client" />
     <MESSAGE value="getBatch is now open/close only once" />
-    <option name="LAST_COMMIT_MESSAGE" value="getBatch is now open/close only once" />
+    <MESSAGE value="Faster getBatch() &amp; Deprecated getp()" />
+    <option name="LAST_COMMIT_MESSAGE" value="Faster getBatch() &amp; Deprecated getp()" />
   </component>
 </project>

@@ -79,12 +79,12 @@ int main(int argc, char *argv[]) {
 
 //    return 0;
 
-//    std::cout << myStore.getp(1451606400, "tsla") << std::endl;
+//    std::cout << myStore.getSingleOpenClose(1451606400, "tsla") << std::endl;
 
     // Microbench
     srand(time(NULL));
     long int randTime;
-    int nIter = 10;
+    int nIter = 1000;
     for (int i = 0; i < nIter; i++) {
         system("free > /dev/null");
         system("sync > /dev/null");
@@ -94,10 +94,8 @@ int main(int argc, char *argv[]) {
         long unixTime = 1451606400 + randTime;
 
         start = std::chrono::high_resolution_clock::now();
-////        currVal = myStore.get(unixTime, "tsla");
-////        currVal = myStore.getSingleOpenClose(unixTime, "tsla");
-////        currVal = myStore.getp(unixTime, "tsla");
-        myStore.getBatch(1451606400, 1451607400, "tsla");
+        myStore.getSingleOpenClose(unixTime, "tsla");
+//        myStore.getBatch(1451606400, 1451607400, "tsla");
         end = std::chrono::high_resolution_clock::now();
         diff = end - start;
 
