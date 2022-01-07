@@ -188,27 +188,22 @@ std::vector<std::string> XStore::getBatch(std::time_t startEpochT, std::time_t e
     // Calculate offset -- Exact location of where a particular target row is stored
     long int offSet = diff * lineSize;
 
-    int bFile, ret;
+    int ret;
 
     // Target file directory
     std::string dataDir = baseDir + "dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
 
-    // Opening binary file
-    bFile = open(dataDir.c_str(), O_RDONLY);
+    // Look-up file descriptor in dbMap
+    FILE *bFile = dbMap.find(dbName)->second.getFfileMap().find(inputYear)->second;
 
     // A single line data will be read into here
-    char buff[lineSize];
+    char *buff = new char[lineSize];
 
     for (int i = offSet; i <= lineSize * rangeDiff; i += lineSize) {
-        // Extract line of data from binary file
-        ret = pread(bFile, &buff[0], lineSize, i);
-
-        // Cache data to return
+        fseek(bFile, i, SEEK_SET);
+        std::fgets(buff, lineSize, bFile);
         toReturn.push_back(buff);
     }
-
-    // Close file
-    close(bFile);
 
     return toReturn;
 }

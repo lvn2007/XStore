@@ -15,11 +15,9 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Enabled &quot;SPEED&quot; mode in &quot;optimized_for&quot; in Protobuf">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Revamp XStore's Python client">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/XStore/XStore_Client.py" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/XStore_Client.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_gRPC.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_gRPC.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -215,14 +213,7 @@
       <workItem from="1640909519124" duration="2886000" />
       <workItem from="1640926345220" duration="341000" />
       <workItem from="1640926691902" duration="42124000" />
-      <workItem from="1641139803506" duration="22079000" />
-    </task>
-    <task id="LOCAL-00016" summary="Update README.md">
-      <created>1635655574009</created>
-      <option name="number" value="00016" />
-      <option name="presentableId" value="LOCAL-00016" />
-      <option name="project" value="LOCAL" />
-      <updated>1635655574009</updated>
+      <workItem from="1641139803506" duration="24643000" />
     </task>
     <task id="LOCAL-00017" summary="Close bFile in get func. Benched of 10 random inputs">
       <created>1635656118154</created>
@@ -560,7 +551,14 @@
       <option name="project" value="LOCAL" />
       <updated>1641146847142</updated>
     </task>
-    <option name="localTasksCounter" value="65" />
+    <task id="LOCAL-00065" summary="Revamp XStore's Python client">
+      <created>1641515205814</created>
+      <option name="number" value="00065" />
+      <option name="presentableId" value="LOCAL-00065" />
+      <option name="project" value="LOCAL" />
+      <updated>1641515205814</updated>
+    </task>
+    <option name="localTasksCounter" value="66" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -661,7 +659,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Modified mongoDB benches &amp; Added second timing for XStore" />
     <MESSAGE value="Modified README.md" />
     <MESSAGE value="Bench script for InfluxDB" />
     <MESSAGE value="Benched single open/close &amp; Update README.md" />
@@ -686,6 +683,7 @@
     <MESSAGE value="Added argument &quot;dbName&quot; in gRPC requests" />
     <MESSAGE value="Clean up" />
     <MESSAGE value="Enabled &quot;SPEED&quot; mode in &quot;optimized_for&quot; in Protobuf" />
-    <option name="LAST_COMMIT_MESSAGE" value="Enabled &quot;SPEED&quot; mode in &quot;optimized_for&quot; in Protobuf" />
+    <MESSAGE value="Revamp XStore's Python client" />
+    <option name="LAST_COMMIT_MESSAGE" value="Revamp XStore's Python client" />
   </component>
 </project>
