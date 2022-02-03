@@ -15,10 +15,8 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Faster getSingleOpenClose()">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Faster getBatch() &amp; Improved XStore Python client">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -33,6 +31,7 @@
     <option name="RECENT_TEMPLATES">
       <list>
         <option value="Python Script" />
+        <option value="CMakeLists.txt" />
       </list>
     </option>
   </component>
@@ -72,32 +71,34 @@
     <property name="cidr.known.project.marker" value="true" />
     <property name="cmake.loaded.for.project" value="true" />
     <property name="com.intellij.ide.scratch.ScratchImplUtil$2/New Scratch File" value="ObjectiveC" />
-    <property name="last_opened_file_path" value="$PROJECT_DIR$/protoFile" />
+    <property name="last_opened_file_path" value="$PROJECT_DIR$/benchmark/pingPong" />
     <property name="nodejs_package_manager_path" value="npm" />
-    <property name="settings.editor.selected.configurable" value="dynamic.analysis.tools.valgrind" />
+    <property name="settings.editor.selected.configurable" value="preferences.pluginManager" />
   </component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/benchmark/pingPong" />
+      <recent name="$PROJECT_DIR$/benchmark/pingPong/build" />
       <recent name="$PROJECT_DIR$/protoFile" />
       <recent name="$PROJECT_DIR$" />
     </key>
     <key name="MoveFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/benchmark/pingPong" />
+      <recent name="$PROJECT_DIR$/benchmark/pingPong/build" />
+      <recent name="$PROJECT_DIR$/benchmark/pingPong/protoFile" />
       <recent name="$PROJECT_DIR$/include/dataStruct" />
       <recent name="$PROJECT_DIR$/protoFile" />
-      <recent name="$PROJECT_DIR$/benchmark/XStore" />
-      <recent name="$PROJECT_DIR$/include/XStore_Networking" />
-      <recent name="$PROJECT_DIR$/include/XStore_Networking" />
     </key>
   </component>
   <component name="RunManager" selected="CMake Application.XStore">
+    <configuration default="true" type="CLionExternalRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
+      <method v="2">
+        <option name="CLION.EXTERNAL.BUILD" enabled="true" />
+      </method>
+    </configuration>
     <configuration name="Unnamed" type="CLion_Remote" version="1" remoteCommand="" symbolFile="" sysroot="">
       <debugger toolchainName="xStore-Master" />
       <method v="2" />
-    </configuration>
-    <configuration name="XStore (1)" type="CMakeRunConfiguration" factoryName="Application" temporary="true" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="XStore" TARGET_NAME="XStore" CONFIG_NAME="Debug" RUN_TARGET_PROJECT_NAME="XStore" RUN_TARGET_NAME="XStore">
-      <method v="2">
-        <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
-      </method>
     </configuration>
     <configuration name="XStore" type="CMakeRunConfiguration" factoryName="Application" temporary="true" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="XStore" TARGET_NAME="XStore" CONFIG_NAME="Debug" RUN_TARGET_PROJECT_NAME="XStore" RUN_TARGET_NAME="XStore">
       <method v="2">
@@ -107,11 +108,6 @@
     <configuration default="true" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
       <method v="2">
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
-      </method>
-    </configuration>
-    <configuration default="true" type="GradleAppRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
-      <method v="2">
-        <option name="com.jetbrains.cidr.cpp.gradle.execution.GradleNativeBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
       </method>
     </configuration>
     <configuration name="timeStuffs (1)" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
@@ -158,15 +154,13 @@
     </configuration>
     <list>
       <item itemvalue="CMake Application.XStore" />
-      <item itemvalue="CMake Application.XStore (1)" />
-      <item itemvalue="Python.timeStuffs" />
       <item itemvalue="Python.timeStuffs (1)" />
+      <item itemvalue="Python.timeStuffs" />
       <item itemvalue="Remote Debug.Unnamed" />
     </list>
     <recent_temporary>
       <list>
         <item itemvalue="CMake Application.XStore" />
-        <item itemvalue="CMake Application.XStore (1)" />
         <item itemvalue="Python.timeStuffs" />
         <item itemvalue="Python.timeStuffs (1)" />
       </list>
@@ -214,14 +208,10 @@
       <workItem from="1640909519124" duration="2886000" />
       <workItem from="1640926345220" duration="341000" />
       <workItem from="1640926691902" duration="42124000" />
-      <workItem from="1641139803506" duration="29750000" />
-    </task>
-    <task id="LOCAL-00020" summary="Added micro bench for mongoDB">
-      <created>1636931487942</created>
-      <option name="number" value="00020" />
-      <option name="presentableId" value="LOCAL-00020" />
-      <option name="project" value="LOCAL" />
-      <updated>1636931487943</updated>
+      <workItem from="1641139803506" duration="31196000" />
+      <workItem from="1641617791156" duration="777000" />
+      <workItem from="1642279265301" duration="594000" />
+      <workItem from="1643335977728" duration="34834000" />
     </task>
     <task id="LOCAL-00021" summary="Faster query &amp; Added clear caches for benchmarks">
       <created>1637811858304</created>
@@ -559,7 +549,14 @@
       <option name="project" value="LOCAL" />
       <updated>1641535288121</updated>
     </task>
-    <option name="localTasksCounter" value="69" />
+    <task id="LOCAL-00069" summary="Faster getBatch() &amp; Improved XStore Python client">
+      <created>1641535843235</created>
+      <option name="number" value="00069" />
+      <option name="presentableId" value="LOCAL-00069" />
+      <option name="project" value="LOCAL" />
+      <updated>1641535843235</updated>
+    </task>
+    <option name="localTasksCounter" value="70" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -660,7 +657,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Done benches for MongoDB" />
     <MESSAGE value="Done benches for InfluxDB" />
     <MESSAGE value="Organizing XStore's .hpp &amp; .cpp" />
     <MESSAGE value="Experimenting open &amp; pread" />
@@ -685,6 +681,7 @@
     <MESSAGE value="getBatch is now open/close only once" />
     <MESSAGE value="Faster getBatch() &amp; Deprecated getp()" />
     <MESSAGE value="Faster getSingleOpenClose()" />
-    <option name="LAST_COMMIT_MESSAGE" value="Faster getSingleOpenClose()" />
+    <MESSAGE value="Faster getBatch() &amp; Improved XStore Python client" />
+    <option name="LAST_COMMIT_MESSAGE" value="Faster getBatch() &amp; Improved XStore Python client" />
   </component>
 </project>
