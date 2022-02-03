@@ -1,0 +1,7 @@
+syntax = "proto3";
+
+package tcpmessage;
+
+message tcpMessage {
+  string msgcontent = 1;
+}
