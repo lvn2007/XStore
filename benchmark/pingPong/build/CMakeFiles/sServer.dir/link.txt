@@ -1,0 +1,1 @@
+/usr/bin/c++ CMakeFiles/sServer.dir/sServer.cpp.o CMakeFiles/sServer.dir/message.pb.cc.o -o sServer  -Wl,-rpath,/usr/local/lib /usr/local/lib/libprotobuf.so -lpthread 
