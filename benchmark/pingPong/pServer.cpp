@@ -5,6 +5,7 @@
 #include <netinet/in.h>
 #include <linux/in.h>
 #include <unistd.h>
+#include "message.pb.h"
 
 #define PORT 8080
 
@@ -17,38 +18,36 @@ typedef struct
 
 void * process(void * ptr)
 {
-    char * buffer;
+    char buffer[1024] = {0};
+    void *buff = malloc(5);
     int len;
     connection_t * conn;
     long addr = 0;
 
+    // Initiate protobuf obj
+    tcpmessage::tcpMessage toClient;
+    tcpmessage::tcpMessage fromClient;
+
     if (!ptr) pthread_exit(0);
     conn = (connection_t *)ptr;
 
-    /* read length of message */
-    read(conn->sock, &len, sizeof(int));
-    if (len > 0)
-    {
-        addr = (long)((struct sockaddr_in *)&conn->address)->sin_addr.s_addr;
-        buffer = (char *)malloc((len+1)*sizeof(char));
-        buffer[len] = 0;
+    // Read incoming msg from CLIENT
+    int valRead = read(conn->sock, buffer, 5);
+    fromClient.ParseFromArray(buffer, 5);
+    std::cout << "From client: " << buffer << "\n" << std::endl;
 
-        /* read message */
-        read(conn->sock, buffer, len);
+    // Prepare protobuf msg
+    toClient.set_msgcontent("123");
+    toClient.SerializeToArray(buff, 5);
 
-        /* print message */
-        printf("%d.%d.%d.%d: %s\n",
-               (int)((addr      ) & 0xff),
-               (int)((addr >>  8) & 0xff),
-               (int)((addr >> 16) & 0xff),
-               (int)((addr >> 24) & 0xff),
-               buffer);
-        free(buffer);
-    }
+    // Send serialized protobuf to CLIENT
+    send(conn->sock, buff, 5, 0);
 
-    /* close socket and clean up */
+    // Close socket and clean-up
     close(conn->sock);
     free(conn);
+//    free(&buffer);
+    free(buff);
     pthread_exit(0);
 }
 
@@ -59,16 +58,12 @@ int main(int argc, char ** argv)
     connection_t * connection;
     pthread_t thread;
 
-    /* create socket */
-//    server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0)
     {
         perror("socket failed");
         exit(EXIT_FAILURE);
     }
 
-    /* bind socket to port */
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(PORT);
@@ -80,31 +75,32 @@ int main(int argc, char ** argv)
         exit(EXIT_FAILURE);
     }
 
-    /* listen on port */
+    // Listen on port
     if (listen(server_fd, 3) < 0)
     {
         perror("listen");
         exit(EXIT_FAILURE);
     }
 
-    printf("%s: ready and listening\n", argv[0]);
+    std::cout << "[INIT] - Listening on port: " << PORT << std::endl;
 
+    // Listen forever
     while (1)
     {
-        /* accept incoming connections */
+        // Accept incoming connections
         connection = (connection_t *)malloc(sizeof(connection_t));
         connection->sock = accept(server_fd, &connection->address, &connection->addr_len);
+
         if (connection->sock <= 0)
         {
             free(connection);
         }
+
+        // Spin new thread for each connection
         else
         {
-            /* start a new thread but do not wait for it */
             pthread_create(&thread, 0, process, (void *)connection);
             pthread_detach(thread);
         }
     }
-
-    return 0;
 }

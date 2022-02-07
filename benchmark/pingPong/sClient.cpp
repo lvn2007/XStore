@@ -126,6 +126,7 @@ int main(int argc, char const *argv[])
         // Prepare protobuf msg
         toServer.set_msgcontent(std::to_string(i));
         toServer.SerializeToArray(sendBuff, 5);
+        std::cout << "To server: " << toServer.msgcontent() << "\n" << std::endl;
 
         // Send serialized protobuf to SERVER
         send(sock, sendBuff, 5, 0);
