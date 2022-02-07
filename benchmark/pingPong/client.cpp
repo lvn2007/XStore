@@ -5,7 +5,7 @@
 #include <string.h>
 #include "message.pb.h"
 
-#define IP_ADDR "127.0.0.1"
+#define IP_ADDR "172.20.3.113"
 #define PORT 8080
 
 int main(int argc, char const *argv[])

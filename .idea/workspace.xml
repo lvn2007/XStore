@@ -15,8 +15,20 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Faster getBatch() &amp; Improved XStore Python client">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Single-threaded client/server protobuf over TCP">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/CMakeLists.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/Makefile.cmake" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/Makefile.cmake" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/Makefile2" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/Makefile2" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/TargetDirectories.txt" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/TargetDirectories.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/client.dir/client.cpp.o" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/client.dir/client.cpp.o" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/client.dir/compiler_depend.internal" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/client.dir/compiler_depend.internal" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/client.dir/compiler_depend.make" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/client.dir/compiler_depend.make" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/progress.marks" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/progress.marks" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/Makefile" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/Makefile" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/client" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/client" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/client.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/client.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/server.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/server.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -211,14 +223,7 @@
       <workItem from="1641139803506" duration="31196000" />
       <workItem from="1641617791156" duration="777000" />
       <workItem from="1642279265301" duration="594000" />
-      <workItem from="1643335977728" duration="34834000" />
-    </task>
-    <task id="LOCAL-00021" summary="Faster query &amp; Added clear caches for benchmarks">
-      <created>1637811858304</created>
-      <option name="number" value="00021" />
-      <option name="presentableId" value="LOCAL-00021" />
-      <option name="project" value="LOCAL" />
-      <updated>1637811858304</updated>
+      <workItem from="1643335977728" duration="54639000" />
     </task>
     <task id="LOCAL-00022" summary="Added statistics calc &amp; Cleaned up comments">
       <created>1637903148015</created>
@@ -556,7 +561,14 @@
       <option name="project" value="LOCAL" />
       <updated>1641535843235</updated>
     </task>
-    <option name="localTasksCounter" value="70" />
+    <task id="LOCAL-00070" summary="Single-threaded client/server protobuf over TCP">
+      <created>1643851823190</created>
+      <option name="number" value="00070" />
+      <option name="presentableId" value="LOCAL-00070" />
+      <option name="project" value="LOCAL" />
+      <updated>1643851823192</updated>
+    </task>
+    <option name="localTasksCounter" value="71" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -657,7 +669,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Done benches for InfluxDB" />
     <MESSAGE value="Organizing XStore's .hpp &amp; .cpp" />
     <MESSAGE value="Experimenting open &amp; pread" />
     <MESSAGE value="Implemented efficient 'insert' without writing dummy data &amp; pread()" />
@@ -682,6 +693,7 @@
     <MESSAGE value="Faster getBatch() &amp; Deprecated getp()" />
     <MESSAGE value="Faster getSingleOpenClose()" />
     <MESSAGE value="Faster getBatch() &amp; Improved XStore Python client" />
-    <option name="LAST_COMMIT_MESSAGE" value="Faster getBatch() &amp; Improved XStore Python client" />
+    <MESSAGE value="Single-threaded client/server protobuf over TCP" />
+    <option name="LAST_COMMIT_MESSAGE" value="Single-threaded client/server protobuf over TCP" />
   </component>
 </project>
