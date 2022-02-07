@@ -1,4 +1,6 @@
-/home/ubuntu/pingPong/build/CMakeFiles/server.dir
-/home/ubuntu/pingPong/build/CMakeFiles/client.dir
+/home/ubuntu/pingPong/build/CMakeFiles/sServer.dir
+/home/ubuntu/pingPong/build/CMakeFiles/sClient.dir
+/home/ubuntu/pingPong/build/CMakeFiles/pServer.dir
+/home/ubuntu/pingPong/build/CMakeFiles/pClient.dir
 /home/ubuntu/pingPong/build/CMakeFiles/edit_cache.dir
 /home/ubuntu/pingPong/build/CMakeFiles/rebuild_cache.dir

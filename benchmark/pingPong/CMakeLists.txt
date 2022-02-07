@@ -10,7 +10,15 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
 protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS message.proto)
 
-add_executable(server server.cpp ${PROTO_SRCS} ${PROTO_HDRS})
-add_executable(client client.cpp ${PROTO_SRCS} ${PROTO_HDRS})
-TARGET_LINK_LIBRARIES(server ${Protobuf_LIBRARIES})
-TARGET_LINK_LIBRARIES(client ${Protobuf_LIBRARIES})
+# Single threaded
+add_executable(sServer sServer.cpp ${PROTO_SRCS} ${PROTO_HDRS})
+add_executable(sClient sClient.cpp ${PROTO_SRCS} ${PROTO_HDRS})
+
+# Multi-threaded
+add_executable(pServer pServer.cpp ${PROTO_SRCS} ${PROTO_HDRS})
+add_executable(pClient pClient.cpp ${PROTO_SRCS} ${PROTO_HDRS})
+
+TARGET_LINK_LIBRARIES(sServer ${Protobuf_LIBRARIES})
+TARGET_LINK_LIBRARIES(sClient ${Protobuf_LIBRARIES})
+TARGET_LINK_LIBRARIES(pServer ${Protobuf_LIBRARIES})
+TARGET_LINK_LIBRARIES(pClient ${Protobuf_LIBRARIES})
