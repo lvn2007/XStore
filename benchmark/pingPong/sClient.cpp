@@ -9,7 +9,7 @@
 #include <cmath>
 #include <fstream>
 
-#define IP_ADDR "127.0.0.1"
+#define IP_ADDR "172.20.3.113"
 #define PORT 8080
 
 double meanCalc(std::vector<double> inputVector) {
@@ -85,7 +85,7 @@ int main(int argc, char const *argv[])
     int sock = 0, valread;
     struct sockaddr_in serv_addr;
     char buffer[1024] = {0};
-    void *sendBuff = malloc(5);
+    void *sendBuff = malloc(10);
 
     if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
     {
@@ -119,25 +119,26 @@ int main(int argc, char const *argv[])
 
     for (int i = 0; i < nIter; i++) {
         start = std::chrono::high_resolution_clock::now();
+
         // Instantiate protobuf obj
         tcpmessage::tcpMessage toServer;
         tcpmessage::tcpMessage fromServer;
 
         // Prepare protobuf msg
         toServer.set_msgcontent(std::to_string(i));
-        toServer.SerializeToArray(sendBuff, 5);
-        std::cout << "To server: " << toServer.msgcontent() << "\n" << std::endl;
+        toServer.SerializeToArray(sendBuff, 10);
+//        std::cout << "To server: " << toServer.msgcontent() << "\n" << std::endl;
 
         // Send serialized protobuf to SERVER
-        send(sock, sendBuff, 5, 0);
+        send(sock, sendBuff, 10, 0);
 
         // Read incoming msg from SERVER
-        valread = read(sock, buffer, 5);
-        fromServer.ParseFromArray(buffer, 5);
+        valread = read(sock, buffer, 10);
+        fromServer.ParseFromArray(buffer, 10);
 
         end = std::chrono::high_resolution_clock::now();
         diff = end - start;
-        std::cout << "From server: " << fromServer.msgcontent() << "\n" << std::endl;
+//        std::cout << "From server: " << fromServer.msgcontent() << "\n" << std::endl;
         ms.push_back(std::chrono::duration<double, std::milli> (diff).count());
     }
 
@@ -149,5 +150,8 @@ int main(int argc, char const *argv[])
     std::cout << "  - Stdev: " << stdCalc(ms) << std::endl;
 
     // Write to CSV
-    writeCSV("ss-sc_1000.csv", "Time taken", ms);
+    writeCSV("ss-sc_1000.csv", "Time taken (ms)", ms);
+
+    // Close socket
+    close(sock);
 }
