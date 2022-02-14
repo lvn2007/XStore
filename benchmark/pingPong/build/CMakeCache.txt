@@ -399,7 +399,9 @@ CMAKE_UNAME:INTERNAL=/bin/uname
 //ADVANCED property for variable: CMAKE_VERBOSE_MAKEFILE
 CMAKE_VERBOSE_MAKEFILE-ADVANCED:INTERNAL=1
 //Details about finding Protobuf
-FIND_PACKAGE_MESSAGE_DETAILS_Protobuf:INTERNAL=[/usr/local/lib/libprotobuf.so;-lpthread][/usr/local/include][v3.19.4()]
+FIND_PACKAGE_MESSAGE_DETAILS_Protobuf:INTERNAL=[/usr/local/lib/libprotobuf.so;-pthread][/usr/local/include][v3.19.4()]
+//Details about finding Threads
+FIND_PACKAGE_MESSAGE_DETAILS_Threads:INTERNAL=[TRUE][v()]
 //ADVANCED property for variable: Protobuf_INCLUDE_DIR
 Protobuf_INCLUDE_DIR-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: Protobuf_LIBRARY_DEBUG
@@ -416,4 +418,6 @@ Protobuf_PROTOC_EXECUTABLE-ADVANCED:INTERNAL=1
 Protobuf_PROTOC_LIBRARY_DEBUG-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: Protobuf_PROTOC_LIBRARY_RELEASE
 Protobuf_PROTOC_LIBRARY_RELEASE-ADVANCED:INTERNAL=1
+//Result of TRY_COMPILE
+THREADS_HAVE_PTHREAD_ARG:INTERNAL=TRUE
 

@@ -17,7 +17,7 @@ int main(int argc, char const *argv[])
     int opt = 1;
     int addrlen = sizeof(address);
     char buffer[1024] = {0};
-    void *buff = malloc(5);
+    void *buff = malloc(10);
 
     // Instantiate protobuf obj
     tcpmessage::tcpMessage toClient;
@@ -53,7 +53,7 @@ int main(int argc, char const *argv[])
         exit(EXIT_FAILURE);
     }
 
-    if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen))<0)
+    if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0)
     {
         perror("accept");
         exit(EXIT_FAILURE);
@@ -62,17 +62,18 @@ int main(int argc, char const *argv[])
     // Listen forever
     while (true) {
         // Read incoming msg from CLIENT
-        valread = read(new_socket , buffer, 5);
-        fromClient.ParseFromArray(buffer, 5);
+        valread = read(new_socket , buffer, 10);
+        fromClient.ParseFromArray(buffer, 10);
 //        std::cout << "From client: " << buffer << "\n" << std::endl;
 
         // Prepare protobuf msg
-        toClient.set_msgcontent("123");
+        toClient.set_msgcontent(buffer);
 //        size_t size = pingPongMsg.ByteSizeLong();
 //        buff = malloc(size);
-        toClient.SerializeToArray(buff, 5);
+//        std::cout << "To client: " << toClient.msgcontent() << "\n" << std::endl;
+        toClient.SerializeToArray(buff, 10);
 
         // Send serialized protobuf to CLIENT
-        send(new_socket, buff, 5, 0);
+        send(new_socket, buff, 10, 0);
     }
 }

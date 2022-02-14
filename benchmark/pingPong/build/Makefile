@@ -117,30 +117,56 @@ depend:
 .PHONY : depend
 
 #=============================================================================
-# Target rules for targets named sServer
+# Target rules for targets named sServer_Protobuf
 
 # Build rule for target.
-sServer: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 sServer
-.PHONY : sServer
+sServer_Protobuf: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 sServer_Protobuf
+.PHONY : sServer_Protobuf
 
 # fast build rule for target.
-sServer/fast:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer.dir/build.make CMakeFiles/sServer.dir/build
-.PHONY : sServer/fast
+sServer_Protobuf/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Protobuf.dir/build.make CMakeFiles/sServer_Protobuf.dir/build
+.PHONY : sServer_Protobuf/fast
 
 #=============================================================================
-# Target rules for targets named sClient
+# Target rules for targets named sClient_Protobuf
 
 # Build rule for target.
-sClient: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 sClient
-.PHONY : sClient
+sClient_Protobuf: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 sClient_Protobuf
+.PHONY : sClient_Protobuf
 
 # fast build rule for target.
-sClient/fast:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient.dir/build.make CMakeFiles/sClient.dir/build
-.PHONY : sClient/fast
+sClient_Protobuf/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Protobuf.dir/build.make CMakeFiles/sClient_Protobuf.dir/build
+.PHONY : sClient_Protobuf/fast
+
+#=============================================================================
+# Target rules for targets named sServer_Raw
+
+# Build rule for target.
+sServer_Raw: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 sServer_Raw
+.PHONY : sServer_Raw
+
+# fast build rule for target.
+sServer_Raw/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Raw.dir/build.make CMakeFiles/sServer_Raw.dir/build
+.PHONY : sServer_Raw/fast
+
+#=============================================================================
+# Target rules for targets named sClient_Raw
+
+# Build rule for target.
+sClient_Raw: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 sClient_Raw
+.PHONY : sClient_Raw
+
+# fast build rule for target.
+sClient_Raw/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Raw.dir/build.make CMakeFiles/sClient_Raw.dir/build
+.PHONY : sClient_Raw/fast
 
 #=============================================================================
 # Target rules for targets named pServer
@@ -173,8 +199,10 @@ message.pb.o: message.pb.cc.o
 
 # target to build an object file
 message.pb.cc.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer.dir/build.make CMakeFiles/sServer.dir/message.pb.cc.o
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient.dir/build.make CMakeFiles/sClient.dir/message.pb.cc.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Protobuf.dir/build.make CMakeFiles/sServer_Protobuf.dir/message.pb.cc.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Protobuf.dir/build.make CMakeFiles/sClient_Protobuf.dir/message.pb.cc.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Raw.dir/build.make CMakeFiles/sServer_Raw.dir/message.pb.cc.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Raw.dir/build.make CMakeFiles/sClient_Raw.dir/message.pb.cc.o
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/pServer.dir/build.make CMakeFiles/pServer.dir/message.pb.cc.o
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/pClient.dir/build.make CMakeFiles/pClient.dir/message.pb.cc.o
 .PHONY : message.pb.cc.o
@@ -184,8 +212,10 @@ message.pb.i: message.pb.cc.i
 
 # target to preprocess a source file
 message.pb.cc.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer.dir/build.make CMakeFiles/sServer.dir/message.pb.cc.i
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient.dir/build.make CMakeFiles/sClient.dir/message.pb.cc.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Protobuf.dir/build.make CMakeFiles/sServer_Protobuf.dir/message.pb.cc.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Protobuf.dir/build.make CMakeFiles/sClient_Protobuf.dir/message.pb.cc.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Raw.dir/build.make CMakeFiles/sServer_Raw.dir/message.pb.cc.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Raw.dir/build.make CMakeFiles/sClient_Raw.dir/message.pb.cc.i
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/pServer.dir/build.make CMakeFiles/pServer.dir/message.pb.cc.i
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/pClient.dir/build.make CMakeFiles/pClient.dir/message.pb.cc.i
 .PHONY : message.pb.cc.i
@@ -195,8 +225,10 @@ message.pb.s: message.pb.cc.s
 
 # target to generate assembly for a file
 message.pb.cc.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer.dir/build.make CMakeFiles/sServer.dir/message.pb.cc.s
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient.dir/build.make CMakeFiles/sClient.dir/message.pb.cc.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Protobuf.dir/build.make CMakeFiles/sServer_Protobuf.dir/message.pb.cc.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Protobuf.dir/build.make CMakeFiles/sClient_Protobuf.dir/message.pb.cc.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Raw.dir/build.make CMakeFiles/sServer_Raw.dir/message.pb.cc.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Raw.dir/build.make CMakeFiles/sClient_Raw.dir/message.pb.cc.s
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/pServer.dir/build.make CMakeFiles/pServer.dir/message.pb.cc.s
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/pClient.dir/build.make CMakeFiles/pClient.dir/message.pb.cc.s
 .PHONY : message.pb.cc.s
@@ -249,53 +281,101 @@ pServer.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/pServer.dir/build.make CMakeFiles/pServer.dir/pServer.cpp.s
 .PHONY : pServer.cpp.s
 
-sClient.o: sClient.cpp.o
-.PHONY : sClient.o
+sClient_Protobuf.o: sClient_Protobuf.cpp.o
+.PHONY : sClient_Protobuf.o
 
 # target to build an object file
-sClient.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient.dir/build.make CMakeFiles/sClient.dir/sClient.cpp.o
-.PHONY : sClient.cpp.o
+sClient_Protobuf.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Protobuf.dir/build.make CMakeFiles/sClient_Protobuf.dir/sClient_Protobuf.cpp.o
+.PHONY : sClient_Protobuf.cpp.o
 
-sClient.i: sClient.cpp.i
-.PHONY : sClient.i
+sClient_Protobuf.i: sClient_Protobuf.cpp.i
+.PHONY : sClient_Protobuf.i
 
 # target to preprocess a source file
-sClient.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient.dir/build.make CMakeFiles/sClient.dir/sClient.cpp.i
-.PHONY : sClient.cpp.i
+sClient_Protobuf.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Protobuf.dir/build.make CMakeFiles/sClient_Protobuf.dir/sClient_Protobuf.cpp.i
+.PHONY : sClient_Protobuf.cpp.i
 
-sClient.s: sClient.cpp.s
-.PHONY : sClient.s
+sClient_Protobuf.s: sClient_Protobuf.cpp.s
+.PHONY : sClient_Protobuf.s
 
 # target to generate assembly for a file
-sClient.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient.dir/build.make CMakeFiles/sClient.dir/sClient.cpp.s
-.PHONY : sClient.cpp.s
+sClient_Protobuf.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Protobuf.dir/build.make CMakeFiles/sClient_Protobuf.dir/sClient_Protobuf.cpp.s
+.PHONY : sClient_Protobuf.cpp.s
 
-sServer.o: sServer.cpp.o
-.PHONY : sServer.o
+sClient_Raw.o: sClient_Raw.cpp.o
+.PHONY : sClient_Raw.o
 
 # target to build an object file
-sServer.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer.dir/build.make CMakeFiles/sServer.dir/sServer.cpp.o
-.PHONY : sServer.cpp.o
+sClient_Raw.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Raw.dir/build.make CMakeFiles/sClient_Raw.dir/sClient_Raw.cpp.o
+.PHONY : sClient_Raw.cpp.o
 
-sServer.i: sServer.cpp.i
-.PHONY : sServer.i
+sClient_Raw.i: sClient_Raw.cpp.i
+.PHONY : sClient_Raw.i
 
 # target to preprocess a source file
-sServer.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer.dir/build.make CMakeFiles/sServer.dir/sServer.cpp.i
-.PHONY : sServer.cpp.i
+sClient_Raw.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Raw.dir/build.make CMakeFiles/sClient_Raw.dir/sClient_Raw.cpp.i
+.PHONY : sClient_Raw.cpp.i
 
-sServer.s: sServer.cpp.s
-.PHONY : sServer.s
+sClient_Raw.s: sClient_Raw.cpp.s
+.PHONY : sClient_Raw.s
 
 # target to generate assembly for a file
-sServer.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer.dir/build.make CMakeFiles/sServer.dir/sServer.cpp.s
-.PHONY : sServer.cpp.s
+sClient_Raw.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Raw.dir/build.make CMakeFiles/sClient_Raw.dir/sClient_Raw.cpp.s
+.PHONY : sClient_Raw.cpp.s
+
+sServer_Protobuf.o: sServer_Protobuf.cpp.o
+.PHONY : sServer_Protobuf.o
+
+# target to build an object file
+sServer_Protobuf.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Protobuf.dir/build.make CMakeFiles/sServer_Protobuf.dir/sServer_Protobuf.cpp.o
+.PHONY : sServer_Protobuf.cpp.o
+
+sServer_Protobuf.i: sServer_Protobuf.cpp.i
+.PHONY : sServer_Protobuf.i
+
+# target to preprocess a source file
+sServer_Protobuf.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Protobuf.dir/build.make CMakeFiles/sServer_Protobuf.dir/sServer_Protobuf.cpp.i
+.PHONY : sServer_Protobuf.cpp.i
+
+sServer_Protobuf.s: sServer_Protobuf.cpp.s
+.PHONY : sServer_Protobuf.s
+
+# target to generate assembly for a file
+sServer_Protobuf.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Protobuf.dir/build.make CMakeFiles/sServer_Protobuf.dir/sServer_Protobuf.cpp.s
+.PHONY : sServer_Protobuf.cpp.s
+
+sServer_Raw.o: sServer_Raw.cpp.o
+.PHONY : sServer_Raw.o
+
+# target to build an object file
+sServer_Raw.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Raw.dir/build.make CMakeFiles/sServer_Raw.dir/sServer_Raw.cpp.o
+.PHONY : sServer_Raw.cpp.o
+
+sServer_Raw.i: sServer_Raw.cpp.i
+.PHONY : sServer_Raw.i
+
+# target to preprocess a source file
+sServer_Raw.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Raw.dir/build.make CMakeFiles/sServer_Raw.dir/sServer_Raw.cpp.i
+.PHONY : sServer_Raw.cpp.i
+
+sServer_Raw.s: sServer_Raw.cpp.s
+.PHONY : sServer_Raw.s
+
+# target to generate assembly for a file
+sServer_Raw.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Raw.dir/build.make CMakeFiles/sServer_Raw.dir/sServer_Raw.cpp.s
+.PHONY : sServer_Raw.cpp.s
 
 # Help Target
 help:
@@ -307,8 +387,10 @@ help:
 	@echo "... rebuild_cache"
 	@echo "... pClient"
 	@echo "... pServer"
-	@echo "... sClient"
-	@echo "... sServer"
+	@echo "... sClient_Protobuf"
+	@echo "... sClient_Raw"
+	@echo "... sServer_Protobuf"
+	@echo "... sServer_Raw"
 	@echo "... message.pb.o"
 	@echo "... message.pb.i"
 	@echo "... message.pb.s"
@@ -318,12 +400,18 @@ help:
 	@echo "... pServer.o"
 	@echo "... pServer.i"
 	@echo "... pServer.s"
-	@echo "... sClient.o"
-	@echo "... sClient.i"
-	@echo "... sClient.s"
-	@echo "... sServer.o"
-	@echo "... sServer.i"
-	@echo "... sServer.s"
+	@echo "... sClient_Protobuf.o"
+	@echo "... sClient_Protobuf.i"
+	@echo "... sClient_Protobuf.s"
+	@echo "... sClient_Raw.o"
+	@echo "... sClient_Raw.i"
+	@echo "... sClient_Raw.s"
+	@echo "... sServer_Protobuf.o"
+	@echo "... sServer_Protobuf.i"
+	@echo "... sServer_Protobuf.s"
+	@echo "... sServer_Raw.o"
+	@echo "... sServer_Raw.i"
+	@echo "... sServer_Raw.s"
 .PHONY : help
 
 

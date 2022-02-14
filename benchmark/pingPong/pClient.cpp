@@ -1,62 +1,76 @@
 #include <stdio.h>
 #include <sys/socket.h>
-#include <netdb.h>
-#include <unistd.h>
+#include <netinet/in.h>
 #include <string.h>
+#include <arpa/inet.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <fstream>
+#include "message.pb.h"
 
-int main(int argc, char ** argv)
-{
-    int port;
-    int sock = -1;
-    struct sockaddr_in address;
-    struct hostent * host;
-    int len;
+void * cientThread(void *arg) {
+    char buffer[1024] = {0};
+    void *sendBuff = malloc(5);
+    int clientSocket, valRead;
+    struct sockaddr_in serverAddr;
+    socklen_t addr_size;
 
-    /* checking commandline parameter */
-    if (argc != 4)
+    // Create the socket.
+    clientSocket = socket(PF_INET, SOCK_STREAM, 0);
+
+    //Configure settings of the server address
+    // Address family is Internet
+    serverAddr.sin_family = AF_INET;
+
+    //Set port number, using htons function
+    serverAddr.sin_port = htons(8080);
+
+    //Set IP address to localhost
+    serverAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    memset(serverAddr.sin_zero, '\0', sizeof serverAddr.sin_zero);
+
+    //Connect the socket to the server using the address
+    addr_size = sizeof serverAddr;
+    connect(clientSocket, (struct sockaddr *) &serverAddr, addr_size);
+
+    // Instantiate protobuf obj
+    tcpmessage::tcpMessage toServer;
+    tcpmessage::tcpMessage fromServer;
+
+    // Prepare protobuf msg
+    toServer.set_msgcontent("123");
+    toServer.SerializeToArray(sendBuff, 5);
+    std::cout << "To server: " << toServer.msgcontent() << "\n" << std::endl;
+
+    // Send serialized protobuf to SERVER
+    send(clientSocket, sendBuff, 5, 0);
+
+    // Read incoming msg from SERVER
+    valRead = read(clientSocket, buffer, 5);
+    fromServer.ParseFromArray(buffer, 5);
+
+    std::cout << "From server: " << fromServer.msgcontent() << "\n" << std::endl;
+
+    close(clientSocket);
+    pthread_exit(NULL);
+}
+
+int main(){
+    int i = 0;
+    pthread_t tid[51];
+    while(i< 50)
     {
-        printf("usage: %s hostname port text\n", argv[0]);
-        return -1;
+        if( pthread_create(&tid[i], NULL, cientThread, NULL) != 0 )
+            printf("Failed to create thread\n");
+        i++;
     }
-
-    /* obtain port number */
-    if (sscanf(argv[2], "%d", &port) <= 0)
+    i = 0;
+    while(i< 50)
     {
-        fprintf(stderr, "%s: error: wrong parameter: port\n", argv[0]);
-        return -2;
+        pthread_join(tid[i++],NULL);
+        printf("%d:\n",i);
     }
-
-    /* create socket */
-    sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock <= 0)
-    {
-        fprintf(stderr, "%s: error: cannot create socket\n", argv[0]);
-        return -3;
-    }
-
-    /* connect to server */
-    address.sin_family = AF_INET;
-    address.sin_port = htons(port);
-    host = gethostbyname(argv[1]);
-    if (!host)
-    {
-        fprintf(stderr, "%s: error: unknown host %s\n", argv[0], argv[1]);
-        return -4;
-    }
-    memcpy(&address.sin_addr, host->h_addr_list[0], host->h_length);
-    if (connect(sock, (struct sockaddr *)&address, sizeof(address)))
-    {
-        fprintf(stderr, "%s: error: cannot connect to host %s\n", argv[0], argv[1]);
-        return -5;
-    }
-
-    /* send text to server */
-    len = strlen(argv[3]);
-    write(sock, &len, sizeof(int));
-    write(sock, argv[3], len);
-
-    /* close socket */
-    close(sock);
-
     return 0;
 }

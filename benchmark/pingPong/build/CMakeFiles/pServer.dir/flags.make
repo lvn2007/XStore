@@ -6,5 +6,5 @@ CXX_DEFINES =
 
 CXX_INCLUDES = -I/home/ubuntu/pingPong/build
 
-CXX_FLAGS = -std=gnu++1z
+CXX_FLAGS = -pthread -std=gnu++1z
 
