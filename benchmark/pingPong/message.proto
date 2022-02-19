@@ -1,7 +1,14 @@
 syntax = "proto3";
 
+option optimize_for = SPEED;
+
 package tcpmessage;
 
 message tcpMessage {
   string msgcontent = 1;
+}
+
+service pingPong {
+  // Function invoked to send the request
+  rpc unaryRequest (tcpMessage) returns (tcpMessage) {}
 }

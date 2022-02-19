@@ -53,11 +53,13 @@ static ::PROTOBUF_NAMESPACE_ID::Message const * const file_default_instances[] =
 
 const char descriptor_table_protodef_message_2eproto[] PROTOBUF_SECTION_VARIABLE(protodesc_cold) =
   "\n\rmessage.proto\022\ntcpmessage\" \n\ntcpMessag"
-  "e\022\022\n\nmsgcontent\030\001 \001(\tb\006proto3"
+  "e\022\022\n\nmsgcontent\030\001 \001(\t2L\n\010pingPong\022@\n\014una"
+  "ryRequest\022\026.tcpmessage.tcpMessage\032\026.tcpm"
+  "essage.tcpMessage\"\000B\002H\001b\006proto3"
   ;
 static ::PROTOBUF_NAMESPACE_ID::internal::once_flag descriptor_table_message_2eproto_once;
 const ::PROTOBUF_NAMESPACE_ID::internal::DescriptorTable descriptor_table_message_2eproto = {
-  false, false, 69, descriptor_table_protodef_message_2eproto, "message.proto", 
+  false, false, 151, descriptor_table_protodef_message_2eproto, "message.proto", 
   &descriptor_table_message_2eproto_once, nullptr, 0, 1,
   schemas, file_default_instances, TableStruct_message_2eproto::offsets,
   file_level_metadata_message_2eproto, file_level_enum_descriptors_message_2eproto, file_level_service_descriptors_message_2eproto,

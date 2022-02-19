@@ -42,7 +42,7 @@ if __name__ == '__main__':
     # Init xStore client obj
     client = xStoreClient()
 
-    for i in range(2):
+    for i in range(1000):
         target = random.randint(startDate, endDate)
         result = client.unaryRequest(1451606400, 'tsla')
         # result = client.batchRequest(1451606400, 1451616405, 'tsla')
