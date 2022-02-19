@@ -117,32 +117,6 @@ depend:
 .PHONY : depend
 
 #=============================================================================
-# Target rules for targets named sServer_Protobuf
-
-# Build rule for target.
-sServer_Protobuf: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 sServer_Protobuf
-.PHONY : sServer_Protobuf
-
-# fast build rule for target.
-sServer_Protobuf/fast:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Protobuf.dir/build.make CMakeFiles/sServer_Protobuf.dir/build
-.PHONY : sServer_Protobuf/fast
-
-#=============================================================================
-# Target rules for targets named sClient_Protobuf
-
-# Build rule for target.
-sClient_Protobuf: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 sClient_Protobuf
-.PHONY : sClient_Protobuf
-
-# fast build rule for target.
-sClient_Protobuf/fast:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Protobuf.dir/build.make CMakeFiles/sClient_Protobuf.dir/build
-.PHONY : sClient_Protobuf/fast
-
-#=============================================================================
 # Target rules for targets named sServer_Raw
 
 # Build rule for target.
@@ -167,6 +141,32 @@ sClient_Raw: cmake_check_build_system
 sClient_Raw/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Raw.dir/build.make CMakeFiles/sClient_Raw.dir/build
 .PHONY : sClient_Raw/fast
+
+#=============================================================================
+# Target rules for targets named sServer_Protobuf
+
+# Build rule for target.
+sServer_Protobuf: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 sServer_Protobuf
+.PHONY : sServer_Protobuf
+
+# fast build rule for target.
+sServer_Protobuf/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Protobuf.dir/build.make CMakeFiles/sServer_Protobuf.dir/build
+.PHONY : sServer_Protobuf/fast
+
+#=============================================================================
+# Target rules for targets named sClient_Protobuf
+
+# Build rule for target.
+sClient_Protobuf: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 sClient_Protobuf
+.PHONY : sClient_Protobuf
+
+# fast build rule for target.
+sClient_Protobuf/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Protobuf.dir/build.make CMakeFiles/sClient_Protobuf.dir/build
+.PHONY : sClient_Protobuf/fast
 
 #=============================================================================
 # Target rules for targets named pServer
@@ -201,8 +201,6 @@ message.pb.o: message.pb.cc.o
 message.pb.cc.o:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Protobuf.dir/build.make CMakeFiles/sServer_Protobuf.dir/message.pb.cc.o
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Protobuf.dir/build.make CMakeFiles/sClient_Protobuf.dir/message.pb.cc.o
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Raw.dir/build.make CMakeFiles/sServer_Raw.dir/message.pb.cc.o
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Raw.dir/build.make CMakeFiles/sClient_Raw.dir/message.pb.cc.o
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/pServer.dir/build.make CMakeFiles/pServer.dir/message.pb.cc.o
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/pClient.dir/build.make CMakeFiles/pClient.dir/message.pb.cc.o
 .PHONY : message.pb.cc.o
@@ -214,8 +212,6 @@ message.pb.i: message.pb.cc.i
 message.pb.cc.i:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Protobuf.dir/build.make CMakeFiles/sServer_Protobuf.dir/message.pb.cc.i
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Protobuf.dir/build.make CMakeFiles/sClient_Protobuf.dir/message.pb.cc.i
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Raw.dir/build.make CMakeFiles/sServer_Raw.dir/message.pb.cc.i
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Raw.dir/build.make CMakeFiles/sClient_Raw.dir/message.pb.cc.i
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/pServer.dir/build.make CMakeFiles/pServer.dir/message.pb.cc.i
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/pClient.dir/build.make CMakeFiles/pClient.dir/message.pb.cc.i
 .PHONY : message.pb.cc.i
@@ -227,8 +223,6 @@ message.pb.s: message.pb.cc.s
 message.pb.cc.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Protobuf.dir/build.make CMakeFiles/sServer_Protobuf.dir/message.pb.cc.s
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Protobuf.dir/build.make CMakeFiles/sClient_Protobuf.dir/message.pb.cc.s
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Raw.dir/build.make CMakeFiles/sServer_Raw.dir/message.pb.cc.s
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Raw.dir/build.make CMakeFiles/sClient_Raw.dir/message.pb.cc.s
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/pServer.dir/build.make CMakeFiles/pServer.dir/message.pb.cc.s
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/pClient.dir/build.make CMakeFiles/pClient.dir/message.pb.cc.s
 .PHONY : message.pb.cc.s

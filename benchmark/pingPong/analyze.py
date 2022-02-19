@@ -2,7 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 
-toAnalyze = ['ss-sc_1000_Protobuf.csv', 'ss-sc_1000_Raw.csv']
+toAnalyze = ['ss-sc_1000_Protobuf.csv', 'ss-sc_1000_Raw.csv', 'ss-sc_1000_gRPC.csv']
 
 for data in toAnalyze:
     df = pd.read_csv(data, header=0)

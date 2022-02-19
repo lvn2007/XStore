@@ -1,1 +1,1 @@
-/usr/bin/c++ CMakeFiles/sClient_Raw.dir/sClient_Raw.cpp.o CMakeFiles/sClient_Raw.dir/message.pb.cc.o -o sClient_Raw  -Wl,-rpath,/usr/local/lib /usr/local/lib/libprotobuf.so -pthread 
+/usr/bin/c++ CMakeFiles/sClient_Raw.dir/sClient_Raw.cpp.o -o sClient_Raw 

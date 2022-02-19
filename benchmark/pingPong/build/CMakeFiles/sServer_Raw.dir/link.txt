@@ -1,1 +1,1 @@
-/usr/bin/c++ CMakeFiles/sServer_Raw.dir/sServer_Raw.cpp.o CMakeFiles/sServer_Raw.dir/message.pb.cc.o -o sServer_Raw  -Wl,-rpath,/usr/local/lib /usr/local/lib/libprotobuf.so -pthread 
+/usr/bin/c++ CMakeFiles/sServer_Raw.dir/sServer_Raw.cpp.o -o sServer_Raw 

@@ -63,10 +63,10 @@ CMAKE_BINARY_DIR = /home/ubuntu/pingPong/build
 # Directory level rules for the build root directory
 
 # The main recursive "all" target.
-all: CMakeFiles/sServer_Protobuf.dir/all
-all: CMakeFiles/sClient_Protobuf.dir/all
 all: CMakeFiles/sServer_Raw.dir/all
 all: CMakeFiles/sClient_Raw.dir/all
+all: CMakeFiles/sServer_Protobuf.dir/all
+all: CMakeFiles/sClient_Protobuf.dir/all
 all: CMakeFiles/pServer.dir/all
 all: CMakeFiles/pClient.dir/all
 .PHONY : all
@@ -76,13 +76,65 @@ preinstall:
 .PHONY : preinstall
 
 # The main recursive "clean" target.
-clean: CMakeFiles/sServer_Protobuf.dir/clean
-clean: CMakeFiles/sClient_Protobuf.dir/clean
 clean: CMakeFiles/sServer_Raw.dir/clean
 clean: CMakeFiles/sClient_Raw.dir/clean
+clean: CMakeFiles/sServer_Protobuf.dir/clean
+clean: CMakeFiles/sClient_Protobuf.dir/clean
 clean: CMakeFiles/pServer.dir/clean
 clean: CMakeFiles/pClient.dir/clean
 .PHONY : clean
+
+#=============================================================================
+# Target rules for target CMakeFiles/sServer_Raw.dir
+
+# All Build rule for target.
+CMakeFiles/sServer_Raw.dir/all:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Raw.dir/build.make CMakeFiles/sServer_Raw.dir/depend
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Raw.dir/build.make CMakeFiles/sServer_Raw.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/ubuntu/pingPong/build/CMakeFiles --progress-num=19,20 "Built target sServer_Raw"
+.PHONY : CMakeFiles/sServer_Raw.dir/all
+
+# Build rule for subdir invocation for target.
+CMakeFiles/sServer_Raw.dir/rule: cmake_check_build_system
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/ubuntu/pingPong/build/CMakeFiles 2
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/sServer_Raw.dir/all
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/ubuntu/pingPong/build/CMakeFiles 0
+.PHONY : CMakeFiles/sServer_Raw.dir/rule
+
+# Convenience name for target.
+sServer_Raw: CMakeFiles/sServer_Raw.dir/rule
+.PHONY : sServer_Raw
+
+# clean rule for target.
+CMakeFiles/sServer_Raw.dir/clean:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Raw.dir/build.make CMakeFiles/sServer_Raw.dir/clean
+.PHONY : CMakeFiles/sServer_Raw.dir/clean
+
+#=============================================================================
+# Target rules for target CMakeFiles/sClient_Raw.dir
+
+# All Build rule for target.
+CMakeFiles/sClient_Raw.dir/all:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Raw.dir/build.make CMakeFiles/sClient_Raw.dir/depend
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Raw.dir/build.make CMakeFiles/sClient_Raw.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/ubuntu/pingPong/build/CMakeFiles --progress-num=13,14 "Built target sClient_Raw"
+.PHONY : CMakeFiles/sClient_Raw.dir/all
+
+# Build rule for subdir invocation for target.
+CMakeFiles/sClient_Raw.dir/rule: cmake_check_build_system
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/ubuntu/pingPong/build/CMakeFiles 2
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/sClient_Raw.dir/all
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/ubuntu/pingPong/build/CMakeFiles 0
+.PHONY : CMakeFiles/sClient_Raw.dir/rule
+
+# Convenience name for target.
+sClient_Raw: CMakeFiles/sClient_Raw.dir/rule
+.PHONY : sClient_Raw
+
+# clean rule for target.
+CMakeFiles/sClient_Raw.dir/clean:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Raw.dir/build.make CMakeFiles/sClient_Raw.dir/clean
+.PHONY : CMakeFiles/sClient_Raw.dir/clean
 
 #=============================================================================
 # Target rules for target CMakeFiles/sServer_Protobuf.dir
@@ -91,7 +143,7 @@ clean: CMakeFiles/pClient.dir/clean
 CMakeFiles/sServer_Protobuf.dir/all:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Protobuf.dir/build.make CMakeFiles/sServer_Protobuf.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Protobuf.dir/build.make CMakeFiles/sServer_Protobuf.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/ubuntu/pingPong/build/CMakeFiles --progress-num=17,18,19,20 "Built target sServer_Protobuf"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/ubuntu/pingPong/build/CMakeFiles --progress-num=15,16,17,18 "Built target sServer_Protobuf"
 .PHONY : CMakeFiles/sServer_Protobuf.dir/all
 
 # Build rule for subdir invocation for target.
@@ -135,58 +187,6 @@ sClient_Protobuf: CMakeFiles/sClient_Protobuf.dir/rule
 CMakeFiles/sClient_Protobuf.dir/clean:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Protobuf.dir/build.make CMakeFiles/sClient_Protobuf.dir/clean
 .PHONY : CMakeFiles/sClient_Protobuf.dir/clean
-
-#=============================================================================
-# Target rules for target CMakeFiles/sServer_Raw.dir
-
-# All Build rule for target.
-CMakeFiles/sServer_Raw.dir/all:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Raw.dir/build.make CMakeFiles/sServer_Raw.dir/depend
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Raw.dir/build.make CMakeFiles/sServer_Raw.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/ubuntu/pingPong/build/CMakeFiles --progress-num=21,22,23,24 "Built target sServer_Raw"
-.PHONY : CMakeFiles/sServer_Raw.dir/all
-
-# Build rule for subdir invocation for target.
-CMakeFiles/sServer_Raw.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/ubuntu/pingPong/build/CMakeFiles 4
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/sServer_Raw.dir/all
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/ubuntu/pingPong/build/CMakeFiles 0
-.PHONY : CMakeFiles/sServer_Raw.dir/rule
-
-# Convenience name for target.
-sServer_Raw: CMakeFiles/sServer_Raw.dir/rule
-.PHONY : sServer_Raw
-
-# clean rule for target.
-CMakeFiles/sServer_Raw.dir/clean:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sServer_Raw.dir/build.make CMakeFiles/sServer_Raw.dir/clean
-.PHONY : CMakeFiles/sServer_Raw.dir/clean
-
-#=============================================================================
-# Target rules for target CMakeFiles/sClient_Raw.dir
-
-# All Build rule for target.
-CMakeFiles/sClient_Raw.dir/all:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Raw.dir/build.make CMakeFiles/sClient_Raw.dir/depend
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Raw.dir/build.make CMakeFiles/sClient_Raw.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/ubuntu/pingPong/build/CMakeFiles --progress-num=13,14,15,16 "Built target sClient_Raw"
-.PHONY : CMakeFiles/sClient_Raw.dir/all
-
-# Build rule for subdir invocation for target.
-CMakeFiles/sClient_Raw.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/ubuntu/pingPong/build/CMakeFiles 4
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/sClient_Raw.dir/all
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/ubuntu/pingPong/build/CMakeFiles 0
-.PHONY : CMakeFiles/sClient_Raw.dir/rule
-
-# Convenience name for target.
-sClient_Raw: CMakeFiles/sClient_Raw.dir/rule
-.PHONY : sClient_Raw
-
-# clean rule for target.
-CMakeFiles/sClient_Raw.dir/clean:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/sClient_Raw.dir/build.make CMakeFiles/sClient_Raw.dir/clean
-.PHONY : CMakeFiles/sClient_Raw.dir/clean
 
 #=============================================================================
 # Target rules for target CMakeFiles/pServer.dir

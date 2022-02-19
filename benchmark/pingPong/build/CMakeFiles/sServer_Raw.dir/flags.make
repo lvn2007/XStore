@@ -4,7 +4,7 @@
 # compile CXX with /usr/bin/c++
 CXX_DEFINES = 
 
-CXX_INCLUDES = -I/home/ubuntu/pingPong/build
+CXX_INCLUDES = -I/home/ubuntu/pingPong/build -I/home/ubuntu/pingPong/.
 
 CXX_FLAGS = -std=gnu++1z
 
