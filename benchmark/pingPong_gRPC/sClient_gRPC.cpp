@@ -96,15 +96,7 @@ public:
         ClientContext context;
 
         // The actual RPC.
-        Status status = stub_->unaryRequest(&context, request, &reply);
-
-        // Act upon its status.
-        if (status.ok()) {
-            return reply.msgcontent();
-        } else {
-            std::cout << status.error_code() << ": " << status.error_message() << std::endl;
-            return "RPC failed";
-        }
+        Status status = stub_->unaryRequest(&context, request, &reply);Œ
     }
 
 private:

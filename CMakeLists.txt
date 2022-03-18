@@ -17,10 +17,10 @@ set(_PROTOBUF_PROTOC $<TARGET_FILE:protobuf::protoc>)
 message(STATUS "Using Protobuf ${Protobuf_VERSION}")
 
 # gRPC
-find_package(gRPC CONFIG REQUIRED)
-message(STATUS "Using gRPC ${gRPC_VERSION}")
-set(_GRPC_GRPCPP gRPC::grpc++)
-set(_GRPC_CPP_PLUGIN_EXECUTABLE $<TARGET_FILE:gRPC::grpc_cpp_plugin>)
+#find_package(gRPC CONFIG REQUIRED)
+#message(STATUS "Using gRPC ${gRPC_VERSION}")
+#set(_GRPC_GRPCPP gRPC::grpc++)
+#set(_GRPC_CPP_PLUGIN_EXECUTABLE $<TARGET_FILE:gRPC::grpc_cpp_plugin>)
 
 # Proto file
 get_filename_component(hw_proto "protoFile/xStore.proto" ABSOLUTE)
@@ -29,8 +29,8 @@ get_filename_component(hw_proto_path "${hw_proto}" PATH)
 # Generated sources
 #set(hw_proto_srcs "${CMAKE_CURRENT_BINARY_DIR}/xStore.pb.cc")
 #set(hw_proto_hdrs "${CMAKE_CURRENT_BINARY_DIR}/xStore.pb.h")
-set(hw_grpc_srcs "${CMAKE_CURRENT_BINARY_DIR}/xStore.grpc.pb.cc")
-set(hw_grpc_hdrs "${CMAKE_CURRENT_BINARY_DIR}/xStore.grpc.pb.h")
+#set(hw_grpc_srcs "${CMAKE_CURRENT_BINARY_DIR}/xStore.grpc.pb.cc")
+#set(hw_grpc_hdrs "${CMAKE_CURRENT_BINARY_DIR}/xStore.grpc.pb.h")
 add_custom_command(
         OUTPUT "${hw_grpc_srcs}" "${hw_grpc_hdrs}"
         COMMAND ${_PROTOBUF_PROTOC}
@@ -54,10 +54,21 @@ include_directories(include)
 include_directories(src)
 include_directories(protoFile)
 
+# WITHOUT gRPC
 add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h src/dataStruct/dataStruct.cpp
-        include/dataStruct/dataStruct.h src/XStore_Networking/XStore_gRPC.cpp include/XStore_Networking/XStore_gRPC.h
-        ${PROTO_SRCS} ${PROTO_HDRS} ${hw_grpc_srcs} src/dataStruct/fileStruct.cpp include/dataStruct/fileStruct.h)
+        include/dataStruct/dataStruct.h src/XStore_Networking/XStore_tcpServer.cpp include/XStore_Networking/XStore_tcpServer.h
+        ${PROTO_SRCS} ${PROTO_HDRS} src/dataStruct/fileStruct.cpp include/dataStruct/fileStruct.h include/dataStruct/clientCmdStruct.h
+        src/dataStruct/clientCmdStruct.cpp)
 
 if(${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS 9)
-    target_link_libraries(XStore PUBLIC "stdc++fs" ${Protobuf_LIBRARIES} ${_GRPC_GRPCPP})
+    target_link_libraries(XStore PUBLIC "stdc++fs" ${Protobuf_LIBRARIES})
 endif()
+
+# WITH gRPC
+#add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h src/dataStruct/dataStruct.cpp
+#        include/dataStruct/dataStruct.h src/XStore_Networking/XStore_gRPC.cpp include/XStore_Networking/XStore_gRPC.h
+#        ${PROTO_SRCS} ${PROTO_HDRS} ${hw_grpc_srcs} src/dataStruct/fileStruct.cpp include/dataStruct/fileStruct.h)
+
+#if(${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS 9)
+#    target_link_libraries(XStore PUBLIC "stdc++fs" ${Protobuf_LIBRARIES} ${_GRPC_GRPCPP})
+#endif()

@@ -3,7 +3,11 @@
 #include <algorithm>
 #include <map>
 #include <cmath>
-#include "include/XStore_Networking/XStore_gRPC.h"
+//#include "include/XStore_Networking/XStore_gRPC.h"
+#include "include/XStore_Networking/XStore_tcpServer.h"
+#include "include/XStore/XStore.h"
+#include "include/dataStruct/clientCmdStruct.h"
+#include "xStore.pb.h"
 
 double meanCalc(std::vector<double> inputVector) {
     double totalSum = 0;
@@ -62,7 +66,7 @@ int main(int argc, char *argv[]) {
     std::chrono::duration<double> diff;
 
     // Instantiate XStore obj
-//    XStore myStore;
+    XStore myStore;
 
 //    myStore.insert(1483228801, "0,NaN,NaN,NaN,NaN,NaN,NaN", "tsla");
 //    myStore.insert(1451606400, "0,NaN,NaN,NaN,NaN,NaN,NaN", "tsla");
@@ -74,8 +78,45 @@ int main(int argc, char *argv[]) {
     std::vector<double> us = { };
     std::vector<double> ns = { };
 
-    xStoreServiceImplementation xStoreServiceImplementation;
-    xStoreServiceImplementation.Run();
+    XStore_tcpServer tcpServer;
+    tcpServer.startServer();
+
+    while (1) {
+        // Start accepting client
+        tcpServer.acceptClient();
+
+        for (int i = 0; i < 100; i++) {
+            // Receiving command from CLIENT
+            xStoregRPC::unaryRequestMsg clientCmd = tcpServer.recvCmdFromClientProto();
+
+//            if (clientCmd.requestType == "UNARY") {
+                tcpServer.sendDataToClient(clientCmd.timestamp(), clientCmd.dbname());
+//            }
+        }
+
+        break;
+//        xStoregRPC::unaryRequestMsg toClient;
+//
+//        toClient.set_timestamp(123456678);
+//        toClient.set_dbname("TSLA");
+//
+//        std::cout << toClient.timestamp() << std::endl;
+//        std::cout << toClient.dbname() << std::endl;
+//
+//        std::cout << toClient.ByteSizeLong() << std::endl;
+//        char* array = new char[toClient.ByteSizeLong()];
+//        toClient.SerializeToArray(array, toClient.ByteSizeLong());
+//
+//        std::cout << "START" << std::endl;
+//        for (int i = 0; i < toClient.ByteSizeLong(); i++) {
+//            std::cout << (int) array[i] << std::endl;
+//        }
+//        std::cout << "END" << std::endl;
+//        std::cout << array[0] << std::endl;
+    }
+
+//    xStoreServiceImplementation xStoreServiceImplementation;
+//    xStoreServiceImplementation.Run();
 
 //    return 0;
 
