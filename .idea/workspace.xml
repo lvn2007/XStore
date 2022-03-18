@@ -15,54 +15,23 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Done single-threaded pingPong bench for both Protobuf &amp; Raw">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Done single-threaded pingPong bench for both Protobuf &amp; Raw &amp; gRPC">
+      <change afterPath="$PROJECT_DIR$/benchmark/XStore/cpp/CMakeLists.txt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/benchmark/XStore/cpp/xStore.proto" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/benchmark/XStore/cpp/xstoreClient_Protobuf.cpp" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/include/XStore_Networking/TCPServer.hpp" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/include/XStore_Networking/XStore_tcpServer.h" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/include/dataStruct/clientCmdStruct.h" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/XStore_Networking/TCPServer.cpp" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_tcpServer.cpp" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dataStruct/clientCmdStruct.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/CMakeLists.txt" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/benchmark/XStore/XStore_Client.py" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/XStore_Client.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/CMakeLists.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/analyze.py" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/analyze.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeCache.txt" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeCache.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/Makefile.cmake" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/Makefile.cmake" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/Makefile2" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/Makefile2" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/TargetDirectories.txt" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/TargetDirectories.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/pClient.dir/flags.make" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/pClient.dir/flags.make" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/pClient.dir/message.pb.cc.o" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/pClient.dir/message.pb.cc.o" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/pServer.dir/flags.make" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/pServer.dir/flags.make" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/pServer.dir/message.pb.cc.o" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/pServer.dir/message.pb.cc.o" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/progress.marks" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/progress.marks" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sClient_Protobuf.dir/flags.make" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sClient_Protobuf.dir/flags.make" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sClient_Protobuf.dir/message.pb.cc.o" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sClient_Protobuf.dir/message.pb.cc.o" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sClient_Raw.dir/DependInfo.cmake" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sClient_Raw.dir/DependInfo.cmake" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sClient_Raw.dir/build.make" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sClient_Raw.dir/build.make" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sClient_Raw.dir/cmake_clean.cmake" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sClient_Raw.dir/cmake_clean.cmake" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sClient_Raw.dir/flags.make" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sClient_Raw.dir/flags.make" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sClient_Raw.dir/link.txt" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sClient_Raw.dir/link.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sClient_Raw.dir/message.pb.cc.o" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sClient_Raw.dir/message.pb.cc.o" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sClient_Raw.dir/progress.make" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sClient_Raw.dir/progress.make" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sClient_Raw.dir/sClient_Raw.cpp.o" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sClient_Raw.dir/sClient_Raw.cpp.o" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sClient_Raw.dir/sClient_Raw.cpp.o.d" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sClient_Raw.dir/sClient_Raw.cpp.o.d" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Protobuf.dir/flags.make" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Protobuf.dir/flags.make" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Protobuf.dir/message.pb.cc.o" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Protobuf.dir/message.pb.cc.o" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Protobuf.dir/progress.make" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Protobuf.dir/progress.make" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Raw.dir/DependInfo.cmake" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Raw.dir/DependInfo.cmake" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Raw.dir/build.make" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Raw.dir/build.make" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Raw.dir/cmake_clean.cmake" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Raw.dir/cmake_clean.cmake" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Raw.dir/flags.make" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Raw.dir/flags.make" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Raw.dir/link.txt" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Raw.dir/link.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Raw.dir/message.pb.cc.o" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Raw.dir/message.pb.cc.o" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Raw.dir/progress.make" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Raw.dir/progress.make" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Raw.dir/sServer_Raw.cpp.o" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Raw.dir/sServer_Raw.cpp.o" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Raw.dir/sServer_Raw.cpp.o.d" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/CMakeFiles/sServer_Raw.dir/sServer_Raw.cpp.o.d" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/Makefile" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/Makefile" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/message.pb.cc" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/message.pb.cc" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/pClient" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/pClient" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/pServer" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/pServer" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/sClient_Protobuf" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/sClient_Protobuf" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/sClient_Raw" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/sClient_Raw" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/sServer_Protobuf" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/sServer_Protobuf" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/build/sServer_Raw" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/build/sServer_Raw" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/message.proto" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/message.proto" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/sClient_Raw.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/sClient_Raw.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong/sServer_Raw.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong/sServer_Raw.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/mongoDB/mongoTS.py" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/mongoDB/mongoTS.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/pingPong_gRPC/sClient_gRPC.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong_gRPC/sClient_gRPC.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/protoFile/xStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/xStore.proto" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -72,6 +41,7 @@
   <component name="ClangdSettings">
     <option name="formatViaClangd" value="false" />
   </component>
+  <component name="ExecutionTargetManager" SELECTED_TARGET="CMakeBuildProfile:Debug" />
   <component name="FileTemplateManagerImpl">
     <option name="RECENT_TEMPLATES">
       <list>
@@ -116,31 +86,27 @@
     <property name="cidr.known.project.marker" value="true" />
     <property name="cmake.loaded.for.project" value="true" />
     <property name="com.intellij.ide.scratch.ScratchImplUtil$2/New Scratch File" value="ObjectiveC" />
-    <property name="last_opened_file_path" value="$PROJECT_DIR$/benchmark/pingPong" />
+    <property name="last_opened_file_path" value="$PROJECT_DIR$/benchmark/XStore/cpp" />
     <property name="nodejs_package_manager_path" value="npm" />
     <property name="settings.editor.selected.configurable" value="preferences.pluginManager" />
   </component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/benchmark/XStore/cpp" />
+      <recent name="$PROJECT_DIR$/benchmark/XStore" />
       <recent name="$PROJECT_DIR$/benchmark/pingPong" />
       <recent name="$PROJECT_DIR$/benchmark/pingPong/build" />
       <recent name="$PROJECT_DIR$/protoFile" />
-      <recent name="$PROJECT_DIR$" />
     </key>
     <key name="MoveFile.RECENT_KEYS">
-      <recent name="$PROJECT_DIR$/benchmark/pingPong" />
-      <recent name="$PROJECT_DIR$/benchmark/pingPong" />
-      <recent name="$PROJECT_DIR$/benchmark/pingPong/build" />
-      <recent name="$PROJECT_DIR$/benchmark/pingPong/protoFile" />
       <recent name="$PROJECT_DIR$/include/dataStruct" />
+      <recent name="$PROJECT_DIR$/benchmark/XStore/cpp" />
+      <recent name="$PROJECT_DIR$/src/XStore_Networking" />
+      <recent name="$PROJECT_DIR$/include/XStore_Networking" />
+      <recent name="$PROJECT_DIR$/benchmark/pingPong" />
     </key>
   </component>
-  <component name="RunManager" selected="Python.analyze (1)">
-    <configuration default="true" type="CLionExternalRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
-      <method v="2">
-        <option name="CLION.EXTERNAL.BUILD" enabled="true" />
-      </method>
-    </configuration>
+  <component name="RunManager" selected="CMake Application.XStore">
     <configuration name="Unnamed" type="CLion_Remote" version="1" remoteCommand="" symbolFile="" sysroot="">
       <debugger toolchainName="xStore-Master" />
       <method v="2" />
@@ -153,6 +119,11 @@
     <configuration default="true" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
       <method v="2">
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
+      </method>
+    </configuration>
+    <configuration default="true" type="GradleAppRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
+      <method v="2">
+        <option name="com.jetbrains.cidr.cpp.gradle.execution.GradleNativeBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
       </method>
     </configuration>
     <configuration name="analyze (1)" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
@@ -244,13 +215,13 @@
       <item itemvalue="Python.timeStuffs (1)" />
       <item itemvalue="Python.timeStuffs" />
       <item itemvalue="Python.analyze" />
-      <item itemvalue="Remote Debug.Unnamed" />
       <item itemvalue="Python.analyze (1)" />
+      <item itemvalue="Remote Debug.Unnamed" />
     </list>
     <recent_temporary>
       <list>
-        <item itemvalue="Python.analyze (1)" />
         <item itemvalue="CMake Application.XStore" />
+        <item itemvalue="Python.analyze (1)" />
         <item itemvalue="Python.analyze" />
         <item itemvalue="Python.timeStuffs" />
         <item itemvalue="Python.timeStuffs (1)" />
@@ -305,14 +276,11 @@
       <workItem from="1643335977728" duration="57652000" />
       <workItem from="1644279270508" duration="1732000" />
       <workItem from="1644415742714" duration="27956000" />
-      <workItem from="1645189560175" duration="9253000" />
-    </task>
-    <task id="LOCAL-00026" summary="Code cleanup">
-      <created>1637950293467</created>
-      <option name="number" value="00026" />
-      <option name="presentableId" value="LOCAL-00026" />
-      <option name="project" value="LOCAL" />
-      <updated>1637950293467</updated>
+      <workItem from="1645189560175" duration="9702000" />
+      <workItem from="1645242414946" duration="619000" />
+      <workItem from="1645243308878" duration="30000" />
+      <workItem from="1645244820190" duration="34461000" />
+      <workItem from="1647486682612" duration="14847000" />
     </task>
     <task id="LOCAL-00027" summary="Code cleanup">
       <created>1637950405431</created>
@@ -650,7 +618,14 @@
       <option name="project" value="LOCAL" />
       <updated>1644798031611</updated>
     </task>
-    <option name="localTasksCounter" value="75" />
+    <task id="LOCAL-00075" summary="Done single-threaded pingPong bench for both Protobuf &amp; Raw &amp; gRPC">
+      <created>1645242126853</created>
+      <option name="number" value="00075" />
+      <option name="presentableId" value="LOCAL-00075" />
+      <option name="project" value="LOCAL" />
+      <updated>1645242126854</updated>
+    </task>
+    <option name="localTasksCounter" value="76" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -751,7 +726,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Implemented 'insert' when there's DB existed" />
     <MESSAGE value="Implemented 'getBatch'" />
     <MESSAGE value="Experimenting Protobuf &amp; gRPC" />
     <MESSAGE value="Including dependencies" />
@@ -776,6 +750,7 @@
     <MESSAGE value="WIP: Single/Multi-threaded client/server over TCP" />
     <MESSAGE value="WIP: Working multi-threaded client/server over TCP" />
     <MESSAGE value="Done single-threaded pingPong bench for both Protobuf &amp; Raw" />
-    <option name="LAST_COMMIT_MESSAGE" value="Done single-threaded pingPong bench for both Protobuf &amp; Raw" />
+    <MESSAGE value="Done single-threaded pingPong bench for both Protobuf &amp; Raw &amp; gRPC" />
+    <option name="LAST_COMMIT_MESSAGE" value="Done single-threaded pingPong bench for both Protobuf &amp; Raw &amp; gRPC" />
   </component>
 </project>

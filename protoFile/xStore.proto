@@ -14,8 +14,13 @@ service xStore {
 
 // The request message containing requested numbers
 message unaryRequestMsg {
-  uint32 timestamp = 1;
-  string dbName = 2;
+  enum requestType {
+    UNARY = 0;
+    STREAM = 1;
+  }
+  requestType rType = 1;
+  uint32 timestamp = 2;
+  string dbName = 3;
 }
 
 message rangeRequestMsg {
@@ -26,5 +31,11 @@ message rangeRequestMsg {
 
 // The response message containing response
 message responseData {
-  string dataset = 1;
+  uint32 timestamp = 1;
+  string dataset = 2;
+}
+
+message messageInfo {
+  uint32 nItems = 1;
+  uint32 msgLength = 2;
 }
