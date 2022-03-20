@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <netinet/tcp.h>
 #include <unistd.h>
 #include <string.h>
 #include <algorithm>
@@ -80,12 +81,35 @@ void writeCSV(std::string fName, std::string colName, std::vector<double> inputs
     myFile.close();
 }
 
+void sendMsgInfoToServer(int serverSocket, int nItems, int totalBytes) {
+    // Preparing protobuf obj
+    xStoregRPC::messageInfo messageInfo;
+
+    // Configuring messageInfo
+    messageInfo.set_nitems(nItems);
+    messageInfo.set_msglength(totalBytes);
+
+    // messageInfoSize -- Size about message to be sent
+    size_t messageInfoSize = messageInfo.ByteSizeLong();
+
+    // Dispatch messageInfo to SERVER
+    char messageInfoBuff[messageInfoSize];
+    messageInfo.SerializeToArray(messageInfoBuff, messageInfoSize);
+    size_t n = send(serverSocket, messageInfoBuff, 128, 0);
+
+    if (n <= 0) {
+        close(serverSocket);
+        std::cout << "[ERROR] Could not send data to client!" << std::endl;
+    }
+}
+
 int main(int argc, char const *argv[])
 {
     int sock = 0, valread;
     struct sockaddr_in serv_addr;
-    char buffer[128] = {0};
+    char buffer[1024] = {0};
     void *sendBuff = malloc(32);
+    int flag = 1;
 
     if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
     {
@@ -93,6 +117,7 @@ int main(int argc, char const *argv[])
         return -1;
     }
 
+//    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(int));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(PORT);
 
@@ -109,57 +134,54 @@ int main(int argc, char const *argv[])
         return -1;
     }
 
-    std::vector<double> ms = { };
+    std::vector<double> us = { };
+    std::vector<double> protoMs = { };
 
     // Clock init
     std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
     std::chrono::duration<double> diff;
 
-    int nIter = 100;
+    int nIter = 10000;
+    srand(time(NULL));
+    long int randTime;
 
     for (int i = 0; i < nIter; i++) {
+        randTime = rand() % 1000 + 1;
+        long targetTime = 1451606400 + randTime;
         start = std::chrono::high_resolution_clock::now();
 
         // Instantiate protobuf obj
         xStoregRPC::unaryRequestMsg toServer;
         xStoregRPC::responseData fromServer;
-        xStoregRPC::messageInfo messageInfo;
+
+        // Preparing request to SERVER
+        toServer.set_timestamp(targetTime);
+        toServer.set_dbname("tsla");
+        toServer.set_rtype(xStoregRPC::unaryRequestMsg::UNARY);
+        toServer.SerializeToArray(sendBuff, 32);
 
         // Dispatch request to SERVER
-        toServer.set_timestamp(123456789);
-        toServer.set_dbname("testUnary");
-//        toServer.set_rtype(xStoregRPC::unaryRequestMsg::UNARY);
-        toServer.SerializeToArray(sendBuff, 32);
-//        std::cout << "To server: " << toServer.rtype() << "\n" << std::endl;
-
-        // Sending request to SERVER
         send(sock, sendBuff, 32, 0);
 
-        // Read incoming messageInfo from SERVER
-        valread = read(sock, buffer, 128);
-        messageInfo.ParseFromArray(buffer, 128);
-
         // Read incoming msg from SERVER
-        for (int i = 0; i < messageInfo.nitems(); i++) {
-            valread = read(sock, buffer, messageInfo.msglength());
-            fromServer.ParseFromArray(buffer, messageInfo.msglength());
-        }
+        valread = recv(sock, buffer, 32, 0);
+        fromServer.ParseFromArray(buffer, 32);
 
         end = std::chrono::high_resolution_clock::now();
         diff = end - start;
         std::cout << "From server: " << fromServer.dataset() << "\n" << std::endl;
-        ms.push_back(std::chrono::duration<double, std::milli> (diff).count());
+        us.push_back(std::chrono::duration<double, std::micro> (diff).count());
     }
 
     std::cout << nIter << " queries experiments" << std::endl;
-    std::cout << "--- EXECUTION TIME in [ms] ---" << std::endl;
-    std::cout << "  - Min: " << *std::min_element(ms.begin(), ms.end()) << std::endl;
-    std::cout << "  - Max: " << *std::max_element(ms.begin(), ms.end()) << std::endl;
-    std::cout << "  - Mean: " << meanCalc(ms) << std::endl;
-    std::cout << "  - Stdev: " << stdCalc(ms) << std::endl;
+    std::cout << "--- EXECUTION TIME in [us] ---" << std::endl;
+    std::cout << "  - Min: " << *std::min_element(us.begin(), us.end()) << std::endl;
+    std::cout << "  - Max: " << *std::max_element(us.begin(), us.end()) << std::endl;
+    std::cout << "  - Mean: " << meanCalc(us) << std::endl;
+    std::cout << "  - Stdev: " << stdCalc(us) << std::endl;
 
     // Write to CSV
-    writeCSV("ss-sc_1000_Protobuf.csv", "Time taken (ms)", ms);
+    writeCSV("ss-sc_1000_Protobuf.csv", "Time taken (ms)", us);
 
     // Close socket
     close(sock);

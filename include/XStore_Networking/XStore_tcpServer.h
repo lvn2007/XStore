@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <iostream>
 #include <unistd.h>
 #include "include/XStore/XStore.h"
@@ -21,11 +22,11 @@ class XStore_tcpServer {
 
         void acceptClient();
 
-        void sendMsgInfoToClient(uint32_t nItems, uint32_t totalBytes);
-
         void sendDataToClient(std::time_t timestamp, std::string dbName);
 
         void streamDataToClient(std::time_t startTime, std::time_t endTime, std::string dbName);
+
+        xStoregRPC::messageInfo recvMsgInfoFromClient();
 
         clientCmdStruct recvCmdFromClient();
 
