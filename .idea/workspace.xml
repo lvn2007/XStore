@@ -15,22 +15,14 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Done single-threaded pingPong bench for both Protobuf &amp; Raw &amp; gRPC">
-      <change afterPath="$PROJECT_DIR$/benchmark/XStore/cpp/CMakeLists.txt" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/benchmark/XStore/cpp/xStore.proto" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/benchmark/XStore/cpp/xstoreClient_Protobuf.cpp" afterDir="false" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="WIP - XStore TCP connection">
       <change afterPath="$PROJECT_DIR$/include/XStore_Networking/TCPServer.hpp" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/include/XStore_Networking/XStore_tcpServer.h" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/include/dataStruct/clientCmdStruct.h" afterDir="false" />
       <change afterPath="$PROJECT_DIR$/src/XStore_Networking/TCPServer.cpp" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_tcpServer.cpp" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/dataStruct/clientCmdStruct.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/CMakeLists.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/XStore/XStore_Client.py" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/XStore_Client.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/mongoDB/mongoTS.py" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/mongoDB/mongoTS.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/pingPong_gRPC/sClient_gRPC.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/pingPong_gRPC/sClient_gRPC.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/protoFile/xStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/xStore.proto" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/XStore/cpp/xstoreClient_Protobuf.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/cpp/xstoreClient_Protobuf.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/include/XStore_Networking/XStore_tcpServer.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore_Networking/XStore_tcpServer.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_tcpServer.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_tcpServer.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -280,14 +272,7 @@
       <workItem from="1645242414946" duration="619000" />
       <workItem from="1645243308878" duration="30000" />
       <workItem from="1645244820190" duration="34461000" />
-      <workItem from="1647486682612" duration="14847000" />
-    </task>
-    <task id="LOCAL-00027" summary="Code cleanup">
-      <created>1637950405431</created>
-      <option name="number" value="00027" />
-      <option name="presentableId" value="LOCAL-00027" />
-      <option name="project" value="LOCAL" />
-      <updated>1637950405431</updated>
+      <workItem from="1647486682612" duration="32057000" />
     </task>
     <task id="LOCAL-00028" summary="Modified mongoDB benches &amp; Added second timing for XStore">
       <created>1638143288714</created>
@@ -625,7 +610,14 @@
       <option name="project" value="LOCAL" />
       <updated>1645242126854</updated>
     </task>
-    <option name="localTasksCounter" value="76" />
+    <task id="LOCAL-00076" summary="WIP - XStore TCP connection">
+      <created>1647632547130</created>
+      <option name="number" value="00076" />
+      <option name="presentableId" value="LOCAL-00076" />
+      <option name="project" value="LOCAL" />
+      <updated>1647632547131</updated>
+    </task>
+    <option name="localTasksCounter" value="77" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -726,7 +718,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Implemented 'getBatch'" />
     <MESSAGE value="Experimenting Protobuf &amp; gRPC" />
     <MESSAGE value="Including dependencies" />
     <MESSAGE value="Organized hpp &amp; cpp for gRPC" />
@@ -751,6 +742,7 @@
     <MESSAGE value="WIP: Working multi-threaded client/server over TCP" />
     <MESSAGE value="Done single-threaded pingPong bench for both Protobuf &amp; Raw" />
     <MESSAGE value="Done single-threaded pingPong bench for both Protobuf &amp; Raw &amp; gRPC" />
-    <option name="LAST_COMMIT_MESSAGE" value="Done single-threaded pingPong bench for both Protobuf &amp; Raw &amp; gRPC" />
+    <MESSAGE value="WIP - XStore TCP connection" />
+    <option name="LAST_COMMIT_MESSAGE" value="WIP - XStore TCP connection" />
   </component>
 </project>

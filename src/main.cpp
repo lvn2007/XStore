@@ -66,7 +66,7 @@ int main(int argc, char *argv[]) {
     std::chrono::duration<double> diff;
 
     // Instantiate XStore obj
-    XStore myStore;
+//    XStore myStore;
 
 //    myStore.insert(1483228801, "0,NaN,NaN,NaN,NaN,NaN,NaN", "tsla");
 //    myStore.insert(1451606400, "0,NaN,NaN,NaN,NaN,NaN,NaN", "tsla");
@@ -85,16 +85,15 @@ int main(int argc, char *argv[]) {
         // Start accepting client
         tcpServer.acceptClient();
 
-        for (int i = 0; i < 100; i++) {
+        for (int i = 0; i < 10000; i++) {
             // Receiving command from CLIENT
-            xStoregRPC::unaryRequestMsg clientCmd = tcpServer.recvCmdFromClientProto();
+            clientCmdStruct clientCmd = tcpServer.recvCmdFromClient();
 
 //            if (clientCmd.requestType == "UNARY") {
-                tcpServer.sendDataToClient(clientCmd.timestamp(), clientCmd.dbname());
+                tcpServer.sendDataToClient(clientCmd.startTime, clientCmd.dbName);
 //            }
         }
 
-        break;
 //        xStoregRPC::unaryRequestMsg toClient;
 //
 //        toClient.set_timestamp(123456678);

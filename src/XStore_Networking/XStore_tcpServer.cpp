@@ -2,6 +2,7 @@
 
 void XStore_tcpServer::startServer() {
     int opt = 1;
+    int flag = 1;
     struct sockaddr_in socketAddr;
 
     // Creating socket
@@ -15,7 +16,7 @@ void XStore_tcpServer::startServer() {
         perror("[ERROR] -- Failed to apply socket settings");
         exit(EXIT_FAILURE);
     }
-//    setsockopt(serverSocket, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(int));
+//    setsockopt(serverSocket, IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(int));
     socketAddr.sin_family = AF_INET;
     socketAddr.sin_addr.s_addr = INADDR_ANY;
     socketAddr.sin_port = htons(PORT);
@@ -50,35 +51,37 @@ void XStore_tcpServer::acceptClient() {
     std::cout << "[INFO] -- Accepted connection from " << clientIP << ":" <<clientPort << std::endl;
 }
 
-void XStore_tcpServer::sendMsgInfoToClient(uint32_t nItems, uint32_t totalBytes) {
-    // Preparing protobuf obj
-    xStoregRPC::messageInfo messageInfo;
-
-    // Configuring messageInfo
-    messageInfo.set_nitems(nItems);
-    messageInfo.set_msglength(totalBytes);
-
-    // messageInfo -- Info about message to be sent
-    size_t messageInfoSize = messageInfo.ByteSizeLong();
-
-    // Dispatch message info to CLIENT
-    char messageInfoBuff[messageInfoSize];
-    messageInfo.SerializeToArray(messageInfoBuff, messageInfoSize);
-    size_t n = send(clientSocket, messageInfoBuff, 128, 0);
-
-    if (n <= 0) {
-        close(serverSocket);
-        close(clientSocket);
-        std::cout << "[ERROR] Could not send data to client!" << std::endl;
-    }
-}
+//void XStore_tcpServer::sendMsgInfoToClient(uint32_t nItems, uint32_t totalBytes) {
+//    // Preparing protobuf obj
+//    xStoregRPC::messageInfo messageInfo;
+//
+//    // Configuring messageInfo
+//    messageInfo.set_nitems(nItems);
+//    messageInfo.set_msglength(totalBytes);
+//
+//    // messageInfoSize -- Size about message to be sent
+//    size_t messageInfoSize = messageInfo.ByteSizeLong();
+//
+//    // Dispatch messageInfo to CLIENT
+//    char messageInfoBuff[messageInfoSize];
+//    messageInfo.SerializeToArray(messageInfoBuff, messageInfoSize);
+//    size_t n = send(clientSocket, messageInfoBuff, 128, 0);
+//
+//    if (n <= 0) {
+//        close(serverSocket);
+//        close(clientSocket);
+//        std::cout << "[ERROR] Could not send data to client!" << std::endl;
+//    }
+//}
 
 void XStore_tcpServer::sendDataToClient(std::time_t timestamp, std::string dbName) {
-    xStore.getSingleOpenClose(timestamp, dbName);
+    // XStore query
+    std::string queryResult = xStore.getSingleOpenClose(timestamp, dbName);
 
     // Preparing protobuf obj
     xStoregRPC::responseData toClient;
-    toClient.set_dataset("asdbsxc");
+    toClient.set_timestamp(timestamp);
+    toClient.set_dataset(queryResult);
 
     // actualData -- Info about message to be sent
     size_t currentByte = 0;
@@ -86,41 +89,37 @@ void XStore_tcpServer::sendDataToClient(std::time_t timestamp, std::string dbNam
     size_t bytesleft = totalBytes;
     size_t n;
 
-    // Notify CLIENT incoming actual message
-    sendMsgInfoToClient(1, totalBytes);
-
     // Serialized Protobuf obj to bytes array
-//    void *buff = malloc(totalBytes);
     char buff[totalBytes];
     toClient.SerializeToArray(buff, totalBytes);
 
-//    for (int i = 0; i < totalBytes; i++) {
-//        std::cout << buff[i] << std::endl;
-//    }
+    n = send(clientSocket, buff, 32, 0);
+}
 
-//    while (bytesleft > 0) {
-        n = send(clientSocket, buff, bytesleft, 0);
-//        if (n == -1) {
-//            close(serverSocket);
-//            close(clientSocket);
-//            std::cout << "ERROR: Could not send data to client!" << std::endl;
-//        }
-//        currentByte += n;
-//        bytesleft -= n;
-//    }
+xStoregRPC::messageInfo XStore_tcpServer::recvMsgInfoFromClient() {
+    // Instantiate protobuf obj
+    xStoregRPC::messageInfo fromClient;
+    char clientMsgInfo[128];
+
+    // Read incoming messageInfo from CLIENT
+    int valRead = read(clientSocket, clientMsgInfo, 128);
+    fromClient.ParseFromArray(clientMsgInfo, 128);
+
+    return fromClient;
 }
 
 clientCmdStruct XStore_tcpServer::recvCmdFromClient() {
     // Instantiate protobuf obj
+    xStoregRPC::messageInfo msgInfoFromClient;
     xStoregRPC::unaryRequestMsg fromClient;
-    char clientCmd[128];
+    char clientCmd[32];
+
+    // Read incoming messageInfo from CLIENT
+//    msgInfoFromClient = recvMsgInfoFromClient();
 
     // Read incoming message from CLIENT
-    int valRead = read(clientSocket, clientCmd, 128);
-    fromClient.ParseFromArray(clientCmd, 128);
-//    std::cout << "Requested timestamp: " << fromClient.timestamp() << std::endl;
-//    std::cout << "Requested dbName: " << fromClient.dbname() << std::endl;
-//    std::cout << "Client CMD: " << fromClient.requestType_Name(fromClient.rtype()) << std::endl;
+    int valRead = recv(clientSocket, clientCmd, 32, 0);
+    fromClient.ParseFromArray(clientCmd, 32);
 
     // Parse for command type requested by CLIENT
     std::string cmdType = fromClient.requestType_Name(fromClient.rtype());

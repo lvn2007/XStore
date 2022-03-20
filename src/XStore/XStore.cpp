@@ -235,6 +235,12 @@ std::string XStore::getSingleOpenClose(std::time_t epochTime, std::string dbName
     // Remove newline at the end of char[]
     buff[strlen(buff) - 1] = '\0';
 
+    // IF a target time contains no data
+    //  -> Return "NULL" as string
+    if (strlen(buff) == 0) {
+        return "NULL";
+    }
+
     return buff;
 }
 
