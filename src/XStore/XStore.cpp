@@ -244,6 +244,47 @@ std::string XStore::getSingleOpenClose(std::time_t epochTime, std::string dbName
     return buff;
 }
 
+int XStore::getRowSize(std::string dbName) {
+    // Make sure dbName exists
+    //  IF given dbName is not available
+    //  Return -1 to indicate error
+    if (dbMap.find(dbName) == dbMap.end()) {
+        return -1;
+    }
+
+    // Look-up file descriptor in dbMap
+//    int bFile = dbMap.find(dbName)->second.getBfileMap().find(inputYear)->second;
+    int bFile = dbMap.find(dbName)->second.getBfileMap().begin()->second;
+
+    int tempLineSize = 2;
+
+    // A single line data will be read into here
+    char firstBuff[lineSize];
+    std::string tempBuff;
+
+    // Extract line of data from binary file
+    pread(bFile, &firstBuff[0], tempLineSize, 0);
+
+    while (true) {
+        tempLineSize *= 2;
+        char secondBuff[tempLineSize];
+        pread(bFile, &secondBuff[0], tempLineSize, 0);
+
+        if (std::string(secondBuff).find("\n") < tempLineSize) {
+            tempBuff = std::string(secondBuff);
+            break;
+        }
+    }
+    char lastChar = firstBuff[strlen(firstBuff) - 1];
+    std::cout << tempBuff << std::endl;
+    std::cout << tempBuff.find("\n") << std::endl;
+
+    // Remove newline at the end of char[]
+//    buff[strlen(buff) - 1] = '\0';
+
+
+}
+
 void XStore::initDB() {
     // Directory contains all data file for a specific DB
     std::filesystem::path dbNames = baseDir + "dataStore/";

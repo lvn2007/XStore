@@ -4,10 +4,12 @@
 #include <map>
 #include <cmath>
 //#include "include/XStore_Networking/XStore_gRPC.h"
-#include "include/XStore_Networking/XStore_tcpServer.h"
+#include "include/XStore_Networking/XStore_zmqServer.h"
 #include "include/XStore/XStore.h"
 #include "include/dataStruct/clientCmdStruct.h"
 #include "xStore.pb.h"
+//#include "include/XStore_Networking/zmq.hpp"
+#include "include/XStore_Networking/zmq_addon.hpp"
 
 double meanCalc(std::vector<double> inputVector) {
     double totalSum = 0;
@@ -78,41 +80,100 @@ int main(int argc, char *argv[]) {
     std::vector<double> us = { };
     std::vector<double> ns = { };
 
-    XStore_tcpServer tcpServer;
-    tcpServer.startServer();
+    XStore_zmqServer xStoreZmqServer(32);
+    xStoreZmqServer.startServer();
 
-    while (1) {
-        // Start accepting client
-        tcpServer.acceptClient();
+//    XStore_tcpServer tcpServer;
+//    tcpServer.startServer();
+//    zmq::context_t ctx;
+//    zmq::socket_t sock(ctx, zmq::socket_type::router);
+////    sock.connect("172.20.3.113:12345");
+//    sock.bind("tcp://172.20.3.113:12345");
+//
+//    for (int i = 0; i < 10000; i++) {
+//        zmq::message_t zfromClient;
+//        std::vector<zmq::message_t> recv_msgs;
+//
+////        sock.recv(zfromClient, zmq::recv_flags::none);
+//        auto res = zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
+//
+//        xStoregRPC::unaryRequestMsg fromClient;
+////        fromClient.ParseFromArray(zfromClient.data(), zfromClient.size());
+//        fromClient.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
+////        std::cout << "From client: " << fromClient.dbname() << std::endl;
+//
+//        xStoregRPC::responseData toClient;
+//        toClient.set_timestamp(123456789);
+////        toClient.set_dataset("FromServer");
+//        size_t byteSize = toClient.ByteSizeLong();
+//
+//        // SENDING
+//        zmq::message_t z_out(byteSize);
+//        toClient.SerializeToArray(z_out.data(), byteSize);
+//
+//        // Reply address
+//        sock.send(recv_msgs[0], zmq::send_flags::sndmore);
+////        std::cout << "Rep addr: " << recv_msgs[0] << std::endl;
+//
+//        // Deli
+//        zmq::message_t zmqMsgDeli(0);
+//        sock.send(zmqMsgDeli, zmq::send_flags::sndmore);
+//
+//        sock.send(z_out, zmq::send_flags::none);
 
-        for (int i = 0; i < 10000; i++) {
-            // Receiving command from CLIENT
-            clientCmdStruct clientCmd = tcpServer.recvCmdFromClient();
+//        std::cout << "Send status: " << sentRes.value() << std::endl;
+//        std::cout << "Sent to CLIENT: " << toClient.dataset() << std::endl;
+//    }
 
-//            if (clientCmd.requestType == "UNARY") {
-                tcpServer.sendDataToClient(clientCmd.startTime, clientCmd.dbName);
-//            }
-        }
+//    myStore.getRowSize("tsla");
 
-//        xStoregRPC::unaryRequestMsg toClient;
+//    xStoregRPC::dbSizeRecord dbSizeRecord;
+//    for (int i = 1; i < 4; i++) {
+//        xStoregRPC::recordSize* recordSize = dbSizeRecord.add_recordsize();
+//        recordSize->set_dbname(std::to_string(i));
+//        recordSize->set_rowsize(i);
+//    }
 //
-//        toClient.set_timestamp(123456678);
-//        toClient.set_dbname("TSLA");
+//    std::cout << "----" << std::endl;
 //
-//        std::cout << toClient.timestamp() << std::endl;
-//        std::cout << toClient.dbname() << std::endl;
+//    for (int i = 0; i < dbSizeRecord.recordsize_size(); i++) {
+//        std::cout << dbSizeRecord.recordsize(i).DebugString() << std::endl;
+//    }
 //
-//        std::cout << toClient.ByteSizeLong() << std::endl;
-//        char* array = new char[toClient.ByteSizeLong()];
-//        toClient.SerializeToArray(array, toClient.ByteSizeLong());
+//    std::cout << dbSizeRecord.recordsize_size() << std::endl;
+
+//    while (1) {
+//        // Start accepting client
+//        tcpServer.acceptClient();
 //
-//        std::cout << "START" << std::endl;
-//        for (int i = 0; i < toClient.ByteSizeLong(); i++) {
-//            std::cout << (int) array[i] << std::endl;
+//        for (int i = 0; i < 10000; i++) {
+//            // Receiving command from CLIENT
+//            clientCmdStruct clientCmd = tcpServer.recvCmdFromClient();
+//
+////            if (clientCmd.requestType == "UNARY") {
+//                tcpServer.sendDataToClient(clientCmd.startTime, clientCmd.dbName);
+////            }
 //        }
-//        std::cout << "END" << std::endl;
-//        std::cout << array[0] << std::endl;
-    }
+//
+////        xStoregRPC::unaryRequestMsg toClient;
+////
+////        toClient.set_timestamp(123456678);
+////        toClient.set_dbname("TSLA");
+////
+////        std::cout << toClient.timestamp() << std::endl;
+////        std::cout << toClient.dbname() << std::endl;
+////
+////        std::cout << toClient.ByteSizeLong() << std::endl;
+////        char* array = new char[toClient.ByteSizeLong()];
+////        toClient.SerializeToArray(array, toClient.ByteSizeLong());
+////
+////        std::cout << "START" << std::endl;
+////        for (int i = 0; i < toClient.ByteSizeLong(); i++) {
+////            std::cout << (int) array[i] << std::endl;
+////        }
+////        std::cout << "END" << std::endl;
+////        std::cout << array[0] << std::endl;
+//    }
 
 //    xStoreServiceImplementation xStoreServiceImplementation;
 //    xStoreServiceImplementation.Run();

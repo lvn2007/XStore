@@ -43,10 +43,12 @@ include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 include_directories(.)
 
 # WITHOUT gRPC
-add_executable(xstoreClient_Protobuf ${PROTO_SRCS} ${PROTO_HDRS} xstoreClient_Protobuf.cpp)
+add_executable(xstoreClient_Protobuf ${PROTO_SRCS} ${PROTO_HDRS} xstoreClient_Protobuf.cpp zmq.hpp zmq_addon.hpp)
+add_executable(xstoreServer_Protobuf ${PROTO_SRCS} ${PROTO_HDRS} xstoreServer_Protobuf.cpp zhelpers.hpp zmq.hpp)
 
 if(${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS 9)
-    target_link_libraries(xstoreClient_Protobuf PUBLIC ${Protobuf_LIBRARIES})
+    target_link_libraries(xstoreClient_Protobuf PUBLIC ${Protobuf_LIBRARIES} "zmq")
+    target_link_libraries(xstoreServer_Protobuf PUBLIC ${Protobuf_LIBRARIES} "zmq" "pthread")
 endif()
 
 # WITH gRPC

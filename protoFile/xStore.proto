@@ -12,6 +12,15 @@ service xStore {
   rpc batchRequest (rangeRequestMsg) returns (stream responseData) {}
 }
 
+message recordSize {
+  string dbName = 1;
+  uint32 rowSize = 2;
+}
+
+message dbSizeRecord {
+  repeated recordSize recordsize = 1;
+}
+
 // The request message containing requested numbers
 message unaryRequestMsg {
   enum requestType {

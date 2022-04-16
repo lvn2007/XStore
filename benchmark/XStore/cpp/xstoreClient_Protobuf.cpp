@@ -9,6 +9,8 @@
 #include <cmath>
 #include <fstream>
 #include "xStore.pb.h"
+#include "zmq.hpp"
+#include "zmq_addon.hpp"
 
 #define IP_ADDR "172.20.3.113"
 #define PORT 12345
@@ -105,34 +107,34 @@ void sendMsgInfoToServer(int serverSocket, int nItems, int totalBytes) {
 
 int main(int argc, char const *argv[])
 {
-    int sock = 0, valread;
-    struct sockaddr_in serv_addr;
-    char buffer[1024] = {0};
-    void *sendBuff = malloc(32);
-    int flag = 1;
-
-    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
-    {
-        printf("\n Socket creation error \n");
-        return -1;
-    }
-
-//    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(int));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(PORT);
-
-    // Convert IPv4 and IPv6 addresses from text to binary form
-    if(inet_pton(AF_INET, IP_ADDR, &serv_addr.sin_addr)<=0)
-    {
-        printf("\nInvalid address/ Address not supported \n");
-        return -1;
-    }
-
-    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
-    {
-        printf("\nConnection Failed \n");
-        return -1;
-    }
+//    int sock = 0, valread;
+//    struct sockaddr_in serv_addr;
+//    char buffer[4096] = {0};
+//    void *sendBuff = malloc(32);
+//    int flag = 1;
+//
+//    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+//    {
+//        printf("\n Socket creation error \n");
+//        return -1;
+//    }
+//
+////    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(int));
+//    serv_addr.sin_family = AF_INET;
+//    serv_addr.sin_port = htons(PORT);
+//
+//    // Convert IPv4 and IPv6 addresses from text to binary form
+//    if(inet_pton(AF_INET, IP_ADDR, &serv_addr.sin_addr)<=0)
+//    {
+//        printf("\nInvalid address/ Address not supported \n");
+//        return -1;
+//    }
+//
+//    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
+//    {
+//        printf("\nConnection Failed \n");
+//        return -1;
+//    }
 
     std::vector<double> us = { };
     std::vector<double> protoMs = { };
@@ -145,33 +147,69 @@ int main(int argc, char const *argv[])
     srand(time(NULL));
     long int randTime;
 
-    for (int i = 0; i < nIter; i++) {
-        randTime = rand() % 1000 + 1;
-        long targetTime = 1451606400 + randTime;
+    zmq::context_t ctx;
+    zmq::socket_t sock(ctx, zmq::socket_type::req);
+
+    sock.connect("tcp://172.20.3.113:12345");
+
+    for (int i = 0; i < 10000; i++) {
         start = std::chrono::high_resolution_clock::now();
-
-        // Instantiate protobuf obj
         xStoregRPC::unaryRequestMsg toServer;
+        toServer.set_rtype(toServer.UNARY);
+        toServer.set_timestamp(123456789);
+        toServer.set_dbname("TSLA");
+
+        size_t byteSize = toServer.ByteSizeLong();
+        zmq::message_t z_out(byteSize);
+        toServer.SerializeToArray(z_out.data(), byteSize);
+        sock.send(z_out, zmq::send_flags::none);
+
+        // RECEIVING
+        std::vector<zmq::message_t> recv_msgs;
+
+        zmq::message_t zFromServer;
+
+//        auto res = sock.recv(zFromServer);
+        zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
+
+//        std::cout << "Received: " << zFromServer.to_string_view() << std::endl;
         xStoregRPC::responseData fromServer;
-
-        // Preparing request to SERVER
-        toServer.set_timestamp(targetTime);
-        toServer.set_dbname("tsla");
-        toServer.set_rtype(xStoregRPC::unaryRequestMsg::UNARY);
-        toServer.SerializeToArray(sendBuff, 32);
-
-        // Dispatch request to SERVER
-        send(sock, sendBuff, 32, 0);
-
-        // Read incoming msg from SERVER
-        valread = recv(sock, buffer, 32, 0);
-        fromServer.ParseFromArray(buffer, 32);
-
+//        fromServer.ParseFromArray(zFromServer.data(), zFromServer.size());
+        fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
+//        std::cout << "From server: " << fromServer.dataset() << std::endl;
         end = std::chrono::high_resolution_clock::now();
         diff = end - start;
-        std::cout << "From server: " << fromServer.dataset() << "\n" << std::endl;
+//        std::cout << "From server: " << fromServer.dataset() << "\n" << std::endl;
         us.push_back(std::chrono::duration<double, std::micro> (diff).count());
     }
+
+//    for (int i = 0; i < nIter; i++) {
+//        randTime = rand() % 1000 + 1;
+//        long targetTime = 1451606400 + randTime;
+//        start = std::chrono::high_resolution_clock::now();
+//
+//        // Instantiate protobuf obj
+//        xStoregRPC::unaryRequestMsg toServer;
+//        xStoregRPC::responseData fromServer;
+//
+//        // Preparing request to SERVER
+//        toServer.set_timestamp(targetTime);
+//        toServer.set_dbname("tsla");
+//        toServer.set_rtype(xStoregRPC::unaryRequestMsg::UNARY);
+//        toServer.SerializeToArray(sendBuff, 32);
+//
+//        // Dispatch request to SERVER
+//        send(sock, sendBuff, 32, 0);
+//
+//        // Read incoming msg from SERVER
+//        valread = recv(sock, buffer, 4096, 0);
+//        fromServer.ParseFromArray(buffer, 4096);
+//
+//        end = std::chrono::high_resolution_clock::now();
+//        diff = end - start;
+//        std::cout << "From server: " << fromServer.dataset() << "\n" << std::endl;
+//        us.push_back(std::chrono::duration<double, std::micro> (diff).count());
+//    }
 
     std::cout << nIter << " queries experiments" << std::endl;
     std::cout << "--- EXECUTION TIME in [us] ---" << std::endl;
@@ -181,8 +219,8 @@ int main(int argc, char const *argv[])
     std::cout << "  - Stdev: " << stdCalc(us) << std::endl;
 
     // Write to CSV
-    writeCSV("ss-sc_1000_Protobuf.csv", "Time taken (ms)", us);
+    writeCSV("zmq_1000_Protobuf.csv", "Time taken (us)", us);
 
-    // Close socket
-    close(sock);
+//    // Close socket
+//    close(sock);
 }
