@@ -93,7 +93,7 @@ void XStore_tcpServer::sendDataToClient(std::time_t timestamp, std::string dbNam
     char buff[totalBytes];
     toClient.SerializeToArray(buff, totalBytes);
 
-    n = send(clientSocket, buff, 32, 0);
+    n = send(clientSocket, buff, 4096, 0);
 }
 
 xStoregRPC::messageInfo XStore_tcpServer::recvMsgInfoFromClient() {
@@ -108,27 +108,27 @@ xStoregRPC::messageInfo XStore_tcpServer::recvMsgInfoFromClient() {
     return fromClient;
 }
 
-clientCmdStruct XStore_tcpServer::recvCmdFromClient() {
-    // Instantiate protobuf obj
-    xStoregRPC::messageInfo msgInfoFromClient;
-    xStoregRPC::unaryRequestMsg fromClient;
-    char clientCmd[32];
-
-    // Read incoming messageInfo from CLIENT
-//    msgInfoFromClient = recvMsgInfoFromClient();
-
-    // Read incoming message from CLIENT
-    int valRead = recv(clientSocket, clientCmd, 32, 0);
-    fromClient.ParseFromArray(clientCmd, 32);
-
-    // Parse for command type requested by CLIENT
-    std::string cmdType = fromClient.requestType_Name(fromClient.rtype());
-
-    // Construct clientCmdStruct to return
-    clientCmdStruct clientCmdStruct(cmdType, fromClient.timestamp(), 123456789, fromClient.dbname());
-
-    return clientCmdStruct;
-}
+//clientCmdStruct XStore_tcpServer::recvCmdFromClient() {
+//    // Instantiate protobuf obj
+//    xStoregRPC::messageInfo msgInfoFromClient;
+//    xStoregRPC::unaryRequestMsg fromClient;
+//    char clientCmd[32];
+//
+//    // Read incoming messageInfo from CLIENT
+////    msgInfoFromClient = recvMsgInfoFromClient();
+//
+//    // Read incoming message from CLIENT
+//    int valRead = recv(clientSocket, clientCmd, 32, 0);
+//    fromClient.ParseFromArray(clientCmd, 32);
+//
+//    // Parse for command type requested by CLIENT
+//    std::string cmdType = fromClient.requestType_Name(fromClient.rtype());
+//
+//    // Construct clientCmdStruct to return
+//    clientCmdStruct clientCmdStruct(cmdType, fromClient.timestamp(), 123456789, fromClient.dbname());
+//
+//    return clientCmdStruct;
+//}
 
 xStoregRPC::unaryRequestMsg XStore_tcpServer::recvCmdFromClientProto() {
     // Instantiate protobuf obj
