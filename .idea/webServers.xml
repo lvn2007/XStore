@@ -23,6 +23,13 @@
           </advancedOptions>
         </fileTransfer>
       </webServer>
+      <webServer id="8ed07775-fbd7-4df3-b7a9-44e621daab10" name="8Socket">
+        <fileTransfer rootFolder="/home/lnguyen" accessType="SFTP" host="eightsocket.mystic.cs.iit.edu" port="22" sshConfigId="568a376d-86a3-4ac7-ae04-41743d38efd1" sshConfig="lnguyen@eightsocket.mystic.cs.iit.edu:22 password">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" keepAliveTimeout="0" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
     </option>
   </component>
 </project>

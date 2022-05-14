@@ -1,5 +1,5 @@
-#ifndef XSTORE_FILESTRUCT_H
-#define XSTORE_FILESTRUCT_H
+#ifndef XSTORE_FILESTRUCTS_H
+#define XSTORE_FILESTRUCTS_H
 
 #include <iostream>
 #include <filesystem>
@@ -32,4 +32,4 @@ struct fileStruct {
         int extractYear(std::string);
 };
 
-#endif //XSTORE_FILESTRUCT_H
+#endif //XSTORE_FILESTRUCTS_H

@@ -9,8 +9,6 @@
 
 class XStore_zmqServer {
     private:
-        std::string PORT = "12345";
-        XStore xStore;
         int numThreads = 1;
 
         // Work routines in each thread
@@ -18,7 +16,7 @@ class XStore_zmqServer {
 
     public:
         XStore_zmqServer(int numThreads);
-        void startServer();
+        void startServer(std::string listenAddr, std::string listenPort);
 };
 
 #endif //XSTORE_XSTORE_ZMQSERVER_H

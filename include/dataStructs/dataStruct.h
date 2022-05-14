@@ -1,5 +1,5 @@
-#ifndef XSTORE_DATASTRUCT_H
-#define XSTORE_DATASTRUCT_H
+#ifndef XSTORE_DATASTRUCTS_H
+#define XSTORE_DATASTRUCTS_H
 
 #include <iostream>
 #include <filesystem>
@@ -22,4 +22,4 @@ struct dataStruct {
     void printData(bool humanTime);
 };
 
-#endif //XSTORE_DATASTRUCT_H
+#endif //XSTORE_DATASTRUCTS_H
