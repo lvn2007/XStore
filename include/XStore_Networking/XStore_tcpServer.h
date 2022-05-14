@@ -9,7 +9,7 @@
 #include <iostream>
 #include <unistd.h>
 #include "include/XStore/XStore.h"
-#include "include/dataStruct/clientCmdStruct.h"
+#include "include/dataStructs/clientCmdStruct.h"
 #include "xStore.pb.h"
 
 class XStore_tcpServer {

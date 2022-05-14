@@ -1,5 +1,5 @@
-#ifndef XSTORE_CLIENTCMDSTRUCT_H
-#define XSTORE_CLIENTCMDSTRUCT_H
+#ifndef XSTORE_CLIENTCMDSTRUCTS_H
+#define XSTORE_CLIENTCMDSTRUCTS_H
 
 #include <iostream>
 #include <filesystem>
@@ -14,4 +14,4 @@ struct clientCmdStruct {
     clientCmdStruct(std::string requestType, std::time_t startTime, std::time_t endTime, std::string dbName);
 };
 
-#endif //XSTORE_CLIENTCMDSTRUCT_H
+#endif //XSTORE_CLIENTCMDSTRUCTS_H

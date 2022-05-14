@@ -5,7 +5,7 @@
 // Initialization
 XStore::XStore() {
     // Initialize message
-    initMsg();
+//    initMsg();
 
     // Initialize DB
     initDB();
@@ -14,100 +14,160 @@ XStore::XStore() {
     hasDB();
 }
 
+bool XStore::createDB(std::string dbName, int rowLength) {
+    // Fetch all dirs in dataStore dir
+    dbStats();
+
+    // Ensure dbName string is all capitalized
+    for (int i = 0; i < dbName.size(); i++) {
+        dbName[i] = toupper(dbName[i]);
+    }
+
+    // Check if dbName is already existed in XStore
+    bool isFound = std::find(dbNames.begin(), dbNames.end(), dbName) != dbNames.end();
+
+    // IF folder for dbName is already created
+    //  -> Do nothing
+    if (isFound) {
+        return false;
+    }
+
+    // Else -> Create folder
+    std::filesystem::create_directories(baseDir + "dataStore/" + dbName);
+
+    // Dumps db configuration info to disk
+    //  Organize configs into a struct
+    configStruct cfgStruct;
+    strcpy(cfgStruct.dbName, dbName.c_str());
+    strcpy(cfgStruct.timeResolution, "NULL");
+    cfgStruct.rowLength = rowLength;
+
+    //  I/O related items
+    std::string configFilePath = baseDir + "dataStore/" + dbName + "/" + dbName + ".config";
+    int bFile = open(configFilePath.c_str(), O_WRONLY | O_CREAT, 0666);
+
+    //  Write config to binary file
+    pwrite(bFile, &cfgStruct, sizeof(configStruct), 0);
+    close(bFile);
+
+//    std::cout << "dbCount: " << dbCount << std::endl;
+
+//    configStruct testData;
+//    int bbFile = open(configFilePath.c_str(), O_RDONLY);
+//
+//    pread(bbFile, &testData, sizeof(configStruct), 0);
+//    testData.printData();
+
+    // Re-run dbStats to update new changes
+    dbStats();
+}
+
 // INSERT time-series oriented values
 void XStore::insert(std::time_t unixTime, std::string value, std::string dbName) {
-    // Read timeValue -- UNIX time
+    // Fetch all dirs in dataStore dir
+    dbStats();
+
+    // IF no DB exists i.e., dbCount == 0
+    //  Requiring a db space to be instantiated with "createDB" method prior to this
+    if (dbCount == 0) {
+        return;
+    }
+
+    // Check whether dbName is already created
+    //  Ensure dbName string is all capitalized
+    for (int i = 0; i < dbName.size(); i++) {
+        dbName[i] = toupper(dbName[i]);
+    }
+
+    //  Check if dbName is already existed in XStore
+    bool isFound = std::find(dbNames.begin(), dbNames.end(), dbName) != dbNames.end();
+
+    //  IF dbName is NOT existed
+    //   -> Do nothing
+    if (!isFound) {
+        return;
+    }
+
+    // Otherwise, create a file with name of inputYear.XSTORE
+    //  Read timeValue -- UNIX time
+    //  Ensure timeResolution is enforced
+    configStruct cfgStruct;
+    std::string cfgFilePath = baseDir + "dataStore/" + dbName + "/" + dbName + ".config";
+    int cfgFile = open(cfgFilePath.c_str(), O_RDWR);
+    pread(cfgFile, &cfgStruct, sizeof(configStruct), 0);
+
+    //  timeResolution staging area
     int inputYear = toHumanYear(unixTime);
     std::string currResolution = getTimeResolution(unixTime);
-    std::cout << resolutionMap[currResolution] << std::endl;
 
-    FILE *bFile;
-
-    // Start & End time of a given year
+    //  Start & End time of a given year
     long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
     long int endEpoch = getEndTimeEpoch(inputYear, currResolution);
 
-    // IF no DB exists i.e., dbCount == 0
-    if (dbCount == 0) {
-        //  -> Create new one
-        std::filesystem::create_directories(baseDir + "dataStore/" + dbName);
-
-        // -> Create a file with name of inputYear.XSTORE
-        std::string dataDir = baseDir + "dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
-        bFile = std::fopen(dataDir.c_str(), "wb+");
-
-        // Creating dummy file with n Size
-        ftruncate(fileno(bFile), (endEpoch - startEpoch) * lineSize);
-
-        // IF no error
-        // -> Organize timestamp & data into an object
-        dataStruct currData{unixTime, value};
-
-        // Epoch time difference between target & startEpoch
-        long int diff = unixTime - startEpoch;
-
-        // Calculate offset -- Exact location of where a particular target row is stored
-        long int offSet = diff * lineSize;
-
-        // Seek to target offset prior to write
-        std::fseek(bFile, offSet, SEEK_SET);
-
-        // Write as binary file to disk with new line indicates EOL
-        std::fwrite((currData.getData()).data(), lineSize, 1, bFile);
-
-        // Close file after write
-        std::fclose(bFile);
-
-        // Updating dbStats
-        dbStats();
+    //  IF timeResolution is not yet initialized
+    //   -> First inserting time will determine resolution of this current DB
+    if (strcmp(cfgStruct.timeResolution, "NULL") == 0) {
+        // Updating configFile and dump to disk
+        strcpy(cfgStruct.timeResolution, currResolution.c_str());
+        pwrite(cfgFile, &cfgStruct, sizeof(configStruct), 0);
+        close(cfgFile);
     }
+
+    //  Staging area for new data file waiting to be inserted
+    std::string dataFilePath = baseDir + "dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
+    FILE *bFile;
+
+    // DB is empty
+    if (dbMap.size() == 0) {
+        bFile = std::fopen(dataFilePath.c_str(), "wb+");
+
+        //  Creating dummy file with n Size from cfgStruct
+        ftruncate(fileno(bFile), (endEpoch - startEpoch) * cfgStruct.rowLength);
+    }
+
+    // DB is not empty
     else {
-        // Making sure a DB's directory is there
-        std::filesystem::create_directories(baseDir + "dataStore/" + dbName);
+        // Ensure that the file inputYear.XSTORE is NOT existed
+        if (dbMap.find(dbName)->second.hasYear(inputYear) != true) {
+            bFile = std::fopen(dataFilePath.c_str(), "wb+");
 
-        // -> Create a file with name of inputYear.XSTORE
-        std::string dataDir = baseDir + "dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
-
-        // Check if year.XSTORE exists
-        //  IF year.XSTORE exists
-        if (hasDBFile(dataDir)) {
-            // Open in updating mode
-            bFile = std::fopen(dataDir.c_str(), "r+b");
+            //  Creating dummy file with n Size from cfgStruct
+            ftruncate(fileno(bFile), (endEpoch - startEpoch) * cfgStruct.rowLength);
         }
-        //  IF year.XSTORE exists
+        // IF inputYear.XSTORE existed
+        //  -> Open in append mode
         else {
-            // Create & write mode
-            bFile = std::fopen(dataDir.c_str(), "wb");
-
-            // Creating dummy file with n Size
-            ftruncate(fileno(bFile), (endEpoch - startEpoch) * lineSize);
+            bFile = std::fopen(dataFilePath.c_str(), "rb+");
+            rewind(bFile);
         }
-
-        // IF no error
-        // -> Organize timestamp & data into an object
-        dataStruct currData{unixTime, value};
-
-        // Epoch time difference between target & startEpoch
-        long int diff = unixTime - startEpoch;
-
-        // Calculate offset -- Exact location of where a particular target row is stored
-        long int offSet = diff * (lineSize);
-
-        // Seek to target offset prior to write
-        std::fseek(bFile, offSet, SEEK_SET);
-
-        // Write as binary file to disk with new line indicates EOL
-        std::fwrite((currData.getData()).data(), lineSize, 1, bFile);
-
-        // Close file after write
-        std::fclose(bFile);
-
-        // Updating dbStats
-        dbStats();
     }
+
+    // IF no error
+    // -> Organize timestamp & data into an object
+    dataStruct currData{unixTime, value};
+
+    // Writing actual data to disk
+    //  Epoch time difference between target & startEpoch
+    long int diff = unixTime - startEpoch;
+
+    //  Calculate offset -- Exact location of where a particular target row is stored
+    long int offSet = diff * cfgStruct.rowLength;
+
+    //  Seek to target offset prior to write
+    std::fseek(bFile, offSet, SEEK_SET);
+
+    //  Write as binary file to disk with new line indicates EOL
+    std::fwrite((currData.getData()).data(), cfgStruct.rowLength, 1, bFile);
+
+    //  Close file after write
+    std::fclose(bFile);
+
+    //  Updating dbStats & dbMap
+    dbStats();
+    initDB();
 }
 
-void XStore::batchInsert(std::time_t epochTime, std::string value, std::string dbName) {
+void XStore::insertBatch(std::time_t epochTime, std::string value, std::string dbName) {
 
 }
 
@@ -137,6 +197,67 @@ std::string XStore::get(std::time_t epochTime, std::string dbName) {
     std::fclose(bFile);
     std::string toReturn(buff);
     return toReturn;
+}
+
+std::string XStore::getSingleOpenClose(std::time_t epochTime, std::string dbName) {
+    // Fetch all dirs in dataStore dir
+    dbStats();
+
+    // Make sure dbName exists
+    //  IF given dbName is not available
+    //  Return "NULL" as string
+    if (dbMap.find(dbName) == dbMap.end()) {
+        return "NULL";
+    }
+
+    // Read timeValue -- UNIX time
+    int inputYear = toHumanYear(epochTime);
+
+    // Make sure inputYear is available in DB
+    //  IF inputYear is not available
+    //  Return "NULL" as string
+    if ((dbMap.find(dbName)->second.hasYear(inputYear)) != true) {
+        return "NULL";
+    }
+
+    // Fetch config of a target DB
+    configStruct cfgStruct;
+    std::string cfgFilePath = baseDir + "dataStore/" + dbName + "/" + dbName + ".config";
+    int cfgFile = open(cfgFilePath.c_str(), O_RDONLY);
+    pread(cfgFile, &cfgStruct, sizeof(configStruct), 0);
+
+    // Otherwise, keep processing
+//    std::string currResolution = getTimeResolution(epochTime);
+
+    // Start epoch time of a given year
+    long int startEpoch = getStartTimeEpoch(inputYear, cfgStruct.timeResolution);
+
+    // Epoch time difference between target & startEpoch
+    long int diff = epochTime - startEpoch;
+
+    // Calculate offset -- Exact location of where a particular target row is stored
+    long int offSet = diff * cfgStruct.rowLength;
+    std::cout << "offset: " << offSet << std::endl;
+    // Look-up file descriptor in dbMap
+    int bFile = dbMap.find(dbName)->second.getBfileMap().find(inputYear)->second;
+//    int sync = fsync(bFile);
+
+    // A single line data will be read into here
+    char buff[cfgStruct.rowLength];
+
+    // Extract line of data from binary file
+    pread(bFile, &buff[0], cfgStruct.rowLength , offSet);
+
+    // Remove newline at the end of char[]
+    buff[strlen(buff) - 1] = '\0';
+
+    // IF a target time contains no data
+    //  -> Return "NULL" as string
+    if (strlen(buff) == 0) {
+        return "NULL";
+    }
+
+    return buff;
 }
 
 std::vector<std::string> XStore::getBatch(std::time_t startEpochT, std::time_t endEpochT, std::string dbName) {
@@ -193,57 +314,6 @@ std::vector<std::string> XStore::getBatch(std::time_t startEpochT, std::time_t e
     return toReturn;
 }
 
-std::string XStore::getSingleOpenClose(std::time_t epochTime, std::string dbName) {
-    // Make sure dbName exists
-    //  IF given dbName is not available
-    //  Return "NULL" as string
-    if (dbMap.find(dbName) == dbMap.end()) {
-        return "NULL";
-    }
-
-    // Read timeValue -- UNIX time
-    int inputYear = toHumanYear(epochTime);
-
-    // Make sure inputYear is available in DB
-    //  IF inputYear is not available
-    //  Return "NULL" as string
-    if ((dbMap.find(dbName)->second.hasYear(inputYear)) != true) {
-        return "NULL";
-    }
-
-    // Otherwise, keep processing
-    std::string currResolution = getTimeResolution(epochTime);
-
-    // Start epoch time of a given year
-    long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
-
-    // Epoch time difference between target & startEpoch
-    long int diff = epochTime - startEpoch;
-
-    // Calculate offset -- Exact location of where a particular target row is stored
-    long int offSet = diff * lineSize;
-
-    // Look-up file descriptor in dbMap
-    int bFile = dbMap.find(dbName)->second.getBfileMap().find(inputYear)->second;
-
-    // A single line data will be read into here
-    char buff[lineSize];
-
-    // Extract line of data from binary file
-    pread(bFile, &buff[0], lineSize , offSet);
-
-    // Remove newline at the end of char[]
-    buff[strlen(buff) - 1] = '\0';
-
-    // IF a target time contains no data
-    //  -> Return "NULL" as string
-    if (strlen(buff) == 0) {
-        return "NULL";
-    }
-
-    return buff;
-}
-
 int XStore::getRowSize(std::string dbName) {
     // Make sure dbName exists
     //  IF given dbName is not available
@@ -288,6 +358,8 @@ int XStore::getRowSize(std::string dbName) {
 void XStore::initDB() {
     // Directory contains all data file for a specific DB
     std::filesystem::path dbNames = baseDir + "dataStore/";
+
+    dbMap.clear();
 
     // Loop through each dbName
     for (auto& p : std::filesystem::directory_iterator(dbNames))
@@ -347,7 +419,12 @@ void XStore::initMsg() {
 }
 
 void XStore::dbStats() {
+    // Path of dataStore
     std::filesystem::path dbDir = baseDir + "dataStore";
+
+    // Reset dbCount & dbNames list
+    dbCount = 0;
+    dbNames.clear();
 
     for (auto& p : std::filesystem::directory_iterator(dbDir))
     {

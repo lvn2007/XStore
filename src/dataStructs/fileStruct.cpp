@@ -1,4 +1,4 @@
-#include "include/dataStruct/fileStruct.h"
+#include "include/dataStructs/fileStruct.h"
 
 // Constructor
 fileStruct::fileStruct(std::string dbName, std::string baseDir) {
@@ -44,6 +44,12 @@ void fileStruct::openAllDBFiles() {
         // File path as string
         //  i.e., /home/ubuntu/XStore/dataStore/tsla/2017.XSTORE
         currDataFilePath = p.path().string();
+
+        // IF meets with any file that's not .XSTORE
+        //  -> Skip to next iteration
+        if (currDataFilePath.find(".XSTORE") == currDataFilePath.npos) {
+            continue;
+        }
 
         // Extracted file name from path
         //  i.e., 2017

@@ -12,8 +12,9 @@
 #include <sys/stat.h>
 #include <algorithm>
 
-#include "include/dataStruct/dataStruct.h"
-#include "include/dataStruct/fileStruct.h"
+#include "include/dataStructs/dataStruct.h"
+#include "include/dataStructs/fileStruct.h"
+#include "include/dataStructs/configStruct.h"
 #include <xStore.grpc.pb.h>
 
 class XStore {
@@ -28,10 +29,14 @@ class XStore {
         // Initialization
         XStore();
 
+        // CREATING new DB instance with row length
+        bool createDB(std::string dbName, int rowLength);
+
         // INSERT time-series oriented values
         void insert(std::time_t epochTime, std::string value, std::string dbName);
 
-        void batchInsert(std::time_t epochTime, std::string value, std::string dbName);
+        // INSERT BATCH time-series oriented values
+        void insertBatch(std::time_t epochTime, std::string value, std::string dbName);
 
         std::string get(std::time_t epochTime, std::string dbName);
 

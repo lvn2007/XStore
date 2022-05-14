@@ -152,12 +152,15 @@ int main(int argc, char const *argv[])
 
     sock.connect("tcp://172.20.3.113:12345");
 
-    for (int i = 0; i < 10000; i++) {
+    for (int i = 0; i < nIter; i++) {
+        randTime = rand() % 1000 + 1;
+        long unixTime = 1451606400 + randTime;
+
         start = std::chrono::high_resolution_clock::now();
         xStoregRPC::unaryRequestMsg toServer;
         toServer.set_rtype(toServer.UNARY);
-        toServer.set_timestamp(123456789);
-        toServer.set_dbname("TSLA");
+        toServer.set_timestamp(unixTime);
+        toServer.set_dbname("tsla");
 
         size_t byteSize = toServer.ByteSizeLong();
         zmq::message_t z_out(byteSize);
@@ -176,10 +179,13 @@ int main(int argc, char const *argv[])
         xStoregRPC::responseData fromServer;
 //        fromServer.ParseFromArray(zFromServer.data(), zFromServer.size());
         fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
-//        std::cout << "From server: " << fromServer.dataset() << std::endl;
+
         end = std::chrono::high_resolution_clock::now();
         diff = end - start;
-//        std::cout << "From server: " << fromServer.dataset() << "\n" << std::endl;
+
+        std::cout << "[Response] -- Timestamp: " << fromServer.timestamp() << std::endl;
+        std::cout << "[Response] -- Data: " << fromServer.dataset() << std::endl << std::endl;
+
         us.push_back(std::chrono::duration<double, std::micro> (diff).count());
     }
 

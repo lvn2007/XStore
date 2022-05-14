@@ -55,11 +55,11 @@ include_directories(src)
 include_directories(protoFile)
 
 # WITHOUT gRPC
-add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h src/dataStruct/dataStruct.cpp
-        include/dataStruct/dataStruct.h src/XStore_Networking/XStore_tcpServer.cpp include/XStore_Networking/XStore_tcpServer.h
-        ${PROTO_SRCS} ${PROTO_HDRS} src/dataStruct/fileStruct.cpp include/dataStruct/fileStruct.h include/XStore_Networking/zmq.hpp
+add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h src/dataStructs/dataStruct.cpp
+        include/dataStructs/dataStruct.h src/XStore_Networking/XStore_tcpServer.cpp include/XStore_Networking/XStore_tcpServer.h
+        ${PROTO_SRCS} ${PROTO_HDRS} src/dataStructs/fileStruct.cpp include/dataStructs/fileStruct.h include/XStore_Networking/zmq.hpp
         include/XStore_Networking/zmq_addon.hpp include/XStore_Networking/XStore_zmqServer.h src/XStore_Networking/XStore_zmqServer.cpp
-        include/XStore_Networking/zhelpers.hpp)
+        include/XStore_Networking/zhelpers.hpp src/dataStructs/configStruct.cpp include/dataStructs/configStruct.h)
 
 if(${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS 9)
     target_link_libraries(XStore PUBLIC "stdc++fs" ${Protobuf_LIBRARIES} "zmq")
