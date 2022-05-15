@@ -2,6 +2,7 @@
 #define XSTORE_XSTORE_H
 
 #include <string>
+#include <cstring>
 #include <map>
 #include <iostream>
 #include <filesystem>
@@ -11,11 +12,11 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <algorithm>
+#include "xStore.pb.h"
 
 #include "include/dataStructs/dataStruct.h"
 #include "include/dataStructs/fileStruct.h"
 #include "include/dataStructs/configStruct.h"
-#include <xStore.grpc.pb.h>
 
 class XStore {
     public:
@@ -24,7 +25,7 @@ class XStore {
 
         int dbCount = 0;
         std::vector<std::string> dbNames = { };
-        std::map<std::string, long int> resolutionMap { {"SECOND", 31536000}, {"MILLISECOND", 31536000000}, {"MICROSECOND", 31536000000000} };
+        std::map<std::string, long int> resolutionMap { {"SECOND", 31536000}, {"MILLISECOND", 31536000000}, {"MICROSECOND", 31536000000000}, {"NANOSECOND", 31536000000000000} };
 
         // Initialization
         XStore();
@@ -42,7 +43,7 @@ class XStore {
 
         std::vector<std::string> getBatch(std::time_t startEpochT, std::time_t endEpochT, std::string dbName);
 
-        std::string getSingleOpenClose(std::time_t epochTime, std::string dbName);
+        xstoreProto::unaryResponse getSingleOpenClose(std::time_t epochTime, std::string dbName);
 
         int getRowSize(std::string dbName);
 

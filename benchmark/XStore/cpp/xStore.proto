@@ -1,23 +1,38 @@
 syntax = "proto3";
 
-//option java_package = "ex.grpc";
 option optimize_for = SPEED;
 
 package xStoregRPC;
 
 // Defines the service
-service xStore {
-  // Function invoked to send the request
-  rpc unaryRequest (unaryRequestMsg) returns (responseData) {}
-  rpc batchRequest (rangeRequestMsg) returns (stream responseData) {}
+//service xStore {
+//  // Function invoked to send the request
+//  rpc unaryRequest (unaryRequestMsg) returns (responseData) {}
+//  rpc batchRequest (rangeRequestMsg) returns (stream responseData) {}
+//}
+
+message recordSize {
+  string dbName = 1;
+  uint32 rowSize = 2;
+}
+
+message dbSizeRecord {
+  repeated recordSize recordsize = 1;
+}
+
+enum requestType {
+  unaryRequest = 0;
+  batchRequest = 1;
+  unaryInsert = 2;
+  batchInsert = 3;
 }
 
 // The request message containing requested numbers
 message unaryRequestMsg {
-  enum requestType {
-    UNARY = 0;
-    STREAM = 1;
-  }
+  //  enum requestType {
+  //    UNARY = 0;
+  //    STREAM = 1;
+  //  }
   requestType rType = 1;
   uint32 timestamp = 2;
   string dbName = 3;

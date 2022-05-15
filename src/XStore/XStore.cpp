@@ -199,15 +199,20 @@ std::string XStore::get(std::time_t epochTime, std::string dbName) {
     return toReturn;
 }
 
-std::string XStore::getSingleOpenClose(std::time_t epochTime, std::string dbName) {
+xstoreProto::unaryResponse XStore::getSingleOpenClose(std::time_t epochTime, std::string dbName) {
     // Fetch all dirs in dataStore dir
     dbStats();
+
+    // Protobuf obj to be return
+    xstoreProto::unaryResponse toReturn;
+    toReturn.set_timestamp(epochTime);
 
     // Make sure dbName exists
     //  IF given dbName is not available
     //  Return "NULL" as string
     if (dbMap.find(dbName) == dbMap.end()) {
-        return "NULL";
+        toReturn.set_dataset("NULL");
+        return toReturn;
     }
 
     // Read timeValue -- UNIX time
@@ -217,7 +222,8 @@ std::string XStore::getSingleOpenClose(std::time_t epochTime, std::string dbName
     //  IF inputYear is not available
     //  Return "NULL" as string
     if ((dbMap.find(dbName)->second.hasYear(inputYear)) != true) {
-        return "NULL";
+        toReturn.set_dataset("NULL");
+        return toReturn;
     }
 
     // Fetch config of a target DB
@@ -254,10 +260,14 @@ std::string XStore::getSingleOpenClose(std::time_t epochTime, std::string dbName
     // IF a target time contains no data
     //  -> Return "NULL" as string
     if (strlen(buff) == 0) {
-        return "NULL";
+        toReturn.set_dataset("NULL");
+        return toReturn;
     }
 
-    return buff;
+    // Set data fetched from XStore to returning Protobuf obj
+    toReturn.set_dataset(std::string(buff));
+
+    return toReturn;
 }
 
 std::vector<std::string> XStore::getBatch(std::time_t startEpochT, std::time_t endEpochT, std::string dbName) {
