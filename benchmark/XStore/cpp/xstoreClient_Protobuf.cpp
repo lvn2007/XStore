@@ -143,7 +143,7 @@ int main(int argc, char const *argv[])
     std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
     std::chrono::duration<double> diff;
 
-    int nIter = 10000;
+    int nIter = 1;
     srand(time(NULL));
     long int randTime;
 
@@ -158,9 +158,13 @@ int main(int argc, char const *argv[])
 
         start = std::chrono::high_resolution_clock::now();
         xStoregRPC::unaryRequestMsg toServer;
-        toServer.set_rtype(toServer.UNARY);
+//        toServer.set_rtype(toServer.UNARY);
+//        toServer.set_rtype(xStoregRPC::unaryRequest);
+        toServer.set_rtype(0);
         toServer.set_timestamp(unixTime);
         toServer.set_dbname("tsla");
+
+        std::cout << toServer.rtype() << std::endl;
 
         size_t byteSize = toServer.ByteSizeLong();
         zmq::message_t z_out(byteSize);

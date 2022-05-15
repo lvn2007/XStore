@@ -44,25 +44,49 @@ void* XStore_zmqServer::workerRoutine(void *args) {
         zmq::recv_multipart(socket, std::back_inserter(messagesFromClient));
 
         //  Parse Protobuf request from CLIENT
-        xStoregRPC::unaryRequestMsg protoFromClient;
+        xstoreProto::unaryRequest protoFromClient;
         protoFromClient.ParseFromArray(messagesFromClient.back().data(), messagesFromClient.back().size());
 
-//        std::cout << "DB Name: " << protoFromClient.dbname() << std::endl;
-//        std::cout << "DB Name: " << protoFromClient.timestamp() << std::endl;
+        //  Parsed CMD from CLIENT
+        int rType = protoFromClient.rtype();
 
-        // XStore stuffs
-        std::string queryResult = myStore.getSingleOpenClose(protoFromClient.timestamp(), protoFromClient.dbname());
+        switch (rType) {
+            // UNARY REQUEST
+            case 0: {
+                // XStore stuffs
+                //  Returning Protobuf obj
+                xstoreProto::unaryResponse protoToClient = myStore.getSingleOpenClose(protoFromClient.timestamp(), protoFromClient.dbname());
 
-        // SENDING
-        //  Preparing Protobuf response to CLIENT
-        xStoregRPC::responseData protoToClient;
-        protoToClient.set_timestamp(protoFromClient.timestamp());
-        protoToClient.set_dataset(queryResult);
+                //  Response message size
+                size_t protoToClientSize = protoToClient.ByteSizeLong();
+                zmq::message_t responseToClient(protoToClientSize);
+                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
+                socket.send(responseToClient);
+                break;
+            }
 
-        //  Response message size
-        size_t protoToClientSize = protoToClient.ByteSizeLong();
-        zmq::message_t responseToClient(protoToClientSize);
-        protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
-        socket.send(responseToClient);
+            // BATCH REQUEST
+            case 1: {
+                std::cout << 1 << std::endl;
+                break;
+            }
+
+            // UNARY INSERT
+            case 2: {
+                std::cout << 2 << std::endl;
+                break;
+            }
+
+            // BATCH INSERT
+            case 3: {
+                std::cout << 3 << std::endl;
+                break;
+            }
+
+            default: {
+                std::cout << "Default" << std::endl;
+                break;
+            }
+        }
     }
 }

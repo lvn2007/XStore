@@ -15,32 +15,18 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Done XStore ZMQ Networking -- Needs cleanup">
-      <change afterPath="$PROJECT_DIR$/include/dataStructs/configStruct.h" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/overleaf/overleaf.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/overleaf/ss-sc_1000_Protobuf.csv" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/overleaf/ss-sc_1000_Raw.csv" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/overleaf/ss-sc_1000_gRPC.csv" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/overleaf/zmq_1000_Protobuf-ZMQ.csv" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/dataStructs/configStruct.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/deployment.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/deployment.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/sshConfigs.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/sshConfigs.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/webServers.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/webServers.xml" afterDir="false" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="WIP - insertBatch()">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/CMakeLists.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/XStore/cpp/xStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/cpp/xStore.proto" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/benchmark/XStore/cpp/xstoreClient_Protobuf.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/cpp/xstoreClient_Protobuf.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/XStore_Networking/TCPServer.hpp" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/XStore_Networking/XStore_tcpServer.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore_Networking/XStore_tcpServer.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/include/XStore_Networking/XStore_tcpServer.h" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/include/XStore_Networking/XStore_zmqServer.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore_Networking/XStore_zmqServer.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/dataStruct/clientCmdStruct.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/dataStructs/clientCmdStruct.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/dataStruct/dataStruct.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/dataStructs/dataStruct.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/dataStruct/fileStruct.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/dataStructs/fileStruct.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/protoFile/xStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/xStore.proto" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_tcpServer.cpp" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/dataStruct/clientCmdStruct.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/dataStructs/clientCmdStruct.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/dataStruct/dataStruct.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/dataStructs/dataStruct.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/dataStruct/fileStruct.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/dataStructs/fileStruct.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -303,14 +289,7 @@
       <workItem from="1651359106172" duration="21434000" />
       <workItem from="1652126295860" duration="8763000" />
       <workItem from="1652236111408" duration="33597000" />
-      <workItem from="1652408546575" duration="18637000" />
-    </task>
-    <task id="LOCAL-00030" summary="Modified README.md">
-      <created>1638148484670</created>
-      <option name="number" value="00030" />
-      <option name="presentableId" value="LOCAL-00030" />
-      <option name="project" value="LOCAL" />
-      <updated>1638148484670</updated>
+      <workItem from="1652408546575" duration="40495000" />
     </task>
     <task id="LOCAL-00031" summary="Modified README.md">
       <created>1638148659013</created>
@@ -648,7 +627,14 @@
       <option name="project" value="LOCAL" />
       <updated>1650152234809</updated>
     </task>
-    <option name="localTasksCounter" value="79" />
+    <task id="LOCAL-00079" summary="WIP - insertBatch()">
+      <created>1652541581959</created>
+      <option name="number" value="00079" />
+      <option name="presentableId" value="LOCAL-00079" />
+      <option name="project" value="LOCAL" />
+      <updated>1652541581959</updated>
+    </task>
+    <option name="localTasksCounter" value="80" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -749,7 +735,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Organized hpp &amp; cpp for gRPC" />
     <MESSAGE value="WIP: Gradually implementing query for XStore" />
     <MESSAGE value="Experimenting data stream" />
     <MESSAGE value="Done data streaming for rangeRequest" />
@@ -774,6 +759,7 @@
     <MESSAGE value="WIP - XStore TCP connection" />
     <MESSAGE value="WIP (Prototype) - XStore TCP connection" />
     <MESSAGE value="Done XStore ZMQ Networking -- Needs cleanup" />
-    <option name="LAST_COMMIT_MESSAGE" value="Done XStore ZMQ Networking -- Needs cleanup" />
+    <MESSAGE value="WIP - insertBatch()" />
+    <option name="LAST_COMMIT_MESSAGE" value="WIP - insertBatch()" />
   </component>
 </project>

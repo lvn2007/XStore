@@ -1,50 +1,47 @@
 syntax = "proto3";
 
-//option java_package = "ex.grpc";
 option optimize_for = SPEED;
 
-package xStoregRPC;
+package xstoreProto;
 
-// Defines the service
-service xStore {
-  // Function invoked to send the request
-  rpc unaryRequest (unaryRequestMsg) returns (responseData) {}
-  rpc batchRequest (rangeRequestMsg) returns (stream responseData) {}
+// Defines the service - gRPC only
+//service xStore {
+//  // Function invoked to send the request
+//  rpc unaryRequest (unaryRequestMsg) returns (responseData) {}
+//  rpc batchRequest (rangeRequestMsg) returns (stream responseData) {}
+//}
+
+enum requestType {
+  UNARYREQUEST = 0;
+  BATCHREQUEST = 1;
+  UNARYINSERT = 2;
+  BATCHINSERT = 3;
 }
 
-message recordSize {
-  string dbName = 1;
-  uint32 rowSize = 2;
-}
-
-message dbSizeRecord {
-  repeated recordSize recordsize = 1;
-}
-
-// The request message containing requested numbers
-message unaryRequestMsg {
-  enum requestType {
-    UNARY = 0;
-    STREAM = 1;
-  }
+// REQUEST section
+//  UNARY request
+message unaryRequest {
   requestType rType = 1;
   uint32 timestamp = 2;
   string dbName = 3;
 }
 
-message rangeRequestMsg {
-  uint32 startTime = 1;
-  uint32 endTime = 2;
-  string dbName = 3;
+//  RANGE request
+message rangeRequest {
+  requestType rType = 1;
+  uint32 startTime = 2;
+  uint32 endTime = 3;
+  string dbName = 4;
 }
 
-// The response message containing response
-message responseData {
+// RESPONSE section
+//  UNARY response
+message unaryResponse {
   uint32 timestamp = 1;
   string dataset = 2;
 }
 
-message messageInfo {
-  uint32 nItems = 1;
-  uint32 msgLength = 2;
+message batchResponse {
+  repeated unaryResponse unaryResponse = 1;
+  uint32 nElements = 2;
 }
