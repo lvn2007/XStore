@@ -3,7 +3,10 @@
   <component name="AutoImportSettings">
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
-  <component name="CMakeRunConfigurationManager" shouldGenerate="true" shouldDeleteObsolete="true">
+  <component name="CMakeReloadState">
+    <option name="reloaded" value="true" />
+  </component>
+  <component name="CMakeRunConfigurationManager">
     <generated>
       <config projectName="XStore" targetName="XStore" />
     </generated>
@@ -15,19 +18,11 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="WIP - insertBatch()">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Update XStore's 2022 presentation slides">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/CMakeLists.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/XStore/cpp/xStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/cpp/xStore.proto" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/XStore/cpp/xstoreClient_Protobuf.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/cpp/xstoreClient_Protobuf.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/XStore_Networking/XStore_tcpServer.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/XStore_Networking/XStore_zmqServer.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore_Networking/XStore_zmqServer.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/protoFile/xStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/xStore.proto" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_tcpServer.cpp" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -57,6 +52,9 @@
       <filtered-out-file-type name="COMMIT_BY_MESSAGE" />
     </file-type-list>
   </component>
+  <component name="MarkdownSettingsMigration">
+    <option name="stateVersion" value="1" />
+  </component>
   <component name="ProjectId" id="1zsiv7cuy9cXM9GSSwJkPS8Q3GL" />
   <component name="ProjectLevelVcsManager" settingsEditedManually="true">
     <ConfirmationsSetting value="2" id="Add" />
@@ -67,25 +65,19 @@
     <option name="showMembers" value="true" />
     <option name="showVisibilityIcons" value="true" />
   </component>
-  <component name="PropertiesComponent">
-    <property name="RunOnceActivity.OpenProjectViewOnStart" value="true" />
-    <property name="RunOnceActivity.ShowReadmeOnStart" value="true" />
-    <property name="RunOnceActivity.cidr.known.project.marker" value="true" />
-    <property name="WebServerToolWindowFactoryState" value="true" />
-    <property name="WebServerToolWindowPanel.toolwindow.highlight.mappings" value="true" />
-    <property name="WebServerToolWindowPanel.toolwindow.highlight.symlinks" value="true" />
-    <property name="WebServerToolWindowPanel.toolwindow.show.date" value="false" />
-    <property name="WebServerToolWindowPanel.toolwindow.show.permissions" value="false" />
-    <property name="WebServerToolWindowPanel.toolwindow.show.size" value="false" />
-    <property name="cf.advertisement.text.has.clang-format" value="true" />
-    <property name="cf.first.check.clang-format" value="false" />
-    <property name="cidr.known.project.marker" value="true" />
-    <property name="cmake.loaded.for.project" value="true" />
-    <property name="com.intellij.ide.scratch.ScratchImplUtil$2/New Scratch File" value="ObjectiveC" />
-    <property name="last_opened_file_path" value="$PROJECT_DIR$/overleaf" />
-    <property name="nodejs_package_manager_path" value="npm" />
-    <property name="settings.editor.selected.configurable" value="preferences.pluginManager" />
-  </component>
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "RunOnceActivity.cidr.known.project.marker": "true",
+    "WebServerToolWindowFactoryState": "true",
+    "WebServerToolWindowPanel.toolwindow.highlight.mappings": "true",
+    "WebServerToolWindowPanel.toolwindow.highlight.symlinks": "true",
+    "WebServerToolWindowPanel.toolwindow.show.date": "false",
+    "WebServerToolWindowPanel.toolwindow.show.permissions": "false",
+    "WebServerToolWindowPanel.toolwindow.show.size": "false",
+    "cf.first.check.clang-format": "false",
+    "cidr.known.project.marker": "true"
+  }
+}]]></component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
       <recent name="$PROJECT_DIR$/overleaf" />
@@ -103,6 +95,16 @@
     </key>
   </component>
   <component name="RunManager" selected="CMake Application.XStore">
+    <configuration default="true" type="GradleAppRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
+      <method v="2">
+        <option name="com.jetbrains.cidr.cpp.gradle.execution.GradleNativeBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
+      </method>
+    </configuration>
+    <configuration default="true" type="CLionExternalRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
+      <method v="2">
+        <option name="CLION.EXTERNAL.BUILD" enabled="true" />
+      </method>
+    </configuration>
     <configuration name="Unnamed" type="CLion_Remote" version="1" remoteCommand="" symbolFile="" sysroot="">
       <debugger toolchainName="xStore-Master" />
       <method v="2" />
@@ -110,16 +112,6 @@
     <configuration name="XStore" type="CMakeRunConfiguration" factoryName="Application" temporary="true" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="XStore" TARGET_NAME="XStore" CONFIG_NAME="Debug" RUN_TARGET_PROJECT_NAME="XStore" RUN_TARGET_NAME="XStore">
       <method v="2">
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
-      </method>
-    </configuration>
-    <configuration default="true" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
-      <method v="2">
-        <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
-      </method>
-    </configuration>
-    <configuration default="true" type="GradleAppRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
-      <method v="2">
-        <option name="com.jetbrains.cidr.cpp.gradle.execution.GradleNativeBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
       </method>
     </configuration>
     <configuration name="analyze (1)" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
@@ -289,21 +281,8 @@
       <workItem from="1651359106172" duration="21434000" />
       <workItem from="1652126295860" duration="8763000" />
       <workItem from="1652236111408" duration="33597000" />
-      <workItem from="1652408546575" duration="40495000" />
-    </task>
-    <task id="LOCAL-00031" summary="Modified README.md">
-      <created>1638148659013</created>
-      <option name="number" value="00031" />
-      <option name="presentableId" value="LOCAL-00031" />
-      <option name="project" value="LOCAL" />
-      <updated>1638148659013</updated>
-    </task>
-    <task id="LOCAL-00032" summary="Modified README.md">
-      <created>1638148695278</created>
-      <option name="number" value="00032" />
-      <option name="presentableId" value="LOCAL-00032" />
-      <option name="project" value="LOCAL" />
-      <updated>1638148695278</updated>
+      <workItem from="1652408546575" duration="44201000" />
+      <workItem from="1652663666980" duration="4954000" />
     </task>
     <task id="LOCAL-00033" summary="Bench script for InfluxDB">
       <created>1638318541975</created>
@@ -634,7 +613,21 @@
       <option name="project" value="LOCAL" />
       <updated>1652541581959</updated>
     </task>
-    <option name="localTasksCounter" value="80" />
+    <task id="LOCAL-00080" summary="Modified xStore.proto -- WIP: API handler on server-end">
+      <created>1652652851919</created>
+      <option name="number" value="00080" />
+      <option name="presentableId" value="LOCAL-00080" />
+      <option name="project" value="LOCAL" />
+      <updated>1652652851919</updated>
+    </task>
+    <task id="LOCAL-00081" summary="Update XStore's 2022 presentation slides">
+      <created>1652653012253</created>
+      <option name="number" value="00081" />
+      <option name="presentableId" value="LOCAL-00081" />
+      <option name="project" value="LOCAL" />
+      <updated>1652653012253</updated>
+    </task>
+    <option name="localTasksCounter" value="82" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -680,7 +673,6 @@
         <entry key="44b59b07-9a9e-481f-95c2-80a9552e1f80" value="TOOL_WINDOW" />
       </map>
     </option>
-    <option name="oldMeFiltersMigrated" value="true" />
   </component>
   <component name="VcsManagerConfiguration">
     <ignored-roots>
@@ -735,8 +727,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="WIP: Gradually implementing query for XStore" />
-    <MESSAGE value="Experimenting data stream" />
     <MESSAGE value="Done data streaming for rangeRequest" />
     <MESSAGE value="Clean-up" />
     <MESSAGE value="Rename proto &amp; modifying Python client" />
@@ -760,6 +750,8 @@
     <MESSAGE value="WIP (Prototype) - XStore TCP connection" />
     <MESSAGE value="Done XStore ZMQ Networking -- Needs cleanup" />
     <MESSAGE value="WIP - insertBatch()" />
-    <option name="LAST_COMMIT_MESSAGE" value="WIP - insertBatch()" />
+    <MESSAGE value="Modified xStore.proto -- WIP: API handler on server-end" />
+    <MESSAGE value="Update XStore's 2022 presentation slides" />
+    <option name="LAST_COMMIT_MESSAGE" value="Update XStore's 2022 presentation slides" />
   </component>
 </project>

@@ -43,16 +43,22 @@ void* XStore_zmqServer::workerRoutine(void *args) {
         std::vector<zmq::message_t> messagesFromClient;
         zmq::recv_multipart(socket, std::back_inserter(messagesFromClient));
 
-        //  Parse Protobuf request from CLIENT
-        xstoreProto::unaryRequest protoFromClient;
-        protoFromClient.ParseFromArray(messagesFromClient.back().data(), messagesFromClient.back().size());
+        //  Partially parse Protobuf request from CLIENT
+        //      ONLY parse the CMD type -- We only interested in field "rType"
+        //      Doesn't matter if actual msgLength > reqCMD protobuf obj
+        xstoreProto::reqCMD cmdFromClient;
+        cmdFromClient.ParseFromArray(messagesFromClient.back().data(), messagesFromClient.back().size());
 
         //  Parsed CMD from CLIENT
-        int rType = protoFromClient.rtype();
+        int rType = cmdFromClient.rtype();
 
         switch (rType) {
             // UNARY REQUEST
             case 0: {
+                // Properly parse Protobuf obj from CLIENT
+                xstoreProto::unaryRequest protoFromClient;
+                protoFromClient.ParseFromArray(messagesFromClient.back().data(), messagesFromClient.back().size());
+
                 // XStore stuffs
                 //  Returning Protobuf obj
                 xstoreProto::unaryResponse protoToClient = myStore.getSingleOpenClose(protoFromClient.timestamp(), protoFromClient.dbname());
@@ -66,8 +72,12 @@ void* XStore_zmqServer::workerRoutine(void *args) {
             }
 
             // BATCH REQUEST
-            case 1: {
-                std::cout << 1 << std::endl;
+            case xstoreProto::BATCHREQUEST: {
+                // Properly parse Protobuf obj from CLIENT
+                xstoreProto::rangeRequest protoFromClient;
+
+                // XStore stuffs
+                //  Returning Protobug obj
                 break;
             }
 

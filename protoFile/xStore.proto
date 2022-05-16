@@ -18,6 +18,10 @@ enum requestType {
   BATCHINSERT = 3;
 }
 
+message reqCMD {
+  requestType rType = 1;
+}
+
 // REQUEST section
 //  UNARY request
 message unaryRequest {
