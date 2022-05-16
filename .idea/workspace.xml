@@ -18,11 +18,8 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Update XStore's 2022 presentation slides">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/protoFile/xStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/xStore.proto" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" afterDir="false" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Modified XStore_zmqServer.cpp such that it can recognize commands from CLIENT">
+      <change beforePath="$PROJECT_DIR$/benchmark/XStore/cpp/xstoreClient_Protobuf.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/cpp/xstoreClient_Protobuf.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -282,14 +279,7 @@
       <workItem from="1652126295860" duration="8763000" />
       <workItem from="1652236111408" duration="33597000" />
       <workItem from="1652408546575" duration="44201000" />
-      <workItem from="1652663666980" duration="4954000" />
-    </task>
-    <task id="LOCAL-00033" summary="Bench script for InfluxDB">
-      <created>1638318541975</created>
-      <option name="number" value="00033" />
-      <option name="presentableId" value="LOCAL-00033" />
-      <option name="project" value="LOCAL" />
-      <updated>1638318541975</updated>
+      <workItem from="1652663666980" duration="5132000" />
     </task>
     <task id="LOCAL-00034" summary="Benched single open/close &amp; Update README.md">
       <created>1638324476004</created>
@@ -627,7 +617,14 @@
       <option name="project" value="LOCAL" />
       <updated>1652653012253</updated>
     </task>
-    <option name="localTasksCounter" value="82" />
+    <task id="LOCAL-00082" summary="Modified XStore_zmqServer.cpp such that it can recognize commands from CLIENT">
+      <created>1652730827280</created>
+      <option name="number" value="00082" />
+      <option name="presentableId" value="LOCAL-00082" />
+      <option name="project" value="LOCAL" />
+      <updated>1652730827281</updated>
+    </task>
+    <option name="localTasksCounter" value="83" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -727,7 +724,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Done data streaming for rangeRequest" />
     <MESSAGE value="Clean-up" />
     <MESSAGE value="Rename proto &amp; modifying Python client" />
     <MESSAGE value="Updated README.md" />
@@ -752,6 +748,7 @@
     <MESSAGE value="WIP - insertBatch()" />
     <MESSAGE value="Modified xStore.proto -- WIP: API handler on server-end" />
     <MESSAGE value="Update XStore's 2022 presentation slides" />
-    <option name="LAST_COMMIT_MESSAGE" value="Update XStore's 2022 presentation slides" />
+    <MESSAGE value="Modified XStore_zmqServer.cpp such that it can recognize commands from CLIENT" />
+    <option name="LAST_COMMIT_MESSAGE" value="Modified XStore_zmqServer.cpp such that it can recognize commands from CLIENT" />
   </component>
 </project>
