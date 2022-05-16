@@ -13,7 +13,7 @@ eXtreme performance in distributed kv-Store for time-series
 - g++ 8.4.0
 - C++17
 - Protobuf 3.18.1
-- gRPC 1.42.0
+- cppzmq v4.8.1
 
 # File Organization
 <img src="MISC/XStore_fileOrganization.svg">
