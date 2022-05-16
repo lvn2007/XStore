@@ -243,7 +243,7 @@ xstoreProto::unaryResponse XStore::getSingleOpenClose(std::time_t epochTime, std
 
     // Calculate offset -- Exact location of where a particular target row is stored
     long int offSet = diff * cfgStruct.rowLength;
-    std::cout << "offset: " << offSet << std::endl;
+
     // Look-up file descriptor in dbMap
     int bFile = dbMap.find(dbName)->second.getBfileMap().find(inputYear)->second;
 //    int sync = fsync(bFile);
