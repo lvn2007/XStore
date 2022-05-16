@@ -18,8 +18,13 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Modified XStore_zmqServer.cpp such that it can recognize commands from CLIENT">
-      <change beforePath="$PROJECT_DIR$/benchmark/XStore/cpp/xstoreClient_Protobuf.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/cpp/xstoreClient_Protobuf.cpp" afterDir="false" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Working XStore C++ client unaryReq bench">
+      <change afterPath="$PROJECT_DIR$/MISC/XStore_dataOrganization.svg" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/MISC/XStore_fileOrganization.svg" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/MISC/XStore_innerLayer-Engine.svg" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/MISC/XStore_outerLayer-Networking.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/XStore.pdf" beforeDir="false" afterPath="$PROJECT_DIR$/MISC/XStore.pdf" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -72,7 +77,8 @@
     "WebServerToolWindowPanel.toolwindow.show.permissions": "false",
     "WebServerToolWindowPanel.toolwindow.show.size": "false",
     "cf.first.check.clang-format": "false",
-    "cidr.known.project.marker": "true"
+    "cidr.known.project.marker": "true",
+    "nodejs_package_manager_path": "npm"
   }
 }]]></component>
   <component name="RecentsManager">
@@ -279,14 +285,7 @@
       <workItem from="1652126295860" duration="8763000" />
       <workItem from="1652236111408" duration="33597000" />
       <workItem from="1652408546575" duration="44201000" />
-      <workItem from="1652663666980" duration="5132000" />
-    </task>
-    <task id="LOCAL-00034" summary="Benched single open/close &amp; Update README.md">
-      <created>1638324476004</created>
-      <option name="number" value="00034" />
-      <option name="presentableId" value="LOCAL-00034" />
-      <option name="project" value="LOCAL" />
-      <updated>1638324476004</updated>
+      <workItem from="1652663666980" duration="5462000" />
     </task>
     <task id="LOCAL-00035" summary="Done benches for MongoDB">
       <created>1638505035515</created>
@@ -624,7 +623,14 @@
       <option name="project" value="LOCAL" />
       <updated>1652730827281</updated>
     </task>
-    <option name="localTasksCounter" value="83" />
+    <task id="LOCAL-00083" summary="Working XStore C++ client unaryReq bench">
+      <created>1652730885633</created>
+      <option name="number" value="00083" />
+      <option name="presentableId" value="LOCAL-00083" />
+      <option name="project" value="LOCAL" />
+      <updated>1652730885633</updated>
+    </task>
+    <option name="localTasksCounter" value="84" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -724,7 +730,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Clean-up" />
     <MESSAGE value="Rename proto &amp; modifying Python client" />
     <MESSAGE value="Updated README.md" />
     <MESSAGE value="Enhancing XStore -- Dynamically locate baseDir &amp; Staging fileStruct" />
@@ -749,6 +754,7 @@
     <MESSAGE value="Modified xStore.proto -- WIP: API handler on server-end" />
     <MESSAGE value="Update XStore's 2022 presentation slides" />
     <MESSAGE value="Modified XStore_zmqServer.cpp such that it can recognize commands from CLIENT" />
-    <option name="LAST_COMMIT_MESSAGE" value="Modified XStore_zmqServer.cpp such that it can recognize commands from CLIENT" />
+    <MESSAGE value="Working XStore C++ client unaryReq bench" />
+    <option name="LAST_COMMIT_MESSAGE" value="Working XStore C++ client unaryReq bench" />
   </component>
 </project>

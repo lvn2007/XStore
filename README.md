@@ -1,6 +1,6 @@
-# xStore
+# XStore
 
-eXtreme performance in distributed tv-Store for time-series
+eXtreme performance in distributed kv-Store for time-series
 
 # Testbed
 - Dual socket Intel® Xeon® Silver 4108 Processor @ 1.80GHz (16-cores, 32-hardware threads)
@@ -14,6 +14,18 @@ eXtreme performance in distributed tv-Store for time-series
 - C++17
 - Protobuf 3.18.1
 - gRPC 1.42.0
+
+# File Organization
+<img src="MISC/XStore_fileOrganization.svg">
+
+# Data Organization
+<img src="MISC/XStore_dataOrganization.svg">
+
+# Design: Outer Layer - Networking
+<img src="MISC/XStore_outerLayer-Networking.svg">
+
+# Design: Inner Layer - XStore Engine
+<img src="MISC/XStore_innerLayer-Engine.svg">
 
 # Note
 - Python: Code generation for Protobuf & gRPC
