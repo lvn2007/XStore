@@ -232,9 +232,6 @@ xstoreProto::unaryResponse XStore::getSingleOpenClose(std::time_t epochTime, std
     int cfgFile = open(cfgFilePath.c_str(), O_RDONLY);
     pread(cfgFile, &cfgStruct, sizeof(configStruct), 0);
 
-    // Otherwise, keep processing
-//    std::string currResolution = getTimeResolution(epochTime);
-
     // Start epoch time of a given year
     long int startEpoch = getStartTimeEpoch(inputYear, cfgStruct.timeResolution);
 
@@ -246,7 +243,6 @@ xstoreProto::unaryResponse XStore::getSingleOpenClose(std::time_t epochTime, std
 
     // Look-up file descriptor in dbMap
     int bFile = dbMap.find(dbName)->second.getBfileMap().find(inputYear)->second;
-//    int sync = fsync(bFile);
 
     // A single line data will be read into here
     char buff[cfgStruct.rowLength];
@@ -270,56 +266,102 @@ xstoreProto::unaryResponse XStore::getSingleOpenClose(std::time_t epochTime, std
     return toReturn;
 }
 
-std::vector<std::string> XStore::getBatch(std::time_t startEpochT, std::time_t endEpochT, std::string dbName) {
-    // Placeholder of queried data to return
-    std::vector<std::string> toReturn;
+xstoreProto::batchResponse XStore::getBatch(std::time_t startEpochT, std::time_t endEpochT, std::string dbName) {
+    // Fetch all dirs in dataStore dir
+    dbStats();
+
+    // Protobuf obj to be return
+    xstoreProto::batchResponse toReturn;
+
+    // Ranges of queried time
+    //  i.e., N elements of time-series row of data
+    long int timeRange = endEpochT - startEpochT;
+
+    // Pre-populating time for all defined ranges
+    for (int i = 0; i < timeRange; i++) {
+        xstoreProto::unaryResponse *currEntry = toReturn.add_unaryresponse();
+        currEntry->set_timestamp(startEpochT + i);
+        currEntry->set_dataset("NULL");
+    }
+
+    // Ensure dbName string is all capitalized
+    for (int i = 0; i < dbName.size(); i++) {
+        dbName[i] = toupper(dbName[i]);
+    }
 
     // Make sure dbName exists
     //  IF given dbName is not available
     //  Return empty vector
     if (dbMap.find(dbName) == dbMap.end()) {
+        toReturn.set_querystatus("[ERROR] -- DB Name does not exists");
         return toReturn;
     }
 
     // Read timeValue -- UNIX time
-    int inputYear = toHumanYear(startEpochT);
+    int startYear = toHumanYear(startEpochT);
+    int endYear = toHumanYear(endEpochT);
+
+    // TEMPORARY -- Waiting for Ioan's inputs/advice on this
+    //  Guard against a query that spans over 1 year
+    if ((endYear - startYear) != 0) {
+        toReturn.set_querystatus("[ERROR] -- Queried range is larger than 1 year");
+        return toReturn;
+    }
 
     // Make sure inputYear is available in DB
     //  IF inputYear is not available
     //  Return empty vector
-    if ((dbMap.find(dbName)->second.hasYear(inputYear)) != true) {
+    if ((dbMap.find(dbName)->second.hasYear(startYear)) != true) {
+        std::string errMsg = "[ERROR] -- " + std::to_string(startYear) + ".XSTORE does not exists";
+        toReturn.set_querystatus(errMsg);
         return toReturn;
     }
 
-    std::string currResolution = getTimeResolution(startEpochT);
+    // Fetch config of a target DB
+    configStruct cfgStruct;
+    std::string cfgFilePath = baseDir + "dataStore/" + dbName + "/" + dbName + ".config";
+    int cfgFile = open(cfgFilePath.c_str(), O_RDONLY);
+    pread(cfgFile, &cfgStruct, sizeof(configStruct), 0);
 
     // Start epoch time of a given year
-    long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
+    long int startEpoch = getStartTimeEpoch(startYear, cfgStruct.timeResolution);
 
     // Epoch time difference between target & startEpoch
     long int diff = startEpochT - startEpoch;
-    long int rangeDiff = endEpochT - startEpoch;
 
     // Calculate offset -- Exact location of where a particular target row is stored
-    long int offSet = diff * lineSize;
-
-    // Target file directory
-    std::string dataDir = baseDir + "dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
+    long int startOffset = diff * cfgStruct.rowLength;
 
     // Look-up file descriptor in dbMap
-    int bFile = dbMap.find(dbName)->second.getBfileMap().find(inputYear)->second;
+    int bFile = dbMap.find(dbName)->second.getBfileMap().find(startYear)->second;
 
-    // A single line data will be read into here
-    char buff[lineSize];
+    // A single line of data will be read into this buffer
+    char buff[cfgStruct.rowLength];
 
-    for (int i = offSet; i <= lineSize * rangeDiff; i += lineSize) {
-        pread(bFile, &buff[0], lineSize, i);
+    for (long int i = 0; i < timeRange; i++) {
+        // Computes offset of current iteration
+        long int currOffset = startOffset + (cfgStruct.rowLength * i);
+
+        // Reads data into buffer
+        pread(bFile, &buff[0], cfgStruct.rowLength, currOffset);
 
         // Remove newline at the end of char[]
         buff[strlen(buff) - 1] = '\0';
 
-        toReturn.push_back(buff);
+        // IF a target time contains no data
+        //  -> Set dataset to "NULL" as string
+        //  NOTE: We don't actually set dataset to NULL since it was pre-populated prior
+        //  Instead, we will skip to next iteration
+        if (strlen(buff) == 0) {
+            continue;
+        }
+
+        // Set data fetched from XStore to returning Protobuf obj
+        toReturn.mutable_unaryresponse(i)->set_dataset(std::string(buff));
     }
+
+    // Set query status msg
+    toReturn.set_querystatus("[SUCCESS] -- Batch queries completed");
 
     return toReturn;
 }

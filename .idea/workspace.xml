@@ -18,13 +18,13 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Working XStore C++ client unaryReq bench">
-      <change afterPath="$PROJECT_DIR$/MISC/XStore_dataOrganization.svg" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/MISC/XStore_fileOrganization.svg" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/MISC/XStore_innerLayer-Engine.svg" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/MISC/XStore_outerLayer-Networking.svg" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/XStore.pdf" beforeDir="false" afterPath="$PROJECT_DIR$/MISC/XStore.pdf" afterDir="false" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Updated README.md">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/protoFile/xStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/xStore.proto" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -285,21 +285,7 @@
       <workItem from="1652126295860" duration="8763000" />
       <workItem from="1652236111408" duration="33597000" />
       <workItem from="1652408546575" duration="44201000" />
-      <workItem from="1652663666980" duration="5462000" />
-    </task>
-    <task id="LOCAL-00035" summary="Done benches for MongoDB">
-      <created>1638505035515</created>
-      <option name="number" value="00035" />
-      <option name="presentableId" value="LOCAL-00035" />
-      <option name="project" value="LOCAL" />
-      <updated>1638505035515</updated>
-    </task>
-    <task id="LOCAL-00036" summary="Done benches for InfluxDB">
-      <created>1638505664653</created>
-      <option name="number" value="00036" />
-      <option name="presentableId" value="LOCAL-00036" />
-      <option name="project" value="LOCAL" />
-      <updated>1638505664653</updated>
+      <workItem from="1652663666980" duration="17992000" />
     </task>
     <task id="LOCAL-00037" summary="Done benches for InfluxDB">
       <created>1638505726160</created>
@@ -630,7 +616,21 @@
       <option name="project" value="LOCAL" />
       <updated>1652730885633</updated>
     </task>
-    <option name="localTasksCounter" value="84" />
+    <task id="LOCAL-00084" summary="Added MISC containing XStore's design and Updated README.md">
+      <created>1652731209326</created>
+      <option name="number" value="00084" />
+      <option name="presentableId" value="LOCAL-00084" />
+      <option name="project" value="LOCAL" />
+      <updated>1652731209327</updated>
+    </task>
+    <task id="LOCAL-00085" summary="Updated README.md">
+      <created>1652731311864</created>
+      <option name="number" value="00085" />
+      <option name="presentableId" value="LOCAL-00085" />
+      <option name="project" value="LOCAL" />
+      <updated>1652731311864</updated>
+    </task>
+    <option name="localTasksCounter" value="86" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -730,8 +730,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Rename proto &amp; modifying Python client" />
-    <MESSAGE value="Updated README.md" />
     <MESSAGE value="Enhancing XStore -- Dynamically locate baseDir &amp; Staging fileStruct" />
     <MESSAGE value="Implemented single open via dbMap (Storing file descriptor in map)" />
     <MESSAGE value="Added argument &quot;dbName&quot; in gRPC requests" />
@@ -755,6 +753,8 @@
     <MESSAGE value="Update XStore's 2022 presentation slides" />
     <MESSAGE value="Modified XStore_zmqServer.cpp such that it can recognize commands from CLIENT" />
     <MESSAGE value="Working XStore C++ client unaryReq bench" />
-    <option name="LAST_COMMIT_MESSAGE" value="Working XStore C++ client unaryReq bench" />
+    <MESSAGE value="Added MISC containing XStore's design and Updated README.md" />
+    <MESSAGE value="Updated README.md" />
+    <option name="LAST_COMMIT_MESSAGE" value="Updated README.md" />
   </component>
 </project>
