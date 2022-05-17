@@ -171,35 +171,7 @@ void XStore::insertBatch(std::time_t epochTime, std::string value, std::string d
 
 }
 
-std::string XStore::get(std::time_t epochTime, std::string dbName) {
-    // Read timeValue -- UNIX time
-    int inputYear = toHumanYear(epochTime);
-    std::string currResolution = getTimeResolution(epochTime);
-
-    // Start epoch time of a given year
-    long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
-
-    // Epoch time difference between target & startEpoch
-    long int diff = epochTime - startEpoch;
-
-    // Calculate offset -- Exact location of where a particular target row is stored
-    long int offSet = diff * lineSize;
-
-    FILE *bFile;
-    std::string dataDir = baseDir + "dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
-    bFile = std::fopen(dataDir.c_str(), "rb");
-
-    char *buff = new char[lineSize];
-
-    std::fseek(bFile, offSet, SEEK_SET);
-    std::fgets(buff, lineSize, bFile);
-//    std::puts(buff);
-    std::fclose(bFile);
-    std::string toReturn(buff);
-    return toReturn;
-}
-
-xstoreProto::unaryResponse XStore::getSingleOpenClose(std::time_t epochTime, std::string dbName) {
+xstoreProto::unaryResponse XStore::unaryQuery(std::time_t epochTime, std::string dbName) {
     // Fetch all dirs in dataStore dir
     dbStats();
 
@@ -260,6 +232,10 @@ xstoreProto::unaryResponse XStore::getSingleOpenClose(std::time_t epochTime, std
     // Remove newline at the end of char[]
     buff[strlen(buff) - 1] = '\0';
 
+    // Set query status msg
+    //  NOTE: Anything runs below this is considered as SUCCESS
+    toReturn.set_querystatus("[SUCCESS] -- Unary query completed");
+
     // IF a target time contains no data
     //  -> Set dataset to "NULL" as string
     //  NOTE: We don't actually set dataset to NULL since it was pre-populated prior
@@ -276,13 +252,10 @@ xstoreProto::unaryResponse XStore::getSingleOpenClose(std::time_t epochTime, std
     // Set data fetched from XStore to returning Protobuf obj
     toReturn.set_dataset(strBuff);
 
-    // Set query status msg
-    toReturn.set_querystatus("[SUCCESS] -- Unary query completed");
-
     return toReturn;
 }
 
-xstoreProto::batchResponse XStore::getBatch(std::time_t startEpochT, std::time_t endEpochT, std::string dbName) {
+xstoreProto::batchResponse XStore::batchQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName) {
     // Fetch all dirs in dataStore dir
     dbStats();
 

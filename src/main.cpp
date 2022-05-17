@@ -17,10 +17,10 @@ int main(int argc, char *argv[]) {
 //    xstoreProto::unaryResponse ur = myStore.getSingleOpenClose(1483228801, "tsla");
 //    ur.PrintDebugString();
 
-    xstoreProto::batchResponse br = myStore.getBatch(1483228800, 1483228805, "tsla");
-    br.PrintDebugString();
+//    xstoreProto::batchResponse br = myStore.getBatch(1483228800, 1483228805, "tsla");
+//    br.PrintDebugString();
     // ----DEV AREA
 
-//    XStore_zmqServer xStoreZmqServer(30);
-//    xStoreZmqServer.startServer("172.20.3.113", "12345");
+    XStore_zmqServer xStoreZmqServer(30);
+    xStoreZmqServer.startServer("172.20.3.113", "12345");
 }
