@@ -39,11 +39,9 @@ class XStore {
         // INSERT BATCH time-series oriented values
         void insertBatch(std::time_t epochTime, std::string value, std::string dbName);
 
-        std::string get(std::time_t epochTime, std::string dbName);
+        xstoreProto::batchResponse batchQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName);
 
-        xstoreProto::batchResponse getBatch(std::time_t startEpochT, std::time_t endEpochT, std::string dbName);
-
-        xstoreProto::unaryResponse getSingleOpenClose(std::time_t epochTime, std::string dbName);
+        xstoreProto::unaryResponse unaryQuery(std::time_t epochTime, std::string dbName);
 
         // Initialize DB
         void initDB();
