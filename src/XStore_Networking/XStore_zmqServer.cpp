@@ -31,33 +31,33 @@ void XStore_zmqServer::startServer(std::string listenAddr, std::string listenPor
 void* XStore_zmqServer::workerRoutine(void *args) {
     // Instantiate XStore for each thread
     XStore myStore;
-    zmq::context_t *ctx = (zmq::context_t *) args;
 
+    // Each thread owns its own ZMQ context
+    zmq::context_t *ctx = (zmq::context_t *) args;
     zmq::socket_t socket (*ctx, zmq::socket_type::rep);
     socket.connect("inproc://workers");
 
     while (true) {
         // RECEIVING
         //  Wait for next request from CLIENT
-        zmq::message_t requestFromClient;
-        std::vector<zmq::message_t> messagesFromClient;
-        zmq::recv_multipart(socket, std::back_inserter(messagesFromClient));
+        std::vector<zmq::message_t> clientMsgs;
+        zmq::recv_multipart(socket, std::back_inserter(clientMsgs));
 
         //  Partially parse Protobuf request from CLIENT
         //      ONLY parse the CMD type -- We only interested in field "rType"
         //      Doesn't matter if actual msgLength > reqCMD protobuf obj
-        xstoreProto::reqCMD cmdFromClient;
-        cmdFromClient.ParseFromArray(messagesFromClient.back().data(), messagesFromClient.back().size());
+        xstoreProto::reqCMD clientReqCmd;
+        clientReqCmd.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
 
         //  Parsed CMD from CLIENT
-        int rType = cmdFromClient.rtype();
+        int rType = clientReqCmd.rtype();
 
         switch (rType) {
             // UNARY REQUEST
-            case 0: {
+            case xstoreProto::UNARYREQUEST: {
                 // Properly parse Protobuf obj from CLIENT
                 xstoreProto::unaryRequest protoFromClient;
-                protoFromClient.ParseFromArray(messagesFromClient.back().data(), messagesFromClient.back().size());
+                protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
 
                 // XStore stuffs
                 //  Returning Protobuf obj
@@ -66,8 +66,10 @@ void* XStore_zmqServer::workerRoutine(void *args) {
                 //  Response message size
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
                 zmq::message_t responseToClient(protoToClientSize);
+
+                //  Serialize & Dispatch msg to CLIENT
                 protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
-                socket.send(responseToClient);
+                socket.send(responseToClient, zmq::send_flags::none);
                 break;
             }
 
@@ -75,20 +77,30 @@ void* XStore_zmqServer::workerRoutine(void *args) {
             case xstoreProto::BATCHREQUEST: {
                 // Properly parse Protobuf obj from CLIENT
                 xstoreProto::rangeRequest protoFromClient;
+                protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
 
                 // XStore stuffs
                 //  Returning Protobug obj
+                xstoreProto::batchResponse protoToClient = myStore.getBatch(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname());
+
+                //  Response message
+                size_t protoToClientSize = protoToClient.ByteSizeLong();
+                zmq::message_t responseToClient(protoToClientSize);
+
+                //  Serialize & Dispatch msg to CLIENT
+                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
+                socket.send(responseToClient, zmq::send_flags::none);
                 break;
             }
 
             // UNARY INSERT
-            case 2: {
+            case xstoreProto::UNARYINSERT: {
                 std::cout << 2 << std::endl;
                 break;
             }
 
             // BATCH INSERT
-            case 3: {
+            case xstoreProto::BATCHINSERT: {
                 std::cout << 3 << std::endl;
                 break;
             }

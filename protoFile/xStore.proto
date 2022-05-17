@@ -43,9 +43,10 @@ message rangeRequest {
 message unaryResponse {
   uint32 timestamp = 1;
   string dataset = 2;
+  string queryStatus = 3;
 }
 
 message batchResponse {
   repeated unaryResponse unaryResponse = 1;
-  uint32 nElements = 2;
+  string queryStatus = 2;
 }
