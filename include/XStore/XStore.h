@@ -45,8 +45,6 @@ class XStore {
 
         xstoreProto::unaryResponse getSingleOpenClose(std::time_t epochTime, std::string dbName);
 
-        int getRowSize(std::string dbName);
-
         // Initialize DB
         void initDB();
 
