@@ -206,12 +206,18 @@ xstoreProto::unaryResponse XStore::getSingleOpenClose(std::time_t epochTime, std
     // Protobuf obj to be return
     xstoreProto::unaryResponse toReturn;
     toReturn.set_timestamp(epochTime);
+    toReturn.set_dataset("NULL");
+
+    // Ensure dbName string is all capitalized
+    for (int i = 0; i < dbName.size(); i++) {
+        dbName[i] = toupper(dbName[i]);
+    }
 
     // Make sure dbName exists
     //  IF given dbName is not available
     //  Return "NULL" as string
     if (dbMap.find(dbName) == dbMap.end()) {
-        toReturn.set_dataset("NULL");
+        toReturn.set_querystatus("[ERROR] -- DB Name does not exists");
         return toReturn;
     }
 
@@ -222,7 +228,8 @@ xstoreProto::unaryResponse XStore::getSingleOpenClose(std::time_t epochTime, std
     //  IF inputYear is not available
     //  Return "NULL" as string
     if ((dbMap.find(dbName)->second.hasYear(inputYear)) != true) {
-        toReturn.set_dataset("NULL");
+        std::string errMsg = "[ERROR] -- " + std::to_string(inputYear) + ".XSTORE does not exists";
+        toReturn.set_querystatus(errMsg);
         return toReturn;
     }
 
@@ -254,14 +261,23 @@ xstoreProto::unaryResponse XStore::getSingleOpenClose(std::time_t epochTime, std
     buff[strlen(buff) - 1] = '\0';
 
     // IF a target time contains no data
-    //  -> Return "NULL" as string
+    //  -> Set dataset to "NULL" as string
+    //  NOTE: We don't actually set dataset to NULL since it was pre-populated prior
     if (strlen(buff) == 0) {
-        toReturn.set_dataset("NULL");
         return toReturn;
     }
 
+    // Convert raw line of data to str for further processing
+    std::string strBuff = std::string(buff);
+
+    // Strip timestamp from raw line of data
+    strBuff.erase(0, strBuff.find_first_of(",") + 1);
+
     // Set data fetched from XStore to returning Protobuf obj
-    toReturn.set_dataset(std::string(buff));
+    toReturn.set_dataset(strBuff);
+
+    // Set query status msg
+    toReturn.set_querystatus("[SUCCESS] -- Unary query completed");
 
     return toReturn;
 }
@@ -356,55 +372,20 @@ xstoreProto::batchResponse XStore::getBatch(std::time_t startEpochT, std::time_t
             continue;
         }
 
+        // Convert raw line of data to str for further processing
+        std::string strBuff = std::string(buff);
+
+        // Strip timestamp from raw line of data
+        strBuff.erase(0, strBuff.find_first_of(",") + 1);
+
         // Set data fetched from XStore to returning Protobuf obj
-        toReturn.mutable_unaryresponse(i)->set_dataset(std::string(buff));
+        toReturn.mutable_unaryresponse(i)->set_dataset(strBuff);
     }
 
     // Set query status msg
     toReturn.set_querystatus("[SUCCESS] -- Batch queries completed");
 
     return toReturn;
-}
-
-int XStore::getRowSize(std::string dbName) {
-    // Make sure dbName exists
-    //  IF given dbName is not available
-    //  Return -1 to indicate error
-    if (dbMap.find(dbName) == dbMap.end()) {
-        return -1;
-    }
-
-    // Look-up file descriptor in dbMap
-//    int bFile = dbMap.find(dbName)->second.getBfileMap().find(inputYear)->second;
-    int bFile = dbMap.find(dbName)->second.getBfileMap().begin()->second;
-
-    int tempLineSize = 2;
-
-    // A single line data will be read into here
-    char firstBuff[lineSize];
-    std::string tempBuff;
-
-    // Extract line of data from binary file
-    pread(bFile, &firstBuff[0], tempLineSize, 0);
-
-    while (true) {
-        tempLineSize *= 2;
-        char secondBuff[tempLineSize];
-        pread(bFile, &secondBuff[0], tempLineSize, 0);
-
-        if (std::string(secondBuff).find("\n") < tempLineSize) {
-            tempBuff = std::string(secondBuff);
-            break;
-        }
-    }
-    char lastChar = firstBuff[strlen(firstBuff) - 1];
-    std::cout << tempBuff << std::endl;
-    std::cout << tempBuff.find("\n") << std::endl;
-
-    // Remove newline at the end of char[]
-//    buff[strlen(buff) - 1] = '\0';
-
-
 }
 
 void XStore::initDB() {
