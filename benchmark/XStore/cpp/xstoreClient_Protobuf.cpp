@@ -96,7 +96,7 @@ int main(int argc, char const *argv[])
     std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
     std::chrono::duration<double> diff;
 
-    int nIter = 10000;
+    int nIter = 1;
     srand(time(NULL));
     long int randTime;
 
@@ -113,18 +113,23 @@ int main(int argc, char const *argv[])
         start = std::chrono::high_resolution_clock::now();
 
         // Unary REQ -- Routine
-        xstoreProto::unaryRequest toServer;
-        toServer.set_rtype(xstoreProto::UNARYREQUEST);
-        toServer.set_timestamp(unixTime);
-        toServer.set_dbname("tsla");
-
-        // Batch REQ -- Routine
-//        xstoreProto::rangeRequest toServer;
-//        toServer.set_rtype(xstoreProto::BATCHREQUEST);
-//        toServer.set_starttime(unixTime);
-//        toServer.set_endtime(unixTime + 10);
+//        xstoreProto::unaryRequest toServer;
+//        toServer.set_rtype(xstoreProto::UNARYREQUEST);
+//        toServer.set_timestamp(1483228800);
 //        toServer.set_dbname("tsla");
 
+        // RANGE REQ -- Routine
+//        xstoreProto::rangeRequest toServer;
+//        toServer.set_rtype(xstoreProto::RANGEREQUEST);
+//        toServer.set_starttime(1483228800);
+//        toServer.set_endtime(1483228805);
+//        toServer.set_dbname("tsla");
+
+        // Info REQ -- Routine
+        xstoreProto::reqCMD toServer;
+        toServer.set_rtype(xstoreProto::INFOREQUEST);
+
+        // Config msg and send
         size_t byteSize = toServer.ByteSizeLong();
         zmq::message_t z_out(byteSize);
         toServer.SerializeToArray(z_out.data(), byteSize);
@@ -132,21 +137,26 @@ int main(int argc, char const *argv[])
 
         // RECEIVING
         std::vector<zmq::message_t> recv_msgs;
-
         zmq::message_t zFromServer;
-
-//        auto res = sock.recv(zFromServer);
         zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
 
-//        std::cout << "Received: " << zFromServer.to_string_view() << std::endl;
-        xstoreProto::unaryResponse fromServer;
-//        fromServer.ParseFromArray(zFromServer.data(), zFromServer.size());
+        // Received structs
+        //  UNARY REP
+//        xstoreProto::unaryResponse fromServer;
+
+        //  RANGE REP
+//        xstoreProto::batchResponse fromServer;
+
+        //  INFO REP
+        xstoreProto::infoResponse fromServer;
         fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
-//        std::cout << fromServer.DebugString() << std::endl;
 
         // End timer
         end = std::chrono::high_resolution_clock::now();
         diff = end - start;
+
+        // OUTPUTS PRINTING
+        fromServer.PrintDebugString();
 
 //        std::cout << "[Response] -- Timestamp: " << fromServer.timestamp() << std::endl;
 //        std::cout << "[Response] -- Data: " << fromServer.dataset() << std::endl << std::endl;

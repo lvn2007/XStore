@@ -4,25 +4,35 @@ option optimize_for = SPEED;
 
 package xstoreProto;
 
-// Defines the service - gRPC only
-//service xStore {
-//  // Function invoked to send the request
-//  rpc unaryRequest (unaryRequestMsg) returns (responseData) {}
-//  rpc batchRequest (rangeRequestMsg) returns (stream responseData) {}
-//}
-
 enum requestType {
-  UNARYREQUEST = 0;
-  BATCHREQUEST = 1;
-  UNARYINSERT = 2;
-  BATCHINSERT = 3;
+  INFOREQUEST = 0;
+  UNARYREQUEST = 1;
+  RANGEREQUEST = 2;
+  UNARYINSERT = 3;
+  BATCHINSERT = 4;
 }
 
+// --- DB Stats & Info
+message dbStats {
+  string dbName = 1;
+  string dbResolution = 2;
+  float totalSizeInGB = 3;
+  repeated string fileName = 4;
+}
+
+message infoResponse {
+  string serverAddr = 1;
+  int32 threadCount = 2;
+  repeated dbStats dbInfo = 3;
+}
+// --- DB Stats & Info
+
+// REQUEST section
+//  COMMAND directive
 message reqCMD {
   requestType rType = 1;
 }
 
-// REQUEST section
 //  UNARY request
 message unaryRequest {
   requestType rType = 1;

@@ -30,6 +30,9 @@ class XStore {
         // Initialization
         XStore();
 
+        // PROCESSING dbStats/info query
+        xstoreProto::infoResponse infoQuery(std::string serverAddr, int threadCount);
+
         // CREATING new DB instance with row length
         bool createDB(std::string dbName, int rowLength);
 

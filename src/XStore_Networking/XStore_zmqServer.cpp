@@ -1,5 +1,11 @@
 #include "include/XStore_Networking/XStore_zmqServer.h"
 
+struct threadArgs {
+    zmq::context_t *zmqCtx;
+    int numThreads;
+    std::string serverAddr;
+};
+
 XStore_zmqServer::XStore_zmqServer(int numThreads) {
     this->numThreads = numThreads;
 }
@@ -10,7 +16,12 @@ void XStore_zmqServer::startServer(std::string listenAddr, std::string listenPor
 
     //  Socket to talk to CLIENTS
     zmq::socket_t clientSocket(ctx, zmq::socket_type::router);
-    clientSocket.bind("tcp://" + listenAddr + ":" + listenPort);
+    std::string serverAddr = "tcp://" + listenAddr + ":" + listenPort;
+
+    // Set listenAddr & port internally
+    this->serverAddr = serverAddr;
+
+    clientSocket.bind(serverAddr);
     std::cout << "[INFO - Networking] -- Listening on: " << listenAddr + ":" + listenPort << std::endl;
 
     //  Socket to talk to WORKERS
@@ -19,8 +30,15 @@ void XStore_zmqServer::startServer(std::string listenAddr, std::string listenPor
 
     //  Launch pool of WORKER threads
     for (int i = 0; i < numThreads; i++) {
+        // Wrap args struct for each thread
+        threadArgs tArgs;
+        tArgs.zmqCtx = &ctx;
+        tArgs.numThreads = numThreads;
+        tArgs.serverAddr = serverAddr;
+
         pthread_t worker;
-        pthread_create(&worker, NULL, XStore_zmqServer::workerRoutine, (void *) &ctx);
+//        pthread_create(&worker, NULL, XStore_zmqServer::workerRoutine, (void *) &ctx);
+        pthread_create(&worker, NULL, XStore_zmqServer::workerRoutine, &tArgs);
     }
     std::cout << "[INFO - Networking] -- Launched " << numThreads << " worker thread(s)" << std::endl;
 
@@ -29,11 +47,16 @@ void XStore_zmqServer::startServer(std::string listenAddr, std::string listenPor
 }
 
 void* XStore_zmqServer::workerRoutine(void *args) {
+    // Unwrap thread args
+    threadArgs *tArgs = (threadArgs*) args;
+    std::string serverAddr = (std::string) tArgs->serverAddr;
+
     // Instantiate XStore for each thread
     XStore myStore;
 
     // Each thread owns its own ZMQ context
-    zmq::context_t *ctx = (zmq::context_t *) args;
+//    zmq::context_t *ctx = (zmq::context_t *) args;
+    zmq::context_t *ctx = tArgs->zmqCtx;
     zmq::socket_t socket (*ctx, zmq::socket_type::rep);
     socket.connect("inproc://workers");
 
@@ -53,6 +76,22 @@ void* XStore_zmqServer::workerRoutine(void *args) {
         int rType = clientReqCmd.rtype();
 
         switch (rType) {
+            // INFOREQUEST
+            case xstoreProto::INFOREQUEST: {
+                // XStore stuffs
+                //  Returning Protobuf obj
+                xstoreProto::infoResponse protoToClient = myStore.infoQuery(serverAddr, tArgs->numThreads);
+
+                //  Response message size
+                size_t protoToClientSize = protoToClient.ByteSizeLong();
+                zmq::message_t responseToClient(protoToClientSize);
+
+                //  Serialize & Dispatch msg to CLIENT
+                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
+                socket.send(responseToClient, zmq::send_flags::none);
+                break;
+            }
+
             // UNARY REQUEST
             case xstoreProto::UNARYREQUEST: {
                 // Properly parse Protobuf obj from CLIENT
@@ -74,7 +113,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
             }
 
             // BATCH REQUEST
-            case xstoreProto::BATCHREQUEST: {
+            case xstoreProto::RANGEREQUEST: {
                 // Properly parse Protobuf obj from CLIENT
                 xstoreProto::rangeRequest protoFromClient;
                 protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());

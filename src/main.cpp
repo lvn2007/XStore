@@ -19,6 +19,11 @@ int main(int argc, char *argv[]) {
 
 //    xstoreProto::batchResponse br = myStore.getBatch(1483228800, 1483228805, "tsla");
 //    br.PrintDebugString();
+
+    // INFO REP TEST
+//    xstoreProto::infoResponse ir = myStore.infoQuery("192.168.1.1", "12345", 10);
+//    ir.PrintDebugString();
+
     // ----DEV AREA
 
     XStore_zmqServer xStoreZmqServer(30);

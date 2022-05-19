@@ -2,55 +2,61 @@ syntax = "proto3";
 
 option optimize_for = SPEED;
 
-package xStoregRPC;
-
-// Defines the service
-//service xStore {
-//  // Function invoked to send the request
-//  rpc unaryRequest (unaryRequestMsg) returns (responseData) {}
-//  rpc batchRequest (rangeRequestMsg) returns (stream responseData) {}
-//}
-
-message recordSize {
-  string dbName = 1;
-  uint32 rowSize = 2;
-}
-
-message dbSizeRecord {
-  repeated recordSize recordsize = 1;
-}
+package xstoreProto;
 
 enum requestType {
-  unaryRequest = 0;
-  batchRequest = 1;
-  unaryInsert = 2;
-  batchInsert = 3;
+  INFOREQUEST = 0;
+  UNARYREQUEST = 1;
+  RANGEREQUEST = 2;
+  UNARYINSERT = 3;
+  BATCHINSERT = 4;
 }
 
-// The request message containing requested numbers
-message unaryRequestMsg {
-  //  enum requestType {
-  //    UNARY = 0;
-  //    STREAM = 1;
-  //  }
+// --- DB Stats & Info
+message dbStats {
+  string dbName = 1;
+  string dbResolution = 2;
+  float totalSizeInGB = 3;
+  repeated string fileName = 4;
+}
+
+message infoResponse {
+  string serverAddr = 1;
+  int32 threadCount = 2;
+  repeated dbStats dbInfo = 3;
+}
+// --- DB Stats & Info
+
+// REQUEST section
+//  COMMAND directive
+message reqCMD {
+  requestType rType = 1;
+}
+
+//  UNARY request
+message unaryRequest {
   requestType rType = 1;
   uint32 timestamp = 2;
   string dbName = 3;
 }
 
-message rangeRequestMsg {
-  uint32 startTime = 1;
-  uint32 endTime = 2;
-  string dbName = 3;
+//  RANGE request
+message rangeRequest {
+  requestType rType = 1;
+  uint32 startTime = 2;
+  uint32 endTime = 3;
+  string dbName = 4;
 }
 
-// The response message containing response
-message responseData {
+// RESPONSE section
+//  UNARY response
+message unaryResponse {
   uint32 timestamp = 1;
   string dataset = 2;
+  string queryStatus = 3;
 }
 
-message messageInfo {
-  uint32 nItems = 1;
-  uint32 msgLength = 2;
+message batchResponse {
+  repeated unaryResponse unaryResponse = 1;
+  string queryStatus = 2;
 }
