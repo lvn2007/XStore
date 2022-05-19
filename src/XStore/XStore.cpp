@@ -108,7 +108,7 @@ bool XStore::createDB(std::string dbName, int rowLength) {
 }
 
 // INSERT time-series oriented values
-void XStore::insert(std::time_t unixTime, std::string value, std::string dbName) {
+void XStore::unaryInsert(std::time_t unixTime, std::string data, std::string dbName) {
     // Fetch all dirs in dataStore dir
     dbStats();
 
@@ -189,7 +189,7 @@ void XStore::insert(std::time_t unixTime, std::string value, std::string dbName)
 
     // IF no error
     // -> Organize timestamp & data into an object
-    dataStruct currData{unixTime, value};
+    dataStruct currData{unixTime, data};
 
     // Writing actual data to disk
     //  Epoch time difference between target & startEpoch

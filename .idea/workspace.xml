@@ -18,13 +18,11 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Implemented infoQuery &amp; Modified Protobuf &amp; Attach args via struct to threads">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="House cleaning">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/CMakeLists.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/XStore_Networking/zmq.hpp" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore_Networking/zmq.hpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/TCPServer.cpp" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/dataStructs/clientCmdStruct.cpp" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/protoFile/xStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/xStore.proto" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -285,14 +283,7 @@
       <workItem from="1652126295860" duration="8763000" />
       <workItem from="1652236111408" duration="33597000" />
       <workItem from="1652408546575" duration="44201000" />
-      <workItem from="1652663666980" duration="45268000" />
-    </task>
-    <task id="LOCAL-00041" summary="Implemented 'insert' when there's DB existed">
-      <created>1639719864843</created>
-      <option name="number" value="00041" />
-      <option name="presentableId" value="LOCAL-00041" />
-      <option name="project" value="LOCAL" />
-      <updated>1639719864843</updated>
+      <workItem from="1652663666980" duration="47488000" />
     </task>
     <task id="LOCAL-00042" summary="Implemented 'getBatch'">
       <created>1639927378864</created>
@@ -630,7 +621,14 @@
       <option name="project" value="LOCAL" />
       <updated>1652924649885</updated>
     </task>
-    <option name="localTasksCounter" value="90" />
+    <task id="LOCAL-00090" summary="House cleaning">
+      <created>1652948621946</created>
+      <option name="number" value="00090" />
+      <option name="presentableId" value="LOCAL-00090" />
+      <option name="project" value="LOCAL" />
+      <updated>1652948621946</updated>
+    </task>
+    <option name="localTasksCounter" value="91" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -730,7 +728,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Enabled &quot;SPEED&quot; mode in &quot;optimized_for&quot; in Protobuf" />
     <MESSAGE value="Revamp XStore's Python client" />
     <MESSAGE value="getBatch is now open/close only once" />
     <MESSAGE value="Faster getBatch() &amp; Deprecated getp()" />
@@ -755,6 +752,7 @@
     <MESSAGE value="Refine unary &amp; batch responses outputs -- Stripping timestamp from dataset field" />
     <MESSAGE value="Completed unary &amp; batch request/respond" />
     <MESSAGE value="Implemented infoQuery &amp; Modified Protobuf &amp; Attach args via struct to threads" />
-    <option name="LAST_COMMIT_MESSAGE" value="Implemented infoQuery &amp; Modified Protobuf &amp; Attach args via struct to threads" />
+    <MESSAGE value="House cleaning" />
+    <option name="LAST_COMMIT_MESSAGE" value="House cleaning" />
   </component>
 </project>
