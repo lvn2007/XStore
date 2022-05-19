@@ -1,9 +1,8 @@
 syntax = "proto3";
-
 option optimize_for = SPEED;
-
 package xstoreProto;
 
+// ======== COMMAND directives section ========
 enum requestType {
   INFOREQUEST = 0;
   UNARYREQUEST = 1;
@@ -12,7 +11,36 @@ enum requestType {
   BATCHINSERT = 4;
 }
 
-// --- DB Stats & Info
+message reqCMD {
+  requestType rType = 1;
+}
+
+// ======== REQUESTS section ========
+// --- UNARY request
+message unaryRequest {
+  requestType rType = 1;
+  uint32 timestamp = 2;
+  string dbName = 3;
+}
+
+// --- UNARY insert
+message unaryInsert {
+  requestType rType = 1;
+  uint32 timestamp = 2;
+  string data = 3;
+  string dbName = 4;
+}
+
+// --- RANGE request
+message rangeRequest {
+  requestType rType = 1;
+  uint32 startTime = 2;
+  uint32 endTime = 3;
+  string dbName = 4;
+}
+
+// ======== RESPONSE section ========
+// --- DB Stats & Info REQ response
 message dbStats {
   string dbName = 1;
   string dbResolution = 2;
@@ -25,37 +53,19 @@ message infoResponse {
   int32 threadCount = 2;
   repeated dbStats dbInfo = 3;
 }
-// --- DB Stats & Info
 
-// REQUEST section
-//  COMMAND directive
-message reqCMD {
-  requestType rType = 1;
-}
-
-//  UNARY request
-message unaryRequest {
-  requestType rType = 1;
-  uint32 timestamp = 2;
-  string dbName = 3;
-}
-
-//  RANGE request
-message rangeRequest {
-  requestType rType = 1;
-  uint32 startTime = 2;
-  uint32 endTime = 3;
-  string dbName = 4;
-}
-
-// RESPONSE section
-//  UNARY response
+// --- UNARY REQ response
 message unaryResponse {
   uint32 timestamp = 1;
   string dataset = 2;
   string queryStatus = 3;
 }
 
+message unaryInsertResponse {
+  string insertStatus = 1;
+}
+
+// --- RANGE/BATCH REQ response
 message batchResponse {
   repeated unaryResponse unaryResponse = 1;
   string queryStatus = 2;

@@ -115,19 +115,26 @@ int main(int argc, char const *argv[])
         // Unary REQ -- Routine
 //        xstoreProto::unaryRequest toServer;
 //        toServer.set_rtype(xstoreProto::UNARYREQUEST);
-//        toServer.set_timestamp(1483228800);
+//        toServer.set_timestamp(unixTime);
 //        toServer.set_dbname("tsla");
 
         // RANGE REQ -- Routine
 //        xstoreProto::rangeRequest toServer;
 //        toServer.set_rtype(xstoreProto::RANGEREQUEST);
 //        toServer.set_starttime(1483228800);
-//        toServer.set_endtime(1483228805);
+//        toServer.set_endtime(1484228805);
 //        toServer.set_dbname("tsla");
 
         // Info REQ -- Routine
-        xstoreProto::reqCMD toServer;
-        toServer.set_rtype(xstoreProto::INFOREQUEST);
+//        xstoreProto::reqCMD toServer;
+//        toServer.set_rtype(xstoreProto::INFOREQUEST);
+
+        // Unary Insert -- Routine
+        xstoreProto::unaryInsert toServer;
+        toServer.set_rtype(xstoreProto::UNARYINSERT);
+        toServer.set_timestamp(1483228802);
+        toServer.set_data("Test");
+        toServer.set_dbname("TSLA");
 
         // Config msg and send
         size_t byteSize = toServer.ByteSizeLong();
@@ -148,7 +155,11 @@ int main(int argc, char const *argv[])
 //        xstoreProto::batchResponse fromServer;
 
         //  INFO REP
-        xstoreProto::infoResponse fromServer;
+//        xstoreProto::infoResponse fromServer;
+
+        //  UNARY INSERT REP
+        xstoreProto::unaryInsertResponse fromServer;
+
         fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
 
         // End timer

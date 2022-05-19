@@ -118,7 +118,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
                 protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
 
                 // XStore stuffs
-                //  Returning Protobug obj
+                //  Returning Protobuf obj
                 xstoreProto::batchResponse protoToClient = myStore.batchQuery(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname());
 
                 //  Response message
@@ -133,18 +133,27 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
             // UNARY INSERT
             case xstoreProto::UNARYINSERT: {
-                std::cout << 2 << std::endl;
+                // Properly parse Protobuf obj from CLIENT
+                xstoreProto::unaryInsert protoFromClient;
+                protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
+
+                // XStore stuffs
+                //  Returning Protobuf obj
+                xstoreProto::unaryInsertResponse protoToClient = myStore.unaryInsert(protoFromClient.timestamp(), protoFromClient.data(), protoFromClient.dbname());
+
+                //  Response message
+                size_t protoToClientSize = protoToClient.ByteSizeLong();
+                zmq::message_t responseToClient(protoToClientSize);
+
+                //  Serialize & Dispatch msg to CLIENT
+                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
+                socket.send(responseToClient, zmq::send_flags::none);
                 break;
             }
 
             // BATCH INSERT
             case xstoreProto::BATCHINSERT: {
                 std::cout << 3 << std::endl;
-                break;
-            }
-
-            default: {
-                std::cout << "Default" << std::endl;
                 break;
             }
         }

@@ -37,7 +37,7 @@ class XStore {
         bool createDB(std::string dbName, int rowLength);
 
         // INSERT time-series oriented values
-        void unaryInsert(std::time_t epochTime, std::string data, std::string dbName);
+        xstoreProto::unaryInsertResponse unaryInsert(std::time_t epochTime, std::string data, std::string dbName);
 
         // INSERT BATCH time-series oriented values
         void insertBatch(std::time_t epochTime, std::string value, std::string dbName);
