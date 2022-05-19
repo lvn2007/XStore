@@ -1,7 +1,5 @@
 #include "include/XStore/XStore.h"
 
-#define lineSize 128
-
 // Initialization
 XStore::XStore() {
     // Initialize message
@@ -12,6 +10,61 @@ XStore::XStore() {
 
     // First, check if there's any existing data exists
     hasDB();
+}
+
+xstoreProto::infoResponse XStore::infoQuery(std::string serverAddr, int threadCount) {
+    // Protobuf obj to be returned
+    xstoreProto::infoResponse toReturn;
+
+    // Overview info
+    toReturn.set_serveraddr(serverAddr);
+    toReturn.set_threadcount(threadCount);
+
+    // Location of dataStore
+    std::string dataStoreLoc = baseDir + "dataStore/";
+
+    // Loop through all db available in dataStore
+    for (auto& dir : std::filesystem::directory_iterator(dataStoreLoc)) {
+        std::string currDBName = dir.path().filename().string();
+        std::string currDBDir = dataStoreLoc + currDBName;
+
+        // Set DB Name
+        xstoreProto::dbStats *currDB = toReturn.add_dbinfo();
+        currDB->set_dbname(currDBName);
+
+        // Fetch config of a target DB
+        configStruct cfgStruct;
+        std::string currCfgFilePath = currDBDir + "/" + currDBName + ".config";
+        int cfgFile = open(currCfgFilePath.c_str(), O_RDONLY);
+        pread(cfgFile, &cfgStruct, sizeof(cfgStruct), 0);
+
+        // Set DB Resolution
+        currDB->set_dbresolution(cfgStruct.timeResolution);
+
+        // Size of all data files in current DB
+        float allSize = 0;
+
+        // Loop through all files in currentDBDir
+        for (auto& dbDir : std::filesystem::directory_iterator(currDBDir)) {
+            // Current file name & path in dbDir
+            std::string currFileName = dbDir.path().filename().string();
+
+            // Count only data file -- Ignore .config file(s)
+            //  IF current file name contains ".config"
+            //   -> Skip to next iteration
+            if (currFileName.find(".config") != std::string::npos) {
+                continue;
+            }
+
+            // Fetch current file size & conver to GB
+            double currFileSizeInGB = static_cast<double>(file_size(dbDir.path())) / 1024 / 1024 / 1024;
+            allSize += currFileSizeInGB;
+            currDB->add_filename(currFileName);
+        }
+        currDB->set_totalsizeingb(allSize);
+    }
+
+    return toReturn;
 }
 
 bool XStore::createDB(std::string dbName, int rowLength) {
@@ -49,14 +102,6 @@ bool XStore::createDB(std::string dbName, int rowLength) {
     //  Write config to binary file
     pwrite(bFile, &cfgStruct, sizeof(configStruct), 0);
     close(bFile);
-
-//    std::cout << "dbCount: " << dbCount << std::endl;
-
-//    configStruct testData;
-//    int bbFile = open(configFilePath.c_str(), O_RDONLY);
-//
-//    pread(bbFile, &testData, sizeof(configStruct), 0);
-//    testData.printData();
 
     // Re-run dbStats to update new changes
     dbStats();
@@ -175,7 +220,7 @@ xstoreProto::unaryResponse XStore::unaryQuery(std::time_t epochTime, std::string
     // Fetch all dirs in dataStore dir
     dbStats();
 
-    // Protobuf obj to be return
+    // Protobuf obj to be returned
     xstoreProto::unaryResponse toReturn;
     toReturn.set_timestamp(epochTime);
     toReturn.set_dataset("NULL");
@@ -259,7 +304,7 @@ xstoreProto::batchResponse XStore::batchQuery(std::time_t startEpochT, std::time
     // Fetch all dirs in dataStore dir
     dbStats();
 
-    // Protobuf obj to be return
+    // Protobuf obj to be returned
     xstoreProto::batchResponse toReturn;
 
     // Ranges of queried time

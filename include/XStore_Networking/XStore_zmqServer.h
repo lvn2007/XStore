@@ -9,7 +9,8 @@
 
 class XStore_zmqServer {
     private:
-        int numThreads = 1;
+        int numThreads;
+        std::string serverAddr;
 
         // Work routines in each thread
         static void* workerRoutine(void *args);
