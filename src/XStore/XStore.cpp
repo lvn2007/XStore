@@ -108,14 +108,18 @@ bool XStore::createDB(std::string dbName, int rowLength) {
 }
 
 // INSERT time-series oriented values
-void XStore::unaryInsert(std::time_t unixTime, std::string data, std::string dbName) {
+xstoreProto::unaryInsertResponse XStore::unaryInsert(std::time_t unixTime, std::string data, std::string dbName) {
     // Fetch all dirs in dataStore dir
     dbStats();
+
+    // Protobuf obj to be returned
+    xstoreProto::unaryInsertResponse toReturn;
 
     // IF no DB exists i.e., dbCount == 0
     //  Requiring a db space to be instantiated with "createDB" method prior to this
     if (dbCount == 0) {
-        return;
+        toReturn.set_insertstatus("[ERROR] -- DB Name does not exists");
+        return toReturn;
     }
 
     // Check whether dbName is already created
@@ -130,7 +134,8 @@ void XStore::unaryInsert(std::time_t unixTime, std::string data, std::string dbN
     //  IF dbName is NOT existed
     //   -> Do nothing
     if (!isFound) {
-        return;
+        toReturn.set_insertstatus("[ERROR] -- DB Name does not exists");
+        return toReturn;
     }
 
     // Otherwise, create a file with name of inputYear.XSTORE
@@ -210,6 +215,9 @@ void XStore::unaryInsert(std::time_t unixTime, std::string data, std::string dbN
     //  Updating dbStats & dbMap
     dbStats();
     initDB();
+
+    toReturn.set_insertstatus("[SUCCESS] -- Unary insert completed");
+    return toReturn;
 }
 
 void XStore::insertBatch(std::time_t epochTime, std::string value, std::string dbName) {
