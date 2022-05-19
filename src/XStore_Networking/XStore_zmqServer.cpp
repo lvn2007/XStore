@@ -30,14 +30,13 @@ void XStore_zmqServer::startServer(std::string listenAddr, std::string listenPor
 
     //  Launch pool of WORKER threads
     for (int i = 0; i < numThreads; i++) {
-        // Wrap args struct for each thread
+        // Pack args struct for each thread
         threadArgs tArgs;
         tArgs.zmqCtx = &ctx;
         tArgs.numThreads = numThreads;
         tArgs.serverAddr = serverAddr;
 
         pthread_t worker;
-//        pthread_create(&worker, NULL, XStore_zmqServer::workerRoutine, (void *) &ctx);
         pthread_create(&worker, NULL, XStore_zmqServer::workerRoutine, &tArgs);
     }
     std::cout << "[INFO - Networking] -- Launched " << numThreads << " worker thread(s)" << std::endl;
@@ -47,7 +46,7 @@ void XStore_zmqServer::startServer(std::string listenAddr, std::string listenPor
 }
 
 void* XStore_zmqServer::workerRoutine(void *args) {
-    // Unwrap thread args
+    // Unpack thread args
     threadArgs *tArgs = (threadArgs*) args;
     std::string serverAddr = (std::string) tArgs->serverAddr;
 
