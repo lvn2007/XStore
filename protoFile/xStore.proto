@@ -7,8 +7,9 @@ enum requestType {
   INFOREQUEST = 0;
   UNARYREQUEST = 1;
   RANGEREQUEST = 2;
-  UNARYINSERT = 3;
-  BATCHINSERT = 4;
+  CREATEDBREQUEST = 3;
+  UNARYINSERT = 4;
+  BATCHINSERT = 5;
 }
 
 message reqCMD {
@@ -17,14 +18,21 @@ message reqCMD {
 
 // ======== REQUESTS section ========
 // --- UNARY request
-message unaryRequest {
+message unaryQuery_REQ {
   requestType rType = 1;
   uint32 timestamp = 2;
   string dbName = 3;
 }
 
-// --- UNARY insert
-message unaryInsert {
+// --- CREATE DB request
+message createDB_REQ {
+  requestType rType = 1;
+  string dbName = 2;
+  int32 rowLength = 3;
+}
+
+// --- UNARY insert request
+message unaryInsert_REQ {
   requestType rType = 1;
   uint32 timestamp = 2;
   string data = 3;
@@ -32,7 +40,7 @@ message unaryInsert {
 }
 
 // --- RANGE request
-message rangeRequest {
+message rangeQuery_REQ {
   requestType rType = 1;
   uint32 startTime = 2;
   uint32 endTime = 3;
@@ -48,25 +56,31 @@ message dbStats {
   repeated string fileName = 4;
 }
 
-message infoResponse {
+message sysInfo_REP {
   string serverAddr = 1;
   int32 threadCount = 2;
   repeated dbStats dbInfo = 3;
 }
 
 // --- UNARY REQ response
-message unaryResponse {
+message unaryQuery_REP {
   uint32 timestamp = 1;
   string dataset = 2;
   string queryStatus = 3;
 }
 
-message unaryInsertResponse {
+// --- CREATE DB response
+message createDB_REP {
+  string createDBStatus = 1;
+}
+
+// --- UNARY INSERT REQ response
+message unaryInsert_REP {
   string insertStatus = 1;
 }
 
 // --- RANGE/BATCH REQ response
-message batchResponse {
-  repeated unaryResponse unaryResponse = 1;
+message batchQuery_REP {
+  repeated unaryQuery_REP unaryResponse = 1;
   string queryStatus = 2;
 }

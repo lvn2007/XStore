@@ -31,20 +31,20 @@ class XStore {
         XStore();
 
         // PROCESSING dbStats/info query
-        xstoreProto::infoResponse infoQuery(std::string serverAddr, int threadCount);
+        xstoreProto::sysInfo_REP infoQuery(std::string serverAddr, int threadCount);
 
         // CREATING new DB instance with row length
-        bool createDB(std::string dbName, int rowLength);
+        xstoreProto::createDB_REP createDB(std::string dbName, int rowLength);
 
         // INSERT time-series oriented values
-        xstoreProto::unaryInsertResponse unaryInsert(std::time_t epochTime, std::string data, std::string dbName);
+        xstoreProto::unaryInsert_REP unaryInsert(std::time_t epochTime, std::string data, std::string dbName);
 
         // INSERT BATCH time-series oriented values
         void insertBatch(std::time_t epochTime, std::string value, std::string dbName);
 
-        xstoreProto::batchResponse batchQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName);
+        xstoreProto::unaryQuery_REP unaryQuery(std::time_t epochTime, std::string dbName);
 
-        xstoreProto::unaryResponse unaryQuery(std::time_t epochTime, std::string dbName);
+        xstoreProto::batchQuery_REP batchQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName);
 
         // Initialize DB
         void initDB();
