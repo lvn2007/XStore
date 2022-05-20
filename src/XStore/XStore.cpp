@@ -133,11 +133,13 @@ xstoreProto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::stri
 
     // Protobuf obj to be returned
     xstoreProto::unaryInsert_REP toReturn;
+    std::string insertStatus;
 
     // IF no DB exists i.e., dbCount == 0
     //  Requiring a db space to be instantiated with "createDB" method prior to this
     if (dbCount == 0) {
-        toReturn.set_insertstatus("[ERROR] -- DB Name does not exists");
+        insertStatus = "[ERROR] -- DB with name: " + dbName + " does not exist";
+        toReturn.set_insertstatus(insertStatus);
         return toReturn;
     }
 
@@ -153,7 +155,8 @@ xstoreProto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::stri
     //  IF dbName is NOT existed
     //   -> Do nothing
     if (!isFound) {
-        toReturn.set_insertstatus("[ERROR] -- DB Name does not exists");
+        insertStatus = "[ERROR] -- DB with name: " + dbName + " does not exist";
+        toReturn.set_insertstatus(insertStatus);
         return toReturn;
     }
 
@@ -248,6 +251,7 @@ xstoreProto::unaryQuery_REP XStore::unaryQuery(std::time_t epochTime, std::strin
     dbStats();
 
     // Protobuf obj to be returned
+    std::string queryStatus;
     xstoreProto::unaryQuery_REP toReturn;
     toReturn.set_timestamp(epochTime);
     toReturn.set_dataset("NULL");
@@ -261,7 +265,8 @@ xstoreProto::unaryQuery_REP XStore::unaryQuery(std::time_t epochTime, std::strin
     //  IF given dbName is not available
     //  Return "NULL" as string
     if (dbMap.find(dbName) == dbMap.end()) {
-        toReturn.set_querystatus("[ERROR] -- DB Name does not exists");
+        queryStatus = "[ERROR] -- DB with name: " + dbName + " does not exist";
+        toReturn.set_querystatus(queryStatus);
         return toReturn;
     }
 
@@ -272,7 +277,7 @@ xstoreProto::unaryQuery_REP XStore::unaryQuery(std::time_t epochTime, std::strin
     //  IF inputYear is not available
     //  Return "NULL" as string
     if ((dbMap.find(dbName)->second.hasYear(inputYear)) != true) {
-        std::string errMsg = "[ERROR] -- " + std::to_string(inputYear) + ".XSTORE does not exists";
+        std::string errMsg = "[ERROR] -- " + std::to_string(inputYear) + ".XSTORE does not exist";
         toReturn.set_querystatus(errMsg);
         return toReturn;
     }
