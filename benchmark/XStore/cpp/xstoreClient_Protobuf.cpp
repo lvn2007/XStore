@@ -88,8 +88,6 @@ int main(int argc, char const *argv[])
     std::string uniqueID;
     uniqueID = argv[1];
 
-//    std::cout << "Unique ID: " << uniqueID << std::endl;
-
     std::vector<double> us = { };
 
     // Clock init
@@ -113,16 +111,16 @@ int main(int argc, char const *argv[])
         start = std::chrono::high_resolution_clock::now();
 
         // Unary REQ -- Routine
-//        xstoreProto::unaryRequest toServer;
-//        toServer.set_rtype(xstoreProto::UNARYREQUEST);
-//        toServer.set_timestamp(unixTime);
-//        toServer.set_dbname("tsla");
+        xstoreProto::unaryQuery_REQ toServer;
+        toServer.set_rtype(xstoreProto::UNARYREQUEST);
+        toServer.set_timestamp(1483228802);
+        toServer.set_dbname("tsla");
 
         // RANGE REQ -- Routine
-//        xstoreProto::rangeRequest toServer;
+//        xstoreProto::rangeQuery_REQ toServer;
 //        toServer.set_rtype(xstoreProto::RANGEREQUEST);
 //        toServer.set_starttime(1483228800);
-//        toServer.set_endtime(1484228805);
+//        toServer.set_endtime(1484338805);
 //        toServer.set_dbname("tsla");
 
         // Info REQ -- Routine
@@ -130,11 +128,17 @@ int main(int argc, char const *argv[])
 //        toServer.set_rtype(xstoreProto::INFOREQUEST);
 
         // Unary Insert -- Routine
-        xstoreProto::unaryInsert toServer;
-        toServer.set_rtype(xstoreProto::UNARYINSERT);
-        toServer.set_timestamp(1483228802);
-        toServer.set_data("Test");
-        toServer.set_dbname("TSLA");
+//        xstoreProto::unaryInsert_REQ toServer;
+//        toServer.set_rtype(xstoreProto::UNARYINSERT);
+//        toServer.set_timestamp(1483228802);
+//        toServer.set_data("Test");
+//        toServer.set_dbname("tsla");
+
+        // CreateDB -- Routine
+//        xstoreProto::createDB_REQ toServer;
+//        toServer.set_rtype(xstoreProto::CREATEDBREQUEST);
+//        toServer.set_dbname("abc");
+//        toServer.set_rowlength(8);
 
         // Config msg and send
         size_t byteSize = toServer.ByteSizeLong();
@@ -149,16 +153,19 @@ int main(int argc, char const *argv[])
 
         // Received structs
         //  UNARY REP
-//        xstoreProto::unaryResponse fromServer;
+        xstoreProto::unaryQuery_REP fromServer;
 
         //  RANGE REP
-//        xstoreProto::batchResponse fromServer;
+//        xstoreProto::batchQuery_REP fromServer;
 
         //  INFO REP
-//        xstoreProto::infoResponse fromServer;
+//        xstoreProto::sysInfo_REP fromServer;
 
         //  UNARY INSERT REP
-        xstoreProto::unaryInsertResponse fromServer;
+//        xstoreProto::unaryInsert_REP fromServer;
+
+        //  CREATE DB REP
+//        xstoreProto::createDB_REP fromServer;
 
         fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
 

@@ -18,13 +18,11 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Enabled unaryInsert">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Enabled createDB &amp; Modified Protobuf">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/XStore/cpp/xStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/cpp/xStore.proto" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/protoFile/xStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/xStore.proto" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/CMakeLists.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/XStore/cpp/xstoreClient_Protobuf.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/cpp/xstoreClient_Protobuf.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -285,14 +283,7 @@
       <workItem from="1652126295860" duration="8763000" />
       <workItem from="1652236111408" duration="33597000" />
       <workItem from="1652408546575" duration="44201000" />
-      <workItem from="1652663666980" duration="57808000" />
-    </task>
-    <task id="LOCAL-00044" summary="Including dependencies">
-      <created>1640236300141</created>
-      <option name="number" value="00044" />
-      <option name="presentableId" value="LOCAL-00044" />
-      <option name="project" value="LOCAL" />
-      <updated>1640236300141</updated>
+      <workItem from="1652663666980" duration="64925000" />
     </task>
     <task id="LOCAL-00045" summary="Including dependencies">
       <created>1640237415782</created>
@@ -630,7 +621,14 @@
       <option name="project" value="LOCAL" />
       <updated>1652997509378</updated>
     </task>
-    <option name="localTasksCounter" value="93" />
+    <task id="LOCAL-00093" summary="Enabled createDB &amp; Modified Protobuf">
+      <created>1653006647281</created>
+      <option name="number" value="00093" />
+      <option name="presentableId" value="LOCAL-00093" />
+      <option name="project" value="LOCAL" />
+      <updated>1653006647281</updated>
+    </task>
+    <option name="localTasksCounter" value="94" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -730,7 +728,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="getBatch is now open/close only once" />
     <MESSAGE value="Faster getBatch() &amp; Deprecated getp()" />
     <MESSAGE value="Faster getSingleOpenClose()" />
     <MESSAGE value="Faster getBatch() &amp; Improved XStore Python client" />
@@ -755,6 +752,7 @@
     <MESSAGE value="Implemented infoQuery &amp; Modified Protobuf &amp; Attach args via struct to threads" />
     <MESSAGE value="House cleaning" />
     <MESSAGE value="Enabled unaryInsert" />
-    <option name="LAST_COMMIT_MESSAGE" value="Enabled unaryInsert" />
+    <MESSAGE value="Enabled createDB &amp; Modified Protobuf" />
+    <option name="LAST_COMMIT_MESSAGE" value="Enabled createDB &amp; Modified Protobuf" />
   </component>
 </project>
