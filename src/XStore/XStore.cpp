@@ -12,9 +12,9 @@ XStore::XStore() {
     hasDB();
 }
 
-xstoreProto::infoResponse XStore::infoQuery(std::string serverAddr, int threadCount) {
+xstoreProto::sysInfo_REP XStore::infoQuery(std::string serverAddr, int threadCount) {
     // Protobuf obj to be returned
-    xstoreProto::infoResponse toReturn;
+    xstoreProto::sysInfo_REP toReturn;
 
     // Overview info
     toReturn.set_serveraddr(serverAddr);
@@ -67,9 +67,13 @@ xstoreProto::infoResponse XStore::infoQuery(std::string serverAddr, int threadCo
     return toReturn;
 }
 
-bool XStore::createDB(std::string dbName, int rowLength) {
+xstoreProto::createDB_REP XStore::createDB(std::string dbName, int rowLength) {
     // Fetch all dirs in dataStore dir
     dbStats();
+
+    // Protobuf obj to be returned
+    xstoreProto::createDB_REP toReturn;
+    std::string createDBStatus;
 
     // Ensure dbName string is all capitalized
     for (int i = 0; i < dbName.size(); i++) {
@@ -80,9 +84,19 @@ bool XStore::createDB(std::string dbName, int rowLength) {
     bool isFound = std::find(dbNames.begin(), dbNames.end(), dbName) != dbNames.end();
 
     // IF folder for dbName is already created
-    //  -> Do nothing
+    //  -> Inform user about the error
     if (isFound) {
-        return false;
+        createDBStatus = "[ERROR] -- DB with name: " + dbName + " is already existed";
+        toReturn.set_createdbstatus(createDBStatus);
+        return toReturn;
+    }
+
+    // IF rowLength is not valid
+    //  -> Inform user about the error
+    if (rowLength <= 0) {
+        createDBStatus = "[ERROR] -- Row length must be greater than 0";
+        toReturn.set_createdbstatus(createDBStatus);
+        return toReturn;
     }
 
     // Else -> Create folder
@@ -105,15 +119,20 @@ bool XStore::createDB(std::string dbName, int rowLength) {
 
     // Re-run dbStats to update new changes
     dbStats();
+
+    // Set return msg
+    createDBStatus = "[SUCCESS] -- DB with name: " + dbName + " is successfully created";
+    toReturn.set_createdbstatus(createDBStatus);
+    return toReturn;
 }
 
 // INSERT time-series oriented values
-xstoreProto::unaryInsertResponse XStore::unaryInsert(std::time_t unixTime, std::string data, std::string dbName) {
+xstoreProto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::string data, std::string dbName) {
     // Fetch all dirs in dataStore dir
     dbStats();
 
     // Protobuf obj to be returned
-    xstoreProto::unaryInsertResponse toReturn;
+    xstoreProto::unaryInsert_REP toReturn;
 
     // IF no DB exists i.e., dbCount == 0
     //  Requiring a db space to be instantiated with "createDB" method prior to this
@@ -224,12 +243,12 @@ void XStore::insertBatch(std::time_t epochTime, std::string value, std::string d
 
 }
 
-xstoreProto::unaryResponse XStore::unaryQuery(std::time_t epochTime, std::string dbName) {
+xstoreProto::unaryQuery_REP XStore::unaryQuery(std::time_t epochTime, std::string dbName) {
     // Fetch all dirs in dataStore dir
     dbStats();
 
     // Protobuf obj to be returned
-    xstoreProto::unaryResponse toReturn;
+    xstoreProto::unaryQuery_REP toReturn;
     toReturn.set_timestamp(epochTime);
     toReturn.set_dataset("NULL");
 
@@ -308,12 +327,12 @@ xstoreProto::unaryResponse XStore::unaryQuery(std::time_t epochTime, std::string
     return toReturn;
 }
 
-xstoreProto::batchResponse XStore::batchQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName) {
+xstoreProto::batchQuery_REP XStore::batchQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName) {
     // Fetch all dirs in dataStore dir
     dbStats();
 
     // Protobuf obj to be returned
-    xstoreProto::batchResponse toReturn;
+    xstoreProto::batchQuery_REP toReturn;
 
     // Ranges of queried time
     //  i.e., N elements of time-series row of data
@@ -321,7 +340,7 @@ xstoreProto::batchResponse XStore::batchQuery(std::time_t startEpochT, std::time
 
     // Pre-populating time for all defined ranges
     for (int i = 0; i < timeRange; i++) {
-        xstoreProto::unaryResponse *currEntry = toReturn.add_unaryresponse();
+        xstoreProto::unaryQuery_REP *currEntry = toReturn.add_unaryresponse();
         currEntry->set_timestamp(startEpochT + i);
         currEntry->set_dataset("NULL");
     }

@@ -18,8 +18,9 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="House cleaning">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Enabled unaryInsert">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/XStore/cpp/xStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/cpp/xStore.proto" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/protoFile/xStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/xStore.proto" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
@@ -284,14 +285,7 @@
       <workItem from="1652126295860" duration="8763000" />
       <workItem from="1652236111408" duration="33597000" />
       <workItem from="1652408546575" duration="44201000" />
-      <workItem from="1652663666980" duration="50069000" />
-    </task>
-    <task id="LOCAL-00043" summary="Experimenting Protobuf &amp; gRPC">
-      <created>1640236155962</created>
-      <option name="number" value="00043" />
-      <option name="presentableId" value="LOCAL-00043" />
-      <option name="project" value="LOCAL" />
-      <updated>1640236155962</updated>
+      <workItem from="1652663666980" duration="57808000" />
     </task>
     <task id="LOCAL-00044" summary="Including dependencies">
       <created>1640236300141</created>
@@ -629,7 +623,14 @@
       <option name="project" value="LOCAL" />
       <updated>1652993609885</updated>
     </task>
-    <option name="localTasksCounter" value="92" />
+    <task id="LOCAL-00092" summary="Enabled unaryInsert">
+      <created>1652997509378</created>
+      <option name="number" value="00092" />
+      <option name="presentableId" value="LOCAL-00092" />
+      <option name="project" value="LOCAL" />
+      <updated>1652997509378</updated>
+    </task>
+    <option name="localTasksCounter" value="93" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -729,7 +730,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Revamp XStore's Python client" />
     <MESSAGE value="getBatch is now open/close only once" />
     <MESSAGE value="Faster getBatch() &amp; Deprecated getp()" />
     <MESSAGE value="Faster getSingleOpenClose()" />
@@ -754,6 +754,7 @@
     <MESSAGE value="Completed unary &amp; batch request/respond" />
     <MESSAGE value="Implemented infoQuery &amp; Modified Protobuf &amp; Attach args via struct to threads" />
     <MESSAGE value="House cleaning" />
-    <option name="LAST_COMMIT_MESSAGE" value="House cleaning" />
+    <MESSAGE value="Enabled unaryInsert" />
+    <option name="LAST_COMMIT_MESSAGE" value="Enabled unaryInsert" />
   </component>
 </project>
