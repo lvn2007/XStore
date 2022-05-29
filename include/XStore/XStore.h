@@ -42,9 +42,17 @@ class XStore {
         // INSERT BATCH time-series oriented values
         void insertBatch(std::time_t epochTime, std::string value, std::string dbName);
 
+        // UNARY GET time-series oriented values
         xstoreProto::unaryQuery_REP unaryQuery(std::time_t epochTime, std::string dbName);
 
+        // BATCH GET time-series oriented values
         xstoreProto::batchQuery_REP batchQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName);
+
+        // REMOVE DB -- Removing an entire DB and its data files
+        xstoreProto::removeDB_REP removeDB(std::string dbName);
+
+        // REMOVE DB FILES -- Removing file(s) based on name in a certain DB
+        xstoreProto::removeDBFiles_REP removeDBFiles(std::string dbName, std::vector<std::string> fileName);
 
         // Initialize DB
         void initDB();

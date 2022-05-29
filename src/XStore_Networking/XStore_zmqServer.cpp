@@ -36,6 +36,7 @@ void XStore_zmqServer::startServer(std::string listenAddr, std::string listenPor
         tArgs.numThreads = numThreads;
         tArgs.serverAddr = serverAddr;
 
+        // Spawn thread
         pthread_t worker;
         pthread_create(&worker, NULL, XStore_zmqServer::workerRoutine, &tArgs);
     }
@@ -54,7 +55,6 @@ void* XStore_zmqServer::workerRoutine(void *args) {
     XStore myStore;
 
     // Each thread owns its own ZMQ context
-//    zmq::context_t *ctx = (zmq::context_t *) args;
     zmq::context_t *ctx = tArgs->zmqCtx;
     zmq::socket_t socket (*ctx, zmq::socket_type::rep);
     socket.connect("inproc://workers");
@@ -174,6 +174,26 @@ void* XStore_zmqServer::workerRoutine(void *args) {
             // BATCH INSERT REQUEST
             case xstoreProto::BATCHINSERT: {
                 std::cout << 3 << std::endl;
+                break;
+            }
+
+            // REMOVE DB REQUEST
+            case xstoreProto::REMOVEDB: {
+                // Properly parse Protobuf obj from CLIENT
+                xstoreProto::removeDB_REQ protoFromClient;
+                protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
+
+                // XStore stuffs
+                //  Returning Protobuf obj
+                xstoreProto::removeDB_REP protoToClient = myStore.removeDB(protoFromClient.dbname());
+
+                //  Response message
+                size_t protoToClientSize = protoToClient.ByteSizeLong();
+                zmq::message_t responseToClient(protoToClientSize);
+
+                //  Serialize & Dispatch msg to CLIENT
+                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
+                socket.send(responseToClient, zmq::send_flags::none);
                 break;
             }
         }
