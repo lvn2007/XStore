@@ -196,6 +196,27 @@ void* XStore_zmqServer::workerRoutine(void *args) {
                 socket.send(responseToClient, zmq::send_flags::none);
                 break;
             }
+
+            // REMOVE DB FILES REQUEST
+            case xstoreProto::REMOVEDBFILES: {
+                // Properly parse Protobuf obj from CLIENT
+                xstoreProto::removeDBFiles_REQ protoFromClient;
+                protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
+
+                // XStore stuffs
+                //  Returning Protobuf obj
+                std::vector<std::string> fileNames(protoFromClient.filename().begin(), protoFromClient.filename().end());
+                xstoreProto::removeDBFiles_REP protoToClient = myStore.removeDBFiles(protoFromClient.dbname(), fileNames);
+
+                //  Response message
+                size_t protoToClientSize = protoToClient.ByteSizeLong();
+                zmq::message_t responseToClient(protoToClientSize);
+
+                //  Serialize & Dispatch msg to CLIENT
+                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
+                socket.send(responseToClient, zmq::send_flags::none);
+                break;
+            }
         }
     }
 }

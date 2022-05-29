@@ -24,11 +24,17 @@ int main(int argc, char *argv[]) {
 //    xstoreProto::infoResponse ir = myStore.infoQuery("192.168.1.1", "12345", 10);
 //    ir.PrintDebugString();
 
-    xstoreProto::removeDB_REP test = myStore.removeDB("ABC");
-    test.PrintDebugString();
-
+//    xstoreProto::removeDBFiles_REQ fromClient;
+//    fromClient.set_rtype(xstoreProto::REMOVEDBFILES);
+//    fromClient.set_dbname("ABC");
+//    fromClient.add_filename("2017.XSTORE");
+//    fromClient.add_filename("2018.XSTORE");
+//
+//    std::vector<std::string> targetVector(fromClient.filename().begin(), fromClient.filename().end());
+//    xstoreProto::removeDBFiles_REP asd = myStore.removeDBFiles(fromClient.dbname(), targetVector);
+//    asd.PrintDebugString();
     // ----DEV AREA
 
-//    XStore_zmqServer xStoreZmqServer(30);
-//    xStoreZmqServer.startServer("172.20.3.113", "12345");
+    XStore_zmqServer xStoreZmqServer(30);
+    xStoreZmqServer.startServer("172.20.3.113", "12345");
 }
