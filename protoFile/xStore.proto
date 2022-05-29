@@ -107,5 +107,5 @@ message removeDB_REP {
 
 // --- REMOVE DB FILES response
 message removeDBFiles_REP {
-  string removeStatus = 1;
+  repeated string removeStatus = 1;
 }
