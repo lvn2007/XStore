@@ -10,6 +10,8 @@ enum requestType {
   CREATEDBREQUEST = 3;
   UNARYINSERT = 4;
   BATCHINSERT = 5;
+  REMOVEDB = 6;
+  REMOVEDBFILES = 7;
 }
 
 message reqCMD {
@@ -45,6 +47,19 @@ message rangeQuery_REQ {
   uint32 startTime = 2;
   uint32 endTime = 3;
   string dbName = 4;
+}
+
+// --- REMOVE DB request
+message removeDB_REQ {
+  requestType rType = 1;
+  string dbName = 2;
+}
+
+// --- REMOVE DB FILES request
+message removeDBFiles_REQ {
+  requestType rType = 1;
+  string dbName = 2;
+  repeated string fileName = 3;
 }
 
 // ======== RESPONSE section ========
@@ -83,4 +98,14 @@ message unaryInsert_REP {
 message batchQuery_REP {
   repeated unaryQuery_REP unaryResponse = 1;
   string queryStatus = 2;
+}
+
+// --- REMOVE DB response
+message removeDB_REP {
+  string removeStatus = 1;
+}
+
+// --- REMOVE DB FILES response
+message removeDBFiles_REP {
+  string removeStatus = 1;
 }
