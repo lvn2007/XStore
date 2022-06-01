@@ -14,8 +14,8 @@ int main(int argc, char *argv[]) {
 //    std::string res = myStore.getSingleOpenClose(1483228801, "TSLA");
 //    std::cout << res << std::endl;
 
-//    xstoreProto::unaryResponse ur = myStore.getSingleOpenClose(1483228801, "tsla");
-//    ur.PrintDebugString();
+    xstoreProto::unaryQuery_REP ur = myStore.unaryQuery(1483228802, "asd");
+    ur.PrintDebugString();
 
 //    xstoreProto::batchResponse br = myStore.getBatch(1483228800, 1483228805, "tsla");
 //    br.PrintDebugString();
@@ -23,6 +23,12 @@ int main(int argc, char *argv[]) {
     // INFO REP TEST
 //    xstoreProto::infoResponse ir = myStore.infoQuery("192.168.1.1", "12345", 10);
 //    ir.PrintDebugString();
+
+//    xstoreProto::createDB_REP createDbRep = myStore.createDB("asd", 64);
+//    xstoreProto::unaryInsert_REP insertRep = myStore.unaryInsert(1483228802, "hello", "asd");
+//    createDbRep.PrintDebugString();
+//    insertRep.PrintDebugString();
+
 
 //    xstoreProto::removeDBFiles_REQ fromClient;
 //    fromClient.set_rtype(xstoreProto::REMOVEDBFILES);
@@ -35,6 +41,6 @@ int main(int argc, char *argv[]) {
 //    asd.PrintDebugString();
     // ----DEV AREA
 
-    XStore_zmqServer xStoreZmqServer(30);
-    xStoreZmqServer.startServer("172.20.3.113", "12345");
+//    XStore_zmqServer xStoreZmqServer(30);
+//    xStoreZmqServer.startServer("172.20.3.113", "12345");
 }
