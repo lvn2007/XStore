@@ -18,7 +18,7 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Implemented removeDBFiles">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Reworked unaryInsert -- Replaced with pwrite">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/protoFile/xStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/xStore.proto" afterDir="false" />
@@ -285,14 +285,7 @@
       <workItem from="1653513560850" duration="596000" />
       <workItem from="1653515350106" duration="425000" />
       <workItem from="1653627847078" duration="2313000" />
-      <workItem from="1653788610986" duration="18905000" />
-    </task>
-    <task id="LOCAL-00048" summary="WIP: Gradually implementing query for XStore">
-      <created>1640334558030</created>
-      <option name="number" value="00048" />
-      <option name="presentableId" value="LOCAL-00048" />
-      <option name="project" value="LOCAL" />
-      <updated>1640334558030</updated>
+      <workItem from="1653788610986" duration="19758000" />
     </task>
     <task id="LOCAL-00049" summary="WIP: Gradually implementing query for XStore">
       <created>1640388569836</created>
@@ -630,7 +623,14 @@
       <option name="project" value="LOCAL" />
       <updated>1653866965039</updated>
     </task>
-    <option name="localTasksCounter" value="97" />
+    <task id="LOCAL-00097" summary="Reworked unaryInsert -- Replaced with pwrite">
+      <created>1654103758832</created>
+      <option name="number" value="00097" />
+      <option name="presentableId" value="LOCAL-00097" />
+      <option name="project" value="LOCAL" />
+      <updated>1654103758832</updated>
+    </task>
+    <option name="localTasksCounter" value="98" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -730,7 +730,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Single-threaded client/server protobuf over TCP" />
     <MESSAGE value="WIP: Single/Multi-threaded client/server over TCP" />
     <MESSAGE value="WIP: Working multi-threaded client/server over TCP" />
     <MESSAGE value="Done single-threaded pingPong bench for both Protobuf &amp; Raw" />
@@ -755,6 +754,7 @@
     <MESSAGE value="House cleaning &amp; Enhanced outputs' verbality" />
     <MESSAGE value="Implemented removeDB -- Recursively remove all data files given a DB name" />
     <MESSAGE value="Implemented removeDBFiles" />
-    <option name="LAST_COMMIT_MESSAGE" value="Implemented removeDBFiles" />
+    <MESSAGE value="Reworked unaryInsert -- Replaced with pwrite" />
+    <option name="LAST_COMMIT_MESSAGE" value="Reworked unaryInsert -- Replaced with pwrite" />
   </component>
 </project>
