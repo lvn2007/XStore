@@ -41,6 +41,6 @@ int main(int argc, char *argv[]) {
 //    asd.PrintDebugString();
     // ----DEV AREA
 
-    XStore_zmqServer xStoreZmqServer(30);
-    xStoreZmqServer.startServer("172.20.3.113", "12345");
+//    XStore_zmqServer xStoreZmqServer(30);
+//    xStoreZmqServer.startServer("172.20.3.113", "12345");
 }
