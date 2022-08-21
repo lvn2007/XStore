@@ -438,6 +438,14 @@ xstoreProto::batchQuery_REP XStore::batchQuery(std::time_t startEpochT, std::tim
     return toReturn;
 }
 
+xstoreProto::removeDB_REP XStore::removeDB(std::string dbName) {
+
+}
+
+xstoreProto::removeDBFiles_REP XStore::removeDBFiles(std::string dbName, std::vector<std::string> fileName) {
+
+}
+
 void XStore::initDB() {
     // Directory contains all data file for a specific DB
     std::filesystem::path dbNames = baseDir + "dataStore/";
