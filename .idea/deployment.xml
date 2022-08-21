@@ -1,8 +1,29 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" remoteFilesAllowedToDisappearOnAutoupload="false">
+  <component name="PublishConfigData" serverName="xStore-Master (bfdc2152-fb91-4d63-b567-ed994a8576b1)" remoteFilesAllowedToDisappearOnAutoupload="false">
     <serverData>
-      <paths name="8Socket">
+      <paths name="GIGI-1">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="InfluxDB">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="K40">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="MongoDB">
         <serverdata>
           <mappings>
             <mapping local="$PROJECT_DIR$" web="/" />
