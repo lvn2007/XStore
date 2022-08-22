@@ -439,7 +439,7 @@ xstoreProto::batchQuery_REP XStore::batchQuery(std::time_t startEpochT, std::tim
 }
 
 xstoreProto::removeDB_REP XStore::removeDB(std::string dbName) {
-
+//    std::filesystem::remove()
 }
 
 xstoreProto::removeDBFiles_REP XStore::removeDBFiles(std::string dbName, std::vector<std::string> fileName) {
