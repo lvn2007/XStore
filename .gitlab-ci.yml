@@ -27,6 +27,7 @@ default:
 build-job:       # This job runs in the build stage, which runs first.
   stage: build
   script:
+    - ls
     - echo "Compiling the code..."
     - echo "Compile complete."
 
