@@ -26,6 +26,8 @@ default:
 
 build-job:       # This job runs in the build stage, which runs first.
   stage: build
+  before_script:
+    - ssh-add /Users/user/mysticCloud
   script:
     - ls
     - echo "Compiling the code..."

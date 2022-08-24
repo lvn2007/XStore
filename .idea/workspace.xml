@@ -18,11 +18,7 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Remove un-used libs">
-      <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/TSLA.csv" beforeDir="false" />
-    </list>
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Test DataSys Ubuntu VM" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -301,14 +297,7 @@
       <workItem from="1661062660468" duration="1906000" />
       <workItem from="1661064583123" duration="3496000" />
       <workItem from="1661128729223" duration="6371000" />
-      <workItem from="1661354340237" duration="1082000" />
-    </task>
-    <task id="LOCAL-00055" summary="Rename proto &amp; modifying Python client">
-      <created>1640931950388</created>
-      <option name="number" value="00055" />
-      <option name="presentableId" value="LOCAL-00055" />
-      <option name="project" value="LOCAL" />
-      <updated>1640931950388</updated>
+      <workItem from="1661354340237" duration="2123000" />
     </task>
     <task id="LOCAL-00056" summary="Updated README.md">
       <created>1640932412021</created>
@@ -646,7 +635,14 @@
       <option name="project" value="LOCAL" />
       <updated>1661148724134</updated>
     </task>
-    <option name="localTasksCounter" value="104" />
+    <task id="LOCAL-00104" summary="Test DataSys Ubuntu VM">
+      <created>1661357652345</created>
+      <option name="number" value="00104" />
+      <option name="presentableId" value="LOCAL-00104" />
+      <option name="project" value="LOCAL" />
+      <updated>1661357652346</updated>
+    </task>
+    <option name="localTasksCounter" value="105" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -753,7 +749,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Done single-threaded pingPong bench for both Protobuf &amp; Raw" />
     <MESSAGE value="Done single-threaded pingPong bench for both Protobuf &amp; Raw &amp; gRPC" />
     <MESSAGE value="WIP - XStore TCP connection" />
     <MESSAGE value="WIP (Prototype) - XStore TCP connection" />
@@ -778,6 +773,7 @@
     <MESSAGE value="Reworked unaryInsert -- Replaced with pwrite" />
     <MESSAGE value="Test GH/GL" />
     <MESSAGE value="Remove un-used libs" />
-    <option name="LAST_COMMIT_MESSAGE" value="Remove un-used libs" />
+    <MESSAGE value="Test DataSys Ubuntu VM" />
+    <option name="LAST_COMMIT_MESSAGE" value="Test DataSys Ubuntu VM" />
   </component>
 </project>
