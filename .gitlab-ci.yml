@@ -26,6 +26,9 @@ default:
 
 build-job:       # This job runs in the build stage, which runs first.
   stage: build
+  before_script:
+    - whoami
+    - ls
   script:
     - ls
     - echo "Compiling the code..."
