@@ -20,7 +20,6 @@
   <component name="ChangeListManager">
     <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Test ...">
       <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -300,21 +299,7 @@
       <workItem from="1661062660468" duration="1906000" />
       <workItem from="1661064583123" duration="3496000" />
       <workItem from="1661128729223" duration="6371000" />
-      <workItem from="1661354340237" duration="15411000" />
-    </task>
-    <task id="LOCAL-00069" summary="Faster getBatch() &amp; Improved XStore Python client">
-      <created>1641535843235</created>
-      <option name="number" value="00069" />
-      <option name="presentableId" value="LOCAL-00069" />
-      <option name="project" value="LOCAL" />
-      <updated>1641535843235</updated>
-    </task>
-    <task id="LOCAL-00070" summary="Single-threaded client/server protobuf over TCP">
-      <created>1643851823190</created>
-      <option name="number" value="00070" />
-      <option name="presentableId" value="LOCAL-00070" />
-      <option name="project" value="LOCAL" />
-      <updated>1643851823192</updated>
+      <workItem from="1661354340237" duration="16206000" />
     </task>
     <task id="LOCAL-00071" summary="WIP: Single/Multi-threaded client/server over TCP">
       <created>1644199282650</created>
@@ -645,7 +630,21 @@
       <option name="project" value="LOCAL" />
       <updated>1661382070544</updated>
     </task>
-    <option name="localTasksCounter" value="118" />
+    <task id="LOCAL-00118" summary="Test ...">
+      <created>1661383766021</created>
+      <option name="number" value="00118" />
+      <option name="presentableId" value="LOCAL-00118" />
+      <option name="project" value="LOCAL" />
+      <updated>1661383766021</updated>
+    </task>
+    <task id="LOCAL-00119" summary="Test ...">
+      <created>1661383794154</created>
+      <option name="number" value="00119" />
+      <option name="presentableId" value="LOCAL-00119" />
+      <option name="project" value="LOCAL" />
+      <updated>1661383794154</updated>
+    </task>
+    <option name="localTasksCounter" value="120" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
