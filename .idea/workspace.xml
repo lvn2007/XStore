@@ -18,202 +18,10 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Test GH/GL">
-      <change beforePath="$PROJECT_DIR$/.idea/vcs.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Remove un-used libs">
+      <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/byte_buffer.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/byte_buffer_reader.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/census.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/compression.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/event_engine/README.md" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/event_engine/endpoint_config.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/event_engine/event_engine.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/event_engine/internal/memory_allocator_impl.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/event_engine/memory_allocator.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/event_engine/port.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/fork.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/grpc.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/grpc_cronet.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/grpc_posix.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/grpc_security.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/grpc_security_constants.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/README.md" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/atm.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/atm_gcc_atomic.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/atm_gcc_sync.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/atm_windows.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/byte_buffer.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/byte_buffer_reader.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/compression_types.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/connectivity_state.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/fork.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/gpr_slice.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/gpr_types.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/grpc_types.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/log.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/port_platform.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/propagation_bits.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/slice.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/status.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/sync.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/sync_abseil.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/sync_custom.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/sync_generic.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/sync_posix.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/impl/codegen/sync_windows.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/load_reporting.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/module.modulemap" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/slice.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/slice_buffer.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/status.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/support/alloc.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/support/atm.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/support/atm_gcc_atomic.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/support/atm_gcc_sync.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/support/atm_windows.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/support/cpu.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/support/log.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/support/log_windows.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/support/port_platform.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/support/string_util.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/support/sync.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/support/sync_abseil.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/support/sync_custom.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/support/sync_generic.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/support/sync_posix.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/support/sync_windows.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/support/thd_id.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/support/time.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpc/support/workaround_list.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/alarm.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/channel.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/client_context.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/completion_queue.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/create_channel.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/create_channel_binder.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/create_channel_posix.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/ext/admin_services.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/ext/channelz_service_plugin.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/ext/health_check_service_server_builder_option.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/ext/proto_server_reflection_plugin.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/ext/server_load_reporting.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/generic/async_generic_service.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/generic/generic_stub.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/grpcpp.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/health_check_service_interface.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/README.md" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/call.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/channel_argument_option.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/client_unary_call.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/README.md" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/async_generic_service.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/async_stream.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/async_unary_call.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/byte_buffer.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/call.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/call_hook.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/call_op_set.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/call_op_set_interface.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/callback_common.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/channel_interface.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/client_callback.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/client_context.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/client_interceptor.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/client_unary_call.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/completion_queue.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/completion_queue_tag.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/config.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/config_protobuf.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/core_codegen.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/core_codegen_interface.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/create_auth_context.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/delegating_channel.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/grpc_library.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/intercepted_channel.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/interceptor.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/interceptor_common.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/message_allocator.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/metadata_map.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/method_handler.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/method_handler_impl.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/proto_buffer_reader.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/proto_buffer_writer.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/proto_utils.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/rpc_method.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/rpc_service_method.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/security/auth_context.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/serialization_traits.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/server_callback.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/server_callback_handlers.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/server_context.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/server_interceptor.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/server_interface.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/service_type.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/slice.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/status.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/status_code_enum.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/string_ref.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/stub_options.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/sync.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/sync_stream.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/codegen/time.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/grpc_library.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/method_handler_impl.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/rpc_method.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/rpc_service_method.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/serialization_traits.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/server_builder_option.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/server_builder_plugin.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/server_initializer.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/impl/service_type.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/opencensus.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/resource_quota.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/security/alts_context.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/security/alts_util.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/security/auth_context.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/security/auth_metadata_processor.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/security/authorization_policy_provider.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/security/binder_credentials.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/security/binder_security_policy.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/security/credentials.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/security/cronet_credentials.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/security/server_credentials.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/security/tls_certificate_provider.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/security/tls_credentials_options.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/server.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/server_builder.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/server_context.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/server_posix.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/support/async_stream.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/support/async_unary_call.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/support/byte_buffer.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/support/channel_arguments.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/support/client_callback.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/support/client_interceptor.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/support/config.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/support/error_details.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/support/interceptor.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/support/message_allocator.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/support/method_handler.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/support/proto_buffer_reader.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/support/proto_buffer_writer.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/support/server_callback.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/support/server_interceptor.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/support/slice.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/support/status.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/support/status_code_enum.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/support/string_ref.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/support/stub_options.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/support/sync_stream.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/support/time.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/support/validate_service_config.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/test/channel_test_peer.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/test/client_context_test_peer.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/test/default_reactor_test_peer.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/test/mock_stream.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/test/server_context_test_spouse.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/grpcpp/xds_server_builder.h" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/TSLA.csv" beforeDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -257,23 +65,23 @@
     <option name="showMembers" value="true" />
     <option name="showVisibilityIcons" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "Git.Branch.Popup.ShowAllRepositories": "true",
-    "RunOnceActivity.cidr.known.project.marker": "true",
-    "WebServerToolWindowFactoryState": "true",
-    "WebServerToolWindowPanel.toolwindow.highlight.mappings": "true",
-    "WebServerToolWindowPanel.toolwindow.highlight.symlinks": "true",
-    "WebServerToolWindowPanel.toolwindow.show.date": "false",
-    "WebServerToolWindowPanel.toolwindow.show.permissions": "false",
-    "WebServerToolWindowPanel.toolwindow.show.size": "false",
-    "cf.first.check.clang-format": "false",
-    "cidr.known.project.marker": "true",
-    "nodejs_package_manager_path": "npm",
-    "settings.editor.selected.configurable": "preferences.pluginManager",
-    "structure.view.defaults.are.configured": "true"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;Git.Branch.Popup.ShowAllRepositories&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.cidr.known.project.marker&quot;: &quot;true&quot;,
+    &quot;WebServerToolWindowFactoryState&quot;: &quot;true&quot;,
+    &quot;WebServerToolWindowPanel.toolwindow.highlight.mappings&quot;: &quot;true&quot;,
+    &quot;WebServerToolWindowPanel.toolwindow.highlight.symlinks&quot;: &quot;true&quot;,
+    &quot;WebServerToolWindowPanel.toolwindow.show.date&quot;: &quot;false&quot;,
+    &quot;WebServerToolWindowPanel.toolwindow.show.permissions&quot;: &quot;false&quot;,
+    &quot;WebServerToolWindowPanel.toolwindow.show.size&quot;: &quot;false&quot;,
+    &quot;cf.first.check.clang-format&quot;: &quot;false&quot;,
+    &quot;cidr.known.project.marker&quot;: &quot;true&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;preferences.pluginManager&quot;,
+    &quot;structure.view.defaults.are.configured&quot;: &quot;true&quot;
   }
-}]]></component>
+}</component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
       <recent name="$PROJECT_DIR$/overleaf" />
@@ -492,14 +300,8 @@
       <workItem from="1661062451047" duration="206000" />
       <workItem from="1661062660468" duration="1906000" />
       <workItem from="1661064583123" duration="3496000" />
-      <workItem from="1661128729223" duration="6097000" />
-    </task>
-    <task id="LOCAL-00054" summary="Clean-up">
-      <created>1640910412775</created>
-      <option name="number" value="00054" />
-      <option name="presentableId" value="LOCAL-00054" />
-      <option name="project" value="LOCAL" />
-      <updated>1640910412775</updated>
+      <workItem from="1661128729223" duration="6371000" />
+      <workItem from="1661354340237" duration="1082000" />
     </task>
     <task id="LOCAL-00055" summary="Rename proto &amp; modifying Python client">
       <created>1640931950388</created>
@@ -837,7 +639,14 @@
       <option name="project" value="LOCAL" />
       <updated>1661064881391</updated>
     </task>
-    <option name="localTasksCounter" value="103" />
+    <task id="LOCAL-00103" summary="Remove un-used libs">
+      <created>1661148724133</created>
+      <option name="number" value="00103" />
+      <option name="presentableId" value="LOCAL-00103" />
+      <option name="project" value="LOCAL" />
+      <updated>1661148724134</updated>
+    </task>
+    <option name="localTasksCounter" value="104" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -944,7 +753,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="WIP: Working multi-threaded client/server over TCP" />
     <MESSAGE value="Done single-threaded pingPong bench for both Protobuf &amp; Raw" />
     <MESSAGE value="Done single-threaded pingPong bench for both Protobuf &amp; Raw &amp; gRPC" />
     <MESSAGE value="WIP - XStore TCP connection" />
@@ -969,6 +777,7 @@
     <MESSAGE value="Implemented removeDBFiles" />
     <MESSAGE value="Reworked unaryInsert -- Replaced with pwrite" />
     <MESSAGE value="Test GH/GL" />
-    <option name="LAST_COMMIT_MESSAGE" value="Test GH/GL" />
+    <MESSAGE value="Remove un-used libs" />
+    <option name="LAST_COMMIT_MESSAGE" value="Remove un-used libs" />
   </component>
 </project>
