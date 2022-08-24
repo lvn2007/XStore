@@ -18,9 +18,8 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Test DataSys Ubuntu VM">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="DataSys VM working ... Test update &amp; installing libs pipe">
       <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -300,14 +299,7 @@
       <workItem from="1661062660468" duration="1906000" />
       <workItem from="1661064583123" duration="3496000" />
       <workItem from="1661128729223" duration="6371000" />
-      <workItem from="1661354340237" duration="9970000" />
-    </task>
-    <task id="LOCAL-00059" summary="Implemented single open via dbMap (Storing file descriptor in map)">
-      <created>1641112326003</created>
-      <option name="number" value="00059" />
-      <option name="presentableId" value="LOCAL-00059" />
-      <option name="project" value="LOCAL" />
-      <updated>1641112326003</updated>
+      <workItem from="1661354340237" duration="10339000" />
     </task>
     <task id="LOCAL-00060" summary="Clean up">
       <created>1641113183005</created>
@@ -645,7 +637,14 @@
       <option name="project" value="LOCAL" />
       <updated>1661363991719</updated>
     </task>
-    <option name="localTasksCounter" value="108" />
+    <task id="LOCAL-00108" summary="DataSys VM working ... Test update &amp; installing libs pipe">
+      <created>1661373101334</created>
+      <option name="number" value="00108" />
+      <option name="presentableId" value="LOCAL-00108" />
+      <option name="project" value="LOCAL" />
+      <updated>1661373101334</updated>
+    </task>
+    <option name="localTasksCounter" value="109" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -752,7 +751,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Done single-threaded pingPong bench for both Protobuf &amp; Raw &amp; gRPC" />
     <MESSAGE value="WIP - XStore TCP connection" />
     <MESSAGE value="WIP (Prototype) - XStore TCP connection" />
     <MESSAGE value="Done XStore ZMQ Networking -- Needs cleanup" />
@@ -777,6 +775,7 @@
     <MESSAGE value="Test GH/GL" />
     <MESSAGE value="Remove un-used libs" />
     <MESSAGE value="Test DataSys Ubuntu VM" />
-    <option name="LAST_COMMIT_MESSAGE" value="Test DataSys Ubuntu VM" />
+    <MESSAGE value="DataSys VM working ... Test update &amp; installing libs pipe" />
+    <option name="LAST_COMMIT_MESSAGE" value="DataSys VM working ... Test update &amp; installing libs pipe" />
   </component>
 </project>
