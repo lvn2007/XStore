@@ -18,9 +18,8 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="DataSys VM working ... Test update &amp; installing libs pipe">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Test ...">
       <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -300,21 +299,7 @@
       <workItem from="1661062660468" duration="1906000" />
       <workItem from="1661064583123" duration="3496000" />
       <workItem from="1661128729223" duration="6371000" />
-      <workItem from="1661354340237" duration="13755000" />
-    </task>
-    <task id="LOCAL-00064" summary="Enabled &quot;SPEED&quot; mode in &quot;optimized_for&quot; in Protobuf">
-      <created>1641146847142</created>
-      <option name="number" value="00064" />
-      <option name="presentableId" value="LOCAL-00064" />
-      <option name="project" value="LOCAL" />
-      <updated>1641146847142</updated>
-    </task>
-    <task id="LOCAL-00065" summary="Revamp XStore's Python client">
-      <created>1641515205814</created>
-      <option name="number" value="00065" />
-      <option name="presentableId" value="LOCAL-00065" />
-      <option name="project" value="LOCAL" />
-      <updated>1641515205814</updated>
+      <workItem from="1661354340237" duration="14058000" />
     </task>
     <task id="LOCAL-00066" summary="getBatch is now open/close only once">
       <created>1641518110729</created>
@@ -645,7 +630,21 @@
       <option name="project" value="LOCAL" />
       <updated>1661377480933</updated>
     </task>
-    <option name="localTasksCounter" value="113" />
+    <task id="LOCAL-00113" summary="Test ...">
+      <created>1661381248508</created>
+      <option name="number" value="00113" />
+      <option name="presentableId" value="LOCAL-00113" />
+      <option name="project" value="LOCAL" />
+      <updated>1661381248508</updated>
+    </task>
+    <task id="LOCAL-00114" summary="Test ...">
+      <created>1661381454216</created>
+      <option name="number" value="00114" />
+      <option name="presentableId" value="LOCAL-00114" />
+      <option name="project" value="LOCAL" />
+      <updated>1661381454216</updated>
+    </task>
+    <option name="localTasksCounter" value="115" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -752,7 +751,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="WIP - XStore TCP connection" />
     <MESSAGE value="WIP (Prototype) - XStore TCP connection" />
     <MESSAGE value="Done XStore ZMQ Networking -- Needs cleanup" />
     <MESSAGE value="WIP - insertBatch()" />
@@ -777,6 +775,7 @@
     <MESSAGE value="Remove un-used libs" />
     <MESSAGE value="Test DataSys Ubuntu VM" />
     <MESSAGE value="DataSys VM working ... Test update &amp; installing libs pipe" />
-    <option name="LAST_COMMIT_MESSAGE" value="DataSys VM working ... Test update &amp; installing libs pipe" />
+    <MESSAGE value="Test ..." />
+    <option name="LAST_COMMIT_MESSAGE" value="Test ..." />
   </component>
 </project>
