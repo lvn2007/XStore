@@ -299,21 +299,7 @@
       <workItem from="1661062660468" duration="1906000" />
       <workItem from="1661064583123" duration="3496000" />
       <workItem from="1661128729223" duration="6371000" />
-      <workItem from="1661354340237" duration="14058000" />
-    </task>
-    <task id="LOCAL-00066" summary="getBatch is now open/close only once">
-      <created>1641518110729</created>
-      <option name="number" value="00066" />
-      <option name="presentableId" value="LOCAL-00066" />
-      <option name="project" value="LOCAL" />
-      <updated>1641518110729</updated>
-    </task>
-    <task id="LOCAL-00067" summary="Faster getBatch() &amp; Deprecated getp()">
-      <created>1641532311926</created>
-      <option name="number" value="00067" />
-      <option name="presentableId" value="LOCAL-00067" />
-      <option name="project" value="LOCAL" />
-      <updated>1641532311926</updated>
+      <workItem from="1661354340237" duration="14526000" />
     </task>
     <task id="LOCAL-00068" summary="Faster getSingleOpenClose()">
       <created>1641535288121</created>
@@ -644,7 +630,21 @@
       <option name="project" value="LOCAL" />
       <updated>1661381454216</updated>
     </task>
-    <option name="localTasksCounter" value="115" />
+    <task id="LOCAL-00115" summary="Test ...">
+      <created>1661381549831</created>
+      <option name="number" value="00115" />
+      <option name="presentableId" value="LOCAL-00115" />
+      <option name="project" value="LOCAL" />
+      <updated>1661381549831</updated>
+    </task>
+    <task id="LOCAL-00116" summary="Test ...">
+      <created>1661381764226</created>
+      <option name="number" value="00116" />
+      <option name="presentableId" value="LOCAL-00116" />
+      <option name="project" value="LOCAL" />
+      <updated>1661381764226</updated>
+    </task>
+    <option name="localTasksCounter" value="117" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
