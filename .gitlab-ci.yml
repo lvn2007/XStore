@@ -17,30 +17,33 @@
 # https://gitlab.com/gitlab-org/gitlab/-/blob/master/lib/gitlab/ci/templates/Getting-Started.gitlab-ci.yml
 
 stages:          # List of stages for jobs, and their order of execution
-  - Preparing Environment
+#  - Preparing Environment
   - build
   - test
   - deploy
 
 default:
-  tags: ['ubuntuVM_DataSys']
+  tags: ['LN_DataSys']
+#  tags: ['ubuntuVM_DataSys']
 
-update-ubuntu-job:
-  stage: Preparing Environment
-  script:
-    - sudo apt-get update
-    - sudo apt-get upgrade -y
-
-install-xstore-deps:
-  stage: Preparing Environment
-  needs:
-    - job: "update-ubuntu-job"
-  script:
-    - sudo apt install build-essential cmake g++ protobuf-compiler libzmq3-dev -y
+#update-ubuntu-job:
+#  stage: Preparing Environment
+#  script:
+#    - sudo apt-get update
+#    - sudo apt-get upgrade -y
+#
+#install-xstore-deps:
+#  stage: Preparing Environment
+#  needs:
+#    - job: "update-ubuntu-job"
+#  script:
+#    - sudo apt install build-essential cmake g++ protobuf-compiler libzmq3-dev -y
 
 build-job:       # This job runs in the build stage, which runs first.
   stage: build
   script:
+    - ls
+    - ssh ubuntu@localhost -p 3022
     - ls
     - echo "Compiling the code..."
     - echo "Compile complete."
