@@ -49,7 +49,7 @@ unit-test-job:   # This job runs in the test stage.
   stage: test    # It only starts when the job in the build stage completes successfully.
   script:
     - echo "Checking if things got lost"
-    - sudo apt install build-essential
+    - sudo apt install build-essential -y
     - echo "Running unit tests... This will take about 60 seconds."
     - sleep 60
     - echo "Code coverage is 90%"
