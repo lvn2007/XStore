@@ -43,7 +43,7 @@ build-job:       # This job runs in the build stage, which runs first.
   stage: build
   script:
     - ls
-    - ssh ubuntu@localhost -p 3022
+    - ssh ubuntu@localhost -p 3022 -i mysticCloud
     - ls
     - echo "Compiling the code..."
     - echo "Compile complete."
