@@ -23,15 +23,13 @@ stages:          # List of stages for jobs, and their order of execution
   - deploy
 
 default:
-  tags: ['LN_Datasys']
+  tags: ['LN_DataSys_SSH']
 
 update-ubuntu-job:
   stage: Preparing Environment
   script:
     - ls
     - whoami
-  tags:
-    - LN_DataSys_SSH
 
 #    - sudo apt-get update
 #    - sudo apt-get upgrade -y
