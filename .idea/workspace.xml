@@ -18,7 +18,8 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Remove postfix &quot;job&quot; &amp; build os configs pipe">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Try build">
+      <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -100,6 +101,11 @@
     <configuration default="true" type="GradleAppRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
       <method v="2">
         <option name="com.jetbrains.cidr.cpp.gradle.execution.GradleNativeBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
+      </method>
+    </configuration>
+    <configuration default="true" type="CLionExternalRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
+      <method v="2">
+        <option name="CLION.EXTERNAL.BUILD" enabled="true" />
       </method>
     </configuration>
     <configuration name="Unnamed" type="CLion_Remote" version="1" remoteCommand="" symbolFile="" sysroot="">
@@ -301,42 +307,7 @@
       <workItem from="1661128729223" duration="6371000" />
       <workItem from="1661354340237" duration="21421000" />
       <workItem from="1661451243323" duration="27000" />
-      <workItem from="1661451396053" duration="590000" />
-    </task>
-    <task id="LOCAL-00079" summary="WIP - insertBatch()">
-      <created>1652541581959</created>
-      <option name="number" value="00079" />
-      <option name="presentableId" value="LOCAL-00079" />
-      <option name="project" value="LOCAL" />
-      <updated>1652541581959</updated>
-    </task>
-    <task id="LOCAL-00080" summary="Modified xStore.proto -- WIP: API handler on server-end">
-      <created>1652652851919</created>
-      <option name="number" value="00080" />
-      <option name="presentableId" value="LOCAL-00080" />
-      <option name="project" value="LOCAL" />
-      <updated>1652652851919</updated>
-    </task>
-    <task id="LOCAL-00081" summary="Update XStore's 2022 presentation slides">
-      <created>1652653012253</created>
-      <option name="number" value="00081" />
-      <option name="presentableId" value="LOCAL-00081" />
-      <option name="project" value="LOCAL" />
-      <updated>1652653012253</updated>
-    </task>
-    <task id="LOCAL-00082" summary="Modified XStore_zmqServer.cpp such that it can recognize commands from CLIENT">
-      <created>1652730827280</created>
-      <option name="number" value="00082" />
-      <option name="presentableId" value="LOCAL-00082" />
-      <option name="project" value="LOCAL" />
-      <updated>1652730827281</updated>
-    </task>
-    <task id="LOCAL-00083" summary="Working XStore C++ client unaryReq bench">
-      <created>1652730885633</created>
-      <option name="number" value="00083" />
-      <option name="presentableId" value="LOCAL-00083" />
-      <option name="project" value="LOCAL" />
-      <updated>1652730885633</updated>
+      <workItem from="1661451396053" duration="5045000" />
     </task>
     <task id="LOCAL-00084" summary="Added MISC containing XStore's design and Updated README.md">
       <created>1652731209326</created>
@@ -646,7 +617,42 @@
       <option name="project" value="LOCAL" />
       <updated>1661408272341</updated>
     </task>
-    <option name="localTasksCounter" value="128" />
+    <task id="LOCAL-00128" summary="Remove postfix &quot;job&quot; &amp; build os configs pipe">
+      <created>1661462120523</created>
+      <option name="number" value="00128" />
+      <option name="presentableId" value="LOCAL-00128" />
+      <option name="project" value="LOCAL" />
+      <updated>1661462120524</updated>
+    </task>
+    <task id="LOCAL-00129" summary="Prepare to build project">
+      <created>1661462932240</created>
+      <option name="number" value="00129" />
+      <option name="presentableId" value="LOCAL-00129" />
+      <option name="project" value="LOCAL" />
+      <updated>1661462932240</updated>
+    </task>
+    <task id="LOCAL-00130" summary="Fixed order or pipeline">
+      <created>1661463301588</created>
+      <option name="number" value="00130" />
+      <option name="presentableId" value="LOCAL-00130" />
+      <option name="project" value="LOCAL" />
+      <updated>1661463301588</updated>
+    </task>
+    <task id="LOCAL-00131" summary="Try build">
+      <created>1661464104176</created>
+      <option name="number" value="00131" />
+      <option name="presentableId" value="LOCAL-00131" />
+      <option name="project" value="LOCAL" />
+      <updated>1661464104176</updated>
+    </task>
+    <task id="LOCAL-00132" summary="Try build">
+      <created>1661465073758</created>
+      <option name="number" value="00132" />
+      <option name="presentableId" value="LOCAL-00132" />
+      <option name="project" value="LOCAL" />
+      <updated>1661465073758</updated>
+    </task>
+    <option name="localTasksCounter" value="133" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -753,9 +759,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="WIP - insertBatch()" />
-    <MESSAGE value="Modified xStore.proto -- WIP: API handler on server-end" />
-    <MESSAGE value="Update XStore's 2022 presentation slides" />
     <MESSAGE value="Modified XStore_zmqServer.cpp such that it can recognize commands from CLIENT" />
     <MESSAGE value="Working XStore C++ client unaryReq bench" />
     <MESSAGE value="Added MISC containing XStore's design and Updated README.md" />
@@ -778,6 +781,9 @@
     <MESSAGE value="Test ..." />
     <MESSAGE value="Test custom pipes" />
     <MESSAGE value="Remove postfix &quot;job&quot; &amp; build os configs pipe" />
-    <option name="LAST_COMMIT_MESSAGE" value="Remove postfix &quot;job&quot; &amp; build os configs pipe" />
+    <MESSAGE value="Prepare to build project" />
+    <MESSAGE value="Fixed order or pipeline" />
+    <MESSAGE value="Try build" />
+    <option name="LAST_COMMIT_MESSAGE" value="Try build" />
   </component>
 </project>
