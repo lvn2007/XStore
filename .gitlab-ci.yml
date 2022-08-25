@@ -61,8 +61,8 @@ compile-code:
     - ls
     - pwd
     - mkdir build && cd build
-    - cmake ..
-    - make
+    - cmake .. && make
+    - ls
 
 cleanup-vm:
   stage: Finalize VM
