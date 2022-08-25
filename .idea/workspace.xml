@@ -18,10 +18,7 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Test ...">
-      <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-    </list>
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Test custom pipes" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -300,14 +297,7 @@
       <workItem from="1661062660468" duration="1906000" />
       <workItem from="1661064583123" duration="3496000" />
       <workItem from="1661128729223" duration="6371000" />
-      <workItem from="1661354340237" duration="19594000" />
-    </task>
-    <task id="LOCAL-00075" summary="Done single-threaded pingPong bench for both Protobuf &amp; Raw &amp; gRPC">
-      <created>1645242126853</created>
-      <option name="number" value="00075" />
-      <option name="presentableId" value="LOCAL-00075" />
-      <option name="project" value="LOCAL" />
-      <updated>1645242126854</updated>
+      <workItem from="1661354340237" duration="19950000" />
     </task>
     <task id="LOCAL-00076" summary="WIP - XStore TCP connection">
       <created>1647632547130</created>
@@ -645,7 +635,14 @@
       <option name="project" value="LOCAL" />
       <updated>1661402368603</updated>
     </task>
-    <option name="localTasksCounter" value="124" />
+    <task id="LOCAL-00124" summary="Test custom pipes">
+      <created>1661407347793</created>
+      <option name="number" value="00124" />
+      <option name="presentableId" value="LOCAL-00124" />
+      <option name="project" value="LOCAL" />
+      <updated>1661407347793</updated>
+    </task>
+    <option name="localTasksCounter" value="125" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -752,7 +749,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="WIP (Prototype) - XStore TCP connection" />
     <MESSAGE value="Done XStore ZMQ Networking -- Needs cleanup" />
     <MESSAGE value="WIP - insertBatch()" />
     <MESSAGE value="Modified xStore.proto -- WIP: API handler on server-end" />
@@ -777,6 +773,7 @@
     <MESSAGE value="Test DataSys Ubuntu VM" />
     <MESSAGE value="DataSys VM working ... Test update &amp; installing libs pipe" />
     <MESSAGE value="Test ..." />
-    <option name="LAST_COMMIT_MESSAGE" value="Test ..." />
+    <MESSAGE value="Test custom pipes" />
+    <option name="LAST_COMMIT_MESSAGE" value="Test custom pipes" />
   </component>
 </project>
