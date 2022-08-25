@@ -63,9 +63,9 @@ add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h
         include/XStore_Networking/XStore_zmqServer.h src/XStore_Networking/XStore_zmqServer.cpp
         include/XStore_Networking/zhelpers.hpp src/dataStructs/configStruct.cpp include/dataStructs/configStruct.h)
 
-if(${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS 9)
-    target_link_libraries(XStore PUBLIC "stdc++fs" ${Protobuf_LIBRARIES} "zmq" Threads::Threads)
-endif()
+#if(${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS 9)
+target_link_libraries(XStore PUBLIC "stdc++fs" ${Protobuf_LIBRARIES} "zmq" Threads::Threads)
+#endif()
 
 # WITH gRPC
 #add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h src/dataStruct/dataStruct.cpp
