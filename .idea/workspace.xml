@@ -18,7 +18,9 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Test custom pipes" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Remove postfix &quot;job&quot; &amp; build os configs pipe">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -297,14 +299,9 @@
       <workItem from="1661062660468" duration="1906000" />
       <workItem from="1661064583123" duration="3496000" />
       <workItem from="1661128729223" duration="6371000" />
-      <workItem from="1661354340237" duration="20670000" />
-    </task>
-    <task id="LOCAL-00078" summary="Done XStore ZMQ Networking -- Needs cleanup">
-      <created>1650152234809</created>
-      <option name="number" value="00078" />
-      <option name="presentableId" value="LOCAL-00078" />
-      <option name="project" value="LOCAL" />
-      <updated>1650152234809</updated>
+      <workItem from="1661354340237" duration="21421000" />
+      <workItem from="1661451243323" duration="27000" />
+      <workItem from="1661451396053" duration="590000" />
     </task>
     <task id="LOCAL-00079" summary="WIP - insertBatch()">
       <created>1652541581959</created>
@@ -642,7 +639,14 @@
       <option name="project" value="LOCAL" />
       <updated>1661407827700</updated>
     </task>
-    <option name="localTasksCounter" value="127" />
+    <task id="LOCAL-00127" summary="Remove postfix &quot;job&quot; &amp; build os configs pipe">
+      <created>1661408272341</created>
+      <option name="number" value="00127" />
+      <option name="presentableId" value="LOCAL-00127" />
+      <option name="project" value="LOCAL" />
+      <updated>1661408272341</updated>
+    </task>
+    <option name="localTasksCounter" value="128" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -749,7 +753,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Done XStore ZMQ Networking -- Needs cleanup" />
     <MESSAGE value="WIP - insertBatch()" />
     <MESSAGE value="Modified xStore.proto -- WIP: API handler on server-end" />
     <MESSAGE value="Update XStore's 2022 presentation slides" />
@@ -774,6 +777,7 @@
     <MESSAGE value="DataSys VM working ... Test update &amp; installing libs pipe" />
     <MESSAGE value="Test ..." />
     <MESSAGE value="Test custom pipes" />
-    <option name="LAST_COMMIT_MESSAGE" value="Test custom pipes" />
+    <MESSAGE value="Remove postfix &quot;job&quot; &amp; build os configs pipe" />
+    <option name="LAST_COMMIT_MESSAGE" value="Remove postfix &quot;job&quot; &amp; build os configs pipe" />
   </component>
 </project>
