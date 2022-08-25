@@ -22,8 +22,8 @@ variables:
 stages:          # List of stages for jobs, and their order of execution
   - Initialize VM
   - OS Configurations
-  - Finalize VM
   - Build
+  - Finalize VM
 #  - test
 #  - deploy
 
