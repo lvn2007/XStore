@@ -21,7 +21,8 @@ variables:
 
 stages:          # List of stages for jobs, and their order of execution
   - Initialize VM
-  - OS Environment Configurations
+  - OS Configurations
+  - Finalize VM
 #  - build
 #  - test
 #  - deploy
@@ -38,15 +39,24 @@ configure-vm-job:
     - echo "[INFO] -- Starting ${VM_NAME} in headless mode"
     - vboxmanage startvm ${VM_NAME} --type headless                 # Start VM in headless mode
     - sleep 30
-    - echo "${VM_NAME} has been initialized successfully"
+    - echo "[INFO] -- ${VM_NAME} has been initialized successfully"
   tags:
     - LN_DataSys                                                    # SHELL runner
 
 update-ubuntu-job:
-  stage: OS Environment Configurations
+  stage: OS Configurations
   script:
     - ls
     - whoami
+
+cleanup-vm-job:
+  stage: Finalize VM
+  script:
+    - echo "[INFO] -- Turning off ${VM_NAME}"
+    - vboxmanage controlvm ${VM_NAME} acpipowerbutton                 # Safely shutdown VM
+    - echo "[INFO] -- ${VM_NAME} has been turned off successfully"
+  tags:
+    - LN_DataSys
 
 #    - sudo apt-get update
 #    - sudo apt-get upgrade -y

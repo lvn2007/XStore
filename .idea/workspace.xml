@@ -18,7 +18,9 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Test custom pipes" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Test custom pipes">
+      <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -297,14 +299,7 @@
       <workItem from="1661062660468" duration="1906000" />
       <workItem from="1661064583123" duration="3496000" />
       <workItem from="1661128729223" duration="6371000" />
-      <workItem from="1661354340237" duration="19950000" />
-    </task>
-    <task id="LOCAL-00076" summary="WIP - XStore TCP connection">
-      <created>1647632547130</created>
-      <option name="number" value="00076" />
-      <option name="presentableId" value="LOCAL-00076" />
-      <option name="project" value="LOCAL" />
-      <updated>1647632547131</updated>
+      <workItem from="1661354340237" duration="20292000" />
     </task>
     <task id="LOCAL-00077" summary="WIP (Prototype) - XStore TCP connection">
       <created>1647743998401</created>
@@ -642,7 +637,14 @@
       <option name="project" value="LOCAL" />
       <updated>1661407347793</updated>
     </task>
-    <option name="localTasksCounter" value="125" />
+    <task id="LOCAL-00125" summary="Test custom pipes">
+      <created>1661407428053</created>
+      <option name="number" value="00125" />
+      <option name="presentableId" value="LOCAL-00125" />
+      <option name="project" value="LOCAL" />
+      <updated>1661407428053</updated>
+    </task>
+    <option name="localTasksCounter" value="126" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
