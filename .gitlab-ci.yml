@@ -59,8 +59,8 @@ compile-code:
   stage: Build
   script:
     - ls
-    - pwd
-    - mkdir build && cd build
+    - mkdir build dataStore && cd build
+    - ls
     - cmake .. && make
     - ls
 
