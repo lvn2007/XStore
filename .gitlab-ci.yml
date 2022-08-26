@@ -64,6 +64,7 @@ compile-server:
     - ls
     - cmake .. && make
     - ls
+    - cd ../.. && mv xStore ~
 
 compile-client:
   stage: Build
@@ -75,7 +76,7 @@ compile-client:
 build-testing:
   stage: Testing
   script:
-    - cd build
+    - cd ~ && cd xStore && cd build
     - ./XStore &                              # Run XStore Server in foreground
     - sleep 10                                # Let XStore runs for at least 10s
     - kill %1                                 # Terminate XStore
