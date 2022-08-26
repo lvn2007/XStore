@@ -23,6 +23,7 @@ stages:          # List of stages for jobs, and their order of execution
   - Initialize VM
   - OS Configurations
   - Build
+  - Testing
   - Finalize VM
 #  - test
 #  - deploy
@@ -55,7 +56,7 @@ install-deps:
   script:
     - sudo apt install build-essential cmake g++ protobuf-compiler libzmq3-dev -y         # XStore specifics
 
-compile-code:
+compile-server:
   stage: Build
   script:
     - ls
@@ -63,7 +64,19 @@ compile-code:
     - ls
     - cmake .. && make
     - ls
-    - ./XStore &                              # Run XStore in foreground
+
+compile-client:
+  stage: Build
+  needs:
+    - job: "compile-server"
+  script:
+    - echo "Compiling client"
+
+build-testing:
+  stage: Testing
+  script:
+    - cd build
+    - ./XStore &                              # Run XStore Server in foreground
     - sleep 10                                # Let XStore runs for at least 10s
     - kill %1                                 # Terminate XStore
 
