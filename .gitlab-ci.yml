@@ -75,7 +75,7 @@ cleanup-vm:
     - echo "[INFO] -- ${VM_NAME} has been turned off successfully"
   tags:
     - LN_DataSys
-  allow_failure: true                                                 # Cleanup regardless
+  when: always                                                 # Cleanup regardless
 
 #    - sudo apt-get update
 #    - sudo apt-get upgrade -y
