@@ -18,8 +18,9 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="XStore to background &amp; Outputs???">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Added &quot;compile-client&quot; stage &amp; &quot;build-testing&quot;">
       <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -306,14 +307,7 @@
       <workItem from="1661128729223" duration="6371000" />
       <workItem from="1661354340237" duration="21421000" />
       <workItem from="1661451243323" duration="27000" />
-      <workItem from="1661451396053" duration="13648000" />
-    </task>
-    <task id="LOCAL-00091" summary="House cleaning">
-      <created>1652993609884</created>
-      <option name="number" value="00091" />
-      <option name="presentableId" value="LOCAL-00091" />
-      <option name="project" value="LOCAL" />
-      <updated>1652993609885</updated>
+      <workItem from="1661451396053" duration="14559000" />
     </task>
     <task id="LOCAL-00092" summary="Enabled unaryInsert">
       <created>1652997509378</created>
@@ -651,7 +645,14 @@
       <option name="project" value="LOCAL" />
       <updated>1661540386060</updated>
     </task>
-    <option name="localTasksCounter" value="140" />
+    <task id="LOCAL-00140" summary="Added &quot;compile-client&quot; stage &amp; &quot;build-testing&quot;">
+      <created>1661541452536</created>
+      <option name="number" value="00140" />
+      <option name="presentableId" value="LOCAL-00140" />
+      <option name="project" value="LOCAL" />
+      <updated>1661541452536</updated>
+    </task>
+    <option name="localTasksCounter" value="141" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -758,7 +759,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Refine unary &amp; batch responses outputs -- Stripping timestamp from dataset field" />
     <MESSAGE value="Completed unary &amp; batch request/respond" />
     <MESSAGE value="Implemented infoQuery &amp; Modified Protobuf &amp; Attach args via struct to threads" />
     <MESSAGE value="House cleaning" />
@@ -783,6 +783,7 @@
     <MESSAGE value="Changed server IP Address" />
     <MESSAGE value="Cleanup regardless of previous failure/success" />
     <MESSAGE value="XStore to background &amp; Outputs???" />
-    <option name="LAST_COMMIT_MESSAGE" value="XStore to background &amp; Outputs???" />
+    <MESSAGE value="Added &quot;compile-client&quot; stage &amp; &quot;build-testing&quot;" />
+    <option name="LAST_COMMIT_MESSAGE" value="Added &quot;compile-client&quot; stage &amp; &quot;build-testing&quot;" />
   </component>
 </project>
