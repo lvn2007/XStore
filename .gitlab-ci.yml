@@ -63,10 +63,9 @@ compile-code:
     - ls
     - cmake .. && make
     - ls
-    - nohup ./XStore &                        # Run XStore in foreground
+    - ./XStore &                              # Run XStore in foreground
     - sleep 10                                # Let XStore runs for at least 10s
     - kill %1                                 # Terminate XStore
-    - cat nohup.out                           # Display outputs
 
 cleanup-vm:
   stage: Finalize VM
