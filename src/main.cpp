@@ -42,5 +42,5 @@ int main(int argc, char *argv[]) {
     // ----DEV AREA
 
     XStore_zmqServer xStoreZmqServer(30);
-    xStoreZmqServer.startServer("172.20.3.113", "12345");
+    xStoreZmqServer.startServer("127.0.0.1", "12345");
 }
