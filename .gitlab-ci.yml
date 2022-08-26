@@ -63,6 +63,9 @@ compile-code:
     - ls
     - cmake .. && make
     - ls
+    - ./XStore
+    - sleep 5
+    - send -- \x03          # Hangup???
 
 cleanup-vm:
   stage: Finalize VM
