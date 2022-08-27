@@ -23,7 +23,7 @@ stages:          # List of stages for jobs, and their order of execution
   - Initialize VM
   - OS Configurations
   - Build
-  - Testing
+  - Test
   - Finalize VM
 #  - test
 #  - deploy
@@ -71,10 +71,11 @@ compile-client:
   needs:
     - job: "compile-server"
   script:
+    - ls
     - echo "Compiling client"
 
-build-testing:
-  stage: Testing
+build-test:
+  stage: Test
   script:
     - cd ~ && cd xStore && cd build
     - ./XStore &                              # Run XStore Server in foreground

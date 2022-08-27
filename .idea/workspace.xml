@@ -18,8 +18,7 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Added &quot;compile-client&quot; stage &amp; &quot;build-testing&quot;">
-      <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Moving working folder to home after build">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -307,14 +306,7 @@
       <workItem from="1661128729223" duration="6371000" />
       <workItem from="1661354340237" duration="21421000" />
       <workItem from="1661451243323" duration="27000" />
-      <workItem from="1661451396053" duration="14559000" />
-    </task>
-    <task id="LOCAL-00092" summary="Enabled unaryInsert">
-      <created>1652997509378</created>
-      <option name="number" value="00092" />
-      <option name="presentableId" value="LOCAL-00092" />
-      <option name="project" value="LOCAL" />
-      <updated>1652997509378</updated>
+      <workItem from="1661451396053" duration="15783000" />
     </task>
     <task id="LOCAL-00093" summary="Enabled createDB &amp; Modified Protobuf">
       <created>1653006647281</created>
@@ -652,7 +644,14 @@
       <option name="project" value="LOCAL" />
       <updated>1661541452536</updated>
     </task>
-    <option name="localTasksCounter" value="141" />
+    <task id="LOCAL-00141" summary="Moving working folder to home after build">
+      <created>1661542168218</created>
+      <option name="number" value="00141" />
+      <option name="presentableId" value="LOCAL-00141" />
+      <option name="project" value="LOCAL" />
+      <updated>1661542168218</updated>
+    </task>
+    <option name="localTasksCounter" value="142" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -759,7 +758,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Completed unary &amp; batch request/respond" />
     <MESSAGE value="Implemented infoQuery &amp; Modified Protobuf &amp; Attach args via struct to threads" />
     <MESSAGE value="House cleaning" />
     <MESSAGE value="Enabled unaryInsert" />
@@ -784,6 +782,7 @@
     <MESSAGE value="Cleanup regardless of previous failure/success" />
     <MESSAGE value="XStore to background &amp; Outputs???" />
     <MESSAGE value="Added &quot;compile-client&quot; stage &amp; &quot;build-testing&quot;" />
-    <option name="LAST_COMMIT_MESSAGE" value="Added &quot;compile-client&quot; stage &amp; &quot;build-testing&quot;" />
+    <MESSAGE value="Moving working folder to home after build" />
+    <option name="LAST_COMMIT_MESSAGE" value="Moving working folder to home after build" />
   </component>
 </project>
