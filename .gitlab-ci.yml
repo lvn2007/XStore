@@ -25,8 +25,6 @@ stages:          # List of stages for jobs, and their order of execution
   - Build
   - Test
   - Finalize VM
-#  - test
-#  - deploy
 
 default:
   tags: ['LN_DataSys_SSH']
@@ -91,30 +89,6 @@ cleanup-vm:
   tags:
     - LN_DataSys
   when: always                                                 # Cleanup regardless
-
-#    - sudo apt-get update
-#    - sudo apt-get upgrade -y
-
-#install-deps:
-#  stage: Preparing Environment
-#  needs:
-#    - job: "snapshot-updateUbuntu-job"
-#  script:
-#    - sudo apt install build-essential cmake g++ protobuf-compiler libzmq3-dev -y
-
-#build-job:       # This job runs in the build stage, which runs first.
-#  stage: build
-#  script:
-#    - ls
-#    - echo "Compiling the code..."
-#    - echo "Compile complete."
-
-#unit-test-job:   # This job runs in the test stage.
-#  stage: test    # It only starts when the job in the build stage completes successfully.
-#  script:
-#    - echo "Running unit tests... This will take about 60 seconds."
-#    - sleep 60
-#    - echo "Code coverage is 90%"
 
 #lint-test-job:   # This job also runs in the test stage.
 #  stage: test    # It can run at the same time as unit-test-job (in parallel).

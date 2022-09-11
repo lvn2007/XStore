@@ -1,5 +1,4 @@
 #include <iostream>
-//#include "include/XStore_Networking/XStore_gRPC.h"
 #include "include/XStore_Networking/XStore_zmqServer.h"
 #include "include/XStore/XStore.h"
 

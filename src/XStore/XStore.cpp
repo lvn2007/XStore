@@ -474,7 +474,6 @@ std::string XStore::getBaseDir() {
 
     // Getting current path of XStore executable
     toReturn = std::filesystem::current_path().parent_path();
-    std::cout << std::filesystem::current_path().parent_path() << std::endl;
 
     // Extract baseDir for XStore i.e., /home/ubuntu/XStore/
 //    toReturn.erase(toReturn.find("XStore") + 7, toReturn.size());

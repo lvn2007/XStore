@@ -18,8 +18,11 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Moving working folder to home after build">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Rename stage &amp; job">
+      <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -100,11 +103,6 @@
     <configuration default="true" type="GradleAppRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
       <method v="2">
         <option name="com.jetbrains.cidr.cpp.gradle.execution.GradleNativeBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
-      </method>
-    </configuration>
-    <configuration default="true" type="CLionExternalRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
-      <method v="2">
-        <option name="CLION.EXTERNAL.BUILD" enabled="true" />
       </method>
     </configuration>
     <configuration name="Unnamed" type="CLion_Remote" version="1" remoteCommand="" symbolFile="" sysroot="">
@@ -306,14 +304,9 @@
       <workItem from="1661128729223" duration="6371000" />
       <workItem from="1661354340237" duration="21421000" />
       <workItem from="1661451243323" duration="27000" />
-      <workItem from="1661451396053" duration="15783000" />
-    </task>
-    <task id="LOCAL-00093" summary="Enabled createDB &amp; Modified Protobuf">
-      <created>1653006647281</created>
-      <option name="number" value="00093" />
-      <option name="presentableId" value="LOCAL-00093" />
-      <option name="project" value="LOCAL" />
-      <updated>1653006647281</updated>
+      <workItem from="1661451396053" duration="17877000" />
+      <workItem from="1662534329266" duration="194000" />
+      <workItem from="1662666265706" duration="698000" />
     </task>
     <task id="LOCAL-00094" summary="House cleaning &amp; Enhanced outputs' verbality">
       <created>1653022247162</created>
@@ -651,7 +644,14 @@
       <option name="project" value="LOCAL" />
       <updated>1661542168218</updated>
     </task>
-    <option name="localTasksCounter" value="142" />
+    <task id="LOCAL-00142" summary="Rename stage &amp; job">
+      <created>1661571466428</created>
+      <option name="number" value="00142" />
+      <option name="presentableId" value="LOCAL-00142" />
+      <option name="project" value="LOCAL" />
+      <updated>1661571466428</updated>
+    </task>
+    <option name="localTasksCounter" value="143" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -758,7 +758,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Implemented infoQuery &amp; Modified Protobuf &amp; Attach args via struct to threads" />
     <MESSAGE value="House cleaning" />
     <MESSAGE value="Enabled unaryInsert" />
     <MESSAGE value="Enabled createDB &amp; Modified Protobuf" />
@@ -783,6 +782,7 @@
     <MESSAGE value="XStore to background &amp; Outputs???" />
     <MESSAGE value="Added &quot;compile-client&quot; stage &amp; &quot;build-testing&quot;" />
     <MESSAGE value="Moving working folder to home after build" />
-    <option name="LAST_COMMIT_MESSAGE" value="Moving working folder to home after build" />
+    <MESSAGE value="Rename stage &amp; job" />
+    <option name="LAST_COMMIT_MESSAGE" value="Rename stage &amp; job" />
   </component>
 </project>
