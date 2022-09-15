@@ -39,13 +39,10 @@ install-deps:
 compile-server:
   stage: Build
   script:
-    - ls
     - mkdir build dataStore && cd build
     - cmake .. && make
-    - cd ../.. && mkdir serverBuild
-    - ls
-    - pwd
-    - cp -r xStore/build/* serverBuild
+    - mkdir ~/serverBuild
+    - cp -r xStore/build/* ~/serverBuild
     - ls ~/serverBuild
 
 compile-client:
