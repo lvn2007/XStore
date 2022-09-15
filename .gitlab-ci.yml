@@ -30,7 +30,7 @@ stages:          # List of stages for jobs, and their order of execution
 default:
   tags: ['LXC_Runner']
 
-configure-env:
+init-lxc:
   stage: Initialize
   script:
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Restoring ${containerName} to ${snapshotName}"
@@ -81,7 +81,7 @@ build-test:
     - sleep 10                                # Let XStore runs for at least 10s
     - kill %1                                 # Terminate XStore
 
-cleanup:
+cleanup-lxc:
   stage: Cleanup
   script:
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Stopping ${containerName}"
