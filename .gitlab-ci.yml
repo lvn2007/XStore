@@ -42,7 +42,7 @@ compile-server:
     - mkdir build dataStore && cd build
     - cmake .. && make
     - mkdir ~/serverBuild
-    - cp -r XStore/build/* ~/serverBuild
+    - cp -r /XStore/build/* ~/serverBuild
     - ls && pwd
     - ls ~/serverBuild
 

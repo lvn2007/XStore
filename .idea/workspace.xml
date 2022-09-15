@@ -305,14 +305,7 @@
       <workItem from="1661451396053" duration="17877000" />
       <workItem from="1662534329266" duration="194000" />
       <workItem from="1662666265706" duration="6861000" />
-      <workItem from="1663282590917" duration="2968000" />
-    </task>
-    <task id="LOCAL-00112" summary="DataSys VM working ... Test update &amp; installing libs pipe">
-      <created>1661377480933</created>
-      <option name="number" value="00112" />
-      <option name="presentableId" value="LOCAL-00112" />
-      <option name="project" value="LOCAL" />
-      <updated>1661377480933</updated>
+      <workItem from="1663282590917" duration="3277000" />
     </task>
     <task id="LOCAL-00113" summary="Test ...">
       <created>1661381248508</created>
@@ -650,7 +643,14 @@
       <option name="project" value="LOCAL" />
       <updated>1663285316743</updated>
     </task>
-    <option name="localTasksCounter" value="161" />
+    <task id="LOCAL-00161" summary="Debugging clientSrc">
+      <created>1663285582091</created>
+      <option name="number" value="00161" />
+      <option name="presentableId" value="LOCAL-00161" />
+      <option name="project" value="LOCAL" />
+      <updated>1663285582091</updated>
+    </task>
+    <option name="localTasksCounter" value="162" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
