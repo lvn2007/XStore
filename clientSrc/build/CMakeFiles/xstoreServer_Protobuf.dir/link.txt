@@ -1,0 +1,1 @@
+/usr/bin/c++ CMakeFiles/xstoreServer_Protobuf.dir/xStore.pb.cc.o CMakeFiles/xstoreServer_Protobuf.dir/xstoreServer_Protobuf.cpp.o -o xstoreServer_Protobuf  /lib/libprotobuf.a -lzmq -lpthread 
