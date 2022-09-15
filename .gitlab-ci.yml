@@ -43,7 +43,7 @@ compile-server:
     - mkdir build dataStore && cd build
     - cmake .. && make
     - cd ../.. && mkdir serverBuild
-    - cp xStore/build/* serverBuild
+    - cp -r xStore/build/* serverBuild
     - ls ~/serverBuild
 
 compile-client:
