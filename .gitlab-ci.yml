@@ -21,17 +21,17 @@ variables:
   snapshotName: "freshSnapshot"
 
 stages:          # List of stages for jobs, and their order of execution
-  - Initialize VM
+  - Initialize
   - OS Configurations
   - Build
   - Test
-  - Finalize VM
+  - Cleanup
 
 default:
   tags: ['LXC_Runner']
 
-configure-vm:
-  stage: Initialize VM
+configure-env:
+  stage: Initialize
   script:
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Restoring ${containerName} to ${snapshotName}"
     - lxc restore ${containerName} ${snapshotName}     # Restore to initial snapshot
@@ -81,8 +81,8 @@ build-test:
     - sleep 10                                # Let XStore runs for at least 10s
     - kill %1                                 # Terminate XStore
 
-cleanup-vm:
-  stage: Finalize VM
+cleanup:
+  stage: Cleanup
   script:
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Stopping ${containerName}"
     - lxc stop ciRunner                       # Stopping LXC container
