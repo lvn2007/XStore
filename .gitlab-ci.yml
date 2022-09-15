@@ -42,7 +42,8 @@ compile-server:
     - ls
     - mkdir build dataStore && cd build
     - cmake .. && make
-    - cd ../.. && mv xStore ~
+    - cd ../.. && mkdir serverBuild
+    - mv xStore/build/* serverBuild
 
 compile-client:
   stage: Build
