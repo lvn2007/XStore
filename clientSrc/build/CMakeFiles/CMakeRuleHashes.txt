@@ -1,0 +1,2 @@
+# Hashes of file build rules.
+46b97396b2e9f4bd2069d691a671040d xStore.pb.h

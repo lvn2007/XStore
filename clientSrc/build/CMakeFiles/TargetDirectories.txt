@@ -1,0 +1,4 @@
+/home/ubuntu/XStore/cpp/build/CMakeFiles/xstoreClient_Protobuf.dir
+/home/ubuntu/XStore/cpp/build/CMakeFiles/xstoreServer_Protobuf.dir
+/home/ubuntu/XStore/cpp/build/CMakeFiles/edit_cache.dir
+/home/ubuntu/XStore/cpp/build/CMakeFiles/rebuild_cache.dir
