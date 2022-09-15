@@ -40,7 +40,7 @@ compile-server:
   stage: Build
   script:
     - mkdir build dataStore && cd build
-    - cmake .. && make
+    - cmake .. && make && cd ../..
     - mkdir ~/serverBuild
     - ls && pwd
     - cp -r /XStore/build/* ~/serverBuild
