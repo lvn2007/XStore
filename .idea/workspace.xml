@@ -18,8 +18,8 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Debugging compiling clientSrc">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Including contents of clientSrc">
+      <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -305,14 +305,7 @@
       <workItem from="1661451396053" duration="17877000" />
       <workItem from="1662534329266" duration="194000" />
       <workItem from="1662666265706" duration="6861000" />
-      <workItem from="1663282590917" duration="18000" />
-    </task>
-    <task id="LOCAL-00103" summary="Remove un-used libs">
-      <created>1661148724133</created>
-      <option name="number" value="00103" />
-      <option name="presentableId" value="LOCAL-00103" />
-      <option name="project" value="LOCAL" />
-      <updated>1661148724134</updated>
+      <workItem from="1663282590917" duration="614000" />
     </task>
     <task id="LOCAL-00104" summary="Test DataSys Ubuntu VM">
       <created>1661357652345</created>
@@ -650,7 +643,14 @@
       <option name="project" value="LOCAL" />
       <updated>1663282236764</updated>
     </task>
-    <option name="localTasksCounter" value="152" />
+    <task id="LOCAL-00152" summary="Including contents of clientSrc">
+      <created>1663282813312</created>
+      <option name="number" value="00152" />
+      <option name="presentableId" value="LOCAL-00152" />
+      <option name="project" value="LOCAL" />
+      <updated>1663282813313</updated>
+    </task>
+    <option name="localTasksCounter" value="153" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -757,7 +757,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Remove un-used libs" />
     <MESSAGE value="Test DataSys Ubuntu VM" />
     <MESSAGE value="DataSys VM working ... Test update &amp; installing libs pipe" />
     <MESSAGE value="Test ..." />
@@ -782,6 +781,7 @@
     <MESSAGE value="Cleanup .gitlab-ci.yml" />
     <MESSAGE value="Compiling clientSrc" />
     <MESSAGE value="Debugging compiling clientSrc" />
-    <option name="LAST_COMMIT_MESSAGE" value="Debugging compiling clientSrc" />
+    <MESSAGE value="Including contents of clientSrc" />
+    <option name="LAST_COMMIT_MESSAGE" value="Including contents of clientSrc" />
   </component>
 </project>
