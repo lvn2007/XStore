@@ -18,7 +18,7 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Cleanup .gitlab-ci.yml">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Compiling clientSrc">
       <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -304,14 +304,7 @@
       <workItem from="1661451243323" duration="27000" />
       <workItem from="1661451396053" duration="17877000" />
       <workItem from="1662534329266" duration="194000" />
-      <workItem from="1662666265706" duration="6306000" />
-    </task>
-    <task id="LOCAL-00101" summary="Test GH/GL">
-      <created>1661062163413</created>
-      <option name="number" value="00101" />
-      <option name="presentableId" value="LOCAL-00101" />
-      <option name="project" value="LOCAL" />
-      <updated>1661062163413</updated>
+      <workItem from="1662666265706" duration="6606000" />
     </task>
     <task id="LOCAL-00102" summary="Test GH/GL">
       <created>1661064881391</created>
@@ -649,7 +642,14 @@
       <option name="project" value="LOCAL" />
       <updated>1663281202033</updated>
     </task>
-    <option name="localTasksCounter" value="150" />
+    <task id="LOCAL-00150" summary="Compiling clientSrc">
+      <created>1663281935859</created>
+      <option name="number" value="00150" />
+      <option name="presentableId" value="LOCAL-00150" />
+      <option name="project" value="LOCAL" />
+      <updated>1663281935859</updated>
+    </task>
+    <option name="localTasksCounter" value="151" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -756,7 +756,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Reworked unaryInsert -- Replaced with pwrite" />
     <MESSAGE value="Test GH/GL" />
     <MESSAGE value="Remove un-used libs" />
     <MESSAGE value="Test DataSys Ubuntu VM" />
@@ -781,6 +780,7 @@
     <MESSAGE value="Renaming ..." />
     <MESSAGE value="Removing sleep is okay?" />
     <MESSAGE value="Cleanup .gitlab-ci.yml" />
-    <option name="LAST_COMMIT_MESSAGE" value="Cleanup .gitlab-ci.yml" />
+    <MESSAGE value="Compiling clientSrc" />
+    <option name="LAST_COMMIT_MESSAGE" value="Compiling clientSrc" />
   </component>
 </project>
