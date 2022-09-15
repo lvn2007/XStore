@@ -39,6 +39,7 @@ install-deps:
 compile-server:
   stage: Build
   script:
+    - ls
     - mkdir build dataStore && cd build
     - cmake .. && make
     - cd ../.. && mv xStore ~
