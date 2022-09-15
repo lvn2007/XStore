@@ -38,7 +38,6 @@ init-lxc:
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Successfully restored ${containerName} to ${snapshotName}"
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Starting LXC container"
     - lxc start ${containerName}                      # Start LXC container
-    - sleep 2
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- ${containerName} has been initialized successfully"
   tags:
     - LXC_Controller                                  # SHELL runner inside of VM
