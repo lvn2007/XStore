@@ -17,7 +17,8 @@
 # https://gitlab.com/gitlab-org/gitlab/-/blob/master/lib/gitlab/ci/templates/Getting-Started.gitlab-ci.yml
 
 variables:
-  VM_NAME: "XStore_workBench"
+  containerName: "ciRunner"
+  snapshotName: "afterCIconfigs"
 
 stages:          # List of stages for jobs, and their order of execution
   - Initialize VM
@@ -27,20 +28,20 @@ stages:          # List of stages for jobs, and their order of execution
   - Finalize VM
 
 default:
-  tags: ['LN_DataSys_SSH']
+  tags: ['LXC_Container']
 
 configure-vm:
   stage: Initialize VM
   script:
-    - echo "[INFO] -- Restoring to fresh snapshot"
-    - vboxmanage snapshot ${VM_NAME} restore "Initial Snapshot"     # Restore to initial snapshot
-    - sleep 5
-    - echo "[INFO] -- Starting ${VM_NAME} in headless mode"
-    - vboxmanage startvm ${VM_NAME} --type headless                 # Start VM in headless mode
-    - sleep 30
-    - echo "[INFO] -- ${VM_NAME} has been initialized successfully"
+    - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Restoring ${containerName} to ${snapshotName}"
+    - lxc restore ${containerName} ${snapshotName}     # Restore to initial snapshot
+    - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Successfully restored ${containerName} to ${snapshotName}"
+    - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Starting LXC container"
+    - lxc start ${containerName}                      # Start LXC container
+    - sleep 2
+    - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- ${containerName} has been initialized successfully"
   tags:
-    - LN_DataSys                                                    # SHELL runner
+    - LXC_Controller                                                    # SHELL runner
 
 update-os:
   stage: OS Configurations
@@ -83,11 +84,11 @@ build-test:
 cleanup-vm:
   stage: Finalize VM
   script:
-    - echo "[INFO] -- Turning off ${VM_NAME}"
-    - vboxmanage controlvm ${VM_NAME} acpipowerbutton                 # Safely shutdown VM
-    - echo "[INFO] -- ${VM_NAME} has been turned off successfully"
+    - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Stopping ${containerName}"
+    - lxc stop ciRunner                       # Stopping LXC container
+    - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- ${containerName} has been turned off successfully"
   tags:
-    - LN_DataSys
+    - LXC_Controller
   when: always                                                 # Cleanup regardless
 
 #lint-test-job:   # This job also runs in the test stage.
