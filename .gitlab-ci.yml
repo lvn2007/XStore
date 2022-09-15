@@ -18,7 +18,7 @@
 
 variables:
   containerName: "ciRunner"
-  snapshotName: "afterCIconfigs"
+  snapshotName: "freshSnapshot"
 
 stages:          # List of stages for jobs, and their order of execution
   - Initialize VM
@@ -28,7 +28,7 @@ stages:          # List of stages for jobs, and their order of execution
   - Finalize VM
 
 default:
-  tags: ['LXC_Container']
+  tags: ['LXC_Runner']
 
 configure-vm:
   stage: Initialize VM
@@ -41,7 +41,7 @@ configure-vm:
     - sleep 2
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- ${containerName} has been initialized successfully"
   tags:
-    - LXC_Controller                                                    # SHELL runner
+    - LXC_Controller                                  # SHELL runner inside of VM
 
 update-os:
   stage: OS Configurations
@@ -89,7 +89,7 @@ cleanup-vm:
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- ${containerName} has been turned off successfully"
   tags:
     - LXC_Controller
-  when: always                                                 # Cleanup regardless
+  when: always                                # Cleanup regardless
 
 #lint-test-job:   # This job also runs in the test stage.
 #  stage: test    # It can run at the same time as unit-test-job (in parallel).
