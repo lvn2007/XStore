@@ -18,8 +18,7 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Cleanup">
-      <change afterPath="$PROJECT_DIR$/.gitlab-ci_VirtualBox.yml" afterDir="false" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Moved CI runner from VirtualBox to LXC">
       <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
@@ -306,14 +305,7 @@
       <workItem from="1661451243323" duration="27000" />
       <workItem from="1661451396053" duration="17877000" />
       <workItem from="1662534329266" duration="194000" />
-      <workItem from="1662666265706" duration="2020000" />
-    </task>
-    <task id="LOCAL-00095" summary="Implemented removeDB -- Recursively remove all data files given a DB name">
-      <created>1653790294918</created>
-      <option name="number" value="00095" />
-      <option name="presentableId" value="LOCAL-00095" />
-      <option name="project" value="LOCAL" />
-      <updated>1653790294919</updated>
+      <workItem from="1662666265706" duration="2704000" />
     </task>
     <task id="LOCAL-00096" summary="Implemented removeDBFiles">
       <created>1653866965039</created>
@@ -651,7 +643,14 @@
       <option name="project" value="LOCAL" />
       <updated>1662935219620</updated>
     </task>
-    <option name="localTasksCounter" value="144" />
+    <task id="LOCAL-00144" summary="Moved CI runner from VirtualBox to LXC">
+      <created>1663274119408</created>
+      <option name="number" value="00144" />
+      <option name="presentableId" value="LOCAL-00144" />
+      <option name="project" value="LOCAL" />
+      <updated>1663274119408</updated>
+    </task>
+    <option name="localTasksCounter" value="145" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -758,7 +757,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Enabled unaryInsert" />
     <MESSAGE value="Enabled createDB &amp; Modified Protobuf" />
     <MESSAGE value="House cleaning &amp; Enhanced outputs' verbality" />
     <MESSAGE value="Implemented removeDB -- Recursively remove all data files given a DB name" />
@@ -783,6 +781,7 @@
     <MESSAGE value="Moving working folder to home after build" />
     <MESSAGE value="Rename stage &amp; job" />
     <MESSAGE value="Cleanup" />
-    <option name="LAST_COMMIT_MESSAGE" value="Cleanup" />
+    <MESSAGE value="Moved CI runner from VirtualBox to LXC" />
+    <option name="LAST_COMMIT_MESSAGE" value="Moved CI runner from VirtualBox to LXC" />
   </component>
 </project>
