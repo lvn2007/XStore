@@ -41,8 +41,11 @@ compile-server:
   script:
     - mkdir build dataStore && cd build
     - cmake .. && make
+    - ls && pwd
     - mkdir ~/serverBuild
+    - ls && pwd
     - cp -r xStore/build/* ~/serverBuild
+    - ls && pwd
     - ls ~/serverBuild
 
 compile-client:
