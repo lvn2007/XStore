@@ -39,11 +39,8 @@ install-deps:
 compile-server:
   stage: Build
   script:
-    - ls
     - mkdir build dataStore && cd build
-    - ls
     - cmake .. && make
-    - ls
     - cd ../.. && mv xStore ~
 
 compile-client:
@@ -51,8 +48,11 @@ compile-client:
   needs:
     - job: "compile-server"
   script:
+    - cd clientSrc && cd build
+    - cmake .. & make
     - ls
-    - echo "Compiling client"
+    - cd ../../.. && mv clientSrc ~
+    - ls
 
 build-test:
   stage: Test
