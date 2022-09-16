@@ -42,5 +42,5 @@ include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 include_directories(.)
 
 # WITHOUT gRPC
-add_executable(xstoreClient_Protobuf ${PROTO_SRCS} ${PROTO_HDRS} xstoreClient_Protobuf.cpp zmq.hpp zmq_addon.hpp)
-target_link_libraries(xstoreClient_Protobuf PUBLIC ${Protobuf_LIBRARIES} "zmq")
+add_executable(XStore_Client ${PROTO_SRCS} ${PROTO_HDRS} XStore_Client.cpp zmq.hpp zmq_addon.hpp)
+target_link_libraries(XStore_Client PUBLIC ${Protobuf_LIBRARIES} "zmq")
