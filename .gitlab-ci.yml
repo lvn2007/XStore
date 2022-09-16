@@ -44,7 +44,7 @@ compile-server:
     - mkdir ~/serverBuild
     - ls && pwd
     - cd xStore && ls && pwd
-    - cp -r /xStore/build/* ~/serverBuild
+    - cp -r xStore/build/* ~/serverBuild
     - ls && pwd
     - ls ~/serverBuild
 
