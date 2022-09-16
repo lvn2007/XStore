@@ -54,15 +54,27 @@ compile-client:
     - mkdir ~/XStore_Client ~/XStore_Client/build
     - cp -r xStore/clientSrc/build/* ~/XStore_Client/build    # Copy to designated home folder so won't get cleaned-up by runner
 
-build-test:
+build-test-server:
   stage: Test
   script:
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Starting build test for XStore (SERVER)"
     - cd ~/XStore_Server/build
-    - ./XStore 127.0.0.1 12345 2 &                            # Run XStore Server in foreground
-    - sleep 10                                                # Let XStore runs for at least 10s
-    - kill %1                                                 # Terminate XStore Server
+    - ./XStore 127.0.0.1 12345 2 &                            # Run SERVER in foreground
+    - sleep 10                                                # Let SERVER runs for at least 10s
+    - kill %1                                                 # Terminate SERVER
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Build test for XStore (SERVER) has concluded"
+
+build-test-client:
+  stage: Test
+  needs:
+    - job: "build-test-server"
+  script:
+    - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Starting build test for XStore (CLIENT)"
+    - cd ~/XStore_Client/build
+    - ./XStore_Client 1 &                                     # Run CLIENT in foreground
+    - sleep 10                                                # Let CLIENT runs for at least 10s
+    - kill %1                                                 # Terminate SERVER
+    - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Build test for XStore (CLIENT) has concluded"
 
 cleanup-lxc:
   stage: Cleanup
