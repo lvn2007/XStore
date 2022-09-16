@@ -19,7 +19,7 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Debugging clientSrc">
-      <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/CMakeLists.txt" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -305,28 +305,7 @@
       <workItem from="1661451396053" duration="17877000" />
       <workItem from="1662534329266" duration="194000" />
       <workItem from="1662666265706" duration="6861000" />
-      <workItem from="1663282590917" duration="4129000" />
-    </task>
-    <task id="LOCAL-00117" summary="Test ...">
-      <created>1661382070544</created>
-      <option name="number" value="00117" />
-      <option name="presentableId" value="LOCAL-00117" />
-      <option name="project" value="LOCAL" />
-      <updated>1661382070544</updated>
-    </task>
-    <task id="LOCAL-00118" summary="Test ...">
-      <created>1661383766021</created>
-      <option name="number" value="00118" />
-      <option name="presentableId" value="LOCAL-00118" />
-      <option name="project" value="LOCAL" />
-      <updated>1661383766021</updated>
-    </task>
-    <task id="LOCAL-00119" summary="Test ...">
-      <created>1661383794154</created>
-      <option name="number" value="00119" />
-      <option name="presentableId" value="LOCAL-00119" />
-      <option name="project" value="LOCAL" />
-      <updated>1661383794154</updated>
+      <workItem from="1663282590917" duration="4705000" />
     </task>
     <task id="LOCAL-00120" summary="Test ...">
       <created>1661384533607</created>
@@ -650,7 +629,28 @@
       <option name="project" value="LOCAL" />
       <updated>1663286534243</updated>
     </task>
-    <option name="localTasksCounter" value="166" />
+    <task id="LOCAL-00166" summary="Debugging clientSrc">
+      <created>1663286745242</created>
+      <option name="number" value="00166" />
+      <option name="presentableId" value="LOCAL-00166" />
+      <option name="project" value="LOCAL" />
+      <updated>1663286745242</updated>
+    </task>
+    <task id="LOCAL-00167" summary="Debugging clientSrc">
+      <created>1663286919696</created>
+      <option name="number" value="00167" />
+      <option name="presentableId" value="LOCAL-00167" />
+      <option name="project" value="LOCAL" />
+      <updated>1663286919696</updated>
+    </task>
+    <task id="LOCAL-00168" summary="Debugging clientSrc">
+      <created>1663287000189</created>
+      <option name="number" value="00168" />
+      <option name="presentableId" value="LOCAL-00168" />
+      <option name="project" value="LOCAL" />
+      <updated>1663287000189</updated>
+    </task>
+    <option name="localTasksCounter" value="169" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
