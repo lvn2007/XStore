@@ -59,17 +59,17 @@ build-test:
   script:
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Starting build test for XStore (SERVER)"
     - cd ~/XStore_Server/build
-    - ./XStore &                              # Run XStore Server in foreground
-    - sleep 10                                # Let XStore runs for at least 10s
-    - kill %1                                 # Terminate XStore Server
+    - ./XStore 127.0.0.1 12345 2 &                            # Run XStore Server in foreground
+    - sleep 10                                                # Let XStore runs for at least 10s
+    - kill %1                                                 # Terminate XStore Server
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Build test for XStore (SERVER) has concluded"
 
 cleanup-lxc:
   stage: Cleanup
   script:
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Stopping ${containerName}"
-    - lxc stop ciRunner                       # Stopping LXC container
+    - lxc stop ciRunner                                       # Stopping LXC container
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- ${containerName} has been turned off successfully"
   tags:
     - LXC_Controller
-  when: always                                # Cleanup regardless
+  when: always                                                # Cleanup regardless

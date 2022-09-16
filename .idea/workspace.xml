@@ -18,10 +18,11 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Debugging clientSrc">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Modified CI">
       <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -109,7 +110,7 @@
       <debugger toolchainName="xStore-Master" />
       <method v="2" />
     </configuration>
-    <configuration name="XStore" type="CMakeRunConfiguration" factoryName="Application" temporary="true" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="XStore" TARGET_NAME="XStore" CONFIG_NAME="Debug" RUN_TARGET_PROJECT_NAME="XStore" RUN_TARGET_NAME="XStore">
+    <configuration name="XStore" type="CMakeRunConfiguration" factoryName="Application" temporary="true" PROGRAM_PARAMS="127.0.0.1 12345 2" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="XStore" TARGET_NAME="XStore" CONFIG_NAME="Debug-Remote-xStore-Master" RUN_TARGET_PROJECT_NAME="XStore" RUN_TARGET_NAME="XStore">
       <method v="2">
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
       </method>
@@ -307,14 +308,7 @@
       <workItem from="1661451396053" duration="17877000" />
       <workItem from="1662534329266" duration="194000" />
       <workItem from="1662666265706" duration="6861000" />
-      <workItem from="1663282590917" duration="9416000" />
-    </task>
-    <task id="LOCAL-00127" summary="Remove postfix &quot;job&quot; &amp; build os configs pipe">
-      <created>1661408272341</created>
-      <option name="number" value="00127" />
-      <option name="presentableId" value="LOCAL-00127" />
-      <option name="project" value="LOCAL" />
-      <updated>1661408272341</updated>
+      <workItem from="1663282590917" duration="11552000" />
     </task>
     <task id="LOCAL-00128" summary="Remove postfix &quot;job&quot; &amp; build os configs pipe">
       <created>1661462120523</created>
@@ -652,7 +646,14 @@
       <option name="project" value="LOCAL" />
       <updated>1663298859672</updated>
     </task>
-    <option name="localTasksCounter" value="176" />
+    <task id="LOCAL-00176" summary="Modified CI">
+      <created>1663300171179</created>
+      <option name="number" value="00176" />
+      <option name="presentableId" value="LOCAL-00176" />
+      <option name="project" value="LOCAL" />
+      <updated>1663300171179</updated>
+    </task>
+    <option name="localTasksCounter" value="177" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -759,7 +760,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Test ..." />
     <MESSAGE value="Test custom pipes" />
     <MESSAGE value="Remove postfix &quot;job&quot; &amp; build os configs pipe" />
     <MESSAGE value="Prepare to build project" />
@@ -784,6 +784,7 @@
     <MESSAGE value="Including contents of clientSrc" />
     <MESSAGE value="Removing CMakeCache.txt" />
     <MESSAGE value="Debugging clientSrc" />
-    <option name="LAST_COMMIT_MESSAGE" value="Debugging clientSrc" />
+    <MESSAGE value="Modified CI" />
+    <option name="LAST_COMMIT_MESSAGE" value="Modified CI" />
   </component>
 </project>
