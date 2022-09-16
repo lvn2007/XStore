@@ -3,17 +3,15 @@ variables:
   snapshotName: "freshSnapshot"
 
 stages:          # List of stages for jobs, and their order of execution
-  - Initialize
   - OS Configurations
   - Build
   - Test
-  - Cleanup
 
 default:
   tags: ['LXC_Runner']
 
 init-lxc:
-  stage: Initialize
+  stage: .pre
   script:
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Restoring ${containerName} to ${snapshotName}"
     - lxc restore ${containerName} ${snapshotName}     # Restore to initial snapshot
@@ -77,7 +75,7 @@ build-test-client:
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Build test for XStore (CLIENT) has concluded"
 
 cleanup-lxc:
-  stage: Cleanup
+  stage: .post
   script:
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Stopping ${containerName}"
     - lxc stop ciRunner                                       # Stopping LXC container
