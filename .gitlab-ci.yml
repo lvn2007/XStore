@@ -52,8 +52,7 @@ compile-client:
   needs:
     - job: "compile-server"
   script:
-    - ls
-    - cd clientSrc && cd build
+    - cd clientSrc && mkdir build && cd build
     - cmake .. & make
     - ls
     - cd ../../.. && mv clientSrc ~

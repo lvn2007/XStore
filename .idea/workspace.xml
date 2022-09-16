@@ -19,10 +19,61 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Debugging clientSrc">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/clientSrc/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/CMakeLists.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/clientSrc/build/xstoreServer_Protobuf" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/clientSrc/xstoreServer_Protobuf.cpp" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/3.22.2/CMakeCCompiler.cmake" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/3.22.2/CMakeCXXCompiler.cmake" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/3.22.2/CMakeDetermineCompilerABI_C.bin" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/3.22.2/CMakeDetermineCompilerABI_CXX.bin" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/3.22.2/CMakeSystem.cmake" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/3.22.2/CompilerIdC/CMakeCCompilerId.c" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/3.22.2/CompilerIdC/a.out" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/3.22.2/CompilerIdCXX/CMakeCXXCompilerId.cpp" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/3.22.2/CompilerIdCXX/a.out" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/CMakeDirectoryInformation.cmake" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/CMakeError.log" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/CMakeOutput.log" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/CMakeRuleHashes.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/Makefile.cmake" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/Makefile2" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/TargetDirectories.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/cmake.check_cache" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/progress.marks" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreClient_Protobuf.dir/DependInfo.cmake" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreClient_Protobuf.dir/build.make" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreClient_Protobuf.dir/cmake_clean.cmake" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreClient_Protobuf.dir/compiler_depend.internal" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreClient_Protobuf.dir/compiler_depend.make" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreClient_Protobuf.dir/compiler_depend.ts" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreClient_Protobuf.dir/depend.make" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreClient_Protobuf.dir/flags.make" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreClient_Protobuf.dir/link.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreClient_Protobuf.dir/progress.make" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreClient_Protobuf.dir/xStore.pb.cc.o" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreClient_Protobuf.dir/xStore.pb.cc.o.d" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreClient_Protobuf.dir/xstoreClient_Protobuf.cpp.o" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreClient_Protobuf.dir/xstoreClient_Protobuf.cpp.o.d" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreServer_Protobuf.dir/DependInfo.cmake" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreServer_Protobuf.dir/build.make" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreServer_Protobuf.dir/cmake_clean.cmake" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreServer_Protobuf.dir/compiler_depend.internal" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreServer_Protobuf.dir/compiler_depend.make" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreServer_Protobuf.dir/compiler_depend.ts" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreServer_Protobuf.dir/depend.make" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreServer_Protobuf.dir/flags.make" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreServer_Protobuf.dir/link.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreServer_Protobuf.dir/progress.make" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreServer_Protobuf.dir/xStore.pb.cc.o" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreServer_Protobuf.dir/xStore.pb.cc.o.d" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreServer_Protobuf.dir/xstoreServer_Protobuf.cpp.o" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/CMakeFiles/xstoreServer_Protobuf.dir/xstoreServer_Protobuf.cpp.o.d" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/Makefile" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/analyze.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/bench.sh" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/cmake_install.cmake" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/xStore.pb.cc" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/xStore.pb.h" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/build/xstoreClient_Protobuf" beforeDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -308,14 +359,7 @@
       <workItem from="1661451396053" duration="17877000" />
       <workItem from="1662534329266" duration="194000" />
       <workItem from="1662666265706" duration="6861000" />
-      <workItem from="1663282590917" duration="5332000" />
-    </task>
-    <task id="LOCAL-00121" summary="Test ...">
-      <created>1661384607239</created>
-      <option name="number" value="00121" />
-      <option name="presentableId" value="LOCAL-00121" />
-      <option name="project" value="LOCAL" />
-      <updated>1661384607239</updated>
+      <workItem from="1663282590917" duration="5719000" />
     </task>
     <task id="LOCAL-00122" summary="Test ...">
       <created>1661389629759</created>
@@ -653,7 +697,14 @@
       <option name="project" value="LOCAL" />
       <updated>1663287420628</updated>
     </task>
-    <option name="localTasksCounter" value="170" />
+    <task id="LOCAL-00170" summary="Debugging clientSrc">
+      <created>1663287952970</created>
+      <option name="number" value="00170" />
+      <option name="presentableId" value="LOCAL-00170" />
+      <option name="project" value="LOCAL" />
+      <updated>1663287952970</updated>
+    </task>
+    <option name="localTasksCounter" value="171" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">

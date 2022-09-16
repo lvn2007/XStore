@@ -26,9 +26,6 @@ message(STATUS "Using Protobuf ${Protobuf_VERSION}")
 get_filename_component(hw_proto "xStore.proto" ABSOLUTE)
 get_filename_component(hw_proto_path "${hw_proto}" PATH)
 
-# Generated sources
-#set(hw_proto_srcs "${CMAKE_CURRENT_BINARY_DIR}/xStore.pb.cc")
-#set(hw_proto_hdrs "${CMAKE_CURRENT_BINARY_DIR}/xStore.pb.h")
 add_custom_command(
         OUTPUT "${hw_grpc_srcs}" "${hw_grpc_hdrs}"
         COMMAND ${_PROTOBUF_PROTOC}
@@ -46,16 +43,13 @@ protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS xStore.proto)
 
 # Include generated *.pb.h files
 include_directories("${CMAKE_CURRENT_BINARY_DIR}")
-
 include_directories(.)
 
 # WITHOUT gRPC
 add_executable(xstoreClient_Protobuf ${PROTO_SRCS} ${PROTO_HDRS} xstoreClient_Protobuf.cpp zmq.hpp zmq_addon.hpp)
-add_executable(xstoreServer_Protobuf ${PROTO_SRCS} ${PROTO_HDRS} xstoreServer_Protobuf.cpp zhelpers.hpp zmq.hpp)
 
 if(${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS 9)
     target_link_libraries(xstoreClient_Protobuf PUBLIC ${Protobuf_LIBRARIES} "zmq")
-    target_link_libraries(xstoreServer_Protobuf PUBLIC ${Protobuf_LIBRARIES} "zmq" "pthread")
 endif()
 
 # WITH gRPC
