@@ -18,21 +18,10 @@ find_package(Threads REQUIRED)
 set(_PROTOBUF_PROTOC $<TARGET_FILE:protobuf::protoc>)
 message(STATUS "Using Protobuf ${Protobuf_VERSION}")
 
-# gRPC
-#find_package(gRPC CONFIG REQUIRED)
-#message(STATUS "Using gRPC ${gRPC_VERSION}")
-#set(_GRPC_GRPCPP gRPC::grpc++)
-#set(_GRPC_CPP_PLUGIN_EXECUTABLE $<TARGET_FILE:gRPC::grpc_cpp_plugin>)
-
 # Proto file
 get_filename_component(hw_proto "protoFile/xStore.proto" ABSOLUTE)
 get_filename_component(hw_proto_path "${hw_proto}" PATH)
 
-# Generated sources
-#set(hw_proto_srcs "${CMAKE_CURRENT_BINARY_DIR}/xStore.pb.cc")
-#set(hw_proto_hdrs "${CMAKE_CURRENT_BINARY_DIR}/xStore.pb.h")
-#set(hw_grpc_srcs "${CMAKE_CURRENT_BINARY_DIR}/xStore.grpc.pb.cc")
-#set(hw_grpc_hdrs "${CMAKE_CURRENT_BINARY_DIR}/xStore.grpc.pb.h")
 add_custom_command(
         OUTPUT "${hw_grpc_srcs}" "${hw_grpc_hdrs}"
         COMMAND ${_PROTOBUF_PROTOC}

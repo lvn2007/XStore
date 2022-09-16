@@ -11,9 +11,12 @@ message(STATUS "Using C++ Standard: ${CMAKE_CXX_STANDARD}")
 include(FetchContent)
 
 # Protobuf-compiler
-set(protobuf_MODULE_COMPATIBLE TRUE)
-find_package(Protobuf CONFIG REQUIRED)
-message(STATUS "Using protobuf ${Protobuf_VERSION}")
+set(_PROTOBUF_PROTOC $<TARGET_FILE:protobuf::protoc>)
+message(STATUS "Using Protobuf ${Protobuf_VERSION}")
+
+#set(protobuf_MODULE_COMPATIBLE TRUE)
+#find_package(Protobuf CONFIG REQUIRED)
+#message(STATUS "Using protobuf ${Protobuf_VERSION}")
 
 # Proto file
 get_filename_component(hw_proto "xStore.proto" ABSOLUTE)
