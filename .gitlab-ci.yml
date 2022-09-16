@@ -50,8 +50,9 @@ compile-client:
     - job: "compile-server"
   script:
     - cd clientSrc && mkdir build && cd build
-    - cmake .. && make && cd ../..
+    - cmake .. && make && cd ../../..
     - mkdir ~/clientBuild
+    - ls && pwd
     - cp -r xStore/clientSrc/build/* ~/clientBuild
 
 build-test:
