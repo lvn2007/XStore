@@ -1,8 +1,3 @@
-#include <stdio.h>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <netinet/tcp.h>
-#include <unistd.h>
 #include <string.h>
 #include <algorithm>
 #include <map>

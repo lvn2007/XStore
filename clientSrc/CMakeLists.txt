@@ -18,10 +18,6 @@ find_package(Threads REQUIRED)
 set(_PROTOBUF_PROTOC $<TARGET_FILE:protobuf::protoc>)
 message(STATUS "Using Protobuf ${Protobuf_VERSION}")
 
-#set(protobuf_MODULE_COMPATIBLE TRUE)
-#find_package(Protobuf CONFIG REQUIRED)
-#message(STATUS "Using protobuf ${Protobuf_VERSION}")
-
 # Proto file
 get_filename_component(hw_proto "xStore.proto" ABSOLUTE)
 get_filename_component(hw_proto_path "${hw_proto}" PATH)
@@ -47,16 +43,4 @@ include_directories(.)
 
 # WITHOUT gRPC
 add_executable(xstoreClient_Protobuf ${PROTO_SRCS} ${PROTO_HDRS} xstoreClient_Protobuf.cpp zmq.hpp zmq_addon.hpp)
-
-if(${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS 9)
-    target_link_libraries(xstoreClient_Protobuf PUBLIC ${Protobuf_LIBRARIES} "zmq")
-endif()
-
-# WITH gRPC
-#add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h src/dataStruct/dataStruct.cpp
-#        include/dataStruct/dataStruct.h src/XStore_Networking/XStore_gRPC.cpp include/XStore_Networking/XStore_gRPC.h
-#        ${PROTO_SRCS} ${PROTO_HDRS} ${hw_grpc_srcs} src/dataStruct/fileStruct.cpp include/dataStruct/fileStruct.h)
-
-#if(${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS 9)
-#    target_link_libraries(XStore PUBLIC "stdc++fs" ${Protobuf_LIBRARIES} ${_GRPC_GRPCPP})
-#endif()
+target_link_libraries(xstoreClient_Protobuf PUBLIC ${Protobuf_LIBRARIES} "zmq")
