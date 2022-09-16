@@ -18,11 +18,8 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Modified CI">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Added server's cmd args">
       <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -308,14 +305,7 @@
       <workItem from="1661451396053" duration="17877000" />
       <workItem from="1662534329266" duration="194000" />
       <workItem from="1662666265706" duration="6861000" />
-      <workItem from="1663282590917" duration="11552000" />
-    </task>
-    <task id="LOCAL-00128" summary="Remove postfix &quot;job&quot; &amp; build os configs pipe">
-      <created>1661462120523</created>
-      <option name="number" value="00128" />
-      <option name="presentableId" value="LOCAL-00128" />
-      <option name="project" value="LOCAL" />
-      <updated>1661462120524</updated>
+      <workItem from="1663282590917" duration="12318000" />
     </task>
     <task id="LOCAL-00129" summary="Prepare to build project">
       <created>1661462932240</created>
@@ -653,7 +643,14 @@
       <option name="project" value="LOCAL" />
       <updated>1663300171179</updated>
     </task>
-    <option name="localTasksCounter" value="177" />
+    <task id="LOCAL-00177" summary="Added server's cmd args">
+      <created>1663303146248</created>
+      <option name="number" value="00177" />
+      <option name="presentableId" value="LOCAL-00177" />
+      <option name="project" value="LOCAL" />
+      <updated>1663303146248</updated>
+    </task>
+    <option name="localTasksCounter" value="178" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -760,7 +757,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Test custom pipes" />
     <MESSAGE value="Remove postfix &quot;job&quot; &amp; build os configs pipe" />
     <MESSAGE value="Prepare to build project" />
     <MESSAGE value="Fixed order or pipeline" />
@@ -785,6 +781,7 @@
     <MESSAGE value="Removing CMakeCache.txt" />
     <MESSAGE value="Debugging clientSrc" />
     <MESSAGE value="Modified CI" />
-    <option name="LAST_COMMIT_MESSAGE" value="Modified CI" />
+    <MESSAGE value="Added server's cmd args" />
+    <option name="LAST_COMMIT_MESSAGE" value="Added server's cmd args" />
   </component>
 </project>
