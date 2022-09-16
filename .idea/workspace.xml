@@ -18,8 +18,9 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Added server's cmd args">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Added build-test for client">
       <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -305,14 +306,7 @@
       <workItem from="1661451396053" duration="17877000" />
       <workItem from="1662534329266" duration="194000" />
       <workItem from="1662666265706" duration="6861000" />
-      <workItem from="1663282590917" duration="12318000" />
-    </task>
-    <task id="LOCAL-00129" summary="Prepare to build project">
-      <created>1661462932240</created>
-      <option name="number" value="00129" />
-      <option name="presentableId" value="LOCAL-00129" />
-      <option name="project" value="LOCAL" />
-      <updated>1661462932240</updated>
+      <workItem from="1663282590917" duration="15389000" />
     </task>
     <task id="LOCAL-00130" summary="Fixed order or pipeline">
       <created>1661463301588</created>
@@ -650,7 +644,14 @@
       <option name="project" value="LOCAL" />
       <updated>1663303146248</updated>
     </task>
-    <option name="localTasksCounter" value="178" />
+    <task id="LOCAL-00178" summary="Added build-test for client">
+      <created>1663303958857</created>
+      <option name="number" value="00178" />
+      <option name="presentableId" value="LOCAL-00178" />
+      <option name="project" value="LOCAL" />
+      <updated>1663303958857</updated>
+    </task>
+    <option name="localTasksCounter" value="179" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -757,7 +758,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Remove postfix &quot;job&quot; &amp; build os configs pipe" />
     <MESSAGE value="Prepare to build project" />
     <MESSAGE value="Fixed order or pipeline" />
     <MESSAGE value="Try build" />
@@ -782,6 +782,7 @@
     <MESSAGE value="Debugging clientSrc" />
     <MESSAGE value="Modified CI" />
     <MESSAGE value="Added server's cmd args" />
-    <option name="LAST_COMMIT_MESSAGE" value="Added server's cmd args" />
+    <MESSAGE value="Added build-test for client" />
+    <option name="LAST_COMMIT_MESSAGE" value="Added build-test for client" />
   </component>
 </project>
