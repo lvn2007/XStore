@@ -3,6 +3,18 @@
 #include "include/XStore/XStore.h"
 
 int main(int argc, char *argv[]) {
+    // Handle arguments
+    if (argc < 4) {
+        std::cout << "[ERROR - Arguments] -- Missing required (2) arguments" << std::endl;
+        std::cout << "[ERROR - Arguments] -- Usages: XStore <BIND ADDR> <BIND PORT> <THREAD COUNT>" << std::endl;
+        exit(1);
+    }
+
+    // Arguments parsing
+    std::string BIND_ADDR = argv[1];
+    std::string BIND_PORT = argv[2];
+    int THREAD_COUNT = atoi(argv[3]);
+
     // ----DEV AREA
     // Instantiate XStore obj
     XStore myStore;
@@ -40,6 +52,6 @@ int main(int argc, char *argv[]) {
 //    asd.PrintDebugString();
     // ----DEV AREA
 
-    XStore_zmqServer xStoreZmqServer(30);
-    xStoreZmqServer.startServer("127.0.0.1", "12345");
+    XStore_zmqServer xStoreZmqServer(THREAD_COUNT);
+    xStoreZmqServer.startServer(BIND_ADDR, BIND_PORT);
 }
