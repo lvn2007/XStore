@@ -10,6 +10,10 @@ message(STATUS "Using C++ Standard: ${CMAKE_CXX_STANDARD}")
 
 include(FetchContent)
 
+find_package(Protobuf REQUIRED)
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
 # Protobuf-compiler
 set(_PROTOBUF_PROTOC $<TARGET_FILE:protobuf::protoc>)
 message(STATUS "Using Protobuf ${Protobuf_VERSION}")
