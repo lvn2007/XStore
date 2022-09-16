@@ -39,10 +39,10 @@ install-deps:
 compile-server:
   stage: Build
   script:
-    - mkdir build dataStore && cd build
+    - mkdir build && cd build
     - cmake .. && make && cd ../..
-    - mkdir ~/serverBuild
-    - cp -r xStore/build/* ~/serverBuild
+    - mkdir ~/XStore_Server ~/XStore_Server/build ~/XStore_Server/dataStore
+    - cp -r xStore/build/* ~/XStore_Server/build              # Copy to designated home folder so won't get cleaned-up by runner
 
 compile-client:
   stage: Build
@@ -51,17 +51,18 @@ compile-client:
   script:
     - cd clientSrc && mkdir build && cd build
     - cmake .. && make && cd ../../..
-    - mkdir ~/clientBuild
-    - ls && pwd
-    - cp -r xStore/clientSrc/build/* ~/clientBuild
+    - mkdir ~/XStore_Client ~/XStore_Client/build
+    - cp -r xStore/clientSrc/build/* ~/XStore_Client/build    # Copy to designated home folder so won't get cleaned-up by runner
 
 build-test:
   stage: Test
   script:
-    - cd ~ && cd xStore && cd build
+    - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Starting build test for XStore (SERVER)"
+    - cd ~/XStore_Server/build
     - ./XStore &                              # Run XStore Server in foreground
     - sleep 10                                # Let XStore runs for at least 10s
-    - kill %1                                 # Terminate XStore
+    - kill %1                                 # Terminate XStore Server
+    - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Build test for XStore (SERVER) has concluded"
 
 cleanup-lxc:
   stage: Cleanup

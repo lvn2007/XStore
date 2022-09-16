@@ -483,6 +483,7 @@ std::string XStore::getBaseDir() {
 // Check if there's any existing database
 bool XStore::hasDB() {
     // Path to dataStore -- Currently hard-coded | WILL NEED TO FIX SO IT IS DYNAMIC
+    std::cout << baseDir << std::endl;
     const std::filesystem::path tmp_dir{ std::filesystem::path(baseDir + "dataStore")};
     return !std::filesystem::is_empty(tmp_dir);
 }
