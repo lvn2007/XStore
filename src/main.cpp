@@ -41,6 +41,16 @@ int main(int argc, char *argv[]) {
 //    createDbRep.PrintDebugString();
 //    insertRep.PrintDebugString();
 
+    // REMOVE DB TEST
+//    xstoreProto::removeDB_REQ fromClient;
+//    fromClient.set_rtype(xstoreProto::removeDB_REQ);
+//    fromClient.set_dbname("abc");
+
+//    myStore.createDB("abc", 64);
+
+//    xstoreProto::removeDB_REP removeDbRep = myStore.removeDB("abc");
+//    removeDbRep.PrintDebugString();
+
 //    xstoreProto::removeDBFiles_REQ fromClient;
 //    fromClient.set_rtype(xstoreProto::REMOVEDBFILES);
 //    fromClient.set_dbname("ABC");
