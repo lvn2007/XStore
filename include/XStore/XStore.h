@@ -21,6 +21,7 @@
 class XStore {
     public:
         std::string baseDir = getBaseDir();
+        std::string dataStoreDir = baseDir + "dataStore/";
         std::map<std::string, fileStruct> dbMap;
 
         int dbCount = 0;

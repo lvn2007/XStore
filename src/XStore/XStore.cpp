@@ -439,7 +439,28 @@ xstoreProto::batchQuery_REP XStore::batchQuery(std::time_t startEpochT, std::tim
 }
 
 xstoreProto::removeDB_REP XStore::removeDB(std::string dbName) {
-//    std::filesystem::remove()
+    // Fetch all dirs in dataStore dir
+    dbStats();
+
+    // Protobuf obj to be returned
+    std::string removeStatus;
+    xstoreProto::removeDB_REP toReturn;
+
+    // Ensure dbName string is all capitalized
+    for (int i = 0; i < dbName.size(); i++) {
+        dbName[i] = toupper(dbName[i]);
+    }
+
+    if (dbMap.find(dbName) == dbMap.end()) {
+        removeStatus = "[ERROR] -- DB with name: " + dbName + " does not exists";
+        toReturn.set_removestatus(removeStatus);
+        return toReturn;
+    }
+
+    // Recursively remove entire DB with given DB Name
+    std::filesystem::path targetPath = dataStoreDir + dbName;
+    std::filesystem::remove_all(targetPath);
+    toReturn.set_removestatus("[SUCCESS] -- Removed DB with name: " + dbName);
 }
 
 xstoreProto::removeDBFiles_REP XStore::removeDBFiles(std::string dbName, std::vector<std::string> fileName) {
