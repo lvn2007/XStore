@@ -106,8 +106,8 @@ int main(int argc, char const *argv[])
         start = std::chrono::high_resolution_clock::now();
 
         // Unary REQ -- Routine
-        xstoreProto::unaryQuery_REQ toServer;
-        toServer.set_rtype(xstoreProto::UNARYREQUEST);
+        XStore_Proto::unaryQuery_REQ toServer;
+        toServer.set_rtype(XStore_Proto::UNARYREQUEST);
         toServer.set_timestamp(1483228802);
         toServer.set_dbname("tsla");
 
@@ -148,7 +148,7 @@ int main(int argc, char const *argv[])
 
         // Received structs
         //  UNARY REP
-        xstoreProto::unaryQuery_REP fromServer;
+        XStore_Proto::unaryQuery_REP fromServer;
 
         //  RANGE REP
 //        xstoreProto::batchQuery_REP fromServer;

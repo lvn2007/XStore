@@ -32,28 +32,28 @@ class XStore {
         XStore();
 
         // PROCESSING dbStats/info query
-        xstoreProto::sysInfo_REP infoQuery(std::string serverAddr, int threadCount);
+        XStore_Proto::sysInfo_REP infoQuery(std::string serverAddr, int threadCount);
 
         // CREATING new DB instance with row length
-        xstoreProto::createDB_REP createDB(std::string dbName, int rowLength);
+        XStore_Proto::createDB_REP createDB(std::string dbName, int rowLength);
 
         // INSERT time-series oriented values
-        xstoreProto::unaryInsert_REP unaryInsert(std::time_t epochTime, std::string data, std::string dbName);
+        XStore_Proto::unaryInsert_REP unaryInsert(std::time_t epochTime, std::string data, std::string dbName);
 
         // INSERT BATCH time-series oriented values
         void insertBatch(std::time_t epochTime, std::string value, std::string dbName);
 
         // UNARY GET time-series oriented values
-        xstoreProto::unaryQuery_REP unaryQuery(std::time_t epochTime, std::string dbName);
+        XStore_Proto::unaryQuery_REP unaryQuery(std::time_t epochTime, std::string dbName);
 
         // BATCH GET time-series oriented values
-        xstoreProto::batchQuery_REP batchQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName);
+        XStore_Proto::batchQuery_REP batchQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName);
 
         // REMOVE DB -- Removing an entire DB and its data files
-        xstoreProto::removeDB_REP removeDB(std::string dbName);
+        XStore_Proto::removeDB_REP removeDB(std::string dbName);
 
         // REMOVE DB FILES -- Removing file(s) based on name in a certain DB
-        xstoreProto::removeDBFiles_REP removeDBFiles(std::string dbName, std::vector<std::string> fileName);
+        XStore_Proto::removeDBFiles_REP removeDBFiles(std::string dbName, std::vector<std::string> fileName);
 
         // Initialize DB
         void initDB();

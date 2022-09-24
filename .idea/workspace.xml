@@ -13,16 +13,24 @@
   </component>
   <component name="CMakeSettings" AUTO_RELOAD="true">
     <configurations>
-      <configuration PROFILE_NAME="Debug-Remote-xStore-Master" ENABLED="true" CONFIG_NAME="Debug" TOOLCHAIN_NAME="xStore-Master" BUILD_OPTIONS="-- -j" />
+      <configuration PROFILE_NAME="Debug-Remote-xStore-Master" ENABLED="true" CONFIG_NAME="Debug" GENERATION_OPTIONS="-G &quot;CodeBlocks - Unix Makefiles&quot; -DCMAKE_BUILD_TYPE=Debug" BUILD_OPTIONS="-- -j" />
       <configuration PROFILE_NAME="Debug" ENABLED="true" CONFIG_NAME="Debug" BUILD_OPTIONS="-- -j" />
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Done experimenting .pre/.post">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Implemented removeDB -- Recursively remove DB and its contents">
+      <change beforePath="$PROJECT_DIR$/.idea/deployment.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/deployment.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/other.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/other.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/sshConfigs.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/sshConfigs.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/CMakeLists.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/CMakeLists.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/xStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore.proto" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/protoFile/xStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/XStore.proto" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -66,24 +74,24 @@
     <option name="showMembers" value="true" />
     <option name="showVisibilityIcons" value="true" />
   </component>
-  <component name="PropertiesComponent">{
-  &quot;keyToString&quot;: {
-    &quot;Git.Branch.Popup.ShowAllRepositories&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.cidr.known.project.marker&quot;: &quot;true&quot;,
-    &quot;WebServerToolWindowFactoryState&quot;: &quot;true&quot;,
-    &quot;WebServerToolWindowPanel.toolwindow.highlight.mappings&quot;: &quot;true&quot;,
-    &quot;WebServerToolWindowPanel.toolwindow.highlight.symlinks&quot;: &quot;true&quot;,
-    &quot;WebServerToolWindowPanel.toolwindow.show.date&quot;: &quot;false&quot;,
-    &quot;WebServerToolWindowPanel.toolwindow.show.permissions&quot;: &quot;false&quot;,
-    &quot;WebServerToolWindowPanel.toolwindow.show.size&quot;: &quot;false&quot;,
-    &quot;cf.first.check.clang-format&quot;: &quot;false&quot;,
-    &quot;cidr.known.project.marker&quot;: &quot;true&quot;,
-    &quot;last_opened_file_path&quot;: &quot;/Users/gbn/CLionProjects/XStore&quot;,
-    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
-    &quot;settings.editor.selected.configurable&quot;: &quot;preferences.pluginManager&quot;,
-    &quot;structure.view.defaults.are.configured&quot;: &quot;true&quot;
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "Git.Branch.Popup.ShowAllRepositories": "true",
+    "RunOnceActivity.cidr.known.project.marker": "true",
+    "WebServerToolWindowFactoryState": "true",
+    "WebServerToolWindowPanel.toolwindow.highlight.mappings": "true",
+    "WebServerToolWindowPanel.toolwindow.highlight.symlinks": "true",
+    "WebServerToolWindowPanel.toolwindow.show.date": "false",
+    "WebServerToolWindowPanel.toolwindow.show.permissions": "false",
+    "WebServerToolWindowPanel.toolwindow.show.size": "false",
+    "cf.first.check.clang-format": "false",
+    "cidr.known.project.marker": "true",
+    "last_opened_file_path": "/Users/gbn/CLionProjects/XStore",
+    "nodejs_package_manager_path": "npm",
+    "settings.editor.selected.configurable": "web.server",
+    "structure.view.defaults.are.configured": "true"
   }
-}</component>
+}]]></component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
       <recent name="$PROJECT_DIR$" />
@@ -106,11 +114,12 @@
         <option name="com.jetbrains.cidr.cpp.gradle.execution.GradleNativeBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
       </method>
     </configuration>
-    <configuration name="Unnamed" type="CLion_Remote" version="1" remoteCommand="" symbolFile="" sysroot="">
-      <debugger toolchainName="xStore-Master" />
-      <method v="2" />
+    <configuration default="true" type="CLionExternalRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
+      <method v="2">
+        <option name="CLION.EXTERNAL.BUILD" enabled="true" />
+      </method>
     </configuration>
-    <configuration name="XStore" type="CMakeRunConfiguration" factoryName="Application" temporary="true" PROGRAM_PARAMS="172.20.3.113 12345 2" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="XStore" TARGET_NAME="XStore" CONFIG_NAME="Debug-Remote-xStore-Master" RUN_TARGET_PROJECT_NAME="XStore" RUN_TARGET_NAME="XStore">
+    <configuration name="XStore" type="CMakeRunConfiguration" factoryName="Application" temporary="true" PROGRAM_PARAMS="127.0.0.1 12345 2" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="XStore" TARGET_NAME="XStore" CONFIG_NAME="Debug-Remote-xStore-Master" RUN_TARGET_PROJECT_NAME="XStore" RUN_TARGET_NAME="XStore">
       <method v="2">
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
       </method>
@@ -205,7 +214,6 @@
       <item itemvalue="Python.analyze (1)" />
       <item itemvalue="Python.analyze (2)" />
       <item itemvalue="Python.overleaf" />
-      <item itemvalue="Remote Debug.Unnamed" />
     </list>
     <recent_temporary>
       <list>
@@ -308,14 +316,10 @@
       <workItem from="1661451396053" duration="17877000" />
       <workItem from="1662534329266" duration="194000" />
       <workItem from="1662666265706" duration="6861000" />
-      <workItem from="1663282590917" duration="24597000" />
-    </task>
-    <task id="LOCAL-00132" summary="Try build">
-      <created>1661465073758</created>
-      <option name="number" value="00132" />
-      <option name="presentableId" value="LOCAL-00132" />
-      <option name="project" value="LOCAL" />
-      <updated>1661465073758</updated>
+      <workItem from="1663282590917" duration="36564000" />
+      <workItem from="1663907372461" duration="2831000" />
+      <workItem from="1663949162357" duration="1826000" />
+      <workItem from="1663962860893" duration="5371000" />
     </task>
     <task id="LOCAL-00133" summary="Build success">
       <created>1661471602120</created>
@@ -653,7 +657,14 @@
       <option name="project" value="LOCAL" />
       <updated>1663361339797</updated>
     </task>
-    <option name="localTasksCounter" value="181" />
+    <task id="LOCAL-00181" summary="Implemented removeDB -- Recursively remove DB and its contents">
+      <created>1663462463049</created>
+      <option name="number" value="00181" />
+      <option name="presentableId" value="LOCAL-00181" />
+      <option name="project" value="LOCAL" />
+      <updated>1663462463049</updated>
+    </task>
+    <option name="localTasksCounter" value="182" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -760,7 +771,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Try build" />
     <MESSAGE value="Build success" />
     <MESSAGE value="Init dataStore folder &amp; Dynamic parent path for getBaseDir()" />
     <MESSAGE value="Changed server IP Address" />
@@ -785,6 +795,7 @@
     <MESSAGE value="Added build-test for client" />
     <MESSAGE value="Experimenting .pre/.post" />
     <MESSAGE value="Done experimenting .pre/.post" />
-    <option name="LAST_COMMIT_MESSAGE" value="Done experimenting .pre/.post" />
+    <MESSAGE value="Implemented removeDB -- Recursively remove DB and its contents" />
+    <option name="LAST_COMMIT_MESSAGE" value="Implemented removeDB -- Recursively remove DB and its contents" />
   </component>
 </project>
