@@ -3,7 +3,7 @@
 #include <map>
 #include <cmath>
 #include <fstream>
-#include "xStore.pb.h"
+#include "XStore.pb.h"
 #include "zmq.hpp"
 #include "zmq_addon.hpp"
 
