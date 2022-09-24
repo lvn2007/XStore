@@ -4,7 +4,7 @@
 #include <include/XStore/XStore.h>
 #include <pthread.h>
 #include "include/XStore_Networking/zmq.hpp"
-#include "xStore.pb.h"
+#include "XStore.pb.h"
 #include "include/XStore_Networking/zmq_addon.hpp"
 
 class XStore_zmqServer {
