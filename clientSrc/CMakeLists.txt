@@ -19,7 +19,7 @@ set(_PROTOBUF_PROTOC $<TARGET_FILE:protobuf::protoc>)
 message(STATUS "Using Protobuf ${Protobuf_VERSION}")
 
 # Proto file
-get_filename_component(hw_proto "xStore.proto" ABSOLUTE)
+get_filename_component(hw_proto "XStore.proto" ABSOLUTE)
 get_filename_component(hw_proto_path "${hw_proto}" PATH)
 
 add_custom_command(
@@ -35,7 +35,7 @@ add_custom_command(
 include_directories(${Protobuf_INCLUDE_DIRS})
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
-protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS xStore.proto)
+protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS XStore.proto)
 
 # Include generated *.pb.h files
 include_directories("${CMAKE_CURRENT_BINARY_DIR}")

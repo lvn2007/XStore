@@ -12,9 +12,9 @@ XStore::XStore() {
     hasDB();
 }
 
-xstoreProto::sysInfo_REP XStore::infoQuery(std::string serverAddr, int threadCount) {
+XStore_Proto::sysInfo_REP XStore::infoQuery(std::string serverAddr, int threadCount) {
     // Protobuf obj to be returned
-    xstoreProto::sysInfo_REP toReturn;
+    XStore_Proto::sysInfo_REP toReturn;
 
     // Overview info
     toReturn.set_serveraddr(serverAddr);
@@ -29,7 +29,7 @@ xstoreProto::sysInfo_REP XStore::infoQuery(std::string serverAddr, int threadCou
         std::string currDBDir = dataStoreLoc + currDBName;
 
         // Set DB Name
-        xstoreProto::dbStats *currDB = toReturn.add_dbinfo();
+        XStore_Proto::dbStats *currDB = toReturn.add_dbinfo();
         currDB->set_dbname(currDBName);
 
         // Fetch config of a target DB
@@ -67,12 +67,12 @@ xstoreProto::sysInfo_REP XStore::infoQuery(std::string serverAddr, int threadCou
     return toReturn;
 }
 
-xstoreProto::createDB_REP XStore::createDB(std::string dbName, int rowLength) {
+XStore_Proto::createDB_REP XStore::createDB(std::string dbName, int rowLength) {
     // Fetch all dirs in dataStore dir
     dbStats();
 
     // Protobuf obj to be returned
-    xstoreProto::createDB_REP toReturn;
+    XStore_Proto::createDB_REP toReturn;
     std::string createDBStatus;
 
     // Ensure dbName string is all capitalized
@@ -127,12 +127,12 @@ xstoreProto::createDB_REP XStore::createDB(std::string dbName, int rowLength) {
 }
 
 // INSERT time-series oriented values
-xstoreProto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::string data, std::string dbName) {
+XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::string data, std::string dbName) {
     // Fetch all dirs in dataStore dir
     dbStats();
 
     // Protobuf obj to be returned
-    xstoreProto::unaryInsert_REP toReturn;
+    XStore_Proto::unaryInsert_REP toReturn;
     std::string insertStatus;
 
     // IF no DB exists i.e., dbCount == 0
@@ -246,13 +246,13 @@ void XStore::insertBatch(std::time_t epochTime, std::string value, std::string d
 
 }
 
-xstoreProto::unaryQuery_REP XStore::unaryQuery(std::time_t epochTime, std::string dbName) {
+XStore_Proto::unaryQuery_REP XStore::unaryQuery(std::time_t epochTime, std::string dbName) {
     // Fetch all dirs in dataStore dir
     dbStats();
 
     // Protobuf obj to be returned
     std::string queryStatus;
-    xstoreProto::unaryQuery_REP toReturn;
+    XStore_Proto::unaryQuery_REP toReturn;
     toReturn.set_timestamp(epochTime);
     toReturn.set_dataset("NULL");
 
@@ -332,12 +332,12 @@ xstoreProto::unaryQuery_REP XStore::unaryQuery(std::time_t epochTime, std::strin
     return toReturn;
 }
 
-xstoreProto::batchQuery_REP XStore::batchQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName) {
+XStore_Proto::batchQuery_REP XStore::batchQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName) {
     // Fetch all dirs in dataStore dir
     dbStats();
 
     // Protobuf obj to be returned
-    xstoreProto::batchQuery_REP toReturn;
+    XStore_Proto::batchQuery_REP toReturn;
 
     // Ranges of queried time
     //  i.e., N elements of time-series row of data
@@ -345,7 +345,7 @@ xstoreProto::batchQuery_REP XStore::batchQuery(std::time_t startEpochT, std::tim
 
     // Pre-populating time for all defined ranges
     for (int i = 0; i < timeRange; i++) {
-        xstoreProto::unaryQuery_REP *currEntry = toReturn.add_unaryresponse();
+        XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_unaryresponse();
         currEntry->set_timestamp(startEpochT + i);
         currEntry->set_dataset("NULL");
     }
@@ -438,13 +438,13 @@ xstoreProto::batchQuery_REP XStore::batchQuery(std::time_t startEpochT, std::tim
     return toReturn;
 }
 
-xstoreProto::removeDB_REP XStore::removeDB(std::string dbName) {
+XStore_Proto::removeDB_REP XStore::removeDB(std::string dbName) {
     // Fetch all dirs in dataStore dir
     dbStats();
 
     // Protobuf obj to be returned
     std::string removeStatus;
-    xstoreProto::removeDB_REP toReturn;
+    XStore_Proto::removeDB_REP toReturn;
 
     // Ensure dbName string is all capitalized
     for (int i = 0; i < dbName.size(); i++) {
@@ -463,7 +463,18 @@ xstoreProto::removeDB_REP XStore::removeDB(std::string dbName) {
     toReturn.set_removestatus("[SUCCESS] -- Removed DB with name: " + dbName);
 }
 
-xstoreProto::removeDBFiles_REP XStore::removeDBFiles(std::string dbName, std::vector<std::string> fileName) {
+XStore_Proto::removeDBFiles_REP XStore::removeDBFiles(std::string dbName, std::vector<std::string> fileName) {
+    // Fetch all dirs in dataStore dir
+    dbStats();
+
+    // Protobuf obj to be returned
+    std::string removeStatus;
+    XStore_Proto::removeDBFiles_REP toReturn;
+
+    // Ensure dbName string is all capitalized
+    for (int i = 0; i < dbName.size(); i++) {
+      dbName[i] = toupper(dbName[i]);
+    }
 
 }
 

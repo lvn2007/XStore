@@ -1,6 +1,6 @@
 syntax = "proto3";
 option optimize_for = SPEED;
-package xstoreProto;
+package XStore_Proto;
 
 // ======== COMMAND directives section ========
 enum requestType {
@@ -56,10 +56,14 @@ message removeDB_REQ {
 }
 
 // --- REMOVE DB FILES request
+message dbFiles {
+  string dbName = 1;
+  repeated string fileName = 2;
+}
+
 message removeDBFiles_REQ {
   requestType rType = 1;
-  string dbName = 2;
-  repeated string fileName = 3;
+  repeated dbFiles dbFiles = 2;
 }
 
 // ======== RESPONSE section ========

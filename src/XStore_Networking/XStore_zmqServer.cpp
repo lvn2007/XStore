@@ -68,7 +68,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
         //  Partially parse Protobuf request from CLIENT
         //      ONLY parse the CMD type -- We only interested in field "rType"
         //      Doesn't matter if actual msgLength > reqCMD protobuf obj
-        xstoreProto::reqCMD clientReqCmd;
+        XStore_Proto::reqCMD clientReqCmd;
         clientReqCmd.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
 
         //  Parsed CMD from CLIENT
@@ -76,10 +76,10 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
         switch (rType) {
             // INFOREQUEST
-            case xstoreProto::INFOREQUEST: {
+            case XStore_Proto::INFOREQUEST: {
                 // XStore stuffs
                 //  Returning Protobuf obj
-                xstoreProto::sysInfo_REP protoToClient = myStore.infoQuery(serverAddr, tArgs->numThreads);
+                XStore_Proto::sysInfo_REP protoToClient = myStore.infoQuery(serverAddr, tArgs->numThreads);
 
                 //  Response message size
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
@@ -92,14 +92,14 @@ void* XStore_zmqServer::workerRoutine(void *args) {
             }
 
             // UNARY REQUEST
-            case xstoreProto::UNARYREQUEST: {
+            case XStore_Proto::UNARYREQUEST: {
                 // Properly parse Protobuf obj from CLIENT
-                xstoreProto::unaryQuery_REQ protoFromClient;
+                XStore_Proto::unaryQuery_REQ protoFromClient;
                 protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
 
                 // XStore stuffs
                 //  Returning Protobuf obj
-                xstoreProto::unaryQuery_REP protoToClient = myStore.unaryQuery(protoFromClient.timestamp(), protoFromClient.dbname());
+                XStore_Proto::unaryQuery_REP protoToClient = myStore.unaryQuery(protoFromClient.timestamp(), protoFromClient.dbname());
 
                 //  Response message size
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
@@ -112,14 +112,14 @@ void* XStore_zmqServer::workerRoutine(void *args) {
             }
 
             // BATCH REQUEST
-            case xstoreProto::RANGEREQUEST: {
+            case XStore_Proto::RANGEREQUEST: {
                 // Properly parse Protobuf obj from CLIENT
-                xstoreProto::rangeQuery_REQ protoFromClient;
+                XStore_Proto::rangeQuery_REQ protoFromClient;
                 protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
 
                 // XStore stuffs
                 //  Returning Protobuf obj
-                xstoreProto::batchQuery_REP protoToClient = myStore.batchQuery(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname());
+                XStore_Proto::batchQuery_REP protoToClient = myStore.batchQuery(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname());
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
@@ -132,14 +132,14 @@ void* XStore_zmqServer::workerRoutine(void *args) {
             }
 
             // CREATE DB REQUEST
-            case xstoreProto::CREATEDBREQUEST: {
+            case XStore_Proto::CREATEDBREQUEST: {
                 // Properly parse Protobuf obj from CLIENT
-                xstoreProto::createDB_REQ protoFromClient;
+                XStore_Proto::createDB_REQ protoFromClient;
                 protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
 
                 // XStore stuffs
                 //  Returning Protobuf obj
-                xstoreProto::createDB_REP protoToClient = myStore.createDB(protoFromClient.dbname(), protoFromClient.rowlength());
+                XStore_Proto::createDB_REP protoToClient = myStore.createDB(protoFromClient.dbname(), protoFromClient.rowlength());
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
@@ -152,14 +152,14 @@ void* XStore_zmqServer::workerRoutine(void *args) {
             }
 
             // UNARY INSERT REQUEST
-            case xstoreProto::UNARYINSERT: {
+            case XStore_Proto::UNARYINSERT: {
                 // Properly parse Protobuf obj from CLIENT
-                xstoreProto::unaryInsert_REQ protoFromClient;
+                XStore_Proto::unaryInsert_REQ protoFromClient;
                 protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
 
                 // XStore stuffs
                 //  Returning Protobuf obj
-                xstoreProto::unaryInsert_REP protoToClient = myStore.unaryInsert(protoFromClient.timestamp(), protoFromClient.data(), protoFromClient.dbname());
+                XStore_Proto::unaryInsert_REP protoToClient = myStore.unaryInsert(protoFromClient.timestamp(), protoFromClient.data(), protoFromClient.dbname());
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
@@ -172,20 +172,20 @@ void* XStore_zmqServer::workerRoutine(void *args) {
             }
 
             // BATCH INSERT REQUEST
-            case xstoreProto::BATCHINSERT: {
+            case XStore_Proto::BATCHINSERT: {
                 std::cout << 3 << std::endl;
                 break;
             }
 
             // REMOVE DB REQUEST
-            case xstoreProto::REMOVEDB: {
+            case XStore_Proto::REMOVEDB: {
                 // Properly parse Protobuf obj from CLIENT
-                xstoreProto::removeDB_REQ protoFromClient;
+                XStore_Proto::removeDB_REQ protoFromClient;
                 protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
 
                 // XStore stuffs
                 //  Returning Protobuf obj
-                xstoreProto::removeDB_REP protoToClient = myStore.removeDB(protoFromClient.dbname());
+                XStore_Proto::removeDB_REP protoToClient = myStore.removeDB(protoFromClient.dbname());
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
@@ -198,15 +198,15 @@ void* XStore_zmqServer::workerRoutine(void *args) {
             }
 
             // REMOVE DB FILES REQUEST
-            case xstoreProto::REMOVEDBFILES: {
+            case XStore_Proto::REMOVEDBFILES: {
                 // Properly parse Protobuf obj from CLIENT
-                xstoreProto::removeDBFiles_REQ protoFromClient;
+                XStore_Proto::removeDBFiles_REQ protoFromClient;
                 protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
 
                 // XStore stuffs
                 //  Returning Protobuf obj
                 std::vector<std::string> fileNames(protoFromClient.filename().begin(), protoFromClient.filename().end());
-                xstoreProto::removeDBFiles_REP protoToClient = myStore.removeDBFiles(protoFromClient.dbname(), fileNames);
+                XStore_Proto::removeDBFiles_REP protoToClient = myStore.removeDBFiles(protoFromClient.dbname(), fileNames);
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
