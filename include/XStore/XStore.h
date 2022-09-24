@@ -12,7 +12,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <algorithm>
-#include "xStore.pb.h"
+#include "XStore.pb.h"
 
 #include "include/dataStructs/dataStruct.h"
 #include "include/dataStructs/fileStruct.h"
