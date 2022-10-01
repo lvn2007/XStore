@@ -7,7 +7,7 @@
 #include "zmq.hpp"
 #include "zmq_addon.hpp"
 
-#define IP_ADDR "172.20.3.113"
+#define IP_ADDR "tcp://127.0.0.1:12345"
 #define PORT 12345
 
 double meanCalc(std::vector<double> inputVector) {
@@ -96,7 +96,7 @@ int main(int argc, char const *argv[])
     zmq::context_t ctx;
     zmq::socket_t sock(ctx, zmq::socket_type::req);
 
-    sock.connect("tcp://172.20.3.113:12345");
+    sock.connect(IP_ADDR);
 
     for (int i = 0; i < nIter; i++) {
         randTime = rand() % 1000 + 1;

@@ -13,7 +13,6 @@
 #include <sys/stat.h>
 #include <algorithm>
 #include "XStore.pb.h"
-
 #include "include/dataStructs/dataStruct.h"
 #include "include/dataStructs/fileStruct.h"
 #include "include/dataStructs/configStruct.h"
@@ -53,7 +52,7 @@ class XStore {
         XStore_Proto::removeDB_REP removeDB(std::string dbName);
 
         // REMOVE DB FILES -- Removing file(s) based on name in a certain DB
-        XStore_Proto::removeDBFiles_REP removeDBFiles(std::string dbName, std::vector<std::string> fileName);
+        XStore_Proto::removeDBFiles_REP removeDBFiles(std::string dbName, XStore_Proto::removeDBFiles_REQ *protoFromClient);
 
         // Initialize DB
         void initDB();

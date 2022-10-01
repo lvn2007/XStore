@@ -463,19 +463,40 @@ XStore_Proto::removeDB_REP XStore::removeDB(std::string dbName) {
     toReturn.set_removestatus("[SUCCESS] -- Removed DB with name: " + dbName);
 }
 
-XStore_Proto::removeDBFiles_REP XStore::removeDBFiles(std::string dbName, std::vector<std::string> fileName) {
+XStore_Proto::removeDBFiles_REP XStore::removeDBFiles(std::string dbName, XStore_Proto::removeDBFiles_REQ *protoFromClient) {
     // Fetch all dirs in dataStore dir
     dbStats();
+
+    // Ensure dbName string is all capitalized
+    for (int i = 0; i < dbName.size(); i++) {
+        dbName[i] = toupper(dbName[i]);
+    }
 
     // Protobuf obj to be returned
     std::string removeStatus;
     XStore_Proto::removeDBFiles_REP toReturn;
 
-    // Ensure dbName string is all capitalized
-    for (int i = 0; i < dbName.size(); i++) {
-      dbName[i] = toupper(dbName[i]);
+    if (dbMap.find(dbName) == dbMap.end()) {
+        std::string errorStatus = "[ERROR] - [DB: " + dbName + "] -- Unable to remove ";
+        for (int i = 0; i < protoFromClient->filename_size(); i++) {
+            toReturn.add_removestatus(errorStatus + protoFromClient->filename(i));
+        }
+        return toReturn;
     }
 
+    // Loop through each requested file name
+    for (int i = 0; i < protoFromClient->filename_size(); i++) {
+        std::filesystem::path targetPath = dataStoreDir + dbName + "/" + protoFromClient->filename(i);
+        bool currRemove = std::filesystem::remove(targetPath);
+        if (currRemove) {
+            toReturn.add_removestatus("[SUCCESS] - [DB: " + dbName + "] -- Removed " + protoFromClient->filename(i));
+        }
+        else {
+            toReturn.add_removestatus("[ERROR] - [DB: " + dbName + "] -- Unable to remove " + protoFromClient->filename(i));
+        }
+    }
+    toReturn.PrintDebugString();
+    return toReturn;
 }
 
 void XStore::initDB() {
