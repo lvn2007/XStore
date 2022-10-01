@@ -56,14 +56,10 @@ message removeDB_REQ {
 }
 
 // --- REMOVE DB FILES request
-message dbFiles {
-  string dbName = 1;
-  repeated string fileName = 2;
-}
-
 message removeDBFiles_REQ {
   requestType rType = 1;
-  repeated dbFiles dbFiles = 2;
+  string dbName = 2;
+  repeated string fileName = 3;
 }
 
 // ======== RESPONSE section ========

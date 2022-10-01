@@ -205,16 +205,15 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 // XStore stuffs
                 //  Returning Protobuf obj
-//                std::vector<std::string> fileNames(protoFromClient.filename().begin(), protoFromClient.filename().end());
-//                XStore_Proto::removeDBFiles_REP protoToClient = myStore.removeDBFiles(protoFromClient.dbname(), fileNames);
+                XStore_Proto::removeDBFiles_REP protoToClient = myStore.removeDBFiles(protoFromClient.dbname(), &protoFromClient);
 
                 //  Response message
-//                size_t protoToClientSize = protoToClient.ByteSizeLong();
-//                zmq::message_t responseToClient(protoToClientSize);
+                size_t protoToClientSize = protoToClient.ByteSizeLong();
+                zmq::message_t responseToClient(protoToClientSize);
 
                 //  Serialize & Dispatch msg to CLIENT
-//                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
-//                socket.send(responseToClient, zmq::send_flags::none);
+                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
+                socket.send(responseToClient, zmq::send_flags::none);
                 break;
             }
         }

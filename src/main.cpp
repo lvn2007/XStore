@@ -21,8 +21,8 @@ int main(int argc, char *argv[]) {
 ////    myStore.insert(1514764801, "123", "tsla");
 ////    std::cout << myStore.getSingleOpenClose(1514764802, "tsla") << std::endl;
 //    myStore.createDB("tsla", 64);
-//    myStore.insert(1483228802, "0,hello,NaN,NaN,NaN,NaN,NaN", "TSLA");
-//    std::string res = myStore.getSingleOpenClose(1483228801, "TSLA");
+//    myStore.unaryInsert(1483228802, "0,hello,NaN,NaN,NaN,NaN,NaN", "TSLA");
+//    myStore.unaryInsert(1583228802, "0,hello,NaN,NaN,NaN,NaN,NaN", "TSLA");
 //    std::cout << res << std::endl;
 
 //    xstoreProto::unaryQuery_REP ur = myStore.unaryQuery(1483228802, "asd");
@@ -51,17 +51,27 @@ int main(int argc, char *argv[]) {
 //    xstoreProto::removeDB_REP removeDbRep = myStore.removeDB("abc");
 //    removeDbRep.PrintDebugString();
 
-//    xstoreProto::removeDBFiles_REQ fromClient;
-//    fromClient.set_rtype(xstoreProto::REMOVEDBFILES);
+    // REMOVE DB FILES TEST
+//    XStore_Proto::removeDBFiles_REQ fromClient;
+//    fromClient.set_dbname("TSLA");
+//    fromClient.add_filename("2017.XSTORE");
+//    fromClient.add_filename("2020.XSTORE");
+
+//    std::vector<std::string> asd(fromClient.filename().begin(), fromClient.filename().end());
+//
+//    for (int i = 0; i < asd.size(); i++) {
+//        std::cout << "File no: " << i << " -- " << asd[i] << std::endl;
+//    }
+//    myStore.removeDBFiles(fromClient.dbname(), &fromClient);
+
 //    fromClient.set_dbname("ABC");
 //    fromClient.add_filename("2017.XSTORE");
 //    fromClient.add_filename("2018.XSTORE");
-//
+
 //    std::vector<std::string> targetVector(fromClient.filename().begin(), fromClient.filename().end());
 //    xstoreProto::removeDBFiles_REP asd = myStore.removeDBFiles(fromClient.dbname(), targetVector);
 //    asd.PrintDebugString();
     // ----DEV AREA
-
     XStore_zmqServer xStoreZmqServer(THREAD_COUNT);
     xStoreZmqServer.startServer(BIND_ADDR, BIND_PORT);
 }
