@@ -41,6 +41,18 @@ message unaryInsert_REQ {
   string dbName = 4;
 }
 
+message batchInsert_DATA {
+  uint32 timestamp = 1;
+  string data = 2;
+  string dbName = 3;
+}
+
+// --- BATCH insert request
+message batchInsert_REQ {
+  requestType rType = 1;
+  repeated batchInsert_DATA batchInsert_DATA = 2;
+}
+
 // --- RANGE request
 message rangeQuery_REQ {
   requestType rType = 1;
@@ -92,6 +104,11 @@ message createDB_REP {
 // --- UNARY INSERT REQ response
 message unaryInsert_REP {
   string insertStatus = 1;
+}
+
+// --- BATCH INSERT REQ response
+message batchInsert_REP {
+  repeated string insertStatus = 1;
 }
 
 // --- RANGE/BATCH REQ response

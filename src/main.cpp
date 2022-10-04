@@ -68,8 +68,23 @@ int main(int argc, char *argv[]) {
 //    fromClient.add_filename("2017.XSTORE");
 //    fromClient.add_filename("2018.XSTORE");
 
-//    std::vector<std::string> targetVector(fromClient.filename().begin(), fromClient.filename().end());
-//    xstoreProto::removeDBFiles_REP asd = myStore.removeDBFiles(fromClient.dbname(), targetVector);
+    // BATCH INSERT TEST
+//    myStore.createDB("ABC", 64);
+//    XStore_Proto::batchInsert_REQ fromClient;
+//    fromClient.set_rtype(XStore_Proto::BATCHINSERT);
+//
+//    for (int i = 0; i < 3; i++) {
+//        XStore_Proto::batchInsert_DATA *batchInsert_DATA = fromClient.add_batchinsert_data();
+//        batchInsert_DATA->set_dbname("ABC");
+//        batchInsert_DATA->set_timestamp(1483228800 + i);
+//        batchInsert_DATA->set_data("hello " + std::to_string(i));
+//    }
+//
+//    XStore_Proto::batchInsert_REP batch_insert_rep = myStore.batchInsert(&fromClient);
+//    batch_insert_rep.PrintDebugString();
+//    XStore_Proto::unaryQuery_REP qRep = myStore.unaryQuery(1483228801, "abc");
+//    qRep.PrintDebugString();
+
 //    asd.PrintDebugString();
     // ----DEV AREA
     XStore_zmqServer xStoreZmqServer(THREAD_COUNT);
