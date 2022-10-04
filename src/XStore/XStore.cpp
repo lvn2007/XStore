@@ -242,8 +242,129 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::str
     return toReturn;
 }
 
-void XStore::insertBatch(std::time_t epochTime, std::string value, std::string dbName) {
+XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ *protoFromClient) {
+    // Protobuf obj to be returned
+    XStore_Proto::batchInsert_REP toReturn;
+    std::string insertStatus;
 
+    // Iterate over batch of insert data
+    for (int idx = 0; idx < protoFromClient->batchinsert_data_size(); idx++) {
+        // Fetch all dirs in dataStore dir
+        dbStats();
+
+        // Parse each data in a batch collection
+        XStore_Proto::batchInsert_DATA currentInsertData = protoFromClient->batchinsert_data(idx);
+        std::time_t unixTime = currentInsertData.timestamp();
+        std::string data = currentInsertData.data();
+        std::string dbName = currentInsertData.dbname();
+
+        // IF no DB exists i.e., dbCount == 0
+        //  Requiring a db space to be instantiated with "createDB" method prior to this
+        if (dbCount == 0) {
+            insertStatus = "[ERROR - BATCH INSERT] - [DB: " + dbName + "] -- DB does not exist";
+            toReturn.add_insertstatus(insertStatus);
+            return toReturn;
+        }
+
+        // Check whether dbName is already created
+        //  Ensure dbName string is all capitalized
+        for (int i = 0; i < dbName.size(); i++) {
+            dbName[i] = toupper(dbName[i]);
+        }
+
+        //  Check if dbName is already existed in XStore
+        bool isFound = std::find(dbNames.begin(), dbNames.end(), dbName) != dbNames.end();
+
+        //  IF dbName is NOT existed
+        //   -> Do nothing
+        if (!isFound) {
+            insertStatus = "[ERROR - BATCH INSERT] - [DB: " + dbName + "] -- DB does not exist";
+            toReturn.add_insertstatus(insertStatus);
+            return toReturn;
+        }
+
+        // Otherwise, create a file with name of inputYear.XSTORE
+        //  Read timeValue -- UNIX time
+        //  Ensure timeResolution is enforced
+        configStruct cfgStruct;
+        std::string cfgFilePath = baseDir + "dataStore/" + dbName + "/" + dbName + ".config";
+        int cfgFile = open(cfgFilePath.c_str(), O_RDWR);
+        pread(cfgFile, &cfgStruct, sizeof(configStruct), 0);
+
+        //  timeResolution staging area
+        int inputYear = toHumanYear(unixTime);
+        std::string currResolution = getTimeResolution(unixTime);
+
+        //  Start & End time of a given year
+        long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
+        long int endEpoch = getEndTimeEpoch(inputYear, currResolution);
+
+        //  IF timeResolution is not yet initialized
+        //   -> First inserting time will determine resolution of this current DB
+        if (strcmp(cfgStruct.timeResolution, "NULL") == 0) {
+            // Updating configFile and dump to disk
+            strcpy(cfgStruct.timeResolution, currResolution.c_str());
+            pwrite(cfgFile, &cfgStruct, sizeof(configStruct), 0);
+            close(cfgFile);
+        }
+
+        //  Staging area for new data file waiting to be inserted
+        std::string dataFilePath = baseDir + "dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
+        FILE *bFile;
+
+        // DB is empty
+        if (dbMap.size() == 0 || (dbMap.find(dbName) == dbMap.end())) {
+            bFile = std::fopen(dataFilePath.c_str(), "wb+");
+
+            //  Creating dummy file with n Size from cfgStruct
+            ftruncate(fileno(bFile), (endEpoch - startEpoch) * cfgStruct.rowLength);
+        }
+
+        // DB is not empty
+        else {
+            // Ensure that the file inputYear.XSTORE is NOT existed
+            if (dbMap.find(dbName)->second.hasYear(inputYear) != true) {
+                bFile = std::fopen(dataFilePath.c_str(), "wb+");
+
+                //  Creating dummy file with n Size from cfgStruct
+                ftruncate(fileno(bFile), (endEpoch - startEpoch) * cfgStruct.rowLength);
+            }
+
+            // IF inputYear.XSTORE existed
+            //  -> Open in append mode
+            else {
+                bFile = std::fopen(dataFilePath.c_str(), "rb+");
+                rewind(bFile);
+            }
+        }
+
+        // IF no error
+        // -> Organize timestamp & data into an object
+        dataStruct currData{unixTime, data};
+
+        // Writing actual data to disk
+        //  Epoch time difference between target & startEpoch
+        long int diff = unixTime - startEpoch;
+
+        //  Calculate offset -- Exact location of where a particular target row is stored
+        long int offSet = diff * cfgStruct.rowLength;
+
+        //  Seek to target offset prior to write
+        std::fseek(bFile, offSet, SEEK_SET);
+
+        //  Write as binary file to disk with new line indicates EOL
+        std::fwrite((currData.getData()).data(), cfgStruct.rowLength, 1, bFile);
+
+        //  Close file after write
+        std::fclose(bFile);
+
+        //  Updating dbStats & dbMap
+        dbStats();
+        initDB();
+
+        toReturn.add_insertstatus("[SUCCESS - BATCH INSERT] - [DB: " + dbName + "] -- Inserted: " + std::to_string(unixTime));
+    }
+    return toReturn;
 }
 
 XStore_Proto::unaryQuery_REP XStore::unaryQuery(std::time_t epochTime, std::string dbName) {
@@ -495,7 +616,6 @@ XStore_Proto::removeDBFiles_REP XStore::removeDBFiles(std::string dbName, XStore
             toReturn.add_removestatus("[ERROR] - [DB: " + dbName + "] -- Unable to remove " + protoFromClient->filename(i));
         }
     }
-    toReturn.PrintDebugString();
     return toReturn;
 }
 

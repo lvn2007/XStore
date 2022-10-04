@@ -173,7 +173,21 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
             // BATCH INSERT REQUEST
             case XStore_Proto::BATCHINSERT: {
-                std::cout << 3 << std::endl;
+                // Properly parse Protobuf obj from CLIENT
+                XStore_Proto::batchInsert_REQ protoFromClient;
+                protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
+
+                // XStore stuffs
+                //  Returning Protobuf obj
+                XStore_Proto::batchInsert_REP protoToClient = myStore.batchInsert(&protoFromClient);
+
+                //  Response message
+                size_t protoToClientSize = protoToClient.ByteSizeLong();
+                zmq::message_t responseToClient(protoToClientSize);
+
+                //  Serialize & Dispatch msg to CLIENT
+                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
+                socket.send(responseToClient, zmq::send_flags::none);
                 break;
             }
 
