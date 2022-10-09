@@ -190,7 +190,7 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::str
     FILE *bFile;
 
     // DB is empty
-    if (dbMap.size() == 0) {
+    if (dbMap.size() == 0 || (dbMap.find(dbName) == dbMap.end())) {
         bFile = std::fopen(dataFilePath.c_str(), "wb+");
 
         //  Creating dummy file with n Size from cfgStruct
@@ -581,6 +581,7 @@ XStore_Proto::removeDB_REP XStore::removeDB(std::string dbName) {
     // Recursively remove entire DB with given DB Name
     std::filesystem::path targetPath = dataStoreDir + dbName;
     std::filesystem::remove_all(targetPath);
+
     toReturn.set_removestatus("[SUCCESS] -- Removed DB with name: " + dbName);
 }
 
@@ -685,6 +686,7 @@ void XStore::initMsg() {
 void XStore::dbStats() {
     // Path of dataStore
     std::filesystem::path dbDir = baseDir + "dataStore";
+    initDB();
 
     // Reset dbCount & dbNames list
     dbCount = 0;
