@@ -18,8 +18,9 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="SYS_INFO test case">
-      <change beforePath="$PROJECT_DIR$/clientSrc/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore.proto" afterDir="false" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Update client proto">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -311,14 +312,7 @@
       <workItem from="1663949162357" duration="1826000" />
       <workItem from="1663962860893" duration="37991000" />
       <workItem from="1665010958172" duration="18488000" />
-      <workItem from="1665202776793" duration="13955000" />
-    </task>
-    <task id="LOCAL-00139" summary="XStore to background &amp; Outputs???">
-      <created>1661540386060</created>
-      <option name="number" value="00139" />
-      <option name="presentableId" value="LOCAL-00139" />
-      <option name="project" value="LOCAL" />
-      <updated>1661540386060</updated>
+      <workItem from="1665202776793" duration="14547000" />
     </task>
     <task id="LOCAL-00140" summary="Added &quot;compile-client&quot; stage &amp; &quot;build-testing&quot;">
       <created>1661541452536</created>
@@ -656,7 +650,14 @@
       <option name="project" value="LOCAL" />
       <updated>1665282067625</updated>
     </task>
-    <option name="localTasksCounter" value="188" />
+    <task id="LOCAL-00188" summary="Update client proto">
+      <created>1665282900634</created>
+      <option name="number" value="00188" />
+      <option name="presentableId" value="LOCAL-00188" />
+      <option name="project" value="LOCAL" />
+      <updated>1665282900635</updated>
+    </task>
+    <option name="localTasksCounter" value="189" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -763,7 +764,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="XStore to background &amp; Outputs???" />
     <MESSAGE value="Added &quot;compile-client&quot; stage &amp; &quot;build-testing&quot;" />
     <MESSAGE value="Moving working folder to home after build" />
     <MESSAGE value="Rename stage &amp; job" />
@@ -788,6 +788,7 @@
     <MESSAGE value="Implemented removeDBFiles" />
     <MESSAGE value="Implemented batchInsert" />
     <MESSAGE value="SYS_INFO test case" />
-    <option name="LAST_COMMIT_MESSAGE" value="SYS_INFO test case" />
+    <MESSAGE value="Update client proto" />
+    <option name="LAST_COMMIT_MESSAGE" value="Update client proto" />
   </component>
 </project>
