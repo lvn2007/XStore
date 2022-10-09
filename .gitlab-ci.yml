@@ -71,7 +71,7 @@ build-test-client:
   script:
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Starting build test for XStore (CLIENT)"
     - cd ~/XStore_Client/build
-    - ./XStore_Client 127.0.0.1 12345                         # Run CLIENT in foreground
+    - ./XStore_Client 127.0.0.1 12345 TEST BUILD              # Run CLIENT in foreground
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Build test for XStore (CLIENT) has concluded"
 
 sysinfo-test-client:
