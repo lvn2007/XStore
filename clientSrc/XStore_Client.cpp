@@ -101,7 +101,13 @@ int main(int argc, char const *argv[])
     if (MODE == "TEST") {
         std::cout << "+------------------------------------------+" << std::endl;
         std::cout << "|                   TEST                   |" << std::endl;
-        if (OP_NAME == "SYS_INFO") {
+        if (OP_NAME == "BUILD") {
+            std::cout << "|                   BUILD                  |" << std::endl;
+            std::cout << "+------------------------------------------+\n" << std::endl;
+            std::cout << "Build ok" << std::endl;
+            exit(0);
+        }
+        else if (OP_NAME == "SYS_INFO") {
             std::cout << "|                 SYS_INFO                 |" << std::endl;
             std::cout << "+------------------------------------------+\n" << std::endl;
 
