@@ -18,17 +18,8 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Implemented batchInsert">
-      <change afterPath="$PROJECT_DIR$/clientSrc/XStore_Client.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/deployment.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/deployment.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/other.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/other.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/sshConfigs.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/sshConfigs.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/clientSrc/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/CMakeLists.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" afterDir="false" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="SYS_INFO test case">
+      <change beforePath="$PROJECT_DIR$/clientSrc/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore.proto" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -320,14 +311,7 @@
       <workItem from="1663949162357" duration="1826000" />
       <workItem from="1663962860893" duration="37991000" />
       <workItem from="1665010958172" duration="18488000" />
-      <workItem from="1665202776793" duration="13307000" />
-    </task>
-    <task id="LOCAL-00138" summary="Cleanup regardless of previous failure/success">
-      <created>1661539863687</created>
-      <option name="number" value="00138" />
-      <option name="presentableId" value="LOCAL-00138" />
-      <option name="project" value="LOCAL" />
-      <updated>1661539863687</updated>
+      <workItem from="1665202776793" duration="13955000" />
     </task>
     <task id="LOCAL-00139" summary="XStore to background &amp; Outputs???">
       <created>1661540386060</created>
@@ -665,7 +649,14 @@
       <option name="project" value="LOCAL" />
       <updated>1664926406846</updated>
     </task>
-    <option name="localTasksCounter" value="187" />
+    <task id="LOCAL-00187" summary="SYS_INFO test case">
+      <created>1665282067625</created>
+      <option name="number" value="00187" />
+      <option name="presentableId" value="LOCAL-00187" />
+      <option name="project" value="LOCAL" />
+      <updated>1665282067625</updated>
+    </task>
+    <option name="localTasksCounter" value="188" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -772,7 +763,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Cleanup regardless of previous failure/success" />
     <MESSAGE value="XStore to background &amp; Outputs???" />
     <MESSAGE value="Added &quot;compile-client&quot; stage &amp; &quot;build-testing&quot;" />
     <MESSAGE value="Moving working folder to home after build" />
@@ -797,6 +787,7 @@
     <MESSAGE value="Renaming &amp; Enhanced Protobuf for removeDBFiles" />
     <MESSAGE value="Implemented removeDBFiles" />
     <MESSAGE value="Implemented batchInsert" />
-    <option name="LAST_COMMIT_MESSAGE" value="Implemented batchInsert" />
+    <MESSAGE value="SYS_INFO test case" />
+    <option name="LAST_COMMIT_MESSAGE" value="SYS_INFO test case" />
   </component>
 </project>
