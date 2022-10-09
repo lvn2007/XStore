@@ -18,9 +18,9 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Update client proto">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Added build test case">
+      <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -312,14 +312,7 @@
       <workItem from="1663949162357" duration="1826000" />
       <workItem from="1663962860893" duration="37991000" />
       <workItem from="1665010958172" duration="18488000" />
-      <workItem from="1665202776793" duration="14547000" />
-    </task>
-    <task id="LOCAL-00140" summary="Added &quot;compile-client&quot; stage &amp; &quot;build-testing&quot;">
-      <created>1661541452536</created>
-      <option name="number" value="00140" />
-      <option name="presentableId" value="LOCAL-00140" />
-      <option name="project" value="LOCAL" />
-      <updated>1661541452536</updated>
+      <workItem from="1665202776793" duration="14878000" />
     </task>
     <task id="LOCAL-00141" summary="Moving working folder to home after build">
       <created>1661542168218</created>
@@ -657,7 +650,14 @@
       <option name="project" value="LOCAL" />
       <updated>1665282900635</updated>
     </task>
-    <option name="localTasksCounter" value="189" />
+    <task id="LOCAL-00189" summary="Added build test case">
+      <created>1665284088307</created>
+      <option name="number" value="00189" />
+      <option name="presentableId" value="LOCAL-00189" />
+      <option name="project" value="LOCAL" />
+      <updated>1665284088307</updated>
+    </task>
+    <option name="localTasksCounter" value="190" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -764,7 +764,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Added &quot;compile-client&quot; stage &amp; &quot;build-testing&quot;" />
     <MESSAGE value="Moving working folder to home after build" />
     <MESSAGE value="Rename stage &amp; job" />
     <MESSAGE value="Cleanup" />
@@ -789,6 +788,7 @@
     <MESSAGE value="Implemented batchInsert" />
     <MESSAGE value="SYS_INFO test case" />
     <MESSAGE value="Update client proto" />
-    <option name="LAST_COMMIT_MESSAGE" value="Update client proto" />
+    <MESSAGE value="Added build test case" />
+    <option name="LAST_COMMIT_MESSAGE" value="Added build test case" />
   </component>
 </project>
