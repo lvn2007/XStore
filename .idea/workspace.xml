@@ -18,9 +18,8 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Rename sysinfo-test in .gitlab-ci.yml">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" afterDir="false" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Added CREATE_DB tests">
+      <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -312,14 +311,7 @@
       <workItem from="1663949162357" duration="1826000" />
       <workItem from="1663962860893" duration="37991000" />
       <workItem from="1665010958172" duration="18488000" />
-      <workItem from="1665202776793" duration="16525000" />
-    </task>
-    <task id="LOCAL-00143" summary="Cleanup">
-      <created>1662935219620</created>
-      <option name="number" value="00143" />
-      <option name="presentableId" value="LOCAL-00143" />
-      <option name="project" value="LOCAL" />
-      <updated>1662935219620</updated>
+      <workItem from="1665202776793" duration="17080000" />
     </task>
     <task id="LOCAL-00144" summary="Moved CI runner from VirtualBox to LXC">
       <created>1663274119408</created>
@@ -657,7 +649,14 @@
       <option name="project" value="LOCAL" />
       <updated>1665287298585</updated>
     </task>
-    <option name="localTasksCounter" value="192" />
+    <task id="LOCAL-00192" summary="Added CREATE_DB tests">
+      <created>1665289102736</created>
+      <option name="number" value="00192" />
+      <option name="presentableId" value="LOCAL-00192" />
+      <option name="project" value="LOCAL" />
+      <updated>1665289102736</updated>
+    </task>
+    <option name="localTasksCounter" value="193" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -764,7 +763,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Rename stage &amp; job" />
     <MESSAGE value="Cleanup" />
     <MESSAGE value="Moved CI runner from VirtualBox to LXC" />
     <MESSAGE value="Debug LXC Runner ..." />
@@ -789,6 +787,7 @@
     <MESSAGE value="Update client proto" />
     <MESSAGE value="Added build test case" />
     <MESSAGE value="Rename sysinfo-test in .gitlab-ci.yml" />
-    <option name="LAST_COMMIT_MESSAGE" value="Rename sysinfo-test in .gitlab-ci.yml" />
+    <MESSAGE value="Added CREATE_DB tests" />
+    <option name="LAST_COMMIT_MESSAGE" value="Added CREATE_DB tests" />
   </component>
 </project>
