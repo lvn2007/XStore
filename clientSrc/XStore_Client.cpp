@@ -1,14 +1,8 @@
-#include <string.h>
 #include <algorithm>
-#include <map>
 #include <cmath>
 #include <fstream>
 #include "XStore.pb.h"
-#include "zmq.hpp"
-#include "zmq_addon.hpp"
-
-#define IP_ADDR "tcp://127.0.0.1:12345"
-#define PORT 12345
+#include "XStore_Client.h"
 
 double meanCalc(std::vector<double> inputVector) {
     double totalSum = 0;
@@ -80,36 +74,138 @@ void writeCSV(std::string fName, std::string colName, std::vector<double> inputs
 
 int main(int argc, char const *argv[])
 {
-    std::string uniqueID;
-    uniqueID = argv[1];
+    // Handle arguments
+    if (argc < 5) {
+        std::cout << "[ERROR - Arguments] -- Missing required (2) arguments" << std::endl;
+        std::cout << " - Usages: XStore_Client <SERVER ADDR> <SERVER PORT> <MODE> <OP_NAME>" << std::endl;
+        exit(1);
+    }
 
-    std::vector<double> us = { };
+    // Arguments parsing
+    std::string SERVER_ADDR = argv[1];
+    std::string SERVER_PORT = argv[2];
+    std::string MODE = argv[3];
+    std::string OP_NAME = argv[4];
 
-    // Clock init
-    std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
-    std::chrono::duration<double> diff;
+    // Ensuring MODE & OP_NAME is all uppercase
+    for (int i = 0; i < MODE.length(); i++) {
+        MODE[i] = std::toupper(MODE[i]);
+    }
+    for (int i = 0; i < OP_NAME.length(); i++) {
+        OP_NAME[i] = std::toupper(OP_NAME[i]);
+    }
 
-    int nIter = 1;
-    srand(time(NULL));
-    long int randTime;
+    // Init XStore Client object
+    XStore_Client xstoreClient = XStore_Client(SERVER_ADDR, SERVER_PORT);
 
-    zmq::context_t ctx;
-    zmq::socket_t sock(ctx, zmq::socket_type::req);
+    if (MODE == "TEST") {
+        std::cout << "+------------------------------------------+" << std::endl;
+        std::cout << "|                   TEST                   |" << std::endl;
+        if (OP_NAME == "SYS_INFO") {
+            std::cout << "|                 SYS_INFO                 |" << std::endl;
+            std::cout << "+------------------------------------------+\n" << std::endl;
 
-    sock.connect(IP_ADDR);
+            // Const
+            std::string dbName = "SYS_INFO";
 
-    for (int i = 0; i < nIter; i++) {
-        randTime = rand() % 1000 + 1;
-        long unixTime = 1451606400 + randTime;
+            // FIRST - CREATE_DB (DUMMY)
+            std::string createDB_statusMessage = xstoreClient.createDB(dbName, 64);
 
-        // Start timer
-        start = std::chrono::high_resolution_clock::now();
+            // SECOND - UNARY_INSERT (DUMMY)
+            std::string insertResult = xstoreClient.unaryInsert(1483228802, "SYS INFO,TEST", dbName);
 
-        // Unary REQ -- Routine
-        XStore_Proto::unaryQuery_REQ toServer;
-        toServer.set_rtype(XStore_Proto::UNARYREQUEST);
-        toServer.set_timestamp(1483228802);
-        toServer.set_dbname("tsla");
+            // THIRD - SYS_INFO
+            sysInfo sysInfo_message = xstoreClient.infoRequest();
+            std::cout << "Server address: " << sysInfo_message.serverAddr << std::endl;
+            std::cout << "Server thread count: " <<sysInfo_message.numThreads << std::endl;
+
+            std::cout << "DB on server: " << std::endl;
+            for (int i = 0; i < sysInfo_message.db_Info.size(); i++) {
+                std::cout << "- DB Name: " << sysInfo_message.db_Info.at(i).dbName << std::endl;
+                std::cout << "  DB Resolution: " << sysInfo_message.db_Info.at(i).dbResolution << std::endl;
+                std::cout << "  DB Size in GB: " << sysInfo_message.db_Info.at(i).dbSizeInGB << std::endl;
+                std::cout << "  Filename: " << std::endl;
+                for (int j = 0; j < sysInfo_message.db_Info.at(i).fileName.size(); j++) {
+                    std::cout << "   - " << sysInfo_message.db_Info.at(i).fileName.at(j) << std::endl;
+                }
+            }
+
+            bool serverAddress_check = (sysInfo_message.serverAddr == (SERVER_ADDR + ":" +SERVER_PORT));
+            bool threadCount_check = (sysInfo_message.numThreads > 0);
+            bool dbName_check = (sysInfo_message.db_Info.at(0).dbName == dbName);
+            bool dbResolution_check = (sysInfo_message.db_Info.at(0).dbResolution == "SECOND");
+            bool dbSize_check = (sysInfo_message.db_Info.at(0).dbSizeInGB > 1);
+            bool dbFilename_check = (sysInfo_message.db_Info.at(0).fileName.at(0) == "2017.XSTORE");
+
+            // FINALLY - DELETE_DB (CLEANUP DUMMY)
+            std::string removeDBStatus = xstoreClient.removeDB(dbName);
+
+            // VALIDATE
+            if (serverAddress_check && threadCount_check && dbName_check && dbResolution_check && dbSize_check && dbFilename_check) {
+                exit(0);
+            }
+            exit(1);
+        }
+        else if (OP_NAME == "CREATE_DB") {
+            std::cout << "|                CREATE_DB                 |" << std::endl;
+            std::cout << "+------------------------------------------+\n" << std::endl;
+
+//            std::string createDB_statusMessage = xstoreClient.createDB("tsl", 64);
+//            std::cout << createDB_statusMessage << std::endl;
+
+            exit(0);
+        }
+        else if (OP_NAME == "UNARY_INSERT") {
+            std::cout << "|               UNARY_INSERT               |" << std::endl;
+            std::cout << "+------------------------------------------+\n" << std::endl;
+
+//            std::string insertResult = xstoreClient.unaryInsert(1483228802, "Unary insert test", "TSL");
+//            std::cout << insertResult << std::endl;
+            exit(0);
+        }
+
+        else if (OP_NAME == "UNARY_QUERY") {
+            std::cout << "|               UNARY_QUERY               |" << std::endl;
+            std::cout << "+------------------------------------------+\n" << std::endl;
+
+            std::string queryResult = xstoreClient.unaryQuery(1483228802, "TSLAa");
+            std::cout << queryResult << std::endl;
+        }
+    }
+    else if (MODE == "BENCH") {
+        std::cout << "Bench mode" << std::endl;
+    }
+
+//    std::string uniqueID;
+//    uniqueID = argv[1];
+//
+//    std::vector<double> us = { };
+//
+//    // Clock init
+//    std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
+//    std::chrono::duration<double> diff;
+//
+//    int nIter = 1;
+//    srand(time(NULL));
+//    long int randTime;
+//
+//    zmq::context_t ctx;
+//    zmq::socket_t sock(ctx, zmq::socket_type::req);
+//
+//    sock.connect(IP_ADDR);
+//
+//    for (int i = 0; i < nIter; i++) {
+//        randTime = rand() % 1000 + 1;
+//        long unixTime = 1451606400 + randTime;
+//
+//        // Start timer
+//        start = std::chrono::high_resolution_clock::now();
+//
+//        // Unary REQ -- Routine
+//        XStore_Proto::unaryQuery_REQ toServer;
+//        toServer.set_rtype(XStore_Proto::UNARYREQUEST);
+//        toServer.set_timestamp(1483228802);
+//        toServer.set_dbname("tsla");
 
         // RANGE REQ -- Routine
 //        xstoreProto::rangeQuery_REQ toServer;
@@ -136,19 +232,19 @@ int main(int argc, char const *argv[])
 //        toServer.set_rowlength(8);
 
         // Config msg and send
-        size_t byteSize = toServer.ByteSizeLong();
-        zmq::message_t z_out(byteSize);
-        toServer.SerializeToArray(z_out.data(), byteSize);
-        sock.send(z_out, zmq::send_flags::none);
+//        size_t byteSize = toServer.ByteSizeLong();
+//        zmq::message_t z_out(byteSize);
+//        toServer.SerializeToArray(z_out.data(), byteSize);
+//        sock.send(z_out, zmq::send_flags::none);
 
         // RECEIVING
-        std::vector<zmq::message_t> recv_msgs;
-        zmq::message_t zFromServer;
-        zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
+//        std::vector<zmq::message_t> recv_msgs;
+//        zmq::message_t zFromServer;
+//        zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
 
         // Received structs
         //  UNARY REP
-        XStore_Proto::unaryQuery_REP fromServer;
+//        XStore_Proto::unaryQuery_REP fromServer;
 
         //  RANGE REP
 //        xstoreProto::batchQuery_REP fromServer;
@@ -162,27 +258,27 @@ int main(int argc, char const *argv[])
         //  CREATE DB REP
 //        xstoreProto::createDB_REP fromServer;
 
-        fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
+//        fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
 
         // End timer
-        end = std::chrono::high_resolution_clock::now();
-        diff = end - start;
+//        end = std::chrono::high_resolution_clock::now();
+//        diff = end - start;
 
         // OUTPUTS PRINTING
-        fromServer.PrintDebugString();
+//        fromServer.PrintDebugString();
 
 //        std::cout << "[Response] -- Timestamp: " << fromServer.timestamp() << std::endl;
 //        std::cout << "[Response] -- Data: " << fromServer.dataset() << std::endl << std::endl;
 
-        us.push_back(std::chrono::duration<double, std::milli> (diff).count());
-    }
+//        us.push_back(std::chrono::duration<double, std::milli> (diff).count());
+//    }
 
-    std::cout << nIter << " queries experiments" << std::endl;
-    std::cout << "--- EXECUTION TIME in [ms] ---" << std::endl;
-    std::cout << "  - Min: " << *std::min_element(us.begin(), us.end()) << std::endl;
-    std::cout << "  - Max: " << *std::max_element(us.begin(), us.end()) << std::endl;
-    std::cout << "  - Mean: " << meanCalc(us) << std::endl;
-    std::cout << "  - Stdev: " << stdCalc(us) << std::endl;
+//    std::cout << nIter << " queries experiments" << std::endl;
+//    std::cout << "--- EXECUTION TIME in [ms] ---" << std::endl;
+//    std::cout << "  - Min: " << *std::min_element(us.begin(), us.end()) << std::endl;
+//    std::cout << "  - Max: " << *std::max_element(us.begin(), us.end()) << std::endl;
+//    std::cout << "  - Mean: " << meanCalc(us) << std::endl;
+//    std::cout << "  - Stdev: " << stdCalc(us) << std::endl;
 
     // Write to CSV
 //    writeCSV("zmq_1000_Protobuf-" + uniqueID + ".csv", "Time taken (ms)", us);

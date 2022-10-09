@@ -6,6 +6,7 @@
       <sshConfig host="64.131.114.123" id="1a602f45-c288-48e2-9e68-db68e5641ba5" keyPath="$USER_HOME$/.ssh/mysticCloud" port="22" nameFormat="DESCRIPTIVE" username="ubuntu" />
       <sshConfig authType="OPEN_SSH" host="64.131.114.66" id="df33caf9-0b9c-4177-9c15-a8165fcff64a" port="22" nameFormat="DESCRIPTIVE" username="ubuntu" />
       <sshConfig authType="PASSWORD" host="eightsocket.mystic.cs.iit.edu" id="568a376d-86a3-4ac7-ae04-41743d38efd1" port="22" nameFormat="DESCRIPTIVE" username="lnguyen" />
+      <sshConfig host="localhost" id="5d1c9ab8-f83e-4385-9e02-12b5a94beee3" keyPath="$USER_HOME$/.ssh/mysticCloud" port="9497" nameFormat="DESCRIPTIVE" username="ubuntu" useOpenSSHConfig="true" />
     </configs>
   </component>
 </project>

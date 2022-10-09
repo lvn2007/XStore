@@ -22,7 +22,7 @@ void XStore_zmqServer::startServer(std::string listenAddr, std::string listenPor
     this->serverAddr = serverAddr;
 
     clientSocket.bind(serverAddr);
-    std::cout << "[INFO - Networking] -- Listening on: " << listenAddr + ":" + listenPort << std::endl;
+    std::cout << "[INFO - Networking] -- Listening on: " << serverAddr << std::endl;
 
     //  Socket to talk to WORKERS
     zmq::socket_t workerSocket(ctx, zmq::socket_type::dealer);
@@ -34,7 +34,7 @@ void XStore_zmqServer::startServer(std::string listenAddr, std::string listenPor
         threadArgs tArgs;
         tArgs.zmqCtx = &ctx;
         tArgs.numThreads = numThreads;
-        tArgs.serverAddr = serverAddr;
+        tArgs.serverAddr = serverAddr.substr(6, serverAddr.length());       // Proto string refuses to work with special char like ://
 
         // Spawn thread
         pthread_t worker;

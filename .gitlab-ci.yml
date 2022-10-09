@@ -71,8 +71,19 @@ build-test-client:
   script:
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Starting build test for XStore (CLIENT)"
     - cd ~/XStore_Client/build
-    - ./XStore_Client 1 &                                     # Run CLIENT in foreground
-    - sleep 10                                                # Let CLIENT runs for at least 10s
+    - ./XStore_Client 127.0.0.1 12345                         # Run CLIENT in foreground
+    - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Build test for XStore (CLIENT) has concluded"
+
+sysinfo-test-client:
+  stage: Test
+  needs:
+    - job: "build-test-client"
+  script:
+    - cd ~/XStore_Server/build
+    - ./XStore 127.0.0.1 12345 2 &                            # Run SERVER in foreground
+    - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Starting build test for XStore (CLIENT)"
+    - cd ~/XStore_Client/build
+    - ./XStore_Client 127.0.0.1 12345 TEST SYS_INFO           # Run CLIENT in foreground
     - kill %1                                                 # Terminate SERVER
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Build test for XStore (CLIENT) has concluded"
 
