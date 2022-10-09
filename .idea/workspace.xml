@@ -312,14 +312,7 @@
       <workItem from="1663949162357" duration="1826000" />
       <workItem from="1663962860893" duration="37991000" />
       <workItem from="1665010958172" duration="18488000" />
-      <workItem from="1665202776793" duration="14878000" />
-    </task>
-    <task id="LOCAL-00141" summary="Moving working folder to home after build">
-      <created>1661542168218</created>
-      <option name="number" value="00141" />
-      <option name="presentableId" value="LOCAL-00141" />
-      <option name="project" value="LOCAL" />
-      <updated>1661542168218</updated>
+      <workItem from="1665202776793" duration="15443000" />
     </task>
     <task id="LOCAL-00142" summary="Rename stage &amp; job">
       <created>1661571466428</created>
@@ -657,7 +650,14 @@
       <option name="project" value="LOCAL" />
       <updated>1665284088307</updated>
     </task>
-    <option name="localTasksCounter" value="190" />
+    <task id="LOCAL-00190" summary="Added build test case">
+      <created>1665285674606</created>
+      <option name="number" value="00190" />
+      <option name="presentableId" value="LOCAL-00190" />
+      <option name="project" value="LOCAL" />
+      <updated>1665285674606</updated>
+    </task>
+    <option name="localTasksCounter" value="191" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
