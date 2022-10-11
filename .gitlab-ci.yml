@@ -117,11 +117,11 @@ unary-insert-test:
     - job: "create-db-test"
   script:
     - cd ~/XStore_Server/build
-    - ./XStore 127.0.0.1 12345 2 &                            # Run SERVER in foreground
+    - ./XStore 127.0.0.1 12345 2 &                                       # Run SERVER in foreground
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Starting ${TEST_NAME} tests"
     - cd ~/XStore_Client/build
-    - ./XStore_Client 127.0.0.1 12345 TEST UNARY_INSERT       # Run CLIENT in foreground
-    - kill %1                                                 # Terminate SERVER
+    - ./XStore_Client 127.0.0.1 12345 TEST UNARY_INSERT && echo $?       # Run CLIENT in foreground
+    - kill %1                                                            # Terminate SERVER
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- ${TEST_NAME} tests has concluded"
 
 cleanup-lxc:

@@ -21,8 +21,8 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Enhance logging for UNARY_INSERT tests">
-      <change beforePath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" afterDir="false" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Return 1 instead of exit 1 works with runner???">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -320,14 +320,7 @@
       <workItem from="1663962860893" duration="37991000" />
       <workItem from="1665010958172" duration="18488000" />
       <workItem from="1665202776793" duration="26728000" />
-      <workItem from="1665329256694" duration="13545000" />
-    </task>
-    <task id="LOCAL-00151" summary="Debugging compiling clientSrc">
-      <created>1663282236764</created>
-      <option name="number" value="00151" />
-      <option name="presentableId" value="LOCAL-00151" />
-      <option name="project" value="LOCAL" />
-      <updated>1663282236764</updated>
+      <workItem from="1665329256694" duration="14446000" />
     </task>
     <task id="LOCAL-00152" summary="Including contents of clientSrc">
       <created>1663282813312</created>
@@ -665,7 +658,14 @@
       <option name="project" value="LOCAL" />
       <updated>1665509152131</updated>
     </task>
-    <option name="localTasksCounter" value="200" />
+    <task id="LOCAL-00200" summary="Return 1 instead of exit 1 works with runner???">
+      <created>1665511039365</created>
+      <option name="number" value="00200" />
+      <option name="presentableId" value="LOCAL-00200" />
+      <option name="project" value="LOCAL" />
+      <updated>1665511039365</updated>
+    </task>
+    <option name="localTasksCounter" value="201" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -772,7 +772,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Cleanup .gitlab-ci.yml" />
     <MESSAGE value="Compiling clientSrc" />
     <MESSAGE value="Debugging compiling clientSrc" />
     <MESSAGE value="Including contents of clientSrc" />
@@ -797,6 +796,7 @@
     <MESSAGE value="Remove debug print in server" />
     <MESSAGE value="Debugging CI" />
     <MESSAGE value="Enhance logging for UNARY_INSERT tests" />
-    <option name="LAST_COMMIT_MESSAGE" value="Enhance logging for UNARY_INSERT tests" />
+    <MESSAGE value="Return 1 instead of exit 1 works with runner???" />
+    <option name="LAST_COMMIT_MESSAGE" value="Return 1 instead of exit 1 works with runner???" />
   </component>
 </project>
