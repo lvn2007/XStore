@@ -21,7 +21,11 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Brute-force with 1m job timeout" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Test exit(1)">
+      <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -318,14 +322,7 @@
       <workItem from="1663962860893" duration="37991000" />
       <workItem from="1665010958172" duration="18488000" />
       <workItem from="1665202776793" duration="26728000" />
-      <workItem from="1665329256694" duration="20597000" />
-    </task>
-    <task id="LOCAL-00160" summary="Debugging clientSrc">
-      <created>1663285316743</created>
-      <option name="number" value="00160" />
-      <option name="presentableId" value="LOCAL-00160" />
-      <option name="project" value="LOCAL" />
-      <updated>1663285316743</updated>
+      <workItem from="1665329256694" duration="21883000" />
     </task>
     <task id="LOCAL-00161" summary="Debugging clientSrc">
       <created>1663285582091</created>
@@ -663,7 +660,14 @@
       <option name="project" value="LOCAL" />
       <updated>1665524886721</updated>
     </task>
-    <option name="localTasksCounter" value="209" />
+    <task id="LOCAL-00209" summary="Test exit(1)">
+      <created>1665526207115</created>
+      <option name="number" value="00209" />
+      <option name="presentableId" value="LOCAL-00209" />
+      <option name="project" value="LOCAL" />
+      <updated>1665526207116</updated>
+    </task>
+    <option name="localTasksCounter" value="210" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -770,7 +774,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Including contents of clientSrc" />
     <MESSAGE value="Removing CMakeCache.txt" />
     <MESSAGE value="Debugging clientSrc" />
     <MESSAGE value="Modified CI" />
@@ -795,6 +798,7 @@
     <MESSAGE value="Return 1 instead of exit 1 works with runner???" />
     <MESSAGE value="Exit code is not captured?" />
     <MESSAGE value="Brute-force with 1m job timeout" />
-    <option name="LAST_COMMIT_MESSAGE" value="Brute-force with 1m job timeout" />
+    <MESSAGE value="Test exit(1)" />
+    <option name="LAST_COMMIT_MESSAGE" value="Test exit(1)" />
   </component>
 </project>
