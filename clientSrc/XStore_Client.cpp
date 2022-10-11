@@ -144,7 +144,7 @@ int main(int argc, char const *argv[])
             bool dbName_check = (sysInfo_message.db_Info.at(0).dbName == dbName);
             bool dbResolution_check = (sysInfo_message.db_Info.at(0).dbResolution == "SECOND");
             bool dbSize_check = (sysInfo_message.db_Info.at(0).dbSizeInGB > 1);
-            bool dbFilename_check = (sysInfo_message.db_Info.at(0).fileName.at(0) == "2017.XSTORE");
+            bool dbFilename_check = (sysInfo_message.db_Info.at(0).fileName.at(0) == "2016.XSTORE");
 
             std::cout << "After bool checks" << std::endl;
 
