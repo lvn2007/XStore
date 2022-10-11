@@ -115,6 +115,7 @@ unary-insert-test:
   stage: Test
   needs:
     - job: "create-db-test"
+  timeout: 1m
   script:
     - cd ~/XStore_Server/build
     - ./XStore 127.0.0.1 12345 2 &                                       # Run SERVER in foreground
