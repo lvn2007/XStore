@@ -221,19 +221,13 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::str
     // Writing actual data to disk
     //  Epoch time difference between target & startEpoch
     long long int diff = unixTime - startEpoch;
-    std::cout << diff << std::endl;
 
     //  Calculate offset -- Exact location of where a particular target row is stored
     long long int offSet = diff * cfgStruct.rowLength;
 
-    std::cout << "Offset: " << offSet << std::endl;
-    cfgStruct.printData();
-
     //  Seek to target offset prior to write
     fseeko64(bFile, offSet, SEEK_SET);
     long currPos = ftello64(bFile);
-
-    std::cout << "currPos: " << currPos << std::endl;
 
     //  Write as binary file to disk with new line indicates EOL
     std::fwrite((currData.getData()).data(), cfgStruct.rowLength, 1, bFile);
