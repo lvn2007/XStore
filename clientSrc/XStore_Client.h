@@ -72,7 +72,7 @@ class XStore_Client {
       return toReturn;
   }
 
-  std::string unaryQuery(std::time_t targetUnixTime, std::string targetDBName) {
+  std::string unaryQuery(std::time_t &targetUnixTime, std::string &targetDBName) {
       XStore_Proto::unaryQuery_REQ toServer;
       toServer.set_rtype(XStore_Proto::UNARYREQUEST);
       toServer.set_timestamp(targetUnixTime);
@@ -120,7 +120,7 @@ class XStore_Client {
       return fromServer.createdbstatus();
   }
 
-  std::string unaryInsert(std::time_t insertUnixTime, std::string data, std::string &dbName) {
+  std::string unaryInsert(std::time_t &insertUnixTime, std::string &data, std::string &dbName) {
       XStore_Proto::unaryInsert_REQ toServer;
       toServer.set_rtype(XStore_Proto::UNARYINSERT);
       toServer.set_timestamp(insertUnixTime);

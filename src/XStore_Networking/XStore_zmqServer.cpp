@@ -106,6 +106,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
                 zmq::message_t responseToClient(protoToClientSize);
 
                 //  Serialize & Dispatch msg to CLIENT
+                std::cout << protoToClient.dataset() << std::endl;
                 protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
                 socket.send(responseToClient, zmq::send_flags::none);
                 break;

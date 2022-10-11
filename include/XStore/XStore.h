@@ -81,11 +81,7 @@ class XStore {
         // Time extractor
         std::string getTimeResolution(std::time_t unixTime);
 
-        int toHumanYear(std::time_t unixTime);
-
-        int toHumanMonth(std::time_t unixTime);
-
-        int toHumanDay(std::time_t unixTime);
+        int toHumanYear(std::time_t &unixTime, std::string &timeResolution);
 };
 
 #endif //XSTORE_XSTORE_H

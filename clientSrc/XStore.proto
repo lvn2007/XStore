@@ -22,7 +22,7 @@ message reqCMD {
 // --- UNARY request
 message unaryQuery_REQ {
   requestType rType = 1;
-  uint32 timestamp = 2;
+  uint64 timestamp = 2;
   string dbName = 3;
 }
 
@@ -36,13 +36,13 @@ message createDB_REQ {
 // --- UNARY insert request
 message unaryInsert_REQ {
   requestType rType = 1;
-  uint32 timestamp = 2;
+  uint64 timestamp = 2;
   string data = 3;
   string dbName = 4;
 }
 
 message batchInsert_DATA {
-  uint32 timestamp = 1;
+  uint64 timestamp = 1;
   string data = 2;
   string dbName = 3;
 }
@@ -56,8 +56,8 @@ message batchInsert_REQ {
 // --- RANGE request
 message rangeQuery_REQ {
   requestType rType = 1;
-  uint32 startTime = 2;
-  uint32 endTime = 3;
+  uint64 startTime = 2;
+  uint64 endTime = 3;
   string dbName = 4;
 }
 
@@ -91,7 +91,7 @@ message sysInfo_REP {
 
 // --- UNARY REQ response
 message unaryQuery_REP {
-  uint32 timestamp = 1;
+  uint64 timestamp = 1;
   string dataset = 2;
   string queryStatus = 3;
 }
