@@ -137,6 +137,7 @@ int main(int argc, char const *argv[])
                     std::cout << "   - " << sysInfo_message.db_Info.at(i).fileName.at(j) << std::endl;
                 }
             }
+            std::cout << "Before bool checks" << std::endl;
 
             bool serverAddress_check = (sysInfo_message.serverAddr == (SERVER_ADDR + ":" +SERVER_PORT));
             bool threadCount_check = (sysInfo_message.numThreads > 0);
@@ -145,13 +146,19 @@ int main(int argc, char const *argv[])
             bool dbSize_check = (sysInfo_message.db_Info.at(0).dbSizeInGB > 1);
             bool dbFilename_check = (sysInfo_message.db_Info.at(0).fileName.at(0) == "2017.XSTORE");
 
+            std::cout << "After bool checks" << std::endl;
+
             // FINALLY - DELETE_DB (CLEANUP DUMMY)
+            std::cout << "Before removeDB" << std::endl;
             std::string removeDBStatus = xstoreClient.removeDB(dbName);
+            std::cout << "After removeDB" << std::endl;
 
             // VALIDATE
             if (serverAddress_check && threadCount_check && dbName_check && dbResolution_check && dbSize_check && dbFilename_check) {
+                std::cout << "Exit code 0" << std::endl;
                 exit(0);
             }
+            std::cout << "Exit code 1" << std::endl;
             exit(1);
         }
         else if (OP_NAME == "CREATE_DB") {
