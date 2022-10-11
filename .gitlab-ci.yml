@@ -110,6 +110,8 @@ create-db-test:
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- ${TEST_NAME} tests has concluded"
 
 unary-insert-test:
+  allow_failure:
+    exit_codes: 1
   variables:
     TEST_NAME: "UNARY_INSERT"
   stage: Test
