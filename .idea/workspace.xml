@@ -21,9 +21,9 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Added UNARY_INSERT tests">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Remove debug print in server">
+      <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -321,14 +321,7 @@
       <workItem from="1663962860893" duration="37991000" />
       <workItem from="1665010958172" duration="18488000" />
       <workItem from="1665202776793" duration="26728000" />
-      <workItem from="1665329256694" duration="7553000" />
-    </task>
-    <task id="LOCAL-00146" summary="Renaming ...">
-      <created>1663278983628</created>
-      <option name="number" value="00146" />
-      <option name="presentableId" value="LOCAL-00146" />
-      <option name="project" value="LOCAL" />
-      <updated>1663278983628</updated>
+      <workItem from="1665329256694" duration="10216000" />
     </task>
     <task id="LOCAL-00147" summary="Renaming ...">
       <created>1663279393386</created>
@@ -666,7 +659,14 @@
       <option name="project" value="LOCAL" />
       <updated>1665446794901</updated>
     </task>
-    <option name="localTasksCounter" value="195" />
+    <task id="LOCAL-00195" summary="Remove debug print in server">
+      <created>1665447610875</created>
+      <option name="number" value="00195" />
+      <option name="presentableId" value="LOCAL-00195" />
+      <option name="project" value="LOCAL" />
+      <updated>1665447610876</updated>
+    </task>
+    <option name="localTasksCounter" value="196" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -773,7 +773,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Debug LXC Runner ..." />
     <MESSAGE value="Renaming ..." />
     <MESSAGE value="Removing sleep is okay?" />
     <MESSAGE value="Cleanup .gitlab-ci.yml" />
@@ -798,6 +797,7 @@
     <MESSAGE value="Added CREATE_DB tests" />
     <MESSAGE value="Enhance CI" />
     <MESSAGE value="Added UNARY_INSERT tests" />
-    <option name="LAST_COMMIT_MESSAGE" value="Added UNARY_INSERT tests" />
+    <MESSAGE value="Remove debug print in server" />
+    <option name="LAST_COMMIT_MESSAGE" value="Remove debug print in server" />
   </component>
 </project>
