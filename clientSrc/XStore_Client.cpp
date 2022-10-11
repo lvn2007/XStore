@@ -223,7 +223,8 @@ int main(int argc, char const *argv[])
 
             // Ensuring all insert status is OK
             if (std::find(insertOk.begin(), insertOk.end(), true) != insertOk.end()) {
-                exit(1);
+                return EXIT_FAILURE;
+//                exit(1);
             }
 
             exit(1);
