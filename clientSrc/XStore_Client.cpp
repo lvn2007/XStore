@@ -113,12 +113,14 @@ int main(int argc, char const *argv[])
 
             // Const
             std::string dbName = "SYS_INFO";
+            std::time_t dummyTime = 1482271200;
+            std::string dummyData = "SYS INFO,TEST";
 
             // FIRST - CREATE_DB (DUMMY)
             std::string createDB_statusMessage = xstoreClient.createDB(dbName, 64);
 
             // SECOND - UNARY_INSERT (DUMMY)
-            std::string insertResult = xstoreClient.unaryInsert(1483228802, "SYS INFO,TEST", dbName);
+            std::string insertResult = xstoreClient.unaryInsert(dummyTime, dummyData, dbName);
 
             // THIRD - SYS_INFO
             sysInfo sysInfo_message = xstoreClient.infoRequest();
@@ -183,17 +185,46 @@ int main(int argc, char const *argv[])
             std::cout << "|               UNARY_INSERT               |" << std::endl;
             std::cout << "+------------------------------------------+\n" << std::endl;
 
-//            std::string insertResult = xstoreClient.unaryInsert(1483228802, "Unary insert test", "TSL");
-//            std::cout << insertResult << std::endl;
-            exit(0);
+            // Const
+            std::string dbName = "UNARY_INSERT";
+            std::vector<std::time_t> timeList {1482271200, 1482271200000};
+            std::vector<std::string> dataList {"SECOND,GRANULARITY", "MILLISECOND,GRANULARITY"};
+
+            std::vector<bool> insertOk { false, false};
+
+            for (int i = 0; i < timeList.size(); i++) {
+                // FIRST - CREATE DB
+                std::string createDB_message = xstoreClient.createDB(dbName, 64);
+
+                // SECOND - UNARY INSERT
+                std::string insertMessage = xstoreClient.unaryInsert(timeList.at(i), dataList.at(i), dbName);
+
+                // THIRD - UNARY QUERY (To validate that insert is valid)
+                std::string queryMessage = xstoreClient.unaryQuery(timeList.at(i), dbName);
+                std::cout << queryMessage << std::endl;
+
+                // FINALLY - DELETE_DB (CLEANUP DUMMY)
+                std::string removeDBStatus = xstoreClient.removeDB(dbName);
+
+                if (queryMessage == (std::to_string(timeList.at(i)) + "," + dataList.at(i))) {
+                    insertOk[i] = true;
+                }
+            }
+
+            // Ensuring all insert status is OK
+            if (std::find(insertOk.begin(), insertOk.end(), true) != insertOk.end()) {
+                exit(0);
+            }
+
+            exit(1);
         }
 
         else if (OP_NAME == "UNARY_QUERY") {
             std::cout << "|               UNARY_QUERY               |" << std::endl;
             std::cout << "+------------------------------------------+\n" << std::endl;
 
-            std::string queryResult = xstoreClient.unaryQuery(1483228802, "TSLAa");
-            std::cout << queryResult << std::endl;
+//            std::string queryResult = xstoreClient.unaryQuery(1483228802, "TSLAa");
+//            std::cout << queryResult << std::endl;
         }
     }
     else if (MODE == "BENCH") {

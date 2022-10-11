@@ -169,12 +169,12 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::str
     pread(cfgFile, &cfgStruct, sizeof(configStruct), 0);
 
     //  timeResolution staging area
-    int inputYear = toHumanYear(unixTime);
     std::string currResolution = getTimeResolution(unixTime);
+    long long int inputYear = toHumanYear(unixTime, currResolution);
 
     //  Start & End time of a given year
-    long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
-    long int endEpoch = getEndTimeEpoch(inputYear, currResolution);
+    long long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
+    long long int endEpoch = getEndTimeEpoch(inputYear, currResolution);
 
     //  IF timeResolution is not yet initialized
     //   -> First inserting time will determine resolution of this current DB
@@ -220,13 +220,20 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::str
 
     // Writing actual data to disk
     //  Epoch time difference between target & startEpoch
-    long int diff = unixTime - startEpoch;
+    long long int diff = unixTime - startEpoch;
+    std::cout << diff << std::endl;
 
     //  Calculate offset -- Exact location of where a particular target row is stored
-    long int offSet = diff * cfgStruct.rowLength;
+    long long int offSet = diff * cfgStruct.rowLength;
+
+    std::cout << "Offset: " << offSet << std::endl;
+    cfgStruct.printData();
 
     //  Seek to target offset prior to write
-    std::fseek(bFile, offSet, SEEK_SET);
+    fseeko64(bFile, offSet, SEEK_SET);
+    long currPos = ftello64(bFile);
+
+    std::cout << "currPos: " << currPos << std::endl;
 
     //  Write as binary file to disk with new line indicates EOL
     std::fwrite((currData.getData()).data(), cfgStruct.rowLength, 1, bFile);
@@ -292,8 +299,8 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
         pread(cfgFile, &cfgStruct, sizeof(configStruct), 0);
 
         //  timeResolution staging area
-        int inputYear = toHumanYear(unixTime);
         std::string currResolution = getTimeResolution(unixTime);
+        int inputYear = toHumanYear(unixTime, currResolution);
 
         //  Start & End time of a given year
         long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
@@ -392,7 +399,8 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery(std::time_t epochTime, std::stri
     }
 
     // Read timeValue -- UNIX time
-    int inputYear = toHumanYear(epochTime);
+    std::string currResolution = getTimeResolution(epochTime);
+    int inputYear = toHumanYear(epochTime, currResolution);
 
     // Make sure inputYear is available in DB
     //  IF inputYear is not available
@@ -485,8 +493,9 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(std::time_t startEpochT, std::ti
     }
 
     // Read timeValue -- UNIX time
-    int startYear = toHumanYear(startEpochT);
-    int endYear = toHumanYear(endEpochT);
+    std::string currResolution = getTimeResolution(startEpochT);
+    int startYear = toHumanYear(startEpochT, currResolution);
+    int endYear = toHumanYear(endEpochT, currResolution);
 
     // TEMPORARY -- Waiting for Ioan's inputs/advice on this
     //  Guard against a query that spans over 1 year
@@ -718,7 +727,7 @@ long int XStore::getStartTimeEpoch(int yearInput, std::string timeResolution) {
     epochConst.tm_min = 0;
     epochConst.tm_sec = 0;
     time_t startTime = mktime(&epochConst);
-    long int startEpoch = static_cast<long int> (startTime);
+    long long int startEpoch = static_cast<long long int> (startTime);
     return startEpoch * resolutionMap[timeResolution];
 }
 
@@ -733,7 +742,7 @@ long int XStore::getEndTimeEpoch(int yearInput, std::string timeResolution) {
     epochConst.tm_min = 59;
     epochConst.tm_sec = 59;
     time_t startTime = mktime(&epochConst);
-    long int startEpoch = static_cast<long int> (startTime);
+    long long int startEpoch = static_cast<long long int> (startTime);
     return startEpoch * resolutionMap[timeResolution];
 }
 
@@ -759,17 +768,18 @@ std::string XStore::getTimeResolution(std::time_t unixTime) {
     return "NULL";
 }
 
-int XStore::toHumanYear(std::time_t unixTime) {
-    tm* timePtr = localtime(&unixTime);
-    return timePtr -> tm_year + 1900;
-}
-
-int XStore::toHumanMonth(std::time_t unixTime) {
-    tm* timePtr = localtime(&unixTime);
-    return timePtr -> tm_mon + 1;
-}
-
-int XStore::toHumanDay(std::time_t unixTime) {
-    tm* timePtr = localtime(&unixTime);
-    return timePtr -> tm_mday;
+int XStore::toHumanYear(std::time_t &unixTime, std::string &timeResolution) {
+    tm* timePtr;
+    if (timeResolution == "SECOND") {
+        timePtr = localtime(&unixTime);
+    }
+    else if (timeResolution == "MILLISECOND") {
+        std::time_t choppedTime = unixTime / 1000;
+        timePtr = localtime(&choppedTime);
+    }
+    else if (timeResolution == "MICROSECOND") {
+        std::time_t choppedTime = unixTime / 1000000;
+        timePtr = localtime(&choppedTime);
+    }
+    return timePtr->tm_year + 1900;
 }
