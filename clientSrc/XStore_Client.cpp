@@ -117,7 +117,7 @@ int main(int argc, char const *argv[])
             std::string dummyData = "SYS INFO,TEST";
 
             // FIRST - CREATE_DB (DUMMY)
-            std::string createDB_statusMessage = xstoreClient.createDB(dbName, 64);
+            std::string createDB_statusMessage = xstoreClient.createDB(dbName);
 
             // SECOND - UNARY_INSERT (DUMMY)
             std::string insertResult = xstoreClient.unaryInsert(dummyTime, dummyData, dbName);

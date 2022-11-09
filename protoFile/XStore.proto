@@ -30,7 +30,6 @@ message unaryQuery_REQ {
 message createDB_REQ {
   requestType rType = 1;
   string dbName = 2;
-  int32 rowLength = 3;
 }
 
 // --- UNARY insert request

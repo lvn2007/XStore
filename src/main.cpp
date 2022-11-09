@@ -72,7 +72,7 @@ int main(int argc, char *argv[]) {
     XStore myStore;
 
     // Create DB
-//    XStore_Proto::createDB_REP create_db_rep = myStore.createDB("TSLA", 64);
+//    XStore_Proto::createDB_REP create_db_rep = myStore.createDB("TSLA");
 //    create_db_rep.PrintDebugString();
 
 //    system("free && sync && sudo sh -c \"echo 3 > /proc/sys/vm/drop_caches\" && free");

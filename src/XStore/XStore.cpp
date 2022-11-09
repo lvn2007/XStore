@@ -67,7 +67,7 @@ XStore_Proto::sysInfo_REP XStore::infoQuery(std::string serverAddr, int threadCo
     return toReturn;
 }
 
-XStore_Proto::createDB_REP XStore::createDB(std::string dbName, int rowLength) {
+XStore_Proto::createDB_REP XStore::createDB(std::string dbName) {
     // Protobuf obj to be returned
     XStore_Proto::createDB_REP toReturn;
     std::string createDBStatus;
