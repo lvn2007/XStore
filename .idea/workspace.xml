@@ -21,11 +21,7 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Cleanup createDB">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
-    </list>
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Temporary disable SYS_INFO test -- Needs reimplementation" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -333,14 +329,7 @@
       <workItem from="1667330155010" duration="19101000" />
       <workItem from="1667616636772" duration="235000" />
       <workItem from="1667616993010" duration="167000" />
-      <workItem from="1667617319231" duration="31955000" />
-    </task>
-    <task id="LOCAL-00167" summary="Debugging clientSrc">
-      <created>1663286919696</created>
-      <option name="number" value="00167" />
-      <option name="presentableId" value="LOCAL-00167" />
-      <option name="project" value="LOCAL" />
-      <updated>1663286919696</updated>
+      <workItem from="1667617319231" duration="32685000" />
     </task>
     <task id="LOCAL-00168" summary="Debugging clientSrc">
       <created>1663287000189</created>
@@ -678,7 +667,14 @@
       <option name="project" value="LOCAL" />
       <updated>1667962708044</updated>
     </task>
-    <option name="localTasksCounter" value="216" />
+    <task id="LOCAL-00216" summary="Temporary disable SYS_INFO test -- Needs reimplementation">
+      <created>1667963696608</created>
+      <option name="number" value="00216" />
+      <option name="presentableId" value="LOCAL-00216" />
+      <option name="project" value="LOCAL" />
+      <updated>1667963696609</updated>
+    </task>
+    <option name="localTasksCounter" value="217" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -785,7 +781,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Added build-test for client" />
     <MESSAGE value="Experimenting .pre/.post" />
     <MESSAGE value="Done experimenting .pre/.post" />
     <MESSAGE value="Implemented removeDB -- Recursively remove DB and its contents" />
@@ -810,6 +805,7 @@
     <MESSAGE value="Switch back to exit()" />
     <MESSAGE value="Re-implementing time structures" />
     <MESSAGE value="Cleanup createDB" />
-    <option name="LAST_COMMIT_MESSAGE" value="Cleanup createDB" />
+    <MESSAGE value="Temporary disable SYS_INFO test -- Needs reimplementation" />
+    <option name="LAST_COMMIT_MESSAGE" value="Temporary disable SYS_INFO test -- Needs reimplementation" />
   </component>
 </project>
