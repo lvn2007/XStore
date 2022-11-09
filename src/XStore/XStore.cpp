@@ -136,8 +136,7 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::str
     dataStruct currData{unixTime, data};
 
     // Writing actual data to disk
-    //  Write as binary file to disk with new line indicates EOL
-    std::fwrite((currData.getData()).data(), 17, 1, bFile);
+    std::fwrite((currData.getData()).data(), data.size(), 1, bFile);
 
     //  Close file after write
     std::fclose(bFile);
@@ -312,12 +311,13 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery(std::time_t unixTime, std::strin
     char bufferIn[fSize];
 
     // Extract line of data from binary file
-    fread(bufferIn, fSize, 1, bFile);
+    fread(&bufferIn[0], 1, fSize, bFile);
+    std::string returnData(bufferIn, fSize);
 
     // Set data fetched from XStore to returning Protobuf obj
     std::string successMsg = "[SUCCESS] [UNARY QUERY] [DB: " + dbName + "] - Acquired " + std::to_string(unixTime) + ".XSTORE";
     toReturn.set_querystatus(successMsg);
-    toReturn.set_dataset(bufferIn);
+    toReturn.set_dataset(returnData);
     fclose(bFile);
     return toReturn;
 }
