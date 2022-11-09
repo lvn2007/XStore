@@ -12,7 +12,7 @@ dataStruct::dataStruct(std::time_t unixTime, std::string data) {
 // Returning a line
 //  i.e., unixTime, values
 std::string dataStruct::getData() {
-    return std::to_string(unixTime) + "," + data + "\n";
+    return data;
 }
 
 // Printing out time-value
