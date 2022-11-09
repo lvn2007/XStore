@@ -89,7 +89,7 @@ sys-info-test:
   timeout: 1m
   script:
     - cd ~/XStore_Server/build
-    - ./XStore 127.0.0.1 12345 2 &                            # Run SERVER in foreground
+#    - ./XStore 127.0.0.1 12345 2 &                            # Run SERVER in foreground
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Starting ${TEST_NAME} tests"
     - cd ~/XStore_Client/build
 #    - ./XStore_Client 127.0.0.1 12345 TEST SYS_INFO           # Run CLIENT in foreground
