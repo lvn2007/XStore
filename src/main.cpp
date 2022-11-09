@@ -70,6 +70,7 @@ int main(int argc, char *argv[]) {
     // ----DEV AREA
     // Instantiate XStore obj
     XStore myStore;
+//    myStore.infoQuery("127.0.0.1:12345", THREAD_COUNT);
 
     // Create DB
 //    XStore_Proto::createDB_REP create_db_rep = myStore.createDB("TSLA");
