@@ -167,12 +167,12 @@ int main(int argc, char const *argv[])
             std::string dbName = "CREATE_DB";
 
             // CASE 1: Create ok IF not yet created
-            std::string createDB_statusMessage = xstoreClient.createDB(dbName, 64);
+            std::string createDB_statusMessage = xstoreClient.createDB(dbName);
             bool createOk = (createDB_statusMessage == ("[SUCCESS] -- DB with name: " + dbName + " is successfully created"));
             std::cout << createDB_statusMessage << std::endl;
 
             // CASE 2: Create error IF already created
-            createDB_statusMessage = xstoreClient.createDB(dbName, 64);
+            createDB_statusMessage = xstoreClient.createDB(dbName);
             bool createError = (createDB_statusMessage == ("[ERROR] -- DB with name: " + dbName + " is already existed"));
             std::cout << createDB_statusMessage << std::endl;
 
@@ -200,7 +200,7 @@ int main(int argc, char const *argv[])
             for (int i = 0; i < timeList.size(); i++) {
                 // FIRST - CREATE DB
                 std::cout << "[INFO] - [DB: " << dbName << "] Create DB with name: " << dbName << std::endl;
-                std::string createDB_message = xstoreClient.createDB(dbName, 64);
+                std::string createDB_message = xstoreClient.createDB(dbName);
 
                 // SECOND - UNARY INSERT
                 std::cout << "[INFO] - [DB: " << dbName << "] Insert at: " << timeList.at(i) << " | Data: " << dataList.at(i) << std::endl;
