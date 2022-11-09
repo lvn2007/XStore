@@ -36,7 +36,7 @@ class XStore {
         XStore_Proto::sysInfo_REP infoQuery(std::string serverAddr, int threadCount);
 
         // CREATING new DB instance with row length
-        XStore_Proto::createDB_REP createDB(std::string dbName, int rowLength);
+        XStore_Proto::createDB_REP createDB(std::string dbName);
 
         // UNARY INSERT time-series oriented values
         XStore_Proto::unaryInsert_REP unaryInsert(std::time_t epochTime, std::string data, std::string dbName);
