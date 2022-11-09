@@ -168,12 +168,12 @@ int main(int argc, char const *argv[])
 
             // CASE 1: Create ok IF not yet created
             std::string createDB_statusMessage = xstoreClient.createDB(dbName);
-            bool createOk = (createDB_statusMessage == ("[SUCCESS] -- DB with name: " + dbName + " is successfully created"));
+            bool createOk = (createDB_statusMessage == ("[SUCCESS] [CREATE DB] [DB: " + dbName + "] - Created DB"));
             std::cout << createDB_statusMessage << std::endl;
 
             // CASE 2: Create error IF already created
             createDB_statusMessage = xstoreClient.createDB(dbName);
-            bool createError = (createDB_statusMessage == ("[ERROR] -- DB with name: " + dbName + " is already existed"));
+            bool createError = (createDB_statusMessage == ("[ERROR] [CREATE DB] [DB: " + dbName + "] - Already existed"));
             std::cout << createDB_statusMessage << std::endl;
 
             // FINALLY - DELETE_DB (CLEANUP DUMMY)
@@ -192,27 +192,27 @@ int main(int argc, char const *argv[])
 
             // Const
             std::string dbName = "UNARY_INSERT";
-            std::vector<std::time_t> timeList {1482271200, 1482271200000};
+            std::vector<std::time_t> timeList {1482271200};
             std::vector<std::string> dataList {"SECOND,GRANULARITY", "MILLISECOND,GRANULARITY"};
 
             std::vector<bool> insertOk { false, false};
 
             for (int i = 0; i < timeList.size(); i++) {
                 // FIRST - CREATE DB
-                std::cout << "[INFO] - [DB: " << dbName << "] Create DB with name: " << dbName << std::endl;
                 std::string createDB_message = xstoreClient.createDB(dbName);
+                std::cout << createDB_message << std::endl;
 
                 // SECOND - UNARY INSERT
-                std::cout << "[INFO] - [DB: " << dbName << "] Insert at: " << timeList.at(i) << " | Data: " << dataList.at(i) << std::endl;
                 std::string insertMessage = xstoreClient.unaryInsert(timeList.at(i), dataList.at(i), dbName);
+                std::cout << insertMessage << std::endl;
 
                 // THIRD - UNARY QUERY (To validate that insert is valid)
                 std::string queryMessage = xstoreClient.unaryQuery(timeList.at(i), dbName);
-                std::cout << "[INFO] - [DB: " << dbName << "] Query time: " << timeList.at(i) << " | Result: " << queryMessage << std::endl;
+                std::cout << "[INFO] [UNARY QUERY] [DB: " << dbName << "] - Query time: " << timeList.at(i) << " | Result: " << queryMessage << std::endl;
 
                 // FINALLY - DELETE_DB (CLEANUP DUMMY)
                 std::string removeDBStatus = xstoreClient.removeDB(dbName);
-                std::cout << "[INFO] - [DB: " << dbName << "] Delete DB with name: " << dbName << std::endl;
+                std::cout << removeDBStatus << std::endl;
 
                 if (queryMessage == (std::to_string(timeList.at(i)) + "," + dataList.at(i))) {
                     insertOk[i] = true;
