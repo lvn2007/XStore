@@ -28,18 +28,21 @@ XStore_Proto::sysInfo_REP XStore::infoQuery(std::string serverAddr, int threadCo
         std::string currDBName = dir.path().filename().string();
         std::string currDBDir = dataStoreLoc + currDBName;
 
+        std::cout << currDBName << std::endl;
+        std::cout << currDBDir << std::endl;
+
         // Set DB Name
         XStore_Proto::dbStats *currDB = toReturn.add_dbinfo();
         currDB->set_dbname(currDBName);
 
         // Fetch config of a target DB
-        configStruct cfgStruct;
-        std::string currCfgFilePath = currDBDir + "/" + currDBName + ".config";
-        int cfgFile = open(currCfgFilePath.c_str(), O_RDONLY);
-        pread(cfgFile, &cfgStruct, sizeof(cfgStruct), 0);
+//        configStruct cfgStruct;
+//        std::string currCfgFilePath = currDBDir + "/" + currDBName + ".config";
+//        int cfgFile = open(currCfgFilePath.c_str(), O_RDONLY);
+//        pread(cfgFile, &cfgStruct, sizeof(cfgStruct), 0);
 
         // Set DB Resolution
-        currDB->set_dbresolution(cfgStruct.timeResolution);
+        currDB->set_dbresolution("SECOND");
 
         // Size of all data files in current DB
         float allSize = 0;
@@ -56,7 +59,7 @@ XStore_Proto::sysInfo_REP XStore::infoQuery(std::string serverAddr, int threadCo
                 continue;
             }
 
-            // Fetch current file size & conver to GB
+            // Fetch current file size & convert to GB
             double currFileSizeInGB = static_cast<double>(file_size(dbDir.path())) / 1024 / 1024 / 1024;
             allSize += currFileSizeInGB;
             currDB->add_filename(currFileName);
