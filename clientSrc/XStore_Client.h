@@ -29,6 +29,14 @@ class XStore_Client {
       std::cout << "[INFO] - Connected to " + fullAddr << std::endl;
   }
 
+  std::string getCurrDT() {
+      std::stringstream formattedTime;
+      std::time_t timeNow = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+      formattedTime << std::put_time(std::localtime(&timeNow), "%b %d, %Y %r");
+      std::string toReturn = formattedTime.str();
+      return toReturn;
+  }
+
   sysInfo infoRequest() {
       XStore_Proto::reqCMD toServer;
       toServer.set_rtype(XStore_Proto::INFOREQUEST);

@@ -1,6 +1,58 @@
 #include <iostream>
 #include "include/XStore_Networking/XStore_zmqServer.h"
 #include "include/XStore/XStore.h"
+#include <cmath>
+
+double meanCalc(std::vector<double> inputVector) {
+    double totalSum = 0;
+
+    for (int i = 0; i < inputVector.size(); i++) {
+        totalSum += inputVector.at(i);
+    }
+
+    return totalSum / inputVector.size();
+}
+
+double stdCalc(std::vector<double> inputVector) {
+    double totalSum = 0;
+    double mean = 0;
+    double std = 0;
+
+    for (int i = 0; i < inputVector.size(); i++) {
+        totalSum += inputVector.at(i);
+    }
+
+    mean = totalSum / inputVector.size();
+
+    for (int i = 0; i < inputVector.size(); i++) {
+        std += pow(inputVector.at(i) - mean, 2);
+    }
+
+    return sqrt(std / inputVector.size());
+}
+
+double getMin(std::vector<double> inputVector) {
+    double minVal = inputVector.at(0);
+
+    for (int i = 1; i < inputVector.size(); i++) {
+        if (inputVector.at(i) < minVal) {
+            minVal = inputVector.at(0);
+        }
+    }
+
+    return minVal;
+}
+
+double getMax(std::vector<double> inputVector) {
+    double maxVal = inputVector.at(0);
+
+    for (int i = 1; i < inputVector.size(); i++) {
+        if (inputVector.at(i) > maxVal) {
+            maxVal = inputVector.at(i);
+        }
+    }
+    return maxVal;
+}
 
 int main(int argc, char *argv[]) {
     // Handle arguments
@@ -18,72 +70,66 @@ int main(int argc, char *argv[]) {
     // ----DEV AREA
     // Instantiate XStore obj
     XStore myStore;
-////    myStore.insert(1514764801, "123", "tsla");
-////    std::cout << myStore.getSingleOpenClose(1514764802, "tsla") << std::endl;
-//    myStore.createDB("tsla", 64);
-//    myStore.unaryInsert(1483228802, "0,hello,NaN,NaN,NaN,NaN,NaN", "TSLA");
-//    myStore.unaryInsert(1583228802, "0,hello,NaN,NaN,NaN,NaN,NaN", "TSLA");
-//    std::cout << res << std::endl;
 
-//    xstoreProto::unaryQuery_REP ur = myStore.unaryQuery(1483228802, "asd");
-//    ur.PrintDebugString();
+    // Create DB
+//    XStore_Proto::createDB_REP create_db_rep = myStore.createDB("TSLA", 64);
+//    create_db_rep.PrintDebugString();
 
-//    xstoreProto::batchResponse br = myStore.getBatch(1483228800, 1483228805, "tsla");
-//    br.PrintDebugString();
+//    system("free && sync && sudo sh -c \"echo 3 > /proc/sys/vm/drop_caches\" && free");
+//    std::vector<double> us = { };
+//    std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
+//    std::chrono::duration<double> diff;
 
-    // INFO REP TEST
-//    xstoreProto::infoResponse ir = myStore.infoQuery("192.168.1.1", "12345", 10);
-//    ir.PrintDebugString();
+    // Start timer
+//    start = std::chrono::high_resolution_clock::now();
 
-    // UNARY INSERT TEST
-//    xstoreProto::createDB_REP createDbRep = myStore.createDB("asd", 64);
-//    xstoreProto::unaryInsert_REP insertRep = myStore.unaryInsert(1483228802, "hello", "asd");
-//    createDbRep.PrintDebugString();
-//    insertRep.PrintDebugString();
-
-    // REMOVE DB TEST
-//    xstoreProto::removeDB_REQ fromClient;
-//    fromClient.set_rtype(xstoreProto::removeDB_REQ);
-//    fromClient.set_dbname("abc");
-
-//    myStore.createDB("abc", 64);
-
-//    xstoreProto::removeDB_REP removeDbRep = myStore.removeDB("abc");
-//    removeDbRep.PrintDebugString();
-
-    // REMOVE DB FILES TEST
-//    XStore_Proto::removeDBFiles_REQ fromClient;
-//    fromClient.set_dbname("TSLA");
-//    fromClient.add_filename("2017.XSTORE");
-//    fromClient.add_filename("2020.XSTORE");
-
-//    std::vector<std::string> asd(fromClient.filename().begin(), fromClient.filename().end());
+    // Insert some data -- V2
+//    XStore_Proto::unaryInsert_REP unary_insert_rep = myStore.unaryInsert(1482271200, "Test", "TSLA");
+//    unary_insert_rep.PrintDebugString();
 //
-//    for (int i = 0; i < asd.size(); i++) {
-//        std::cout << "File no: " << i << " -- " << asd[i] << std::endl;
-//    }
-//    myStore.removeDBFiles(fromClient.dbname(), &fromClient);
-
-//    fromClient.set_dbname("ABC");
-//    fromClient.add_filename("2017.XSTORE");
-//    fromClient.add_filename("2018.XSTORE");
-
-    // BATCH INSERT TEST
-//    myStore.createDB("ABC", 64);
-//    XStore_Proto::batchInsert_REQ fromClient;
-//    fromClient.set_rtype(XStore_Proto::BATCHINSERT);
+//    std::cout << "----" << std::endl;
 //
-//    for (int i = 0; i < 3; i++) {
-//        XStore_Proto::batchInsert_DATA *batchInsert_DATA = fromClient.add_batchinsert_data();
-//        batchInsert_DATA->set_dbname("ABC");
-//        batchInsert_DATA->set_timestamp(1483228800 + i);
-//        batchInsert_DATA->set_data("hello " + std::to_string(i));
+//    XStore_Proto::unaryQuery_REP unary_query_rep = myStore.unaryQuery(1482271200, "tsla");
+//    unary_query_rep.PrintDebugString();
+
+    // End timer
+//    end = std::chrono::high_resolution_clock::now();
+//    diff = end - start;
+
+//    std::cout << "Took: " << std::chrono::duration<double, std::milli> (diff).count() << " (usec)" << std::endl;
+
+
+//    // Clock init
+//    std::vector<double> us = { };
+//    std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
+//    std::chrono::duration<double> diff;
+//    std::string placeholder;
+//    std::string monthArray[12] {"1/", "2/", "3/", "4/", "5/", "6/", "7/", "8/", "9/", "10/", "11/", "12/"};
+//
+//    for (int iter = 0; iter < 1000; iter++) {
+//        // --- Clearing caches
+//        system("free && sync && sudo sh -c \"echo 3 > /proc/sys/vm/drop_caches\" && free");
+//
+//        // Start timer
+//        start = std::chrono::high_resolution_clock::now();
+//
+//        for (int i = 0; i < 12; i++) {
+//            placeholder = monthArray[i];
+//        }
+//
+//        // End timer
+//        end = std::chrono::high_resolution_clock::now();
+//        diff = end - start;
+//
+//        us.push_back(std::chrono::duration<double, std::milli> (diff).count());
+//
 //    }
 //
-//    XStore_Proto::batchInsert_REP batch_insert_rep = myStore.batchInsert(&fromClient);
-//    batch_insert_rep.PrintDebugString();
-//    XStore_Proto::unaryQuery_REP qRep = myStore.unaryQuery(1483228801, "abc");
-//    qRep.PrintDebugString();
+//    std::cout << "--- EXECUTION TIME in [ns] ---" << std::endl;
+//    std::cout << "  - Min: " << *std::min_element(us.begin(), us.end()) << std::endl;
+//    std::cout << "  - Max: " << *std::max_element(us.begin(), us.end()) << std::endl;
+//    std::cout << "  - Mean: " << meanCalc(us) << std::endl;
+//    std::cout << "  - Stdev: " << stdCalc(us) << std::endl;
 
 //    asd.PrintDebugString();
     // ----DEV AREA

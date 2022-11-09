@@ -50,6 +50,7 @@ add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h
         include/dataStructs/dataStruct.h ${PROTO_SRCS} ${PROTO_HDRS} src/dataStructs/fileStruct.cpp
         include/dataStructs/fileStruct.h include/XStore_Networking/zmq.hpp include/XStore_Networking/zmq_addon.hpp
         include/XStore_Networking/XStore_zmqServer.h src/XStore_Networking/XStore_zmqServer.cpp
-        include/XStore_Networking/zhelpers.hpp src/dataStructs/configStruct.cpp include/dataStructs/configStruct.h)
+        include/XStore_Networking/zhelpers.hpp src/dataStructs/configStruct.cpp include/dataStructs/configStruct.h
+        include/dataStructs/timeStruct.h src/dataStructs/timeStruct.cpp)
 
 target_link_libraries(XStore PUBLIC "stdc++fs" ${Protobuf_LIBRARIES} "zmq" Threads::Threads)

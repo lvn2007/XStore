@@ -104,7 +104,7 @@ int main(int argc, char const *argv[])
         if (OP_NAME == "BUILD") {
             std::cout << "|                   BUILD                  |" << std::endl;
             std::cout << "+------------------------------------------+\n" << std::endl;
-            std::cout << "Build ok" << std::endl;
+            std::cout <<  "[" + xstoreClient.getCurrDT() + "]" + "[INFO] [TEST]" + "Build ok" << std::endl;
             exit(0);
         }
         else if (OP_NAME == "SYS_INFO") {
@@ -155,10 +155,8 @@ int main(int argc, char const *argv[])
 
             // VALIDATE
             if (serverAddress_check && threadCount_check && dbName_check && dbResolution_check && dbSize_check && dbFilename_check) {
-                std::cout << "Exit code 0" << std::endl;
                 exit(0);
             }
-            std::cout << "Exit code 1" << std::endl;
             exit(1);
         }
         else if (OP_NAME == "CREATE_DB") {
@@ -229,8 +227,10 @@ int main(int argc, char const *argv[])
         }
 
         else if (OP_NAME == "UNARY_QUERY") {
-            std::cout << "|               UNARY_QUERY               |" << std::endl;
+            std::cout << "|               UNARY_QUERY                |" << std::endl;
             std::cout << "+------------------------------------------+\n" << std::endl;
+
+            std::cout << xstoreClient.getCurrDT() << std::endl;
 
 //            std::string queryResult = xstoreClient.unaryQuery(1483228802, "TSLAa");
 //            std::cout << queryResult << std::endl;
