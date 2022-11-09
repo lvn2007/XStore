@@ -21,15 +21,9 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Re-implementing time structures">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Cleanup createDB">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/clientSrc/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore.proto" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/protoFile/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/XStore.proto" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/XStore_Client.h" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore_Client.h" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -338,14 +332,7 @@
       <workItem from="1667330155010" duration="19101000" />
       <workItem from="1667616636772" duration="235000" />
       <workItem from="1667616993010" duration="167000" />
-      <workItem from="1667617319231" duration="30079000" />
-    </task>
-    <task id="LOCAL-00164" summary="Debugging clientSrc">
-      <created>1663286292053</created>
-      <option name="number" value="00164" />
-      <option name="presentableId" value="LOCAL-00164" />
-      <option name="project" value="LOCAL" />
-      <updated>1663286292053</updated>
+      <workItem from="1667617319231" duration="30763000" />
     </task>
     <task id="LOCAL-00165" summary="Debugging clientSrc">
       <created>1663286534243</created>
@@ -683,7 +670,14 @@
       <option name="project" value="LOCAL" />
       <updated>1667960705366</updated>
     </task>
-    <option name="localTasksCounter" value="213" />
+    <task id="LOCAL-00213" summary="Cleanup createDB">
+      <created>1667961692123</created>
+      <option name="number" value="00213" />
+      <option name="presentableId" value="LOCAL-00213" />
+      <option name="project" value="LOCAL" />
+      <updated>1667961692123</updated>
+    </task>
+    <option name="localTasksCounter" value="214" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -790,7 +784,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Added server's cmd args" />
     <MESSAGE value="Added build-test for client" />
     <MESSAGE value="Experimenting .pre/.post" />
     <MESSAGE value="Done experimenting .pre/.post" />
@@ -815,6 +808,7 @@
     <MESSAGE value="Timeout 1m for all test jobs" />
     <MESSAGE value="Switch back to exit()" />
     <MESSAGE value="Re-implementing time structures" />
-    <option name="LAST_COMMIT_MESSAGE" value="Re-implementing time structures" />
+    <MESSAGE value="Cleanup createDB" />
+    <option name="LAST_COMMIT_MESSAGE" value="Cleanup createDB" />
   </component>
 </project>
