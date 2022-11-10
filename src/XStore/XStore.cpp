@@ -28,9 +28,6 @@ XStore_Proto::sysInfo_REP XStore::infoQuery(std::string serverAddr, int threadCo
         std::string currDBName = dir.path().filename().string();
         std::string currDBDir = dataStoreLoc + currDBName;
 
-        std::cout << currDBName << std::endl;
-        std::cout << currDBDir << std::endl;
-
         // Set DB Name
         XStore_Proto::dbStats *currDB = toReturn.add_dbinfo();
         currDB->set_dbname(currDBName);
@@ -45,26 +42,38 @@ XStore_Proto::sysInfo_REP XStore::infoQuery(std::string serverAddr, int threadCo
         currDB->set_dbresolution("SECOND");
 
         // Size of all data files in current DB
-        float allSize = 0;
+        unsigned long int allSize = 0;
 
-        // Loop through all files in currentDBDir
-        for (auto& dbDir : std::filesystem::directory_iterator(currDBDir)) {
-            // Current file name & path in dbDir
-            std::string currFileName = dbDir.path().filename().string();
+//        for (const std::filesystem::)
 
-            // Count only data file -- Ignore .config file(s)
-            //  IF current file name contains ".config"
-            //   -> Skip to next iteration
-            if (currFileName.find(".config") != std::string::npos) {
-                continue;
+        // Loop through sub-dirs and
+        for (auto& filePath : std::filesystem::recursive_directory_iterator(currDBDir)) {
+            if (!filePath.is_directory()) {
+                unsigned long int currFileSizeInGB = std::filesystem::file_size(filePath.path());
+                std::cout << filePath << std::endl;
+                allSize += currFileSizeInGB;
             }
-
-            // Fetch current file size & convert to GB
-            double currFileSizeInGB = static_cast<double>(file_size(dbDir.path())) / 1024 / 1024 / 1024;
-            allSize += currFileSizeInGB;
-            currDB->add_filename(currFileName);
         }
-        currDB->set_totalsizeingb(allSize);
+        currDB->set_totalsizeinbyte(allSize);
+
+//        // Loop through all files in currentDBDir
+//        for (auto& dbDir : std::filesystem::directory_iterator(currDBDir)) {
+//            // Current file name & path in dbDir
+//            std::string currFileName = dbDir.path().filename().string();
+//
+//            // Count only data file -- Ignore .config file(s)
+//            //  IF current file name contains ".config"
+//            //   -> Skip to next iteration
+//            if (currFileName.find(".config") != std::string::npos) {
+//                continue;
+//            }
+//
+//            // Fetch current file size & convert to GB
+//            double currFileSizeInGB = static_cast<double>(file_size(dbDir.path())) / 1024 / 1024 / 1024;
+//            allSize += currFileSizeInGB;
+//            currDB->add_filename(currFileName);
+//        }
+//        currDB->set_totalsizeinbyte(allSize);
     }
 
     return toReturn;
@@ -131,6 +140,8 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::str
     targetPath = targetPath + std::to_string(unixTime) + ".XSTORE";
     bFile = std::fopen(targetPath.c_str(), "wb+");
 
+    // Lock prior to writing
+    flock(fileno(bFile), LOCK_EX);
     // IF no error
     // -> Organize timestamp & data into an object
     dataStruct currData{unixTime, data};
@@ -138,8 +149,10 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::str
     // Writing actual data to disk
     std::fwrite((currData.getData()).data(), data.size(), 1, bFile);
 
-    //  Close file after write
+    //  Close file & Release lock after write
     std::fclose(bFile);
+    flock(fileno(bFile), LOCK_UN);
+
     std::string successMsg = "[SUCCESS] [UNARY INSERT] [DB: " + dbName + "] - Inserted " + std::to_string(unixTime) + ".XSTORE";
     toReturn.set_insertstatus(successMsg);
     return toReturn;
