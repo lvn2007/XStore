@@ -77,16 +77,16 @@ int main(int argc, char *argv[]) {
 //    XStore_Proto::createDB_REP create_db_rep = myStore.createDB("TSLA");
 //    create_db_rep.PrintDebugString();
 
-    system("free && sync && sudo sh -c \"echo 3 > /proc/sys/vm/drop_caches\" && free");
-    std::vector<double> us = { };
-    std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
-    std::chrono::duration<double> diff;
+//    system("free && sync && sudo sh -c \"echo 3 > /proc/sys/vm/drop_caches\" && free");
+//    std::vector<double> us = { };
+//    std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
+//    std::chrono::duration<double> diff;
 
     // Start timer
-    start = std::chrono::high_resolution_clock::now();
+//    start = std::chrono::high_resolution_clock::now();
 
     // Insert some data -- V2
-    XStore_Proto::unaryInsert_REP unary_insert_rep = myStore.unaryInsert(1482271200, "Test", "TSLA");
+//    XStore_Proto::unaryInsert_REP unary_insert_rep = myStore.unaryInsert(1482271200, "Test", "TSLA");
 //    unary_insert_rep.PrintDebugString();
 
 //    std::cout << "----" << std::endl;
@@ -95,11 +95,10 @@ int main(int argc, char *argv[]) {
 //    unary_query_rep.PrintDebugString();
 
     // End timer
-    end = std::chrono::high_resolution_clock::now();
-    diff = end - start;
+//    end = std::chrono::high_resolution_clock::now();
+//    diff = end - start;
 
-    std::cout << "Took: " << std::chrono::duration<double, std::milli> (diff).count() << " (usec)" << std::endl;
-
+//    std::cout << "Took: " << std::chrono::duration<double, std::milli> (diff).count() << " (usec)" << std::endl;
 
 //    // Clock init
 //    std::vector<double> us = { };
@@ -135,6 +134,6 @@ int main(int argc, char *argv[]) {
 
 //    asd.PrintDebugString();
     // ----DEV AREA
-//    XStore_zmqServer xStoreZmqServer(THREAD_COUNT);
-//    xStoreZmqServer.startServer(BIND_ADDR, BIND_PORT);
+    XStore_zmqServer xStoreZmqServer(THREAD_COUNT);
+    xStoreZmqServer.startServer(BIND_ADDR, BIND_PORT);
 }
