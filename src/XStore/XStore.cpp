@@ -315,6 +315,9 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery(std::time_t unixTime, std::strin
     FILE *bFile;
     bFile = std::fopen(targetPath.c_str(), "rb");
 
+    //  Lock file prior to reading
+    flock(fileno(bFile), LOCK_SH);
+
     // Obtain file size
     fseek(bFile, 0, SEEK_END);
     int fSize = ftell(bFile);
@@ -325,13 +328,18 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery(std::time_t unixTime, std::strin
 
     // Extract line of data from binary file
     fread(&bufferIn[0], 1, fSize, bFile);
+
+    // Close file & release lock after reading
+    fclose(bFile);
+    flock(fileno(bFile), LOCK_UN);
+
+    // Convert to string -- Stripping ending bytes
     std::string returnData(bufferIn, fSize);
 
     // Set data fetched from XStore to returning Protobuf obj
     std::string successMsg = "[SUCCESS] [UNARY QUERY] [DB: " + dbName + "] - Acquired " + std::to_string(unixTime) + ".XSTORE";
     toReturn.set_querystatus(successMsg);
     toReturn.set_dataset(returnData);
-    fclose(bFile);
     return toReturn;
 }
 
