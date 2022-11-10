@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <algorithm>
 #include <sys/types.h>
+#include <sys/file.h>
 #include "XStore.pb.h"
 #include "include/dataStructs/timeStruct.h"
 #include "include/dataStructs/dataStruct.h"
