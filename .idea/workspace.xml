@@ -21,14 +21,9 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Adding lock for reading">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Move cfgStruct to createDB">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/dataStructs/configStruct.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/dataStructs/configStruct.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/protoFile/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/XStore.proto" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/dataStructs/configStruct.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/dataStructs/configStruct.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -338,14 +333,7 @@
       <workItem from="1667330155010" duration="19101000" />
       <workItem from="1667616636772" duration="235000" />
       <workItem from="1667616993010" duration="167000" />
-      <workItem from="1667617319231" duration="62426000" />
-    </task>
-    <task id="LOCAL-00173" summary="Debugging clientSrc">
-      <created>1663292581539</created>
-      <option name="number" value="00173" />
-      <option name="presentableId" value="LOCAL-00173" />
-      <option name="project" value="LOCAL" />
-      <updated>1663292581539</updated>
+      <workItem from="1667617319231" duration="74222000" />
     </task>
     <task id="LOCAL-00174" summary="Debugging clientSrc">
       <created>1663298381799</created>
@@ -683,7 +671,14 @@
       <option name="project" value="LOCAL" />
       <updated>1668062935028</updated>
     </task>
-    <option name="localTasksCounter" value="222" />
+    <task id="LOCAL-00222" summary="Move cfgStruct to createDB">
+      <created>1668146823033</created>
+      <option name="number" value="00222" />
+      <option name="presentableId" value="LOCAL-00222" />
+      <option name="project" value="LOCAL" />
+      <updated>1668146823033</updated>
+    </task>
+    <option name="localTasksCounter" value="223" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -790,7 +785,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Renaming &amp; Enhanced Protobuf for removeDBFiles" />
     <MESSAGE value="Implemented removeDBFiles" />
     <MESSAGE value="Implemented batchInsert" />
     <MESSAGE value="SYS_INFO test case" />
@@ -815,6 +809,7 @@
     <MESSAGE value="Fixed UNARY_QUERY" />
     <MESSAGE value="Modified sysInfo &amp; File lock in writing" />
     <MESSAGE value="Adding lock for reading" />
-    <option name="LAST_COMMIT_MESSAGE" value="Adding lock for reading" />
+    <MESSAGE value="Move cfgStruct to createDB" />
+    <option name="LAST_COMMIT_MESSAGE" value="Move cfgStruct to createDB" />
   </component>
 </project>
