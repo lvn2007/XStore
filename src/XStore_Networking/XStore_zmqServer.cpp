@@ -140,7 +140,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 // XStore stuffs
                 //  Returning Protobuf obj
-                XStore_Proto::createDB_REP protoToClient = myStore.createDB(protoFromClient.dbname());
+                XStore_Proto::createDB_REP protoToClient = myStore.createDB(protoFromClient.dbname(), protoFromClient.timeresolution());
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();

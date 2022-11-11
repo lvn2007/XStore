@@ -74,8 +74,8 @@ int main(int argc, char *argv[]) {
 //    sys_info_rep.PrintDebugString();
 
     // Create DB
-//    XStore_Proto::createDB_REP create_db_rep = myStore.createDB("TSLA");
-//    create_db_rep.PrintDebugString();
+    XStore_Proto::createDB_REP create_db_rep = myStore.createDB("TSLA", "second");
+    create_db_rep.PrintDebugString();
 
 //    system("free && sync && sudo sh -c \"echo 3 > /proc/sys/vm/drop_caches\" && free");
 //    std::vector<double> us = { };
@@ -100,40 +100,7 @@ int main(int argc, char *argv[]) {
 
 //    std::cout << "Took: " << std::chrono::duration<double, std::milli> (diff).count() << " (usec)" << std::endl;
 
-//    // Clock init
-//    std::vector<double> us = { };
-//    std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
-//    std::chrono::duration<double> diff;
-//    std::string placeholder;
-//    std::string monthArray[12] {"1/", "2/", "3/", "4/", "5/", "6/", "7/", "8/", "9/", "10/", "11/", "12/"};
-//
-//    for (int iter = 0; iter < 1000; iter++) {
-//        // --- Clearing caches
-//        system("free && sync && sudo sh -c \"echo 3 > /proc/sys/vm/drop_caches\" && free");
-//
-//        // Start timer
-//        start = std::chrono::high_resolution_clock::now();
-//
-//        for (int i = 0; i < 12; i++) {
-//            placeholder = monthArray[i];
-//        }
-//
-//        // End timer
-//        end = std::chrono::high_resolution_clock::now();
-//        diff = end - start;
-//
-//        us.push_back(std::chrono::duration<double, std::milli> (diff).count());
-//
-//    }
-//
-//    std::cout << "--- EXECUTION TIME in [ns] ---" << std::endl;
-//    std::cout << "  - Min: " << *std::min_element(us.begin(), us.end()) << std::endl;
-//    std::cout << "  - Max: " << *std::max_element(us.begin(), us.end()) << std::endl;
-//    std::cout << "  - Mean: " << meanCalc(us) << std::endl;
-//    std::cout << "  - Stdev: " << stdCalc(us) << std::endl;
-
-//    asd.PrintDebugString();
     // ----DEV AREA
-    XStore_zmqServer xStoreZmqServer(THREAD_COUNT);
-    xStoreZmqServer.startServer(BIND_ADDR, BIND_PORT);
+//    XStore_zmqServer xStoreZmqServer(THREAD_COUNT);
+//    xStoreZmqServer.startServer(BIND_ADDR, BIND_PORT);
 }
