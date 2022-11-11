@@ -147,8 +147,8 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::str
     XStore_Proto::unaryInsert_REP toReturn;
     std::string insertStatus;
 
-    //  Time structure contains all components per UNIXTIME:
-    //      Year, month, day, hour, minute, sec, ...
+    // Time structure contains all components per UNIXTIME:
+    //  Year, month, day, hour, minute, sec, ...
     timeStruct currTS{unixTime};
 
     // Ensure dbName string is all capitalized
@@ -156,15 +156,31 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::str
         dbName[i] = toupper(dbName[i]);
     }
 
+    // Enforce time resolution
+    std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
+    std::string configPath = dbBasePath + dbName + ".CFG";
+    configStruct cfgStruct;
+    FILE *cFile;
+    cFile = std::fopen(configPath.c_str(), "rb");
+    fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
+    std::fclose(cFile);
+
+    if (currTS.timeResolution != cfgStruct.timeResolution) {
+        std::string errMsg = "[ERROR] [UNARY INSERT] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + cfgStruct.timeResolution;
+        toReturn.set_insertstatus(errMsg);
+        return toReturn;
+    }
+
     // Target path of file to WRITE
-    std::string targetPath = baseDir + "dataStore/" + dbName + "/" + std::to_string(currTS.year) + "/" + monthArray[currTS.month - 1] + dayArray[currTS.day - 1] + hourArray[currTS.hour] + minArray[currTS.minute];
+    std::string targetPath = dbBasePath + std::to_string(currTS.year) + "/" + monthArray[currTS.month - 1] + dayArray[currTS.day - 1] + hourArray[currTS.hour] + minArray[currTS.minute];
 
     // IF hierarchical year folder DOES NOT exist
     if (std::filesystem::is_directory(targetPath) == 0) {
         // Create hierarchical directories
-        if (std::filesystem::create_directories(targetPath) == 1) {
+        if (std::filesystem::create_directories(targetPath) == 0) {
             std::string errMsg = "[ERROR] [UNARY INSERT] [DB: " + dbName + "] - Unable to create hierarchical directories";
             toReturn.set_insertstatus(errMsg);
+            return toReturn;
         }
     }
 
@@ -196,25 +212,19 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
     // Protobuf obj to be returned
     XStore_Proto::batchInsert_REP toReturn;
     std::string insertStatus;
+    configStruct cfgStruct;
 
     // Iterate over batch of insert data
     for (int idx = 0; idx < protoFromClient->batchinsert_data_size(); idx++) {
-        // Fetch all dirs in dataStore dir
-        dbStats();
-
         // Parse each data in a batch collection
         XStore_Proto::batchInsert_DATA currentInsertData = protoFromClient->batchinsert_data(idx);
         std::time_t unixTime = currentInsertData.timestamp();
         std::string data = currentInsertData.data();
         std::string dbName = currentInsertData.dbname();
 
-        // IF no DB exists i.e., dbCount == 0
-        //  Requiring a db space to be instantiated with "createDB" method prior to this
-        if (dbCount == 0) {
-            insertStatus = "[ERROR - BATCH INSERT] - [DB: " + dbName + "] -- DB does not exist";
-            toReturn.add_insertstatus(insertStatus);
-            return toReturn;
-        }
+        // Time structure contains all components per UNIXTIME:
+        //  Year, month, day, hour, minute, sec, ...
+        timeStruct currTS{unixTime};
 
         // Check whether dbName is already created
         //  Ensure dbName string is all capitalized
@@ -222,97 +232,58 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
             dbName[i] = toupper(dbName[i]);
         }
 
-        //  Check if dbName is already existed in XStore
-        bool isFound = std::find(dbNames.begin(), dbNames.end(), dbName) != dbNames.end();
+        std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
 
-        //  IF dbName is NOT existed
-        //   -> Do nothing
-        if (!isFound) {
-            insertStatus = "[ERROR - BATCH INSERT] - [DB: " + dbName + "] -- DB does not exist";
-            toReturn.add_insertstatus(insertStatus);
-            return toReturn;
+        // ONLY read config file when necessary
+        if (cfgStruct.dbName != dbName) {
+            FILE *cFile;
+            std::string configPath = dbBasePath + dbName + ".CFG";
+            cFile = std::fopen(configPath.c_str(), "rb");
+            fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
+            std::fclose(cFile);
         }
 
-        // Otherwise, create a file with name of inputYear.XSTORE
-        //  Read timeValue -- UNIX time
-        //  Ensure timeResolution is enforced
-        configStruct cfgStruct;
-        std::string cfgFilePath = baseDir + "dataStore/" + dbName + "/" + dbName + ".config";
-        int cfgFile = open(cfgFilePath.c_str(), O_RDWR);
-        pread(cfgFile, &cfgStruct, sizeof(configStruct), 0);
+        // Enforce time resolution
+        if (currTS.timeResolution != cfgStruct.timeResolution) {
+            std::string errMsg = "[ERROR] [UNARY INSERT] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + cfgStruct.timeResolution;
+            toReturn.add_insertstatus(errMsg);
+            continue;
+        }
 
-        //  timeResolution staging area
-        std::string currResolution = getTimeResolution(unixTime);
-        int inputYear = toHumanYear(unixTime, currResolution);
+        // Target path of file to WRITE
+        std::string targetPath = dbBasePath + std::to_string(currTS.year) + "/" + monthArray[currTS.month - 1] + dayArray[currTS.day - 1] + hourArray[currTS.hour] + minArray[currTS.minute];
 
-        //  Start & End time of a given year
-        long int startEpoch = getStartTimeEpoch(inputYear, currResolution);
-        long int endEpoch = getEndTimeEpoch(inputYear, currResolution);
+        // IF hierarchical year folder DOES NOT exist
+        if (std::filesystem::is_directory(targetPath) == 0) {
+            // Create hierarchical directories
+            if (std::filesystem::create_directories(targetPath) == 0) {
+                std::string errMsg = "[ERROR] [UNARY INSERT] [DB: " + dbName + "] - Unable to create hierarchical directories";
+                toReturn.add_insertstatus(errMsg);
+                continue;
+            }
+        }
 
-        //  IF timeResolution is not yet initialized
-        //   -> First inserting time will determine resolution of this current DB
-//        if (strcmp(cfgStruct.timeResolution, "NULL") == 0) {
-//            // Updating configFile and dump to disk
-//            strcpy(cfgStruct.timeResolution, currResolution.c_str());
-//            pwrite(cfgFile, &cfgStruct, sizeof(configStruct), 0);
-//            close(cfgFile);
-//        }
-
-        //  Staging area for new data file waiting to be inserted
-        std::string dataFilePath = baseDir + "dataStore/" + dbName + "/" + std::to_string(inputYear) + ".XSTORE";
+        // Staging area for new data file waiting to be inserted
         FILE *bFile;
+        targetPath = targetPath + std::to_string(unixTime) + ".XSTORE";
+        bFile = std::fopen(targetPath.c_str(), "wb+");
 
-        // DB is empty
-//        if (dbMap.size() == 0 || (dbMap.find(dbName) == dbMap.end())) {
-//            bFile = std::fopen(dataFilePath.c_str(), "wb+");
-//
-//            //  Creating dummy file with n Size from cfgStruct
-//            ftruncate(fileno(bFile), (endEpoch - startEpoch) * cfgStruct.rowLength);
-//        }
-
-        // DB is not empty
-//        else {
-//            // Ensure that the file inputYear.XSTORE is NOT existed
-//            if (dbMap.find(dbName)->second.hasYear(inputYear) != true) {
-//                bFile = std::fopen(dataFilePath.c_str(), "wb+");
-//
-//                //  Creating dummy file with n Size from cfgStruct
-//                ftruncate(fileno(bFile), (endEpoch - startEpoch) * cfgStruct.rowLength);
-//            }
-//
-//            // IF inputYear.XSTORE existed
-//            //  -> Open in append mode
-//            else {
-//                bFile = std::fopen(dataFilePath.c_str(), "rb+");
-//                rewind(bFile);
-//            }
-//        }
+        // Lock prior to writing
+        flock(fileno(bFile), LOCK_EX);
 
         // IF no error
         // -> Organize timestamp & data into an object
         dataStruct currData{unixTime, data};
 
         // Writing actual data to disk
-        //  Epoch time difference between target & startEpoch
-        long int diff = unixTime - startEpoch;
+        std::fwrite((currData.getData()).data(), data.size(), 1, bFile);
 
-        //  Calculate offset -- Exact location of where a particular target row is stored
-//        long int offSet = diff * cfgStruct.rowLength;
-//
-//        //  Seek to target offset prior to write
-//        std::fseek(bFile, offSet, SEEK_SET);
-//
-//        //  Write as binary file to disk with new line indicates EOL
-//        std::fwrite((currData.getData()).data(), cfgStruct.rowLength, 1, bFile);
-
-        //  Close file after write
+        //  Close file & Release lock after write
         std::fclose(bFile);
+        flock(fileno(bFile), LOCK_UN);
 
-        //  Updating dbStats & dbMap
-        dbStats();
-        initDB();
-
-        toReturn.add_insertstatus("[SUCCESS - BATCH INSERT] - [DB: " + dbName + "] -- Inserted: " + std::to_string(unixTime));
+        std::string successMsg = "[SUCCESS] [UNARY INSERT] [DB: " + dbName + "] - Inserted " + std::to_string(unixTime) + ".XSTORE";
+        toReturn.add_insertstatus(successMsg);
     }
     return toReturn;
 }
@@ -378,109 +349,71 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery(std::time_t unixTime, std::strin
 }
 
 XStore_Proto::batchQuery_REP XStore::batchQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName) {
-    // Fetch all dirs in dataStore dir
-    dbStats();
-
     // Protobuf obj to be returned
+    std::string queryStatus;
     XStore_Proto::batchQuery_REP toReturn;
-
-    // Ranges of queried time
-    //  i.e., N elements of time-series row of data
-    long int timeRange = endEpochT - startEpochT;
-
-    // Pre-populating time for all defined ranges
-    for (int i = 0; i < timeRange; i++) {
-        XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_unaryresponse();
-        currEntry->set_timestamp(startEpochT + i);
-        currEntry->set_dataset("NULL");
-    }
 
     // Ensure dbName string is all capitalized
     for (int i = 0; i < dbName.size(); i++) {
         dbName[i] = toupper(dbName[i]);
     }
 
-    // Make sure dbName exists
-    //  IF given dbName is not available
-    //  Return empty vector
-    if (dbMap.find(dbName) == dbMap.end()) {
-        toReturn.set_querystatus("[ERROR] -- DB Name does not exists");
-        return toReturn;
+    // Loop through all query range
+    for (int unixTime = startEpochT; unixTime <= endEpochT; unixTime++) {
+        // Initialize entry to return
+        XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_unaryresponse();
+        currEntry->set_timestamp(unixTime);
+        currEntry->set_dataset("NULL");
+
+        //  Time structure contains all components per UNIXTIME:
+        //      Year, month, day, hour, minute, sec, ...
+        timeStruct currTS{unixTime};
+
+        // Target path of file to READ
+        std::string dataFilePath = baseDir + "dataStore/" + dbName + "/" + std::to_string(currTS.year) + "/";
+        std::string targetPath = dataFilePath + monthArray[currTS.month - 1] + dayArray[currTS.day - 1] + hourArray[currTS.hour] + minArray[currTS.minute] + std::to_string(unixTime) + ".XSTORE";
+
+        if (std::filesystem::exists(targetPath) == 0) {
+            queryStatus = "[ERROR] [BATCH QUERY] [DB: " + dbName + "] - " + std::to_string(unixTime) + ".XSTORE does not exist";
+            currEntry->set_querystatus(queryStatus);
+            continue;
+        }
+
+        // Target file IS EXISTED
+        //  Staging area for file waiting to be read
+        FILE *bFile;
+        bFile = std::fopen(targetPath.c_str(), "rb");
+
+        //  Lock file prior to reading
+        flock(fileno(bFile), LOCK_SH);
+
+        // Obtain file size
+        fseek(bFile, 0, SEEK_END);
+        int fSize = ftell(bFile);
+        rewind(bFile);
+
+        // A single line data will be read into here
+        char bufferIn[fSize];
+
+        // Extract line of data from binary file
+        fread(&bufferIn[0], 1, fSize, bFile);
+
+        // Close file & release lock after reading
+        fclose(bFile);
+        flock(fileno(bFile), LOCK_UN);
+
+        // Convert to string -- Stripping ending bytes
+        std::string returnData(bufferIn, fSize);
+
+        // Set data fetched from XStore to returning Protobuf obj
+        queryStatus = "[SUCCESS] [BATCH QUERY] [DB: " + dbName + "] - Acquired " + std::to_string(unixTime) + ".XSTORE";
+        currEntry->set_querystatus(queryStatus);
+        currEntry->set_dataset(returnData);
     }
-
-    // Read timeValue -- UNIX time
-    std::string currResolution = getTimeResolution(startEpochT);
-    int startYear = toHumanYear(startEpochT, currResolution);
-    int endYear = toHumanYear(endEpochT, currResolution);
-
-    // TEMPORARY -- Waiting for Ioan's inputs/advice on this
-    //  Guard against a query that spans over 1 year
-    if ((endYear - startYear) != 0) {
-        toReturn.set_querystatus("[ERROR] -- Queried range is larger than 1 year");
-        return toReturn;
-    }
-
-    // Make sure inputYear is available in DB
-    //  IF inputYear is not available
-    //  Return empty vector
-    if ((dbMap.find(dbName)->second.hasYear(startYear)) != true) {
-        std::string errMsg = "[ERROR] -- " + std::to_string(startYear) + ".XSTORE does not exists";
-        toReturn.set_querystatus(errMsg);
-        return toReturn;
-    }
-
-    // Fetch config of a target DB
-    configStruct cfgStruct;
-    std::string cfgFilePath = baseDir + "dataStore/" + dbName + "/" + dbName + ".config";
-    int cfgFile = open(cfgFilePath.c_str(), O_RDONLY);
-    pread(cfgFile, &cfgStruct, sizeof(configStruct), 0);
-
-    // Start epoch time of a given year
-    long int startEpoch = getStartTimeEpoch(startYear, cfgStruct.timeResolution);
-
-    // Epoch time difference between target & startEpoch
-    long int diff = startEpochT - startEpoch;
-
-    // Calculate offset -- Exact location of where a particular target row is stored
-//    long int startOffset = diff * cfgStruct.rowLength;
-//
-//    // Look-up file descriptor in dbMap
-//    int bFile = dbMap.find(dbName)->second.getBfileMap().find(startYear)->second;
-//
-//    // A single line of data will be read into this buffer
-//    char buff[cfgStruct.rowLength];
-//
-//    for (long int i = 0; i < timeRange; i++) {
-//        // Computes offset of current iteration
-//        long int currOffset = startOffset + (cfgStruct.rowLength * i);
-//
-//        // Reads data into buffer
-//        pread(bFile, &buff[0], cfgStruct.rowLength, currOffset);
-//
-//        // Remove newline at the end of char[]
-//        buff[strlen(buff) - 1] = '\0';
-//
-//        // IF a target time contains no data
-//        //  -> Set dataset to "NULL" as string
-//        //  NOTE: We don't actually set dataset to NULL since it was pre-populated prior
-//        //  Instead, we will skip to next iteration
-//        if (strlen(buff) == 0) {
-//            continue;
-//        }
-//
-//        // Convert raw line of data to str for further processing
-//        std::string strBuff = std::string(buff);
-//
-//        // Strip timestamp from raw line of data
-//        strBuff.erase(0, strBuff.find_first_of(",") + 1);
-//
-//        // Set data fetched from XStore to returning Protobuf obj
-//        toReturn.mutable_unaryresponse(i)->set_dataset(strBuff);
-//    }
 
     // Set query status msg
-    toReturn.set_querystatus("[SUCCESS] -- Batch queries completed");
-
+    queryStatus = "[SUCCESS] [BATCH QUERY] [DB: " + dbName + "] - Concluded Batch queries";
+    toReturn.set_querystatus(queryStatus);
     return toReturn;
 }
 

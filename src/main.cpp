@@ -74,13 +74,26 @@ int main(int argc, char *argv[]) {
 //    sys_info_rep.PrintDebugString();
 
     // Create DB
-    XStore_Proto::createDB_REP create_db_rep = myStore.createDB("TSLA", "second");
-    create_db_rep.PrintDebugString();
+//    XStore_Proto::createDB_REP create_db_rep = myStore.createDB("TSLA", "second");
+//    create_db_rep.PrintDebugString();
 
 //    system("free && sync && sudo sh -c \"echo 3 > /proc/sys/vm/drop_caches\" && free");
 //    std::vector<double> us = { };
 //    std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
 //    std::chrono::duration<double> diff;
+
+//    XStore_Proto::batchInsert_REQ batch_insert_req;
+
+//    for (int i = 1; i < 61; i++) {
+//        XStore_Proto::batchInsert_DATA *batch_insert_data = batch_insert_req.add_batchinsert_data();
+//        batch_insert_data->set_timestamp(1482271200 + i);
+//        batch_insert_data->set_dbname("TSLA");
+//        batch_insert_data->set_data("Test" + std::to_string(i));
+//    }
+//    myStore.batchInsert(&batch_insert_req);
+
+//    XStore_Proto::batchQuery_REP batch_query_rep = myStore.batchQuery(1482271200, 1482271200 + 62, "TSLA");
+//    batch_query_rep.PrintDebugString();
 
     // Start timer
 //    start = std::chrono::high_resolution_clock::now();
@@ -99,8 +112,9 @@ int main(int argc, char *argv[]) {
 //    diff = end - start;
 
 //    std::cout << "Took: " << std::chrono::duration<double, std::milli> (diff).count() << " (usec)" << std::endl;
+//    batch_insert_rep.PrintDebugString();
 
     // ----DEV AREA
-//    XStore_zmqServer xStoreZmqServer(THREAD_COUNT);
-//    xStoreZmqServer.startServer(BIND_ADDR, BIND_PORT);
+    XStore_zmqServer xStoreZmqServer(THREAD_COUNT);
+    xStoreZmqServer.startServer(BIND_ADDR, BIND_PORT);
 }
