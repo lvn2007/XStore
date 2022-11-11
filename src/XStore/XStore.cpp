@@ -50,7 +50,6 @@ XStore_Proto::sysInfo_REP XStore::infoQuery(std::string serverAddr, int threadCo
         for (auto& filePath : std::filesystem::recursive_directory_iterator(currDBDir)) {
             if (!filePath.is_directory()) {
                 unsigned long int currFileSizeInGB = std::filesystem::file_size(filePath.path());
-                std::cout << filePath << std::endl;
                 allSize += currFileSizeInGB;
             }
         }
