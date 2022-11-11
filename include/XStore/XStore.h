@@ -25,6 +25,7 @@ class XStore {
         std::string baseDir = getBaseDir();
         std::string dataStoreDir = baseDir + "dataStore/";
         std::map<std::string, fileStruct> dbMap;
+        std::string permittedTimeResolution[2] = {"SECOND", "MILLISECOND"};
 
         int dbCount = 0;
         std::vector<std::string> dbNames = { };
@@ -37,7 +38,7 @@ class XStore {
         XStore_Proto::sysInfo_REP infoQuery(std::string serverAddr, int threadCount);
 
         // CREATING new DB instance with row length
-        XStore_Proto::createDB_REP createDB(std::string dbName);
+        XStore_Proto::createDB_REP createDB(std::string dbName, std::string timeResolution);
 
         // UNARY INSERT time-series oriented values
         XStore_Proto::unaryInsert_REP unaryInsert(std::time_t epochTime, std::string data, std::string dbName);
