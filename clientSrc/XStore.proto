@@ -30,6 +30,7 @@ message unaryQuery_REQ {
 message createDB_REQ {
   requestType rType = 1;
   string dbName = 2;
+  string timeResolution = 3;
 }
 
 // --- UNARY insert request
@@ -78,8 +79,7 @@ message removeDBFiles_REQ {
 message dbStats {
   string dbName = 1;
   string dbResolution = 2;
-  float totalSizeInGB = 3;
-  repeated string fileName = 4;
+  uint64 totalSizeInByte = 3;
 }
 
 message sysInfo_REP {
