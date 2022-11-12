@@ -22,7 +22,10 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Fixed broken C++ Client code">
-      <change beforePath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/Python/XStore_Client.py" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/Python/XStore_Client.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore.proto" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -111,12 +114,12 @@
       <pathMapping remote=":/home/ubuntu/XStore" local="$PROJECT_DIR$" />
       <method v="2" />
     </configuration>
-    <configuration name="XStore" type="CMakeRunConfiguration" factoryName="Application" temporary="true" PROGRAM_PARAMS="127.0.0.1 12345 2" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="XStore" TARGET_NAME="XStore" CONFIG_NAME="Debug-Remote-xStore-Master" RUN_TARGET_PROJECT_NAME="XStore" RUN_TARGET_NAME="XStore">
+    <configuration name="XStore" type="CMakeRunConfiguration" factoryName="Application" temporary="true" PROGRAM_PARAMS="* 12345 2" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="XStore" TARGET_NAME="XStore" CONFIG_NAME="Debug-Remote-xStore-Master" RUN_TARGET_PROJECT_NAME="XStore" RUN_TARGET_NAME="XStore">
       <method v="2">
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
       </method>
     </configuration>
-    <configuration name="XStore_Client" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
+    <configuration name="XStore" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
       <module name="xStore2" />
       <option name="INTERPRETER_OPTIONS" value="" />
       <option name="PARENT_ENVS" value="true" />
@@ -128,7 +131,7 @@
       <option name="IS_MODULE_SDK" value="true" />
       <option name="ADD_CONTENT_ROOTS" value="true" />
       <option name="ADD_SOURCE_ROOTS" value="true" />
-      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/clientSrc/Python/XStore_Client.py" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/clientSrc/Python/XStore.py" />
       <option name="PARAMETERS" value="127.0.0.1 12345" />
       <option name="SHOW_COMMAND_LINE" value="false" />
       <option name="EMULATE_TERMINAL" value="false" />
@@ -331,14 +334,7 @@
       <workItem from="1667330155010" duration="19101000" />
       <workItem from="1667616636772" duration="235000" />
       <workItem from="1667616993010" duration="167000" />
-      <workItem from="1667617319231" duration="80818000" />
-    </task>
-    <task id="LOCAL-00178" summary="Added build-test for client">
-      <created>1663303958857</created>
-      <option name="number" value="00178" />
-      <option name="presentableId" value="LOCAL-00178" />
-      <option name="project" value="LOCAL" />
-      <updated>1663303958857</updated>
+      <workItem from="1667617319231" duration="90758000" />
     </task>
     <task id="LOCAL-00179" summary="Experimenting .pre/.post">
       <created>1663358853345</created>
@@ -676,7 +672,14 @@
       <option name="project" value="LOCAL" />
       <updated>1668212664492</updated>
     </task>
-    <option name="localTasksCounter" value="227" />
+    <task id="LOCAL-00227" summary="Fixed broken C++ Client code">
+      <created>1668213331280</created>
+      <option name="number" value="00227" />
+      <option name="presentableId" value="LOCAL-00227" />
+      <option name="project" value="LOCAL" />
+      <updated>1668213331280</updated>
+    </task>
+    <option name="localTasksCounter" value="228" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
