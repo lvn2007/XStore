@@ -114,10 +114,11 @@ int main(int argc, char const *argv[])
             // Const
             std::string dbName = "SYS_INFO";
             std::time_t dummyTime = 1482271200;
+            std::string timeResolution = "SECOND";
             std::string dummyData = "SYS INFO,TEST";
 
             // FIRST - CREATE_DB (DUMMY)
-            std::string createDB_statusMessage = xstoreClient.createDB(dbName);
+            std::string createDB_statusMessage = xstoreClient.createDB(dbName, timeResolution);
 
             // SECOND - UNARY_INSERT (DUMMY)
             std::string insertResult = xstoreClient.unaryInsert(dummyTime, dummyData, dbName);
@@ -131,11 +132,11 @@ int main(int argc, char const *argv[])
             for (int i = 0; i < sysInfo_message.db_Info.size(); i++) {
                 std::cout << "- DB Name: " << sysInfo_message.db_Info.at(i).dbName << std::endl;
                 std::cout << "  DB Resolution: " << sysInfo_message.db_Info.at(i).dbResolution << std::endl;
-                std::cout << "  DB Size in GB: " << sysInfo_message.db_Info.at(i).dbSizeInGB << std::endl;
-                std::cout << "  Filename: " << std::endl;
-                for (int j = 0; j < sysInfo_message.db_Info.at(i).fileName.size(); j++) {
-                    std::cout << "   - " << sysInfo_message.db_Info.at(i).fileName.at(j) << std::endl;
-                }
+                std::cout << "  DB Size in Byte: " << sysInfo_message.db_Info.at(i).dbSizeInByte << std::endl;
+//                std::cout << "  Filename: " << std::endl;
+//                for (int j = 0; j < sysInfo_message.db_Info.at(i).fileName.size(); j++) {
+//                    std::cout << "   - " << sysInfo_message.db_Info.at(i).fileName.at(j) << std::endl;
+//                }
             }
             std::cout << "Before bool checks" << std::endl;
 
@@ -143,8 +144,8 @@ int main(int argc, char const *argv[])
             bool threadCount_check = (sysInfo_message.numThreads > 0);
             bool dbName_check = (sysInfo_message.db_Info.at(0).dbName == dbName);
             bool dbResolution_check = (sysInfo_message.db_Info.at(0).dbResolution == "SECOND");
-            bool dbSize_check = (sysInfo_message.db_Info.at(0).dbSizeInGB > 1);
-            bool dbFilename_check = (sysInfo_message.db_Info.at(0).fileName.at(0) == "2016.XSTORE");
+            bool dbSize_check = (sysInfo_message.db_Info.at(0).dbSizeInByte > 1);
+//            bool dbFilename_check = (sysInfo_message.db_Info.at(0).fileName.at(0) == "2016.XSTORE");
 
             std::cout << "After bool checks" << std::endl;
 
@@ -154,7 +155,7 @@ int main(int argc, char const *argv[])
             std::cout << "After removeDB" << std::endl;
 
             // VALIDATE
-            if (serverAddress_check && threadCount_check && dbName_check && dbResolution_check && dbSize_check && dbFilename_check) {
+            if (serverAddress_check && threadCount_check && dbName_check && dbResolution_check && dbSize_check) {
                 exit(0);
             }
             exit(1);
@@ -165,14 +166,15 @@ int main(int argc, char const *argv[])
 
             // Const
             std::string dbName = "CREATE_DB";
+            std::string timeResolution = "SECOND";
 
             // CASE 1: Create ok IF not yet created
-            std::string createDB_statusMessage = xstoreClient.createDB(dbName);
+            std::string createDB_statusMessage = xstoreClient.createDB(dbName, timeResolution);
             bool createOk = (createDB_statusMessage == ("[SUCCESS] [CREATE DB] [DB: " + dbName + "] - Created DB"));
             std::cout << createDB_statusMessage << std::endl;
 
             // CASE 2: Create error IF already created
-            createDB_statusMessage = xstoreClient.createDB(dbName);
+            createDB_statusMessage = xstoreClient.createDB(dbName, timeResolution);
             bool createError = (createDB_statusMessage == ("[ERROR] [CREATE DB] [DB: " + dbName + "] - Already existed"));
             std::cout << createDB_statusMessage << std::endl;
 
@@ -193,13 +195,14 @@ int main(int argc, char const *argv[])
             // Const
             std::string dbName = "UNARY_INSERT";
             std::vector<std::time_t> timeList {1482271200};
+            std::vector<std::string> timeResolution {"SECOND"< "MILLISECOND"};
             std::vector<std::string> dataList {"SECOND,GRANULARITY", "MILLISECOND,GRANULARITY"};
 
             std::vector<bool> insertOk { false, false};
 
             for (int i = 0; i < timeList.size(); i++) {
                 // FIRST - CREATE DB
-                std::string createDB_message = xstoreClient.createDB(dbName);
+                std::string createDB_message = xstoreClient.createDB(dbName, timeResolution.at(i));
                 std::cout << createDB_message << std::endl;
 
                 // SECOND - UNARY INSERT
