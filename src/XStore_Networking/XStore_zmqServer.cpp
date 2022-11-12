@@ -75,8 +75,8 @@ void* XStore_zmqServer::workerRoutine(void *args) {
         int rType = clientReqCmd.rtype();
 
         switch (rType) {
-            // INFOREQUEST
-            case XStore_Proto::INFOREQUEST: {
+            // INFO
+            case XStore_Proto::INFO: {
                 // XStore stuffs
                 //  Returning Protobuf obj
                 XStore_Proto::sysInfo_REP protoToClient = myStore.infoQuery(serverAddr, tArgs->numThreads);
@@ -91,8 +91,8 @@ void* XStore_zmqServer::workerRoutine(void *args) {
                 break;
             }
 
-            // UNARY REQUEST
-            case XStore_Proto::UNARYREQUEST: {
+            // UNARY QUERY
+            case XStore_Proto::UNARYQUERY: {
                 // Properly parse Protobuf obj from CLIENT
                 XStore_Proto::unaryQuery_REQ protoFromClient;
                 protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
@@ -106,14 +106,13 @@ void* XStore_zmqServer::workerRoutine(void *args) {
                 zmq::message_t responseToClient(protoToClientSize);
 
                 //  Serialize & Dispatch msg to CLIENT
-                std::cout << protoToClient.dataset() << std::endl;
                 protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
                 socket.send(responseToClient, zmq::send_flags::none);
                 break;
             }
 
-            // BATCH REQUEST
-            case XStore_Proto::RANGEREQUEST: {
+            // RANGE QUERY
+            case XStore_Proto::RANGEQUERY: {
                 // Properly parse Protobuf obj from CLIENT
                 XStore_Proto::rangeQuery_REQ protoFromClient;
                 protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
@@ -133,7 +132,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
             }
 
             // CREATE DB REQUEST
-            case XStore_Proto::CREATEDBREQUEST: {
+            case XStore_Proto::CREATEDB: {
                 // Properly parse Protobuf obj from CLIENT
                 XStore_Proto::createDB_REQ protoFromClient;
                 protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());

@@ -4,10 +4,10 @@ package XStore_Proto;
 
 // ======== COMMAND directives section ========
 enum requestType {
-  INFOREQUEST = 0;
-  UNARYREQUEST = 1;
-  RANGEREQUEST = 2;
-  CREATEDBREQUEST = 3;
+  INFO = 0;
+  UNARYQUERY = 1;
+  RANGEQUERY = 2;
+  CREATEDB = 3;
   UNARYINSERT = 4;
   BATCHINSERT = 5;
   REMOVEDB = 6;
