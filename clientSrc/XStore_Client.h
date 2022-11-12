@@ -8,7 +8,7 @@
 struct dbInfo {
   std::string dbName;
   std::string dbResolution;
-  float dbSizeInGB;
+  float dbSizeInByte;
   std::vector<std::string> fileName;
 };
 
@@ -68,12 +68,12 @@ class XStore_Client {
           dbInfo currDB;
           currDB.dbName = fromServer.dbinfo(i).dbname();
           currDB.dbResolution = fromServer.dbinfo(i).dbresolution();
-          currDB.dbSizeInGB = fromServer.dbinfo(i).totalsizeingb();
+          currDB.dbSizeInByte = fromServer.dbinfo(i).totalsizeinbyte();
 
           // Loop through all file name of a given DB
-          for (int j = 0; j < fromServer.dbinfo(i).filename_size(); j++) {
-              currDB.fileName.push_back(fromServer.dbinfo(i).filename(j));
-          }
+//          for (int j = 0; j < fromServer.dbinfo(i).filename_size(); j++) {
+//              currDB.fileName.push_back(fromServer.dbinfo(i).filename(j));
+//          }
           toReturn.db_Info.push_back(currDB);
       }
 
@@ -104,10 +104,11 @@ class XStore_Client {
       return std::to_string(fromServer.timestamp()) + "," + fromServer.dataset();
   }
 
-  std::string createDB(std::string &dbName) {
+  std::string createDB(std::string &dbName, std::string &timeResolution) {
       XStore_Proto::createDB_REQ toServer;
       toServer.set_rtype(XStore_Proto::CREATEDBREQUEST);
       toServer.set_dbname(dbName);
+      toServer.set_dbname(timeResolution);
 
       // Config msg and send
       size_t byteSize = toServer.ByteSizeLong();
