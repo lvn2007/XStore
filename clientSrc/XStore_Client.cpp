@@ -195,7 +195,7 @@ int main(int argc, char const *argv[])
             // Const
             std::string dbName = "UNARY_INSERT";
             std::vector<std::time_t> timeList {1482271200};
-            std::vector<std::string> timeResolution {"SECOND"< "MILLISECOND"};
+            std::vector<std::string> timeResolution {"SECOND", "MILLISECOND"};
             std::vector<std::string> dataList {"SECOND,GRANULARITY", "MILLISECOND,GRANULARITY"};
 
             std::vector<bool> insertOk { false, false};
