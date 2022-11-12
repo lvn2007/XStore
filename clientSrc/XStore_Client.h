@@ -108,7 +108,7 @@ class XStore_Client {
       XStore_Proto::createDB_REQ toServer;
       toServer.set_rtype(XStore_Proto::CREATEDBREQUEST);
       toServer.set_dbname(dbName);
-      toServer.set_dbname(timeResolution);
+      toServer.set_timeresolution(timeResolution);
 
       // Config msg and send
       size_t byteSize = toServer.ByteSizeLong();

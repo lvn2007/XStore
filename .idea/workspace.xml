@@ -21,9 +21,8 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Remove print in sysInfo &amp; Prelim of Python client">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Fixed broken C++ Client code">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/clientSrc/XStore_Client.h" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore_Client.h" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -333,14 +332,7 @@
       <workItem from="1667330155010" duration="19101000" />
       <workItem from="1667616636772" duration="235000" />
       <workItem from="1667616993010" duration="167000" />
-      <workItem from="1667617319231" duration="79511000" />
-    </task>
-    <task id="LOCAL-00176" summary="Modified CI">
-      <created>1663300171179</created>
-      <option name="number" value="00176" />
-      <option name="presentableId" value="LOCAL-00176" />
-      <option name="project" value="LOCAL" />
-      <updated>1663300171179</updated>
+      <workItem from="1667617319231" duration="80203000" />
     </task>
     <task id="LOCAL-00177" summary="Added server's cmd args">
       <created>1663303146248</created>
@@ -678,7 +670,14 @@
       <option name="project" value="LOCAL" />
       <updated>1668210313445</updated>
     </task>
-    <option name="localTasksCounter" value="225" />
+    <task id="LOCAL-00225" summary="Fixed broken C++ Client code">
+      <created>1668211980621</created>
+      <option name="number" value="00225" />
+      <option name="presentableId" value="LOCAL-00225" />
+      <option name="project" value="LOCAL" />
+      <updated>1668211980621</updated>
+    </task>
+    <option name="localTasksCounter" value="226" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -785,7 +784,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="SYS_INFO test case" />
     <MESSAGE value="Update client proto" />
     <MESSAGE value="Added build test case" />
     <MESSAGE value="Rename sysinfo-test in .gitlab-ci.yml" />
@@ -810,6 +808,7 @@
     <MESSAGE value="Move cfgStruct to createDB" />
     <MESSAGE value="Re-implemented batchInsert/Query" />
     <MESSAGE value="Remove print in sysInfo &amp; Prelim of Python client" />
-    <option name="LAST_COMMIT_MESSAGE" value="Remove print in sysInfo &amp; Prelim of Python client" />
+    <MESSAGE value="Fixed broken C++ Client code" />
+    <option name="LAST_COMMIT_MESSAGE" value="Fixed broken C++ Client code" />
   </component>
 </project>
