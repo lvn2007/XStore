@@ -150,9 +150,7 @@ int main(int argc, char const *argv[])
             std::cout << "After bool checks" << std::endl;
 
             // FINALLY - DELETE_DB (CLEANUP DUMMY)
-            std::cout << "Before removeDB" << std::endl;
             std::string removeDBStatus = xstoreClient.removeDB(dbName);
-            std::cout << "After removeDB" << std::endl;
 
             // VALIDATE
             if (serverAddress_check && threadCount_check && dbName_check && dbResolution_check && dbSize_check) {
