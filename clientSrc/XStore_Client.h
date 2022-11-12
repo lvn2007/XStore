@@ -39,7 +39,7 @@ class XStore_Client {
 
   sysInfo infoRequest() {
       XStore_Proto::reqCMD toServer;
-      toServer.set_rtype(XStore_Proto::INFOREQUEST);
+      toServer.set_rtype(XStore_Proto::INFO);
 
       // Config msg and send
       size_t byteSize = toServer.ByteSizeLong();
@@ -82,7 +82,7 @@ class XStore_Client {
 
   std::string unaryQuery(std::time_t &targetUnixTime, std::string &targetDBName) {
       XStore_Proto::unaryQuery_REQ toServer;
-      toServer.set_rtype(XStore_Proto::UNARYREQUEST);
+      toServer.set_rtype(XStore_Proto::UNARYQUERY);
       toServer.set_timestamp(targetUnixTime);
       toServer.set_dbname(targetDBName);
 
@@ -106,7 +106,7 @@ class XStore_Client {
 
   std::string createDB(std::string &dbName, std::string &timeResolution) {
       XStore_Proto::createDB_REQ toServer;
-      toServer.set_rtype(XStore_Proto::CREATEDBREQUEST);
+      toServer.set_rtype(XStore_Proto::CREATEDB);
       toServer.set_dbname(dbName);
       toServer.set_timeresolution(timeResolution);
 
