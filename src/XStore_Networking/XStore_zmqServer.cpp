@@ -99,8 +99,8 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 // XStore stuffs
                 //  Returning Protobuf obj
-                XStore_Proto::unaryQuery_REP protoToClient = myStore.unaryQuery(protoFromClient.timestamp(), protoFromClient.dbname());
-
+//                XStore_Proto::unaryQuery_REP protoToClient = myStore.unaryQuery(protoFromClient.timestamp(), protoFromClient.dbname());
+                XStore_Proto::unaryQuery_REP protoToClient = myStore.unaryQuery_fTruncate(protoFromClient.timestamp(), protoFromClient.dbname());
                 //  Response message size
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
                 zmq::message_t responseToClient(protoToClientSize);
@@ -139,7 +139,8 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 // XStore stuffs
                 //  Returning Protobuf obj
-                XStore_Proto::createDB_REP protoToClient = myStore.createDB(protoFromClient.dbname(), protoFromClient.timeresolution());
+//                XStore_Proto::createDB_REP protoToClient = myStore.createDB(protoFromClient.dbname(), protoFromClient.timeresolution());
+                XStore_Proto::createDB_REP protoToClient = myStore.createDB_fTruncate(protoFromClient.dbname(), protoFromClient.timeresolution(), protoFromClient.rowlength());
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
@@ -159,7 +160,8 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 // XStore stuffs
                 //  Returning Protobuf obj
-                XStore_Proto::unaryInsert_REP protoToClient = myStore.unaryInsert(protoFromClient.timestamp(), protoFromClient.data(), protoFromClient.dbname());
+//                XStore_Proto::unaryInsert_REP protoToClient = myStore.unaryInsert(protoFromClient.timestamp(), protoFromClient.data(), protoFromClient.dbname());
+                XStore_Proto::unaryInsert_REP protoToClient = myStore.unaryInsert_fTruncate(protoFromClient.timestamp(), protoFromClient.data(), protoFromClient.dbname());
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();

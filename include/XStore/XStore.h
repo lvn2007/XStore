@@ -39,15 +39,18 @@ class XStore {
 
         // CREATING new DB instance with row length
         XStore_Proto::createDB_REP createDB(std::string dbName, std::string timeResolution);
+        XStore_Proto::createDB_REP createDB_fTruncate(std::string dbName, std::string timeResolution, short int rowLength);
 
         // UNARY INSERT time-series oriented values
         XStore_Proto::unaryInsert_REP unaryInsert(std::time_t epochTime, std::string data, std::string dbName);
+        XStore_Proto::unaryInsert_REP unaryInsert_fTruncate(std::time_t epochTime, std::string data, std::string dbName);
 
         // BATCH INSERT time-series oriented values
         XStore_Proto::batchInsert_REP batchInsert(XStore_Proto::batchInsert_REQ *protoFromClient);
 
         // UNARY GET time-series oriented values
         XStore_Proto::unaryQuery_REP unaryQuery(std::time_t epochTime, std::string dbName);
+        XStore_Proto::unaryQuery_REP unaryQuery_fTruncate(std::time_t epochTime, std::string dbName);
 
         // BATCH GET time-series oriented values
         XStore_Proto::batchQuery_REP batchQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName);

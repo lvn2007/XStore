@@ -140,6 +140,69 @@ XStore_Proto::createDB_REP XStore::createDB(std::string dbName, std::string time
     return toReturn;
 }
 
+XStore_Proto::createDB_REP XStore::createDB_fTruncate(std::string dbName, std::string timeResolution, short int rowLength) {
+    // Protobuf obj to be returned
+    XStore_Proto::createDB_REP toReturn;
+    std::string createDBStatus;
+
+    // Ensure dbName & timeResolution string is all capitalized
+    for (int i = 0; i < dbName.size(); i++) {
+        dbName[i] = toupper(dbName[i]);
+    }
+
+    for (int i = 0; i < timeResolution.size(); i++) {
+        timeResolution[i] = toupper(timeResolution[i]);
+    }
+
+    // Target directory of a given DB name
+    std::string targetPath = baseDir + "dataStore/" + dbName + "/";
+
+    // IF folder for dbName is already created
+    //  -> Inform user about the error
+    if (std::filesystem::is_directory(targetPath) == 0) {
+        // Check if within permitted time resolution bounds
+        if (std::find(std::begin(permittedTimeResolution), std::end(permittedTimeResolution), timeResolution) == std::end(permittedTimeResolution)) {
+            createDBStatus = "[ERROR] [CREATE DB] [DB: " + dbName + "] - Invalid time resolution";
+            toReturn.set_createdbstatus(createDBStatus);
+            return toReturn;
+        }
+
+        // Create DB directory
+        if (std::filesystem::create_directory(targetPath) == 1) {
+            std::string successMsg = "[SUCCESS] [CREATE DB] [DB: " + dbName + "] - Created DB";
+            toReturn.set_createdbstatus(successMsg);
+
+            // Dumps DB configurations info to disk
+            //  Organize configs into a struct
+            configStruct cfgStruct;
+            strcpy(cfgStruct.dbName, dbName.c_str());
+            strcpy(cfgStruct.timeResolution, timeResolution.c_str());
+            cfgStruct.rowLength = rowLength;
+
+            // Writing cfgStruct to file
+            FILE *bFile;
+            std::string cfgPath  = targetPath + dbName + ".CFG";
+            bFile = std::fopen(cfgPath.c_str(), "wb+");
+
+            // Lock prior to writing
+            flock(fileno(bFile), LOCK_EX);
+
+            // Writing actual data to disk
+            std::fwrite(&cfgStruct, sizeof(struct configStruct), 1, bFile);
+
+            //  Close file & Release lock after write
+            std::fclose(bFile);
+            flock(fileno(bFile), LOCK_UN);
+
+            return toReturn;
+        }
+    }
+
+    createDBStatus = "[ERROR] [CREATE DB] [DB: " + dbName + "] - Already existed";
+    toReturn.set_createdbstatus(createDBStatus);
+    return toReturn;
+}
+
 // INSERT time-series oriented values
 XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::string data, std::string dbName) {
     // Protobuf obj to be returned
@@ -197,6 +260,82 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::str
 
     // Writing actual data to disk
     std::fwrite((currData.getData()).data(), data.size(), 1, bFile);
+
+    //  Close file & Release lock after write
+    std::fclose(bFile);
+    flock(fileno(bFile), LOCK_UN);
+
+    std::string successMsg = "[SUCCESS] [UNARY INSERT] [DB: " + dbName + "] - Inserted " + std::to_string(unixTime) + ".XSTORE";
+    toReturn.set_insertstatus(successMsg);
+    return toReturn;
+}
+
+XStore_Proto::unaryInsert_REP XStore::unaryInsert_fTruncate(std::time_t unixTime, std::string data, std::string dbName) {
+    // Protobuf obj to be returned
+    XStore_Proto::unaryInsert_REP toReturn;
+    std::string insertStatus;
+
+    // Time structure contains all components per UNIXTIME:
+    //  Year, month, day, hour, minute, sec, ...
+    timeStruct currTS{unixTime};
+
+    // Ensure dbName string is all capitalized
+    for (int i = 0; i < dbName.size(); i++) {
+        dbName[i] = toupper(dbName[i]);
+    }
+
+    // Base directory of a DB
+    std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
+
+    // IF db directory does not exist
+    if (std::filesystem::is_directory(dbBasePath) == 0) {
+        std::string errMsg = "[ERROR] [UNARY INSERT] [DB: " + dbName + "] - DB does not exist";
+        toReturn.set_insertstatus(errMsg);
+        return toReturn;
+    }
+
+    // Enforce time resolution
+    std::string configPath = dbBasePath + dbName + ".CFG";
+    configStruct cfgStruct;
+    FILE *cFile;
+    cFile = std::fopen(configPath.c_str(), "rb");
+    fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
+    std::fclose(cFile);
+
+    if (currTS.timeResolution != cfgStruct.timeResolution) {
+        std::string errMsg = "[ERROR] [UNARY INSERT] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + cfgStruct.timeResolution;
+        toReturn.set_insertstatus(errMsg);
+        return toReturn;
+    }
+
+    // Prepare to write
+    FILE *bFile;
+    std::string targetFile = dbBasePath + std::to_string(currTS.year) + ".XSTORE";
+
+    // Lock prior to file OP
+    flock(fileno(bFile), LOCK_EX);
+
+    // IF target file does NOT exist
+    if (std::filesystem::exists(targetFile) == 0) {
+        // Truncate
+        bFile = std::fopen(targetFile.c_str(), "wb+");
+        ftruncate(fileno(bFile), (currTS.lastEpoch - currTS.firstEpoch) * cfgStruct.rowLength);
+    }
+
+    // ELSE - Target file DOES exist
+    //  -> Organize timestamp & data into an object
+    dataStruct currData{unixTime, data};
+
+    //  Computes diff & offset
+    long long int diff = unixTime - currTS.firstEpoch;
+    long long int offset = diff * cfgStruct.rowLength;
+
+    //  Seek to target offset prior to write
+    bFile = std::fopen(targetFile.c_str(), "rb+");
+    fseeko64(bFile, offset, SEEK_SET);
+
+    //  Writing actual data to disk
+    std::fwrite((currData.getData()).data(), cfgStruct.rowLength, 1, bFile);
 
     //  Close file & Release lock after write
     std::fclose(bFile);
@@ -339,6 +478,84 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery(std::time_t unixTime, std::strin
 
     // Convert to string -- Stripping ending bytes
     std::string returnData(bufferIn, fSize);
+
+    // Set data fetched from XStore to returning Protobuf obj
+    std::string successMsg = "[SUCCESS] [UNARY QUERY] [DB: " + dbName + "] - Acquired " + std::to_string(unixTime) + ".XSTORE";
+    toReturn.set_querystatus(successMsg);
+    toReturn.set_dataset(returnData);
+    return toReturn;
+}
+
+XStore_Proto::unaryQuery_REP XStore::unaryQuery_fTruncate(std::time_t unixTime, std::string dbName) {
+    // Protobuf obj to be returned
+    std::string queryStatus;
+    XStore_Proto::unaryQuery_REP toReturn;
+    toReturn.set_timestamp(unixTime);
+    toReturn.set_dataset("NULL");
+
+    // Ensure dbName string is all capitalized
+    for (int i = 0; i < dbName.size(); i++) {
+        dbName[i] = toupper(dbName[i]);
+    }
+
+    //  Time structure contains all components per UNIXTIME:
+    //      Year, month, day, hour, minute, sec, ...
+    timeStruct currTS{unixTime};
+
+    // Base directory of a DB & Target path of file to READ
+    std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
+    std::string targetFilePath = dbBasePath + std::to_string(currTS.year) + ".XSTORE";
+
+    // IF hierarchical year folder DOES NOT exist
+    if (std::filesystem::exists(targetFilePath) == 0) {
+        std::string errMsg = "[ERROR] [UNARY QUERY] [DB: " + dbName + "] - " + std::to_string(currTS.year) + ".XSTORE does not exist";
+        toReturn.set_querystatus(errMsg);
+        return toReturn;
+    }
+
+    // Enforce time resolution
+    std::string configPath = dbBasePath + dbName + ".CFG";
+    configStruct cfgStruct;
+    FILE *cFile;
+    cFile = std::fopen(configPath.c_str(), "rb");
+    fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
+    std::fclose(cFile);
+
+    if (currTS.timeResolution != cfgStruct.timeResolution) {
+        std::string errMsg = "[ERROR] [UNARY QUERY] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + cfgStruct.timeResolution;
+        toReturn.set_querystatus(errMsg);
+        return toReturn;
+    }
+
+    // Target file IS EXISTED
+    //  Staging area for file waiting to be read
+    FILE *bFile;
+    bFile = std::fopen(targetFilePath.c_str(), "rb");
+
+    //  Lock file prior to reading
+    flock(fileno(bFile), LOCK_SH);
+
+    // Obtain file size
+    //  Computes diff & offset
+    long long int diff = unixTime - currTS.firstEpoch;
+    long long int offset = diff * cfgStruct.rowLength;
+
+    //  A single line data will be read into here
+    char bufferIn[cfgStruct.rowLength];
+
+    //  Seek to computed offset
+    fseeko64(bFile, offset, SEEK_SET);
+
+    // Extract N bytes of data according to N bytes from .CFG file
+    //  .CFG file is set by user when creating db
+    int bytesRead = fread(&bufferIn[0], 1, cfgStruct.rowLength, bFile);
+
+    // Close file & release lock after reading
+    fclose(bFile);
+    flock(fileno(bFile), LOCK_UN);
+
+    // Convert to string -- Stripping ending bytes
+    std::string returnData(bufferIn);
 
     // Set data fetched from XStore to returning Protobuf obj
     std::string successMsg = "[SUCCESS] [UNARY QUERY] [DB: " + dbName + "] - Acquired " + std::to_string(unixTime) + ".XSTORE";

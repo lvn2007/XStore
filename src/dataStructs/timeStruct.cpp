@@ -60,4 +60,22 @@ void timeStruct::extractTimeComponents() {
     this->hour = timePtr->tm_hour;
     this->minute = timePtr->tm_min;
     this->second = timePtr->tm_sec;
+
+    // Set FIRST epoch
+    firstEpochTimePtr.tm_year = this->year - 1900;
+    firstEpochTimePtr.tm_mon = 1-1;
+    firstEpochTimePtr.tm_mday = 1;
+    firstEpochTimePtr.tm_hour = 0;
+    firstEpochTimePtr.tm_min = 0;
+    firstEpochTimePtr.tm_sec = 0;
+    firstEpoch = mktime(&firstEpochTimePtr);
+
+    // Set LAST epoch
+    lastEpochTimePtr.tm_year = this->year - 1900;
+    lastEpochTimePtr.tm_mon = 12-1;
+    lastEpochTimePtr.tm_mday = this->getLastDayOfMonth(12-1);
+    lastEpochTimePtr.tm_hour = 23;
+    lastEpochTimePtr.tm_min = 59;
+    lastEpochTimePtr.tm_sec = 59;
+    lastEpoch = mktime(&lastEpochTimePtr);
 }

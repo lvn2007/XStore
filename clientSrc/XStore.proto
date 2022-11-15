@@ -31,6 +31,7 @@ message createDB_REQ {
   requestType rType = 1;
   string dbName = 2;
   string timeResolution = 3;
+  uint32 rowLength = 4;
 }
 
 // --- UNARY insert request
