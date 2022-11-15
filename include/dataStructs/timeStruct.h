@@ -10,6 +10,7 @@ struct timeStruct {
   std::time_t unixTime;
   std::string timeResolution;
   unsigned short int year, month, day, hour, minute, second;
+  long firstEpoch, lastEpoch;
 
   // Constructor
   timeStruct(std::time_t unixTime);
@@ -18,6 +19,9 @@ struct timeStruct {
   unsigned short int getLastDayOfMonth(unsigned short int iMonth);
 
   private:
+//    unsigned short int firstYear, firstMonth, firstDay, firstHour, firstMinute, firstSecond;
+    tm firstEpochTimePtr{};
+    tm lastEpochTimePtr{};
     void getTimeResolution();
     void extractTimeComponents();
     bool isLeapYear();
