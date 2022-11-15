@@ -312,17 +312,25 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert_fTruncate(std::time_t unixTime
     FILE *bFile;
     std::string targetFile = dbBasePath + std::to_string(currTS.year) + ".XSTORE";
 
-    // Lock prior to file OP
-    flock(fileno(bFile), LOCK_EX);
-
     // IF target file does NOT exist
     if (std::filesystem::exists(targetFile) == 0) {
         // Truncate
         bFile = std::fopen(targetFile.c_str(), "wb+");
+
+        // Lock prior to file OP
+        flock(fileno(bFile), LOCK_EX);
+
         ftruncate(fileno(bFile), (currTS.lastEpoch - currTS.firstEpoch) * cfgStruct.rowLength);
     }
+    else {
+        // ELSE - Target file DOES exist
+        //  Open in append mode
+        bFile = std::fopen(targetFile.c_str(), "rb+");
 
-    // ELSE - Target file DOES exist
+        // Lock prior to file OP
+        flock(fileno(bFile), LOCK_EX);
+    }
+
     //  -> Organize timestamp & data into an object
     dataStruct currData{unixTime, data};
 
@@ -331,7 +339,6 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert_fTruncate(std::time_t unixTime
     long long int offset = diff * cfgStruct.rowLength;
 
     //  Seek to target offset prior to write
-    bFile = std::fopen(targetFile.c_str(), "rb+");
     fseeko64(bFile, offset, SEEK_SET);
 
     //  Writing actual data to disk
