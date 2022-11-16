@@ -73,7 +73,7 @@ void timeStruct::extractTimeComponents() {
     // Set LAST epoch
     lastEpochTimePtr.tm_year = this->year - 1900;
     lastEpochTimePtr.tm_mon = 12-1;
-    lastEpochTimePtr.tm_mday = this->getLastDayOfMonth(12-1);
+    lastEpochTimePtr.tm_mday = this->getLastDayOfMonth(12);
     lastEpochTimePtr.tm_hour = 23;
     lastEpochTimePtr.tm_min = 59;
     lastEpochTimePtr.tm_sec = 59;

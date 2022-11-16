@@ -555,7 +555,7 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery_fTruncate(std::time_t unixTime, 
 
     // Extract N bytes of data according to N bytes from .CFG file
     //  .CFG file is set by user when creating db
-    int bytesRead = fread(&bufferIn[0], 1, cfgStruct.rowLength, bFile);
+    fread(&bufferIn[0], 1, cfgStruct.rowLength, bFile);
 
     // Close file & release lock after reading
     fclose(bFile);
