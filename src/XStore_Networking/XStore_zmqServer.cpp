@@ -101,6 +101,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
                 //  Returning Protobuf obj
 //                XStore_Proto::unaryQuery_REP protoToClient = myStore.unaryQuery(protoFromClient.timestamp(), protoFromClient.dbname());
                 XStore_Proto::unaryQuery_REP protoToClient = myStore.unaryQuery_fTruncate(protoFromClient.timestamp(), protoFromClient.dbname());
+
                 //  Response message size
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
                 zmq::message_t responseToClient(protoToClientSize);
