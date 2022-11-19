@@ -81,6 +81,7 @@ message dbStats {
   string dbName = 1;
   string dbResolution = 2;
   uint64 totalSizeInByte = 3;
+  repeated string fileName = 4;
 }
 
 message sysInfo_REP {
