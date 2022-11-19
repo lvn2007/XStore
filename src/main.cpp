@@ -70,14 +70,10 @@ int main(int argc, char *argv[]) {
     // ----DEV AREA
     // Instantiate XStore obj
     XStore myStore;
-//    XStore_Proto::sysInfo_REP sys_info_rep = myStore.infoQuery("127.0.0.1:12345", THREAD_COUNT);
-//    sys_info_rep.PrintDebugString();
 
     // Create DB
-//    XStore_Proto::createDB_REP create_db_rep = myStore.createDB("TSLA", "second");
-//    create_db_rep.PrintDebugString();
-//    XStore_Proto::createDB_REP create_db_rep = myStore.createDB_fTruncate("TSLA", "second", 5);
-//    create_db_rep.PrintDebugString();
+    XStore_Proto::createDB_REP create_db_rep = myStore.createDB_fTruncate("TSLA", "second", 128);
+    create_db_rep.PrintDebugString();
 
 //    system("free && sync && sudo sh -c \"echo 3 > /proc/sys/vm/drop_caches\" && free");
 //    std::vector<double> us = { };
@@ -103,10 +99,14 @@ int main(int argc, char *argv[]) {
     // Unary Insert
 //    XStore_Proto::unaryInsert_REP unary_insert_rep = myStore.unaryInsert(1482271200, "Test", "TSLA");
 //    unary_insert_rep.PrintDebugString();
-//    XStore_Proto::unaryInsert_REP unary_insert_rep = myStore.unaryInsert_fTruncate(1451606400, "Helo", "TSLA");
+    XStore_Proto::unaryInsert_REP unary_insert_rep = myStore.unaryInsert_fTruncate(1451606400, "Helo", "TSLA");
 //    XStore_Proto::unaryInsert_REP unary_insert_rep1 = myStore.unaryInsert_fTruncate(1451606401, "Worl", "TSLA");
-//    unary_insert_rep.PrintDebugString();
+    unary_insert_rep.PrintDebugString();
 //    unary_insert_rep1.PrintDebugString();
+
+    // SYS INFO
+    XStore_Proto::sysInfo_REP sys_info_rep = myStore.infoQuery("127.0.0.1:12345", THREAD_COUNT);
+    sys_info_rep.PrintDebugString();
 
 //    std::cout << "----" << std::endl;
 
@@ -123,6 +123,6 @@ int main(int argc, char *argv[]) {
 //    batch_insert_rep.PrintDebugString();
 
     // ----DEV AREA
-    XStore_zmqServer xStoreZmqServer(THREAD_COUNT);
-    xStoreZmqServer.startServer(BIND_ADDR, BIND_PORT);
+//    XStore_zmqServer xStoreZmqServer(THREAD_COUNT);
+//    xStoreZmqServer.startServer(BIND_ADDR, BIND_PORT);
 }

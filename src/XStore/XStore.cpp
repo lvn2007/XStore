@@ -33,46 +33,38 @@ XStore_Proto::sysInfo_REP XStore::infoQuery(std::string serverAddr, int threadCo
         currDB->set_dbname(currDBName);
 
         // Fetch config of a target DB
-//        configStruct cfgStruct;
-//        std::string currCfgFilePath = currDBDir + "/" + currDBName + ".config";
-//        int cfgFile = open(currCfgFilePath.c_str(), O_RDONLY);
-//        pread(cfgFile, &cfgStruct, sizeof(cfgStruct), 0);
+        configStruct cfgStruct;
+        std::string currCfgFilePath = currDBDir + "/" + currDBName + ".CFG";
 
-        // Set DB Resolution
-        currDB->set_dbresolution("SECOND");
+        // Check if .CFG file is exist
+        if (std::filesystem::exists(currCfgFilePath)) {
+            int cfgFile = open(currCfgFilePath.c_str(), O_RDONLY);
+            pread(cfgFile, &cfgStruct, sizeof(cfgStruct), 0);
+            // Set DB Resolution
+            currDB->set_dbresolution(cfgStruct.timeResolution);
+        }
+        else {
+            currDB->set_dbresolution("N/A");
+        }
 
         // Size of all data files in current DB
         unsigned long int allSize = 0;
+        struct stat statStruct;
 
-//        for (const std::filesystem::)
+        // Loop through all files in currentDBDir
+        for (auto& dbDir : std::filesystem::directory_iterator(currDBDir)) {
+            // Current file name & path in dbDir
+            std::string currFileName = dbDir.path().filename().string();
+            stat((currDBDir + "/" + currFileName).c_str(), &statStruct);
 
-        // Loop through sub-dirs and
-        for (auto& filePath : std::filesystem::recursive_directory_iterator(currDBDir)) {
-            if (!filePath.is_directory()) {
-                unsigned long int currFileSizeInGB = std::filesystem::file_size(filePath.path());
-                allSize += currFileSizeInGB;
-            }
+            // Fetch current file size & convert to GB
+            unsigned int currFileSizeInGB = file_size(dbDir.path());
+
+            // Number of 512B blocks allocated
+            allSize += statStruct.st_blocks * 512;
+            currDB->add_filename(currFileName);
         }
         currDB->set_totalsizeinbyte(allSize);
-
-//        // Loop through all files in currentDBDir
-//        for (auto& dbDir : std::filesystem::directory_iterator(currDBDir)) {
-//            // Current file name & path in dbDir
-//            std::string currFileName = dbDir.path().filename().string();
-//
-//            // Count only data file -- Ignore .config file(s)
-//            //  IF current file name contains ".config"
-//            //   -> Skip to next iteration
-//            if (currFileName.find(".config") != std::string::npos) {
-//                continue;
-//            }
-//
-//            // Fetch current file size & convert to GB
-//            double currFileSizeInGB = static_cast<double>(file_size(dbDir.path())) / 1024 / 1024 / 1024;
-//            allSize += currFileSizeInGB;
-//            currDB->add_filename(currFileName);
-//        }
-//        currDB->set_totalsizeinbyte(allSize);
     }
 
     return toReturn;
