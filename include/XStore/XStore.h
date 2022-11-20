@@ -26,6 +26,7 @@ class XStore {
         std::string baseDir = getBaseDir();
         std::string dataStoreDir = baseDir + "dataStore/";
         std::map<std::string, fileStruct> dbMap;
+        std::map<std::string, configStruct> cfgMap;
         std::string permittedTimeResolution[2] = {"SECOND", "MILLISECOND"};
 
         int dbCount = 0;

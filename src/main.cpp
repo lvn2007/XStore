@@ -143,6 +143,6 @@ int main(int argc, char *argv[]) {
 //    batch_insert_rep.PrintDebugString();
 
     // ----DEV AREA
-    XStore_zmqServer xStoreZmqServer(THREAD_COUNT);
+    XStore_zmqServer xStoreZmqServer(2);
     xStoreZmqServer.startServer(BIND_ADDR, BIND_PORT);
 }
