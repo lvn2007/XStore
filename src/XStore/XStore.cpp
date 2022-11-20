@@ -20,13 +20,10 @@ XStore_Proto::sysInfo_REP XStore::infoQuery(std::string serverAddr, int threadCo
     toReturn.set_serveraddr(serverAddr);
     toReturn.set_threadcount(threadCount);
 
-    // Location of dataStore
-    std::string dataStoreLoc = baseDir + "dataStore/";
-
     // Loop through all db available in dataStore
-    for (auto& dir : std::filesystem::directory_iterator(dataStoreLoc)) {
+    for (auto& dir : std::filesystem::directory_iterator(dataStoreDir)) {
         std::string currDBName = dir.path().filename().string();
-        std::string currDBDir = dataStoreLoc + currDBName;
+        std::string currDBDir = dataStoreDir + currDBName;
 
         // Set DB Name
         XStore_Proto::dbStats *currDB = toReturn.add_dbinfo();
@@ -497,7 +494,7 @@ XStore_Proto::batchInsert_REP XStore::batchInsert_fTruncate(XStore_Proto::batchI
         std::string targetFile = dbBasePath + std::to_string(yearKey) + ".XSTORE";
 
         // Grab first inserting element for timeStruct purposes
-        //  Getting length of time to truncate
+        //  Get length of time to truncate
         timeStruct thisTS{(std::time_t)protoFromClient->batchinsert_data().at(dataMap[yearKey].at(0)).timestamp()};
 
         // IF target file does NOT exist
@@ -518,6 +515,7 @@ XStore_Proto::batchInsert_REP XStore::batchInsert_fTruncate(XStore_Proto::batchI
             flock(fileno(bFile), LOCK_EX);
         }
 
+        long long int diff, offset;
         // Iterate through each YEAR of inserting data
         for (int i = 0; i < dataMap[yearKey].size(); i++) {
             // Parse each data in a batch collection
@@ -529,8 +527,8 @@ XStore_Proto::batchInsert_REP XStore::batchInsert_fTruncate(XStore_Proto::batchI
             dataStruct currData{unixTime, data};
 
             // Compute diff & offset
-            long long int diff = unixTime - thisTS.firstEpoch;
-            long long int offset = diff * cfgStruct.rowLength;
+            diff = unixTime - thisTS.firstEpoch;
+            offset = diff * cfgStruct.rowLength;
 
             // Seek to target offset prior to write
             fseeko64(bFile, offset, SEEK_SET);
@@ -756,9 +754,6 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(std::time_t startEpochT, std::ti
 }
 
 XStore_Proto::removeDB_REP XStore::removeDB(std::string dbName) {
-    // Fetch all dirs in dataStore dir
-    dbStats();
-
     // Protobuf obj to be returned
     std::string removeStatus;
     XStore_Proto::removeDB_REP toReturn;
@@ -768,17 +763,20 @@ XStore_Proto::removeDB_REP XStore::removeDB(std::string dbName) {
         dbName[i] = toupper(dbName[i]);
     }
 
-    if (dbMap.find(dbName) == dbMap.end()) {
+    // Location of DB
+    std::string dbLoc = dataStoreDir + dbName;
+
+    if (!std::filesystem::exists(dbLoc)) {
         removeStatus = "[ERROR] -- DB with name: " + dbName + " does not exists";
         toReturn.set_removestatus(removeStatus);
         return toReturn;
     }
 
     // Recursively remove entire DB with given DB Name
-    std::filesystem::path targetPath = dataStoreDir + dbName;
-    std::filesystem::remove_all(targetPath);
+    std::filesystem::remove_all(dbLoc);
 
     toReturn.set_removestatus("[SUCCESS] -- Removed DB with name: " + dbName);
+    return toReturn;
 }
 
 XStore_Proto::removeDBFiles_REP XStore::removeDBFiles(std::string dbName, XStore_Proto::removeDBFiles_REQ *protoFromClient) {
