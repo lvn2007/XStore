@@ -45,13 +45,13 @@ message unaryInsert_REQ {
 message batchInsert_DATA {
   uint64 timestamp = 1;
   string data = 2;
-  string dbName = 3;
 }
 
 // --- BATCH insert request
 message batchInsert_REQ {
   requestType rType = 1;
-  repeated batchInsert_DATA batchInsert_DATA = 2;
+  string dbName = 2;
+  repeated batchInsert_DATA batchInsert_DATA = 3;
 }
 
 // --- RANGE request

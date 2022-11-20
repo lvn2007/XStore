@@ -182,7 +182,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 // XStore stuffs
                 //  Returning Protobuf obj
-                XStore_Proto::batchInsert_REP protoToClient = myStore.batchInsert(&protoFromClient);
+                XStore_Proto::batchInsert_REP protoToClient = myStore.batchInsert_fTruncate(&protoFromClient);
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
