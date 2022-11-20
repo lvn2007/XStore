@@ -57,8 +57,8 @@ double getMax(std::vector<double> inputVector) {
 int main(int argc, char *argv[]) {
     // Handle arguments
     if (argc < 4) {
-        std::cout << "[ERROR - Arguments] -- Missing required (2) arguments" << std::endl;
-        std::cout << "[ERROR - Arguments] -- Usages: XStore <BIND ADDR> <BIND PORT> <THREAD COUNT>" << std::endl;
+        std::cout << "[ERROR] [BOOT] -- Missing required (2) arguments" << std::endl;
+        std::cout << "[ERROR] [BOOT] -- Usages: XStore <BIND ADDR> <BIND PORT> <THREAD COUNT>" << std::endl;
         exit(1);
     }
 
@@ -115,6 +115,10 @@ int main(int argc, char *argv[]) {
     // SYS INFO
 //    XStore_Proto::sysInfo_REP sys_info_rep = myStore.infoQuery("127.0.0.1:12345", THREAD_COUNT);
 //    sys_info_rep.PrintDebugString();
+
+    // Remove DB
+//    XStore_Proto::removeDB_REP remove_db_rep = myStore.removeDB("TSLA");
+//    remove_db_rep.PrintDebugString();
 
 //    std::cout << "----" << std::endl;
 

@@ -21,10 +21,10 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Implemented batchInsert">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Cleanup &amp; Update Python API library">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/clientSrc/Python/XStore.py" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/Python/XStore.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -334,14 +334,7 @@
       <workItem from="1667616993010" duration="167000" />
       <workItem from="1667617319231" duration="108234000" />
       <workItem from="1668632121236" duration="1550000" />
-      <workItem from="1668634339233" duration="30767000" />
-    </task>
-    <task id="LOCAL-00186" summary="Implemented batchInsert">
-      <created>1664926406846</created>
-      <option name="number" value="00186" />
-      <option name="presentableId" value="LOCAL-00186" />
-      <option name="project" value="LOCAL" />
-      <updated>1664926406846</updated>
+      <workItem from="1668634339233" duration="33231000" />
     </task>
     <task id="LOCAL-00187" summary="SYS_INFO test case">
       <created>1665282067625</created>
@@ -679,7 +672,14 @@
       <option name="project" value="LOCAL" />
       <updated>1668906344306</updated>
     </task>
-    <option name="localTasksCounter" value="235" />
+    <task id="LOCAL-00235" summary="Cleanup &amp; Update Python API library">
+      <created>1668906994895</created>
+      <option name="number" value="00235" />
+      <option name="presentableId" value="LOCAL-00235" />
+      <option name="project" value="LOCAL" />
+      <updated>1668906994895</updated>
+    </task>
+    <option name="localTasksCounter" value="236" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -786,7 +786,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Debugging CI" />
     <MESSAGE value="Enhance logging for UNARY_INSERT tests" />
     <MESSAGE value="Return 1 instead of exit 1 works with runner???" />
     <MESSAGE value="Exit code is not captured?" />
@@ -811,6 +810,7 @@
     <MESSAGE value="Fixed bug in getting last day of month December" />
     <MESSAGE value="sysInfo now returns amount of 512B blocks allocated per files" />
     <MESSAGE value="Implemented batchInsert" />
-    <option name="LAST_COMMIT_MESSAGE" value="Implemented batchInsert" />
+    <MESSAGE value="Cleanup &amp; Update Python API library" />
+    <option name="LAST_COMMIT_MESSAGE" value="Cleanup &amp; Update Python API library" />
   </component>
 </project>
