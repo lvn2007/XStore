@@ -222,7 +222,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 // XStore stuffs
                 //  Returning Protobuf obj
-                XStore_Proto::removeDBFiles_REP protoToClient = myStore.removeDBFiles(protoFromClient.dbname(), &protoFromClient);
+                XStore_Proto::removeDBFiles_REP protoToClient = myStore.removeDBFiles(&protoFromClient, protoFromClient.dbname());
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
