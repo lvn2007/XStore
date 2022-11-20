@@ -21,11 +21,10 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Updated removeDB">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Updated removeDBFiles">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -336,14 +335,7 @@
       <workItem from="1667616993010" duration="167000" />
       <workItem from="1667617319231" duration="108234000" />
       <workItem from="1668632121236" duration="1550000" />
-      <workItem from="1668634339233" duration="36521000" />
-    </task>
-    <task id="LOCAL-00188" summary="Update client proto">
-      <created>1665282900634</created>
-      <option name="number" value="00188" />
-      <option name="presentableId" value="LOCAL-00188" />
-      <option name="project" value="LOCAL" />
-      <updated>1665282900635</updated>
+      <workItem from="1668634339233" duration="45539000" />
     </task>
     <task id="LOCAL-00189" summary="Added build test case">
       <created>1665284088307</created>
@@ -681,7 +673,14 @@
       <option name="project" value="LOCAL" />
       <updated>1668911117759</updated>
     </task>
-    <option name="localTasksCounter" value="237" />
+    <task id="LOCAL-00237" summary="Updated removeDBFiles">
+      <created>1668915949704</created>
+      <option name="number" value="00237" />
+      <option name="presentableId" value="LOCAL-00237" />
+      <option name="project" value="LOCAL" />
+      <updated>1668915949704</updated>
+    </task>
+    <option name="localTasksCounter" value="238" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -788,7 +787,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Return 1 instead of exit 1 works with runner???" />
     <MESSAGE value="Exit code is not captured?" />
     <MESSAGE value="Brute-force with 1m job timeout" />
     <MESSAGE value="Test exit(1)" />
@@ -813,6 +811,7 @@
     <MESSAGE value="Implemented batchInsert" />
     <MESSAGE value="Cleanup &amp; Update Python API library" />
     <MESSAGE value="Updated removeDB" />
-    <option name="LAST_COMMIT_MESSAGE" value="Updated removeDB" />
+    <MESSAGE value="Updated removeDBFiles" />
+    <option name="LAST_COMMIT_MESSAGE" value="Updated removeDBFiles" />
   </component>
 </project>

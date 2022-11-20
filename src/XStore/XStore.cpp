@@ -9,7 +9,7 @@ XStore::XStore() {
     initDB();
 
     // First, check if there's any existing data exists
-    hasDB();
+//    hasDB();
 }
 
 XStore_Proto::sysInfo_REP XStore::infoQuery(std::string serverAddr, int threadCount) {
@@ -183,6 +183,8 @@ XStore_Proto::createDB_REP XStore::createDB_fTruncate(std::string dbName, std::s
             std::fclose(bFile);
             flock(fileno(bFile), LOCK_UN);
 
+            //  Add this cfgStruct to cfgMap
+            cfgMap[dbName] = cfgStruct;
             return toReturn;
         }
     }
@@ -283,13 +285,21 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert_fTruncate(std::time_t unixTime
         return toReturn;
     }
 
-    // Enforce time resolution
-    std::string configPath = dbBasePath + dbName + ".CFG";
+    // Check if cfgMap NOT contains cfgStruct
     configStruct cfgStruct;
-    FILE *cFile;
-    cFile = std::fopen(configPath.c_str(), "rb");
-    fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
-    std::fclose(cFile);
+    if (cfgMap.find(dbName) == cfgMap.end()) {
+        // Read & add cfgStruct to cfgMap
+        FILE *cFile;
+        std::string configPath = dbBasePath + dbName + ".CFG";
+        cFile = std::fopen(configPath.c_str(), "rb");
+        fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
+        std::fclose(cFile);
+        cfgMap[dbName] = cfgStruct;
+    }
+    else {
+        // Otherwise -> Enforce time resolution
+        cfgStruct = cfgMap[dbName];
+    }
 
     if (currTS.timeResolution != cfgStruct.timeResolution) {
         std::string errMsg = "[ERROR] [UNARY INSERT] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + cfgStruct.timeResolution;
@@ -448,12 +458,7 @@ XStore_Proto::batchInsert_REP XStore::batchInsert_fTruncate(XStore_Proto::batchI
     }
 
     // Enforce time resolution
-    std::string configPath = dbBasePath + dbName + ".CFG";
-    configStruct cfgStruct;
-    FILE *cFile;
-    cFile = std::fopen(configPath.c_str(), "rb");
-    fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
-    std::fclose(cFile);
+    configStruct cfgStruct = cfgMap[dbName];
 
     // Assuming incoming data is unsorted
     //  -> Ascending sort
@@ -635,11 +640,7 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery_fTruncate(std::time_t unixTime, 
 
     // Enforce time resolution
     std::string configPath = dbBasePath + dbName + ".CFG";
-    configStruct cfgStruct;
-    FILE *cFile;
-    cFile = std::fopen(configPath.c_str(), "rb");
-    fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
-    std::fclose(cFile);
+    configStruct cfgStruct = cfgMap[dbName];
 
     if (currTS.timeResolution != cfgStruct.timeResolution) {
         std::string errMsg = "[ERROR] [UNARY QUERY] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + cfgStruct.timeResolution;
@@ -816,25 +817,21 @@ XStore_Proto::removeDBFiles_REP XStore::removeDBFiles(XStore_Proto::removeDBFile
 }
 
 void XStore::initDB() {
-    // Directory contains all data file for a specific DB
-    std::filesystem::path dbNames = baseDir + "dataStore/";
-
-    dbMap.clear();
-
     // Loop through each dbName
-    for (auto& p : std::filesystem::directory_iterator(dbNames))
+    for (auto& p : std::filesystem::directory_iterator(dataStoreDir))
     {
         // Full path of each DB
-        std::string currDBName = p.path().string();
+        std::string currDBPath = p.path().string();
 
         // Extract -- Getting only dbName
-        currDBName = currDBName.erase(0, dbNames.string().size());
+        std::string currDBName = currDBPath.erase(0, dataStoreDir.size());
 
-        // Initialize fileStruct -- Storing file descriptor
-        fileStruct fStruct(currDBName, baseDir);
-
-        // Insert fileStruct for each recognized dbName
-        dbMap.insert(std::make_pair(currDBName, fStruct));
+        // Open & Read cfgStruct of all DB currently exists
+        std::string cfgFilePath = p.path().string() + "/" + currDBName + ".CFG";
+        configStruct cfgStruct;
+        FILE *cFile = std::fopen(cfgFilePath.c_str(), "rb");
+        fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
+        cfgMap[currDBName] = cfgStruct;
     }
 }
 
