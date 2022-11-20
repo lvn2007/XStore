@@ -438,7 +438,6 @@ XStore_Proto::batchInsert_REP XStore::batchInsert_fTruncate(XStore_Proto::batchI
 
     // Base directory of a DB
     std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
-    std::cout << dbBasePath << std::endl;
 
     // IF db directory does not exist
     if (std::filesystem::is_directory(dbBasePath) == 0) {
@@ -494,7 +493,6 @@ XStore_Proto::batchInsert_REP XStore::batchInsert_fTruncate(XStore_Proto::batchI
     // Iterate through each key (year) of dataMap
     for (std::pair<const unsigned short int, std::vector<unsigned long int>> const& pair : dataMap) {
         unsigned short int yearKey = pair.first;
-        std::cout << "Key: " << yearKey << std::endl;
         FILE *bFile;
         std::string targetFile = dbBasePath + std::to_string(yearKey) + ".XSTORE";
 
@@ -541,85 +539,12 @@ XStore_Proto::batchInsert_REP XStore::batchInsert_fTruncate(XStore_Proto::batchI
             std::fwrite((currData.getData()).data(), cfgStruct.rowLength, 1, bFile);
             std::string successMsg = "[SUCCESS] [UNARY INSERT] [DB: " + dbName + "] - Inserted " + std::to_string(unixTime) + " to " + std::to_string(yearKey) + ".XSTORE";
             toReturn.add_insertstatus(successMsg);
-//            std::cout << dataMap[yearKey].at(i) << std::endl;
         }
 
         // Close file & Release lock after write
         std::fclose(bFile);
         flock(fileno(bFile), LOCK_UN);
     }
-
-    // Iterate over batch of insert data
-//    for (int idx = 0; idx < protoFromClient->batchinsert_data_size(); idx++) {
-//        // Parse each data in a batch collection
-//        XStore_Proto::batchInsert_DATA currentInsertData = protoFromClient->batchinsert_data(idx);
-//        std::time_t unixTime = currentInsertData.timestamp();
-//        std::string data = currentInsertData.data();
-//        std::string dbName = currentInsertData.dbname();
-//
-//        // Time structure contains all components per UNIXTIME:
-//        //  Year, month, day, hour, minute, sec, ...
-//        timeStruct currTS{unixTime};
-//
-//        // Check whether dbName is already created
-//        //  Ensure dbName string is all capitalized
-//        for (int i = 0; i < dbName.size(); i++) {
-//            dbName[i] = toupper(dbName[i]);
-//        }
-//
-//        std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
-//
-//        // ONLY read config file when necessary
-//        if (cfgStruct.dbName != dbName) {
-//            FILE *cFile;
-//            std::string configPath = dbBasePath + dbName + ".CFG";
-//            cFile = std::fopen(configPath.c_str(), "rb");
-//            fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
-//            std::fclose(cFile);
-//        }
-//
-//        // Enforce time resolution
-//        if (currTS.timeResolution != cfgStruct.timeResolution) {
-//            std::string errMsg = "[ERROR] [UNARY INSERT] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + cfgStruct.timeResolution;
-//            toReturn.add_insertstatus(errMsg);
-//            continue;
-//        }
-//
-//        // Target path of file to WRITE
-//        std::string targetPath = dbBasePath + std::to_string(currTS.year) + "/" + monthArray[currTS.month - 1] + dayArray[currTS.day - 1] + hourArray[currTS.hour] + minArray[currTS.minute];
-//
-//        // IF hierarchical year folder DOES NOT exist
-//        if (std::filesystem::is_directory(targetPath) == 0) {
-//            // Create hierarchical directories
-//            if (std::filesystem::create_directories(targetPath) == 0) {
-//                std::string errMsg = "[ERROR] [UNARY INSERT] [DB: " + dbName + "] - Unable to create hierarchical directories";
-//                toReturn.add_insertstatus(errMsg);
-//                continue;
-//            }
-//        }
-//
-//        // Staging area for new data file waiting to be inserted
-//        FILE *bFile;
-//        targetPath = targetPath + std::to_string(unixTime) + ".XSTORE";
-//        bFile = std::fopen(targetPath.c_str(), "wb+");
-//
-//        // Lock prior to writing
-//        flock(fileno(bFile), LOCK_EX);
-//
-//        // IF no error
-//        // -> Organize timestamp & data into an object
-//        dataStruct currData{unixTime, data};
-//
-//        // Writing actual data to disk
-//        std::fwrite((currData.getData()).data(), data.size(), 1, bFile);
-//
-//        //  Close file & Release lock after write
-//        std::fclose(bFile);
-//        flock(fileno(bFile), LOCK_UN);
-//
-//        std::string successMsg = "[SUCCESS] [UNARY INSERT] [DB: " + dbName + "] - Inserted " + std::to_string(unixTime) + ".XSTORE";
-//        toReturn.add_insertstatus(successMsg);
-//    }
     return toReturn;
 }
 

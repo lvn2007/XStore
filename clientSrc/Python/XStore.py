@@ -49,6 +49,9 @@ class XStoreClient:
         self.socket.connect(f'tcp://{SERVER_ADDR}:{SERVER_PORT}')
 
     def infoRequest(self):
+        """
+        :return: Nothing
+        """
         # Build msg prior to dispatch
         reqCMD = XStore_Proto.reqCMD()
         reqCMD.rType = XStore_Proto.INFO
@@ -74,12 +77,19 @@ class XStoreClient:
         # SysInfo as returning object
         return SysInfo(recvObj.serverAddr, recvObj.threadCount, dbInfo)
 
-    def createDB(self, dbName, timeResolution):
+    def createDB(self, dbName, timeResolution, rowLength):
+        """
+        :param dbName:
+        :param timeResolution:
+        :param rowLength:
+        :return:
+        """
         # Build msg prior to dispatch
         createDB_REQ = XStore_Proto.createDB_REQ()
         createDB_REQ.rType = XStore_Proto.CREATEDB
         createDB_REQ.dbName = dbName
         createDB_REQ.timeResolution = timeResolution
+        createDB_REQ.rowLength = rowLength
 
         # Dispatch request
         self.socket.send(createDB_REQ.SerializeToString())
@@ -93,6 +103,12 @@ class XStoreClient:
         return StatusMessage(recvObj.createDBStatus)
 
     def unaryInsert(self, insertUnixTime, data, targetDBName):
+        """
+        :param insertUnixTime:
+        :param data:
+        :param targetDBName:
+        :return:
+        """
         # Build msg prior to dispatch
         unaryInsert_REQ = XStore_Proto.unaryInsert_REQ()
         unaryInsert_REQ.rType = XStore_Proto.UNARYINSERT
@@ -112,6 +128,11 @@ class XStoreClient:
         return StatusMessage(recvObj.insertStatus)
 
     def unaryQuery(self, targetUnixTime, targetDBName):
+        """
+        :param targetUnixTime:
+        :param targetDBName:
+        :return:
+        """
         # Build msg prior to dispatch
         unaryQuery_REQ = XStore_Proto.unaryQuery_REQ()
         unaryQuery_REQ.rType = XStore_Proto.UNARYQUERY
@@ -129,10 +150,16 @@ class XStoreClient:
         recvObj.ParseFromString(recvData)
         return QueryResult(recvObj.timestamp, recvObj.dataset, recvObj.queryStatus)
 
-    def batchInsert(self, dataList):
+    def batchInsert(self, dataList, targetDBName):
+        """
+        :param dataList:
+        :param targetDBName:
+        :return:
+        """
         # Build msg prior to dispatch
         batchInsert_REQ = XStore_Proto.batchInsert_REQ()
         batchInsert_REQ.rType = XStore_Proto.BATCHINSERT
+        batchInsert_REQ.dbName = targetDBName
 
         # Loop through each data and add to batchInsert_REQ
         for data in dataList:
@@ -140,7 +167,6 @@ class XStoreClient:
             batchInsert_DATA = batchInsert_REQ.batchInsert_DATA.add()
             batchInsert_DATA.timestamp = data[0]
             batchInsert_DATA.data = data[1]
-            batchInsert_DATA.dbName = data[2]
 
         # Dispatch request
         self.socket.send(batchInsert_REQ.SerializeToString())
@@ -154,6 +180,12 @@ class XStoreClient:
         return StatusMessages(recvObj.insertStatus)
 
     def rangeQuery(self, startUnixTime, endUnixTime, targetDBName):
+        """
+        :param startUnixTime:
+        :param endUnixTime:
+        :param targetDBName:
+        :return:
+        """
         # Build msg prior to dispatch
         rangeQuery_REQ = XStore_Proto.rangeQuery_REQ()
         rangeQuery_REQ.rType = XStore_Proto.RANGEQUERY
@@ -192,8 +224,8 @@ if __name__ == '__main__':
     XStore = XStoreClient(SERVER_ADDR, SERVER_PORT)
 
     # SYS INFO
-    # sysInfo = XStore.infoRequest()
-    # print(sysInfo)
+    sysInfo = XStore.infoRequest()
+    print(sysInfo)
 
     # Create DB
     # createDBStatus = XStore.createDB("TSLA", "SECOND")
@@ -209,8 +241,8 @@ if __name__ == '__main__':
 
     # Batch Insert
     #   Hypothetical list of data
-    # hypData = [[1482271200, "One", "TSLA"], [1482271201, "Two", "TSLA"], [1482271202, "Three", "TSLA"]]
-    # batchInsertStatus = XStore.batchInsert(hypData)
+    # hypData = [[1482271200, "One"], [1482271201, "Two"], [1482271202, "Three"]]
+    # batchInsertStatus = XStore.batchInsert(hypData, "TSLA")
     # print(batchInsertStatus)
 
     # Range Query
