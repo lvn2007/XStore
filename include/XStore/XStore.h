@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <sys/types.h>
 #include <sys/file.h>
+#include <execution>
 #include "XStore.pb.h"
 #include "include/dataStructs/timeStruct.h"
 #include "include/dataStructs/dataStruct.h"
@@ -47,6 +48,7 @@ class XStore {
 
         // BATCH INSERT time-series oriented values
         XStore_Proto::batchInsert_REP batchInsert(XStore_Proto::batchInsert_REQ *protoFromClient);
+        XStore_Proto::batchInsert_REP batchInsert_fTruncate(XStore_Proto::batchInsert_REQ *protoFromClient);
 
         // UNARY GET time-series oriented values
         XStore_Proto::unaryQuery_REP unaryQuery(std::time_t epochTime, std::string dbName);

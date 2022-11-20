@@ -21,10 +21,12 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Fixed bug in getting last day of month December">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="sysInfo now returns amount of 512B blocks allocated per files">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/protoFile/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/XStore.proto" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -335,14 +337,7 @@
       <workItem from="1667616993010" duration="167000" />
       <workItem from="1667617319231" duration="108234000" />
       <workItem from="1668632121236" duration="1550000" />
-      <workItem from="1668634339233" duration="16990000" />
-    </task>
-    <task id="LOCAL-00184" summary="Renaming &amp; Enhanced Protobuf for removeDBFiles">
-      <created>1664006706422</created>
-      <option name="number" value="00184" />
-      <option name="presentableId" value="LOCAL-00184" />
-      <option name="project" value="LOCAL" />
-      <updated>1664006706422</updated>
+      <workItem from="1668634339233" duration="30114000" />
     </task>
     <task id="LOCAL-00185" summary="Implemented removeDBFiles">
       <created>1664598040828</created>
@@ -680,7 +675,14 @@
       <option name="project" value="LOCAL" />
       <updated>1668633034889</updated>
     </task>
-    <option name="localTasksCounter" value="233" />
+    <task id="LOCAL-00233" summary="sysInfo now returns amount of 512B blocks allocated per files">
+      <created>1668834533743</created>
+      <option name="number" value="00233" />
+      <option name="presentableId" value="LOCAL-00233" />
+      <option name="project" value="LOCAL" />
+      <updated>1668834533744</updated>
+    </task>
+    <option name="localTasksCounter" value="234" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -787,7 +789,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Added UNARY_INSERT tests" />
     <MESSAGE value="Remove debug print in server" />
     <MESSAGE value="Debugging CI" />
     <MESSAGE value="Enhance logging for UNARY_INSERT tests" />
@@ -812,6 +813,7 @@
     <MESSAGE value="Switch back to old method" />
     <MESSAGE value="Fixed bug in flock before fopen" />
     <MESSAGE value="Fixed bug in getting last day of month December" />
-    <option name="LAST_COMMIT_MESSAGE" value="Fixed bug in getting last day of month December" />
+    <MESSAGE value="sysInfo now returns amount of 512B blocks allocated per files" />
+    <option name="LAST_COMMIT_MESSAGE" value="sysInfo now returns amount of 512B blocks allocated per files" />
   </component>
 </project>
