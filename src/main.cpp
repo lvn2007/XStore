@@ -120,6 +120,14 @@ int main(int argc, char *argv[]) {
 //    XStore_Proto::removeDB_REP remove_db_rep = myStore.removeDB("TSLA");
 //    remove_db_rep.PrintDebugString();
 
+    // Remove DB
+//    XStore_Proto::removeDBFiles_REQ remove_db_files_req;
+//    remove_db_files_req.set_dbname("TSLA");
+//    remove_db_files_req.add_filename("2016.XSTORE");
+
+//    XStore_Proto::removeDBFiles_REP remove_db_files_rep = myStore.removeDBFiles(&remove_db_files_req, remove_db_files_req.dbname());
+//    remove_db_files_rep.PrintDebugString();
+
 //    std::cout << "----" << std::endl;
 
 //    XStore_Proto::unaryQuery_REP unary_query_rep = myStore.unaryQuery(1482271200, "tsla");
