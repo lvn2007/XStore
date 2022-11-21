@@ -290,17 +290,18 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert_fTruncate(std::time_t unixTime
     if (cfgMap.find(dbName) == cfgMap.end()) {
         // Read & add cfgStruct to cfgMap
         FILE *cFile;
-        std::string configPath = dbBasePath + dbName + ".CFG";
-        cFile = std::fopen(configPath.c_str(), "rb");
+        std::string cfgPath = dbBasePath + dbName + ".CFG";
+        cFile = std::fopen(cfgPath.c_str(), "rb");
         fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
         std::fclose(cFile);
         cfgMap[dbName] = cfgStruct;
     }
     else {
-        // Otherwise -> Enforce time resolution
+        // Otherwise -> Fetch cfgStruct from cfgMap
         cfgStruct = cfgMap[dbName];
     }
 
+    // Enforce time granularity
     if (currTS.timeResolution != cfgStruct.timeResolution) {
         std::string errMsg = "[ERROR] [UNARY INSERT] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + cfgStruct.timeResolution;
         toReturn.set_insertstatus(errMsg);
@@ -457,8 +458,21 @@ XStore_Proto::batchInsert_REP XStore::batchInsert_fTruncate(XStore_Proto::batchI
         return toReturn;
     }
 
-    // Enforce time resolution
-    configStruct cfgStruct = cfgMap[dbName];
+    // Check if cfgMap NOT contains cfgStruct
+    configStruct cfgStruct;
+    if (cfgMap.find(dbName) == cfgMap.end()) {
+        // Read & Add cfgStruct to cfgMap
+        FILE *cFile;
+        std::string cfgPath = dbBasePath + dbName + ".CFG";
+        cFile = std::fopen(cfgPath.c_str(), "rb");
+        fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
+        std::fclose(cFile);
+        cfgMap[dbName] = cfgStruct;
+    }
+    else {
+        // Otherwise -> Fetch cfgStruct from cfgMap
+        cfgStruct = cfgMap[dbName];
+    }
 
     // Assuming incoming data is unsorted
     //  -> Ascending sort
