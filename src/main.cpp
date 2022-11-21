@@ -124,6 +124,7 @@ int main(int argc, char *argv[]) {
 //    XStore_Proto::removeDBFiles_REQ remove_db_files_req;
 //    remove_db_files_req.set_dbname("TSLA");
 //    remove_db_files_req.add_filename("2016.XSTORE");
+//    remove_db_files_req.add_filename("TSLA.CFG");
 
 //    XStore_Proto::removeDBFiles_REP remove_db_files_rep = myStore.removeDBFiles(&remove_db_files_req, remove_db_files_req.dbname());
 //    remove_db_files_rep.PrintDebugString();
@@ -143,6 +144,6 @@ int main(int argc, char *argv[]) {
 //    batch_insert_rep.PrintDebugString();
 
     // ----DEV AREA
-    XStore_zmqServer xStoreZmqServer(2);
+    XStore_zmqServer xStoreZmqServer(THREAD_COUNT);
     xStoreZmqServer.startServer(BIND_ADDR, BIND_PORT);
 }
