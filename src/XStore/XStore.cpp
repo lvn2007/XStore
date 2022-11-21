@@ -777,6 +777,9 @@ XStore_Proto::removeDB_REP XStore::removeDB(std::string dbName) {
 
     // Recursively remove entire DB with given DB Name
     std::filesystem::remove_all(dbLoc);
+
+    // Remove DB from cfgMap
+    cfgMap.erase(dbName);
     toReturn.set_removestatus("[SUCCESS] [REMOVE DB] [DB: " + dbName + "] - Removed DB with name: " + dbName);
     return toReturn;
 }
@@ -805,6 +808,10 @@ XStore_Proto::removeDBFiles_REP XStore::removeDBFiles(XStore_Proto::removeDBFile
     // Loop through each requested file name
     for (int i = 0; i < protoFromClient->filename_size(); i++) {
         std::filesystem::path targetPath = dataStoreDir + dbName + "/" + protoFromClient->filename(i);
+        if (protoFromClient->filename(i) == (dbName + ".CFG")) {
+            toReturn.add_removestatus("[ERROR] [REMOVE DB FILES] [DB: " + dbName + "] - " + protoFromClient->filename(i) + " is prohibited to remove");
+            continue;
+        }
         bool currRemove = std::filesystem::remove(targetPath);
         if (currRemove) {
             toReturn.add_removestatus("[SUCCESS] [REMOVE DB FILES] [DB: " + dbName + "] - Removed " + protoFromClient->filename(i));

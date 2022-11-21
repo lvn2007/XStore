@@ -21,9 +21,8 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Updated removeDBFiles">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="cfgMap for createDB &amp; unaryQuery. WIP: removeDB &amp; batchInsert">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
@@ -335,14 +334,7 @@
       <workItem from="1667616993010" duration="167000" />
       <workItem from="1667617319231" duration="108234000" />
       <workItem from="1668632121236" duration="1550000" />
-      <workItem from="1668634339233" duration="45539000" />
-    </task>
-    <task id="LOCAL-00189" summary="Added build test case">
-      <created>1665284088307</created>
-      <option name="number" value="00189" />
-      <option name="presentableId" value="LOCAL-00189" />
-      <option name="project" value="LOCAL" />
-      <updated>1665284088307</updated>
+      <workItem from="1668634339233" duration="49283000" />
     </task>
     <task id="LOCAL-00190" summary="Added build test case">
       <created>1665285674606</created>
@@ -680,7 +672,14 @@
       <option name="project" value="LOCAL" />
       <updated>1668915949704</updated>
     </task>
-    <option name="localTasksCounter" value="238" />
+    <task id="LOCAL-00238" summary="cfgMap for createDB &amp; unaryQuery. WIP: removeDB &amp; batchInsert">
+      <created>1668934432981</created>
+      <option name="number" value="00238" />
+      <option name="presentableId" value="LOCAL-00238" />
+      <option name="project" value="LOCAL" />
+      <updated>1668934432982</updated>
+    </task>
+    <option name="localTasksCounter" value="239" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -787,7 +786,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Exit code is not captured?" />
     <MESSAGE value="Brute-force with 1m job timeout" />
     <MESSAGE value="Test exit(1)" />
     <MESSAGE value="Timeout 1m for all test jobs" />
@@ -812,6 +810,7 @@
     <MESSAGE value="Cleanup &amp; Update Python API library" />
     <MESSAGE value="Updated removeDB" />
     <MESSAGE value="Updated removeDBFiles" />
-    <option name="LAST_COMMIT_MESSAGE" value="Updated removeDBFiles" />
+    <MESSAGE value="cfgMap for createDB &amp; unaryQuery. WIP: removeDB &amp; batchInsert" />
+    <option name="LAST_COMMIT_MESSAGE" value="cfgMap for createDB &amp; unaryQuery. WIP: removeDB &amp; batchInsert" />
   </component>
 </project>
