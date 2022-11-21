@@ -74,7 +74,7 @@ int main(int argc, char *argv[]) {
     // Create DB
 //    XStore_Proto::createDB_REP create_db_rep = myStore.createDB_fTruncate("TSLA", "second", 128);
 //    create_db_rep.PrintDebugString();
-
+//
 //    XStore_Proto::batchInsert_REQ batch_insert_req;
 //    batch_insert_req.set_dbname("TSLA");
 //
@@ -95,8 +95,9 @@ int main(int argc, char *argv[]) {
 //    XStore_Proto::batchInsert_DATA *batch_insert_data3 = batch_insert_req.add_batchinsert_data();
 //    batch_insert_data3->set_timestamp(1070071201);
 //    batch_insert_data3->set_data("Test unordered");
-
+//
 //    XStore_Proto::batchInsert_REP batch_insert_rep = myStore.batchInsert_fTruncate(&batch_insert_req);
+//    batch_insert_req.PrintDebugString();
 
 //    XStore_Proto::batchQuery_REP batch_query_rep = myStore.batchQuery(1482271200, 1482271200 + 62, "TSLA");
 //    batch_query_rep.PrintDebugString();
@@ -105,22 +106,18 @@ int main(int argc, char *argv[]) {
 //    start = std::chrono::high_resolution_clock::now();
 
     // Unary Insert
-//    XStore_Proto::unaryInsert_REP unary_insert_rep = myStore.unaryInsert(1482271200, "Test", "TSLA");
-//    unary_insert_rep.PrintDebugString();
 //    XStore_Proto::unaryInsert_REP unary_insert_rep = myStore.unaryInsert_fTruncate(1451606400, "Helo", "TSLA");
-//    XStore_Proto::unaryInsert_REP unary_insert_rep1 = myStore.unaryInsert_fTruncate(1451606401, "Worl", "TSLA");
 //    unary_insert_rep.PrintDebugString();
-//    unary_insert_rep1.PrintDebugString();
 
     // SYS INFO
 //    XStore_Proto::sysInfo_REP sys_info_rep = myStore.infoQuery("127.0.0.1:12345", THREAD_COUNT);
 //    sys_info_rep.PrintDebugString();
 
-    // Remove DB
+    // REMOVE DB
 //    XStore_Proto::removeDB_REP remove_db_rep = myStore.removeDB("TSLA");
 //    remove_db_rep.PrintDebugString();
 
-    // Remove DB
+    // RMOVE DB FILES
 //    XStore_Proto::removeDBFiles_REQ remove_db_files_req;
 //    remove_db_files_req.set_dbname("TSLA");
 //    remove_db_files_req.add_filename("2016.XSTORE");
@@ -131,9 +128,18 @@ int main(int argc, char *argv[]) {
 
 //    std::cout << "----" << std::endl;
 
-//    XStore_Proto::unaryQuery_REP unary_query_rep = myStore.unaryQuery(1482271200, "tsla");
+    // UNARY QUERY
+//    XStore_Proto::unaryQuery_REP unary_query_rep = myStore.unaryQuery_fTruncate(1070071200, "tsla");
 //    unary_query_rep.PrintDebugString();
-//    XStore_Proto::unaryQuery_REP unary_query_rep = myStore.unaryQuery_fTruncate(1451606400, "tsla");
+//    unary_query_rep = myStore.unaryQuery_fTruncate(1482271200, "tsla");
+//    unary_query_rep.PrintDebugString();
+//    unary_query_rep = myStore.unaryQuery_fTruncate(1482271201, "tsla");
+//    unary_query_rep.PrintDebugString();
+//    unary_query_rep = myStore.unaryQuery_fTruncate(1482271202, "tsla");
+//    unary_query_rep.PrintDebugString();
+//    unary_query_rep = myStore.unaryQuery_fTruncate(1482271203, "tsla");
+//    unary_query_rep.PrintDebugString();
+//    unary_query_rep = myStore.unaryQuery_fTruncate(1070071201, "tsla");
 //    unary_query_rep.PrintDebugString();
 
     // End timer
