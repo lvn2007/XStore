@@ -104,7 +104,7 @@ int main(int argc, char const *argv[])
         if (OP_NAME == "BUILD") {
             std::cout << "|                   BUILD                  |" << std::endl;
             std::cout << "+------------------------------------------+\n" << std::endl;
-            std::cout <<  "[" + xstoreClient.getCurrDT() + "]" + "[INFO] [TEST]" + "Build ok" << std::endl;
+            std::cout <<  "[" + xstoreClient.getCurrDT() + "] [INFO] [TEST]" + " Build ok" << std::endl;
             exit(0);
         }
         else if (OP_NAME == "SYS_INFO") {
@@ -132,31 +132,19 @@ int main(int argc, char const *argv[])
             for (int i = 0; i < sysInfo_message.db_Info.size(); i++) {
                 std::cout << "- DB Name: " << sysInfo_message.db_Info.at(i).dbName << std::endl;
                 std::cout << "  DB Resolution: " << sysInfo_message.db_Info.at(i).dbResolution << std::endl;
-                std::cout << "  DB Size in Byte: " << sysInfo_message.db_Info.at(i).dbSizeInByte << std::endl;
-//                std::cout << "  Filename: " << std::endl;
-//                for (int j = 0; j < sysInfo_message.db_Info.at(i).fileName.size(); j++) {
-//                    std::cout << "   - " << sysInfo_message.db_Info.at(i).fileName.at(j) << std::endl;
-//                }
+                std::cout << "  Total size in Byte: " << sysInfo_message.db_Info.at(i).totalSizeInByte << std::endl;
             }
-            std::cout << "Before bool checks" << std::endl;
 
-            bool serverAddress_check = (sysInfo_message.serverAddr == (SERVER_ADDR + ":" +SERVER_PORT));
-            bool threadCount_check = (sysInfo_message.numThreads > 0);
-            bool dbName_check = (sysInfo_message.db_Info.at(0).dbName == dbName);
-            bool dbResolution_check = (sysInfo_message.db_Info.at(0).dbResolution == "SECOND");
-            bool dbSize_check = (sysInfo_message.db_Info.at(0).dbSizeInByte > 1);
-//            bool dbFilename_check = (sysInfo_message.db_Info.at(0).fileName.at(0) == "2016.XSTORE");
-
-            std::cout << "After bool checks" << std::endl;
+            // Validate tests PASSED
+            assert(sysInfo_message.numThreads > 0);
+            assert(sysInfo_message.db_Info.at(0).dbName == dbName);
+            assert(sysInfo_message.db_Info.at(0).dbResolution == "SECOND");
+            assert(sysInfo_message.db_Info.at(0).totalSizeInByte > 1);
+            assert(sysInfo_message.db_Info.at(0).fileName.at(0) == "2016.XSTORE");
 
             // FINALLY - DELETE_DB (CLEANUP DUMMY)
             std::string removeDBStatus = xstoreClient.removeDB(dbName);
-
-            // VALIDATE
-            if (serverAddress_check && threadCount_check && dbName_check && dbResolution_check && dbSize_check) {
-                exit(0);
-            }
-            exit(1);
+            assert(removeDBStatus == "[SUCCESS] [REMOVE DB] [DB: SYS_INFO] - Removed DB with name: SYS_INFO");
         }
         else if (OP_NAME == "CREATE_DB") {
             std::cout << "|                CREATE_DB                 |" << std::endl;

@@ -22,7 +22,11 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Updated .gitlab-ci.yml">
-      <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/CMakeLists.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore.proto" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/XStore_Client.h" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore_Client.h" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -87,10 +91,10 @@
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
       <recent name="$PROJECT_DIR$/clientSrc" />
+      <recent name="$PROJECT_DIR$/clientSrc" />
       <recent name="$PROJECT_DIR$/src/dataStructs" />
       <recent name="$PROJECT_DIR$" />
       <recent name="$PROJECT_DIR$/overleaf" />
-      <recent name="$PROJECT_DIR$/include/XStore_Networking" />
     </key>
     <key name="MoveFile.RECENT_KEYS">
       <recent name="$PROJECT_DIR$/clientSrc/Python" />
@@ -338,14 +342,7 @@
       <workItem from="1667617319231" duration="108234000" />
       <workItem from="1668632121236" duration="1550000" />
       <workItem from="1668634339233" duration="66280000" />
-      <workItem from="1669102537407" duration="19424000" />
-    </task>
-    <task id="LOCAL-00199" summary="Enhance logging for UNARY_INSERT tests">
-      <created>1665509152131</created>
-      <option name="number" value="00199" />
-      <option name="presentableId" value="LOCAL-00199" />
-      <option name="project" value="LOCAL" />
-      <updated>1665509152131</updated>
+      <workItem from="1669102537407" duration="21057000" />
     </task>
     <task id="LOCAL-00200" summary="Return 1 instead of exit 1 works with runner???">
       <created>1665511039365</created>
@@ -683,7 +680,14 @@
       <option name="project" value="LOCAL" />
       <updated>1669241510789</updated>
     </task>
-    <option name="localTasksCounter" value="248" />
+    <task id="LOCAL-00248" summary="Updated .gitlab-ci.yml">
+      <created>1669241780617</created>
+      <option name="number" value="00248" />
+      <option name="presentableId" value="LOCAL-00248" />
+      <option name="project" value="LOCAL" />
+      <updated>1669241780617</updated>
+    </task>
+    <option name="localTasksCounter" value="249" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">

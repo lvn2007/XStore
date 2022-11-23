@@ -8,7 +8,7 @@
 struct dbInfo {
   std::string dbName;
   std::string dbResolution;
-  float dbSizeInByte;
+  float totalSizeInByte;
   std::vector<std::string> fileName;
 };
 
@@ -57,7 +57,6 @@ class XStore_Client {
       sysInfo toReturn;
 
       fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
-//      fromServer.PrintDebugString();
 
       // Put return data from server to struct
       toReturn.serverAddr = fromServer.serveraddr();
@@ -68,12 +67,12 @@ class XStore_Client {
           dbInfo currDB;
           currDB.dbName = fromServer.dbinfo(i).dbname();
           currDB.dbResolution = fromServer.dbinfo(i).dbresolution();
-          currDB.dbSizeInByte = fromServer.dbinfo(i).totalsizeinbyte();
+          currDB.totalSizeInByte = fromServer.dbinfo(i).totalsizeinbyte();
 
           // Loop through all file name of a given DB
-//          for (int j = 0; j < fromServer.dbinfo(i).filename_size(); j++) {
-//              currDB.fileName.push_back(fromServer.dbinfo(i).filename(j));
-//          }
+          for (int j = 0; j < fromServer.dbinfo(i).filename_size(); j++) {
+              currDB.fileName.push_back(fromServer.dbinfo(i).filename(j));
+          }
           toReturn.db_Info.push_back(currDB);
       }
 
