@@ -113,7 +113,7 @@ message batchInsert_REP {
 }
 
 // --- RANGE/BATCH REQ response
-message batchQuery_REP {
+message rangeQuery_REP {
   repeated unaryQuery_REP unaryResponse = 1;
   string queryStatus = 2;
 }

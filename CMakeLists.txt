@@ -53,4 +53,5 @@ add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h
         include/XStore_Networking/zhelpers.hpp src/dataStructs/configStruct.cpp include/dataStructs/configStruct.h
         include/dataStructs/timeStruct.h src/dataStructs/timeStruct.cpp)
 
+add_compile_options(-O3)
 target_link_libraries(XStore PUBLIC "stdc++fs" ${Protobuf_LIBRARIES} "zmq" Threads::Threads)
