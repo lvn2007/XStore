@@ -45,13 +45,13 @@ message unaryInsert_REQ {
 message batchInsert_DATA {
   uint64 timestamp = 1;
   string data = 2;
-  string dbName = 3;
 }
 
 // --- BATCH insert request
 message batchInsert_REQ {
   requestType rType = 1;
-  repeated batchInsert_DATA batchInsert_DATA = 2;
+  string dbName = 2;
+  repeated batchInsert_DATA batchInsert_DATA = 3;
 }
 
 // --- RANGE request
@@ -81,6 +81,7 @@ message dbStats {
   string dbName = 1;
   string dbResolution = 2;
   uint64 totalSizeInByte = 3;
+  repeated string fileName = 4;
 }
 
 message sysInfo_REP {
@@ -112,7 +113,7 @@ message batchInsert_REP {
 }
 
 // --- RANGE/BATCH REQ response
-message batchQuery_REP {
+message rangeQuery_REP {
   repeated unaryQuery_REP unaryResponse = 1;
   string queryStatus = 2;
 }
