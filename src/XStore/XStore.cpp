@@ -632,22 +632,6 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
     // Base directory of a DB
     std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
 
-    // IF db directory does not exist
-    if (std::filesystem::is_directory(dbBasePath) == 0) {
-        std::string errMsg = "[ERROR] [RANGE QUERY] [DB: " + dbName +"] - DB does not exist";
-
-        // Iterate over range of query data & add query status
-        for (long epochTime = startEpochT; epochTime <= endEpochT; epochTime++) {
-            // Initialize entry to add to toReturn
-            XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_unaryresponse();
-            currEntry->set_timestamp(epochTime);
-            currEntry->set_dataset("");
-            currEntry->set_querystatus(errMsg);
-            return toReturn;
-        }
-        toReturn.set_querystatus(errMsg);
-    }
-
     // Check if cfgMap NOT contains cfgStruct
     configStruct cfgStruct;
     if (cfgMap.find(dbName) == cfgMap.end()) {
@@ -661,6 +645,29 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
     else {
         // Otherwise -> Fetch cfgStruct from cfgMap
         cfgStruct = cfgMap[dbName];
+    }
+
+    // IF query range > 2GB limit of Protobuf
+    if ((endEpochT - startEpochT) * cfgStruct.rowLength > 2000000000) {
+        std::string errMsg = "[ERROR] [RANGE QUERY] DB: " + dbName + "] - Queried range is above 2GB Protobuf size limit";
+        toReturn.set_querystatus(errMsg);
+        return toReturn;
+    }
+
+    // IF db directory does not exist
+    if (std::filesystem::is_directory(dbBasePath) == 0) {
+        std::string errMsg = "[ERROR] [RANGE QUERY] [DB: " + dbName + "] - DB does not exist";
+
+        // Iterate over range of query data & add query status
+        for (long epochTime = startEpochT; epochTime <= endEpochT; epochTime++) {
+            // Initialize entry to add to toReturn
+            XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_unaryresponse();
+            currEntry->set_timestamp(epochTime);
+            currEntry->set_dataset("");
+            currEntry->set_querystatus(errMsg);
+            return toReturn;
+        }
+        toReturn.set_querystatus(errMsg);
     }
 
     // Time granularity check
