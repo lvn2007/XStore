@@ -118,7 +118,7 @@ int main(int argc, char const *argv[])
             std::string dummyData = "SYS INFO,TEST";
 
             // FIRST - CREATE_DB (DUMMY)
-            std::string createDB_statusMessage = xstoreClient.createDB(dbName, timeResolution);
+            std::string createDB_statusMessage = xstoreClient.createDB(dbName, timeResolution, 128);
 
             // SECOND - UNARY_INSERT (DUMMY)
             std::string insertResult = xstoreClient.unaryInsert(dummyTime, dummyData, dbName);
@@ -153,14 +153,20 @@ int main(int argc, char const *argv[])
             // Const
             std::string dbName = "CREATE_DB";
             std::string timeResolution = "SECOND";
+            short int rowLength = 128;
 
-            // CASE 1: Create ok IF not yet created
-            std::string createDB_statusMessage = xstoreClient.createDB(dbName, timeResolution);
+            // CASE 1: Create error IF rowLength < 4
+            std::string createDB_statusMessage = xstoreClient.createDB(dbName, timeResolution, 3);
+            assert(createDB_statusMessage == ("[ERROR] [CREATE DB] [DB: " + dbName + "] - Row length must be >= 4"));
+            std::cout << createDB_statusMessage << std::endl;
+
+            // CASE 2: Create ok IF not yet created
+            createDB_statusMessage = xstoreClient.createDB(dbName, timeResolution, rowLength);
             assert(createDB_statusMessage == ("[SUCCESS] [CREATE DB] [DB: " + dbName + "] - Created DB"));
             std::cout << createDB_statusMessage << std::endl;
 
-            // CASE 2: Create error IF already created
-            createDB_statusMessage = xstoreClient.createDB(dbName, timeResolution);
+            // CASE 3: Create error IF already created
+            createDB_statusMessage = xstoreClient.createDB(dbName, timeResolution, rowLength);
             assert(createDB_statusMessage == ("[ERROR] [CREATE DB] [DB: " + dbName + "] - Already existed"));
             std::cout << createDB_statusMessage << std::endl;
 
@@ -182,7 +188,7 @@ int main(int argc, char const *argv[])
 
             for (int i = 0; i < timeList.size(); i++) {
                 // FIRST - CREATE DB
-                std::string createDB_message = xstoreClient.createDB(dbName, timeResolution.at(i));
+                std::string createDB_message = xstoreClient.createDB(dbName, timeResolution.at(i), 128);
                 std::cout << createDB_message << std::endl;
 
                 // SECOND - UNARY INSERT

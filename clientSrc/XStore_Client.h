@@ -103,11 +103,12 @@ class XStore_Client {
       return std::to_string(fromServer.timestamp()) + "," + fromServer.dataset();
   }
 
-  std::string createDB(std::string &dbName, std::string &timeResolution) {
+  std::string createDB(std::string &dbName, std::string &timeResolution, short int rowLength) {
       XStore_Proto::createDB_REQ toServer;
       toServer.set_rtype(XStore_Proto::CREATEDB);
       toServer.set_dbname(dbName);
       toServer.set_timeresolution(timeResolution);
+      toServer.set_rowlength(rowLength);
 
       // Config msg and send
       size_t byteSize = toServer.ByteSizeLong();
