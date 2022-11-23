@@ -21,9 +21,9 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Implemented rangeQuery. WIP: Notify user about 2GB protobuf limit">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Implemented notifying user about 2GB protobuf limit. WIP: Guard against startTime &gt; endTime">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/Python/XStore.py" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/Python/XStore.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -339,14 +339,7 @@
       <workItem from="1667617319231" duration="108234000" />
       <workItem from="1668632121236" duration="1550000" />
       <workItem from="1668634339233" duration="66280000" />
-      <workItem from="1669102537407" duration="15007000" />
-    </task>
-    <task id="LOCAL-00193" summary="Enhance CI">
-      <created>1665289778709</created>
-      <option name="number" value="00193" />
-      <option name="presentableId" value="LOCAL-00193" />
-      <option name="project" value="LOCAL" />
-      <updated>1665289778710</updated>
+      <workItem from="1669102537407" duration="15418000" />
     </task>
     <task id="LOCAL-00194" summary="Added UNARY_INSERT tests">
       <created>1665446794900</created>
@@ -684,7 +677,14 @@
       <option name="project" value="LOCAL" />
       <updated>1669187760202</updated>
     </task>
-    <option name="localTasksCounter" value="242" />
+    <task id="LOCAL-00242" summary="Implemented notifying user about 2GB protobuf limit. WIP: Guard against startTime &gt; endTime">
+      <created>1669188418234</created>
+      <option name="number" value="00242" />
+      <option name="presentableId" value="LOCAL-00242" />
+      <option name="project" value="LOCAL" />
+      <updated>1669188418234</updated>
+    </task>
+    <option name="localTasksCounter" value="243" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -791,7 +791,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Switch back to exit()" />
     <MESSAGE value="Re-implementing time structures" />
     <MESSAGE value="Cleanup createDB" />
     <MESSAGE value="Temporary disable SYS_INFO test -- Needs reimplementation" />
@@ -816,6 +815,7 @@
     <MESSAGE value="Remove cfgMap element in removeDB &amp; Prohibit the removal of .CFG in removeDBFiles" />
     <MESSAGE value="Equipped cfgMap for batchInsert" />
     <MESSAGE value="Implemented rangeQuery. WIP: Notify user about 2GB protobuf limit" />
-    <option name="LAST_COMMIT_MESSAGE" value="Implemented rangeQuery. WIP: Notify user about 2GB protobuf limit" />
+    <MESSAGE value="Implemented notifying user about 2GB protobuf limit. WIP: Guard against startTime &gt; endTime" />
+    <option name="LAST_COMMIT_MESSAGE" value="Implemented notifying user about 2GB protobuf limit. WIP: Guard against startTime &gt; endTime" />
   </component>
 </project>
