@@ -21,9 +21,9 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Implemented notifying user about 2GB protobuf limit. WIP: Guard against startTime &gt; endTime">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Updated Python client">
+      <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/clientSrc/Python/XStore.py" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/Python/XStore.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -339,14 +339,7 @@
       <workItem from="1667617319231" duration="108234000" />
       <workItem from="1668632121236" duration="1550000" />
       <workItem from="1668634339233" duration="66280000" />
-      <workItem from="1669102537407" duration="15418000" />
-    </task>
-    <task id="LOCAL-00194" summary="Added UNARY_INSERT tests">
-      <created>1665446794900</created>
-      <option name="number" value="00194" />
-      <option name="presentableId" value="LOCAL-00194" />
-      <option name="project" value="LOCAL" />
-      <updated>1665446794901</updated>
+      <workItem from="1669102537407" duration="17323000" />
     </task>
     <task id="LOCAL-00195" summary="Remove debug print in server">
       <created>1665447610875</created>
@@ -684,7 +677,14 @@
       <option name="project" value="LOCAL" />
       <updated>1669188418234</updated>
     </task>
-    <option name="localTasksCounter" value="243" />
+    <task id="LOCAL-00243" summary="Updated Python client">
+      <created>1669188600987</created>
+      <option name="number" value="00243" />
+      <option name="presentableId" value="LOCAL-00243" />
+      <option name="project" value="LOCAL" />
+      <updated>1669188600987</updated>
+    </task>
+    <option name="localTasksCounter" value="244" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -791,7 +791,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Re-implementing time structures" />
     <MESSAGE value="Cleanup createDB" />
     <MESSAGE value="Temporary disable SYS_INFO test -- Needs reimplementation" />
     <MESSAGE value="Fixed UNARY_QUERY" />
@@ -816,6 +815,7 @@
     <MESSAGE value="Equipped cfgMap for batchInsert" />
     <MESSAGE value="Implemented rangeQuery. WIP: Notify user about 2GB protobuf limit" />
     <MESSAGE value="Implemented notifying user about 2GB protobuf limit. WIP: Guard against startTime &gt; endTime" />
-    <option name="LAST_COMMIT_MESSAGE" value="Implemented notifying user about 2GB protobuf limit. WIP: Guard against startTime &gt; endTime" />
+    <MESSAGE value="Updated Python client" />
+    <option name="LAST_COMMIT_MESSAGE" value="Updated Python client" />
   </component>
 </project>
