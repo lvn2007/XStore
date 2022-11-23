@@ -143,6 +143,12 @@ XStore_Proto::createDB_REP XStore::createDB_fTruncate(std::string dbName, std::s
         timeResolution[i] = toupper(timeResolution[i]);
     }
 
+    if (rowLength < 4) {
+        createDBStatus = "[ERROR] [CREATE DB] [DB: " + dbName + "] - Row length must be >= 4";
+        toReturn.set_createdbstatus(createDBStatus);
+        return toReturn;
+    }
+
     // Target directory of a given DB name
     std::string targetPath = baseDir + "dataStore/" + dbName + "/";
 
