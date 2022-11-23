@@ -156,23 +156,17 @@ int main(int argc, char const *argv[])
 
             // CASE 1: Create ok IF not yet created
             std::string createDB_statusMessage = xstoreClient.createDB(dbName, timeResolution);
-            bool createOk = (createDB_statusMessage == ("[SUCCESS] [CREATE DB] [DB: " + dbName + "] - Created DB"));
+            assert(createDB_statusMessage == ("[SUCCESS] [CREATE DB] [DB: " + dbName + "] - Created DB"));
             std::cout << createDB_statusMessage << std::endl;
 
             // CASE 2: Create error IF already created
             createDB_statusMessage = xstoreClient.createDB(dbName, timeResolution);
-            bool createError = (createDB_statusMessage == ("[ERROR] [CREATE DB] [DB: " + dbName + "] - Already existed"));
+            assert(createDB_statusMessage == ("[ERROR] [CREATE DB] [DB: " + dbName + "] - Already existed"));
             std::cout << createDB_statusMessage << std::endl;
 
             // FINALLY - DELETE_DB (CLEANUP DUMMY)
             std::string removeDBStatus = xstoreClient.removeDB(dbName);
-
-            // VALIDATE
-            if (createOk && createError) {
-                exit(0);
-            }
-
-            exit(1);
+            assert(removeDBStatus == "[SUCCESS] [REMOVE DB] [DB: CREATE_DB] - Removed DB with name: CREATE_DB");
         }
         else if (OP_NAME == "UNARY_INSERT") {
             std::cout << "|               UNARY_INSERT               |" << std::endl;
