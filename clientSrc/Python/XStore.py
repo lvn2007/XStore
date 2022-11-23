@@ -1,4 +1,5 @@
 import sys
+import time
 from typing import List
 import XStore_pb2 as XStore_Proto
 import zmq
@@ -39,6 +40,7 @@ class StatusMessages:
 @dataclasses.dataclass
 class QueryResults:
     queryResult: List[QueryResult]
+    queryStatus: StatusMessage
 
 
 class XStoreClient:
@@ -212,11 +214,59 @@ class XStoreClient:
             queryResults.append(currResult)
 
         # QueryResults as returning object
-        return QueryResults(queryResults)
+        return QueryResults(queryResults, recvObj.queryStatus)
+
+    def remove_db(self, dbName):
+        """
+        :param dbName:
+        :return:
+        """
+        # Build msg prior to dispatch
+        removeDB_REQ = XStore_Proto.removeDB_REQ()
+        removeDB_REQ.rType = XStore_Proto.REMOVEDB
+        removeDB_REQ.dbName = dbName
+
+        # Dispatch request
+        self.socket.send(removeDB_REQ.SerializeToString())
+
+        # Receive response
+        recvData = self.socket.recv()
+
+        # Prepare object to be parsed into
+        recvObj = XStore_Proto.removeDB_REP()
+        recvObj.ParseFromString(recvData)
+        return StatusMessage(recvObj.removeStatus)
+
+    def remove_db_files(self, filenameList, dbName):
+        """
+        :param filenameList:
+        :param dbName:
+        :return:
+        """
+        # Build msg prior to dispatch
+        removeDBFiles_REQ = XStore_Proto.removeDBFiles_REQ()
+        removeDBFiles_REQ.rType = XStore_Proto.REMOVEDBFILES
+        removeDBFiles_REQ.dbName = dbName
+
+        # Loop through each data and add to removeDBFiles_REQ
+        for i in filenameList:
+            # Add filename to removeDBFiles_REQ
+            removeDBFiles_REQ.fileName.append(i)
+
+        # Dispatch request
+        self.socket.send(removeDBFiles_REQ.SerializeToString())
+
+        # Receive response
+        recvData = self.socket.recv()
+
+        # Prepare object to be parsed into
+        recvObj = XStore_Proto.removeDBFiles_REP()
+        recvObj.ParseFromString(recvData)
+        return StatusMessages(recvObj.removeStatus)
 
 
 if __name__ == '__main__':
-    # Command-line args
+    # # Command-line args
     SERVER_ADDR = sys.argv[1]
     SERVER_PORT = sys.argv[2]
 
@@ -228,7 +278,7 @@ if __name__ == '__main__':
     print(sysInfo)
 
     # Create DB
-    # createDBStatus = XStore.createDB("TSLA", "SECOND")
+    # createDBStatus = XStore.createDB("TSLA", "SECOND", 128)
     # print(createDBStatus)
 
     # Unary Insert
@@ -246,5 +296,16 @@ if __name__ == '__main__':
     # print(batchInsertStatus)
 
     # Range Query
-    # rangeQueryResult = XStore.rangeQuery(1482271200, 1482271202, "TSLA")
-    # print(rangeQueryResult)
+    sTime = time.time()
+    rangeQueryResult = XStore.rangeQuery(1483228798, 1483228798+1000, "TSLA")
+    print(f'Took: {time.time() - sTime}')
+    [print(i) for i in rangeQueryResult.queryResult]
+    print(rangeQueryResult.queryStatus)
+
+    # Remove DB
+    # removeDBResult = XStore.remove_db("TSLA")
+    # print(removeDBResult)
+
+    # Remove DB Files
+    # removeDBFilesResults = XStore.remove_db_files(['2016.XSTORE', '2017.XSTORE'], "TSLA")
+    # print(removeDBFilesResults)
