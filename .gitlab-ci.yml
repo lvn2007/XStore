@@ -52,6 +52,8 @@ compile-client:
     - cd clientSrc && mkdir build && cd build
     - cmake .. && make && cd ../../..
     - mkdir ~/XStore_Client ~/XStore_Client/build
+    - ls
+    - pwd
     - cp -r XStore/clientSrc/build/* ~/XStore_Client/build    # Copy to designated home folder so won't get cleaned-up by runner
 
 build-test-server:

@@ -21,9 +21,8 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Updated Python client">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Updated .gitlab-ci.yml">
       <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -339,14 +338,7 @@
       <workItem from="1667617319231" duration="108234000" />
       <workItem from="1668632121236" duration="1550000" />
       <workItem from="1668634339233" duration="66280000" />
-      <workItem from="1669102537407" duration="17323000" />
-    </task>
-    <task id="LOCAL-00195" summary="Remove debug print in server">
-      <created>1665447610875</created>
-      <option name="number" value="00195" />
-      <option name="presentableId" value="LOCAL-00195" />
-      <option name="project" value="LOCAL" />
-      <updated>1665447610876</updated>
+      <workItem from="1669102537407" duration="17604000" />
     </task>
     <task id="LOCAL-00196" summary="Debugging CI">
       <created>1665450612959</created>
@@ -684,7 +676,14 @@
       <option name="project" value="LOCAL" />
       <updated>1669188600987</updated>
     </task>
-    <option name="localTasksCounter" value="244" />
+    <task id="LOCAL-00244" summary="Updated .gitlab-ci.yml">
+      <created>1669239480638</created>
+      <option name="number" value="00244" />
+      <option name="presentableId" value="LOCAL-00244" />
+      <option name="project" value="LOCAL" />
+      <updated>1669239480638</updated>
+    </task>
+    <option name="localTasksCounter" value="245" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -791,7 +790,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Cleanup createDB" />
     <MESSAGE value="Temporary disable SYS_INFO test -- Needs reimplementation" />
     <MESSAGE value="Fixed UNARY_QUERY" />
     <MESSAGE value="Modified sysInfo &amp; File lock in writing" />
@@ -816,6 +814,7 @@
     <MESSAGE value="Implemented rangeQuery. WIP: Notify user about 2GB protobuf limit" />
     <MESSAGE value="Implemented notifying user about 2GB protobuf limit. WIP: Guard against startTime &gt; endTime" />
     <MESSAGE value="Updated Python client" />
-    <option name="LAST_COMMIT_MESSAGE" value="Updated Python client" />
+    <MESSAGE value="Updated .gitlab-ci.yml" />
+    <option name="LAST_COMMIT_MESSAGE" value="Updated .gitlab-ci.yml" />
   </component>
 </project>
