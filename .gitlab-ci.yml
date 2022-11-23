@@ -42,7 +42,7 @@ compile-server:
     - mkdir build && cd build
     - cmake .. && make && cd ../..
     - mkdir ~/XStore_Server ~/XStore_Server/build ~/XStore_Server/dataStore
-    - cp -r xStore/build/* ~/XStore_Server/build              # Copy to designated home folder so won't get cleaned-up by runner
+    - cp -r XStore/build/* ~/XStore_Server/build              # Copy to designated home folder so won't get cleaned-up by runner
 
 compile-client:
   stage: Build
