@@ -22,7 +22,7 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Updated .gitlab-ci.yml">
-      <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -338,14 +338,7 @@
       <workItem from="1667617319231" duration="108234000" />
       <workItem from="1668632121236" duration="1550000" />
       <workItem from="1668634339233" duration="66280000" />
-      <workItem from="1669102537407" duration="17604000" />
-    </task>
-    <task id="LOCAL-00196" summary="Debugging CI">
-      <created>1665450612959</created>
-      <option name="number" value="00196" />
-      <option name="presentableId" value="LOCAL-00196" />
-      <option name="project" value="LOCAL" />
-      <updated>1665450612959</updated>
+      <workItem from="1669102537407" duration="18086000" />
     </task>
     <task id="LOCAL-00197" summary="Debugging CI">
       <created>1665453416761</created>
@@ -683,7 +676,14 @@
       <option name="project" value="LOCAL" />
       <updated>1669239480638</updated>
     </task>
-    <option name="localTasksCounter" value="245" />
+    <task id="LOCAL-00245" summary="Updated .gitlab-ci.yml">
+      <created>1669239831078</created>
+      <option name="number" value="00245" />
+      <option name="presentableId" value="LOCAL-00245" />
+      <option name="project" value="LOCAL" />
+      <updated>1669239831079</updated>
+    </task>
+    <option name="localTasksCounter" value="246" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
