@@ -654,6 +654,12 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
         return toReturn;
     }
 
+    if ((endEpochT - startEpochT) < 0) {
+        std::string errMsg = "[ERROR] [RANGE QUERY] DB: " + dbName + "] - Invalid range query. Requires end time > start time";
+        toReturn.set_querystatus(errMsg);
+        return toReturn;
+    }
+
     // IF db directory does not exist
     if (std::filesystem::is_directory(dbBasePath) == 0) {
         std::string errMsg = "[ERROR] [RANGE QUERY] [DB: " + dbName + "] - DB does not exist";
