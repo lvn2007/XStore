@@ -48,7 +48,6 @@ class XStore {
         XStore_Proto::unaryInsert_REP unaryInsert_fTruncate(std::time_t epochTime, std::string data, std::string dbName);
 
         // BATCH INSERT time-series oriented values
-        XStore_Proto::batchInsert_REP batchInsert(XStore_Proto::batchInsert_REQ *protoFromClient);
         XStore_Proto::batchInsert_REP batchInsert_fTruncate(XStore_Proto::batchInsert_REQ *protoFromClient);
 
         // UNARY GET time-series oriented values
@@ -56,7 +55,7 @@ class XStore {
         XStore_Proto::unaryQuery_REP unaryQuery_fTruncate(std::time_t epochTime, std::string dbName);
 
         // BATCH GET time-series oriented values
-        XStore_Proto::batchQuery_REP batchQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName);
+        XStore_Proto::rangeQuery_REP rangeQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName);
 
         // REMOVE DB -- Removing an entire DB and its data files
         XStore_Proto::removeDB_REP removeDB(std::string dbName);

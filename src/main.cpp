@@ -77,24 +77,15 @@ int main(int argc, char *argv[]) {
 //
 //    XStore_Proto::batchInsert_REQ batch_insert_req;
 //    batch_insert_req.set_dbname("TSLA");
-//
 //    XStore_Proto::batchInsert_DATA *batch_insert_data2 = batch_insert_req.add_batchinsert_data();
-//    batch_insert_data2->set_timestamp(1070071200);
-//    batch_insert_data2->set_data("Test unordered");
+//    batch_insert_data2->set_timestamp(1483228798);
+//    batch_insert_data2->set_data("Before last of 2016");
 //
-//    XStore_Proto::batchInsert_DATA *batch_insert_data1 = batch_insert_req.add_batchinsert_data();
-//    batch_insert_data1->set_timestamp(1482271200);
-//    batch_insert_data1->set_data("Test unordered");
-//
-//    for (int i = 1; i < 3; i++) {
+//    for (int i = 1; i < 5; i++) {
 //        XStore_Proto::batchInsert_DATA *batch_insert_data = batch_insert_req.add_batchinsert_data();
-//        batch_insert_data->set_timestamp(1482271200 + i);
-//        batch_insert_data->set_data("Test" + std::to_string(i));
+//        batch_insert_data->set_timestamp(1483228798 + i);
+//        batch_insert_data->set_data("Test " + std::to_string(1483228798 + i));
 //    }
-//
-//    XStore_Proto::batchInsert_DATA *batch_insert_data3 = batch_insert_req.add_batchinsert_data();
-//    batch_insert_data3->set_timestamp(1070071201);
-//    batch_insert_data3->set_data("Test unordered");
 //
 //    XStore_Proto::batchInsert_REP batch_insert_rep = myStore.batchInsert_fTruncate(&batch_insert_req);
 //    batch_insert_req.PrintDebugString();
@@ -141,6 +132,11 @@ int main(int argc, char *argv[]) {
 //    unary_query_rep.PrintDebugString();
 //    unary_query_rep = myStore.unaryQuery_fTruncate(1070071201, "tsla");
 //    unary_query_rep.PrintDebugString();
+
+    // RANGE QUERY
+//    XStore_Proto::rangeQuery_REP range_query_rep = myStore.rangeQuery(1482271200, 1482271204, "tsla");
+//    XStore_Proto::rangeQuery_REP range_query_rep = myStore.rangeQuery(1483228798, 1483228808, "tsla");
+//    range_query_rep.PrintDebugString();
 
     // End timer
 //    end = std::chrono::high_resolution_clock::now();

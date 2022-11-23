@@ -21,9 +21,13 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Remove cfgMap element in removeDB &amp; Prohibit the removal of .CFG in removeDBFiles">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Equipped cfgMap for batchInsert">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/CMakeLists.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/protoFile/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/XStore.proto" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -114,6 +118,11 @@
       <method v="2" />
     </configuration>
     <configuration name="XStore" type="CMakeRunConfiguration" factoryName="Application" temporary="true" PROGRAM_PARAMS="* 12345 2" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="XStore" TARGET_NAME="XStore" CONFIG_NAME="Debug-Remote-xStore-Master" RUN_TARGET_PROJECT_NAME="XStore" RUN_TARGET_NAME="XStore">
+      <method v="2">
+        <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
+      </method>
+    </configuration>
+    <configuration default="true" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
       <method v="2">
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
       </method>
@@ -334,14 +343,8 @@
       <workItem from="1667616993010" duration="167000" />
       <workItem from="1667617319231" duration="108234000" />
       <workItem from="1668632121236" duration="1550000" />
-      <workItem from="1668634339233" duration="50923000" />
-    </task>
-    <task id="LOCAL-00191" summary="Rename sysinfo-test in .gitlab-ci.yml">
-      <created>1665287298585</created>
-      <option name="number" value="00191" />
-      <option name="presentableId" value="LOCAL-00191" />
-      <option name="project" value="LOCAL" />
-      <updated>1665287298585</updated>
+      <workItem from="1668634339233" duration="66280000" />
+      <workItem from="1669102537407" duration="14524000" />
     </task>
     <task id="LOCAL-00192" summary="Added CREATE_DB tests">
       <created>1665289102736</created>
@@ -679,7 +682,14 @@
       <option name="project" value="LOCAL" />
       <updated>1669066993464</updated>
     </task>
-    <option name="localTasksCounter" value="240" />
+    <task id="LOCAL-00240" summary="Equipped cfgMap for batchInsert">
+      <created>1669068927666</created>
+      <option name="number" value="00240" />
+      <option name="presentableId" value="LOCAL-00240" />
+      <option name="project" value="LOCAL" />
+      <updated>1669068927666</updated>
+    </task>
+    <option name="localTasksCounter" value="241" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -786,7 +796,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Test exit(1)" />
     <MESSAGE value="Timeout 1m for all test jobs" />
     <MESSAGE value="Switch back to exit()" />
     <MESSAGE value="Re-implementing time structures" />
@@ -811,6 +820,7 @@
     <MESSAGE value="Updated removeDBFiles" />
     <MESSAGE value="cfgMap for createDB &amp; unaryQuery. WIP: removeDB &amp; batchInsert" />
     <MESSAGE value="Remove cfgMap element in removeDB &amp; Prohibit the removal of .CFG in removeDBFiles" />
-    <option name="LAST_COMMIT_MESSAGE" value="Remove cfgMap element in removeDB &amp; Prohibit the removal of .CFG in removeDBFiles" />
+    <MESSAGE value="Equipped cfgMap for batchInsert" />
+    <option name="LAST_COMMIT_MESSAGE" value="Equipped cfgMap for batchInsert" />
   </component>
 </project>
