@@ -21,8 +21,11 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Enforce rowLength &gt;= 4 in CREATE_DB for server &amp; Updated C++ client (CREATE_DB)">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Re-enabled SYS_INFO test in .gitlab-ci.yml">
       <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -338,14 +341,7 @@
       <workItem from="1667617319231" duration="108234000" />
       <workItem from="1668632121236" duration="1550000" />
       <workItem from="1668634339233" duration="66280000" />
-      <workItem from="1669102537407" duration="23199000" />
-    </task>
-    <task id="LOCAL-00203" summary="Exit code is not captured?">
-      <created>1665519348656</created>
-      <option name="number" value="00203" />
-      <option name="presentableId" value="LOCAL-00203" />
-      <option name="project" value="LOCAL" />
-      <updated>1665519348656</updated>
+      <workItem from="1669102537407" duration="26244000" />
     </task>
     <task id="LOCAL-00204" summary="Exit code is not captured?">
       <created>1665520348190</created>
@@ -683,7 +679,14 @@
       <option name="project" value="LOCAL" />
       <updated>1669247680137</updated>
     </task>
-    <option name="localTasksCounter" value="252" />
+    <task id="LOCAL-00252" summary="Re-enabled SYS_INFO test in .gitlab-ci.yml">
+      <created>1669248275654</created>
+      <option name="number" value="00252" />
+      <option name="presentableId" value="LOCAL-00252" />
+      <option name="project" value="LOCAL" />
+      <updated>1669248275654</updated>
+    </task>
+    <option name="localTasksCounter" value="253" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -790,7 +793,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Move cfgStruct to createDB" />
     <MESSAGE value="Re-implemented batchInsert/Query" />
     <MESSAGE value="Remove print in sysInfo &amp; Prelim of Python client" />
     <MESSAGE value="Fixed broken C++ Client code" />
@@ -815,6 +817,7 @@
     <MESSAGE value="Updated C++ client (SYS_INFO)" />
     <MESSAGE value="Updated C++ client (CREATE_DB)" />
     <MESSAGE value="Enforce rowLength &gt;= 4 in CREATE_DB for server &amp; Updated C++ client (CREATE_DB)" />
-    <option name="LAST_COMMIT_MESSAGE" value="Enforce rowLength &gt;= 4 in CREATE_DB for server &amp; Updated C++ client (CREATE_DB)" />
+    <MESSAGE value="Re-enabled SYS_INFO test in .gitlab-ci.yml" />
+    <option name="LAST_COMMIT_MESSAGE" value="Re-enabled SYS_INFO test in .gitlab-ci.yml" />
   </component>
 </project>

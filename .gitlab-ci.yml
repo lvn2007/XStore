@@ -115,7 +115,7 @@ create-db-test:
 
 unary-insert-test:
   variables:
-    TEST_NAME: "UNARY_INSERT"
+    TEST_NAME: "UNARY_OPS"
   stage: Test
   needs:
     - job: "create-db-test"
@@ -125,7 +125,7 @@ unary-insert-test:
     - ./XStore 127.0.0.1 12345 2 &                                       # Run SERVER in foreground
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Starting ${TEST_NAME} tests"
     - cd ~/XStore_Client/build
-    - ./XStore_Client 127.0.0.1 12345 TEST UNARY_INSERT                  # Run CLIENT in foreground
+    - ./XStore_Client 127.0.0.1 12345 TEST UNARY_OPS                     # Run CLIENT in foreground
     - kill %1                                                            # Terminate SERVER
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- ${TEST_NAME} tests has concluded"
 
