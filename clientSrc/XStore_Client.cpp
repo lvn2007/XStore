@@ -101,12 +101,14 @@ int main(int argc, char const *argv[])
     if (MODE == "TEST") {
         std::cout << "+------------------------------------------+" << std::endl;
         std::cout << "|                   TEST                   |" << std::endl;
+
         if (OP_NAME == "BUILD") {
             std::cout << "|                   BUILD                  |" << std::endl;
             std::cout << "+------------------------------------------+\n" << std::endl;
             std::cout <<  "[" + xstoreClient.getCurrDT() + "] [INFO] [TEST]" + " Build ok" << std::endl;
             exit(0);
         }
+
         else if (OP_NAME == "SYS_INFO") {
             std::cout << "|                 SYS_INFO                 |" << std::endl;
             std::cout << "+------------------------------------------+\n" << std::endl;
@@ -146,6 +148,7 @@ int main(int argc, char const *argv[])
             std::string removeDBStatus = xstoreClient.removeDB(dbName);
             assert(removeDBStatus == "[SUCCESS] [REMOVE DB] [DB: SYS_INFO] - Removed DB with name: SYS_INFO");
         }
+
         else if (OP_NAME == "CREATE_DB") {
             std::cout << "|                CREATE_DB                 |" << std::endl;
             std::cout << "+------------------------------------------+\n" << std::endl;
@@ -174,48 +177,42 @@ int main(int argc, char const *argv[])
             std::string removeDBStatus = xstoreClient.removeDB(dbName);
             assert(removeDBStatus == "[SUCCESS] [REMOVE DB] [DB: CREATE_DB] - Removed DB with name: CREATE_DB");
         }
-        else if (OP_NAME == "UNARY_INSERT") {
-            std::cout << "|               UNARY_INSERT               |" << std::endl;
+
+        else if (OP_NAME == "UNARY_OPS") {
+            std::cout << "|                 UNARY_OPS                |" << std::endl;
             std::cout << "+------------------------------------------+\n" << std::endl;
 
             // Const
-            std::string dbName = "UNARY_INSERT";
+            std::string dbName = "UNARY_OPS";
             std::vector<std::time_t> timeList {1482271200};
             std::vector<std::string> timeResolution {"SECOND", "MILLISECOND"};
             std::vector<std::string> dataList {"SECOND,GRANULARITY", "MILLISECOND,GRANULARITY"};
 
-            std::vector<bool> insertOk { false, false};
-
             for (int i = 0; i < timeList.size(); i++) {
+                std::cout << "Granularity: " << timeResolution.at(i) << std::endl;
                 // FIRST - CREATE DB
                 std::string createDB_message = xstoreClient.createDB(dbName, timeResolution.at(i), 128);
+                assert(createDB_message == ("[SUCCESS] [CREATE DB] [DB: UNARY_OPS] - Created DB"));
                 std::cout << createDB_message << std::endl;
 
                 // SECOND - UNARY INSERT
                 std::string insertMessage = xstoreClient.unaryInsert(timeList.at(i), dataList.at(i), dbName);
+                assert(insertMessage == ("[SUCCESS] [UNARY INSERT] [DB: UNARY_OPS] - Inserted " + std::to_string(timeList.at(i)) + " to 2016.XSTORE"));
                 std::cout << insertMessage << std::endl;
 
                 // THIRD - UNARY QUERY (To validate that insert is valid)
                 std::string queryMessage = xstoreClient.unaryQuery(timeList.at(i), dbName);
-                std::cout << "[INFO] [UNARY QUERY] [DB: " << dbName << "] - Query time: " << timeList.at(i) << " | Result: " << queryMessage << std::endl;
+                assert(queryMessage == (std::to_string(timeList.at(i)) + "," + dataList.at(i)));
+                std::cout << "[SUCCESS] [UNARY QUERY] [DB: " << dbName << "] - Query time: " << timeList.at(i) << " | Result: " << queryMessage << std::endl;
 
                 // FINALLY - DELETE_DB (CLEANUP DUMMY)
                 std::string removeDBStatus = xstoreClient.removeDB(dbName);
+                assert(removeDBStatus == ("[SUCCESS] [REMOVE DB] [DB: UNARY_OPS] - Removed DB with name: " + dbName));
                 std::cout << removeDBStatus << std::endl;
-
-                if (queryMessage == (std::to_string(timeList.at(i)) + "," + dataList.at(i))) {
-                    insertOk[i] = true;
-                }
             }
-
-            // Ensuring all insert status is OK
-            if (std::find(insertOk.begin(), insertOk.end(), true) != insertOk.end()) {
-                exit(0);
-            }
-            exit(1);
         }
 
-        else if (OP_NAME == "UNARY_QUERY") {
+        else if (OP_NAME == "BATCH_OPS") {
             std::cout << "|               UNARY_QUERY                |" << std::endl;
             std::cout << "+------------------------------------------+\n" << std::endl;
 

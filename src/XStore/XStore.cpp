@@ -354,7 +354,7 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert_fTruncate(std::time_t unixTime
     std::fclose(bFile);
     flock(fileno(bFile), LOCK_UN);
 
-    std::string successMsg = "[SUCCESS] [UNARY INSERT] [DB: " + dbName + "] - Inserted " + std::to_string(unixTime) + ".XSTORE";
+    std::string successMsg = "[SUCCESS] [UNARY INSERT] [DB: " + dbName + "] - Inserted " + std::to_string(unixTime) + " to " + std::to_string(currTS.year) + ".XSTORE";
     toReturn.set_insertstatus(successMsg);
     return toReturn;
 }
