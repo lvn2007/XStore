@@ -57,8 +57,8 @@ double getMax(std::vector<double> inputVector) {
 int main(int argc, char *argv[]) {
     // Handle arguments
     if (argc < 4) {
-        std::cout << "[ERROR] [BOOT] -- Missing required (2) arguments" << std::endl;
-        std::cout << "[ERROR] [BOOT] -- Usages: XStore <BIND ADDR> <BIND PORT> <THREAD COUNT>" << std::endl;
+        std::cout << "[ERROR] [BOOT] - Missing required (2) arguments" << std::endl;
+        std::cout << "[ERROR] [BOOT] - Usages: XStore <BIND ADDR> <BIND PORT> <THREAD COUNT>" << std::endl;
         exit(1);
     }
 
@@ -135,7 +135,7 @@ int main(int argc, char *argv[]) {
 
     // RANGE QUERY
 //    XStore_Proto::rangeQuery_REP range_query_rep = myStore.rangeQuery(1482271200, 1482271204, "tsla");
-//    XStore_Proto::rangeQuery_REP range_query_rep = myStore.rangeQuery(1483228798, 1483228808, "tsla");
+//    XStore_Proto::rangeQuery_REP range_query_rep = myStore.rangeQuery(1483228798, 1483928808, "tsla");
 //    range_query_rep.PrintDebugString();
 
     // End timer

@@ -1,4 +1,4 @@
-2. To create TS collection in MongoDB -- This will create DB as wellŒ:
+2. To create TS collection in MongoDB -- This will create DB as well:
 - db.createCollection("benchTS", { timeseries: { timeField: "Timestamp", granularity: "seconds"}})
 
 Docs:

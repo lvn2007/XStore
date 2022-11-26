@@ -115,7 +115,6 @@ message batchInsert_REP {
 // --- RANGE/BATCH REQ response
 message rangeQuery_REP {
   repeated unaryQuery_REP unaryResponse = 1;
-  string queryStatus = 2;
 }
 
 // --- REMOVE DB response
