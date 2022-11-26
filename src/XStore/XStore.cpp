@@ -495,8 +495,6 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery(std::time_t unixTime, std::strin
     // Protobuf obj to be returned
     std::string queryStatus;
     XStore_Proto::unaryQuery_REP toReturn;
-    toReturn.set_timestamp(unixTime);
-    toReturn.set_dataset("NULL");
 
     // Ensure dbName string is all capitalized
     for (int i = 0; i < dbName.size(); i++) {
@@ -513,8 +511,6 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery(std::time_t unixTime, std::strin
 
     // IF hierarchical year folder DOES NOT exist
     if (std::filesystem::exists(targetPath) == 0) {
-        std::string errMsg = "[ERROR] [UNARY QUERY] [DB: " + dbName + "] - " + std::to_string(currTS.year) + ".XSTORE does not exist";
-        toReturn.set_querystatus(errMsg);
         return toReturn;
     }
 
@@ -545,8 +541,6 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery(std::time_t unixTime, std::strin
     std::string returnData(bufferIn, fSize);
 
     // Set data fetched from XStore to returning Protobuf obj
-    std::string successMsg = "[SUCCESS] [UNARY QUERY] [DB: " + dbName + "] - Acquired " + std::to_string(currTS.year) + ".XSTORE";
-    toReturn.set_querystatus(successMsg);
     toReturn.set_dataset(returnData);
     return toReturn;
 }
@@ -555,8 +549,6 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery_fTruncate(std::time_t unixTime, 
     // Protobuf obj to be returned
     std::string queryStatus;
     XStore_Proto::unaryQuery_REP toReturn;
-    toReturn.set_timestamp(unixTime);
-    toReturn.set_dataset("NULL");
 
     // Ensure dbName string is all capitalized
     for (int i = 0; i < dbName.size(); i++) {
@@ -573,8 +565,6 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery_fTruncate(std::time_t unixTime, 
 
     // IF hierarchical year folder DOES NOT exist
     if (std::filesystem::exists(targetFilePath) == 0) {
-        std::string errMsg = "[ERROR] [UNARY QUERY] [DB: " + dbName + "] - " + std::to_string(currTS.year) + ".XSTORE does not exist";
-        toReturn.set_querystatus(errMsg);
         return toReturn;
     }
 
@@ -583,8 +573,6 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery_fTruncate(std::time_t unixTime, 
     configStruct cfgStruct = cfgMap[dbName];
 
     if (currTS.timeResolution != cfgStruct.timeResolution) {
-        std::string errMsg = "[ERROR] [UNARY QUERY] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + cfgStruct.timeResolution;
-        toReturn.set_querystatus(errMsg);
         return toReturn;
     }
 
@@ -619,8 +607,6 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery_fTruncate(std::time_t unixTime, 
     std::string returnData(bufferIn);
 
     // Set data fetched from XStore to returning Protobuf obj
-    std::string successMsg = "[SUCCESS] [UNARY QUERY] [DB: " + dbName + "] - Acquired " + std::to_string(currTS.year) + ".XSTORE";
-    toReturn.set_querystatus(successMsg);
     toReturn.set_dataset(returnData);
     return toReturn;
 }
@@ -641,8 +627,13 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
     // Check if cfgMap NOT contains cfgStruct
     configStruct cfgStruct;
     if (cfgMap.find(dbName) == cfgMap.end()) {
-        // Read & Add cfgStruct to cfgMap
         std::string cfgPath = dbBasePath + dbName + ".CFG";
+
+        if (std::filesystem::exists(cfgPath) == 0) {
+            return toReturn;
+        }
+
+        // Read & Add cfgStruct to cfgMap
         FILE *cFile = std::fopen(cfgPath.c_str(), "rb");
         fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
         std::fclose(cFile);
@@ -655,39 +646,22 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
 
     // IF query range > 2GB limit of Protobuf
     if ((endEpochT - startEpochT) * cfgStruct.rowLength > 2000000000) {
-        std::string errMsg = "[ERROR] [RANGE QUERY] DB: " + dbName + "] - Queried range is above 2GB Protobuf size limit";
-        toReturn.set_querystatus(errMsg);
         return toReturn;
     }
 
     if ((endEpochT - startEpochT) < 0) {
-        std::string errMsg = "[ERROR] [RANGE QUERY] DB: " + dbName + "] - Invalid range query. Requires end time > start time";
-        toReturn.set_querystatus(errMsg);
         return toReturn;
     }
 
     // IF db directory does not exist
     if (std::filesystem::is_directory(dbBasePath) == 0) {
-        std::string errMsg = "[ERROR] [RANGE QUERY] [DB: " + dbName + "] - DB does not exist";
-
-        // Iterate over range of query data & add query status
-        for (long epochTime = startEpochT; epochTime <= endEpochT; epochTime++) {
-            // Initialize entry to add to toReturn
-            XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_unaryresponse();
-            currEntry->set_timestamp(epochTime);
-            currEntry->set_dataset("");
-            currEntry->set_querystatus(errMsg);
-            return toReturn;
-        }
-        toReturn.set_querystatus(errMsg);
+        return toReturn;
     }
 
     // Time granularity check
     timeStruct startTimeStruct{startEpochT};
     timeStruct endTimeStruct{endEpochT};
     if (startTimeStruct.timeResolution != cfgStruct.timeResolution || endTimeStruct.timeResolution != cfgStruct.timeResolution) {
-        std::string granularityErrMsg = "[ERROR] [RANGE QUERY] [DB: " + dbName + "] - Invalid time granularity. Expecting: " + cfgStruct.timeResolution;
-        toReturn.set_querystatus(granularityErrMsg);
         return toReturn;
     }
 
@@ -707,7 +681,6 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
         // Open file prior to reading
         targetFilePath = dbBasePath + std::to_string(currTS.year) + ".XSTORE";
         bFile = std::fopen(targetFilePath.c_str(), "rb");
-        successMsg = "[SUCCESS] [RANGE QUERY] [DB: " + dbName + "] - Acquired " + std::to_string(currTS.year) + ".XSTORE";
 
         // Lock file prior to reading
         flock(fileno(bFile), LOCK_SH);
@@ -729,7 +702,6 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
             XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_unaryresponse();
             currEntry->set_timestamp(epochTime);
             currEntry->set_dataset(std::string(bufferIn));
-            currEntry->set_querystatus(successMsg);
         }
 
         // Close & Release file lock after reading
@@ -744,25 +716,13 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
         // Loop through each year individually
         while (startEpoch < endEpochT) {
             targetFilePath = dbBasePath + std::to_string(currTS.year) + ".XSTORE";
-            successMsg = "[SUCCESS] [RANGE QUERY] [DB: " + dbName + "] - Acquired " + std::to_string(currTS.year) + ".XSTORE";
 
             // IF the requested start epoch spans ONLY 1 year
             if (currTS.lastEpoch < endEpochT) {
                 // IF target YEAR.XSTORE does NOT exist
                 if (std::filesystem::exists(targetFilePath) == 0) {
-                    std::string errMsg = "[ERROR] [RANGE QUERY] [DB: " + dbName + "] - " + std::to_string(currTS.year) + ".XSTORE does not exist";
-
-                    // Iterate over range of query data & add query status
-                    for (long long int epochTime = startEpoch; epochTime <= currTS.lastEpoch; epochTime++, startEpoch++) {
-                        // Initialize entry to add to toReturn
-                        XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_unaryresponse();
-                        currEntry->set_timestamp(epochTime);
-                        currEntry->set_dataset("");
-                        currEntry->set_querystatus(errMsg);
-                    }
-
                     // Update currTS with latest startEpoch after incrementing
-                    currTS = timeStruct(startEpoch);
+                    currTS = timeStruct(startEpoch + (currTS.lastEpoch - startEpoch));
                     continue;
                 }
 
@@ -787,7 +747,6 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
                     XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_unaryresponse();
                     currEntry->set_timestamp(epochTime);
                     currEntry->set_dataset(std::string(bufferIn));
-                    currEntry->set_querystatus(successMsg);
                 }
 
                 // Update currTS with latest startEpoch after incrementing
@@ -800,19 +759,8 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
             else {
                 // IF target YEAR.XSTORE does NOT exist
                 if (std::filesystem::exists(targetFilePath) == 0) {
-                    std::string errMsg = "[ERROR] [RANGE QUERY] [DB: " + dbName + "] - " + std::to_string(currTS.year) + ".XSTORE does not exist";
-
-                    // Iterate over range of query data & add query status
-                    for (long long int epochTime = startEpoch; epochTime < endEpochT; epochTime++, startEpoch++) {
-                        // Initialize entry to add to toReturn
-                        XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_unaryresponse();
-                        currEntry->set_timestamp(epochTime);
-                        currEntry->set_dataset("");
-                        currEntry->set_querystatus(errMsg);
-                    }
-
                     // Update currTS with latest startEpoch after incrementing
-                    currTS = timeStruct(startEpoch);
+                    currTS = timeStruct(startEpoch + (endEpochT - startEpoch));
                     continue;
                 }
 
@@ -821,7 +769,7 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
                 flock(fileno(bFile), LOCK_SH);
 
                 // Iterate over range of query data & add queried data and status
-                for (long long int epochTime = startEpoch; epochTime < endEpochT; epochTime++, startEpoch++) {
+                for (long long int epochTime = startEpoch; epochTime <= endEpochT; epochTime++, startEpoch++) {
                     // Computes diff & offset
                     diff = epochTime - currTS.firstEpoch;
                     offset = diff * cfgStruct.rowLength;
@@ -837,7 +785,6 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
                     XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_unaryresponse();
                     currEntry->set_timestamp(epochTime);
                     currEntry->set_dataset(std::string(bufferIn));
-                    currEntry->set_querystatus(successMsg);
                 }
 
                 // Update currTS with latest startEpoch after incrementing
@@ -850,10 +797,6 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
             }
         }
     }
-
-    // Set query status msg
-    queryStatus = "[SUCCESS] [BATCH QUERY] [DB: " + dbName + "] - Concluded Batch queries";
-    toReturn.set_querystatus(queryStatus);
     return toReturn;
 }
 

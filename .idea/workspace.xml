@@ -21,11 +21,14 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Re-enabled SYS_INFO test in .gitlab-ci.yml">
-      <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Updated UNARY_OPS">
+      <change afterPath="$PROJECT_DIR$/benchmark/XStore/instructions.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/mongoDB/mongoNote.txt" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/mongoDB/mongoNote.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/Python/XStore_pb2.py" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/Python/XStore_pb2.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/protoFile/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/XStore.proto" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -341,14 +344,7 @@
       <workItem from="1667617319231" duration="108234000" />
       <workItem from="1668632121236" duration="1550000" />
       <workItem from="1668634339233" duration="66280000" />
-      <workItem from="1669102537407" duration="26244000" />
-    </task>
-    <task id="LOCAL-00204" summary="Exit code is not captured?">
-      <created>1665520348190</created>
-      <option name="number" value="00204" />
-      <option name="presentableId" value="LOCAL-00204" />
-      <option name="project" value="LOCAL" />
-      <updated>1665520348190</updated>
+      <workItem from="1669102537407" duration="40365000" />
     </task>
     <task id="LOCAL-00205" summary="Exit code is not captured?">
       <created>1665521316754</created>
@@ -686,7 +682,14 @@
       <option name="project" value="LOCAL" />
       <updated>1669248275654</updated>
     </task>
-    <option name="localTasksCounter" value="253" />
+    <task id="LOCAL-00253" summary="Updated UNARY_OPS">
+      <created>1669253739903</created>
+      <option name="number" value="00253" />
+      <option name="presentableId" value="LOCAL-00253" />
+      <option name="project" value="LOCAL" />
+      <updated>1669253739903</updated>
+    </task>
+    <option name="localTasksCounter" value="254" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -793,7 +796,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Re-implemented batchInsert/Query" />
     <MESSAGE value="Remove print in sysInfo &amp; Prelim of Python client" />
     <MESSAGE value="Fixed broken C++ Client code" />
     <MESSAGE value="XStore Python lib &amp; Rename ENUM Proto" />
@@ -818,6 +820,7 @@
     <MESSAGE value="Updated C++ client (CREATE_DB)" />
     <MESSAGE value="Enforce rowLength &gt;= 4 in CREATE_DB for server &amp; Updated C++ client (CREATE_DB)" />
     <MESSAGE value="Re-enabled SYS_INFO test in .gitlab-ci.yml" />
-    <option name="LAST_COMMIT_MESSAGE" value="Re-enabled SYS_INFO test in .gitlab-ci.yml" />
+    <MESSAGE value="Updated UNARY_OPS" />
+    <option name="LAST_COMMIT_MESSAGE" value="Updated UNARY_OPS" />
   </component>
 </project>
