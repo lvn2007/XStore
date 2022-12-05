@@ -109,7 +109,7 @@ message unaryInsert_REP {
 
 // --- BATCH INSERT REQ response
 message batchInsert_REP {
-  repeated string insertStatus = 1;
+  string insertStatus = 1;
 }
 
 // --- RANGE/BATCH REQ response

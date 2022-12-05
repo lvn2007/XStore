@@ -375,12 +375,8 @@ XStore_Proto::batchInsert_REP XStore::batchInsert_fTruncate(XStore_Proto::batchI
 
     // IF db directory does not exist
     if (std::filesystem::is_directory(dbBasePath) == 0) {
-        std::string errMsg = "[ERROR] [UNARY INSERT] [DB: " + dbName + "] - DB does not exist";
-
-        // Iterate over batch of insert data & add insert status
-        for (int i = 0; i < protoFromClient->batchinsert_data_size(); i++) {
-            toReturn.add_insertstatus(errMsg);
-        }
+        std::string errMsg = "[ERROR] [BATCH INSERT] [DB: " + dbName + "] - DB does not exist";
+        toReturn.set_insertstatus(errMsg);
         return toReturn;
     }
 
@@ -412,24 +408,20 @@ XStore_Proto::batchInsert_REP XStore::batchInsert_fTruncate(XStore_Proto::batchI
     struct tm* epochStruct;
     std::time_t currTime;
     std::map<unsigned short int, std::vector<unsigned long int>> dataMap;
-    std::string granularityErrMsg = "[ERROR] [UNARY INSERT] [DB: " + dbName + "] - Invalid time granularity. Expecting: " + cfgStruct.timeResolution;
-    bool granularityErr = false;
+    std::string granularityErrMsg = "[ERROR] [BATCH INSERT] [DB: " + dbName + "] - Invalid time granularity. Expecting: " + cfgStruct.timeResolution;
+
+    // Granularity check
     for (int i = 0; i < protoFromClient->batchinsert_data_size(); i++) {
         currTime = protoFromClient->batchinsert_data(i).timestamp();
         epochStruct = gmtime(&currTime);
         dataMap[(epochStruct->tm_year + 1900)].push_back(i);
 
-        // Granularity check
+        // Halt execution & Return as long as there's an error in time granularity
         timeStruct currTS {currTime};
         if (currTS.timeResolution != cfgStruct.timeResolution) {
-            toReturn.add_insertstatus(granularityErrMsg);
-            granularityErr = true;
+            toReturn.set_insertstatus(granularityErrMsg);
+            return toReturn;
         }
-    }
-
-    // Halt execution & Return as long as there's an error in time granularity
-    if (granularityErr) {
-        return toReturn;
     }
 
     // Iterate through each key (year) of dataMap
@@ -480,14 +472,17 @@ XStore_Proto::batchInsert_REP XStore::batchInsert_fTruncate(XStore_Proto::batchI
 
             // Writing actual data to disk
             std::fwrite((currData.getData()).data(), cfgStruct.rowLength, 1, bFile);
-            std::string successMsg = "[SUCCESS] [UNARY INSERT] [DB: " + dbName + "] - Inserted " + std::to_string(unixTime) + " to " + std::to_string(yearKey) + ".XSTORE";
-            toReturn.add_insertstatus(successMsg);
         }
 
         // Close file & Release lock after write
         std::fclose(bFile);
         flock(fileno(bFile), LOCK_UN);
     }
+
+    // Return insert status
+    std::string successMsg = "[SUCCESS] [BATCH INSERT] [DB: " + dbName + "] - Inserted " + std::to_string(protoFromClient->batchinsert_data_size()) + " elements successfully";
+    toReturn.set_insertstatus(successMsg);
+
     return toReturn;
 }
 
@@ -549,6 +544,7 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery_fTruncate(std::time_t unixTime, 
     // Protobuf obj to be returned
     std::string queryStatus;
     XStore_Proto::unaryQuery_REP toReturn;
+    toReturn.set_timestamp(unixTime);
 
     // Ensure dbName string is all capitalized
     for (int i = 0; i < dbName.size(); i++) {
