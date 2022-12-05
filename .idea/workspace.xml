@@ -21,14 +21,12 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Updated UNARY_OPS">
-      <change afterPath="$PROJECT_DIR$/benchmark/XStore/instructions.md" afterDir="false" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Improved performance with less verbosity">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/mongoDB/mongoNote.txt" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/mongoDB/mongoNote.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/XStore/instructions.md" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/instructions.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/clientSrc/Python/XStore_pb2.py" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/Python/XStore_pb2.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/protoFile/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/XStore.proto" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -127,20 +125,20 @@
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
       </method>
     </configuration>
-    <configuration name="XStore" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
-      <module name="xStore2" />
+    <configuration name="analyze (2)" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
+      <module name="xStore" />
       <option name="INTERPRETER_OPTIONS" value="" />
       <option name="PARENT_ENVS" value="true" />
       <envs>
         <env name="PYTHONUNBUFFERED" value="1" />
       </envs>
-      <option name="SDK_HOME" value="$PROJECT_DIR$/../GIGI/venv/bin/python" />
-      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/clientSrc/Python" />
+      <option name="SDK_HOME" value="" />
+      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/benchmark/XStore/cpp/build" />
       <option name="IS_MODULE_SDK" value="true" />
       <option name="ADD_CONTENT_ROOTS" value="true" />
       <option name="ADD_SOURCE_ROOTS" value="true" />
-      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/clientSrc/Python/XStore.py" />
-      <option name="PARAMETERS" value="127.0.0.1 12345" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/benchmark/XStore/cpp/build/analyze.py" />
+      <option name="PARAMETERS" value="" />
       <option name="SHOW_COMMAND_LINE" value="false" />
       <option name="EMULATE_TERMINAL" value="false" />
       <option name="MODULE_MODE" value="false" />
@@ -148,8 +146,8 @@
       <option name="INPUT_FILE" value="" />
       <method v="2" />
     </configuration>
-    <configuration name="analyze (1)" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
-      <module name="xStore" />
+    <configuration name="analyze" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
+      <module name="xStore2" />
       <option name="INTERPRETER_OPTIONS" value="" />
       <option name="PARENT_ENVS" value="true" />
       <envs>
@@ -169,19 +167,19 @@
       <option name="INPUT_FILE" value="" />
       <method v="2" />
     </configuration>
-    <configuration name="analyze (2)" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
-      <module name="xStore" />
+    <configuration name="overleaf (1)" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
+      <module name="xStore2" />
       <option name="INTERPRETER_OPTIONS" value="" />
       <option name="PARENT_ENVS" value="true" />
       <envs>
         <env name="PYTHONUNBUFFERED" value="1" />
       </envs>
       <option name="SDK_HOME" value="" />
-      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/benchmark/XStore/cpp/build" />
+      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/overleaf" />
       <option name="IS_MODULE_SDK" value="true" />
       <option name="ADD_CONTENT_ROOTS" value="true" />
       <option name="ADD_SOURCE_ROOTS" value="true" />
-      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/benchmark/XStore/cpp/build/analyze.py" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/overleaf/overleaf.py" />
       <option name="PARAMETERS" value="" />
       <option name="SHOW_COMMAND_LINE" value="false" />
       <option name="EMULATE_TERMINAL" value="false" />
@@ -221,8 +219,8 @@
     </configuration>
     <list>
       <item itemvalue="CMake Application.XStore" />
-      <item itemvalue="Python.XStore" />
-      <item itemvalue="Python.analyze (1)" />
+      <item itemvalue="Python.analyze" />
+      <item itemvalue="Python.overleaf (1)" />
       <item itemvalue="Python.analyze (2)" />
       <item itemvalue="Python.overleaf" />
       <item itemvalue="Remote Debug.Vulcan_GDB" />
@@ -231,9 +229,10 @@
     <recent_temporary>
       <list>
         <item itemvalue="CMake Application.XStore" />
+        <item itemvalue="Python.analyze" />
+        <item itemvalue="Python.overleaf (1)" />
         <item itemvalue="Python.overleaf" />
         <item itemvalue="Python.analyze (2)" />
-        <item itemvalue="Python.analyze (1)" />
       </list>
     </recent_temporary>
   </component>
@@ -344,14 +343,7 @@
       <workItem from="1667617319231" duration="108234000" />
       <workItem from="1668632121236" duration="1550000" />
       <workItem from="1668634339233" duration="66280000" />
-      <workItem from="1669102537407" duration="40365000" />
-    </task>
-    <task id="LOCAL-00205" summary="Exit code is not captured?">
-      <created>1665521316754</created>
-      <option name="number" value="00205" />
-      <option name="presentableId" value="LOCAL-00205" />
-      <option name="project" value="LOCAL" />
-      <updated>1665521316754</updated>
+      <workItem from="1669102537407" duration="61950000" />
     </task>
     <task id="LOCAL-00206" summary="Exit code is not captured?">
       <created>1665521909682</created>
@@ -689,7 +681,14 @@
       <option name="project" value="LOCAL" />
       <updated>1669253739903</updated>
     </task>
-    <option name="localTasksCounter" value="254" />
+    <task id="LOCAL-00254" summary="Improved performance with less verbosity">
+      <created>1669505028579</created>
+      <option name="number" value="00254" />
+      <option name="presentableId" value="LOCAL-00254" />
+      <option name="project" value="LOCAL" />
+      <updated>1669505028579</updated>
+    </task>
+    <option name="localTasksCounter" value="255" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -796,7 +795,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Remove print in sysInfo &amp; Prelim of Python client" />
     <MESSAGE value="Fixed broken C++ Client code" />
     <MESSAGE value="XStore Python lib &amp; Rename ENUM Proto" />
     <MESSAGE value="Reflect new ENUM Proto" />
@@ -821,6 +819,7 @@
     <MESSAGE value="Enforce rowLength &gt;= 4 in CREATE_DB for server &amp; Updated C++ client (CREATE_DB)" />
     <MESSAGE value="Re-enabled SYS_INFO test in .gitlab-ci.yml" />
     <MESSAGE value="Updated UNARY_OPS" />
-    <option name="LAST_COMMIT_MESSAGE" value="Updated UNARY_OPS" />
+    <MESSAGE value="Improved performance with less verbosity" />
+    <option name="LAST_COMMIT_MESSAGE" value="Improved performance with less verbosity" />
   </component>
 </project>
