@@ -511,6 +511,12 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
             //  .CFG file is set by user when creating DB
             fread(&bufferIn[0], 1, cfgStruct.rowLength, bFile);
 
+            // IF fetched data contains nothing
+            //  -> Skip to next iteration
+            if (strlen(bufferIn) == 0) {
+                continue;
+            }
+
             // Add fetched data to returning Protobuf obj
             XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_unaryresponse();
             currEntry->set_timestamp(epochTime);
@@ -556,6 +562,12 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
                     //  .CFG file is set by user when creating DB
                     fread(&bufferIn[0], 1, cfgStruct.rowLength, bFile);
 
+                    // IF fetched data contains nothing
+                    //  -> Skip to next iteration
+                    if (strlen(bufferIn) == 0) {
+                        continue;
+                    }
+
                     // Add fetched data to returning Protobuf obj
                     XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_unaryresponse();
                     currEntry->set_timestamp(epochTime);
@@ -593,6 +605,12 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
                     // Extract N bytes of data according to N bytes from .CFG file
                     //  .CFG file is set by user when creating DB
                     fread(&bufferIn[0], 1, cfgStruct.rowLength, bFile);
+
+                    // IF fetched data contains nothing
+                    //  -> Skip to next iteration
+                    if (strlen(bufferIn) == 0) {
+                        continue;
+                    }
 
                     // Add fetched data to returning Protobuf obj
                     XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_unaryresponse();

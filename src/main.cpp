@@ -72,8 +72,8 @@ int main(int argc, char *argv[]) {
     XStore myStore;
 
     // Create DB
-//    XStore_Proto::createDB_REP create_db_rep = myStore.createDB("TSLA", "millisecond", 128);
-//    create_db_rep.PrintDebugString();
+    XStore_Proto::createDB_REP create_db_rep = myStore.createDB("TSLA", "millisecond", 128);
+    create_db_rep.PrintDebugString();
 
 //    XStore_Proto::batchInsert_REQ batch_insert_req;
 //    batch_insert_req.set_dbname("TSLA");
@@ -97,10 +97,10 @@ int main(int argc, char *argv[]) {
 //    start = std::chrono::high_resolution_clock::now();
 
     // Unary Insert
-//    XStore_Proto::unaryInsert_REP unary_insert_rep = myStore.unaryInsert(1451606400000, "Helo", "TSLA");
-//    XStore_Proto::unaryInsert_REP unary_insert_rep1 = myStore.unaryInsert(1451636401233, "Helo123", "TSLA");
-//    XStore_Proto::unaryInsert_REP unary_insert_rep2 = myStore.unaryInsert(1451606441897, "Helo456", "TSLA");
-//    unary_insert_rep.PrintDebugString();
+    XStore_Proto::unaryInsert_REP unary_insert_rep = myStore.unaryInsert(1451606400000, "Helo", "TSLA");
+    XStore_Proto::unaryInsert_REP unary_insert_rep1 = myStore.unaryInsert(1451636401233, "Helo123", "TSLA");
+    XStore_Proto::unaryInsert_REP unary_insert_rep2 = myStore.unaryInsert(1451606441897, "Helo456", "TSLA");
+    unary_insert_rep.PrintDebugString();
 
     // SYS INFO
 //    XStore_Proto::sysInfo_REP sys_info_rep = myStore.infoQuery("127.0.0.1:12345", THREAD_COUNT);
@@ -122,12 +122,12 @@ int main(int argc, char *argv[]) {
 //    std::cout << "----" << std::endl;
 
     // UNARY QUERY
-//    XStore_Proto::unaryQuery_REP unary_query_rep = myStore.unaryQuery(1451606400000, "tsla");
-//    unary_query_rep.PrintDebugString();
-//    XStore_Proto::unaryQuery_REP unary_query_rep1 = myStore.unaryQuery(1451636401233, "tsla");
-//    unary_query_rep1.PrintDebugString();
-//    XStore_Proto::unaryQuery_REP unary_query_rep2 = myStore.unaryQuery(1451606441897, "tsla");
-//    unary_query_rep2.PrintDebugString();
+    XStore_Proto::unaryQuery_REP unary_query_rep = myStore.unaryQuery(1451606400000, "tsla");
+    unary_query_rep.PrintDebugString();
+    XStore_Proto::unaryQuery_REP unary_query_rep1 = myStore.unaryQuery(1451636401233, "tsla");
+    unary_query_rep1.PrintDebugString();
+    XStore_Proto::unaryQuery_REP unary_query_rep2 = myStore.unaryQuery(1451606441897, "tsla");
+    unary_query_rep2.PrintDebugString();
 
 //    unary_query_rep = myStore.unaryQuery_fTruncate(1482271200, "tsla");
 //    unary_query_rep.PrintDebugString();
@@ -141,9 +141,10 @@ int main(int argc, char *argv[]) {
 //    unary_query_rep.PrintDebugString();
 
     // RANGE QUERY
+    XStore_Proto::rangeQuery_REP range_query_rep = myStore.rangeQuery(1451606400000, 1451606400002, "tsla");
 //    XStore_Proto::rangeQuery_REP range_query_rep = myStore.rangeQuery(1482271200, 1482271204, "tsla");
 //    XStore_Proto::rangeQuery_REP range_query_rep = myStore.rangeQuery(1483228798, 1483928808, "tsla");
-//    range_query_rep.PrintDebugString();
+    range_query_rep.PrintDebugString();
 
     // End timer
 //    end = std::chrono::high_resolution_clock::now();
@@ -153,6 +154,6 @@ int main(int argc, char *argv[]) {
 //    batch_insert_rep.PrintDebugString();
 
     // ----DEV AREA
-    XStore_zmqServer xStoreZmqServer(THREAD_COUNT);
-    xStoreZmqServer.startServer(BIND_ADDR, BIND_PORT);
+//    XStore_zmqServer xStoreZmqServer(THREAD_COUNT);
+//    xStoreZmqServer.startServer(BIND_ADDR, BIND_PORT);
 }
