@@ -72,9 +72,9 @@ int main(int argc, char *argv[]) {
     XStore myStore;
 
     // Create DB
-//    XStore_Proto::createDB_REP create_db_rep = myStore.createDB_fTruncate("TSLA", "second", 128);
+//    XStore_Proto::createDB_REP create_db_rep = myStore.createDB("TSLA", "millisecond", 128);
 //    create_db_rep.PrintDebugString();
-//
+
 //    XStore_Proto::batchInsert_REQ batch_insert_req;
 //    batch_insert_req.set_dbname("TSLA");
 //    XStore_Proto::batchInsert_DATA *batch_insert_data2 = batch_insert_req.add_batchinsert_data();
@@ -97,7 +97,9 @@ int main(int argc, char *argv[]) {
 //    start = std::chrono::high_resolution_clock::now();
 
     // Unary Insert
-//    XStore_Proto::unaryInsert_REP unary_insert_rep = myStore.unaryInsert_fTruncate(1451606400, "Helo", "TSLA");
+//    XStore_Proto::unaryInsert_REP unary_insert_rep = myStore.unaryInsert(1451606400000, "Helo", "TSLA");
+//    XStore_Proto::unaryInsert_REP unary_insert_rep1 = myStore.unaryInsert(1451636401233, "Helo123", "TSLA");
+//    XStore_Proto::unaryInsert_REP unary_insert_rep2 = myStore.unaryInsert(1451606441897, "Helo456", "TSLA");
 //    unary_insert_rep.PrintDebugString();
 
     // SYS INFO
@@ -120,8 +122,13 @@ int main(int argc, char *argv[]) {
 //    std::cout << "----" << std::endl;
 
     // UNARY QUERY
-//    XStore_Proto::unaryQuery_REP unary_query_rep = myStore.unaryQuery_fTruncate(1070071200, "tsla");
+//    XStore_Proto::unaryQuery_REP unary_query_rep = myStore.unaryQuery(1451606400000, "tsla");
 //    unary_query_rep.PrintDebugString();
+//    XStore_Proto::unaryQuery_REP unary_query_rep1 = myStore.unaryQuery(1451636401233, "tsla");
+//    unary_query_rep1.PrintDebugString();
+//    XStore_Proto::unaryQuery_REP unary_query_rep2 = myStore.unaryQuery(1451606441897, "tsla");
+//    unary_query_rep2.PrintDebugString();
+
 //    unary_query_rep = myStore.unaryQuery_fTruncate(1482271200, "tsla");
 //    unary_query_rep.PrintDebugString();
 //    unary_query_rep = myStore.unaryQuery_fTruncate(1482271201, "tsla");
