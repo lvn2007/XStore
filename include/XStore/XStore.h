@@ -27,7 +27,7 @@ class XStore {
         std::string dataStoreDir = baseDir + "dataStore/";
         std::map<std::string, fileStruct> dbMap;
         std::map<std::string, configStruct> cfgMap;
-        std::string permittedTimeResolution[2] = {"SECOND", "MILLISECOND"};
+        std::string permittedTimeResolution[3] = {"SECOND", "MILLISECOND", "MICROSECOND"};
 
         int dbCount = 0;
         std::vector<std::string> dbNames = { };
@@ -40,19 +40,16 @@ class XStore {
         XStore_Proto::sysInfo_REP infoQuery(std::string serverAddr, int threadCount);
 
         // CREATING new DB instance with row length
-        XStore_Proto::createDB_REP createDB(std::string dbName, std::string timeResolution);
-        XStore_Proto::createDB_REP createDB_fTruncate(std::string dbName, std::string timeResolution, short int rowLength);
+        XStore_Proto::createDB_REP createDB(std::string dbName, std::string timeResolution, short int rowLength);
 
         // UNARY INSERT time-series oriented values
         XStore_Proto::unaryInsert_REP unaryInsert(std::time_t epochTime, std::string data, std::string dbName);
-        XStore_Proto::unaryInsert_REP unaryInsert_fTruncate(std::time_t epochTime, std::string data, std::string dbName);
 
         // BATCH INSERT time-series oriented values
-        XStore_Proto::batchInsert_REP batchInsert_fTruncate(XStore_Proto::batchInsert_REQ *protoFromClient);
+        XStore_Proto::batchInsert_REP batchInsert(XStore_Proto::batchInsert_REQ *protoFromClient);
 
         // UNARY GET time-series oriented values
         XStore_Proto::unaryQuery_REP unaryQuery(std::time_t epochTime, std::string dbName);
-        XStore_Proto::unaryQuery_REP unaryQuery_fTruncate(std::time_t epochTime, std::string dbName);
 
         // BATCH GET time-series oriented values
         XStore_Proto::rangeQuery_REP rangeQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName);
@@ -67,12 +64,6 @@ class XStore {
         void initDB();
 
     private:
-        // Static array for fast build of file path
-        const std::string monthArray[12] {"1/", "2/", "3/", "4/", "5/", "6/", "7/", "8/", "9/", "10/", "11/", "12/"};
-        const std::string dayArray[31] {"1/", "2/", "3/", "4/", "5/", "6/", "7/", "8/", "9/", "10/", "11/", "12/", "13/", "14/", "15/", "16/", "17/", "18/", "19/", "20/", "21/", "22/", "23/", "24/", "25/", "26/", "27/", "28/", "29/", "30/", "31/"};
-        const std::string hourArray[24] {"0/", "1/", "2/", "3/", "4/", "5/", "6/", "7/", "8/", "9/", "10/", "11/", "12/", "13/", "14/", "15/", "16/", "17/", "18/", "19/", "20/", "21/", "22/", "23/"};
-        const std::string minArray[60] {"0/", "1/", "2/", "3/", "4/", "5/", "6/", "7/", "8/", "9/", "10/", "11/", "12/", "13/", "14/", "15/", "16/", "17/", "18/", "19/", "20/", "21/", "22/", "23/", "24/", "25/", "26/", "27/", "28/", "29/", "30/", "31/", "32/", "33/", "34/", "35/", "36/", "37/", "38/", "39/", "40/", "41/", "42/", "43/", "44/", "45/", "46/", "47/", "48/", "49/", "50/", "51/", "52/", "53/", "54/", "55/", "56/", "57/", "58/", "59/"};
-
         // Get current base directory
         std::string getBaseDir();
 
@@ -80,20 +71,6 @@ class XStore {
         bool hasDB();
 
         bool hasDBFile(std::string filePath);
-
-        void initMsg();
-
-        void dbStats();
-
-        // Returning epoch value of FIRST available datetime of a given year
-        long int getStartTimeEpoch(int yearInput, std::string timeResolution);
-
-        // Returning epoch value of LAST available datetime of a given year
-        long int getEndTimeEpoch(int yearInput, std::string timeResolution);
-
-        // Time extractor
-        std::string getTimeResolution(std::time_t unixTime);
-        unsigned short int toHumanYear(std::time_t &unixTime, std::string &timeResolution);
 };
 
 #endif //XSTORE_XSTORE_H

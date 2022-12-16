@@ -68,7 +68,6 @@ void timeStruct::extractTimeComponents() {
     firstEpochTimePtr.tm_hour = 0;
     firstEpochTimePtr.tm_min = 0;
     firstEpochTimePtr.tm_sec = 0;
-    firstEpoch = mktime(&firstEpochTimePtr);
 
     // Set LAST epoch
     lastEpochTimePtr.tm_year = this->year - 1900;
@@ -77,5 +76,17 @@ void timeStruct::extractTimeComponents() {
     lastEpochTimePtr.tm_hour = 23;
     lastEpochTimePtr.tm_min = 59;
     lastEpochTimePtr.tm_sec = 59;
-    lastEpoch = mktime(&lastEpochTimePtr);
+
+    if (this->timeResolution == "SECOND") {
+        firstEpoch = mktime(&firstEpochTimePtr);
+        lastEpoch = mktime(&lastEpochTimePtr);
+    }
+    else if (this->timeResolution == "MILLISECOND") {
+        firstEpoch = mktime(&firstEpochTimePtr) * 1000;
+        lastEpoch = mktime(&lastEpochTimePtr) * 1000 + 999;
+    }
+    else if (this->timeResolution == "MICROSECOND") {
+        firstEpoch = mktime(&firstEpochTimePtr) * 1000000;
+        lastEpoch = mktime(&lastEpochTimePtr) * 1000000 + 999999;
+    }
 }

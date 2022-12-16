@@ -21,12 +21,13 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Improved performance with less verbosity">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Improved performance with less verbosity (batchInsert)">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/XStore/instructions.md" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/instructions.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/clientSrc/Python/XStore_pb2.py" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/Python/XStore_pb2.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/protoFile/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/XStore.proto" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/dataStructs/timeStruct.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/dataStructs/timeStruct.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -116,11 +117,6 @@
       <method v="2" />
     </configuration>
     <configuration name="XStore" type="CMakeRunConfiguration" factoryName="Application" temporary="true" PROGRAM_PARAMS="* 12345 2" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="XStore" TARGET_NAME="XStore" CONFIG_NAME="Debug-Remote-xStore-Master" RUN_TARGET_PROJECT_NAME="XStore" RUN_TARGET_NAME="XStore">
-      <method v="2">
-        <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
-      </method>
-    </configuration>
-    <configuration default="true" type="CMakeRunConfiguration" factoryName="Application" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" PASS_PARENT_ENVS_2="true">
       <method v="2">
         <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
       </method>
@@ -343,14 +339,10 @@
       <workItem from="1667617319231" duration="108234000" />
       <workItem from="1668632121236" duration="1550000" />
       <workItem from="1668634339233" duration="66280000" />
-      <workItem from="1669102537407" duration="61950000" />
-    </task>
-    <task id="LOCAL-00206" summary="Exit code is not captured?">
-      <created>1665521909682</created>
-      <option name="number" value="00206" />
-      <option name="presentableId" value="LOCAL-00206" />
-      <option name="project" value="LOCAL" />
-      <updated>1665521909682</updated>
+      <workItem from="1669102537407" duration="64557000" />
+      <workItem from="1670369154870" duration="5132000" />
+      <workItem from="1670548167692" duration="1493000" />
+      <workItem from="1671149831306" duration="4643000" />
     </task>
     <task id="LOCAL-00207" summary="Exit code is not captured?">
       <created>1665523875597</created>
@@ -688,7 +680,14 @@
       <option name="project" value="LOCAL" />
       <updated>1669505028579</updated>
     </task>
-    <option name="localTasksCounter" value="255" />
+    <task id="LOCAL-00255" summary="Improved performance with less verbosity (batchInsert)">
+      <created>1670266888575</created>
+      <option name="number" value="00255" />
+      <option name="presentableId" value="LOCAL-00255" />
+      <option name="project" value="LOCAL" />
+      <updated>1670266888575</updated>
+    </task>
+    <option name="localTasksCounter" value="256" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -795,7 +794,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Fixed broken C++ Client code" />
     <MESSAGE value="XStore Python lib &amp; Rename ENUM Proto" />
     <MESSAGE value="Reflect new ENUM Proto" />
     <MESSAGE value="Switch back to old method" />
@@ -820,6 +818,7 @@
     <MESSAGE value="Re-enabled SYS_INFO test in .gitlab-ci.yml" />
     <MESSAGE value="Updated UNARY_OPS" />
     <MESSAGE value="Improved performance with less verbosity" />
-    <option name="LAST_COMMIT_MESSAGE" value="Improved performance with less verbosity" />
+    <MESSAGE value="Improved performance with less verbosity (batchInsert)" />
+    <option name="LAST_COMMIT_MESSAGE" value="Improved performance with less verbosity (batchInsert)" />
   </component>
 </project>
