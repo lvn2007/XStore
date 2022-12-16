@@ -227,6 +227,92 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::str
     return toReturn;
 }
 
+// INSERT time-series oriented values
+XStore_Proto::unaryDelete_REP XStore::unaryDelete(std::time_t epochTime, std::string dbName) {
+    // Protobuf obj to be returned
+    XStore_Proto::unaryDelete_REP toReturn;
+    std::string deleteStatus;
+
+    // Time structure contains all components per UNIXTIME:
+    //  Year, month, day, hour, minute, sec, ...
+    timeStruct currTS{epochTime};
+
+    // Ensure dbName string is all capitalized
+    for (int i = 0; i < dbName.size(); i++) {
+        dbName[i] = toupper(dbName[i]);
+    }
+
+    // Base directory of a DB
+    std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
+
+    // IF db directory does not exist
+    if (std::filesystem::is_directory(dbBasePath) == 0) {
+        std::string errMsg = "[ERROR] [UNARY DELETE] [DB: " + dbName + "] - DB does not exist";
+        toReturn.set_deletestatus(errMsg);
+        return toReturn;
+    }
+
+    // Check if cfgMap NOT contains cfgStruct
+    configStruct cfgStruct;
+    if (cfgMap.find(dbName) == cfgMap.end()) {
+        // Read & add cfgStruct to cfgMap
+        FILE *cFile;
+        std::string cfgPath = dbBasePath + dbName + ".CFG";
+        cFile = std::fopen(cfgPath.c_str(), "rb");
+        fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
+        std::fclose(cFile);
+        cfgMap[dbName] = cfgStruct;
+    }
+    else {
+        // Otherwise -> Fetch cfgStruct from cfgMap
+        cfgStruct = cfgMap[dbName];
+    }
+
+    // Enforce time granularity
+    if (currTS.timeResolution != cfgStruct.timeResolution) {
+        std::string errMsg = "[ERROR] [UNARY DELETE] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + cfgStruct.timeResolution;
+        toReturn.set_deletestatus(errMsg);
+        return toReturn;
+    }
+
+    // Prepare to delete (Writing NULL byte)
+    FILE *bFile;
+    std::string targetFileName = std::to_string(currTS.year) + ".XSTORE";
+    std::string targetFilePath = dbBasePath + targetFileName;
+
+    // IF target file does NOT exist
+    if (std::filesystem::exists(targetFilePath) == 0) {
+        std::string errMsg = "[ERROR] [UNARY DELETE] [DB: " + dbName + "] - " + targetFileName + " does not exist";
+        toReturn.set_deletestatus(errMsg);
+        return toReturn;
+    }
+
+    // OTHERWISE - Target file DOES exist
+    //  Open in append mode
+    bFile = std::fopen(targetFilePath.c_str(), "rb+");
+
+    // Lock prior to file OP
+    flock(fileno(bFile), LOCK_EX);
+
+    //  Computes diff & offset
+    long long int diff = epochTime - currTS.firstEpoch;
+    long long int offset = diff * cfgStruct.rowLength;
+
+    //  Seek to target offset prior to write
+    fseeko64(bFile, offset, SEEK_SET);
+
+    //  Writing actual data to disk
+    std::fwrite(std::string(cfgStruct.rowLength, '\0').data(), cfgStruct.rowLength, 1, bFile);
+
+    //  Close file & Release lock after write
+    std::fclose(bFile);
+    flock(fileno(bFile), LOCK_UN);
+
+    std::string successMsg = "[SUCCESS] [UNARY DELETE] [DB: " + dbName + "] - Deleted " + std::to_string(epochTime) + " in " + targetFileName;
+    toReturn.set_deletestatus(successMsg);
+    return toReturn;
+}
+
 XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ *protoFromClient) {
     // Protobuf obj to be returned
     XStore_Proto::batchInsert_REP toReturn;

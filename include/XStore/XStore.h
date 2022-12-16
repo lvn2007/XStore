@@ -45,6 +45,9 @@ class XStore {
         // UNARY INSERT time-series oriented values
         XStore_Proto::unaryInsert_REP unaryInsert(std::time_t epochTime, std::string data, std::string dbName);
 
+        // UNARY DELETE time-series oriented values
+        XStore_Proto::unaryDelete_REP unaryDelete(std::time_t epochTime, std::string dbName);
+
         // BATCH INSERT time-series oriented values
         XStore_Proto::batchInsert_REP batchInsert(XStore_Proto::batchInsert_REQ *protoFromClient);
 

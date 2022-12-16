@@ -6,12 +6,13 @@ package XStore_Proto;
 enum requestType {
   INFO = 0;
   UNARYQUERY = 1;
-  RANGEQUERY = 2;
-  CREATEDB = 3;
-  UNARYINSERT = 4;
-  BATCHINSERT = 5;
-  REMOVEDB = 6;
-  REMOVEDBFILES = 7;
+  UNARYDELETE = 2;
+  RANGEQUERY = 3;
+  CREATEDB = 4;
+  UNARYINSERT = 5;
+  BATCHINSERT = 6;
+  REMOVEDB = 7;
+  REMOVEDBFILES = 8;
 }
 
 message reqCMD {
@@ -19,8 +20,14 @@ message reqCMD {
 }
 
 // ======== REQUESTS section ========
-// --- UNARY request
+// --- UNARY QUERY request
 message unaryQuery_REQ {
+  requestType rType = 1;
+  uint64 timestamp = 2;
+  string dbName = 3;
+}
+
+message unaryDelete_REQ {
   requestType rType = 1;
   uint64 timestamp = 2;
   string dbName = 3;
@@ -94,6 +101,10 @@ message sysInfo_REP {
 message unaryQuery_REP {
   uint64 timestamp = 1;
   string dataset = 2;
+}
+
+message unaryDelete_REP {
+  string deleteStatus = 1;
 }
 
 // --- CREATE DB response
