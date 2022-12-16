@@ -72,8 +72,8 @@ int main(int argc, char *argv[]) {
     XStore myStore;
 
     // Create DB
-//    XStore_Proto::createDB_REP create_db_rep = myStore.createDB("TSLA", "millisecond", 128);
-//    create_db_rep.PrintDebugString();
+    XStore_Proto::createDB_REP create_db_rep = myStore.createDB("TSLA", "millisecond", 128);
+    create_db_rep.PrintDebugString();
 
 //    XStore_Proto::batchInsert_REQ batch_insert_req;
 //    batch_insert_req.set_dbname("TSLA");
