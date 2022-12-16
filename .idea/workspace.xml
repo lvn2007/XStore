@@ -21,11 +21,7 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Clean-up Proto file &amp; Faster range query">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/protoFile/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/XStore.proto" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Implemented unaryDelete">
       <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -341,14 +337,7 @@
       <workItem from="1669102537407" duration="64557000" />
       <workItem from="1670369154870" duration="5132000" />
       <workItem from="1670548167692" duration="1493000" />
-      <workItem from="1671149831306" duration="9764000" />
-    </task>
-    <task id="LOCAL-00210" summary="Timeout 1m for all test jobs">
-      <created>1665528213702</created>
-      <option name="number" value="00210" />
-      <option name="presentableId" value="LOCAL-00210" />
-      <option name="project" value="LOCAL" />
-      <updated>1665528213702</updated>
+      <workItem from="1671149831306" duration="10399000" />
     </task>
     <task id="LOCAL-00211" summary="Switch back to exit()">
       <created>1665528977712</created>
@@ -686,7 +675,14 @@
       <option name="project" value="LOCAL" />
       <updated>1671167032061</updated>
     </task>
-    <option name="localTasksCounter" value="259" />
+    <task id="LOCAL-00259" summary="Implemented unaryDelete">
+      <created>1671169515759</created>
+      <option name="number" value="00259" />
+      <option name="presentableId" value="LOCAL-00259" />
+      <option name="project" value="LOCAL" />
+      <updated>1671169515760</updated>
+    </task>
+    <option name="localTasksCounter" value="260" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -793,7 +789,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Switch back to old method" />
     <MESSAGE value="Fixed bug in flock before fopen" />
     <MESSAGE value="Fixed bug in getting last day of month December" />
     <MESSAGE value="sysInfo now returns amount of 512B blocks allocated per files" />
@@ -818,6 +813,7 @@
     <MESSAGE value="Improved performance with less verbosity (batchInsert)" />
     <MESSAGE value="Enable millisecond (ms) &amp; Removed dead code" />
     <MESSAGE value="Clean-up Proto file &amp; Faster range query" />
-    <option name="LAST_COMMIT_MESSAGE" value="Clean-up Proto file &amp; Faster range query" />
+    <MESSAGE value="Implemented unaryDelete" />
+    <option name="LAST_COMMIT_MESSAGE" value="Implemented unaryDelete" />
   </component>
 </project>
