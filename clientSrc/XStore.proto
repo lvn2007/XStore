@@ -94,7 +94,6 @@ message sysInfo_REP {
 message unaryQuery_REP {
   uint64 timestamp = 1;
   string dataset = 2;
-  string queryStatus = 3;
 }
 
 // --- CREATE DB response
@@ -109,13 +108,12 @@ message unaryInsert_REP {
 
 // --- BATCH INSERT REQ response
 message batchInsert_REP {
-  repeated string insertStatus = 1;
+  string insertStatus = 1;
 }
 
 // --- RANGE/BATCH REQ response
 message rangeQuery_REP {
   repeated unaryQuery_REP unaryResponse = 1;
-  string queryStatus = 2;
 }
 
 // --- REMOVE DB response

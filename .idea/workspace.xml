@@ -21,10 +21,8 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Enable millisecond (ms) &amp; Removed dead code">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/protoFile/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/XStore.proto" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Clean-up Proto file &amp; Faster range query">
+      <change beforePath="$PROJECT_DIR$/clientSrc/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore.proto" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -340,14 +338,7 @@
       <workItem from="1669102537407" duration="64557000" />
       <workItem from="1670369154870" duration="5132000" />
       <workItem from="1670548167692" duration="1493000" />
-      <workItem from="1671149831306" duration="6685000" />
-    </task>
-    <task id="LOCAL-00208" summary="Brute-force with 1m job timeout">
-      <created>1665524886721</created>
-      <option name="number" value="00208" />
-      <option name="presentableId" value="LOCAL-00208" />
-      <option name="project" value="LOCAL" />
-      <updated>1665524886721</updated>
+      <workItem from="1671149831306" duration="7330000" />
     </task>
     <task id="LOCAL-00209" summary="Test exit(1)">
       <created>1665526207115</created>
@@ -685,7 +676,14 @@
       <option name="project" value="LOCAL" />
       <updated>1671159528696</updated>
     </task>
-    <option name="localTasksCounter" value="257" />
+    <task id="LOCAL-00257" summary="Clean-up Proto file &amp; Faster range query">
+      <created>1671166448111</created>
+      <option name="number" value="00257" />
+      <option name="presentableId" value="LOCAL-00257" />
+      <option name="project" value="LOCAL" />
+      <updated>1671166448111</updated>
+    </task>
+    <option name="localTasksCounter" value="258" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -792,7 +790,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Reflect new ENUM Proto" />
     <MESSAGE value="Switch back to old method" />
     <MESSAGE value="Fixed bug in flock before fopen" />
     <MESSAGE value="Fixed bug in getting last day of month December" />
@@ -817,6 +814,7 @@
     <MESSAGE value="Improved performance with less verbosity" />
     <MESSAGE value="Improved performance with less verbosity (batchInsert)" />
     <MESSAGE value="Enable millisecond (ms) &amp; Removed dead code" />
-    <option name="LAST_COMMIT_MESSAGE" value="Enable millisecond (ms) &amp; Removed dead code" />
+    <MESSAGE value="Clean-up Proto file &amp; Faster range query" />
+    <option name="LAST_COMMIT_MESSAGE" value="Clean-up Proto file &amp; Faster range query" />
   </component>
 </project>
