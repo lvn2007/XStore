@@ -94,7 +94,6 @@ message sysInfo_REP {
 message unaryQuery_REP {
   uint64 timestamp = 1;
   string dataset = 2;
-  string queryStatus = 3;
 }
 
 // --- CREATE DB response
