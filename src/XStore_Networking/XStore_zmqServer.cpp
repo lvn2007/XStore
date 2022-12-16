@@ -99,8 +99,26 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 // XStore stuffs
                 //  Returning Protobuf obj
-//                XStore_Proto::unaryQuery_REP protoToClient = myStore.unaryQuery(protoFromClient.timestamp(), protoFromClient.dbname());
                 XStore_Proto::unaryQuery_REP protoToClient = myStore.unaryQuery(protoFromClient.timestamp(), protoFromClient.dbname());
+
+                //  Response message size
+                size_t protoToClientSize = protoToClient.ByteSizeLong();
+                zmq::message_t responseToClient(protoToClientSize);
+
+                //  Serialize & Dispatch msg to CLIENT
+                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
+                socket.send(responseToClient, zmq::send_flags::none);
+                break;
+            }
+
+            case XStore_Proto::UNARYDELETE: {
+                // Properly parse Protobuf obj from CLIENT
+                XStore_Proto::unaryDelete_REQ protoFromClient;
+                protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
+
+                // XStore stuffs
+                //  Returning Protobuf obj
+                XStore_Proto::unaryDelete_REP protoToClient = myStore.unaryDelete(protoFromClient.timestamp(), protoFromClient.dbname());
 
                 //  Response message size
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
