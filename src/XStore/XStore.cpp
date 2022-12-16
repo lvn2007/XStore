@@ -194,9 +194,6 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::str
 
         // Lock prior to file OP
         flock(fileno(bFile), LOCK_EX);
-
-        std::cout << (currTS.lastEpoch - currTS.firstEpoch) << std::endl;
-
         ftruncate(fileno(bFile), (currTS.lastEpoch - currTS.firstEpoch) * cfgStruct.rowLength);
     }
     else {
