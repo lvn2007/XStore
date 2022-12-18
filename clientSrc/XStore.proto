@@ -5,14 +5,18 @@ package XStore_Proto;
 // ======== COMMAND directives section ========
 enum requestType {
   INFO = 0;
-  UNARYQUERY = 1;
-  UNARYDELETE = 2;
-  RANGEQUERY = 3;
-  CREATEDB = 4;
-  UNARYINSERT = 5;
-  BATCHINSERT = 6;
-  REMOVEDB = 7;
-  REMOVEDBFILES = 8;
+  CREATEDB = 1;
+  REMOVEDB = 2;
+  REMOVEDBFILES = 3;
+  UNARYINSERT = 4;
+  UNARYQUERY = 5;
+  UNARYDELETE = 6;
+  BATCHINSERT = 7;
+  BATCHQUERY = 8;
+  BATCHDELETE = 9;
+  RANGEINSERT = 10;
+  RANGEQUERY = 11;
+  RANGEDELETE = 12;
 }
 
 message reqCMD {
@@ -20,19 +24,6 @@ message reqCMD {
 }
 
 // ======== REQUESTS section ========
-// --- UNARY QUERY request
-message unaryQuery_REQ {
-  requestType rType = 1;
-  uint64 timestamp = 2;
-  string dbName = 3;
-}
-
-message unaryDelete_REQ {
-  requestType rType = 1;
-  uint64 timestamp = 2;
-  string dbName = 3;
-}
-
 // --- CREATE DB request
 message createDB_REQ {
   requestType rType = 1;
@@ -41,7 +32,7 @@ message createDB_REQ {
   uint32 rowLength = 4;
 }
 
-// --- UNARY insert request
+// --- UNARY INSERT
 message unaryInsert_REQ {
   requestType rType = 1;
   uint64 timestamp = 2;
@@ -49,16 +40,45 @@ message unaryInsert_REQ {
   string dbName = 4;
 }
 
+// --- UNARY QUERY
+message unaryQuery_REQ {
+  requestType rType = 1;
+  uint64 timestamp = 2;
+  string dbName = 3;
+}
+
+// --- UNARY DELETE
+message unaryDelete_REQ {
+  requestType rType = 1;
+  uint64 timestamp = 2;
+  string dbName = 3;
+}
+
+// --- BATCH INSERT (DATA)
 message batchInsert_DATA {
   uint64 timestamp = 1;
   string data = 2;
 }
 
-// --- BATCH insert request
+// --- BATCH INSERT
 message batchInsert_REQ {
   requestType rType = 1;
   string dbName = 2;
   repeated batchInsert_DATA batchInsert_DATA = 3;
+}
+
+// --- BATCH QUERY
+message batchQuery_REQ {
+  requestType rType = 1;
+  repeated uint64 timestamp = 2;
+  string dbName = 3;
+}
+
+// --- BATCH DELETE
+message batchDelete_REQ {
+  requestType rType = 1;
+  repeated uint64 timestamp = 2;
+  string dbName = 3;
 }
 
 // --- RANGE request
@@ -83,7 +103,7 @@ message removeDBFiles_REQ {
 }
 
 // ======== RESPONSE section ========
-// --- DB Stats & Info REQ response
+// --- DB Stats & Info REP
 message dbStats {
   string dbName = 1;
   string dbResolution = 2;
@@ -91,19 +111,41 @@ message dbStats {
   repeated string fileName = 4;
 }
 
+// --- SYS INFO
 message sysInfo_REP {
   string serverAddr = 1;
   int32 threadCount = 2;
   repeated dbStats dbInfo = 3;
 }
 
-// --- UNARY REQ response
+// --- UNARY INSERT
+message unaryInsert_REP {
+  string insertStatus = 1;
+}
+
+// --- UNARY QUERY
 message unaryQuery_REP {
   uint64 timestamp = 1;
   string dataset = 2;
 }
 
+// --- UNARY DELETE
 message unaryDelete_REP {
+  string deleteStatus = 1;
+}
+
+// --- BATCH INSERT
+message batchInsert_REP {
+  string insertStatus = 1;
+}
+
+// --- BATCH QUERY
+message batchQuery_REP {
+  repeated unaryQuery_REP queryResponse = 1;
+}
+
+// --- BATCH DELETE
+message batchDelete_REP {
   string deleteStatus = 1;
 }
 
@@ -112,27 +154,17 @@ message createDB_REP {
   string createDBStatus = 1;
 }
 
-// --- UNARY INSERT REQ response
-message unaryInsert_REP {
-  string insertStatus = 1;
-}
-
-// --- BATCH INSERT REQ response
-message batchInsert_REP {
-  string insertStatus = 1;
-}
-
-// --- RANGE/BATCH REQ response
+// --- RANGE QUERY
 message rangeQuery_REP {
-  repeated unaryQuery_REP unaryResponse = 1;
+  repeated unaryQuery_REP queryResponse = 1;
 }
 
-// --- REMOVE DB response
+// --- REMOVE DB
 message removeDB_REP {
   string removeStatus = 1;
 }
 
-// --- REMOVE DB FILES response
+// --- REMOVE DB FILES
 message removeDBFiles_REP {
   repeated string removeStatus = 1;
 }

@@ -21,12 +21,8 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Implemented batchQuery">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Implemented batchDelete">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/protoFile/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/XStore.proto" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -341,14 +337,7 @@
       <workItem from="1669102537407" duration="64557000" />
       <workItem from="1670369154870" duration="5132000" />
       <workItem from="1670548167692" duration="1493000" />
-      <workItem from="1671149831306" duration="31311000" />
-    </task>
-    <task id="LOCAL-00214" summary="Cleanup createDB">
-      <created>1667962394350</created>
-      <option name="number" value="00214" />
-      <option name="presentableId" value="LOCAL-00214" />
-      <option name="project" value="LOCAL" />
-      <updated>1667962394350</updated>
+      <workItem from="1671149831306" duration="32151000" />
     </task>
     <task id="LOCAL-00215" summary="Cleanup createDB">
       <created>1667962708044</created>
@@ -686,7 +675,14 @@
       <option name="project" value="LOCAL" />
       <updated>1671345863199</updated>
     </task>
-    <option name="localTasksCounter" value="263" />
+    <task id="LOCAL-00263" summary="Implemented batchDelete">
+      <created>1671352943280</created>
+      <option name="number" value="00263" />
+      <option name="presentableId" value="LOCAL-00263" />
+      <option name="project" value="LOCAL" />
+      <updated>1671352943280</updated>
+    </task>
+    <option name="localTasksCounter" value="264" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -793,7 +789,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="sysInfo now returns amount of 512B blocks allocated per files" />
     <MESSAGE value="Implemented batchInsert" />
     <MESSAGE value="Cleanup &amp; Update Python API library" />
     <MESSAGE value="Updated removeDB" />
@@ -818,6 +813,7 @@
     <MESSAGE value="Implemented unaryDelete" />
     <MESSAGE value="Enabled unaryDelete in Server" />
     <MESSAGE value="Implemented batchQuery" />
-    <option name="LAST_COMMIT_MESSAGE" value="Implemented batchQuery" />
+    <MESSAGE value="Implemented batchDelete" />
+    <option name="LAST_COMMIT_MESSAGE" value="Implemented batchDelete" />
   </component>
 </project>
