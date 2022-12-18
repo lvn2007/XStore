@@ -101,44 +101,15 @@ int main(int argc, char *argv[]) {
 //    XStore_Proto::unaryInsert_REP unary_insert_rep1 = myStore.unaryInsert(1451636401233, "Helo123", "TSLA");
 //    XStore_Proto::unaryInsert_REP unary_insert_rep2 = myStore.unaryInsert(1451606441897, "Helo456", "TSLA");
 //    unary_insert_rep.PrintDebugString();
-
-    // SYS INFO
-//    XStore_Proto::sysInfo_REP sys_info_rep = myStore.infoQuery("127.0.0.1:12345", THREAD_COUNT);
-//    sys_info_rep.PrintDebugString();
-
-    // REMOVE DB
-//    XStore_Proto::removeDB_REP remove_db_rep = myStore.removeDB("TSLA");
-//    remove_db_rep.PrintDebugString();
-
-    // RMOVE DB FILES
-//    XStore_Proto::removeDBFiles_REQ remove_db_files_req;
-//    remove_db_files_req.set_dbname("TSLA");
-//    remove_db_files_req.add_filename("2016.XSTORE");
-//    remove_db_files_req.add_filename("TSLA.CFG");
-
-//    XStore_Proto::removeDBFiles_REP remove_db_files_rep = myStore.removeDBFiles(&remove_db_files_req, remove_db_files_req.dbname());
-//    remove_db_files_rep.PrintDebugString();
-
-//    std::cout << "----" << std::endl;
-
-    // UNARY QUERY
-//    XStore_Proto::unaryQuery_REP unary_query_rep = myStore.unaryQuery(1451606400000, "tsla");
-//    unary_query_rep.PrintDebugString();
-//    XStore_Proto::unaryQuery_REP unary_query_rep1 = myStore.unaryQuery(1451636401233, "tsla");
-//    unary_query_rep1.PrintDebugString();
-//    XStore_Proto::unaryQuery_REP unary_query_rep2 = myStore.unaryQuery(1451606441897, "tsla");
-//    unary_query_rep2.PrintDebugString();
-
-//    unary_query_rep = myStore.unaryQuery_fTruncate(1482271200, "tsla");
-//    unary_query_rep.PrintDebugString();
-//    unary_query_rep = myStore.unaryQuery_fTruncate(1482271201, "tsla");
-//    unary_query_rep.PrintDebugString();
-//    unary_query_rep = myStore.unaryQuery_fTruncate(1482271202, "tsla");
-//    unary_query_rep.PrintDebugString();
-//    unary_query_rep = myStore.unaryQuery_fTruncate(1482271203, "tsla");
-//    unary_query_rep.PrintDebugString();
-//    unary_query_rep = myStore.unaryQuery_fTruncate(1070071201, "tsla");
-//    unary_query_rep.PrintDebugString();
+//
+//    XStore_Proto::batchQuery_REQ batch_query_req;
+//    batch_query_req.set_dbname("TSLA");
+//    batch_query_req.add_timestamp(1451636401233);
+//    batch_query_req.add_timestamp(1451606441897);
+//    batch_query_req.add_timestamp(1451606400000);
+//
+//    XStore_Proto::batchQuery_REP batch_query_rep = myStore.batchQuery(&batch_query_req);
+//    batch_query_rep.PrintDebugString();
 
     // RANGE QUERY
 //    XStore_Proto::rangeQuery_REP range_query_rep = myStore.rangeQuery(1451606400000, 1451606400002, "tsla");

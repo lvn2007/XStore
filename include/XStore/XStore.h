@@ -42,26 +42,29 @@ class XStore {
         // CREATING new DB instance with row length
         XStore_Proto::createDB_REP createDB(std::string dbName, std::string timeResolution, short int rowLength);
 
-        // UNARY INSERT time-series oriented values
-        XStore_Proto::unaryInsert_REP unaryInsert(std::time_t epochTime, std::string data, std::string dbName);
-
-        // UNARY DELETE time-series oriented values
-        XStore_Proto::unaryDelete_REP unaryDelete(std::time_t epochTime, std::string dbName);
-
-        // BATCH INSERT time-series oriented values
-        XStore_Proto::batchInsert_REP batchInsert(XStore_Proto::batchInsert_REQ *protoFromClient);
-
-        // UNARY GET time-series oriented values
-        XStore_Proto::unaryQuery_REP unaryQuery(std::time_t epochTime, std::string dbName);
-
-        // BATCH GET time-series oriented values
-        XStore_Proto::rangeQuery_REP rangeQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName);
-
         // REMOVE DB -- Removing an entire DB and its data files
         XStore_Proto::removeDB_REP removeDB(std::string dbName);
 
         // REMOVE DB FILES -- Removing file(s) based on name in a certain DB
         XStore_Proto::removeDBFiles_REP removeDBFiles(XStore_Proto::removeDBFiles_REQ *protoFromClient, std::string dbName);
+
+        // UNARY INSERT
+        XStore_Proto::unaryInsert_REP unaryInsert(std::time_t epochTime, std::string data, std::string dbName);
+
+        // UNARY QUERY
+        XStore_Proto::unaryQuery_REP unaryQuery(std::time_t epochTime, std::string dbName);
+
+        // UNARY DELETE
+        XStore_Proto::unaryDelete_REP unaryDelete(std::time_t epochTime, std::string dbName);
+
+        // BATCH INSERT
+        XStore_Proto::batchInsert_REP batchInsert(XStore_Proto::batchInsert_REQ *protoFromClient);
+
+        // BATCH QUERY
+        XStore_Proto::batchQuery_REP batchQuery(XStore_Proto::batchQuery_REQ *protoFromClient);
+
+        // RANGE QUERY
+        XStore_Proto::rangeQuery_REP rangeQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName);
 
         // Initialize DB
         void initDB();

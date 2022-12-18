@@ -91,65 +91,6 @@ void* XStore_zmqServer::workerRoutine(void *args) {
                 break;
             }
 
-            // UNARY QUERY
-            case XStore_Proto::UNARYQUERY: {
-                // Properly parse Protobuf obj from CLIENT
-                XStore_Proto::unaryQuery_REQ protoFromClient;
-                protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
-
-                // XStore stuffs
-                //  Returning Protobuf obj
-                XStore_Proto::unaryQuery_REP protoToClient = myStore.unaryQuery(protoFromClient.timestamp(), protoFromClient.dbname());
-
-                //  Response message size
-                size_t protoToClientSize = protoToClient.ByteSizeLong();
-                zmq::message_t responseToClient(protoToClientSize);
-
-                //  Serialize & Dispatch msg to CLIENT
-                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
-                socket.send(responseToClient, zmq::send_flags::none);
-                break;
-            }
-
-            case XStore_Proto::UNARYDELETE: {
-                // Properly parse Protobuf obj from CLIENT
-                XStore_Proto::unaryDelete_REQ protoFromClient;
-                protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
-
-                // XStore stuffs
-                //  Returning Protobuf obj
-                XStore_Proto::unaryDelete_REP protoToClient = myStore.unaryDelete(protoFromClient.timestamp(), protoFromClient.dbname());
-
-                //  Response message size
-                size_t protoToClientSize = protoToClient.ByteSizeLong();
-                zmq::message_t responseToClient(protoToClientSize);
-
-                //  Serialize & Dispatch msg to CLIENT
-                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
-                socket.send(responseToClient, zmq::send_flags::none);
-                break;
-            }
-
-            // RANGE QUERY
-            case XStore_Proto::RANGEQUERY: {
-                // Properly parse Protobuf obj from CLIENT
-                XStore_Proto::rangeQuery_REQ protoFromClient;
-                protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
-
-                // XStore stuffs
-                //  Returning Protobuf obj
-                XStore_Proto::rangeQuery_REP protoToClient = myStore.rangeQuery(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname());
-
-                //  Response message
-                size_t protoToClientSize = protoToClient.ByteSizeLong();
-                zmq::message_t responseToClient(protoToClientSize);
-
-                //  Serialize & Dispatch msg to CLIENT
-                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
-                socket.send(responseToClient, zmq::send_flags::none);
-                break;
-            }
-
             // CREATE DB REQUEST
             case XStore_Proto::CREATEDB: {
                 // Properly parse Protobuf obj from CLIENT
@@ -159,46 +100,6 @@ void* XStore_zmqServer::workerRoutine(void *args) {
                 // XStore stuffs
                 //  Returning Protobuf obj
                 XStore_Proto::createDB_REP protoToClient = myStore.createDB(protoFromClient.dbname(), protoFromClient.timeresolution(), protoFromClient.rowlength());
-
-                //  Response message
-                size_t protoToClientSize = protoToClient.ByteSizeLong();
-                zmq::message_t responseToClient(protoToClientSize);
-
-                //  Serialize & Dispatch msg to CLIENT
-                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
-                socket.send(responseToClient, zmq::send_flags::none);
-                break;
-            }
-
-            // UNARY INSERT REQUEST
-            case XStore_Proto::UNARYINSERT: {
-                // Properly parse Protobuf obj from CLIENT
-                XStore_Proto::unaryInsert_REQ protoFromClient;
-                protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
-
-                // XStore stuffs
-                //  Returning Protobuf obj
-                XStore_Proto::unaryInsert_REP protoToClient = myStore.unaryInsert(protoFromClient.timestamp(), protoFromClient.data(), protoFromClient.dbname());
-
-                //  Response message
-                size_t protoToClientSize = protoToClient.ByteSizeLong();
-                zmq::message_t responseToClient(protoToClientSize);
-
-                //  Serialize & Dispatch msg to CLIENT
-                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
-                socket.send(responseToClient, zmq::send_flags::none);
-                break;
-            }
-
-            // BATCH INSERT REQUEST
-            case XStore_Proto::BATCHINSERT: {
-                // Properly parse Protobuf obj from CLIENT
-                XStore_Proto::batchInsert_REQ protoFromClient;
-                protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
-
-                // XStore stuffs
-                //  Returning Protobuf obj
-                XStore_Proto::batchInsert_REP protoToClient = myStore.batchInsert(&protoFromClient);
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
@@ -239,6 +140,186 @@ void* XStore_zmqServer::workerRoutine(void *args) {
                 // XStore stuffs
                 //  Returning Protobuf obj
                 XStore_Proto::removeDBFiles_REP protoToClient = myStore.removeDBFiles(&protoFromClient, protoFromClient.dbname());
+
+                //  Response message
+                size_t protoToClientSize = protoToClient.ByteSizeLong();
+                zmq::message_t responseToClient(protoToClientSize);
+
+                //  Serialize & Dispatch msg to CLIENT
+                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
+                socket.send(responseToClient, zmq::send_flags::none);
+                break;
+            }
+
+            // UNARY INSERT REQUEST
+            case XStore_Proto::UNARYINSERT: {
+                // Properly parse Protobuf obj from CLIENT
+                XStore_Proto::unaryInsert_REQ protoFromClient;
+                protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
+
+                // XStore stuffs
+                //  Returning Protobuf obj
+                XStore_Proto::unaryInsert_REP protoToClient = myStore.unaryInsert(protoFromClient.timestamp(), protoFromClient.data(), protoFromClient.dbname());
+
+                //  Response message
+                size_t protoToClientSize = protoToClient.ByteSizeLong();
+                zmq::message_t responseToClient(protoToClientSize);
+
+                //  Serialize & Dispatch msg to CLIENT
+                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
+                socket.send(responseToClient, zmq::send_flags::none);
+                break;
+            }
+
+            // UNARY QUERY
+            case XStore_Proto::UNARYQUERY: {
+                // Properly parse Protobuf obj from CLIENT
+                XStore_Proto::unaryQuery_REQ protoFromClient;
+                protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
+
+                // XStore stuffs
+                //  Returning Protobuf obj
+                XStore_Proto::unaryQuery_REP protoToClient = myStore.unaryQuery(protoFromClient.timestamp(), protoFromClient.dbname());
+
+                //  Response message size
+                size_t protoToClientSize = protoToClient.ByteSizeLong();
+                zmq::message_t responseToClient(protoToClientSize);
+
+                //  Serialize & Dispatch msg to CLIENT
+                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
+                socket.send(responseToClient, zmq::send_flags::none);
+                break;
+            }
+
+            // UNARY DELETE
+            case XStore_Proto::UNARYDELETE: {
+                // Properly parse Protobuf obj from CLIENT
+                XStore_Proto::unaryDelete_REQ protoFromClient;
+                protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
+
+                // XStore stuffs
+                //  Returning Protobuf obj
+                XStore_Proto::unaryDelete_REP protoToClient = myStore.unaryDelete(protoFromClient.timestamp(), protoFromClient.dbname());
+
+                //  Response message size
+                size_t protoToClientSize = protoToClient.ByteSizeLong();
+                zmq::message_t responseToClient(protoToClientSize);
+
+                //  Serialize & Dispatch msg to CLIENT
+                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
+                socket.send(responseToClient, zmq::send_flags::none);
+                break;
+            }
+
+            // BATCH INSERT REQUEST
+            case XStore_Proto::BATCHINSERT: {
+                // Properly parse Protobuf obj from CLIENT
+                XStore_Proto::batchInsert_REQ protoFromClient;
+                protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
+
+                // XStore stuffs
+                //  Returning Protobuf obj
+                XStore_Proto::batchInsert_REP protoToClient = myStore.batchInsert(&protoFromClient);
+
+                //  Response message
+                size_t protoToClientSize = protoToClient.ByteSizeLong();
+                zmq::message_t responseToClient(protoToClientSize);
+
+                //  Serialize & Dispatch msg to CLIENT
+                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
+                socket.send(responseToClient, zmq::send_flags::none);
+                break;
+            }
+
+            // BATCH QUERY
+            case XStore_Proto::BATCHQUERY: {
+                // Properly parse Protobuf obj from CLIENT
+                XStore_Proto::batchQuery_REQ protoFromClient;
+                protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
+
+                // XStore stuffs
+                //  Returning Protobuf obj
+                XStore_Proto::batchQuery_REP protoToClient = myStore.batchQuery(&protoFromClient);
+
+                //  Response message
+                size_t protoToClientSize = protoToClient.ByteSizeLong();
+                zmq::message_t responseToClient(protoToClientSize);
+
+                //  Serialize & Dispatch msg to CLIENT
+                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
+                socket.send(responseToClient, zmq::send_flags::none);
+                break;
+            }
+
+            // BATCH DELETE
+            case XStore_Proto::BATCHDELETE: {
+                // Properly parse Protobuf obj from CLIENT
+                XStore_Proto::rangeQuery_REQ protoFromClient;
+                protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
+
+                // XStore stuffs
+                //  Returning Protobuf obj
+                XStore_Proto::rangeQuery_REP protoToClient = myStore.rangeQuery(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname());
+
+                //  Response message
+                size_t protoToClientSize = protoToClient.ByteSizeLong();
+                zmq::message_t responseToClient(protoToClientSize);
+
+                //  Serialize & Dispatch msg to CLIENT
+                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
+                socket.send(responseToClient, zmq::send_flags::none);
+                break;
+            }
+
+            // RANGE INSERT
+            case XStore_Proto::RANGEINSERT: {
+                // Properly parse Protobuf obj from CLIENT
+                XStore_Proto::rangeQuery_REQ protoFromClient;
+                protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
+
+                // XStore stuffs
+                //  Returning Protobuf obj
+                XStore_Proto::rangeQuery_REP protoToClient = myStore.rangeQuery(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname());
+
+                //  Response message
+                size_t protoToClientSize = protoToClient.ByteSizeLong();
+                zmq::message_t responseToClient(protoToClientSize);
+
+                //  Serialize & Dispatch msg to CLIENT
+                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
+                socket.send(responseToClient, zmq::send_flags::none);
+                break;
+            }
+
+            // RANGE QUERY
+            case XStore_Proto::RANGEQUERY: {
+                // Properly parse Protobuf obj from CLIENT
+                XStore_Proto::rangeQuery_REQ protoFromClient;
+                protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
+
+                // XStore stuffs
+                //  Returning Protobuf obj
+                XStore_Proto::rangeQuery_REP protoToClient = myStore.rangeQuery(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname());
+
+                //  Response message
+                size_t protoToClientSize = protoToClient.ByteSizeLong();
+                zmq::message_t responseToClient(protoToClientSize);
+
+                //  Serialize & Dispatch msg to CLIENT
+                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
+                socket.send(responseToClient, zmq::send_flags::none);
+                break;
+            }
+
+            // RANGE DELETE
+            case XStore_Proto::RANGEDELETE: {
+                // Properly parse Protobuf obj from CLIENT
+                XStore_Proto::rangeQuery_REQ protoFromClient;
+                protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
+
+                // XStore stuffs
+                //  Returning Protobuf obj
+                XStore_Proto::rangeQuery_REP protoToClient = myStore.rangeQuery(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname());
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();

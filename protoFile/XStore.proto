@@ -5,14 +5,18 @@ package XStore_Proto;
 // ======== COMMAND directives section ========
 enum requestType {
   INFO = 0;
-  UNARYQUERY = 1;
-  UNARYDELETE = 2;
-  RANGEQUERY = 3;
-  CREATEDB = 4;
-  UNARYINSERT = 5;
-  BATCHINSERT = 6;
-  REMOVEDB = 7;
-  REMOVEDBFILES = 8;
+  CREATEDB = 1;
+  REMOVEDB = 2;
+  REMOVEDBFILES = 3;
+  UNARYINSERT = 4;
+  UNARYQUERY = 5;
+  UNARYDELETE = 6;
+  BATCHINSERT = 7;
+  BATCHQUERY = 8;
+  BATCHDELETE = 9;
+  RANGEINSERT = 10;
+  RANGEQUERY = 11;
+  RANGEDELETE = 12;
 }
 
 message reqCMD {
@@ -61,6 +65,13 @@ message batchInsert_REQ {
   repeated batchInsert_DATA batchInsert_DATA = 3;
 }
 
+// --- BATCH query request
+message batchQuery_REQ {
+  requestType rType = 1;
+  repeated uint64 timestamp = 2;
+  string dbName = 3;
+}
+
 // --- RANGE request
 message rangeQuery_REQ {
   requestType rType = 1;
@@ -91,18 +102,20 @@ message dbStats {
   repeated string fileName = 4;
 }
 
+// --- SYS INFO response
 message sysInfo_REP {
   string serverAddr = 1;
   int32 threadCount = 2;
   repeated dbStats dbInfo = 3;
 }
 
-// --- UNARY REQ response
+// --- UNARY QUERY response
 message unaryQuery_REP {
   uint64 timestamp = 1;
   string dataset = 2;
 }
 
+// --- UNARY DELETE response
 message unaryDelete_REP {
   string deleteStatus = 1;
 }
@@ -112,19 +125,24 @@ message createDB_REP {
   string createDBStatus = 1;
 }
 
-// --- UNARY INSERT REQ response
+// --- UNARY INSERT response
 message unaryInsert_REP {
   string insertStatus = 1;
 }
 
-// --- BATCH INSERT REQ response
+// --- BATCH INSERT response
 message batchInsert_REP {
   string insertStatus = 1;
 }
 
-// --- RANGE/BATCH REQ response
+// --- RANGE response
 message rangeQuery_REP {
-  repeated unaryQuery_REP unaryResponse = 1;
+  repeated unaryQuery_REP queryResponse = 1;
+}
+
+// --- RANGE response
+message batchQuery_REP {
+  repeated unaryQuery_REP queryResponse = 1;
 }
 
 // --- REMOVE DB response
