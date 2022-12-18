@@ -21,8 +21,13 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Implemented unaryDelete">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Enabled unaryDelete in Server">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/protoFile/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/XStore.proto" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -337,14 +342,7 @@
       <workItem from="1669102537407" duration="64557000" />
       <workItem from="1670369154870" duration="5132000" />
       <workItem from="1670548167692" duration="1493000" />
-      <workItem from="1671149831306" duration="11029000" />
-    </task>
-    <task id="LOCAL-00212" summary="Re-implementing time structures">
-      <created>1667960705366</created>
-      <option name="number" value="00212" />
-      <option name="presentableId" value="LOCAL-00212" />
-      <option name="project" value="LOCAL" />
-      <updated>1667960705366</updated>
+      <workItem from="1671149831306" duration="25300000" />
     </task>
     <task id="LOCAL-00213" summary="Cleanup createDB">
       <created>1667961692123</created>
@@ -682,7 +680,14 @@
       <option name="project" value="LOCAL" />
       <updated>1671170117226</updated>
     </task>
-    <option name="localTasksCounter" value="261" />
+    <task id="LOCAL-00261" summary="Enabled unaryDelete in Server">
+      <created>1671174381256</created>
+      <option name="number" value="00261" />
+      <option name="presentableId" value="LOCAL-00261" />
+      <option name="project" value="LOCAL" />
+      <updated>1671174381256</updated>
+    </task>
+    <option name="localTasksCounter" value="262" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -789,7 +794,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Fixed bug in flock before fopen" />
     <MESSAGE value="Fixed bug in getting last day of month December" />
     <MESSAGE value="sysInfo now returns amount of 512B blocks allocated per files" />
     <MESSAGE value="Implemented batchInsert" />
@@ -814,6 +818,7 @@
     <MESSAGE value="Enable millisecond (ms) &amp; Removed dead code" />
     <MESSAGE value="Clean-up Proto file &amp; Faster range query" />
     <MESSAGE value="Implemented unaryDelete" />
-    <option name="LAST_COMMIT_MESSAGE" value="Implemented unaryDelete" />
+    <MESSAGE value="Enabled unaryDelete in Server" />
+    <option name="LAST_COMMIT_MESSAGE" value="Enabled unaryDelete in Server" />
   </component>
 </project>
