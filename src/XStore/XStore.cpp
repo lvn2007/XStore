@@ -118,7 +118,7 @@ XStore_Proto::createDB_REP XStore::createDB(std::string dbName, std::string time
             flock(fileno(bFile), LOCK_EX);
 
             // Writing actual data to disk
-            std::fwrite(&cfgStruct, sizeof(struct configStruct), 1, bFile);
+            fwrite(&cfgStruct, sizeof(struct configStruct), 1, bFile);
 
             //  Close file & Release lock after write
             std::fclose(bFile);
@@ -216,7 +216,7 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::str
     fseeko64(bFile, offset, SEEK_SET);
 
     //  Writing actual data to disk
-    std::fwrite((currData.getData()).data(), cfgStruct.rowLength, 1, bFile);
+    fwrite((currData.getData()).data(), cfgStruct.rowLength, 1, bFile);
 
     //  Close file & Release lock after write
     std::fclose(bFile);
@@ -379,7 +379,7 @@ XStore_Proto::unaryDelete_REP XStore::unaryDelete(std::time_t epochTime, std::st
     fseeko64(bFile, offset, SEEK_SET);
 
     // Nullify data based on N number of bytes available at that data point
-    std::fwrite(std::string(strlen(bufferIn), '\0').data(), cfgStruct.rowLength, 1, bFile);
+    fwrite(std::string(strlen(bufferIn), '\0').data(), cfgStruct.rowLength, 1, bFile);
 
     // Close file & Release lock after write
     std::fclose(bFile);
@@ -503,7 +503,7 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
             fseeko64(bFile, offset, SEEK_SET);
 
             // Writing actual data to disk
-            std::fwrite((currData.getData()).data(), cfgStruct.rowLength, 1, bFile);
+            fwrite((currData.getData()).data(), cfgStruct.rowLength, 1, bFile);
         }
 
         // Close file & Release lock after write
@@ -520,10 +520,8 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
 
 // BATCH QUERY
 XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *protoFromClient) {
-// Protobuf obj to be returned
-    std::string queryStatus;
+    // Protobuf obj to be returned
     XStore_Proto::batchQuery_REP toReturn;
-
     std::string dbName = protoFromClient->dbname();
 
     // Ensure dbName string is all capitalized
@@ -554,12 +552,8 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
         cfgStruct = cfgMap[dbName];
     }
 
-    // IF query range > 2GB limit of Protobuf
-    if ((protoFromClient->timestamp_size() * cfgStruct.rowLength) > 2000000000) {
-        return toReturn;
-    }
-
-    if (protoFromClient->timestamp_size() < 0) {
+    // IF query range > 2GB limit of Protobuf or Empty
+    if ((protoFromClient->timestamp_size() * cfgStruct.rowLength) > 2000000000 || protoFromClient->timestamp_size() < 0) {
         return toReturn;
     }
 
@@ -645,6 +639,138 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
         std::fclose(bFile);
         flock(fileno(bFile), LOCK_UN);
     }
+    return toReturn;
+}
+
+// BATCH DELETE
+XStore_Proto::batchDelete_REP XStore::batchDelete(XStore_Proto::batchDelete_REQ *protoFromClient) {
+    // Protobuf obj to be returned
+    XStore_Proto::batchDelete_REP toReturn;
+    std::string dbName = protoFromClient->dbname();
+    int deleteCount = 0;
+
+    // Ensure dbName string is all capitalized
+    for (int i = 0; i < dbName.size(); i++) {
+        dbName[i] = toupper(dbName[i]);
+    }
+
+    // Base directory of a DB
+    std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
+
+    // Check if cfgMap NOT contains cfgStruct
+    configStruct cfgStruct;
+    if (cfgMap.find(dbName) == cfgMap.end()) {
+        std::string cfgPath = dbBasePath + dbName + ".CFG";
+
+        if (std::filesystem::exists(cfgPath) == 0) {
+            return toReturn;
+        }
+
+        // Read & Add cfgStruct to cfgMap
+        FILE *cFile = std::fopen(cfgPath.c_str(), "rb");
+        fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
+        std::fclose(cFile);
+        cfgMap[dbName] = cfgStruct;
+    }
+    else {
+        // Otherwise -> Fetch cfgStruct from cfgMap
+        cfgStruct = cfgMap[dbName];
+    }
+
+    // IF target delete timestamp(s) is empty OR db directory does not exist
+    if (protoFromClient->timestamp_size() < 0) {
+        std::string errMsg = "[ERROR] [BATCH DELETE] [DB: " + dbName + "] - Empty target timestamp(s)";
+        toReturn.set_deletestatus(errMsg);
+        return toReturn;
+    }
+    else if (std::filesystem::is_directory(dbBasePath) == 0) {
+        std::string errMsg = "[ERROR] [BATCH DELETE] [DB: " + dbName + "] - DB does not exist";
+        toReturn.set_deletestatus(errMsg);
+        return toReturn;
+    }
+
+    // Assuming incoming batch query is unsorted
+    //  -> Ascending sort
+    std::sort(std::execution::par_unseq, protoFromClient->mutable_timestamp()->begin(), protoFromClient->mutable_timestamp()->end(),
+              [](const unsigned long long int& a, const unsigned long long int& b) {
+                return a < b;
+    });
+
+    // Organize incoming batch delete timestamp into map
+    //  dataMap[2016] = Vector {Index 0, Index 1, ...}
+    std::time_t currTime;
+    std::map<unsigned short int, std::vector<unsigned long long int>> dataMap;
+
+    // Granularity check
+    for (int i = 0; i < protoFromClient->timestamp_size(); i++) {
+        currTime = protoFromClient->timestamp(i);
+        struct timeStruct currTS{currTime};
+        dataMap[currTS.year].push_back(i);
+
+        // Halt execution & Return as long as there's an error in time granularity
+        if (currTS.timeResolution != cfgStruct.timeResolution) {
+            std::string errMsg = "[ERROR] [BATCH DELETE] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + cfgStruct.timeResolution;
+            toReturn.set_deletestatus(errMsg);
+            return toReturn;
+        }
+    }
+
+    // Iterate through each key (year) of dataMap
+    for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& pair : dataMap) {
+        FILE *bFile;
+        unsigned short int yearKey = pair.first;
+        std::string targetFile = dbBasePath + std::to_string(yearKey) + ".XSTORE";
+
+        // IF target file does NOT exist
+        if (std::filesystem::exists(targetFile) == 0) {
+            // Skip to next iteration
+            continue;
+        }
+        else {
+            // ELSE - Target file DOES exist
+            //  Open in read mode
+            bFile = std::fopen(targetFile.c_str(), "rb+");
+
+            // Lock prior to file OP
+            flock(fileno(bFile), LOCK_EX);
+        }
+
+        // Time-related & Auxiliary
+        long long int diff, offset;
+        char bufferIn[cfgStruct.rowLength];
+        timeStruct thisTS{static_cast<time_t>(protoFromClient->timestamp(dataMap[yearKey].at(0)))};
+
+        for (int i = 0; i < dataMap[yearKey].size(); i++) {
+            // Computes diff & offset
+            diff = protoFromClient->timestamp(dataMap[yearKey].at(i)) - thisTS.firstEpoch;
+            offset = diff * cfgStruct.rowLength;
+
+            // Seek to target offset prior to read
+            fseeko64(bFile, offset, SEEK_SET);
+
+            // Extract N bytes of data according to N bytes from .CFG file
+            //  .CFG file is set by user when creating DB
+            fread(&bufferIn[0], 1, cfgStruct.rowLength, bFile);
+
+            // IF fetched data contains nothing
+            //  -> Skip to next iteration
+            if (strlen(bufferIn) == 0) {
+                continue;
+            }
+            // Seek to target offset prior to write
+            fseeko64(bFile, offset, SEEK_SET);
+
+            // Nullify data based on N number of bytes available at that data point
+            fwrite(std::string(strlen(bufferIn), '\0').data(), cfgStruct.rowLength, 1, bFile);
+            deleteCount++;
+        }
+
+        // Close file & Release lock after read
+        std::fclose(bFile);
+        flock(fileno(bFile), LOCK_UN);
+    }
+    std::string successMsg = "[SUCCESS] [BATCH DELETE] [DB: " + dbName + "] - Deleted " + std::to_string(deleteCount) + " items";
+    toReturn.set_deletestatus(successMsg);
     return toReturn;
 }
 

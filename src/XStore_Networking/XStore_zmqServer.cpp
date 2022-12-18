@@ -254,12 +254,12 @@ void* XStore_zmqServer::workerRoutine(void *args) {
             // BATCH DELETE
             case XStore_Proto::BATCHDELETE: {
                 // Properly parse Protobuf obj from CLIENT
-                XStore_Proto::rangeQuery_REQ protoFromClient;
+                XStore_Proto::batchDelete_REQ protoFromClient;
                 protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
 
                 // XStore stuffs
                 //  Returning Protobuf obj
-                XStore_Proto::rangeQuery_REP protoToClient = myStore.rangeQuery(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname());
+                XStore_Proto::batchDelete_REP protoToClient = myStore.batchDelete(&protoFromClient);
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
