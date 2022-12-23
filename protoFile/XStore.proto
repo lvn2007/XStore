@@ -32,6 +32,19 @@ message createDB_REQ {
   uint32 rowLength = 4;
 }
 
+// --- REMOVE DB request
+message removeDB_REQ {
+  requestType rType = 1;
+  string dbName = 2;
+}
+
+// --- REMOVE DB FILES request
+message removeDBFiles_REQ {
+  requestType rType = 1;
+  string dbName = 2;
+  repeated string fileName = 3;
+}
+
 // --- UNARY INSERT
 message unaryInsert_REQ {
   requestType rType = 1;
@@ -102,17 +115,12 @@ message rangeQuery_REQ {
   string dbName = 4;
 }
 
-// --- REMOVE DB request
-message removeDB_REQ {
+// --- RANGE DELETE
+message rangeDelete_REQ {
   requestType rType = 1;
-  string dbName = 2;
-}
-
-// --- REMOVE DB FILES request
-message removeDBFiles_REQ {
-  requestType rType = 1;
-  string dbName = 2;
-  repeated string fileName = 3;
+  uint64 startTime = 2;
+  uint64 endTime = 3;
+  string dbName = 4;
 }
 
 // ======== RESPONSE section ========
@@ -185,4 +193,9 @@ message rangeInsert_REP {
 // --- RANGE QUERY
 message rangeQuery_REP {
   repeated unaryQuery_REP queryResponse = 1;
+}
+
+// --- RANGE DELETE
+message rangeDelete_REP {
+  string deleteStatus = 1;
 }

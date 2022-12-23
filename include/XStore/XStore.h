@@ -73,7 +73,7 @@ class XStore {
         XStore_Proto::rangeQuery_REP rangeQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName);
 
         // RANGE DELETE
-
+        XStore_Proto::rangeDelete_REP rangeDelete(std::time_t startEpochT, std::time_t endEpochT, std::string dbName);
 
         // Initialize DB
         void initDB();
