@@ -966,6 +966,13 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
     if (currTS.lastEpoch >= endEpochT) {
         // Open file prior to reading
         targetFilePath = dbBasePath + std::to_string(currTS.year) + ".XSTORE";
+
+        // IF target YEAR.XSTORE does NOT exist
+        if (std::filesystem::exists(targetFilePath) == 0) {
+            // Return without error
+            return toReturn;
+        }
+
         bFile = std::fopen(targetFilePath.c_str(), "rb");
 
         // Lock file prior to reading
@@ -1187,7 +1194,7 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
         bFile = std::fopen(targetFilePath.c_str(), "rb");
 
         // Lock file prior to reading
-        flock(fileno(bFile), LOCK_SH);
+        flock(fileno(bFile), LOCK_EX);
 
         // Iterate over range of query data & add queried data and status
         for (long epochTime = startEpochT; epochTime <= endEpochT; epochTime++) {
@@ -1240,7 +1247,7 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
 
                 // Open & Lock file prior to reading
                 bFile = std::fopen(targetFilePath.c_str(), "rb");
-                flock(fileno(bFile), LOCK_SH);
+                flock(fileno(bFile), LOCK_EX);
 
                 // Iterate over range of query data & add queried data and status
                 for (long long int epochTime = startEpoch; epochTime <= currTS.lastEpoch; epochTime++, startEpoch++) {
@@ -1286,7 +1293,7 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
 
                 // Open & Lock file prior to reading
                 bFile = std::fopen(targetFilePath.c_str(), "rb");
-                flock(fileno(bFile), LOCK_SH);
+                flock(fileno(bFile), LOCK_EX);
 
                 // Iterate over range of query data & add queried data and status
                 for (long long int epochTime = startEpoch; epochTime <= endEpochT; epochTime++, startEpoch++) {
