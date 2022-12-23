@@ -81,7 +81,20 @@ message batchDelete_REQ {
   string dbName = 3;
 }
 
-// --- RANGE request
+// --- RANGE INSERT (DATA)
+message rangeInsert_DATA {
+  uint64 timestamp = 1;
+  string data = 2;
+}
+
+// --- RANGE INSERT
+message rangeInsert_REQ {
+  requestType rType = 1;
+  string dbName = 2;
+  repeated rangeInsert_DATA rangeInsert_DATA = 3;
+}
+
+// --- RANGE QUERY
 message rangeQuery_REQ {
   requestType rType = 1;
   uint64 startTime = 2;
@@ -118,6 +131,21 @@ message sysInfo_REP {
   repeated dbStats dbInfo = 3;
 }
 
+// --- CREATE DB response
+message createDB_REP {
+  string createDBStatus = 1;
+}
+
+// --- REMOVE DB
+message removeDB_REP {
+  string removeStatus = 1;
+}
+
+// --- REMOVE DB FILES
+message removeDBFiles_REP {
+  repeated string removeStatus = 1;
+}
+
 // --- UNARY INSERT
 message unaryInsert_REP {
   string insertStatus = 1;
@@ -149,22 +177,12 @@ message batchDelete_REP {
   string deleteStatus = 1;
 }
 
-// --- CREATE DB response
-message createDB_REP {
-  string createDBStatus = 1;
+// --- RANGE INSERT
+message rangeInsert_REP {
+  string insertStatus = 1;
 }
 
 // --- RANGE QUERY
 message rangeQuery_REP {
   repeated unaryQuery_REP queryResponse = 1;
-}
-
-// --- REMOVE DB
-message removeDB_REP {
-  string removeStatus = 1;
-}
-
-// --- REMOVE DB FILES
-message removeDBFiles_REP {
-  repeated string removeStatus = 1;
 }

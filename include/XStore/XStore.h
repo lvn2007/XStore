@@ -66,8 +66,14 @@ class XStore {
         // BATCH DELETE
         XStore_Proto::batchDelete_REP batchDelete(XStore_Proto::batchDelete_REQ *protoFromClient);
 
+        // RANGE INSERT
+        XStore_Proto::rangeInsert_REP rangeInsert(XStore_Proto::rangeInsert_REQ *protoFromClient);
+
         // RANGE QUERY
         XStore_Proto::rangeQuery_REP rangeQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName);
+
+        // RANGE DELETE
+
 
         // Initialize DB
         void initDB();
