@@ -774,6 +774,129 @@ XStore_Proto::batchDelete_REP XStore::batchDelete(XStore_Proto::batchDelete_REQ 
     return toReturn;
 }
 
+// RANGE INSERT
+XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ *protoFromClient) {
+    // Protobuf obj to be returned
+    XStore_Proto::rangeInsert_REP toReturn;
+    std::string insertStatus;
+
+    // Ensure DB Name string is all capitalized
+    std::string dbName = protoFromClient->dbname();
+    for (int i = 0; i < dbName.size(); i++) {
+        dbName[i] = toupper(dbName[i]);
+    }
+
+    // Base directory of a DB
+    std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
+
+    // IF db directory does not exist
+    if (std::filesystem::is_directory(dbBasePath) == 0) {
+        std::string errMsg = "[ERROR] [RANGE INSERT] [DB: " + dbName + "] - DB does not exist";
+        toReturn.set_insertstatus(errMsg);
+        return toReturn;
+    }
+
+    // Check if cfgMap NOT contains cfgStruct
+    configStruct cfgStruct;
+    if (cfgMap.find(dbName) == cfgMap.end()) {
+        // Read & Add cfgStruct to cfgMap
+        FILE *cFile;
+        std::string cfgPath = dbBasePath + dbName + ".CFG";
+        cFile = std::fopen(cfgPath.c_str(), "rb");
+        fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
+        std::fclose(cFile);
+        cfgMap[dbName] = cfgStruct;
+    }
+    else {
+        // Otherwise -> Fetch cfgStruct from cfgMap
+        cfgStruct = cfgMap[dbName];
+    }
+
+    // Assuming incoming data is sorted --> Skip sorting
+    // Organize incoming data into map
+    //  dataMap[2016] = Vector {Index 0, Index 1, ...}
+    struct tm* epochStruct;
+    std::time_t currTime;
+    std::map<unsigned short int, std::vector<unsigned long long int>> dataMap;
+    std::string granularityErrMsg = "[ERROR] [RANGE INSERT] [DB: " + dbName + "] - Invalid time granularity. Expecting: " + cfgStruct.timeResolution;
+
+    // Granularity check
+    for (int i = 0; i < protoFromClient->rangeinsert_data_size(); i++) {
+        currTime = protoFromClient->rangeinsert_data(i).timestamp();
+        epochStruct = gmtime(&currTime);
+        dataMap[(epochStruct->tm_year + 1900)].push_back(i);
+
+        // Halt execution & Return as long as there's an error in time granularity
+        timeStruct currTS {currTime};
+        if (currTS.timeResolution != cfgStruct.timeResolution) {
+            toReturn.set_insertstatus(granularityErrMsg);
+            return toReturn;
+        }
+    }
+
+    // Iterate through each key (year) of dataMap
+    for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& pair : dataMap) {
+        unsigned short int yearKey = pair.first;
+        FILE *bFile;
+        std::string targetFile = dbBasePath + std::to_string(yearKey) + ".XSTORE";
+
+        // Grab first inserting element for timeStruct purposes
+        //  Get length of time to truncate
+        timeStruct thisTS{static_cast<time_t>(protoFromClient->rangeinsert_data().at(dataMap[yearKey].at(0)).timestamp())};
+
+        // IF target file does NOT exist
+        if (std::filesystem::exists(targetFile) == 0) {
+            // Truncate
+            bFile = std::fopen(targetFile.c_str(), "wb+");
+
+            // Lock prior to file OP
+            flock(fileno(bFile), LOCK_EX);
+            ftruncate(fileno(bFile), (thisTS.lastEpoch - thisTS.firstEpoch) * cfgStruct.rowLength);
+        }
+        else {
+            // ELSE - Target file DOES exist
+            //  Open in append mode
+            bFile = std::fopen(targetFile.c_str(), "rb+");
+
+            // Lock prior to file OP
+            flock(fileno(bFile), LOCK_EX);
+        }
+
+        long long int diff, offset;
+        // Iterate through each YEAR of inserting data
+        for (int i = 0; i < dataMap[yearKey].size(); i++) {
+            // Parse each data in a batch collection
+            XStore_Proto::rangeInsert_DATA currInsertData = protoFromClient->rangeinsert_data(dataMap[yearKey].at(i));
+            std::time_t unixTime = currInsertData.timestamp();
+            std::string data = currInsertData.data();
+
+            // Organize timestamp & data into an object
+            dataStruct currData{unixTime, data};
+
+            // Compute diff & offset
+            diff = unixTime - thisTS.firstEpoch;
+            offset = diff * cfgStruct.rowLength;
+
+            // Seek to target offset prior to write
+            fseeko64(bFile, offset, SEEK_SET);
+
+            // Writing actual data to disk
+            fwrite((currData.getData()).data(), cfgStruct.rowLength, 1, bFile);
+        }
+
+        // Close file & Release lock after write
+        std::fclose(bFile);
+        flock(fileno(bFile), LOCK_UN);
+    }
+
+    // Return insert status
+    std::string successMsg = "[SUCCESS] [RANGE INSERT] [DB: " + dbName + "] - Inserted " + std::to_string(protoFromClient->rangeinsert_data_size()) + " elements successfully";
+    toReturn.set_insertstatus(successMsg);
+
+    return toReturn;
+}
+
+// RANGE QUERY
 XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName) {
     // Protobuf obj to be returned
     std::string queryStatus;

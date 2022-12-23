@@ -274,12 +274,12 @@ void* XStore_zmqServer::workerRoutine(void *args) {
             // RANGE INSERT
             case XStore_Proto::RANGEINSERT: {
                 // Properly parse Protobuf obj from CLIENT
-                XStore_Proto::rangeQuery_REQ protoFromClient;
+                XStore_Proto::rangeInsert_REQ protoFromClient;
                 protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
 
                 // XStore stuffs
                 //  Returning Protobuf obj
-                XStore_Proto::rangeQuery_REP protoToClient = myStore.rangeQuery(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname());
+                XStore_Proto::rangeInsert_REP protoToClient = myStore.rangeInsert(&protoFromClient);
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();

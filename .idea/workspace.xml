@@ -21,8 +21,13 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Implemented batchDelete">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Update C++ Client Proto">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore.proto" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/protoFile/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/XStore.proto" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -337,14 +342,7 @@
       <workItem from="1669102537407" duration="64557000" />
       <workItem from="1670369154870" duration="5132000" />
       <workItem from="1670548167692" duration="1493000" />
-      <workItem from="1671149831306" duration="32151000" />
-    </task>
-    <task id="LOCAL-00215" summary="Cleanup createDB">
-      <created>1667962708044</created>
-      <option name="number" value="00215" />
-      <option name="presentableId" value="LOCAL-00215" />
-      <option name="project" value="LOCAL" />
-      <updated>1667962708044</updated>
+      <workItem from="1671149831306" duration="38135000" />
     </task>
     <task id="LOCAL-00216" summary="Temporary disable SYS_INFO test -- Needs reimplementation">
       <created>1667963696608</created>
@@ -682,7 +680,14 @@
       <option name="project" value="LOCAL" />
       <updated>1671352943280</updated>
     </task>
-    <option name="localTasksCounter" value="264" />
+    <task id="LOCAL-00264" summary="Update C++ Client Proto">
+      <created>1671354954203</created>
+      <option name="number" value="00264" />
+      <option name="presentableId" value="LOCAL-00264" />
+      <option name="project" value="LOCAL" />
+      <updated>1671354954203</updated>
+    </task>
+    <option name="localTasksCounter" value="265" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -789,7 +794,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Implemented batchInsert" />
     <MESSAGE value="Cleanup &amp; Update Python API library" />
     <MESSAGE value="Updated removeDB" />
     <MESSAGE value="Updated removeDBFiles" />
@@ -814,6 +818,7 @@
     <MESSAGE value="Enabled unaryDelete in Server" />
     <MESSAGE value="Implemented batchQuery" />
     <MESSAGE value="Implemented batchDelete" />
-    <option name="LAST_COMMIT_MESSAGE" value="Implemented batchDelete" />
+    <MESSAGE value="Update C++ Client Proto" />
+    <option name="LAST_COMMIT_MESSAGE" value="Update C++ Client Proto" />
   </component>
 </project>
