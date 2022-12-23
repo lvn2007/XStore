@@ -1104,6 +1104,232 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
     return toReturn;
 }
 
+// RANGE DELETE
+XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::time_t endEpochT, std::string dbName) {
+    // Protobuf obj to be returned
+    std::string queryStatus;
+    XStore_Proto::rangeDelete_REP toReturn;
+    int deleteCount = 0;
+
+    // Ensure dbName string is all capitalized
+    for (int i = 0; i < dbName.size(); i++) {
+        dbName[i] = toupper(dbName[i]);
+    }
+
+    // Base directory of a DB
+    std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
+
+    // Check if cfgMap NOT contains cfgStruct
+    configStruct cfgStruct;
+    if (cfgMap.find(dbName) == cfgMap.end()) {
+        std::string cfgPath = dbBasePath + dbName + ".CFG";
+
+        if (std::filesystem::exists(cfgPath) == 0) {
+            return toReturn;
+        }
+
+        // Read & Add cfgStruct to cfgMap
+        FILE *cFile = std::fopen(cfgPath.c_str(), "rb");
+        fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
+        std::fclose(cFile);
+        cfgMap[dbName] = cfgStruct;
+    }
+    else {
+        // Otherwise -> Fetch cfgStruct from cfgMap
+        cfgStruct = cfgMap[dbName];
+    }
+
+    if ((endEpochT - startEpochT) < 0) {
+        std::string errMsg = "[ERROR] [RANGE DELETE] [DB: " + dbName + "] - Invalid range";
+        toReturn.set_deletestatus(errMsg);
+        return toReturn;
+    }
+
+    // IF db directory does not exist
+    if (std::filesystem::is_directory(dbBasePath) == 0) {
+        std::string errMsg = "[ERROR] [RANGE DELETE] [DB: " + dbName + "] - DB does not exist";
+        toReturn.set_deletestatus(errMsg);
+        return toReturn;
+    }
+
+    // Time granularity check
+    timeStruct startTimeStruct{startEpochT};
+    timeStruct endTimeStruct{endEpochT};
+    if (startTimeStruct.timeResolution != cfgStruct.timeResolution || endTimeStruct.timeResolution != cfgStruct.timeResolution) {
+        std::string errMsg = "[ERROR] [RANGE DELETE] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + cfgStruct.timeResolution;
+        toReturn.set_deletestatus(errMsg);
+        return toReturn;
+    }
+
+    // Organize into timeStruct
+    //  timeStruct provides many auxiliary vars/methods useful for read/write ops
+    timeStruct currTS{startEpochT};
+
+    // Placeholder for READ op
+    FILE *bFile;
+    std::string targetFilePath;
+    long long int diff, offset;
+    char bufferIn[cfgStruct.rowLength];
+
+    // IF query range is within 1-year
+    if (currTS.lastEpoch >= endEpochT) {
+        // Open file prior to reading
+        targetFilePath = dbBasePath + std::to_string(currTS.year) + ".XSTORE";
+
+        // IF target YEAR.XSTORE does NOT exist
+        if (std::filesystem::exists(targetFilePath) == 0) {
+            // Return without error
+            std::string successMsg = "[SUCCESS] [RANGE DELETE] [DB: " + dbName + "] - Deleted " + std::to_string(deleteCount) + " items";
+            toReturn.set_deletestatus(successMsg);
+            return toReturn;
+        }
+
+        bFile = std::fopen(targetFilePath.c_str(), "rb");
+
+        // Lock file prior to reading
+        flock(fileno(bFile), LOCK_SH);
+
+        // Iterate over range of query data & add queried data and status
+        for (long epochTime = startEpochT; epochTime <= endEpochT; epochTime++) {
+            // Computes diff & offset
+            diff = epochTime - currTS.firstEpoch;
+            offset = diff * cfgStruct.rowLength;
+
+            // Seek to computed offset
+            fseeko64(bFile, offset, SEEK_SET);
+
+            // Extract N bytes of data according to N bytes from .CFG file
+            //  .CFG file is set by user when creating DB
+            fread(&bufferIn[0], 1, cfgStruct.rowLength, bFile);
+
+            // IF fetched data contains nothing
+            //  -> Skip to next iteration
+            if (strlen(bufferIn) == 0) {
+                continue;
+            }
+
+            // Seek to target offset prior to write
+            fseeko64(bFile, offset, SEEK_SET);
+
+            // Nullify data based on N number of bytes available at that data point
+            fwrite(std::string(strlen(bufferIn), '\0').data(), cfgStruct.rowLength, 1, bFile);
+            deleteCount++;
+        }
+
+        // Close & Release file lock after reading
+        fclose(bFile);
+        flock(fileno(bFile), LOCK_UN);
+    }
+    // Otherwise -> Involves multi-year
+    else {
+        // Make a copy of start epoch time for incrementing
+        std::time_t startEpoch = startEpochT;
+
+        // Loop through each year individually
+        while (startEpoch < endEpochT) {
+            targetFilePath = dbBasePath + std::to_string(currTS.year) + ".XSTORE";
+
+            // IF the requested start epoch spans ONLY 1 year
+            if (currTS.lastEpoch < endEpochT) {
+                // IF target YEAR.XSTORE does NOT exist
+                if (std::filesystem::exists(targetFilePath) == 0) {
+                    // Update currTS with latest startEpoch after incrementing
+                    currTS = timeStruct(startEpoch + (currTS.lastEpoch - startEpoch));
+                    continue;
+                }
+
+                // Open & Lock file prior to reading
+                bFile = std::fopen(targetFilePath.c_str(), "rb");
+                flock(fileno(bFile), LOCK_SH);
+
+                // Iterate over range of query data & add queried data and status
+                for (long long int epochTime = startEpoch; epochTime <= currTS.lastEpoch; epochTime++, startEpoch++) {
+                    // Computes diff & offset
+                    diff = epochTime - currTS.firstEpoch;
+                    offset = diff * cfgStruct.rowLength;
+
+                    // Seek to computed offset
+                    fseeko64(bFile, offset, SEEK_SET);
+
+                    // Extract N bytes of data according to N bytes from .CFG file
+                    //  .CFG file is set by user when creating DB
+                    fread(&bufferIn[0], 1, cfgStruct.rowLength, bFile);
+
+                    // IF fetched data contains nothing
+                    //  -> Skip to next iteration
+                    if (strlen(bufferIn) == 0) {
+                        continue;
+                    }
+
+                    // Seek to target offset prior to write
+                    fseeko64(bFile, offset, SEEK_SET);
+
+                    // Nullify data based on N number of bytes available at that data point
+                    fwrite(std::string(strlen(bufferIn), '\0').data(), cfgStruct.rowLength, 1, bFile);
+                    deleteCount++;
+                }
+
+                // Update currTS with latest startEpoch after incrementing
+                currTS = timeStruct(startEpoch);
+
+                // Close file & Release lock after write
+                std::fclose(bFile);
+                flock(fileno(bFile), LOCK_UN);
+            }
+            else {
+                // IF target YEAR.XSTORE does NOT exist
+                if (std::filesystem::exists(targetFilePath) == 0) {
+                    // Update currTS with latest startEpoch after incrementing
+                    currTS = timeStruct(startEpoch + (endEpochT - startEpoch));
+                    continue;
+                }
+
+                // Open & Lock file prior to reading
+                bFile = std::fopen(targetFilePath.c_str(), "rb");
+                flock(fileno(bFile), LOCK_SH);
+
+                // Iterate over range of query data & add queried data and status
+                for (long long int epochTime = startEpoch; epochTime <= endEpochT; epochTime++, startEpoch++) {
+                    // Computes diff & offset
+                    diff = epochTime - currTS.firstEpoch;
+                    offset = diff * cfgStruct.rowLength;
+
+                    // Seek to computed offset
+                    fseeko64(bFile, offset, SEEK_SET);
+
+                    // Extract N bytes of data according to N bytes from .CFG file
+                    //  .CFG file is set by user when creating DB
+                    fread(&bufferIn[0], 1, cfgStruct.rowLength, bFile);
+
+                    // IF fetched data contains nothing
+                    //  -> Skip to next iteration
+                    if (strlen(bufferIn) == 0) {
+                        continue;
+                    }
+
+                    // Seek to target offset prior to write
+                    fseeko64(bFile, offset, SEEK_SET);
+
+                    // Nullify data based on N number of bytes available at that data point
+                    fwrite(std::string(strlen(bufferIn), '\0').data(), cfgStruct.rowLength, 1, bFile);
+                    deleteCount++;
+                }
+
+                // Update currTS with latest startEpoch after incrementing
+                currTS = timeStruct(startEpoch);
+
+                // Close file & Release lock after read
+                std::fclose(bFile);
+                flock(fileno(bFile), LOCK_UN);
+                break;
+            }
+        }
+    }
+    std::string successMsg = "[SUCCESS] [RANGE DELETE] [DB: " + dbName + "] - Deleted " + std::to_string(deleteCount) + " items";
+    toReturn.set_deletestatus(successMsg);
+    return toReturn;
+}
+
 XStore_Proto::removeDB_REP XStore::removeDB(std::string dbName) {
     // Protobuf obj to be returned
     std::string removeStatus;

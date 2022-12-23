@@ -21,7 +21,7 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Update C++ Client Proto">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Implemented rangeInsert">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/clientSrc/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore.proto" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
@@ -342,14 +342,7 @@
       <workItem from="1669102537407" duration="64557000" />
       <workItem from="1670369154870" duration="5132000" />
       <workItem from="1670548167692" duration="1493000" />
-      <workItem from="1671149831306" duration="38135000" />
-    </task>
-    <task id="LOCAL-00216" summary="Temporary disable SYS_INFO test -- Needs reimplementation">
-      <created>1667963696608</created>
-      <option name="number" value="00216" />
-      <option name="presentableId" value="LOCAL-00216" />
-      <option name="project" value="LOCAL" />
-      <updated>1667963696609</updated>
+      <workItem from="1671149831306" duration="41687000" />
     </task>
     <task id="LOCAL-00217" summary="Temporary disable SYS_INFO test -- Needs reimplementation">
       <created>1667964911514</created>
@@ -687,7 +680,14 @@
       <option name="project" value="LOCAL" />
       <updated>1671354954203</updated>
     </task>
-    <option name="localTasksCounter" value="265" />
+    <task id="LOCAL-00265" summary="Implemented rangeInsert">
+      <created>1671760361702</created>
+      <option name="number" value="00265" />
+      <option name="presentableId" value="LOCAL-00265" />
+      <option name="project" value="LOCAL" />
+      <updated>1671760361703</updated>
+    </task>
+    <option name="localTasksCounter" value="266" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -794,7 +794,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Cleanup &amp; Update Python API library" />
     <MESSAGE value="Updated removeDB" />
     <MESSAGE value="Updated removeDBFiles" />
     <MESSAGE value="cfgMap for createDB &amp; unaryQuery. WIP: removeDB &amp; batchInsert" />
@@ -819,6 +818,7 @@
     <MESSAGE value="Implemented batchQuery" />
     <MESSAGE value="Implemented batchDelete" />
     <MESSAGE value="Update C++ Client Proto" />
-    <option name="LAST_COMMIT_MESSAGE" value="Update C++ Client Proto" />
+    <MESSAGE value="Implemented rangeInsert" />
+    <option name="LAST_COMMIT_MESSAGE" value="Implemented rangeInsert" />
   </component>
 </project>

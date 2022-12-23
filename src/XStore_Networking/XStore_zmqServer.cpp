@@ -314,12 +314,12 @@ void* XStore_zmqServer::workerRoutine(void *args) {
             // RANGE DELETE
             case XStore_Proto::RANGEDELETE: {
                 // Properly parse Protobuf obj from CLIENT
-                XStore_Proto::rangeQuery_REQ protoFromClient;
+                XStore_Proto::rangeDelete_REQ protoFromClient;
                 protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
 
                 // XStore stuffs
                 //  Returning Protobuf obj
-                XStore_Proto::rangeQuery_REP protoToClient = myStore.rangeQuery(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname());
+                XStore_Proto::rangeDelete_REP protoToClient = myStore.rangeDelete(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname());
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
