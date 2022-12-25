@@ -21,9 +21,10 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Implemented rangeDelete">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Modify file lock &amp; Guard against empty target file">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/dataStructs/timeStruct.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/dataStructs/timeStruct.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -338,14 +339,9 @@
       <workItem from="1669102537407" duration="64557000" />
       <workItem from="1670369154870" duration="5132000" />
       <workItem from="1670548167692" duration="1493000" />
-      <workItem from="1671149831306" duration="42157000" />
-    </task>
-    <task id="LOCAL-00218" summary="Temporary disable SYS_INFO test -- Needs reimplementation">
-      <created>1667966138419</created>
-      <option name="number" value="00218" />
-      <option name="presentableId" value="LOCAL-00218" />
-      <option name="project" value="LOCAL" />
-      <updated>1667966138419</updated>
+      <workItem from="1671149831306" duration="42915000" />
+      <workItem from="1671835584611" duration="505000" />
+      <workItem from="1671871038691" duration="3046000" />
     </task>
     <task id="LOCAL-00219" summary="Fixed UNARY_QUERY">
       <created>1667970420792</created>
@@ -683,7 +679,14 @@
       <option name="project" value="LOCAL" />
       <updated>1671781529386</updated>
     </task>
-    <option name="localTasksCounter" value="267" />
+    <task id="LOCAL-00267" summary="Modify file lock &amp; Guard against empty target file">
+      <created>1671783364058</created>
+      <option name="number" value="00267" />
+      <option name="presentableId" value="LOCAL-00267" />
+      <option name="project" value="LOCAL" />
+      <updated>1671783364058</updated>
+    </task>
+    <option name="localTasksCounter" value="268" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -790,7 +793,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Updated removeDBFiles" />
     <MESSAGE value="cfgMap for createDB &amp; unaryQuery. WIP: removeDB &amp; batchInsert" />
     <MESSAGE value="Remove cfgMap element in removeDB &amp; Prohibit the removal of .CFG in removeDBFiles" />
     <MESSAGE value="Equipped cfgMap for batchInsert" />
@@ -815,6 +817,7 @@
     <MESSAGE value="Update C++ Client Proto" />
     <MESSAGE value="Implemented rangeInsert" />
     <MESSAGE value="Implemented rangeDelete" />
-    <option name="LAST_COMMIT_MESSAGE" value="Implemented rangeDelete" />
+    <MESSAGE value="Modify file lock &amp; Guard against empty target file" />
+    <option name="LAST_COMMIT_MESSAGE" value="Modify file lock &amp; Guard against empty target file" />
   </component>
 </project>

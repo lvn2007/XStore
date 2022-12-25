@@ -24,7 +24,7 @@ void timeStruct::getTimeResolution() {
         ++count;
     }
 
-    if (count >= 10 && count < 13) {
+    if (count < 13) {
         this->timeResolution = "SECOND";
         return;
     }
