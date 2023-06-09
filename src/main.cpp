@@ -81,7 +81,7 @@ int main(int argc, char *argv[]) {
 
     // ----DEV AREA
     // Instantiate XStore obj
-    XStore myStore;
+//    XStore myStore;
 
     // Create DB
 //    XStore_Proto::createDB_REP create_db_rep = myStore.createDB("TSLA", XStore_Proto::timeUnit::SECOND, 128);
@@ -108,23 +108,23 @@ int main(int argc, char *argv[]) {
 //    XStore_Proto::unaryQuery_REP unary_query_rep = myStore.unaryQuery(1451606401, "TSLA");
 //    unary_query_rep.PrintDebugString();
 
-    XStore_Proto::batchInsert_REQ batch_insert_req;
-    batch_insert_req.set_dbname("TSLA");
-
-    for (int i = 1; i < 5; i++) {
-        XStore_Proto::batchInsert_DATA *batch_insert_data = batch_insert_req.add_batchinsert_data();
-        batch_insert_data->set_timestamp(1483228798 + i);
-
-        // Assemble rowData
-        XStore_Proto::rowData oneRow;
-        XStore_Proto::fieldData *field_data = oneRow.add_fdata();
-        field_data->set_stringdata("Test " + std::to_string(1483228798 + i));
-        *batch_insert_data->mutable_data() = oneRow;
-    }
-    batch_insert_req.PrintDebugString();
-
-    XStore_Proto::batchInsert_REP batch_insert_rep = myStore.batchInsert(&batch_insert_req);
-    batch_insert_rep.PrintDebugString();
+//    XStore_Proto::batchInsert_REQ batch_insert_req;
+//    batch_insert_req.set_dbname("TSLA");
+//
+//    for (int i = 1; i < 5; i++) {
+//        XStore_Proto::batchInsert_DATA *batch_insert_data = batch_insert_req.add_batchinsert_data();
+//        batch_insert_data->set_timestamp(1483228798 + i);
+//
+//        // Assemble rowData
+//        XStore_Proto::rowData oneRow;
+//        XStore_Proto::fieldData *field_data = oneRow.add_fdata();
+//        field_data->set_stringdata("Test " + std::to_string(1483228798 + i));
+//        *batch_insert_data->mutable_data() = oneRow;
+//    }
+//    batch_insert_req.PrintDebugString();
+//
+//    XStore_Proto::batchInsert_REP batch_insert_rep = myStore.batchInsert(&batch_insert_req);
+//    batch_insert_rep.PrintDebugString();
 
 //    XStore_Proto::batchInsert_REP batch_insert_rep = myStore.batchInsert_fTruncate(&batch_insert_req);
 //    batch_insert_req.PrintDebugString();

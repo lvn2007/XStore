@@ -202,7 +202,7 @@ int main(int argc, char const *argv[])
             std::vector<XStore_Proto::rowData> dataList {firstRow, secondRow};
 
             for (int i = 0; i < timeList.size(); i++) {
-                std::cout << "Granularity: " << timeResolution.at(i) << std::endl;
+                std::cout << "Granularity: " << XStore_Proto::timeUnit_Name(timeResolution.at(i)) << std::endl;
                 // FIRST - CREATE DB
                 std::string createDB_message = xstoreClient.createDB(dbName, timeResolution.at(i), 128);
                 assert(createDB_message == ("[SUCCESS] [CREATE DB] [DB: UNARY_OPS] - Created DB"));
@@ -215,7 +215,7 @@ int main(int argc, char const *argv[])
 
                 // THIRD - UNARY QUERY (To validate that insert is valid)
                 std::string queryMessage = xstoreClient.unaryQuery(timeList.at(i), dbName);
-                assert(queryMessage == (std::to_string(timeList.at(i)) + "," + dataList.at(i).DebugString()));
+                assert(queryMessage == (std::to_string(timeList.at(i)) + "," + dataList.at(i).fdata(0).stringdata()));
                 std::cout << "[SUCCESS] [UNARY QUERY] [DB: " << dbName << "] - Query time: " << timeList.at(i) << " | Result: " << queryMessage << std::endl;
 
                 // FINALLY - DELETE_DB (CLEANUP DUMMY)

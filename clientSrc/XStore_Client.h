@@ -98,9 +98,9 @@ class XStore_Client {
 
       // Received structs
       XStore_Proto::unaryQuery_REP fromServer;
-
       fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
-      return std::to_string(fromServer.timestamp()) + "," + fromServer.data().DebugString();
+
+      return std::to_string(fromServer.timestamp()) + "," + fromServer.data().fdata(0).stringdata();
   }
 
   std::string createDB(std::string &dbName, XStore_Proto::timeUnit &timeResolution, short int rowLength) {
