@@ -21,19 +21,11 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Experimenting fflush">
-      <change beforePath="$PROJECT_DIR$/.idea/deployment.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/deployment.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/sshConfigs.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/sshConfigs.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/webServers.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/webServers.xml" afterDir="false" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Switching to new serialization strategy (Protobuf)">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/XStore/instructions.md" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/instructions.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/mongoDB/mongoNote.txt" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/mongoDB/mongoNote.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/clientSrc/Python/XStore.py" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/Python/XStore.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/clientSrc/Python/XStore_pb2.py" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/Python/XStore_pb2.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/XStore/XStore.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore/XStore.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/dataStructs/configStruct.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/dataStructs/configStruct.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/overleaf/overleaf.py" beforeDir="false" afterPath="$PROJECT_DIR$/overleaf/overleaf.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore.proto" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/XStore_Client.h" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore_Client.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/protoFile/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/XStore.proto" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
@@ -373,14 +365,7 @@
       <workItem from="1685971616370" duration="5242000" />
       <workItem from="1685984584551" duration="24821000" />
       <workItem from="1686156104802" duration="2204000" />
-      <workItem from="1686168708370" duration="18476000" />
-    </task>
-    <task id="LOCAL-00220" summary="Modified sysInfo &amp; File lock in writing">
-      <created>1668062270912</created>
-      <option name="number" value="00220" />
-      <option name="presentableId" value="LOCAL-00220" />
-      <option name="project" value="LOCAL" />
-      <updated>1668062270912</updated>
+      <workItem from="1686168708370" duration="23727000" />
     </task>
     <task id="LOCAL-00221" summary="Adding lock for reading">
       <created>1668062935028</created>
@@ -718,7 +703,14 @@
       <option name="project" value="LOCAL" />
       <updated>1671967118389</updated>
     </task>
-    <option name="localTasksCounter" value="269" />
+    <task id="LOCAL-00269" summary="Switching to new serialization strategy (Protobuf)">
+      <created>1686338677261</created>
+      <option name="number" value="00269" />
+      <option name="presentableId" value="LOCAL-00269" />
+      <option name="project" value="LOCAL" />
+      <updated>1686338677261</updated>
+    </task>
+    <option name="localTasksCounter" value="270" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -825,7 +817,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Remove cfgMap element in removeDB &amp; Prohibit the removal of .CFG in removeDBFiles" />
     <MESSAGE value="Equipped cfgMap for batchInsert" />
     <MESSAGE value="Implemented rangeQuery. WIP: Notify user about 2GB protobuf limit" />
     <MESSAGE value="Implemented notifying user about 2GB protobuf limit. WIP: Guard against startTime &gt; endTime" />
@@ -850,6 +841,7 @@
     <MESSAGE value="Implemented rangeDelete" />
     <MESSAGE value="Modify file lock &amp; Guard against empty target file" />
     <MESSAGE value="Fixed a very subtle bug in timeStruct.cpp where actual second granularity is not recognized" />
-    <option name="LAST_COMMIT_MESSAGE" value="Fixed a very subtle bug in timeStruct.cpp where actual second granularity is not recognized" />
+    <MESSAGE value="Switching to new serialization strategy (Protobuf)" />
+    <option name="LAST_COMMIT_MESSAGE" value="Switching to new serialization strategy (Protobuf)" />
   </component>
 </project>

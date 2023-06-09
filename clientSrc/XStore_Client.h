@@ -7,7 +7,7 @@
 
 struct dbInfo {
   std::string dbName;
-  std::string dbResolution;
+  XStore_Proto::timeUnit dbResolution;
   float totalSizeInByte;
   std::vector<std::string> fileName;
 };
@@ -100,10 +100,10 @@ class XStore_Client {
       XStore_Proto::unaryQuery_REP fromServer;
 
       fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
-      return std::to_string(fromServer.timestamp()) + "," + fromServer.dataset();
+      return std::to_string(fromServer.timestamp()) + "," + fromServer.data().DebugString();
   }
 
-  std::string createDB(std::string &dbName, std::string &timeResolution, short int rowLength) {
+  std::string createDB(std::string &dbName, XStore_Proto::timeUnit &timeResolution, short int rowLength) {
       XStore_Proto::createDB_REQ toServer;
       toServer.set_rtype(XStore_Proto::CREATEDB);
       toServer.set_dbname(dbName);
@@ -128,11 +128,11 @@ class XStore_Client {
       return fromServer.createdbstatus();
   }
 
-  std::string unaryInsert(std::time_t &insertUnixTime, std::string &data, std::string &dbName) {
+  std::string unaryInsert(std::time_t &insertUnixTime, XStore_Proto::rowData &data, std::string &dbName) {
       XStore_Proto::unaryInsert_REQ toServer;
       toServer.set_rtype(XStore_Proto::UNARYINSERT);
       toServer.set_timestamp(insertUnixTime);
-      toServer.set_data(data);
+      *toServer.mutable_data() = data;
       toServer.set_dbname(dbName);
 
       // Config msg and send

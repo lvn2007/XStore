@@ -116,8 +116,10 @@ int main(int argc, char const *argv[])
             // Const
             std::string dbName = "SYS_INFO";
             std::time_t dummyTime = 1482271200;
-            std::string timeResolution = "SECOND";
-            std::string dummyData = "SYS INFO,TEST";
+            XStore_Proto::timeUnit timeResolution = XStore_Proto::SECOND;
+            XStore_Proto::rowData dummyData;
+            XStore_Proto::fieldData *fData = dummyData.add_fdata();
+            fData->set_stringdata("SYS INFO,TEST");
 
             // FIRST - CREATE_DB (DUMMY)
             std::string createDB_statusMessage = xstoreClient.createDB(dbName, timeResolution, 128);
@@ -140,7 +142,7 @@ int main(int argc, char const *argv[])
             // Validate tests PASSED
             assert(sysInfo_message.numThreads > 0);
             assert(sysInfo_message.db_Info.at(0).dbName == dbName);
-            assert(sysInfo_message.db_Info.at(0).dbResolution == "SECOND");
+            assert(sysInfo_message.db_Info.at(0).dbResolution == XStore_Proto::SECOND);
             assert(sysInfo_message.db_Info.at(0).totalSizeInByte > 1);
             assert(sysInfo_message.db_Info.at(0).fileName.at(0) == "2016.XSTORE");
 
@@ -155,7 +157,7 @@ int main(int argc, char const *argv[])
 
             // Const
             std::string dbName = "CREATE_DB";
-            std::string timeResolution = "SECOND";
+            XStore_Proto::timeUnit timeResolution = XStore_Proto::SECOND;
             short int rowLength = 128;
 
             // CASE 1: Create error IF rowLength < 4
@@ -185,8 +187,19 @@ int main(int argc, char const *argv[])
             // Const
             std::string dbName = "UNARY_OPS";
             std::vector<std::time_t> timeList {1482271200};
-            std::vector<std::string> timeResolution {"SECOND", "MILLISECOND"};
-            std::vector<std::string> dataList {"SECOND,GRANULARITY", "MILLISECOND,GRANULARITY"};
+            std::vector<XStore_Proto::timeUnit> timeResolution {XStore_Proto::SECOND, XStore_Proto::MILLISECOND};
+
+            // FIRST data
+            XStore_Proto::rowData firstRow;
+            XStore_Proto::fieldData *fData = firstRow.add_fdata();
+            fData->set_stringdata("SECOND,GRANULARITY");
+
+            // SECOND data
+            XStore_Proto::rowData secondRow;
+            XStore_Proto::fieldData *sData = firstRow.add_fdata();
+            fData->set_stringdata("MILLISECOND,GRANULARITY");
+
+            std::vector<XStore_Proto::rowData> dataList {firstRow, secondRow};
 
             for (int i = 0; i < timeList.size(); i++) {
                 std::cout << "Granularity: " << timeResolution.at(i) << std::endl;
@@ -202,7 +215,7 @@ int main(int argc, char const *argv[])
 
                 // THIRD - UNARY QUERY (To validate that insert is valid)
                 std::string queryMessage = xstoreClient.unaryQuery(timeList.at(i), dbName);
-                assert(queryMessage == (std::to_string(timeList.at(i)) + "," + dataList.at(i)));
+                assert(queryMessage == (std::to_string(timeList.at(i)) + "," + dataList.at(i).DebugString()));
                 std::cout << "[SUCCESS] [UNARY QUERY] [DB: " << dbName << "] - Query time: " << timeList.at(i) << " | Result: " << queryMessage << std::endl;
 
                 // FINALLY - DELETE_DB (CLEANUP DUMMY)
