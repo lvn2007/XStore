@@ -30,6 +30,10 @@ eXtreme performance in distributed kv-Store for time-series
 # Note
 - Python: Code generation for Protobuf & gRPC
 ```shell
+protoc -I=. --python_out=. protoFile/XStore.proto
+```
+
+```shell
 python3 -m grpc_tools.protoc --proto_path=. protoFile/xStore.proto --python_out=. --grpc_python_out=.
 ```
 

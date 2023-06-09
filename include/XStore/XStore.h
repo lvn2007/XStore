@@ -26,7 +26,7 @@ class XStore {
         std::string baseDir = getBaseDir();
         std::string dataStoreDir = baseDir + "dataStore/";
         std::map<std::string, fileStruct> dbMap;
-        std::map<std::string, configStruct> cfgMap;
+        std::map<std::string, XStore_Proto::configStruct> cfgMap;
         std::string permittedTimeResolution[3] = {"SECOND", "MILLISECOND", "MICROSECOND"};
 
         int dbCount = 0;
@@ -40,7 +40,7 @@ class XStore {
         XStore_Proto::sysInfo_REP infoQuery(std::string serverAddr, int threadCount);
 
         // CREATING new DB instance with row length
-        XStore_Proto::createDB_REP createDB(std::string dbName, std::string timeResolution, short int rowLength);
+        XStore_Proto::createDB_REP createDB(std::string dbName, XStore_Proto::timeUnit timeResolution, short int rowLength);
 
         // REMOVE DB -- Removing an entire DB and its data files
         XStore_Proto::removeDB_REP removeDB(std::string dbName);
@@ -49,7 +49,7 @@ class XStore {
         XStore_Proto::removeDBFiles_REP removeDBFiles(XStore_Proto::removeDBFiles_REQ *protoFromClient, std::string dbName);
 
         // UNARY INSERT
-        XStore_Proto::unaryInsert_REP unaryInsert(std::time_t epochTime, std::string data, std::string dbName);
+        XStore_Proto::unaryInsert_REP unaryInsert(std::time_t epochTime, XStore_Proto::rowData data, std::string dbName);
 
         // UNARY QUERY
         XStore_Proto::unaryQuery_REP unaryQuery(std::time_t epochTime, std::string dbName);

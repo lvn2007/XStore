@@ -27,7 +27,7 @@ XStore_Proto::sysInfo_REP XStore::infoQuery(std::string serverAddr, int threadCo
         currDB->set_dbname(currDBName);
 
         // Fetch config of a target DB
-        configStruct cfgStruct;
+        XStore_Proto::configStruct cfgStruct;
         std::string currCfgFilePath = currDBDir + "/" + currDBName + ".CFG";
 
         // Check if .CFG file is exist
@@ -35,10 +35,7 @@ XStore_Proto::sysInfo_REP XStore::infoQuery(std::string serverAddr, int threadCo
             int cfgFile = open(currCfgFilePath.c_str(), O_RDONLY);
             pread(cfgFile, &cfgStruct, sizeof(cfgStruct), 0);
             // Set DB Resolution
-            currDB->set_dbresolution(cfgStruct.timeResolution);
-        }
-        else {
-            currDB->set_dbresolution("N/A");
+            currDB->set_dbresolution(cfgStruct.timeresolution());
         }
 
         // Size of all data files in current DB
@@ -64,7 +61,7 @@ XStore_Proto::sysInfo_REP XStore::infoQuery(std::string serverAddr, int threadCo
     return toReturn;
 }
 
-XStore_Proto::createDB_REP XStore::createDB(std::string dbName, std::string timeResolution, short int rowLength) {
+XStore_Proto::createDB_REP XStore::createDB(std::string dbName, XStore_Proto::timeUnit timeResolution, short int rowLength) {
     // Protobuf obj to be returned
     XStore_Proto::createDB_REP toReturn;
     std::string createDBStatus;
@@ -72,10 +69,6 @@ XStore_Proto::createDB_REP XStore::createDB(std::string dbName, std::string time
     // Ensure dbName & timeResolution string is all capitalized
     for (int i = 0; i < dbName.size(); i++) {
         dbName[i] = toupper(dbName[i]);
-    }
-
-    for (int i = 0; i < timeResolution.size(); i++) {
-        timeResolution[i] = toupper(timeResolution[i]);
     }
 
     if (rowLength < 4) {
@@ -91,7 +84,7 @@ XStore_Proto::createDB_REP XStore::createDB(std::string dbName, std::string time
     //  -> Inform user about the error
     if (std::filesystem::is_directory(targetPath) == 0) {
         // Check if within permitted time resolution bounds
-        if (std::find(std::begin(permittedTimeResolution), std::end(permittedTimeResolution), timeResolution) == std::end(permittedTimeResolution)) {
+        if (std::find(std::begin(permittedTimeResolution), std::end(permittedTimeResolution), XStore_Proto::timeUnit_Name(timeResolution)) == std::end(permittedTimeResolution)) {
             createDBStatus = "[ERROR] [CREATE DB] [DB: " + dbName + "] - Invalid time resolution";
             toReturn.set_createdbstatus(createDBStatus);
             return toReturn;
@@ -104,10 +97,10 @@ XStore_Proto::createDB_REP XStore::createDB(std::string dbName, std::string time
 
             // Dumps DB configurations info to disk
             //  Organize configs into a struct
-            configStruct cfgStruct;
-            strcpy(cfgStruct.dbName, dbName.c_str());
-            strcpy(cfgStruct.timeResolution, timeResolution.c_str());
-            cfgStruct.rowLength = rowLength;
+            XStore_Proto::configStruct cfgStruct;
+            cfgStruct.set_dbname(dbName);
+            cfgStruct.set_timeresolution(timeResolution);
+            cfgStruct.set_rowlength(rowLength);
 
             // Writing cfgStruct to file
             FILE *bFile;
@@ -118,7 +111,7 @@ XStore_Proto::createDB_REP XStore::createDB(std::string dbName, std::string time
             flock(fileno(bFile), LOCK_EX);
 
             // Writing actual data to disk
-            fwrite(&cfgStruct, sizeof(struct configStruct), 1, bFile);
+            cfgStruct.SerializeToFileDescriptor(fileno(bFile));
 
             //  Close file & Release lock after write
             std::fclose(bFile);
@@ -136,7 +129,7 @@ XStore_Proto::createDB_REP XStore::createDB(std::string dbName, std::string time
 }
 
 // UNARY INSERT
-XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::string data, std::string dbName) {
+XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, XStore_Proto::rowData data, std::string dbName) {
     // Protobuf obj to be returned
     XStore_Proto::unaryInsert_REP toReturn;
     std::string insertStatus;
@@ -161,13 +154,13 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::str
     }
 
     // Check if cfgMap NOT contains cfgStruct
-    configStruct cfgStruct;
+    XStore_Proto::configStruct cfgStruct;
     if (cfgMap.find(dbName) == cfgMap.end()) {
         // Read & add cfgStruct to cfgMap
         FILE *cFile;
         std::string cfgPath = dbBasePath + dbName + ".CFG";
         cFile = std::fopen(cfgPath.c_str(), "rb");
-        fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
+        cfgStruct.ParseFromFileDescriptor(fileno(cFile));
         std::fclose(cFile);
         cfgMap[dbName] = cfgStruct;
     }
@@ -177,8 +170,9 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::str
     }
 
     // Enforce time granularity
-    if (currTS.timeResolution != cfgStruct.timeResolution) {
-        std::string errMsg = "[ERROR] [UNARY INSERT] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + cfgStruct.timeResolution;
+    std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
+    if (currTS.timeResolution != expectedTimeResolution) {
+        std::string errMsg = "[ERROR] [UNARY INSERT] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + expectedTimeResolution;
         toReturn.set_insertstatus(errMsg);
         return toReturn;
     }
@@ -194,7 +188,7 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::str
 
         // Lock prior to file OP
         flock(fileno(bFile), LOCK_EX);
-        ftruncate(fileno(bFile), (currTS.lastEpoch - currTS.firstEpoch) * cfgStruct.rowLength);
+        ftruncate(fileno(bFile), (currTS.lastEpoch - currTS.firstEpoch) * cfgStruct.rowlength());
     }
     else {
         // ELSE - Target file DOES exist
@@ -205,18 +199,15 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, std::str
         flock(fileno(bFile), LOCK_EX);
     }
 
-    //  -> Organize timestamp & data into an object
-    dataStruct currData{unixTime, data};
-
     //  Computes diff & offset
     long long int diff = unixTime - currTS.firstEpoch;
-    long long int offset = diff * cfgStruct.rowLength;
+    long long int offset = diff * cfgStruct.rowlength();
 
     //  Seek to target offset prior to write
     fseeko64(bFile, offset, SEEK_SET);
 
     //  Writing actual data to disk
-    fwrite((currData.getData()).data(), cfgStruct.rowLength, 1, bFile);
+    fwrite(data.SerializeAsString().data(), cfgStruct.rowlength(), 1, bFile);
 
     //  Close file & Release lock after write
     std::fclose(bFile);
@@ -254,9 +245,9 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery(std::time_t unixTime, std::strin
 
     // Enforce time resolution
     std::string configPath = dbBasePath + dbName + ".CFG";
-    configStruct cfgStruct = cfgMap[dbName];
+    XStore_Proto::configStruct cfgStruct = cfgMap[dbName];
 
-    if (currTS.timeResolution != cfgStruct.timeResolution) {
+    if (currTS.timeResolution != XStore_Proto::timeUnit_Name(cfgStruct.timeresolution())) {
         return toReturn;
     }
 
@@ -271,27 +262,27 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery(std::time_t unixTime, std::strin
     // Obtain file size
     //  Computes diff & offset
     long long int diff = unixTime - currTS.firstEpoch;
-    long long int offset = diff * cfgStruct.rowLength;
+    long long int offset = diff * cfgStruct.rowlength();
 
     //  A single line data will be read into here
-    char bufferIn[cfgStruct.rowLength];
+    char bufferIn[cfgStruct.rowlength()];
+    XStore_Proto::rowData tempData;
 
     //  Seek to computed offset
     fseeko64(bFile, offset, SEEK_SET);
 
     // Extract N bytes of data according to N bytes from .CFG file
     //  .CFG file is set by user when creating DB
-    fread(&bufferIn[0], 1, cfgStruct.rowLength, bFile);
+    fread(&bufferIn[0], 1, cfgStruct.rowlength(), bFile);
 
     // Close file & release lock after reading
     fclose(bFile);
     flock(fileno(bFile), LOCK_UN);
 
-    // Convert to string -- Stripping ending bytes
-    std::string returnData(bufferIn);
-
     // Set data fetched from XStore to returning Protobuf obj
-    toReturn.set_dataset(returnData);
+    tempData.ParseFromArray(bufferIn, cfgStruct.rowlength());
+    *toReturn.mutable_data() = tempData;
+
     return toReturn;
 }
 
@@ -321,7 +312,7 @@ XStore_Proto::unaryDelete_REP XStore::unaryDelete(std::time_t epochTime, std::st
     }
 
     // Check if cfgMap NOT contains cfgStruct
-    configStruct cfgStruct;
+    XStore_Proto::configStruct cfgStruct;
     if (cfgMap.find(dbName) == cfgMap.end()) {
         // Read & add cfgStruct to cfgMap
         FILE *cFile;
@@ -337,8 +328,9 @@ XStore_Proto::unaryDelete_REP XStore::unaryDelete(std::time_t epochTime, std::st
     }
 
     // Enforce time granularity
-    if (currTS.timeResolution != cfgStruct.timeResolution) {
-        std::string errMsg = "[ERROR] [UNARY DELETE] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + cfgStruct.timeResolution;
+    std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
+    if (currTS.timeResolution != expectedTimeResolution) {
+        std::string errMsg = "[ERROR] [UNARY DELETE] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + expectedTimeResolution;
         toReturn.set_deletestatus(errMsg);
         return toReturn;
     }
@@ -364,22 +356,22 @@ XStore_Proto::unaryDelete_REP XStore::unaryDelete(std::time_t epochTime, std::st
 
     //  Computes diff & offset
     long long int diff = epochTime - currTS.firstEpoch;
-    long long int offset = diff * cfgStruct.rowLength;
+    long long int offset = diff * cfgStruct.rowlength();
 
     // Seek to target offset prior to read
     fseeko64(bFile, offset, SEEK_SET);
 
     // A single line of data will be read into here
-    char bufferIn[cfgStruct.rowLength];
+    char bufferIn[cfgStruct.rowlength()];
 
     // Find how many bytes occupied
-    fread(&bufferIn[0], 1, cfgStruct.rowLength, bFile);
+    fread(&bufferIn[0], 1, cfgStruct.rowlength(), bFile);
 
     // Seek to target offset prior to write
     fseeko64(bFile, offset, SEEK_SET);
 
     // Nullify data based on N number of bytes available at that data point
-    fwrite(std::string(strlen(bufferIn), '\0').data(), cfgStruct.rowLength, 1, bFile);
+    fwrite(std::string(strlen(bufferIn), '\0').data(), cfgStruct.rowlength(), 1, bFile);
 
     // Close file & Release lock after write
     std::fclose(bFile);
@@ -413,7 +405,7 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
     }
 
     // Check if cfgMap NOT contains cfgStruct
-    configStruct cfgStruct;
+    XStore_Proto::configStruct cfgStruct;
     if (cfgMap.find(dbName) == cfgMap.end()) {
         // Read & Add cfgStruct to cfgMap
         FILE *cFile;
@@ -440,7 +432,8 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
     struct tm* epochStruct;
     std::time_t currTime;
     std::map<unsigned short int, std::vector<unsigned long long int>> dataMap;
-    std::string granularityErrMsg = "[ERROR] [BATCH INSERT] [DB: " + dbName + "] - Invalid time granularity. Expecting: " + cfgStruct.timeResolution;
+    std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
+    std::string granularityErrMsg = "[ERROR] [BATCH INSERT] [DB: " + dbName + "] - Invalid time granularity. Expecting: " + expectedTimeResolution;
 
     // Granularity check
     for (int i = 0; i < protoFromClient->batchinsert_data_size(); i++) {
@@ -450,7 +443,7 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
 
         // Halt execution & Return as long as there's an error in time granularity
         timeStruct currTS {currTime};
-        if (currTS.timeResolution != cfgStruct.timeResolution) {
+        if (currTS.timeResolution != expectedTimeResolution) {
             toReturn.set_insertstatus(granularityErrMsg);
             return toReturn;
         }
@@ -473,7 +466,7 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
 
             // Lock prior to file OP
             flock(fileno(bFile), LOCK_EX);
-            ftruncate(fileno(bFile), (thisTS.lastEpoch - thisTS.firstEpoch) * cfgStruct.rowLength);
+            ftruncate(fileno(bFile), (thisTS.lastEpoch - thisTS.firstEpoch) * cfgStruct.rowlength());
         }
         else {
             // ELSE - Target file DOES exist
@@ -497,13 +490,13 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
 
             // Compute diff & offset
             diff = unixTime - thisTS.firstEpoch;
-            offset = diff * cfgStruct.rowLength;
+            offset = diff * cfgStruct.rowlength();
 
             // Seek to target offset prior to write
             fseeko64(bFile, offset, SEEK_SET);
 
             // Writing actual data to disk
-            fwrite((currData.getData()).data(), cfgStruct.rowLength, 1, bFile);
+            fwrite((currData.getData()).data(), cfgStruct.rowlength(), 1, bFile);
         }
 
         // Close file & Release lock after write
@@ -533,7 +526,7 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
     std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
 
     // Check if cfgMap NOT contains cfgStruct
-    configStruct cfgStruct;
+    XStore_Proto::configStruct cfgStruct;
     if (cfgMap.find(dbName) == cfgMap.end()) {
         std::string cfgPath = dbBasePath + dbName + ".CFG";
 
@@ -553,7 +546,7 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
     }
 
     // IF query range > 2GB limit of Protobuf or Empty
-    if ((protoFromClient->timestamp_size() * cfgStruct.rowLength) > 2000000000 || protoFromClient->timestamp_size() < 0) {
+    if ((protoFromClient->timestamp_size() * cfgStruct.rowlength()) > 2000000000 || protoFromClient->timestamp_size() < 0) {
         return toReturn;
     }
 
@@ -575,13 +568,14 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
     std::map<unsigned short int, std::vector<unsigned long long int>> dataMap;
 
     // Granularity check
+    std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
     for (int i = 0; i < protoFromClient->timestamp_size(); i++) {
         currTime = protoFromClient->timestamp(i);
         struct timeStruct currTS{currTime};
         dataMap[currTS.year].push_back(i);
 
         // Halt execution & Return as long as there's an error in time granularity
-        if (currTS.timeResolution != cfgStruct.timeResolution) {
+        if (currTS.timeResolution != expectedTimeResolution) {
             return toReturn;
         }
     }
@@ -608,20 +602,20 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
 
         // Time-related & Auxiliary
         long long int diff, offset;
-        char bufferIn[cfgStruct.rowLength];
+        char bufferIn[cfgStruct.rowlength()];
         timeStruct thisTS{static_cast<time_t>(protoFromClient->timestamp(dataMap[yearKey].at(0)))};
 
         for (int i = 0; i < dataMap[yearKey].size(); i++) {
             // Computes diff & offset
             diff = protoFromClient->timestamp(dataMap[yearKey].at(i)) - thisTS.firstEpoch;
-            offset = diff * cfgStruct.rowLength;
+            offset = diff * cfgStruct.rowlength();
 
             // Seek to target offset prior to read
             fseeko64(bFile, offset, SEEK_SET);
 
             // Extract N bytes of data according to N bytes from .CFG file
             //  .CFG file is set by user when creating DB
-            fread(&bufferIn[0], 1, cfgStruct.rowLength, bFile);
+            fread(&bufferIn[0], 1, cfgStruct.rowlength(), bFile);
 
             // IF fetched data contains nothing
             //  -> Skip to next iteration
@@ -632,7 +626,7 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
             // Add fetched data to returning Protobuf obj
             XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_queryresponse();
             currEntry->set_timestamp(protoFromClient->timestamp(dataMap[yearKey].at(i)));
-            currEntry->set_dataset(std::string(bufferIn));
+//            currEntry->set_dataset(std::string(bufferIn));
         }
 
         // Close file & Release lock after read
@@ -658,7 +652,7 @@ XStore_Proto::batchDelete_REP XStore::batchDelete(XStore_Proto::batchDelete_REQ 
     std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
 
     // Check if cfgMap NOT contains cfgStruct
-    configStruct cfgStruct;
+    XStore_Proto::configStruct cfgStruct;
     if (cfgMap.find(dbName) == cfgMap.end()) {
         std::string cfgPath = dbBasePath + dbName + ".CFG";
 
@@ -702,14 +696,15 @@ XStore_Proto::batchDelete_REP XStore::batchDelete(XStore_Proto::batchDelete_REQ 
     std::map<unsigned short int, std::vector<unsigned long long int>> dataMap;
 
     // Granularity check
+    std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
     for (int i = 0; i < protoFromClient->timestamp_size(); i++) {
         currTime = protoFromClient->timestamp(i);
         struct timeStruct currTS{currTime};
         dataMap[currTS.year].push_back(i);
 
         // Halt execution & Return as long as there's an error in time granularity
-        if (currTS.timeResolution != cfgStruct.timeResolution) {
-            std::string errMsg = "[ERROR] [BATCH DELETE] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + cfgStruct.timeResolution;
+        if (currTS.timeResolution != expectedTimeResolution) {
+            std::string errMsg = "[ERROR] [BATCH DELETE] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + expectedTimeResolution;
             toReturn.set_deletestatus(errMsg);
             return toReturn;
         }
@@ -737,20 +732,20 @@ XStore_Proto::batchDelete_REP XStore::batchDelete(XStore_Proto::batchDelete_REQ 
 
         // Time-related & Auxiliary
         long long int diff, offset;
-        char bufferIn[cfgStruct.rowLength];
+        char bufferIn[cfgStruct.rowlength()];
         timeStruct thisTS{static_cast<time_t>(protoFromClient->timestamp(dataMap[yearKey].at(0)))};
 
         for (int i = 0; i < dataMap[yearKey].size(); i++) {
             // Computes diff & offset
             diff = protoFromClient->timestamp(dataMap[yearKey].at(i)) - thisTS.firstEpoch;
-            offset = diff * cfgStruct.rowLength;
+            offset = diff * cfgStruct.rowlength();
 
             // Seek to target offset prior to read
             fseeko64(bFile, offset, SEEK_SET);
 
             // Extract N bytes of data according to N bytes from .CFG file
             //  .CFG file is set by user when creating DB
-            fread(&bufferIn[0], 1, cfgStruct.rowLength, bFile);
+            fread(&bufferIn[0], 1, cfgStruct.rowlength(), bFile);
 
             // IF fetched data contains nothing
             //  -> Skip to next iteration
@@ -761,7 +756,7 @@ XStore_Proto::batchDelete_REP XStore::batchDelete(XStore_Proto::batchDelete_REQ 
             fseeko64(bFile, offset, SEEK_SET);
 
             // Nullify data based on N number of bytes available at that data point
-            fwrite(std::string(strlen(bufferIn), '\0').data(), cfgStruct.rowLength, 1, bFile);
+            fwrite(std::string(strlen(bufferIn), '\0').data(), cfgStruct.rowlength(), 1, bFile);
             deleteCount++;
         }
 
@@ -797,7 +792,7 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
     }
 
     // Check if cfgMap NOT contains cfgStruct
-    configStruct cfgStruct;
+    XStore_Proto::configStruct cfgStruct;
     if (cfgMap.find(dbName) == cfgMap.end()) {
         // Read & Add cfgStruct to cfgMap
         FILE *cFile;
@@ -818,7 +813,8 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
     struct tm* epochStruct;
     std::time_t currTime;
     std::map<unsigned short int, std::vector<unsigned long long int>> dataMap;
-    std::string granularityErrMsg = "[ERROR] [RANGE INSERT] [DB: " + dbName + "] - Invalid time granularity. Expecting: " + cfgStruct.timeResolution;
+    std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
+    std::string granularityErrMsg = "[ERROR] [RANGE INSERT] [DB: " + dbName + "] - Invalid time granularity. Expecting: " + expectedTimeResolution;
 
     // Granularity check
     for (int i = 0; i < protoFromClient->rangeinsert_data_size(); i++) {
@@ -828,7 +824,7 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
 
         // Halt execution & Return as long as there's an error in time granularity
         timeStruct currTS {currTime};
-        if (currTS.timeResolution != cfgStruct.timeResolution) {
+        if (currTS.timeResolution != expectedTimeResolution) {
             toReturn.set_insertstatus(granularityErrMsg);
             return toReturn;
         }
@@ -851,7 +847,7 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
 
             // Lock prior to file OP
             flock(fileno(bFile), LOCK_EX);
-            ftruncate(fileno(bFile), (thisTS.lastEpoch - thisTS.firstEpoch) * cfgStruct.rowLength);
+            ftruncate(fileno(bFile), (thisTS.lastEpoch - thisTS.firstEpoch) * cfgStruct.rowlength());
         }
         else {
             // ELSE - Target file DOES exist
@@ -875,13 +871,13 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
 
             // Compute diff & offset
             diff = unixTime - thisTS.firstEpoch;
-            offset = diff * cfgStruct.rowLength;
+            offset = diff * cfgStruct.rowlength();
 
             // Seek to target offset prior to write
             fseeko64(bFile, offset, SEEK_SET);
 
             // Writing actual data to disk
-            fwrite((currData.getData()).data(), cfgStruct.rowLength, 1, bFile);
+            fwrite((currData.getData()).data(), cfgStruct.rowlength(), 1, bFile);
         }
 
         // Close file & Release lock after write
@@ -911,7 +907,7 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
     std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
 
     // Check if cfgMap NOT contains cfgStruct
-    configStruct cfgStruct;
+    XStore_Proto::configStruct cfgStruct;
     if (cfgMap.find(dbName) == cfgMap.end()) {
         std::string cfgPath = dbBasePath + dbName + ".CFG";
 
@@ -931,7 +927,7 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
     }
 
     // IF query range > 2GB limit of Protobuf
-    if ((endEpochT - startEpochT) * cfgStruct.rowLength > 2000000000) {
+    if ((endEpochT - startEpochT) * cfgStruct.rowlength() > 2000000000) {
         return toReturn;
     }
 
@@ -947,7 +943,8 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
     // Time granularity check
     timeStruct startTimeStruct{startEpochT};
     timeStruct endTimeStruct{endEpochT};
-    if (startTimeStruct.timeResolution != cfgStruct.timeResolution || endTimeStruct.timeResolution != cfgStruct.timeResolution) {
+    std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
+    if (startTimeStruct.timeResolution != expectedTimeResolution || endTimeStruct.timeResolution != expectedTimeResolution) {
         return toReturn;
     }
 
@@ -959,7 +956,7 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
     FILE *bFile;
     std::string targetFilePath;
     long long int diff, offset;
-    char bufferIn[cfgStruct.rowLength];
+    char bufferIn[cfgStruct.rowlength()];
     std::string successMsg;
 
     // IF query range is within 1-year
@@ -982,14 +979,14 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
         for (long epochTime = startEpochT; epochTime <= endEpochT; epochTime++) {
             // Computes diff & offset
             diff = epochTime - currTS.firstEpoch;
-            offset = diff * cfgStruct.rowLength;
+            offset = diff * cfgStruct.rowlength();
 
             // Seek to computed offset
             fseeko64(bFile, offset, SEEK_SET);
 
             // Extract N bytes of data according to N bytes from .CFG file
             //  .CFG file is set by user when creating DB
-            fread(&bufferIn[0], 1, cfgStruct.rowLength, bFile);
+            fread(&bufferIn[0], 1, cfgStruct.rowlength(), bFile);
 
             // IF fetched data contains nothing
             //  -> Skip to next iteration
@@ -1000,7 +997,7 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
             // Add fetched data to returning Protobuf obj
             XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_queryresponse();
             currEntry->set_timestamp(epochTime);
-            currEntry->set_dataset(std::string(bufferIn));
+//            currEntry->set_dataset(std::string(bufferIn));
         }
 
         // Close & Release file lock after reading
@@ -1033,14 +1030,14 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
                 for (long long int epochTime = startEpoch; epochTime <= currTS.lastEpoch; epochTime++, startEpoch++) {
                     // Computes diff & offset
                     diff = epochTime - currTS.firstEpoch;
-                    offset = diff * cfgStruct.rowLength;
+                    offset = diff * cfgStruct.rowlength();
 
                     // Seek to computed offset
                     fseeko64(bFile, offset, SEEK_SET);
 
                     // Extract N bytes of data according to N bytes from .CFG file
                     //  .CFG file is set by user when creating DB
-                    fread(&bufferIn[0], 1, cfgStruct.rowLength, bFile);
+                    fread(&bufferIn[0], 1, cfgStruct.rowlength(), bFile);
 
                     // IF fetched data contains nothing
                     //  -> Skip to next iteration
@@ -1051,7 +1048,7 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
                     // Add fetched data to returning Protobuf obj
                     XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_queryresponse();
                     currEntry->set_timestamp(epochTime);
-                    currEntry->set_dataset(std::string(bufferIn));
+//                    currEntry->set_dataset(std::string(bufferIn));
                 }
 
                 // Update currTS with latest startEpoch after incrementing
@@ -1077,14 +1074,14 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
                 for (long long int epochTime = startEpoch; epochTime <= endEpochT; epochTime++, startEpoch++) {
                     // Computes diff & offset
                     diff = epochTime - currTS.firstEpoch;
-                    offset = diff * cfgStruct.rowLength;
+                    offset = diff * cfgStruct.rowlength();
 
                     // Seek to computed offset
                     fseeko64(bFile, offset, SEEK_SET);
 
                     // Extract N bytes of data according to N bytes from .CFG file
                     //  .CFG file is set by user when creating DB
-                    fread(&bufferIn[0], 1, cfgStruct.rowLength, bFile);
+                    fread(&bufferIn[0], 1, cfgStruct.rowlength(), bFile);
 
                     // IF fetched data contains nothing
                     //  -> Skip to next iteration
@@ -1095,7 +1092,7 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
                     // Add fetched data to returning Protobuf obj
                     XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_queryresponse();
                     currEntry->set_timestamp(epochTime);
-                    currEntry->set_dataset(std::string(bufferIn));
+//                    currEntry->set_dataset(std::string(bufferIn));
                 }
 
                 // Update currTS with latest startEpoch after incrementing
@@ -1127,7 +1124,7 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
     std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
 
     // Check if cfgMap NOT contains cfgStruct
-    configStruct cfgStruct;
+    XStore_Proto::configStruct cfgStruct;
     if (cfgMap.find(dbName) == cfgMap.end()) {
         std::string cfgPath = dbBasePath + dbName + ".CFG";
 
@@ -1162,8 +1159,9 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
     // Time granularity check
     timeStruct startTimeStruct{startEpochT};
     timeStruct endTimeStruct{endEpochT};
-    if (startTimeStruct.timeResolution != cfgStruct.timeResolution || endTimeStruct.timeResolution != cfgStruct.timeResolution) {
-        std::string errMsg = "[ERROR] [RANGE DELETE] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + cfgStruct.timeResolution;
+    std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
+    if (startTimeStruct.timeResolution != expectedTimeResolution || endTimeStruct.timeResolution != expectedTimeResolution) {
+        std::string errMsg = "[ERROR] [RANGE DELETE] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + expectedTimeResolution;
         toReturn.set_deletestatus(errMsg);
         return toReturn;
     }
@@ -1176,7 +1174,7 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
     FILE *bFile;
     std::string targetFilePath;
     long long int diff, offset;
-    char bufferIn[cfgStruct.rowLength];
+    char bufferIn[cfgStruct.rowlength()];
 
     // IF query range is within 1-year
     if (currTS.lastEpoch >= endEpochT) {
@@ -1200,14 +1198,14 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
         for (long epochTime = startEpochT; epochTime <= endEpochT; epochTime++) {
             // Computes diff & offset
             diff = epochTime - currTS.firstEpoch;
-            offset = diff * cfgStruct.rowLength;
+            offset = diff * cfgStruct.rowlength();
 
             // Seek to computed offset
             fseeko64(bFile, offset, SEEK_SET);
 
             // Extract N bytes of data according to N bytes from .CFG file
             //  .CFG file is set by user when creating DB
-            fread(&bufferIn[0], 1, cfgStruct.rowLength, bFile);
+            fread(&bufferIn[0], 1, cfgStruct.rowlength(), bFile);
 
             // IF fetched data contains nothing
             //  -> Skip to next iteration
@@ -1219,7 +1217,7 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
             fseeko64(bFile, offset, SEEK_SET);
 
             // Nullify data based on N number of bytes available at that data point
-            fwrite(std::string(strlen(bufferIn), '\0').data(), cfgStruct.rowLength, 1, bFile);
+            fwrite(std::string(strlen(bufferIn), '\0').data(), cfgStruct.rowlength(), 1, bFile);
             deleteCount++;
         }
 
@@ -1253,14 +1251,14 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
                 for (long long int epochTime = startEpoch; epochTime <= currTS.lastEpoch; epochTime++, startEpoch++) {
                     // Computes diff & offset
                     diff = epochTime - currTS.firstEpoch;
-                    offset = diff * cfgStruct.rowLength;
+                    offset = diff * cfgStruct.rowlength();
 
                     // Seek to computed offset
                     fseeko64(bFile, offset, SEEK_SET);
 
                     // Extract N bytes of data according to N bytes from .CFG file
                     //  .CFG file is set by user when creating DB
-                    fread(&bufferIn[0], 1, cfgStruct.rowLength, bFile);
+                    fread(&bufferIn[0], 1, cfgStruct.rowlength(), bFile);
 
                     // IF fetched data contains nothing
                     //  -> Skip to next iteration
@@ -1272,7 +1270,7 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
                     fseeko64(bFile, offset, SEEK_SET);
 
                     // Nullify data based on N number of bytes available at that data point
-                    fwrite(std::string(strlen(bufferIn), '\0').data(), cfgStruct.rowLength, 1, bFile);
+                    fwrite(std::string(strlen(bufferIn), '\0').data(), cfgStruct.rowlength(), 1, bFile);
                     deleteCount++;
                 }
 
@@ -1299,14 +1297,14 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
                 for (long long int epochTime = startEpoch; epochTime <= endEpochT; epochTime++, startEpoch++) {
                     // Computes diff & offset
                     diff = epochTime - currTS.firstEpoch;
-                    offset = diff * cfgStruct.rowLength;
+                    offset = diff * cfgStruct.rowlength();
 
                     // Seek to computed offset
                     fseeko64(bFile, offset, SEEK_SET);
 
                     // Extract N bytes of data according to N bytes from .CFG file
                     //  .CFG file is set by user when creating DB
-                    fread(&bufferIn[0], 1, cfgStruct.rowLength, bFile);
+                    fread(&bufferIn[0], 1, cfgStruct.rowlength(), bFile);
 
                     // IF fetched data contains nothing
                     //  -> Skip to next iteration
@@ -1318,7 +1316,7 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
                     fseeko64(bFile, offset, SEEK_SET);
 
                     // Nullify data based on N number of bytes available at that data point
-                    fwrite(std::string(strlen(bufferIn), '\0').data(), cfgStruct.rowLength, 1, bFile);
+                    fwrite(std::string(strlen(bufferIn), '\0').data(), cfgStruct.rowlength(), 1, bFile);
                     deleteCount++;
                 }
 
@@ -1418,9 +1416,10 @@ void XStore::initDB() {
 
         // Open & Read cfgStruct of all DB currently exists
         std::string cfgFilePath = p.path().string() + "/" + currDBName + ".CFG";
-        configStruct cfgStruct;
+        XStore_Proto::configStruct cfgStruct;
         FILE *cFile = std::fopen(cfgFilePath.c_str(), "rb");
-        fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
+        cfgStruct.ParseFromFileDescriptor(fileno(cFile));
+//        fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
         cfgMap[currDBName] = cfgStruct;
     }
 }
