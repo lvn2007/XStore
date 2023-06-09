@@ -9,6 +9,13 @@
           </advancedOptions>
         </fileTransfer>
       </webServer>
+      <webServer id="d6d83a42-a017-4b7a-95cd-2d006a19d751" name="TACC-1">
+        <fileTransfer rootFolder="/home/cc" accessType="SFTP" host="tacc-1" port="22" sshConfigId="63b548d8-5359-438f-ab1e-71aacd063ad9" sshConfig="cc@tacc-1:22 key" keyPair="true">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" keepAliveTimeout="0" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
     </option>
   </component>
 </project>

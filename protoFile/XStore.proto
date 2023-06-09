@@ -19,6 +19,43 @@ enum requestType {
   RANGEDELETE = 12;
 }
 
+enum timeUnit {
+  SECOND = 0;
+  MILLISECOND = 1;
+  MICROSECOND = 3;
+  NANOSECOND = 4;
+}
+
+message configStruct {
+  string dbName = 1;
+  timeUnit timeResolution = 2;
+  sfixed32 rowLength = 3;
+}
+
+message fieldData {
+  oneof oneOfData {
+    double doubleData = 1;
+    float floatData = 2;
+    int32 int32Data = 3;
+    int64 int64Data = 4;
+    uint32 uint32Data = 5;
+    uint64 uint64Data = 6;
+    sint32 sint32Data = 7;
+    sint64 sint64Data = 8;
+    fixed32 fixed32Data = 9;
+    fixed64 fixed64Data = 10;
+    sfixed32 sfixed32Data = 11;
+    sfixed64 sfixed64Data = 12;
+    bool boolData = 13;
+    string stringData = 14;
+    bytes bytesData = 15;
+  }
+}
+
+message rowData {
+  repeated fieldData fData = 1;
+}
+
 message reqCMD {
   requestType rType = 1;
 }
@@ -28,7 +65,7 @@ message reqCMD {
 message createDB_REQ {
   requestType rType = 1;
   string dbName = 2;
-  string timeResolution = 3;
+  timeUnit timeResolution = 3;
   uint32 rowLength = 4;
 }
 
@@ -49,7 +86,7 @@ message removeDBFiles_REQ {
 message unaryInsert_REQ {
   requestType rType = 1;
   uint64 timestamp = 2;
-  string data = 3;
+  rowData data = 3;
   string dbName = 4;
 }
 
@@ -127,7 +164,7 @@ message rangeDelete_REQ {
 // --- DB Stats & Info REP
 message dbStats {
   string dbName = 1;
-  string dbResolution = 2;
+  timeUnit dbResolution = 2;
   uint64 totalSizeInByte = 3;
   repeated string fileName = 4;
 }
@@ -162,7 +199,7 @@ message unaryInsert_REP {
 // --- UNARY QUERY
 message unaryQuery_REP {
   uint64 timestamp = 1;
-  string dataset = 2;
+  rowData data = 2;
 }
 
 // --- UNARY DELETE

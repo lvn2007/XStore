@@ -38,7 +38,7 @@ ax.plot(grpcDF.index, zmqMean, linestyle='--', linewidth=1)
 ax.set_xlabel('Iteration')
 ax.set_ylabel('Latency (ms)')
 plt.legend()
-plt.tight_layout()
+plt.tight_layout(pad=0.15)
 
 # plt.show()
 plt.savefig('latencyBench.svg', format='svg')

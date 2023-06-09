@@ -15,7 +15,20 @@ Note:
   * sudo iptables -t nat -A PREROUTING -p tcp --dport 12345 -j DNAT --to-destination 10.83.233.196:12345
   * sudo iptables -t nat -A POSTROUTING -j MASQUERADE
 * Clear caches: sudo free && sudo sync && sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" && sudo free
-
+* Ubuntu 20.04 (Chameleon) - Server:
+  * CMake:
+    * wget -c https://github.com/Kitware/CMake/releases/download/v3.25.1/cmake-3.25.1.tar.gz
+    * tar -zxvf cmake-3.25.1.tar.gz && rm -r cmake-3.25.1.tar.gz
+    * cd cmake-3.25.1/ && ./configure && make && sudo make install && cd ~
+  * Protobuf: 
+    * wget -c https://github.com/protocolbuffers/protobuf/releases/download/v3.12.4/protobuf-all-3.12.4.tar.gz
+    * tar -zxvf protobuf-all-3.12.4.tar.gz && rm -r protobuf-all-3.12.4.tar.gz
+    * cd protobuf-3.12.4/ && ./autogen.sh && ./configure && make && sudo make install 
+    * which protoc && sudo ldconfig
+  * Other:
+    * sudo apt install build-essential g++ libzmq3-dev libtbb-dev
+* ubuntu 20.04 (Chameleon) - Client:
+  * pip3 install pyzmq pandas protobuf==3.20.*
 # MongoDB
 ## Configuring LXC container
 1. sudo lxd init

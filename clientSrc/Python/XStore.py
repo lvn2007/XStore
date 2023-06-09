@@ -21,15 +21,9 @@ class SysInfo:
 
 
 @dataclasses.dataclass
-class StatusMessage:
-    statusMessage: str
-
-
-@dataclasses.dataclass
 class QueryResult:
     timestamp: int
     data: str
-    queryStatus: StatusMessage
 
 
 @dataclasses.dataclass
@@ -40,7 +34,6 @@ class StatusMessages:
 @dataclasses.dataclass
 class QueryResults:
     queryResult: List[QueryResult]
-    queryStatus: StatusMessage
 
 
 class XStoreClient:
@@ -102,7 +95,7 @@ class XStoreClient:
         # Prepare object to be parsed into
         recvObj = XStore_Proto.createDB_REP()
         recvObj.ParseFromString(recvData)
-        return StatusMessage(recvObj.createDBStatus)
+        return recvObj.createDBStatus
 
     def unaryInsert(self, insertUnixTime, data, targetDBName):
         """
@@ -127,7 +120,7 @@ class XStoreClient:
         # Prepare object to be parsed into
         recvObj = XStore_Proto.unaryInsert_REP()
         recvObj.ParseFromString(recvData)
-        return StatusMessage(recvObj.insertStatus)
+        return recvObj.insertStatus
 
     def unaryQuery(self, targetUnixTime, targetDBName):
         """
@@ -150,7 +143,36 @@ class XStoreClient:
         # Prepare object to be parsed into
         recvObj = XStore_Proto.unaryQuery_REP()
         recvObj.ParseFromString(recvData)
-        return QueryResult(recvObj.timestamp, recvObj.dataset, recvObj.queryStatus)
+        return recvObj
+
+    def rangeInsert(self, dataList, targetDBName):
+        """
+        :param dataList:
+        :param targetDBName:
+        :return:
+        """
+        # Build msg prior to dispatch
+        rangeInsert_REQ = XStore_Proto.rangeInsert_REQ()
+        rangeInsert_REQ.rType = XStore_Proto.RANGEINSERT
+        rangeInsert_REQ.dbName = targetDBName
+
+        # Loop through each data and add to batchInsert_REQ
+        for data in dataList:
+            # Organize rangeInsert_DATA
+            rangeInsert_DATA = rangeInsert_REQ.rangeInsert_DATA.add()
+            rangeInsert_DATA.timestamp = data[0]
+            rangeInsert_DATA.data = data[1]
+
+        # Dispatch request
+        self.socket.send(rangeInsert_REQ.SerializeToString())
+
+        # Receive response
+        recvData = self.socket.recv()
+
+        # Prepare object to be parsed into
+        recvObj = XStore_Proto.rangeInsert_REP()
+        recvObj.ParseFromString(recvData)
+        return recvObj.insertStatus
 
     def batchInsert(self, dataList, targetDBName):
         """
@@ -179,7 +201,7 @@ class XStoreClient:
         # Prepare object to be parsed into
         recvObj = XStore_Proto.batchInsert_REP()
         recvObj.ParseFromString(recvData)
-        return StatusMessages(recvObj.insertStatus)
+        return recvObj.insertStatus
 
     def rangeQuery(self, startUnixTime, endUnixTime, targetDBName):
         """
@@ -202,19 +224,47 @@ class XStoreClient:
         recvData = self.socket.recv()
 
         # Prepare object to be parsed into
-        recvObj = XStore_Proto.batchQuery_REP()
+        recvObj = XStore_Proto.rangeQuery_REP()
         recvObj.ParseFromString(recvData)
 
         # List of dbInfo
-        queryResults = []
+        # queryResults = []
 
         # Extract & Append each DB Info into list
-        for i in recvObj.unaryResponse:
-            currResult = QueryResult(i.timestamp, i.dataset, i.queryStatus)
-            queryResults.append(currResult)
+        # for i in recvObj.unaryResponse:
+        #     currResult = QueryResult(i.timestamp, i.dataset, i.queryStatus)
+        #     queryResults.append(currResult)
 
         # QueryResults as returning object
-        return QueryResults(queryResults, recvObj.queryStatus)
+        # return QueryResults(queryResults, recvObj.queryStatus)
+        return recvObj
+
+    def batchQuery(self, dataList, targetDBName):
+        """
+        :param dataList:
+        :param targetDBName:
+        :return:
+        """
+        # Build msg prior to dispatch
+        batchQuery_REQ = XStore_Proto.batchQuery_REQ()
+        batchQuery_REQ.rType = XStore_Proto.BATCHQUERY
+        batchQuery_REQ.dbName = targetDBName
+
+        # Loop through each data and add to batchQuery_REQ
+        for targetTime in dataList:
+            # Organize batchInsert_DATA
+            batchQuery_REQ.timestamp.append(targetTime)
+
+        # Dispatch request
+        self.socket.send(batchQuery_REQ.SerializeToString())
+
+        # Receive response
+        recvData = self.socket.recv()
+
+        # Prepare object to be parsed into
+        recvObj = XStore_Proto.batchQuery_REP()
+        recvObj.ParseFromString(recvData)
+        return recvObj.queryResponse
 
     def remove_db(self, dbName):
         """
@@ -235,7 +285,7 @@ class XStoreClient:
         # Prepare object to be parsed into
         recvObj = XStore_Proto.removeDB_REP()
         recvObj.ParseFromString(recvData)
-        return StatusMessage(recvObj.removeStatus)
+        return recvObj.removeStatus
 
     def remove_db_files(self, filenameList, dbName):
         """
@@ -274,8 +324,8 @@ if __name__ == '__main__':
     XStore = XStoreClient(SERVER_ADDR, SERVER_PORT)
 
     # SYS INFO
-    sysInfo = XStore.infoRequest()
-    print(sysInfo)
+    # sysInfo = XStore.infoRequest()
+    # print(sysInfo)
 
     # Create DB
     # createDBStatus = XStore.createDB("TSLA", "SECOND", 128)
@@ -296,11 +346,11 @@ if __name__ == '__main__':
     # print(batchInsertStatus)
 
     # Range Query
-    sTime = time.time()
-    rangeQueryResult = XStore.rangeQuery(1483228798, 1483228798+1000, "TSLA")
-    print(f'Took: {time.time() - sTime}')
-    [print(i) for i in rangeQueryResult.queryResult]
-    print(rangeQueryResult.queryStatus)
+    # sTime = time.time()
+    # rangeQueryResult = XStore.rangeQuery(1483228798, 1483228798+1000, "TSLA")
+    # print(f'Took: {time.time() - sTime}')
+    # [print(i) for i in rangeQueryResult.queryResult]
+    # print(rangeQueryResult.queryStatus)
 
     # Remove DB
     # removeDBResult = XStore.remove_db("TSLA")

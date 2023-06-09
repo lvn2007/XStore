@@ -2,6 +2,7 @@
 #include "include/XStore_Networking/XStore_zmqServer.h"
 #include "include/XStore/XStore.h"
 #include <cmath>
+#include <variant>
 
 double meanCalc(std::vector<double> inputVector) {
     double totalSum = 0;
@@ -55,6 +56,17 @@ double getMax(std::vector<double> inputVector) {
 }
 
 int main(int argc, char *argv[]) {
+//    FILE *bFile;
+//    bFile = fopen("usingFWRITE.ttt", "wb+");
+//    oneRow.SerializeToFileDescriptor(fileno(bFile));
+//    std::fwrite(oneRow.SerializeAsString().c_str(), 128, 1, bFile);
+
+//    std::cout << "TEST READING ---- " << std::endl;
+//    XStore_Proto::data someRow;
+//    bFile = fopen("usingFWRITE.ttt", "rb");
+//    someRow.ParseFromFileDescriptor(fileno(bFile));
+//    someRow.PrintDebugString();
+
     // Handle arguments
     if (argc < 4) {
         std::cout << "[ERROR] [BOOT] - Missing required (2) arguments" << std::endl;
@@ -69,11 +81,32 @@ int main(int argc, char *argv[]) {
 
     // ----DEV AREA
     // Instantiate XStore obj
-    XStore myStore;
+//    XStore myStore;
 
     // Create DB
-//    XStore_Proto::createDB_REP create_db_rep = myStore.createDB("TSLA", "millisecond", 128);
-//    create_db_rep.PrintDebugString();
+//    XStore_Proto::createDB_REP create_db_rep_1 = myStore.createDB("TEST", XStore_Proto::timeUnit::SECOND, 128);
+//    create_db_rep_1.PrintDebugString();
+
+    // UNARY INSERT
+//    XStore_Proto::rowData oneRow;
+//    XStore_Proto::fieldData *field1 = oneRow.add_fdata();
+//    field1->set_int32data(191239);
+//    XStore_Proto::fieldData *field2 = oneRow.add_fdata();
+//    field2->set_stringdata("191239");
+//    XStore_Proto::fieldData *field22 = oneRow.add_fdata();
+//    field22->set_doubledata(33.3333333333333);
+//
+//    XStore_Proto::rowData twoRow;
+//    XStore_Proto::fieldData *field3 = twoRow.add_fdata();
+//    field3->set_int32data(39123923);
+//    XStore_Proto::fieldData *field4 = twoRow.add_fdata();
+//    field4->set_stringdata("39123923");
+//    XStore_Proto::unaryInsert_REP unary_insert_rep_1 = myStore.unaryInsert(1451606401, oneRow, "TEST");
+//    unary_insert_rep_1.PrintDebugString();
+
+    // UNARY QUERY
+//    XStore_Proto::unaryQuery_REP unary_query_rep = myStore.unaryQuery(1451606401, "TEST");
+//    unary_query_rep.PrintDebugString();
 
 //    XStore_Proto::batchInsert_REQ batch_insert_req;
 //    batch_insert_req.set_dbname("TSLA");
@@ -97,6 +130,10 @@ int main(int argc, char *argv[]) {
 //    start = std::chrono::high_resolution_clock::now();
 
     // Unary Insert
+//    XStore_Proto::unaryInsert_REP unary_insert_rep = myStore.unaryInsert(1451606401, "Helo1451606401", "TSLA");
+//    unary_insert_rep.PrintDebugString();
+//    XStore_Proto::unaryInsert_REP unary_insert_rep2 = myStore.unaryInsert(1451606410, "Helo1451606410", "TSLA");
+
 //    XStore_Proto::unaryInsert_REP unary_insert_rep = myStore.unaryInsert(1451606400000, "Helo", "TSLA");
 //    XStore_Proto::unaryInsert_REP unary_insert_rep1 = myStore.unaryInsert(1451636401233, "Helo123", "TSLA");
 //    XStore_Proto::unaryInsert_REP unary_insert_rep2 = myStore.unaryInsert(1451606441897, "Helo456", "TSLA");
@@ -112,6 +149,8 @@ int main(int argc, char *argv[]) {
 //    batch_query_rep.PrintDebugString();
 
     // RANGE QUERY
+//    XStore_Proto::unaryQuery_REP range_query_rep = myStore.unaryQuery(1451606401, "TSLA");
+//    range_query_rep.PrintDebugString();
 //    XStore_Proto::rangeQuery_REP range_query_rep = myStore.rangeQuery(1451606400000, 1451606400002, "tsla");
 //    XStore_Proto::rangeQuery_REP range_query_rep = myStore.rangeQuery(1482271200, 1482271204, "tsla");
 //    XStore_Proto::rangeQuery_REP range_query_rep = myStore.rangeQuery(1483228798, 1483928808, "tsla");
