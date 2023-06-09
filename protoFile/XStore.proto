@@ -107,7 +107,7 @@ message unaryDelete_REQ {
 // --- BATCH INSERT (DATA)
 message batchInsert_DATA {
   uint64 timestamp = 1;
-  string data = 2;
+  rowData data = 2;
 }
 
 // --- BATCH INSERT

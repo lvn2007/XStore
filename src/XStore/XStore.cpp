@@ -33,7 +33,8 @@ XStore_Proto::sysInfo_REP XStore::infoQuery(std::string serverAddr, int threadCo
         // Check if .CFG file is exist
         if (std::filesystem::exists(currCfgFilePath)) {
             int cfgFile = open(currCfgFilePath.c_str(), O_RDONLY);
-            pread(cfgFile, &cfgStruct, sizeof(cfgStruct), 0);
+            cfgStruct.ParseFromFileDescriptor(cfgFile);
+
             // Set DB Resolution
             currDB->set_dbresolution(cfgStruct.timeresolution());
         }
@@ -483,10 +484,7 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
             // Parse each data in a batch collection
             XStore_Proto::batchInsert_DATA currInsertData = protoFromClient->batchinsert_data(dataMap[yearKey].at(i));
             std::time_t unixTime = currInsertData.timestamp();
-            std::string data = currInsertData.data();
-
-            // Organize timestamp & data into an object
-            dataStruct currData{unixTime, data};
+            XStore_Proto::rowData data = currInsertData.data();
 
             // Compute diff & offset
             diff = unixTime - thisTS.firstEpoch;
@@ -496,7 +494,7 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
             fseeko64(bFile, offset, SEEK_SET);
 
             // Writing actual data to disk
-            fwrite((currData.getData()).data(), cfgStruct.rowlength(), 1, bFile);
+            fwrite(data.SerializeAsString().data(), cfgStruct.rowlength(), 1, bFile);
         }
 
         // Close file & Release lock after write
