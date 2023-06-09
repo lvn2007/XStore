@@ -21,13 +21,10 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Switching to new serialization strategy (Protobuf)">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Fixing [TEST] SYS_INFO">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/clientSrc/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore.proto" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/clientSrc/XStore_Client.h" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore_Client.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/protoFile/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/XStore.proto" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -365,14 +362,7 @@
       <workItem from="1685971616370" duration="5242000" />
       <workItem from="1685984584551" duration="24821000" />
       <workItem from="1686156104802" duration="2204000" />
-      <workItem from="1686168708370" duration="23727000" />
-    </task>
-    <task id="LOCAL-00221" summary="Adding lock for reading">
-      <created>1668062935028</created>
-      <option name="number" value="00221" />
-      <option name="presentableId" value="LOCAL-00221" />
-      <option name="project" value="LOCAL" />
-      <updated>1668062935028</updated>
+      <workItem from="1686168708370" duration="25833000" />
     </task>
     <task id="LOCAL-00222" summary="Move cfgStruct to createDB">
       <created>1668146823033</created>
@@ -710,7 +700,14 @@
       <option name="project" value="LOCAL" />
       <updated>1686338677261</updated>
     </task>
-    <option name="localTasksCounter" value="270" />
+    <task id="LOCAL-00270" summary="Fixing [TEST] SYS_INFO">
+      <created>1686344305600</created>
+      <option name="number" value="00270" />
+      <option name="presentableId" value="LOCAL-00270" />
+      <option name="project" value="LOCAL" />
+      <updated>1686344305600</updated>
+    </task>
+    <option name="localTasksCounter" value="271" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -817,7 +814,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Equipped cfgMap for batchInsert" />
     <MESSAGE value="Implemented rangeQuery. WIP: Notify user about 2GB protobuf limit" />
     <MESSAGE value="Implemented notifying user about 2GB protobuf limit. WIP: Guard against startTime &gt; endTime" />
     <MESSAGE value="Updated Python client" />
@@ -842,6 +838,7 @@
     <MESSAGE value="Modify file lock &amp; Guard against empty target file" />
     <MESSAGE value="Fixed a very subtle bug in timeStruct.cpp where actual second granularity is not recognized" />
     <MESSAGE value="Switching to new serialization strategy (Protobuf)" />
-    <option name="LAST_COMMIT_MESSAGE" value="Switching to new serialization strategy (Protobuf)" />
+    <MESSAGE value="Fixing [TEST] SYS_INFO" />
+    <option name="LAST_COMMIT_MESSAGE" value="Fixing [TEST] SYS_INFO" />
   </component>
 </project>
