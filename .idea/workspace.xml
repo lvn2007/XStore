@@ -21,10 +21,13 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Fixing [TEST] UNARY_OPS">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Python client overloading [UNARY INSERT]">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/clientSrc/Python/XStore.py" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/Python/XStore.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/MISC/XStore.pdf" beforeDir="false" afterPath="$PROJECT_DIR$/MISC/XStore.pdf" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/MISC/XStore_dataOrganization.svg" beforeDir="false" afterPath="$PROJECT_DIR$/MISC/XStore_dataOrganization.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/MISC/XStore_fileOrganization.svg" beforeDir="false" afterPath="$PROJECT_DIR$/MISC/XStore_fileOrganization.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/MISC/XStore_innerLayer-Engine.svg" beforeDir="false" afterPath="$PROJECT_DIR$/MISC/XStore_innerLayer-Engine.svg" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/MISC/XStore_outerLayer-Networking.svg" beforeDir="false" afterPath="$PROJECT_DIR$/MISC/XStore_outerLayer-Networking.svg" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -364,14 +367,7 @@
       <workItem from="1686168708370" duration="27708000" />
       <workItem from="1686577194885" duration="12000" />
       <workItem from="1686577468137" duration="2906000" />
-      <workItem from="1686596444430" duration="2940000" />
-    </task>
-    <task id="LOCAL-00223" summary="Re-implemented batchInsert/Query">
-      <created>1668205350238</created>
-      <option name="number" value="00223" />
-      <option name="presentableId" value="LOCAL-00223" />
-      <option name="project" value="LOCAL" />
-      <updated>1668205350238</updated>
+      <workItem from="1686596444430" duration="3635000" />
     </task>
     <task id="LOCAL-00224" summary="Remove print in sysInfo &amp; Prelim of Python client">
       <created>1668210313445</created>
@@ -709,7 +705,14 @@
       <option name="project" value="LOCAL" />
       <updated>1686346609354</updated>
     </task>
-    <option name="localTasksCounter" value="272" />
+    <task id="LOCAL-00272" summary="Python client overloading [UNARY INSERT]">
+      <created>1686603563614</created>
+      <option name="number" value="00272" />
+      <option name="presentableId" value="LOCAL-00272" />
+      <option name="project" value="LOCAL" />
+      <updated>1686603563614</updated>
+    </task>
+    <option name="localTasksCounter" value="273" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -816,7 +819,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Implemented notifying user about 2GB protobuf limit. WIP: Guard against startTime &gt; endTime" />
     <MESSAGE value="Updated Python client" />
     <MESSAGE value="Guard against endTime &lt; startTime in rangeQuery" />
     <MESSAGE value="Updated .gitlab-ci.yml" />
@@ -841,6 +843,7 @@
     <MESSAGE value="Switching to new serialization strategy (Protobuf)" />
     <MESSAGE value="Fixing [TEST] SYS_INFO" />
     <MESSAGE value="Fixing [TEST] UNARY_OPS" />
-    <option name="LAST_COMMIT_MESSAGE" value="Fixing [TEST] UNARY_OPS" />
+    <MESSAGE value="Python client overloading [UNARY INSERT]" />
+    <option name="LAST_COMMIT_MESSAGE" value="Python client overloading [UNARY INSERT]" />
   </component>
 </project>
