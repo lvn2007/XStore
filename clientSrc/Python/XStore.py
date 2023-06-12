@@ -97,19 +97,28 @@ class XStoreClient:
         recvObj.ParseFromString(recvData)
         return recvObj.createDBStatus
 
-    def unaryInsert(self, insertUnixTime, data, targetDBName):
-        """
-        :param insertUnixTime:
-        :param data:
-        :param targetDBName:
-        :return:
-        """
+    def unaryInsert(self, insertUnixTime: int, data: [object, list], targetDBName: str) -> str:
         # Build msg prior to dispatch
         unaryInsert_REQ = XStore_Proto.unaryInsert_REQ()
         unaryInsert_REQ.rType = XStore_Proto.UNARYINSERT
         unaryInsert_REQ.timestamp = insertUnixTime
-        unaryInsert_REQ.data = data
         unaryInsert_REQ.dbName = targetDBName
+
+        # IF data is list -> Assume worse case scenario for space-efficiency
+        if isinstance(data, list):
+            # Build 1 row worth of data
+            rowData = XStore_Proto.rowData()
+            for idx, item in enumerate(data):
+                fieldData = rowData.fData.add()
+                if isinstance(item, str):
+                    fieldData.stringData = item
+                elif isinstance(item, bool):
+                    fieldData.boolData = item
+                elif isinstance(item, (int, float)):
+                    fieldData.doubleData = item
+            unaryInsert_REQ.data.MergeFrom(rowData)
+        else:
+            unaryInsert_REQ.data.MergeFrom(data)
 
         # Dispatch request
         self.socket.send(unaryInsert_REQ.SerializeToString())
@@ -328,15 +337,26 @@ if __name__ == '__main__':
     # print(sysInfo)
 
     # Create DB
-    # createDBStatus = XStore.createDB("TSLA", "SECOND", 128)
+    # createDBStatus = XStore.createDB("TSLA", XStore_Proto.timeUnit.Value("SECOND"), 64)
     # print(createDBStatus)
 
     # Unary Insert
-    # unaryInsertStatus = XStore.unaryInsert(1482271200, "From Python", "TSLA")
+    #   STAGING -- One row worth of data
+    # Placeholder for each column of data
+    # rowData = XStore_Proto.rowData()
+    #
+    # for idx, item in enumerate([123, 456, 99999999999]):
+    #     fieldData = rowData.fData.add()
+    #     fieldData.uint64Data = item
+    # unaryInsertStatus = XStore.unaryInsert(1482271200, rowData, "TSLA")
+    # print(unaryInsertStatus)
+
+    # myData = [True, 'okBro', 123123799999]
+    # unaryInsertStatus = XStore.unaryInsert(1482271201, myData, "TSLA")
     # print(unaryInsertStatus)
 
     # Unary Query
-    # unaryQueryResult = XStore.unaryQuery(1482271200, "TSLA")
+    # unaryQueryResult = XStore.unaryQuery(1482271201, "TSLA")
     # print(unaryQueryResult)
 
     # Batch Insert

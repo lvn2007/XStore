@@ -81,7 +81,7 @@ int main(int argc, char *argv[]) {
 
     // ----DEV AREA
     // Instantiate XStore obj
-//    XStore myStore;
+    XStore myStore;
 
     // Create DB
 //    XStore_Proto::createDB_REP create_db_rep = myStore.createDB("TSLA", XStore_Proto::timeUnit::SECOND, 128);
@@ -95,7 +95,7 @@ int main(int argc, char *argv[]) {
 //    field2->set_stringdata("191239");
 //    XStore_Proto::fieldData *field22 = oneRow.add_fdata();
 //    field22->set_doubledata(33.3333333333333);
-//
+
 //    XStore_Proto::rowData twoRow;
 //    XStore_Proto::fieldData *field3 = twoRow.add_fdata();
 //    field3->set_int32data(39123923);
