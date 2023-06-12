@@ -21,10 +21,9 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Fixing [TEST] SYS_INFO">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Fixing [TEST] UNARY_OPS">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore_Client.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/clientSrc/XStore_Client.h" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/XStore_Client.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/Python/XStore.py" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/Python/XStore.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -362,14 +361,10 @@
       <workItem from="1685971616370" duration="5242000" />
       <workItem from="1685984584551" duration="24821000" />
       <workItem from="1686156104802" duration="2204000" />
-      <workItem from="1686168708370" duration="25833000" />
-    </task>
-    <task id="LOCAL-00222" summary="Move cfgStruct to createDB">
-      <created>1668146823033</created>
-      <option name="number" value="00222" />
-      <option name="presentableId" value="LOCAL-00222" />
-      <option name="project" value="LOCAL" />
-      <updated>1668146823033</updated>
+      <workItem from="1686168708370" duration="27708000" />
+      <workItem from="1686577194885" duration="12000" />
+      <workItem from="1686577468137" duration="2906000" />
+      <workItem from="1686596444430" duration="2940000" />
     </task>
     <task id="LOCAL-00223" summary="Re-implemented batchInsert/Query">
       <created>1668205350238</created>
@@ -707,7 +702,14 @@
       <option name="project" value="LOCAL" />
       <updated>1686344305600</updated>
     </task>
-    <option name="localTasksCounter" value="271" />
+    <task id="LOCAL-00271" summary="Fixing [TEST] UNARY_OPS">
+      <created>1686346609354</created>
+      <option name="number" value="00271" />
+      <option name="presentableId" value="LOCAL-00271" />
+      <option name="project" value="LOCAL" />
+      <updated>1686346609354</updated>
+    </task>
+    <option name="localTasksCounter" value="272" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -814,7 +816,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Implemented rangeQuery. WIP: Notify user about 2GB protobuf limit" />
     <MESSAGE value="Implemented notifying user about 2GB protobuf limit. WIP: Guard against startTime &gt; endTime" />
     <MESSAGE value="Updated Python client" />
     <MESSAGE value="Guard against endTime &lt; startTime in rangeQuery" />
@@ -839,6 +840,7 @@
     <MESSAGE value="Fixed a very subtle bug in timeStruct.cpp where actual second granularity is not recognized" />
     <MESSAGE value="Switching to new serialization strategy (Protobuf)" />
     <MESSAGE value="Fixing [TEST] SYS_INFO" />
-    <option name="LAST_COMMIT_MESSAGE" value="Fixing [TEST] SYS_INFO" />
+    <MESSAGE value="Fixing [TEST] UNARY_OPS" />
+    <option name="LAST_COMMIT_MESSAGE" value="Fixing [TEST] UNARY_OPS" />
   </component>
 </project>
