@@ -366,11 +366,12 @@ if __name__ == '__main__':
     # print(batchInsertStatus)
 
     # Range Query
-    # sTime = time.time()
-    # rangeQueryResult = XStore.rangeQuery(1483228798, 1483228798+1000, "TSLA")
-    # print(f'Took: {time.time() - sTime}')
-    # [print(i) for i in rangeQueryResult.queryResult]
-    # print(rangeQueryResult.queryStatus)
+    sTime = time.time()
+    rangeQueryResult = XStore.rangeQuery(1483228797, 1483228798+6, "TSLA")
+    print(f'Took: {time.time() - sTime}')
+    print(rangeQueryResult.queryResponse)
+    [print(i) for i in rangeQueryResult.queryResponse]
+    print(rangeQueryResult.queryStatus)
 
     # Remove DB
     # removeDBResult = XStore.remove_db("TSLA")

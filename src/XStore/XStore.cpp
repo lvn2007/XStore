@@ -281,7 +281,7 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery(std::time_t unixTime, std::strin
     flock(fileno(bFile), LOCK_UN);
 
     // Set data fetched from XStore to returning Protobuf obj
-    tempData.ParseFromArray(bufferIn, cfgStruct.rowlength());
+    tempData.ParseFromArray(&bufferIn, cfgStruct.rowlength());
     *toReturn.mutable_data() = tempData;
 
     return toReturn;
@@ -623,7 +623,7 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
             }
 
             // Add fetched data to returning Protobuf obj
-            tempData.ParseFromArray(bufferIn, cfgStruct.rowlength());
+            tempData.ParseFromArray(&bufferIn, cfgStruct.rowlength());
             XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_queryresponse();
             currEntry->set_timestamp(protoFromClient->timestamp(dataMap[yearKey].at(i)));
             *currEntry->mutable_data() = tempData;
@@ -895,8 +895,9 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
 // RANGE QUERY
 XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName) {
     // Protobuf obj to be returned
-    std::string queryStatus;
     XStore_Proto::rangeQuery_REP toReturn;
+    XStore_Proto::rowData tempData;
+    std::string queryStatus;
 
     // Ensure dbName string is all capitalized
     for (int i = 0; i < dbName.size(); i++) {
@@ -917,7 +918,7 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
 
         // Read & Add cfgStruct to cfgMap
         FILE *cFile = std::fopen(cfgPath.c_str(), "rb");
-        fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
+        cfgStruct.ParseFromFileDescriptor(fileno(cFile));
         std::fclose(cFile);
         cfgMap[dbName] = cfgStruct;
     }
@@ -995,9 +996,10 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
             }
 
             // Add fetched data to returning Protobuf obj
+            tempData.ParseFromArray(&bufferIn, cfgStruct.rowlength());
             XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_queryresponse();
             currEntry->set_timestamp(epochTime);
-//            currEntry->set_dataset(std::string(bufferIn));
+            *currEntry->mutable_data() = tempData;
         }
 
         // Close & Release file lock after reading
@@ -1046,9 +1048,10 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
                     }
 
                     // Add fetched data to returning Protobuf obj
+                    tempData.ParseFromArray(&bufferIn, cfgStruct.rowlength());
                     XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_queryresponse();
                     currEntry->set_timestamp(epochTime);
-//                    currEntry->set_dataset(std::string(bufferIn));
+                    *currEntry->mutable_data() = tempData;
                 }
 
                 // Update currTS with latest startEpoch after incrementing
@@ -1090,9 +1093,10 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
                     }
 
                     // Add fetched data to returning Protobuf obj
+                    tempData.ParseFromArray(&bufferIn, cfgStruct.rowlength());
                     XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_queryresponse();
                     currEntry->set_timestamp(epochTime);
-//                    currEntry->set_dataset(std::string(bufferIn));
+                    *currEntry->mutable_data() = tempData;
                 }
 
                 // Update currTS with latest startEpoch after incrementing
