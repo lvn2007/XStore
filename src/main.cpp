@@ -81,7 +81,7 @@ int main(int argc, char *argv[]) {
 
     // ----DEV AREA
     // Instantiate XStore obj
-    XStore myStore;
+//    XStore myStore;
 
     // Create DB
 //    XStore_Proto::createDB_REP create_db_rep = myStore.createDB("TSLA", XStore_Proto::timeUnit::SECOND, 128);
@@ -110,7 +110,7 @@ int main(int argc, char *argv[]) {
 
 //    XStore_Proto::batchInsert_REQ batch_insert_req;
 //    batch_insert_req.set_dbname("TSLA");
-//
+
 //    for (int i = 1; i < 5; i++) {
 //        XStore_Proto::batchInsert_DATA *batch_insert_data = batch_insert_req.add_batchinsert_data();
 //        batch_insert_data->set_timestamp(1483228798 + i);
@@ -122,14 +122,17 @@ int main(int argc, char *argv[]) {
 //        *batch_insert_data->mutable_data() = oneRow;
 //    }
 //    batch_insert_req.PrintDebugString();
-//
+
 //    XStore_Proto::batchInsert_REP batch_insert_rep = myStore.batchInsert(&batch_insert_req);
 //    batch_insert_rep.PrintDebugString();
 
-//    XStore_Proto::batchInsert_REP batch_insert_rep = myStore.batchInsert_fTruncate(&batch_insert_req);
-//    batch_insert_req.PrintDebugString();
+//    XStore_Proto::batchQuery_REQ batch_query_req;
+//    batch_query_req.set_dbname("TSLA");
+//    for (int i = 0; i < 5; i++) {
+//        batch_query_req.add_timestamp(1483228798 + i);
+//    }
 
-//    XStore_Proto::batchQuery_REP batch_query_rep = myStore.batchQuery(1482271200, 1482271200 + 62, "TSLA");
+//    XStore_Proto::batchQuery_REP batch_query_rep = myStore.batchQuery(&batch_query_req);
 //    batch_query_rep.PrintDebugString();
 
     // Start timer
@@ -145,14 +148,6 @@ int main(int argc, char *argv[]) {
 //    XStore_Proto::unaryInsert_REP unary_insert_rep2 = myStore.unaryInsert(1451606441897, "Helo456", "TSLA");
 //    unary_insert_rep.PrintDebugString();
 //
-//    XStore_Proto::batchQuery_REQ batch_query_req;
-//    batch_query_req.set_dbname("TSLA");
-//    batch_query_req.add_timestamp(1451636401233);
-//    batch_query_req.add_timestamp(1451606441897);
-//    batch_query_req.add_timestamp(1451606400000);
-//
-//    XStore_Proto::batchQuery_REP batch_query_rep = myStore.batchQuery(&batch_query_req);
-//    batch_query_rep.PrintDebugString();
 
     // RANGE QUERY
 //    XStore_Proto::unaryQuery_REP range_query_rep = myStore.unaryQuery(1451606401, "TSLA");
