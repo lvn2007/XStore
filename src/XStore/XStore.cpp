@@ -513,6 +513,7 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
 XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *protoFromClient) {
     // Protobuf obj to be returned
     XStore_Proto::batchQuery_REP toReturn;
+    XStore_Proto::rowData tempData;
     std::string dbName = protoFromClient->dbname();
 
     // Ensure dbName string is all capitalized
@@ -534,7 +535,7 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
 
         // Read & Add cfgStruct to cfgMap
         FILE *cFile = std::fopen(cfgPath.c_str(), "rb");
-        fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
+        cfgStruct.ParseFromFileDescriptor(fileno(cFile));
         std::fclose(cFile);
         cfgMap[dbName] = cfgStruct;
     }
@@ -622,9 +623,10 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
             }
 
             // Add fetched data to returning Protobuf obj
+            tempData.ParseFromArray(bufferIn, cfgStruct.rowlength());
             XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_queryresponse();
             currEntry->set_timestamp(protoFromClient->timestamp(dataMap[yearKey].at(i)));
-//            currEntry->set_dataset(std::string(bufferIn));
+            *currEntry->mutable_data() = tempData;
         }
 
         // Close file & Release lock after read
