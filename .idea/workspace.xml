@@ -21,11 +21,10 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Updated figures &amp; slides">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Updated batchInsert/Query">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/clientSrc/Python/XStore.py" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/Python/XStore.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -365,14 +364,7 @@
       <workItem from="1686168708370" duration="27708000" />
       <workItem from="1686577194885" duration="12000" />
       <workItem from="1686577468137" duration="2906000" />
-      <workItem from="1686596444430" duration="8508000" />
-    </task>
-    <task id="LOCAL-00225" summary="Fixed broken C++ Client code">
-      <created>1668211980621</created>
-      <option name="number" value="00225" />
-      <option name="presentableId" value="LOCAL-00225" />
-      <option name="project" value="LOCAL" />
-      <updated>1668211980621</updated>
+      <workItem from="1686596444430" duration="9301000" />
     </task>
     <task id="LOCAL-00226" summary="Fixed broken C++ Client code">
       <created>1668212664492</created>
@@ -710,7 +702,14 @@
       <option name="project" value="LOCAL" />
       <updated>1686604351953</updated>
     </task>
-    <option name="localTasksCounter" value="274" />
+    <task id="LOCAL-00274" summary="Updated batchInsert/Query">
+      <created>1686669927297</created>
+      <option name="number" value="00274" />
+      <option name="presentableId" value="LOCAL-00274" />
+      <option name="project" value="LOCAL" />
+      <updated>1686669927297</updated>
+    </task>
+    <option name="localTasksCounter" value="275" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -817,7 +816,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Guard against endTime &lt; startTime in rangeQuery" />
     <MESSAGE value="Updated .gitlab-ci.yml" />
     <MESSAGE value="Updated C++ client (SYS_INFO)" />
     <MESSAGE value="Updated C++ client (CREATE_DB)" />
@@ -842,6 +840,7 @@
     <MESSAGE value="Fixing [TEST] UNARY_OPS" />
     <MESSAGE value="Python client overloading [UNARY INSERT]" />
     <MESSAGE value="Updated figures &amp; slides" />
-    <option name="LAST_COMMIT_MESSAGE" value="Updated figures &amp; slides" />
+    <MESSAGE value="Updated batchInsert/Query" />
+    <option name="LAST_COMMIT_MESSAGE" value="Updated batchInsert/Query" />
   </component>
 </project>
