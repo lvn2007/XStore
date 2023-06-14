@@ -118,8 +118,8 @@ int main(int argc, char const *argv[])
             std::time_t dummyTime = 1482271200;
             XStore_Proto::timeUnit timeResolution = XStore_Proto::SECOND;
             XStore_Proto::rowData dummyData;
-            XStore_Proto::fieldData *fData = dummyData.add_fdata();
-            fData->set_stringdata("SYS INFO,TEST");
+            XStore_Proto::fData *fieldData = dummyData.add_fielddata();
+            fieldData->set_stringdata("SYS INFO,TEST");
 
             // FIRST - CREATE_DB (DUMMY)
             std::string createDB_statusMessage = xstoreClient.createDB(dbName, timeResolution, 128);
@@ -191,13 +191,13 @@ int main(int argc, char const *argv[])
 
             // FIRST data
             XStore_Proto::rowData firstRow;
-            XStore_Proto::fieldData *fData = firstRow.add_fdata();
-            fData->set_stringdata("SECOND,GRANULARITY");
+            XStore_Proto::fData *fieldData = firstRow.add_fielddata();
+            fieldData->set_stringdata("SECOND,GRANULARITY");
 
             // SECOND data
             XStore_Proto::rowData secondRow;
-            XStore_Proto::fieldData *sData = firstRow.add_fdata();
-            fData->set_stringdata("MILLISECOND,GRANULARITY");
+            XStore_Proto::fData *sData = firstRow.add_fielddata();
+            sData->set_stringdata("MILLISECOND,GRANULARITY");
 
             std::vector<XStore_Proto::rowData> dataList {firstRow, secondRow};
 
@@ -215,7 +215,7 @@ int main(int argc, char const *argv[])
 
                 // THIRD - UNARY QUERY (To validate that insert is valid)
                 std::string queryMessage = xstoreClient.unaryQuery(timeList.at(i), dbName);
-                assert(queryMessage == (std::to_string(timeList.at(i)) + "," + dataList.at(i).fdata(0).stringdata()));
+                assert(queryMessage == (std::to_string(timeList.at(i)) + "," + dataList.at(i).fielddata(0).stringdata()));
                 std::cout << "[SUCCESS] [UNARY QUERY] [DB: " << dbName << "] - Query time: " << timeList.at(i) << " | Result: " << queryMessage << std::endl;
 
                 // FINALLY - DELETE_DB (CLEANUP DUMMY)

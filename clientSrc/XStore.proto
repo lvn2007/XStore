@@ -32,7 +32,7 @@ message configStruct {
   sfixed32 rowLength = 3;
 }
 
-message fieldData {
+message fData {
   oneof oneOfData {
     double doubleData = 1;
     float floatData = 2;
@@ -53,7 +53,7 @@ message fieldData {
 }
 
 message rowData {
-  repeated fieldData fData = 1;
+  repeated fData fieldData = 1;
 }
 
 message reqCMD {

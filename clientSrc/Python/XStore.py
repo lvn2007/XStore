@@ -4,7 +4,7 @@ from typing import List
 import XStore_pb2 as XStore_Proto
 import zmq
 import dataclasses
-
+from google.protobuf.json_format import MessageToJson
 
 @dataclasses.dataclass
 class DBInfo:
@@ -356,8 +356,8 @@ if __name__ == '__main__':
     # print(unaryInsertStatus)
 
     # Unary Query
-    # unaryQueryResult = XStore.unaryQuery(1482271201, "TSLA")
-    # print(unaryQueryResult)
+    unaryQueryResult = XStore.unaryQuery(1482271201, "TSLA")
+    print(MessageToJson(unaryQueryResult))
 
     # Batch Insert
     #   Hypothetical list of data
@@ -366,12 +366,12 @@ if __name__ == '__main__':
     # print(batchInsertStatus)
 
     # Range Query
-    sTime = time.time()
-    rangeQueryResult = XStore.rangeQuery(1483228797, 1483228798+6, "TSLA")
-    print(f'Took: {time.time() - sTime}')
-    print(rangeQueryResult.queryResponse)
-    [print(i) for i in rangeQueryResult.queryResponse]
-    print(rangeQueryResult.queryStatus)
+    # sTime = time.time()
+    # rangeQueryResult = XStore.rangeQuery(1483228797, 1483228798+6, "TSLA")
+    # print(f'Took: {time.time() - sTime}')
+    # print(rangeQueryResult.queryResponse)
+    # [print(i) for i in rangeQueryResult.queryResponse]
+    # print(rangeQueryResult.queryStatus)
 
     # Remove DB
     # removeDBResult = XStore.remove_db("TSLA")
