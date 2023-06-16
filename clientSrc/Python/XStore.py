@@ -1,39 +1,5 @@
-import sys
-import time
-from typing import List
 import XStore_pb2 as XStore_Proto
 import zmq
-import dataclasses
-from google.protobuf.json_format import MessageToJson
-
-@dataclasses.dataclass
-class DBInfo:
-    dbName: str
-    dbResolution: str
-    totalSizeInByte: int
-
-
-@dataclasses.dataclass
-class SysInfo:
-    serverAddr: str
-    threadCount: int
-    dbList: List[DBInfo]
-
-
-@dataclasses.dataclass
-class QueryResult:
-    timestamp: int
-    data: str
-
-
-@dataclasses.dataclass
-class StatusMessages:
-    statusMessages: list
-
-
-@dataclasses.dataclass
-class QueryResults:
-    queryResult: List[QueryResult]
 
 
 class XStoreClient:
@@ -43,7 +9,7 @@ class XStoreClient:
         self.socket = self.zmqContext.socket(zmq.REQ)
         self.socket.connect(f'tcp://{SERVER_ADDR}:{SERVER_PORT}')
 
-    def infoRequest(self):
+    def infoQuery(self):
         """
         :return: Nothing
         """
@@ -235,17 +201,6 @@ class XStoreClient:
         # Prepare object to be parsed into
         recvObj = XStore_Proto.rangeQuery_REP()
         recvObj.ParseFromString(recvData)
-
-        # List of dbInfo
-        # queryResults = []
-
-        # Extract & Append each DB Info into list
-        # for i in recvObj.unaryResponse:
-        #     currResult = QueryResult(i.timestamp, i.dataset, i.queryStatus)
-        #     queryResults.append(currResult)
-
-        # QueryResults as returning object
-        # return QueryResults(queryResults, recvObj.queryStatus)
         return recvObj
 
     def batchQuery(self, dataList, targetDBName):
@@ -321,62 +276,62 @@ class XStoreClient:
         # Prepare object to be parsed into
         recvObj = XStore_Proto.removeDBFiles_REP()
         recvObj.ParseFromString(recvData)
-        return StatusMessages(recvObj.removeStatus)
+        return recvObj.removeStatus
 
 
-if __name__ == '__main__':
-    # # Command-line args
-    SERVER_ADDR = sys.argv[1]
-    SERVER_PORT = sys.argv[2]
+# if __name__ == '__main__':
+# Command-line args
+# SERVER_ADDR = sys.argv[1]
+# SERVER_PORT = sys.argv[2]
 
-    # XStore client object
-    XStore = XStoreClient(SERVER_ADDR, SERVER_PORT)
+# XStore client object
+# XStore = XStoreClient(SERVER_ADDR, SERVER_PORT)
 
-    # SYS INFO
-    # sysInfo = XStore.infoRequest()
-    # print(sysInfo)
+# SYS INFO
+# sysInfo = XStore.infoQuery()
+# print(sysInfo)
 
-    # Create DB
-    # createDBStatus = XStore.createDB("TSLA", XStore_Proto.timeUnit.Value("SECOND"), 64)
-    # print(createDBStatus)
+# Create DB
+# createDBStatus = XStore.createDB("TSLA", XStore_Proto.timeUnit.Value("SECOND"), 64)
+# print(createDBStatus)
 
-    # Unary Insert
-    #   STAGING -- One row worth of data
-    # Placeholder for each column of data
-    # rowData = XStore_Proto.rowData()
-    #
-    # for idx, item in enumerate([123, 456, 99999999999]):
-    #     fieldData = rowData.fData.add()
-    #     fieldData.uint64Data = item
-    # unaryInsertStatus = XStore.unaryInsert(1482271200, rowData, "TSLA")
-    # print(unaryInsertStatus)
+# Unary Insert
+#   STAGING -- One row worth of data
+# Placeholder for each column of data
+# rowData = XStore_Proto.rowData()
+#
+# for idx, item in enumerate([123, 456, 99999999999]):
+#     fieldData = rowData.fData.add()
+#     fieldData.uint64Data = item
+# unaryInsertStatus = XStore.unaryInsert(1482271200, rowData, "TSLA")
+# print(unaryInsertStatus)
 
-    # myData = [True, 'okBro', 123123799999]
-    # unaryInsertStatus = XStore.unaryInsert(1482271201, myData, "TSLA")
-    # print(unaryInsertStatus)
+# myData = [True, 'okBro', 123123799999]
+# unaryInsertStatus = XStore.unaryInsert(1482271201, myData, "TSLA")
+# print(unaryInsertStatus)
 
-    # Unary Query
-    unaryQueryResult = XStore.unaryQuery(1482271201, "TSLA")
-    print(MessageToJson(unaryQueryResult))
+# Unary Query
+# unaryQueryResult = XStore.unaryQuery(1482271201, "TSLA")
+# print(unaryQueryResult)
 
-    # Batch Insert
-    #   Hypothetical list of data
-    # hypData = [[1482271200, "One"], [1482271201, "Two"], [1482271202, "Three"]]
-    # batchInsertStatus = XStore.batchInsert(hypData, "TSLA")
-    # print(batchInsertStatus)
+# Batch Insert
+#   Hypothetical list of data
+# hypData = [[1482271200, "One"], [1482271201, "Two"], [1482271202, "Three"]]
+# batchInsertStatus = XStore.batchInsert(hypData, "TSLA")
+# print(batchInsertStatus)
 
-    # Range Query
-    # sTime = time.time()
-    # rangeQueryResult = XStore.rangeQuery(1483228797, 1483228798+6, "TSLA")
-    # print(f'Took: {time.time() - sTime}')
-    # print(rangeQueryResult.queryResponse)
-    # [print(i) for i in rangeQueryResult.queryResponse]
-    # print(rangeQueryResult.queryStatus)
+# Range Query
+# sTime = time.time()
+# rangeQueryResult = XStore.rangeQuery(1483228797, 1483228798+6, "TSLA")
+# print(f'Took: {time.time() - sTime}')
+# print(rangeQueryResult.queryResponse)
+# [print(i) for i in rangeQueryResult.queryResponse]
+# print(rangeQueryResult.queryStatus)
 
-    # Remove DB
-    # removeDBResult = XStore.remove_db("TSLA")
-    # print(removeDBResult)
+# Remove DB
+# removeDBResult = XStore.remove_db("TSLA")
+# print(removeDBResult)
 
-    # Remove DB Files
-    # removeDBFilesResults = XStore.remove_db_files(['2016.XSTORE', '2017.XSTORE'], "TSLA")
-    # print(removeDBFilesResults)
+# Remove DB Files
+# removeDBFilesResults = XStore.remove_db_files(['2016.XSTORE', '2017.XSTORE'], "TSLA")
+# print(removeDBFilesResults)
