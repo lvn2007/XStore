@@ -22,8 +22,8 @@ enum requestType {
 enum timeUnit {
   SECOND = 0;
   MILLISECOND = 1;
-  MICROSECOND = 3;
-  NANOSECOND = 4;
+  MICROSECOND = 2;
+  NANOSECOND = 3;
 }
 
 message configStruct {
