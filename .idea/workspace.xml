@@ -21,11 +21,10 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Rename fData to fieldData">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="House cleaning">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/clientSrc/Python/XStore.py" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/Python/XStore.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/protoFile/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/XStore.proto" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/timeStuffs.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/clientSrc/Python/XStore_pb2.py" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/Python/XStore_pb2.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -365,14 +364,7 @@
       <workItem from="1686168708370" duration="27708000" />
       <workItem from="1686577194885" duration="12000" />
       <workItem from="1686577468137" duration="2906000" />
-      <workItem from="1686596444430" duration="21844000" />
-    </task>
-    <task id="LOCAL-00228" summary="XStore Python lib &amp; Rename ENUM Proto">
-      <created>1668234471177</created>
-      <option name="number" value="00228" />
-      <option name="presentableId" value="LOCAL-00228" />
-      <option name="project" value="LOCAL" />
-      <updated>1668234471177</updated>
+      <workItem from="1686596444430" duration="30128000" />
     </task>
     <task id="LOCAL-00229" summary="Reflect new ENUM Proto">
       <created>1668234878562</created>
@@ -710,7 +702,14 @@
       <option name="project" value="LOCAL" />
       <updated>1686779853481</updated>
     </task>
-    <option name="localTasksCounter" value="277" />
+    <task id="LOCAL-00277" summary="House cleaning">
+      <created>1686881677938</created>
+      <option name="number" value="00277" />
+      <option name="presentableId" value="LOCAL-00277" />
+      <option name="project" value="LOCAL" />
+      <updated>1686881677938</updated>
+    </task>
+    <option name="localTasksCounter" value="278" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -817,7 +816,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Updated C++ client (CREATE_DB)" />
     <MESSAGE value="Enforce rowLength &gt;= 4 in CREATE_DB for server &amp; Updated C++ client (CREATE_DB)" />
     <MESSAGE value="Re-enabled SYS_INFO test in .gitlab-ci.yml" />
     <MESSAGE value="Updated UNARY_OPS" />
@@ -842,6 +840,7 @@
     <MESSAGE value="Updated batchInsert/Query" />
     <MESSAGE value="Pass by ref. &amp; Updated rangeQuery &amp; Python client" />
     <MESSAGE value="Rename fData to fieldData" />
-    <option name="LAST_COMMIT_MESSAGE" value="Rename fData to fieldData" />
+    <MESSAGE value="House cleaning" />
+    <option name="LAST_COMMIT_MESSAGE" value="House cleaning" />
   </component>
 </project>

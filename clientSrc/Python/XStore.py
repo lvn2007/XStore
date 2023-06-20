@@ -1,5 +1,21 @@
+from typing import List
 import XStore_pb2 as XStore_Proto
 import zmq
+import dataclasses
+
+
+@dataclasses.dataclass
+class DBInfo:
+    dbName: str
+    dbResolution: str
+    totalSizeInByte: int
+
+
+@dataclasses.dataclass
+class SysInfo:
+    serverAddr: str
+    threadCount: int
+    dbList: List[DBInfo]
 
 
 class XStoreClient:
@@ -120,6 +136,24 @@ class XStoreClient:
         recvObj.ParseFromString(recvData)
         return recvObj
 
+    def unaryDelete(self, targetUnixTime, targetDBName):
+        # Build msg prior to dispatch
+        unaryDelete_REQ = XStore_Proto.unaryDelete_REQ()
+        unaryDelete_REQ.rType = XStore_Proto.UNARYDELETE
+        unaryDelete_REQ.timestamp = targetUnixTime
+        unaryDelete_REQ.dbName = targetDBName
+
+        # Dispatch request
+        self.socket.send(unaryDelete_REQ.SerializeToString())
+
+        # Receive response
+        recvData = self.socket.recv()
+
+        # Prepare object to be parsed into
+        recvObj = XStore_Proto.unaryDelete_REP()
+        recvObj.ParseFromString(recvData)
+        return recvObj.deleteStatus
+
     def rangeInsert(self, dataList, targetDBName):
         """
         :param dataList:
@@ -160,12 +194,25 @@ class XStoreClient:
         batchInsert_REQ.rType = XStore_Proto.BATCHINSERT
         batchInsert_REQ.dbName = targetDBName
 
-        # Loop through each data and add to batchInsert_REQ
-        for data in dataList:
-            # Organize batchInsert_DATA
-            batchInsert_DATA = batchInsert_REQ.batchInsert_DATA.add()
-            batchInsert_DATA.timestamp = data[0]
-            batchInsert_DATA.data = data[1]
+        # IF first element in dataList is not type batchInsert_DATA
+        #   -> Inferred data type -- Assume worse case scenario for space-efficiency
+        if type(dataList[0]) != XStore_Proto.batchInsert_DATA:
+            # Build 1 row worth of data
+            for data in dataList:
+                rowData = XStore_Proto.rowData()
+                for idx, item in enumerate(data["data"]):
+                    if isinstance(item, str):
+                        rowData.fieldData.add().stringData = item
+                    elif isinstance(item, bool):
+                        rowData.fieldData.add().boolData = item
+                    elif isinstance(item, (int, float)):
+                        rowData.fieldData.add().doubleData = item
+                insertData = XStore_Proto.batchInsert_DATA()
+                insertData.timestamp = data["timestamp"]
+                insertData.data.MergeFrom(rowData)
+                batchInsert_REQ.batchInsert_DATA.append(insertData)
+        else:
+            batchInsert_REQ.batchInsert_DATA.MergeFrom(dataList)
 
         # Dispatch request
         self.socket.send(batchInsert_REQ.SerializeToString())
@@ -201,6 +248,17 @@ class XStoreClient:
         # Prepare object to be parsed into
         recvObj = XStore_Proto.rangeQuery_REP()
         recvObj.ParseFromString(recvData)
+
+        # List of dbInfo
+        # queryResults = []
+
+        # Extract & Append each DB Info into list
+        # for i in recvObj.unaryResponse:
+        #     currResult = QueryResult(i.timestamp, i.dataset, i.queryStatus)
+        #     queryResults.append(currResult)
+
+        # QueryResults as returning object
+        # return QueryResults(queryResults, recvObj.queryStatus)
         return recvObj
 
     def batchQuery(self, dataList, targetDBName):
@@ -230,7 +288,7 @@ class XStoreClient:
         recvObj.ParseFromString(recvData)
         return recvObj.queryResponse
 
-    def remove_db(self, dbName):
+    def removeDB(self, dbName):
         """
         :param dbName:
         :return:
@@ -251,7 +309,7 @@ class XStoreClient:
         recvObj.ParseFromString(recvData)
         return recvObj.removeStatus
 
-    def remove_db_files(self, filenameList, dbName):
+    def removeDB_files(self, filenameList, dbName):
         """
         :param filenameList:
         :param dbName:
@@ -277,61 +335,3 @@ class XStoreClient:
         recvObj = XStore_Proto.removeDBFiles_REP()
         recvObj.ParseFromString(recvData)
         return recvObj.removeStatus
-
-
-# if __name__ == '__main__':
-# Command-line args
-# SERVER_ADDR = sys.argv[1]
-# SERVER_PORT = sys.argv[2]
-
-# XStore client object
-# XStore = XStoreClient(SERVER_ADDR, SERVER_PORT)
-
-# SYS INFO
-# sysInfo = XStore.infoQuery()
-# print(sysInfo)
-
-# Create DB
-# createDBStatus = XStore.createDB("TSLA", XStore_Proto.timeUnit.Value("SECOND"), 64)
-# print(createDBStatus)
-
-# Unary Insert
-#   STAGING -- One row worth of data
-# Placeholder for each column of data
-# rowData = XStore_Proto.rowData()
-#
-# for idx, item in enumerate([123, 456, 99999999999]):
-#     fieldData = rowData.fData.add()
-#     fieldData.uint64Data = item
-# unaryInsertStatus = XStore.unaryInsert(1482271200, rowData, "TSLA")
-# print(unaryInsertStatus)
-
-# myData = [True, 'okBro', 123123799999]
-# unaryInsertStatus = XStore.unaryInsert(1482271201, myData, "TSLA")
-# print(unaryInsertStatus)
-
-# Unary Query
-# unaryQueryResult = XStore.unaryQuery(1482271201, "TSLA")
-# print(unaryQueryResult)
-
-# Batch Insert
-#   Hypothetical list of data
-# hypData = [[1482271200, "One"], [1482271201, "Two"], [1482271202, "Three"]]
-# batchInsertStatus = XStore.batchInsert(hypData, "TSLA")
-# print(batchInsertStatus)
-
-# Range Query
-# sTime = time.time()
-# rangeQueryResult = XStore.rangeQuery(1483228797, 1483228798+6, "TSLA")
-# print(f'Took: {time.time() - sTime}')
-# print(rangeQueryResult.queryResponse)
-# [print(i) for i in rangeQueryResult.queryResponse]
-# print(rangeQueryResult.queryStatus)
-
-# Remove DB
-# removeDBResult = XStore.remove_db("TSLA")
-# print(removeDBResult)
-
-# Remove DB Files
-# removeDBFilesResults = XStore.remove_db_files(['2016.XSTORE', '2017.XSTORE'], "TSLA")
-# print(removeDBFilesResults)

@@ -20,7 +20,7 @@ DESCRIPTOR = _descriptor.FileDescriptor(
   syntax='proto3',
   serialized_options=b'H\001',
   create_key=_descriptor._internal_create_key,
-  serialized_pb=b'\n\x16protoFile/XStore.proto\x12\x0cXStore_Proto\"a\n\x0c\x63onfigStruct\x12\x0e\n\x06\x64\x62Name\x18\x01 \x01(\t\x12.\n\x0etimeResolution\x18\x02 \x01(\x0e\x32\x16.XStore_Proto.timeUnit\x12\x11\n\trowLength\x18\x03 \x01(\x0f\"\xe2\x02\n\tfieldData\x12\x14\n\ndoubleData\x18\x01 \x01(\x01H\x00\x12\x13\n\tfloatData\x18\x02 \x01(\x02H\x00\x12\x13\n\tint32Data\x18\x03 \x01(\x05H\x00\x12\x13\n\tint64Data\x18\x04 \x01(\x03H\x00\x12\x14\n\nuint32Data\x18\x05 \x01(\rH\x00\x12\x14\n\nuint64Data\x18\x06 \x01(\x04H\x00\x12\x14\n\nsint32Data\x18\x07 \x01(\x11H\x00\x12\x14\n\nsint64Data\x18\x08 \x01(\x12H\x00\x12\x15\n\x0b\x66ixed32Data\x18\t \x01(\x07H\x00\x12\x15\n\x0b\x66ixed64Data\x18\n \x01(\x06H\x00\x12\x16\n\x0csfixed32Data\x18\x0b \x01(\x0fH\x00\x12\x16\n\x0csfixed64Data\x18\x0c \x01(\x10H\x00\x12\x12\n\x08\x62oolData\x18\r \x01(\x08H\x00\x12\x14\n\nstringData\x18\x0e \x01(\tH\x00\x12\x13\n\tbytesData\x18\x0f \x01(\x0cH\x00\x42\x0b\n\toneOfData\"1\n\x07rowData\x12&\n\x05\x66\x44\x61ta\x18\x01 \x03(\x0b\x32\x17.XStore_Proto.fieldData\"2\n\x06reqCMD\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\"\x8b\x01\n\x0c\x63reateDB_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x0e\n\x06\x64\x62Name\x18\x02 \x01(\t\x12.\n\x0etimeResolution\x18\x03 \x01(\x0e\x32\x16.XStore_Proto.timeUnit\x12\x11\n\trowLength\x18\x04 \x01(\r\"H\n\x0cremoveDB_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x0e\n\x06\x64\x62Name\x18\x02 \x01(\t\"_\n\x11removeDBFiles_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x0e\n\x06\x64\x62Name\x18\x02 \x01(\t\x12\x10\n\x08\x66ileName\x18\x03 \x03(\t\"\x83\x01\n\x0funaryInsert_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\ttimestamp\x18\x02 \x01(\x04\x12#\n\x04\x64\x61ta\x18\x03 \x01(\x0b\x32\x15.XStore_Proto.rowData\x12\x0e\n\x06\x64\x62Name\x18\x04 \x01(\t\"]\n\x0eunaryQuery_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\ttimestamp\x18\x02 \x01(\x04\x12\x0e\n\x06\x64\x62Name\x18\x03 \x01(\t\"^\n\x0funaryDelete_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\ttimestamp\x18\x02 \x01(\x04\x12\x0e\n\x06\x64\x62Name\x18\x03 \x01(\t\"3\n\x10\x62\x61tchInsert_DATA\x12\x11\n\ttimestamp\x18\x01 \x01(\x04\x12\x0c\n\x04\x64\x61ta\x18\x02 \x01(\t\"\x85\x01\n\x0f\x62\x61tchInsert_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x0e\n\x06\x64\x62Name\x18\x02 \x01(\t\x12\x38\n\x10\x62\x61tchInsert_DATA\x18\x03 \x03(\x0b\x32\x1e.XStore_Proto.batchInsert_DATA\"]\n\x0e\x62\x61tchQuery_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\ttimestamp\x18\x02 \x03(\x04\x12\x0e\n\x06\x64\x62Name\x18\x03 \x01(\t\"^\n\x0f\x62\x61tchDelete_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\ttimestamp\x18\x02 \x03(\x04\x12\x0e\n\x06\x64\x62Name\x18\x03 \x01(\t\"3\n\x10rangeInsert_DATA\x12\x11\n\ttimestamp\x18\x01 \x01(\x04\x12\x0c\n\x04\x64\x61ta\x18\x02 \x01(\t\"\x85\x01\n\x0frangeInsert_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x0e\n\x06\x64\x62Name\x18\x02 \x01(\t\x12\x38\n\x10rangeInsert_DATA\x18\x03 \x03(\x0b\x32\x1e.XStore_Proto.rangeInsert_DATA\"n\n\x0erangeQuery_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\tstartTime\x18\x02 \x01(\x04\x12\x0f\n\x07\x65ndTime\x18\x03 \x01(\x04\x12\x0e\n\x06\x64\x62Name\x18\x04 \x01(\t\"o\n\x0frangeDelete_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\tstartTime\x18\x02 \x01(\x04\x12\x0f\n\x07\x65ndTime\x18\x03 \x01(\x04\x12\x0e\n\x06\x64\x62Name\x18\x04 \x01(\t\"r\n\x07\x64\x62Stats\x12\x0e\n\x06\x64\x62Name\x18\x01 \x01(\t\x12,\n\x0c\x64\x62Resolution\x18\x02 \x01(\x0e\x32\x16.XStore_Proto.timeUnit\x12\x17\n\x0ftotalSizeInByte\x18\x03 \x01(\x04\x12\x10\n\x08\x66ileName\x18\x04 \x03(\t\"]\n\x0bsysInfo_REP\x12\x12\n\nserverAddr\x18\x01 \x01(\t\x12\x13\n\x0bthreadCount\x18\x02 \x01(\x05\x12%\n\x06\x64\x62Info\x18\x03 \x03(\x0b\x32\x15.XStore_Proto.dbStats\"&\n\x0c\x63reateDB_REP\x12\x16\n\x0e\x63reateDBStatus\x18\x01 \x01(\t\"$\n\x0cremoveDB_REP\x12\x14\n\x0cremoveStatus\x18\x01 \x01(\t\")\n\x11removeDBFiles_REP\x12\x14\n\x0cremoveStatus\x18\x01 \x03(\t\"\'\n\x0funaryInsert_REP\x12\x14\n\x0cinsertStatus\x18\x01 \x01(\t\"H\n\x0eunaryQuery_REP\x12\x11\n\ttimestamp\x18\x01 \x01(\x04\x12#\n\x04\x64\x61ta\x18\x02 \x01(\x0b\x32\x15.XStore_Proto.rowData\"\'\n\x0funaryDelete_REP\x12\x14\n\x0c\x64\x65leteStatus\x18\x01 \x01(\t\"\'\n\x0f\x62\x61tchInsert_REP\x12\x14\n\x0cinsertStatus\x18\x01 \x01(\t\"E\n\x0e\x62\x61tchQuery_REP\x12\x33\n\rqueryResponse\x18\x01 \x03(\x0b\x32\x1c.XStore_Proto.unaryQuery_REP\"\'\n\x0f\x62\x61tchDelete_REP\x12\x14\n\x0c\x64\x65leteStatus\x18\x01 \x01(\t\"\'\n\x0frangeInsert_REP\x12\x14\n\x0cinsertStatus\x18\x01 \x01(\t\"E\n\x0erangeQuery_REP\x12\x33\n\rqueryResponse\x18\x01 \x03(\x0b\x32\x1c.XStore_Proto.unaryQuery_REP\"\'\n\x0frangeDelete_REP\x12\x14\n\x0c\x64\x65leteStatus\x18\x01 \x01(\t*\xdc\x01\n\x0brequestType\x12\x08\n\x04INFO\x10\x00\x12\x0c\n\x08\x43REATEDB\x10\x01\x12\x0c\n\x08REMOVEDB\x10\x02\x12\x11\n\rREMOVEDBFILES\x10\x03\x12\x0f\n\x0bUNARYINSERT\x10\x04\x12\x0e\n\nUNARYQUERY\x10\x05\x12\x0f\n\x0bUNARYDELETE\x10\x06\x12\x0f\n\x0b\x42\x41TCHINSERT\x10\x07\x12\x0e\n\nBATCHQUERY\x10\x08\x12\x0f\n\x0b\x42\x41TCHDELETE\x10\t\x12\x0f\n\x0bRANGEINSERT\x10\n\x12\x0e\n\nRANGEQUERY\x10\x0b\x12\x0f\n\x0bRANGEDELETE\x10\x0c*H\n\x08timeUnit\x12\n\n\x06SECOND\x10\x00\x12\x0f\n\x0bMILLISECOND\x10\x01\x12\x0f\n\x0bMICROSECOND\x10\x03\x12\x0e\n\nNANOSECOND\x10\x04\x42\x02H\x01\x62\x06proto3'
+  serialized_pb=b'\n\x16protoFile/XStore.proto\x12\x0cXStore_Proto\"a\n\x0c\x63onfigStruct\x12\x0e\n\x06\x64\x62Name\x18\x01 \x01(\t\x12.\n\x0etimeResolution\x18\x02 \x01(\x0e\x32\x16.XStore_Proto.timeUnit\x12\x11\n\trowLength\x18\x03 \x01(\x0f\"\xde\x02\n\x05\x66\x44\x61ta\x12\x14\n\ndoubleData\x18\x01 \x01(\x01H\x00\x12\x13\n\tfloatData\x18\x02 \x01(\x02H\x00\x12\x13\n\tint32Data\x18\x03 \x01(\x05H\x00\x12\x13\n\tint64Data\x18\x04 \x01(\x03H\x00\x12\x14\n\nuint32Data\x18\x05 \x01(\rH\x00\x12\x14\n\nuint64Data\x18\x06 \x01(\x04H\x00\x12\x14\n\nsint32Data\x18\x07 \x01(\x11H\x00\x12\x14\n\nsint64Data\x18\x08 \x01(\x12H\x00\x12\x15\n\x0b\x66ixed32Data\x18\t \x01(\x07H\x00\x12\x15\n\x0b\x66ixed64Data\x18\n \x01(\x06H\x00\x12\x16\n\x0csfixed32Data\x18\x0b \x01(\x0fH\x00\x12\x16\n\x0csfixed64Data\x18\x0c \x01(\x10H\x00\x12\x12\n\x08\x62oolData\x18\r \x01(\x08H\x00\x12\x14\n\nstringData\x18\x0e \x01(\tH\x00\x12\x13\n\tbytesData\x18\x0f \x01(\x0cH\x00\x42\x0b\n\toneOfData\"1\n\x07rowData\x12&\n\tfieldData\x18\x01 \x03(\x0b\x32\x13.XStore_Proto.fData\"2\n\x06reqCMD\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\"\x8b\x01\n\x0c\x63reateDB_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x0e\n\x06\x64\x62Name\x18\x02 \x01(\t\x12.\n\x0etimeResolution\x18\x03 \x01(\x0e\x32\x16.XStore_Proto.timeUnit\x12\x11\n\trowLength\x18\x04 \x01(\r\"H\n\x0cremoveDB_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x0e\n\x06\x64\x62Name\x18\x02 \x01(\t\"_\n\x11removeDBFiles_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x0e\n\x06\x64\x62Name\x18\x02 \x01(\t\x12\x10\n\x08\x66ileName\x18\x03 \x03(\t\"\x83\x01\n\x0funaryInsert_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\ttimestamp\x18\x02 \x01(\x04\x12#\n\x04\x64\x61ta\x18\x03 \x01(\x0b\x32\x15.XStore_Proto.rowData\x12\x0e\n\x06\x64\x62Name\x18\x04 \x01(\t\"]\n\x0eunaryQuery_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\ttimestamp\x18\x02 \x01(\x04\x12\x0e\n\x06\x64\x62Name\x18\x03 \x01(\t\"^\n\x0funaryDelete_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\ttimestamp\x18\x02 \x01(\x04\x12\x0e\n\x06\x64\x62Name\x18\x03 \x01(\t\"J\n\x10\x62\x61tchInsert_DATA\x12\x11\n\ttimestamp\x18\x01 \x01(\x04\x12#\n\x04\x64\x61ta\x18\x02 \x01(\x0b\x32\x15.XStore_Proto.rowData\"\x85\x01\n\x0f\x62\x61tchInsert_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x0e\n\x06\x64\x62Name\x18\x02 \x01(\t\x12\x38\n\x10\x62\x61tchInsert_DATA\x18\x03 \x03(\x0b\x32\x1e.XStore_Proto.batchInsert_DATA\"]\n\x0e\x62\x61tchQuery_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\ttimestamp\x18\x02 \x03(\x04\x12\x0e\n\x06\x64\x62Name\x18\x03 \x01(\t\"^\n\x0f\x62\x61tchDelete_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\ttimestamp\x18\x02 \x03(\x04\x12\x0e\n\x06\x64\x62Name\x18\x03 \x01(\t\"3\n\x10rangeInsert_DATA\x12\x11\n\ttimestamp\x18\x01 \x01(\x04\x12\x0c\n\x04\x64\x61ta\x18\x02 \x01(\t\"\x85\x01\n\x0frangeInsert_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x0e\n\x06\x64\x62Name\x18\x02 \x01(\t\x12\x38\n\x10rangeInsert_DATA\x18\x03 \x03(\x0b\x32\x1e.XStore_Proto.rangeInsert_DATA\"n\n\x0erangeQuery_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\tstartTime\x18\x02 \x01(\x04\x12\x0f\n\x07\x65ndTime\x18\x03 \x01(\x04\x12\x0e\n\x06\x64\x62Name\x18\x04 \x01(\t\"o\n\x0frangeDelete_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\tstartTime\x18\x02 \x01(\x04\x12\x0f\n\x07\x65ndTime\x18\x03 \x01(\x04\x12\x0e\n\x06\x64\x62Name\x18\x04 \x01(\t\"r\n\x07\x64\x62Stats\x12\x0e\n\x06\x64\x62Name\x18\x01 \x01(\t\x12,\n\x0c\x64\x62Resolution\x18\x02 \x01(\x0e\x32\x16.XStore_Proto.timeUnit\x12\x17\n\x0ftotalSizeInByte\x18\x03 \x01(\x04\x12\x10\n\x08\x66ileName\x18\x04 \x03(\t\"]\n\x0bsysInfo_REP\x12\x12\n\nserverAddr\x18\x01 \x01(\t\x12\x13\n\x0bthreadCount\x18\x02 \x01(\x05\x12%\n\x06\x64\x62Info\x18\x03 \x03(\x0b\x32\x15.XStore_Proto.dbStats\"&\n\x0c\x63reateDB_REP\x12\x16\n\x0e\x63reateDBStatus\x18\x01 \x01(\t\"$\n\x0cremoveDB_REP\x12\x14\n\x0cremoveStatus\x18\x01 \x01(\t\")\n\x11removeDBFiles_REP\x12\x14\n\x0cremoveStatus\x18\x01 \x03(\t\"\'\n\x0funaryInsert_REP\x12\x14\n\x0cinsertStatus\x18\x01 \x01(\t\"H\n\x0eunaryQuery_REP\x12\x11\n\ttimestamp\x18\x01 \x01(\x04\x12#\n\x04\x64\x61ta\x18\x02 \x01(\x0b\x32\x15.XStore_Proto.rowData\"\'\n\x0funaryDelete_REP\x12\x14\n\x0c\x64\x65leteStatus\x18\x01 \x01(\t\"\'\n\x0f\x62\x61tchInsert_REP\x12\x14\n\x0cinsertStatus\x18\x01 \x01(\t\"E\n\x0e\x62\x61tchQuery_REP\x12\x33\n\rqueryResponse\x18\x01 \x03(\x0b\x32\x1c.XStore_Proto.unaryQuery_REP\"\'\n\x0f\x62\x61tchDelete_REP\x12\x14\n\x0c\x64\x65leteStatus\x18\x01 \x01(\t\"\'\n\x0frangeInsert_REP\x12\x14\n\x0cinsertStatus\x18\x01 \x01(\t\"E\n\x0erangeQuery_REP\x12\x33\n\rqueryResponse\x18\x01 \x03(\x0b\x32\x1c.XStore_Proto.unaryQuery_REP\"\'\n\x0frangeDelete_REP\x12\x14\n\x0c\x64\x65leteStatus\x18\x01 \x01(\t*\xdc\x01\n\x0brequestType\x12\x08\n\x04INFO\x10\x00\x12\x0c\n\x08\x43REATEDB\x10\x01\x12\x0c\n\x08REMOVEDB\x10\x02\x12\x11\n\rREMOVEDBFILES\x10\x03\x12\x0f\n\x0bUNARYINSERT\x10\x04\x12\x0e\n\nUNARYQUERY\x10\x05\x12\x0f\n\x0bUNARYDELETE\x10\x06\x12\x0f\n\x0b\x42\x41TCHINSERT\x10\x07\x12\x0e\n\nBATCHQUERY\x10\x08\x12\x0f\n\x0b\x42\x41TCHDELETE\x10\t\x12\x0f\n\x0bRANGEINSERT\x10\n\x12\x0e\n\nRANGEQUERY\x10\x0b\x12\x0f\n\x0bRANGEDELETE\x10\x0c*H\n\x08timeUnit\x12\n\n\x06SECOND\x10\x00\x12\x0f\n\x0bMILLISECOND\x10\x01\x12\x0f\n\x0bMICROSECOND\x10\x02\x12\x0e\n\nNANOSECOND\x10\x03\x42\x02H\x01\x62\x06proto3'
 )
 
 _REQUESTTYPE = _descriptor.EnumDescriptor(
@@ -98,8 +98,8 @@ _REQUESTTYPE = _descriptor.EnumDescriptor(
   ],
   containing_type=None,
   serialized_options=None,
-  serialized_start=2826,
-  serialized_end=3046,
+  serialized_start=2845,
+  serialized_end=3065,
 )
 _sym_db.RegisterEnumDescriptor(_REQUESTTYPE)
 
@@ -122,20 +122,20 @@ _TIMEUNIT = _descriptor.EnumDescriptor(
       type=None,
       create_key=_descriptor._internal_create_key),
     _descriptor.EnumValueDescriptor(
-      name='MICROSECOND', index=2, number=3,
+      name='MICROSECOND', index=2, number=2,
       serialized_options=None,
       type=None,
       create_key=_descriptor._internal_create_key),
     _descriptor.EnumValueDescriptor(
-      name='NANOSECOND', index=3, number=4,
+      name='NANOSECOND', index=3, number=3,
       serialized_options=None,
       type=None,
       create_key=_descriptor._internal_create_key),
   ],
   containing_type=None,
   serialized_options=None,
-  serialized_start=3048,
-  serialized_end=3120,
+  serialized_start=3067,
+  serialized_end=3139,
 )
 _sym_db.RegisterEnumDescriptor(_TIMEUNIT)
 
@@ -155,8 +155,8 @@ RANGEQUERY = 11
 RANGEDELETE = 12
 SECOND = 0
 MILLISECOND = 1
-MICROSECOND = 3
-NANOSECOND = 4
+MICROSECOND = 2
+NANOSECOND = 3
 
 
 
@@ -206,114 +206,114 @@ _CONFIGSTRUCT = _descriptor.Descriptor(
 )
 
 
-_FIELDDATA = _descriptor.Descriptor(
-  name='fieldData',
-  full_name='XStore_Proto.fieldData',
+_FDATA = _descriptor.Descriptor(
+  name='fData',
+  full_name='XStore_Proto.fData',
   filename=None,
   file=DESCRIPTOR,
   containing_type=None,
   create_key=_descriptor._internal_create_key,
   fields=[
     _descriptor.FieldDescriptor(
-      name='doubleData', full_name='XStore_Proto.fieldData.doubleData', index=0,
+      name='doubleData', full_name='XStore_Proto.fData.doubleData', index=0,
       number=1, type=1, cpp_type=5, label=1,
       has_default_value=False, default_value=float(0),
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
     _descriptor.FieldDescriptor(
-      name='floatData', full_name='XStore_Proto.fieldData.floatData', index=1,
+      name='floatData', full_name='XStore_Proto.fData.floatData', index=1,
       number=2, type=2, cpp_type=6, label=1,
       has_default_value=False, default_value=float(0),
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
     _descriptor.FieldDescriptor(
-      name='int32Data', full_name='XStore_Proto.fieldData.int32Data', index=2,
+      name='int32Data', full_name='XStore_Proto.fData.int32Data', index=2,
       number=3, type=5, cpp_type=1, label=1,
       has_default_value=False, default_value=0,
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
     _descriptor.FieldDescriptor(
-      name='int64Data', full_name='XStore_Proto.fieldData.int64Data', index=3,
+      name='int64Data', full_name='XStore_Proto.fData.int64Data', index=3,
       number=4, type=3, cpp_type=2, label=1,
       has_default_value=False, default_value=0,
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
     _descriptor.FieldDescriptor(
-      name='uint32Data', full_name='XStore_Proto.fieldData.uint32Data', index=4,
+      name='uint32Data', full_name='XStore_Proto.fData.uint32Data', index=4,
       number=5, type=13, cpp_type=3, label=1,
       has_default_value=False, default_value=0,
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
     _descriptor.FieldDescriptor(
-      name='uint64Data', full_name='XStore_Proto.fieldData.uint64Data', index=5,
+      name='uint64Data', full_name='XStore_Proto.fData.uint64Data', index=5,
       number=6, type=4, cpp_type=4, label=1,
       has_default_value=False, default_value=0,
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
     _descriptor.FieldDescriptor(
-      name='sint32Data', full_name='XStore_Proto.fieldData.sint32Data', index=6,
+      name='sint32Data', full_name='XStore_Proto.fData.sint32Data', index=6,
       number=7, type=17, cpp_type=1, label=1,
       has_default_value=False, default_value=0,
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
     _descriptor.FieldDescriptor(
-      name='sint64Data', full_name='XStore_Proto.fieldData.sint64Data', index=7,
+      name='sint64Data', full_name='XStore_Proto.fData.sint64Data', index=7,
       number=8, type=18, cpp_type=2, label=1,
       has_default_value=False, default_value=0,
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
     _descriptor.FieldDescriptor(
-      name='fixed32Data', full_name='XStore_Proto.fieldData.fixed32Data', index=8,
+      name='fixed32Data', full_name='XStore_Proto.fData.fixed32Data', index=8,
       number=9, type=7, cpp_type=3, label=1,
       has_default_value=False, default_value=0,
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
     _descriptor.FieldDescriptor(
-      name='fixed64Data', full_name='XStore_Proto.fieldData.fixed64Data', index=9,
+      name='fixed64Data', full_name='XStore_Proto.fData.fixed64Data', index=9,
       number=10, type=6, cpp_type=4, label=1,
       has_default_value=False, default_value=0,
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
     _descriptor.FieldDescriptor(
-      name='sfixed32Data', full_name='XStore_Proto.fieldData.sfixed32Data', index=10,
+      name='sfixed32Data', full_name='XStore_Proto.fData.sfixed32Data', index=10,
       number=11, type=15, cpp_type=1, label=1,
       has_default_value=False, default_value=0,
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
     _descriptor.FieldDescriptor(
-      name='sfixed64Data', full_name='XStore_Proto.fieldData.sfixed64Data', index=11,
+      name='sfixed64Data', full_name='XStore_Proto.fData.sfixed64Data', index=11,
       number=12, type=16, cpp_type=2, label=1,
       has_default_value=False, default_value=0,
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
     _descriptor.FieldDescriptor(
-      name='boolData', full_name='XStore_Proto.fieldData.boolData', index=12,
+      name='boolData', full_name='XStore_Proto.fData.boolData', index=12,
       number=13, type=8, cpp_type=7, label=1,
       has_default_value=False, default_value=False,
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
     _descriptor.FieldDescriptor(
-      name='stringData', full_name='XStore_Proto.fieldData.stringData', index=13,
+      name='stringData', full_name='XStore_Proto.fData.stringData', index=13,
       number=14, type=9, cpp_type=9, label=1,
       has_default_value=False, default_value=b"".decode('utf-8'),
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
     _descriptor.FieldDescriptor(
-      name='bytesData', full_name='XStore_Proto.fieldData.bytesData', index=14,
+      name='bytesData', full_name='XStore_Proto.fData.bytesData', index=14,
       number=15, type=12, cpp_type=9, label=1,
       has_default_value=False, default_value=b"",
       message_type=None, enum_type=None, containing_type=None,
@@ -331,13 +331,13 @@ _FIELDDATA = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
     _descriptor.OneofDescriptor(
-      name='oneOfData', full_name='XStore_Proto.fieldData.oneOfData',
+      name='oneOfData', full_name='XStore_Proto.fData.oneOfData',
       index=0, containing_type=None,
       create_key=_descriptor._internal_create_key,
     fields=[]),
   ],
   serialized_start=140,
-  serialized_end=494,
+  serialized_end=490,
 )
 
 
@@ -350,7 +350,7 @@ _ROWDATA = _descriptor.Descriptor(
   create_key=_descriptor._internal_create_key,
   fields=[
     _descriptor.FieldDescriptor(
-      name='fData', full_name='XStore_Proto.rowData.fData', index=0,
+      name='fieldData', full_name='XStore_Proto.rowData.fieldData', index=0,
       number=1, type=11, cpp_type=10, label=3,
       has_default_value=False, default_value=[],
       message_type=None, enum_type=None, containing_type=None,
@@ -368,8 +368,8 @@ _ROWDATA = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=496,
-  serialized_end=545,
+  serialized_start=492,
+  serialized_end=541,
 )
 
 
@@ -400,8 +400,8 @@ _REQCMD = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=547,
-  serialized_end=597,
+  serialized_start=543,
+  serialized_end=593,
 )
 
 
@@ -453,8 +453,8 @@ _CREATEDB_REQ = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=600,
-  serialized_end=739,
+  serialized_start=596,
+  serialized_end=735,
 )
 
 
@@ -492,8 +492,8 @@ _REMOVEDB_REQ = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=741,
-  serialized_end=813,
+  serialized_start=737,
+  serialized_end=809,
 )
 
 
@@ -538,8 +538,8 @@ _REMOVEDBFILES_REQ = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=815,
-  serialized_end=910,
+  serialized_start=811,
+  serialized_end=906,
 )
 
 
@@ -591,8 +591,8 @@ _UNARYINSERT_REQ = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=913,
-  serialized_end=1044,
+  serialized_start=909,
+  serialized_end=1040,
 )
 
 
@@ -637,8 +637,8 @@ _UNARYQUERY_REQ = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=1046,
-  serialized_end=1139,
+  serialized_start=1042,
+  serialized_end=1135,
 )
 
 
@@ -683,8 +683,8 @@ _UNARYDELETE_REQ = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=1141,
-  serialized_end=1235,
+  serialized_start=1137,
+  serialized_end=1231,
 )
 
 
@@ -705,8 +705,8 @@ _BATCHINSERT_DATA = _descriptor.Descriptor(
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
     _descriptor.FieldDescriptor(
       name='data', full_name='XStore_Proto.batchInsert_DATA.data', index=1,
-      number=2, type=9, cpp_type=9, label=1,
-      has_default_value=False, default_value=b"".decode('utf-8'),
+      number=2, type=11, cpp_type=10, label=1,
+      has_default_value=False, default_value=None,
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
@@ -722,8 +722,8 @@ _BATCHINSERT_DATA = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=1237,
-  serialized_end=1288,
+  serialized_start=1233,
+  serialized_end=1307,
 )
 
 
@@ -768,8 +768,8 @@ _BATCHINSERT_REQ = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=1291,
-  serialized_end=1424,
+  serialized_start=1310,
+  serialized_end=1443,
 )
 
 
@@ -814,8 +814,8 @@ _BATCHQUERY_REQ = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=1426,
-  serialized_end=1519,
+  serialized_start=1445,
+  serialized_end=1538,
 )
 
 
@@ -860,8 +860,8 @@ _BATCHDELETE_REQ = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=1521,
-  serialized_end=1615,
+  serialized_start=1540,
+  serialized_end=1634,
 )
 
 
@@ -899,8 +899,8 @@ _RANGEINSERT_DATA = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=1617,
-  serialized_end=1668,
+  serialized_start=1636,
+  serialized_end=1687,
 )
 
 
@@ -945,8 +945,8 @@ _RANGEINSERT_REQ = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=1671,
-  serialized_end=1804,
+  serialized_start=1690,
+  serialized_end=1823,
 )
 
 
@@ -998,8 +998,8 @@ _RANGEQUERY_REQ = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=1806,
-  serialized_end=1916,
+  serialized_start=1825,
+  serialized_end=1935,
 )
 
 
@@ -1051,8 +1051,8 @@ _RANGEDELETE_REQ = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=1918,
-  serialized_end=2029,
+  serialized_start=1937,
+  serialized_end=2048,
 )
 
 
@@ -1104,8 +1104,8 @@ _DBSTATS = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2031,
-  serialized_end=2145,
+  serialized_start=2050,
+  serialized_end=2164,
 )
 
 
@@ -1150,8 +1150,8 @@ _SYSINFO_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2147,
-  serialized_end=2240,
+  serialized_start=2166,
+  serialized_end=2259,
 )
 
 
@@ -1182,8 +1182,8 @@ _CREATEDB_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2242,
-  serialized_end=2280,
+  serialized_start=2261,
+  serialized_end=2299,
 )
 
 
@@ -1214,8 +1214,8 @@ _REMOVEDB_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2282,
-  serialized_end=2318,
+  serialized_start=2301,
+  serialized_end=2337,
 )
 
 
@@ -1246,8 +1246,8 @@ _REMOVEDBFILES_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2320,
-  serialized_end=2361,
+  serialized_start=2339,
+  serialized_end=2380,
 )
 
 
@@ -1278,8 +1278,8 @@ _UNARYINSERT_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2363,
-  serialized_end=2402,
+  serialized_start=2382,
+  serialized_end=2421,
 )
 
 
@@ -1317,8 +1317,8 @@ _UNARYQUERY_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2404,
-  serialized_end=2476,
+  serialized_start=2423,
+  serialized_end=2495,
 )
 
 
@@ -1349,8 +1349,8 @@ _UNARYDELETE_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2478,
-  serialized_end=2517,
+  serialized_start=2497,
+  serialized_end=2536,
 )
 
 
@@ -1381,8 +1381,8 @@ _BATCHINSERT_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2519,
-  serialized_end=2558,
+  serialized_start=2538,
+  serialized_end=2577,
 )
 
 
@@ -1413,8 +1413,8 @@ _BATCHQUERY_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2560,
-  serialized_end=2629,
+  serialized_start=2579,
+  serialized_end=2648,
 )
 
 
@@ -1445,8 +1445,8 @@ _BATCHDELETE_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2631,
-  serialized_end=2670,
+  serialized_start=2650,
+  serialized_end=2689,
 )
 
 
@@ -1477,8 +1477,8 @@ _RANGEINSERT_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2672,
-  serialized_end=2711,
+  serialized_start=2691,
+  serialized_end=2730,
 )
 
 
@@ -1509,8 +1509,8 @@ _RANGEQUERY_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2713,
-  serialized_end=2782,
+  serialized_start=2732,
+  serialized_end=2801,
 )
 
 
@@ -1541,57 +1541,57 @@ _RANGEDELETE_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2784,
-  serialized_end=2823,
+  serialized_start=2803,
+  serialized_end=2842,
 )
 
 _CONFIGSTRUCT.fields_by_name['timeResolution'].enum_type = _TIMEUNIT
-_FIELDDATA.oneofs_by_name['oneOfData'].fields.append(
-  _FIELDDATA.fields_by_name['doubleData'])
-_FIELDDATA.fields_by_name['doubleData'].containing_oneof = _FIELDDATA.oneofs_by_name['oneOfData']
-_FIELDDATA.oneofs_by_name['oneOfData'].fields.append(
-  _FIELDDATA.fields_by_name['floatData'])
-_FIELDDATA.fields_by_name['floatData'].containing_oneof = _FIELDDATA.oneofs_by_name['oneOfData']
-_FIELDDATA.oneofs_by_name['oneOfData'].fields.append(
-  _FIELDDATA.fields_by_name['int32Data'])
-_FIELDDATA.fields_by_name['int32Data'].containing_oneof = _FIELDDATA.oneofs_by_name['oneOfData']
-_FIELDDATA.oneofs_by_name['oneOfData'].fields.append(
-  _FIELDDATA.fields_by_name['int64Data'])
-_FIELDDATA.fields_by_name['int64Data'].containing_oneof = _FIELDDATA.oneofs_by_name['oneOfData']
-_FIELDDATA.oneofs_by_name['oneOfData'].fields.append(
-  _FIELDDATA.fields_by_name['uint32Data'])
-_FIELDDATA.fields_by_name['uint32Data'].containing_oneof = _FIELDDATA.oneofs_by_name['oneOfData']
-_FIELDDATA.oneofs_by_name['oneOfData'].fields.append(
-  _FIELDDATA.fields_by_name['uint64Data'])
-_FIELDDATA.fields_by_name['uint64Data'].containing_oneof = _FIELDDATA.oneofs_by_name['oneOfData']
-_FIELDDATA.oneofs_by_name['oneOfData'].fields.append(
-  _FIELDDATA.fields_by_name['sint32Data'])
-_FIELDDATA.fields_by_name['sint32Data'].containing_oneof = _FIELDDATA.oneofs_by_name['oneOfData']
-_FIELDDATA.oneofs_by_name['oneOfData'].fields.append(
-  _FIELDDATA.fields_by_name['sint64Data'])
-_FIELDDATA.fields_by_name['sint64Data'].containing_oneof = _FIELDDATA.oneofs_by_name['oneOfData']
-_FIELDDATA.oneofs_by_name['oneOfData'].fields.append(
-  _FIELDDATA.fields_by_name['fixed32Data'])
-_FIELDDATA.fields_by_name['fixed32Data'].containing_oneof = _FIELDDATA.oneofs_by_name['oneOfData']
-_FIELDDATA.oneofs_by_name['oneOfData'].fields.append(
-  _FIELDDATA.fields_by_name['fixed64Data'])
-_FIELDDATA.fields_by_name['fixed64Data'].containing_oneof = _FIELDDATA.oneofs_by_name['oneOfData']
-_FIELDDATA.oneofs_by_name['oneOfData'].fields.append(
-  _FIELDDATA.fields_by_name['sfixed32Data'])
-_FIELDDATA.fields_by_name['sfixed32Data'].containing_oneof = _FIELDDATA.oneofs_by_name['oneOfData']
-_FIELDDATA.oneofs_by_name['oneOfData'].fields.append(
-  _FIELDDATA.fields_by_name['sfixed64Data'])
-_FIELDDATA.fields_by_name['sfixed64Data'].containing_oneof = _FIELDDATA.oneofs_by_name['oneOfData']
-_FIELDDATA.oneofs_by_name['oneOfData'].fields.append(
-  _FIELDDATA.fields_by_name['boolData'])
-_FIELDDATA.fields_by_name['boolData'].containing_oneof = _FIELDDATA.oneofs_by_name['oneOfData']
-_FIELDDATA.oneofs_by_name['oneOfData'].fields.append(
-  _FIELDDATA.fields_by_name['stringData'])
-_FIELDDATA.fields_by_name['stringData'].containing_oneof = _FIELDDATA.oneofs_by_name['oneOfData']
-_FIELDDATA.oneofs_by_name['oneOfData'].fields.append(
-  _FIELDDATA.fields_by_name['bytesData'])
-_FIELDDATA.fields_by_name['bytesData'].containing_oneof = _FIELDDATA.oneofs_by_name['oneOfData']
-_ROWDATA.fields_by_name['fData'].message_type = _FIELDDATA
+_FDATA.oneofs_by_name['oneOfData'].fields.append(
+  _FDATA.fields_by_name['doubleData'])
+_FDATA.fields_by_name['doubleData'].containing_oneof = _FDATA.oneofs_by_name['oneOfData']
+_FDATA.oneofs_by_name['oneOfData'].fields.append(
+  _FDATA.fields_by_name['floatData'])
+_FDATA.fields_by_name['floatData'].containing_oneof = _FDATA.oneofs_by_name['oneOfData']
+_FDATA.oneofs_by_name['oneOfData'].fields.append(
+  _FDATA.fields_by_name['int32Data'])
+_FDATA.fields_by_name['int32Data'].containing_oneof = _FDATA.oneofs_by_name['oneOfData']
+_FDATA.oneofs_by_name['oneOfData'].fields.append(
+  _FDATA.fields_by_name['int64Data'])
+_FDATA.fields_by_name['int64Data'].containing_oneof = _FDATA.oneofs_by_name['oneOfData']
+_FDATA.oneofs_by_name['oneOfData'].fields.append(
+  _FDATA.fields_by_name['uint32Data'])
+_FDATA.fields_by_name['uint32Data'].containing_oneof = _FDATA.oneofs_by_name['oneOfData']
+_FDATA.oneofs_by_name['oneOfData'].fields.append(
+  _FDATA.fields_by_name['uint64Data'])
+_FDATA.fields_by_name['uint64Data'].containing_oneof = _FDATA.oneofs_by_name['oneOfData']
+_FDATA.oneofs_by_name['oneOfData'].fields.append(
+  _FDATA.fields_by_name['sint32Data'])
+_FDATA.fields_by_name['sint32Data'].containing_oneof = _FDATA.oneofs_by_name['oneOfData']
+_FDATA.oneofs_by_name['oneOfData'].fields.append(
+  _FDATA.fields_by_name['sint64Data'])
+_FDATA.fields_by_name['sint64Data'].containing_oneof = _FDATA.oneofs_by_name['oneOfData']
+_FDATA.oneofs_by_name['oneOfData'].fields.append(
+  _FDATA.fields_by_name['fixed32Data'])
+_FDATA.fields_by_name['fixed32Data'].containing_oneof = _FDATA.oneofs_by_name['oneOfData']
+_FDATA.oneofs_by_name['oneOfData'].fields.append(
+  _FDATA.fields_by_name['fixed64Data'])
+_FDATA.fields_by_name['fixed64Data'].containing_oneof = _FDATA.oneofs_by_name['oneOfData']
+_FDATA.oneofs_by_name['oneOfData'].fields.append(
+  _FDATA.fields_by_name['sfixed32Data'])
+_FDATA.fields_by_name['sfixed32Data'].containing_oneof = _FDATA.oneofs_by_name['oneOfData']
+_FDATA.oneofs_by_name['oneOfData'].fields.append(
+  _FDATA.fields_by_name['sfixed64Data'])
+_FDATA.fields_by_name['sfixed64Data'].containing_oneof = _FDATA.oneofs_by_name['oneOfData']
+_FDATA.oneofs_by_name['oneOfData'].fields.append(
+  _FDATA.fields_by_name['boolData'])
+_FDATA.fields_by_name['boolData'].containing_oneof = _FDATA.oneofs_by_name['oneOfData']
+_FDATA.oneofs_by_name['oneOfData'].fields.append(
+  _FDATA.fields_by_name['stringData'])
+_FDATA.fields_by_name['stringData'].containing_oneof = _FDATA.oneofs_by_name['oneOfData']
+_FDATA.oneofs_by_name['oneOfData'].fields.append(
+  _FDATA.fields_by_name['bytesData'])
+_FDATA.fields_by_name['bytesData'].containing_oneof = _FDATA.oneofs_by_name['oneOfData']
+_ROWDATA.fields_by_name['fieldData'].message_type = _FDATA
 _REQCMD.fields_by_name['rType'].enum_type = _REQUESTTYPE
 _CREATEDB_REQ.fields_by_name['rType'].enum_type = _REQUESTTYPE
 _CREATEDB_REQ.fields_by_name['timeResolution'].enum_type = _TIMEUNIT
@@ -1601,6 +1601,7 @@ _UNARYINSERT_REQ.fields_by_name['rType'].enum_type = _REQUESTTYPE
 _UNARYINSERT_REQ.fields_by_name['data'].message_type = _ROWDATA
 _UNARYQUERY_REQ.fields_by_name['rType'].enum_type = _REQUESTTYPE
 _UNARYDELETE_REQ.fields_by_name['rType'].enum_type = _REQUESTTYPE
+_BATCHINSERT_DATA.fields_by_name['data'].message_type = _ROWDATA
 _BATCHINSERT_REQ.fields_by_name['rType'].enum_type = _REQUESTTYPE
 _BATCHINSERT_REQ.fields_by_name['batchInsert_DATA'].message_type = _BATCHINSERT_DATA
 _BATCHQUERY_REQ.fields_by_name['rType'].enum_type = _REQUESTTYPE
@@ -1615,7 +1616,7 @@ _UNARYQUERY_REP.fields_by_name['data'].message_type = _ROWDATA
 _BATCHQUERY_REP.fields_by_name['queryResponse'].message_type = _UNARYQUERY_REP
 _RANGEQUERY_REP.fields_by_name['queryResponse'].message_type = _UNARYQUERY_REP
 DESCRIPTOR.message_types_by_name['configStruct'] = _CONFIGSTRUCT
-DESCRIPTOR.message_types_by_name['fieldData'] = _FIELDDATA
+DESCRIPTOR.message_types_by_name['fData'] = _FDATA
 DESCRIPTOR.message_types_by_name['rowData'] = _ROWDATA
 DESCRIPTOR.message_types_by_name['reqCMD'] = _REQCMD
 DESCRIPTOR.message_types_by_name['createDB_REQ'] = _CREATEDB_REQ
@@ -1657,12 +1658,12 @@ configStruct = _reflection.GeneratedProtocolMessageType('configStruct', (_messag
   })
 _sym_db.RegisterMessage(configStruct)
 
-fieldData = _reflection.GeneratedProtocolMessageType('fieldData', (_message.Message,), {
-  'DESCRIPTOR' : _FIELDDATA,
+fData = _reflection.GeneratedProtocolMessageType('fData', (_message.Message,), {
+  'DESCRIPTOR' : _FDATA,
   '__module__' : 'protoFile.XStore_pb2'
-  # @@protoc_insertion_point(class_scope:XStore_Proto.fieldData)
+  # @@protoc_insertion_point(class_scope:XStore_Proto.fData)
   })
-_sym_db.RegisterMessage(fieldData)
+_sym_db.RegisterMessage(fData)
 
 rowData = _reflection.GeneratedProtocolMessageType('rowData', (_message.Message,), {
   'DESCRIPTOR' : _ROWDATA,
