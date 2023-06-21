@@ -863,11 +863,8 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
         for (int i = 0; i < dataMap[yearKey].size(); i++) {
             // Parse each data in a batch collection
             XStore_Proto::rangeInsert_DATA currInsertData = protoFromClient->rangeinsert_data(dataMap[yearKey].at(i));
-            std::time_t unixTime = currInsertData.timestamp();
-            std::string data = currInsertData.data();
-
-            // Organize timestamp & data into an object
-            dataStruct currData{unixTime, data};
+            const std::time_t &unixTime = currInsertData.timestamp();
+            const XStore_Proto::rowData &data = currInsertData.data();
 
             // Compute diff & offset
             diff = unixTime - thisTS.firstEpoch;
@@ -877,7 +874,7 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
             fseeko64(bFile, offset, SEEK_SET);
 
             // Writing actual data to disk
-            fwrite((currData.getData()).data(), cfgStruct.rowlength(), 1, bFile);
+            fwrite(data.SerializeAsString().data(), cfgStruct.rowlength(), 1, bFile);
         }
 
         // Close file & Release lock after write

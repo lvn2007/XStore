@@ -21,10 +21,11 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="House cleaning">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Update Python Client API">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/clientSrc/Python/XStore.py" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/Python/XStore.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/clientSrc/Python/XStore_pb2.py" beforeDir="false" afterPath="$PROJECT_DIR$/clientSrc/Python/XStore_pb2.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/protoFile/XStore.proto" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/XStore.proto" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/protoFile/XStore_pb2.py" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/XStore_pb2.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore/XStore.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore/XStore.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -364,14 +365,7 @@
       <workItem from="1686168708370" duration="27708000" />
       <workItem from="1686577194885" duration="12000" />
       <workItem from="1686577468137" duration="2906000" />
-      <workItem from="1686596444430" duration="30128000" />
-    </task>
-    <task id="LOCAL-00229" summary="Reflect new ENUM Proto">
-      <created>1668234878562</created>
-      <option name="number" value="00229" />
-      <option name="presentableId" value="LOCAL-00229" />
-      <option name="project" value="LOCAL" />
-      <updated>1668234878562</updated>
+      <workItem from="1686596444430" duration="33200000" />
     </task>
     <task id="LOCAL-00230" summary="Switch back to old method">
       <created>1668549890031</created>
@@ -709,7 +703,14 @@
       <option name="project" value="LOCAL" />
       <updated>1686881677938</updated>
     </task>
-    <option name="localTasksCounter" value="278" />
+    <task id="LOCAL-00278" summary="Update Python Client API">
+      <created>1687292700643</created>
+      <option name="number" value="00278" />
+      <option name="presentableId" value="LOCAL-00278" />
+      <option name="project" value="LOCAL" />
+      <updated>1687292700644</updated>
+    </task>
+    <option name="localTasksCounter" value="279" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -816,7 +817,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Enforce rowLength &gt;= 4 in CREATE_DB for server &amp; Updated C++ client (CREATE_DB)" />
     <MESSAGE value="Re-enabled SYS_INFO test in .gitlab-ci.yml" />
     <MESSAGE value="Updated UNARY_OPS" />
     <MESSAGE value="Improved performance with less verbosity" />
@@ -841,6 +841,7 @@
     <MESSAGE value="Pass by ref. &amp; Updated rangeQuery &amp; Python client" />
     <MESSAGE value="Rename fData to fieldData" />
     <MESSAGE value="House cleaning" />
-    <option name="LAST_COMMIT_MESSAGE" value="House cleaning" />
+    <MESSAGE value="Update Python Client API" />
+    <option name="LAST_COMMIT_MESSAGE" value="Update Python Client API" />
   </component>
 </project>
