@@ -165,12 +165,25 @@ class XStoreClient:
         rangeInsert_REQ.rType = XStore_Proto.RANGEINSERT
         rangeInsert_REQ.dbName = targetDBName
 
-        # Loop through each data and add to batchInsert_REQ
-        for data in dataList:
-            # Organize rangeInsert_DATA
-            rangeInsert_DATA = rangeInsert_REQ.rangeInsert_DATA.add()
-            rangeInsert_DATA.timestamp = data[0]
-            rangeInsert_DATA.data = data[1]
+        # IF first element in dataList is not type rangeInsert_DATA
+        #   -> Inferred data type -- Assume worse case scenario for space-efficiency
+        if type(dataList[0]) != XStore_Proto.rangeInsert_DATA:
+            # Build 1 row worth of data
+            for data in dataList:
+                rowData = XStore_Proto.rowData()
+                for idx, item in enumerate(data["data"]):
+                    if isinstance(item, str):
+                        rowData.fieldData.add().stringData = item
+                    elif isinstance(item, bool):
+                        rowData.fieldData.add().boolData = item
+                    elif isinstance(item, (int, float)):
+                        rowData.fieldData.add().doubleData = item
+                insertData = XStore_Proto.rangeInsert_DATA()
+                insertData.timestamp = data["timestamp"]
+                insertData.data.MergeFrom(rowData)
+                rangeInsert_REQ.rangeInsert_DATA.append(insertData)
+        else:
+            rangeInsert_REQ.rangeInsert_DATA.MergeFrom(dataList)
 
         # Dispatch request
         self.socket.send(rangeInsert_REQ.SerializeToString())

@@ -20,7 +20,7 @@ DESCRIPTOR = _descriptor.FileDescriptor(
   syntax='proto3',
   serialized_options=b'H\001',
   create_key=_descriptor._internal_create_key,
-  serialized_pb=b'\n\x16protoFile/XStore.proto\x12\x0cXStore_Proto\"a\n\x0c\x63onfigStruct\x12\x0e\n\x06\x64\x62Name\x18\x01 \x01(\t\x12.\n\x0etimeResolution\x18\x02 \x01(\x0e\x32\x16.XStore_Proto.timeUnit\x12\x11\n\trowLength\x18\x03 \x01(\x0f\"\xde\x02\n\x05\x66\x44\x61ta\x12\x14\n\ndoubleData\x18\x01 \x01(\x01H\x00\x12\x13\n\tfloatData\x18\x02 \x01(\x02H\x00\x12\x13\n\tint32Data\x18\x03 \x01(\x05H\x00\x12\x13\n\tint64Data\x18\x04 \x01(\x03H\x00\x12\x14\n\nuint32Data\x18\x05 \x01(\rH\x00\x12\x14\n\nuint64Data\x18\x06 \x01(\x04H\x00\x12\x14\n\nsint32Data\x18\x07 \x01(\x11H\x00\x12\x14\n\nsint64Data\x18\x08 \x01(\x12H\x00\x12\x15\n\x0b\x66ixed32Data\x18\t \x01(\x07H\x00\x12\x15\n\x0b\x66ixed64Data\x18\n \x01(\x06H\x00\x12\x16\n\x0csfixed32Data\x18\x0b \x01(\x0fH\x00\x12\x16\n\x0csfixed64Data\x18\x0c \x01(\x10H\x00\x12\x12\n\x08\x62oolData\x18\r \x01(\x08H\x00\x12\x14\n\nstringData\x18\x0e \x01(\tH\x00\x12\x13\n\tbytesData\x18\x0f \x01(\x0cH\x00\x42\x0b\n\toneOfData\"1\n\x07rowData\x12&\n\tfieldData\x18\x01 \x03(\x0b\x32\x13.XStore_Proto.fData\"2\n\x06reqCMD\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\"\x8b\x01\n\x0c\x63reateDB_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x0e\n\x06\x64\x62Name\x18\x02 \x01(\t\x12.\n\x0etimeResolution\x18\x03 \x01(\x0e\x32\x16.XStore_Proto.timeUnit\x12\x11\n\trowLength\x18\x04 \x01(\r\"H\n\x0cremoveDB_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x0e\n\x06\x64\x62Name\x18\x02 \x01(\t\"_\n\x11removeDBFiles_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x0e\n\x06\x64\x62Name\x18\x02 \x01(\t\x12\x10\n\x08\x66ileName\x18\x03 \x03(\t\"\x83\x01\n\x0funaryInsert_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\ttimestamp\x18\x02 \x01(\x04\x12#\n\x04\x64\x61ta\x18\x03 \x01(\x0b\x32\x15.XStore_Proto.rowData\x12\x0e\n\x06\x64\x62Name\x18\x04 \x01(\t\"]\n\x0eunaryQuery_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\ttimestamp\x18\x02 \x01(\x04\x12\x0e\n\x06\x64\x62Name\x18\x03 \x01(\t\"^\n\x0funaryDelete_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\ttimestamp\x18\x02 \x01(\x04\x12\x0e\n\x06\x64\x62Name\x18\x03 \x01(\t\"J\n\x10\x62\x61tchInsert_DATA\x12\x11\n\ttimestamp\x18\x01 \x01(\x04\x12#\n\x04\x64\x61ta\x18\x02 \x01(\x0b\x32\x15.XStore_Proto.rowData\"\x85\x01\n\x0f\x62\x61tchInsert_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x0e\n\x06\x64\x62Name\x18\x02 \x01(\t\x12\x38\n\x10\x62\x61tchInsert_DATA\x18\x03 \x03(\x0b\x32\x1e.XStore_Proto.batchInsert_DATA\"]\n\x0e\x62\x61tchQuery_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\ttimestamp\x18\x02 \x03(\x04\x12\x0e\n\x06\x64\x62Name\x18\x03 \x01(\t\"^\n\x0f\x62\x61tchDelete_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\ttimestamp\x18\x02 \x03(\x04\x12\x0e\n\x06\x64\x62Name\x18\x03 \x01(\t\"3\n\x10rangeInsert_DATA\x12\x11\n\ttimestamp\x18\x01 \x01(\x04\x12\x0c\n\x04\x64\x61ta\x18\x02 \x01(\t\"\x85\x01\n\x0frangeInsert_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x0e\n\x06\x64\x62Name\x18\x02 \x01(\t\x12\x38\n\x10rangeInsert_DATA\x18\x03 \x03(\x0b\x32\x1e.XStore_Proto.rangeInsert_DATA\"n\n\x0erangeQuery_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\tstartTime\x18\x02 \x01(\x04\x12\x0f\n\x07\x65ndTime\x18\x03 \x01(\x04\x12\x0e\n\x06\x64\x62Name\x18\x04 \x01(\t\"o\n\x0frangeDelete_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\tstartTime\x18\x02 \x01(\x04\x12\x0f\n\x07\x65ndTime\x18\x03 \x01(\x04\x12\x0e\n\x06\x64\x62Name\x18\x04 \x01(\t\"r\n\x07\x64\x62Stats\x12\x0e\n\x06\x64\x62Name\x18\x01 \x01(\t\x12,\n\x0c\x64\x62Resolution\x18\x02 \x01(\x0e\x32\x16.XStore_Proto.timeUnit\x12\x17\n\x0ftotalSizeInByte\x18\x03 \x01(\x04\x12\x10\n\x08\x66ileName\x18\x04 \x03(\t\"]\n\x0bsysInfo_REP\x12\x12\n\nserverAddr\x18\x01 \x01(\t\x12\x13\n\x0bthreadCount\x18\x02 \x01(\x05\x12%\n\x06\x64\x62Info\x18\x03 \x03(\x0b\x32\x15.XStore_Proto.dbStats\"&\n\x0c\x63reateDB_REP\x12\x16\n\x0e\x63reateDBStatus\x18\x01 \x01(\t\"$\n\x0cremoveDB_REP\x12\x14\n\x0cremoveStatus\x18\x01 \x01(\t\")\n\x11removeDBFiles_REP\x12\x14\n\x0cremoveStatus\x18\x01 \x03(\t\"\'\n\x0funaryInsert_REP\x12\x14\n\x0cinsertStatus\x18\x01 \x01(\t\"H\n\x0eunaryQuery_REP\x12\x11\n\ttimestamp\x18\x01 \x01(\x04\x12#\n\x04\x64\x61ta\x18\x02 \x01(\x0b\x32\x15.XStore_Proto.rowData\"\'\n\x0funaryDelete_REP\x12\x14\n\x0c\x64\x65leteStatus\x18\x01 \x01(\t\"\'\n\x0f\x62\x61tchInsert_REP\x12\x14\n\x0cinsertStatus\x18\x01 \x01(\t\"E\n\x0e\x62\x61tchQuery_REP\x12\x33\n\rqueryResponse\x18\x01 \x03(\x0b\x32\x1c.XStore_Proto.unaryQuery_REP\"\'\n\x0f\x62\x61tchDelete_REP\x12\x14\n\x0c\x64\x65leteStatus\x18\x01 \x01(\t\"\'\n\x0frangeInsert_REP\x12\x14\n\x0cinsertStatus\x18\x01 \x01(\t\"E\n\x0erangeQuery_REP\x12\x33\n\rqueryResponse\x18\x01 \x03(\x0b\x32\x1c.XStore_Proto.unaryQuery_REP\"\'\n\x0frangeDelete_REP\x12\x14\n\x0c\x64\x65leteStatus\x18\x01 \x01(\t*\xdc\x01\n\x0brequestType\x12\x08\n\x04INFO\x10\x00\x12\x0c\n\x08\x43REATEDB\x10\x01\x12\x0c\n\x08REMOVEDB\x10\x02\x12\x11\n\rREMOVEDBFILES\x10\x03\x12\x0f\n\x0bUNARYINSERT\x10\x04\x12\x0e\n\nUNARYQUERY\x10\x05\x12\x0f\n\x0bUNARYDELETE\x10\x06\x12\x0f\n\x0b\x42\x41TCHINSERT\x10\x07\x12\x0e\n\nBATCHQUERY\x10\x08\x12\x0f\n\x0b\x42\x41TCHDELETE\x10\t\x12\x0f\n\x0bRANGEINSERT\x10\n\x12\x0e\n\nRANGEQUERY\x10\x0b\x12\x0f\n\x0bRANGEDELETE\x10\x0c*H\n\x08timeUnit\x12\n\n\x06SECOND\x10\x00\x12\x0f\n\x0bMILLISECOND\x10\x01\x12\x0f\n\x0bMICROSECOND\x10\x02\x12\x0e\n\nNANOSECOND\x10\x03\x42\x02H\x01\x62\x06proto3'
+  serialized_pb=b'\n\x16protoFile/XStore.proto\x12\x0cXStore_Proto\"a\n\x0c\x63onfigStruct\x12\x0e\n\x06\x64\x62Name\x18\x01 \x01(\t\x12.\n\x0etimeResolution\x18\x02 \x01(\x0e\x32\x16.XStore_Proto.timeUnit\x12\x11\n\trowLength\x18\x03 \x01(\x0f\"\xde\x02\n\x05\x66\x44\x61ta\x12\x14\n\ndoubleData\x18\x01 \x01(\x01H\x00\x12\x13\n\tfloatData\x18\x02 \x01(\x02H\x00\x12\x13\n\tint32Data\x18\x03 \x01(\x05H\x00\x12\x13\n\tint64Data\x18\x04 \x01(\x03H\x00\x12\x14\n\nuint32Data\x18\x05 \x01(\rH\x00\x12\x14\n\nuint64Data\x18\x06 \x01(\x04H\x00\x12\x14\n\nsint32Data\x18\x07 \x01(\x11H\x00\x12\x14\n\nsint64Data\x18\x08 \x01(\x12H\x00\x12\x15\n\x0b\x66ixed32Data\x18\t \x01(\x07H\x00\x12\x15\n\x0b\x66ixed64Data\x18\n \x01(\x06H\x00\x12\x16\n\x0csfixed32Data\x18\x0b \x01(\x0fH\x00\x12\x16\n\x0csfixed64Data\x18\x0c \x01(\x10H\x00\x12\x12\n\x08\x62oolData\x18\r \x01(\x08H\x00\x12\x14\n\nstringData\x18\x0e \x01(\tH\x00\x12\x13\n\tbytesData\x18\x0f \x01(\x0cH\x00\x42\x0b\n\toneOfData\"1\n\x07rowData\x12&\n\tfieldData\x18\x01 \x03(\x0b\x32\x13.XStore_Proto.fData\"2\n\x06reqCMD\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\"\x8b\x01\n\x0c\x63reateDB_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x0e\n\x06\x64\x62Name\x18\x02 \x01(\t\x12.\n\x0etimeResolution\x18\x03 \x01(\x0e\x32\x16.XStore_Proto.timeUnit\x12\x11\n\trowLength\x18\x04 \x01(\r\"H\n\x0cremoveDB_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x0e\n\x06\x64\x62Name\x18\x02 \x01(\t\"_\n\x11removeDBFiles_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x0e\n\x06\x64\x62Name\x18\x02 \x01(\t\x12\x10\n\x08\x66ileName\x18\x03 \x03(\t\"\x83\x01\n\x0funaryInsert_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\ttimestamp\x18\x02 \x01(\x04\x12#\n\x04\x64\x61ta\x18\x03 \x01(\x0b\x32\x15.XStore_Proto.rowData\x12\x0e\n\x06\x64\x62Name\x18\x04 \x01(\t\"]\n\x0eunaryQuery_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\ttimestamp\x18\x02 \x01(\x04\x12\x0e\n\x06\x64\x62Name\x18\x03 \x01(\t\"^\n\x0funaryDelete_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\ttimestamp\x18\x02 \x01(\x04\x12\x0e\n\x06\x64\x62Name\x18\x03 \x01(\t\"J\n\x10\x62\x61tchInsert_DATA\x12\x11\n\ttimestamp\x18\x01 \x01(\x04\x12#\n\x04\x64\x61ta\x18\x02 \x01(\x0b\x32\x15.XStore_Proto.rowData\"\x85\x01\n\x0f\x62\x61tchInsert_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x0e\n\x06\x64\x62Name\x18\x02 \x01(\t\x12\x38\n\x10\x62\x61tchInsert_DATA\x18\x03 \x03(\x0b\x32\x1e.XStore_Proto.batchInsert_DATA\"]\n\x0e\x62\x61tchQuery_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\ttimestamp\x18\x02 \x03(\x04\x12\x0e\n\x06\x64\x62Name\x18\x03 \x01(\t\"^\n\x0f\x62\x61tchDelete_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\ttimestamp\x18\x02 \x03(\x04\x12\x0e\n\x06\x64\x62Name\x18\x03 \x01(\t\"J\n\x10rangeInsert_DATA\x12\x11\n\ttimestamp\x18\x01 \x01(\x04\x12#\n\x04\x64\x61ta\x18\x02 \x01(\x0b\x32\x15.XStore_Proto.rowData\"\x85\x01\n\x0frangeInsert_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x0e\n\x06\x64\x62Name\x18\x02 \x01(\t\x12\x38\n\x10rangeInsert_DATA\x18\x03 \x03(\x0b\x32\x1e.XStore_Proto.rangeInsert_DATA\"n\n\x0erangeQuery_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\tstartTime\x18\x02 \x01(\x04\x12\x0f\n\x07\x65ndTime\x18\x03 \x01(\x04\x12\x0e\n\x06\x64\x62Name\x18\x04 \x01(\t\"o\n\x0frangeDelete_REQ\x12(\n\x05rType\x18\x01 \x01(\x0e\x32\x19.XStore_Proto.requestType\x12\x11\n\tstartTime\x18\x02 \x01(\x04\x12\x0f\n\x07\x65ndTime\x18\x03 \x01(\x04\x12\x0e\n\x06\x64\x62Name\x18\x04 \x01(\t\"r\n\x07\x64\x62Stats\x12\x0e\n\x06\x64\x62Name\x18\x01 \x01(\t\x12,\n\x0c\x64\x62Resolution\x18\x02 \x01(\x0e\x32\x16.XStore_Proto.timeUnit\x12\x17\n\x0ftotalSizeInByte\x18\x03 \x01(\x04\x12\x10\n\x08\x66ileName\x18\x04 \x03(\t\"]\n\x0bsysInfo_REP\x12\x12\n\nserverAddr\x18\x01 \x01(\t\x12\x13\n\x0bthreadCount\x18\x02 \x01(\x05\x12%\n\x06\x64\x62Info\x18\x03 \x03(\x0b\x32\x15.XStore_Proto.dbStats\"&\n\x0c\x63reateDB_REP\x12\x16\n\x0e\x63reateDBStatus\x18\x01 \x01(\t\"$\n\x0cremoveDB_REP\x12\x14\n\x0cremoveStatus\x18\x01 \x01(\t\")\n\x11removeDBFiles_REP\x12\x14\n\x0cremoveStatus\x18\x01 \x03(\t\"\'\n\x0funaryInsert_REP\x12\x14\n\x0cinsertStatus\x18\x01 \x01(\t\"H\n\x0eunaryQuery_REP\x12\x11\n\ttimestamp\x18\x01 \x01(\x04\x12#\n\x04\x64\x61ta\x18\x02 \x01(\x0b\x32\x15.XStore_Proto.rowData\"\'\n\x0funaryDelete_REP\x12\x14\n\x0c\x64\x65leteStatus\x18\x01 \x01(\t\"\'\n\x0f\x62\x61tchInsert_REP\x12\x14\n\x0cinsertStatus\x18\x01 \x01(\t\"E\n\x0e\x62\x61tchQuery_REP\x12\x33\n\rqueryResponse\x18\x01 \x03(\x0b\x32\x1c.XStore_Proto.unaryQuery_REP\"\'\n\x0f\x62\x61tchDelete_REP\x12\x14\n\x0c\x64\x65leteStatus\x18\x01 \x01(\t\"\'\n\x0frangeInsert_REP\x12\x14\n\x0cinsertStatus\x18\x01 \x01(\t\"E\n\x0erangeQuery_REP\x12\x33\n\rqueryResponse\x18\x01 \x03(\x0b\x32\x1c.XStore_Proto.unaryQuery_REP\"\'\n\x0frangeDelete_REP\x12\x14\n\x0c\x64\x65leteStatus\x18\x01 \x01(\t*\xdc\x01\n\x0brequestType\x12\x08\n\x04INFO\x10\x00\x12\x0c\n\x08\x43REATEDB\x10\x01\x12\x0c\n\x08REMOVEDB\x10\x02\x12\x11\n\rREMOVEDBFILES\x10\x03\x12\x0f\n\x0bUNARYINSERT\x10\x04\x12\x0e\n\nUNARYQUERY\x10\x05\x12\x0f\n\x0bUNARYDELETE\x10\x06\x12\x0f\n\x0b\x42\x41TCHINSERT\x10\x07\x12\x0e\n\nBATCHQUERY\x10\x08\x12\x0f\n\x0b\x42\x41TCHDELETE\x10\t\x12\x0f\n\x0bRANGEINSERT\x10\n\x12\x0e\n\nRANGEQUERY\x10\x0b\x12\x0f\n\x0bRANGEDELETE\x10\x0c*H\n\x08timeUnit\x12\n\n\x06SECOND\x10\x00\x12\x0f\n\x0bMILLISECOND\x10\x01\x12\x0f\n\x0bMICROSECOND\x10\x02\x12\x0e\n\nNANOSECOND\x10\x03\x42\x02H\x01\x62\x06proto3'
 )
 
 _REQUESTTYPE = _descriptor.EnumDescriptor(
@@ -98,8 +98,8 @@ _REQUESTTYPE = _descriptor.EnumDescriptor(
   ],
   containing_type=None,
   serialized_options=None,
-  serialized_start=2845,
-  serialized_end=3065,
+  serialized_start=2868,
+  serialized_end=3088,
 )
 _sym_db.RegisterEnumDescriptor(_REQUESTTYPE)
 
@@ -134,8 +134,8 @@ _TIMEUNIT = _descriptor.EnumDescriptor(
   ],
   containing_type=None,
   serialized_options=None,
-  serialized_start=3067,
-  serialized_end=3139,
+  serialized_start=3090,
+  serialized_end=3162,
 )
 _sym_db.RegisterEnumDescriptor(_TIMEUNIT)
 
@@ -882,8 +882,8 @@ _RANGEINSERT_DATA = _descriptor.Descriptor(
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
     _descriptor.FieldDescriptor(
       name='data', full_name='XStore_Proto.rangeInsert_DATA.data', index=1,
-      number=2, type=9, cpp_type=9, label=1,
-      has_default_value=False, default_value=b"".decode('utf-8'),
+      number=2, type=11, cpp_type=10, label=1,
+      has_default_value=False, default_value=None,
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
@@ -900,7 +900,7 @@ _RANGEINSERT_DATA = _descriptor.Descriptor(
   oneofs=[
   ],
   serialized_start=1636,
-  serialized_end=1687,
+  serialized_end=1710,
 )
 
 
@@ -945,8 +945,8 @@ _RANGEINSERT_REQ = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=1690,
-  serialized_end=1823,
+  serialized_start=1713,
+  serialized_end=1846,
 )
 
 
@@ -998,8 +998,8 @@ _RANGEQUERY_REQ = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=1825,
-  serialized_end=1935,
+  serialized_start=1848,
+  serialized_end=1958,
 )
 
 
@@ -1051,8 +1051,8 @@ _RANGEDELETE_REQ = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=1937,
-  serialized_end=2048,
+  serialized_start=1960,
+  serialized_end=2071,
 )
 
 
@@ -1104,8 +1104,8 @@ _DBSTATS = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2050,
-  serialized_end=2164,
+  serialized_start=2073,
+  serialized_end=2187,
 )
 
 
@@ -1150,8 +1150,8 @@ _SYSINFO_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2166,
-  serialized_end=2259,
+  serialized_start=2189,
+  serialized_end=2282,
 )
 
 
@@ -1182,8 +1182,8 @@ _CREATEDB_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2261,
-  serialized_end=2299,
+  serialized_start=2284,
+  serialized_end=2322,
 )
 
 
@@ -1214,8 +1214,8 @@ _REMOVEDB_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2301,
-  serialized_end=2337,
+  serialized_start=2324,
+  serialized_end=2360,
 )
 
 
@@ -1246,8 +1246,8 @@ _REMOVEDBFILES_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2339,
-  serialized_end=2380,
+  serialized_start=2362,
+  serialized_end=2403,
 )
 
 
@@ -1278,8 +1278,8 @@ _UNARYINSERT_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2382,
-  serialized_end=2421,
+  serialized_start=2405,
+  serialized_end=2444,
 )
 
 
@@ -1317,8 +1317,8 @@ _UNARYQUERY_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2423,
-  serialized_end=2495,
+  serialized_start=2446,
+  serialized_end=2518,
 )
 
 
@@ -1349,8 +1349,8 @@ _UNARYDELETE_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2497,
-  serialized_end=2536,
+  serialized_start=2520,
+  serialized_end=2559,
 )
 
 
@@ -1381,8 +1381,8 @@ _BATCHINSERT_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2538,
-  serialized_end=2577,
+  serialized_start=2561,
+  serialized_end=2600,
 )
 
 
@@ -1413,8 +1413,8 @@ _BATCHQUERY_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2579,
-  serialized_end=2648,
+  serialized_start=2602,
+  serialized_end=2671,
 )
 
 
@@ -1445,8 +1445,8 @@ _BATCHDELETE_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2650,
-  serialized_end=2689,
+  serialized_start=2673,
+  serialized_end=2712,
 )
 
 
@@ -1477,8 +1477,8 @@ _RANGEINSERT_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2691,
-  serialized_end=2730,
+  serialized_start=2714,
+  serialized_end=2753,
 )
 
 
@@ -1509,8 +1509,8 @@ _RANGEQUERY_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2732,
-  serialized_end=2801,
+  serialized_start=2755,
+  serialized_end=2824,
 )
 
 
@@ -1541,8 +1541,8 @@ _RANGEDELETE_REP = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=2803,
-  serialized_end=2842,
+  serialized_start=2826,
+  serialized_end=2865,
 )
 
 _CONFIGSTRUCT.fields_by_name['timeResolution'].enum_type = _TIMEUNIT
@@ -1606,6 +1606,7 @@ _BATCHINSERT_REQ.fields_by_name['rType'].enum_type = _REQUESTTYPE
 _BATCHINSERT_REQ.fields_by_name['batchInsert_DATA'].message_type = _BATCHINSERT_DATA
 _BATCHQUERY_REQ.fields_by_name['rType'].enum_type = _REQUESTTYPE
 _BATCHDELETE_REQ.fields_by_name['rType'].enum_type = _REQUESTTYPE
+_RANGEINSERT_DATA.fields_by_name['data'].message_type = _ROWDATA
 _RANGEINSERT_REQ.fields_by_name['rType'].enum_type = _REQUESTTYPE
 _RANGEINSERT_REQ.fields_by_name['rangeInsert_DATA'].message_type = _RANGEINSERT_DATA
 _RANGEQUERY_REQ.fields_by_name['rType'].enum_type = _REQUESTTYPE
