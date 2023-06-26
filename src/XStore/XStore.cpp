@@ -894,6 +894,7 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
     // Protobuf obj to be returned
     XStore_Proto::rangeQuery_REP toReturn;
     XStore_Proto::rowData tempData;
+    XStore_Proto::unaryQuery_REP *currEntry;
     std::string queryStatus;
 
     // Ensure dbName string is all capitalized
@@ -994,7 +995,7 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
 
             // Add fetched data to returning Protobuf obj
             tempData.ParseFromArray(&bufferIn, cfgStruct.rowlength());
-            XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_queryresponse();
+            currEntry = toReturn.add_queryresponse();
             currEntry->set_timestamp(epochTime);
             *currEntry->mutable_data() = tempData;
         }
@@ -1046,7 +1047,7 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
 
                     // Add fetched data to returning Protobuf obj
                     tempData.ParseFromArray(&bufferIn, cfgStruct.rowlength());
-                    XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_queryresponse();
+                    currEntry = toReturn.add_queryresponse();
                     currEntry->set_timestamp(epochTime);
                     *currEntry->mutable_data() = tempData;
                 }
@@ -1091,7 +1092,7 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
 
                     // Add fetched data to returning Protobuf obj
                     tempData.ParseFromArray(&bufferIn, cfgStruct.rowlength());
-                    XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_queryresponse();
+                    currEntry = toReturn.add_queryresponse();
                     currEntry->set_timestamp(epochTime);
                     *currEntry->mutable_data() = tempData;
                 }
