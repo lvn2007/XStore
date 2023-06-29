@@ -3,6 +3,7 @@
 #include "include/XStore/XStore.h"
 #include <cmath>
 #include <variant>
+#include "zlib.h"
 
 double meanCalc(std::vector<double> inputVector) {
     double totalSum = 0;
@@ -78,6 +79,31 @@ int main(int argc, char *argv[]) {
     std::string BIND_ADDR = argv[1];
     std::string BIND_PORT = argv[2];
     int THREAD_COUNT = atoi(argv[3]);
+
+//    char a[] = "202cb962ac59075b964b07152d234b70";
+//    char b[50];
+//    std::cout << "OG Size: " << strlen(a) << std::endl;
+//
+//    // zlib struct
+//    z_stream zStream;
+//    zStream.zalloc = Z_NULL;
+//    zStream.zfree = Z_NULL;
+//    zStream.opaque = Z_NULL;
+//
+//    // Setup input a to compressed output b
+//    zStream.avail_in = (uInt) strlen(a) + 1;
+//    zStream.next_in = (Bytef *) a;
+//    zStream.avail_out = (uInt) sizeof(b);
+//    zStream.next_out = (Bytef *) b;
+//
+//    // COMPRESS
+//    deflateInit(&zStream, Z_BEST_COMPRESSION);
+//    deflate(&zStream, Z_FINISH);
+//    deflateEnd(&zStream);
+//
+//    std::cout << "Compressed size: " << strlen(b) << std::endl;
+//    std::cout << "Compressed string: " << b << std::endl;
+
 
     // ----DEV AREA
     // Instantiate XStore obj
