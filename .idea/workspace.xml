@@ -21,16 +21,14 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Re-using single Protobuf object throughout entire rangeQuery call">
-      <change afterPath="$PROJECT_DIR$/.idea/codeStyles/codeStyleConfig.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/profiles_settings.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/deployment.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/deployment.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/inspectionProfiles/Project_Default.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/Project_Default.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/other.xml" beforeDir="false" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Test commit">
+      <change afterPath="$PROJECT_DIR$/Findzstd.cmake" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/include/XStore_Networking/zstdpp.hpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/xStore.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/xStore.iml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/CMakeLists.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/include/XStore_Networking/XStore_zmqServer.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore_Networking/XStore_zmqServer.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/protoFile/XStore_pb2.py" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/XStore_pb2.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -400,14 +398,9 @@
       <workItem from="1687833829264" duration="1371000" />
       <workItem from="1687835265508" duration="373000" />
       <workItem from="1687835675826" duration="1237000" />
-      <workItem from="1687867452858" duration="7188000" />
-    </task>
-    <task id="LOCAL-00233" summary="sysInfo now returns amount of 512B blocks allocated per files">
-      <created>1668834533743</created>
-      <option name="number" value="00233" />
-      <option name="presentableId" value="LOCAL-00233" />
-      <option name="project" value="LOCAL" />
-      <updated>1668834533744</updated>
+      <workItem from="1687867452858" duration="7860000" />
+      <workItem from="1688564191435" duration="20374000" />
+      <workItem from="1688660461536" duration="10073000" />
     </task>
     <task id="LOCAL-00234" summary="Implemented batchInsert">
       <created>1668906344306</created>
@@ -745,7 +738,14 @@
       <option name="project" value="LOCAL" />
       <updated>1687794074829</updated>
     </task>
-    <option name="localTasksCounter" value="282" />
+    <task id="LOCAL-00282" summary="Test commit">
+      <created>1688074940257</created>
+      <option name="number" value="00282" />
+      <option name="presentableId" value="LOCAL-00282" />
+      <option name="project" value="LOCAL" />
+      <updated>1688074940257</updated>
+    </task>
+    <option name="localTasksCounter" value="283" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -852,7 +852,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Improved performance with less verbosity (batchInsert)" />
     <MESSAGE value="Enable millisecond (ms) &amp; Removed dead code" />
     <MESSAGE value="Clean-up Proto file &amp; Faster range query" />
     <MESSAGE value="Implemented unaryDelete" />
@@ -877,7 +876,8 @@
     <MESSAGE value="Update rangeInsert &amp; Python Client API" />
     <MESSAGE value="Removed absl lib" />
     <MESSAGE value="Re-using single Protobuf object throughout entire rangeQuery call" />
-    <option name="LAST_COMMIT_MESSAGE" value="Re-using single Protobuf object throughout entire rangeQuery call" />
+    <MESSAGE value="Test commit" />
+    <option name="LAST_COMMIT_MESSAGE" value="Test commit" />
   </component>
   <component name="XSLT-Support.FileAssociations.UIState">
     <expand />
