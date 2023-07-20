@@ -65,10 +65,11 @@ include_directories(protoFile)
 # WITHOUT gRPC
 add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h src/dataStructs/dataStruct.cpp
         include/dataStructs/dataStruct.h ${PROTO_SRCS} ${PROTO_HDRS} src/dataStructs/fileStruct.cpp
-        include/dataStructs/fileStruct.h include/XStore_Networking/zmq.hpp include/XStore_Networking/zmq_addon.hpp
-        include/XStore_Networking/XStore_zmqServer.h src/XStore_Networking/XStore_zmqServer.cpp
-        include/XStore_Networking/zhelpers.hpp src/dataStructs/configStruct.cpp include/dataStructs/configStruct.h
-        include/dataStructs/timeStruct.h src/dataStructs/timeStruct.cpp include/XStore_Networking/zstdpp.hpp)
+        include/dataStructs/fileStruct.h include/Networking/zmq.hpp include/Networking/zmq_addon.hpp
+        include/Networking/XStore_zmqServer.h src/XStore_Networking/XStore_zmqServer.cpp
+        include/Networking/zhelpers.hpp src/dataStructs/configStruct.cpp include/dataStructs/configStruct.h
+        include/dataStructs/timeStruct.h src/dataStructs/timeStruct.cpp include/Networking/zstdpp.hpp
+        include/Compression/zstd_seekable.h)
 
 add_compile_options(-O3)
 target_link_libraries(XStore PUBLIC "zstd" "stdc++fs" ${Protobuf_LIBRARIES} "zmq" Threads::Threads)

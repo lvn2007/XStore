@@ -21,14 +21,22 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Test commit">
-      <change afterPath="$PROJECT_DIR$/Findzstd.cmake" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/include/XStore_Networking/zstdpp.hpp" afterDir="false" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Testing ZSTD">
+      <change afterPath="$PROJECT_DIR$/.idea/other.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/include/Compression/zstd_seekable.h" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/Compression/zstdseek_compress.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.gitlab-ci.yml" beforeDir="false" afterPath="$PROJECT_DIR$/.gitlab-ci.yml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/CMakeLists.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/include/XStore_Networking/XStore_zmqServer.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/XStore_Networking/XStore_zmqServer.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/protoFile/XStore_pb2.py" beforeDir="false" afterPath="$PROJECT_DIR$/protoFile/XStore_pb2.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/XStore/cpp/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/cpp/CMakeLists.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/include/XStore_Networking/XStore_gRPC.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/Networking/XStore_gRPC.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/include/XStore_Networking/XStore_zmqServer.h" beforeDir="false" afterPath="$PROJECT_DIR$/include/Networking/XStore_zmqServer.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/include/XStore_Networking/zhelpers.hpp" beforeDir="false" afterPath="$PROJECT_DIR$/include/Networking/zhelpers.hpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/include/XStore_Networking/zmq.hpp" beforeDir="false" afterPath="$PROJECT_DIR$/include/Networking/zmq.hpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/include/XStore_Networking/zmq_addon.hpp" beforeDir="false" afterPath="$PROJECT_DIR$/include/Networking/zmq_addon.hpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/include/XStore_Networking/zstdpp.hpp" beforeDir="false" afterPath="$PROJECT_DIR$/include/Networking/zstdpp.hpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/XStore_Networking/XStore_zmqServer.cpp" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -81,28 +89,28 @@
     <option name="showMembers" value="true" />
     <option name="showVisibilityIcons" value="true" />
   </component>
-  <component name="PropertiesComponent">{
-  &quot;keyToString&quot;: {
-    &quot;Git.Branch.Popup.ShowAllRepositories&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.OpenProjectViewOnStart&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.cidr.known.project.marker&quot;: &quot;true&quot;,
-    &quot;SHARE_PROJECT_CONFIGURATION_FILES&quot;: &quot;true&quot;,
-    &quot;WebServerToolWindowFactoryState&quot;: &quot;true&quot;,
-    &quot;WebServerToolWindowPanel.toolwindow.highlight.mappings&quot;: &quot;true&quot;,
-    &quot;WebServerToolWindowPanel.toolwindow.highlight.symlinks&quot;: &quot;true&quot;,
-    &quot;WebServerToolWindowPanel.toolwindow.show.date&quot;: &quot;false&quot;,
-    &quot;WebServerToolWindowPanel.toolwindow.show.permissions&quot;: &quot;false&quot;,
-    &quot;WebServerToolWindowPanel.toolwindow.show.size&quot;: &quot;false&quot;,
-    &quot;cf.first.check.clang-format&quot;: &quot;false&quot;,
-    &quot;cidr.known.project.marker&quot;: &quot;true&quot;,
-    &quot;last_opened_file_path&quot;: &quot;/Users/gbn/CLionProjects/XStore&quot;,
-    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
-    &quot;run.code.analysis.last.selected.profile&quot;: &quot;pProject Default&quot;,
-    &quot;settings.editor.selected.configurable&quot;: &quot;CMakeSettings&quot;,
-    &quot;structure.view.defaults.are.configured&quot;: &quot;true&quot;
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "Git.Branch.Popup.ShowAllRepositories": "true",
+    "RunOnceActivity.OpenProjectViewOnStart": "true",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.cidr.known.project.marker": "true",
+    "SHARE_PROJECT_CONFIGURATION_FILES": "true",
+    "WebServerToolWindowFactoryState": "true",
+    "WebServerToolWindowPanel.toolwindow.highlight.mappings": "true",
+    "WebServerToolWindowPanel.toolwindow.highlight.symlinks": "true",
+    "WebServerToolWindowPanel.toolwindow.show.date": "false",
+    "WebServerToolWindowPanel.toolwindow.show.permissions": "false",
+    "WebServerToolWindowPanel.toolwindow.show.size": "false",
+    "cf.first.check.clang-format": "false",
+    "cidr.known.project.marker": "true",
+    "last_opened_file_path": "/Users/gbn/CLionProjects/XStore",
+    "nodejs_package_manager_path": "npm",
+    "run.code.analysis.last.selected.profile": "pProject Default",
+    "settings.editor.selected.configurable": "CPPToolchains",
+    "structure.view.defaults.are.configured": "true"
   }
-}</component>
+}]]></component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
       <recent name="$PROJECT_DIR$/include/XStore" />
@@ -400,14 +408,9 @@
       <workItem from="1687835675826" duration="1237000" />
       <workItem from="1687867452858" duration="7860000" />
       <workItem from="1688564191435" duration="20374000" />
-      <workItem from="1688660461536" duration="10073000" />
-    </task>
-    <task id="LOCAL-00234" summary="Implemented batchInsert">
-      <created>1668906344306</created>
-      <option name="number" value="00234" />
-      <option name="presentableId" value="LOCAL-00234" />
-      <option name="project" value="LOCAL" />
-      <updated>1668906344306</updated>
+      <workItem from="1688660461536" duration="29770000" />
+      <workItem from="1689603602035" duration="107000" />
+      <workItem from="1689603722897" duration="852000" />
     </task>
     <task id="LOCAL-00235" summary="Cleanup &amp; Update Python API library">
       <created>1668906994895</created>
@@ -745,7 +748,14 @@
       <option name="project" value="LOCAL" />
       <updated>1688074940257</updated>
     </task>
-    <option name="localTasksCounter" value="283" />
+    <task id="LOCAL-00283" summary="Testing ZSTD">
+      <created>1688743992146</created>
+      <option name="number" value="00283" />
+      <option name="presentableId" value="LOCAL-00283" />
+      <option name="project" value="LOCAL" />
+      <updated>1688743992147</updated>
+    </task>
+    <option name="localTasksCounter" value="284" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -852,7 +862,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Enable millisecond (ms) &amp; Removed dead code" />
     <MESSAGE value="Clean-up Proto file &amp; Faster range query" />
     <MESSAGE value="Implemented unaryDelete" />
     <MESSAGE value="Enabled unaryDelete in Server" />
@@ -877,7 +886,8 @@
     <MESSAGE value="Removed absl lib" />
     <MESSAGE value="Re-using single Protobuf object throughout entire rangeQuery call" />
     <MESSAGE value="Test commit" />
-    <option name="LAST_COMMIT_MESSAGE" value="Test commit" />
+    <MESSAGE value="Testing ZSTD" />
+    <option name="LAST_COMMIT_MESSAGE" value="Testing ZSTD" />
   </component>
   <component name="XSLT-Support.FileAssociations.UIState">
     <expand />

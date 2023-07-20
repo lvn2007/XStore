@@ -1,5 +1,6 @@
 #include <string.h>
 #include <zstd.h>
+#include "include/Compression/zstd_seekable.h"
 
 namespace zstdpp {
     inline std::string compress(const std::string data, int compress_level) {
