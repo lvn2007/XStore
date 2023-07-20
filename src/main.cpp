@@ -1,5 +1,5 @@
 #include <iostream>
-#include "include/XStore_Networking/XStore_zmqServer.h"
+#include "include/Networking/XStore_zmqServer.h"
 #include "include/XStore/XStore.h"
 #include <cmath>
 #include <variant>
@@ -80,34 +80,9 @@ int main(int argc, char *argv[]) {
     std::string BIND_PORT = argv[2];
     int THREAD_COUNT = atoi(argv[3]);
 
-//    char a[] = "202cb962ac59075b964b07152d234b70";
-//    char b[50];
-//    std::cout << "OG Size: " << strlen(a) << std::endl;
-//
-//    // zlib struct
-//    z_stream zStream;
-//    zStream.zalloc = Z_NULL;
-//    zStream.zfree = Z_NULL;
-//    zStream.opaque = Z_NULL;
-//
-//    // Setup input a to compressed output b
-//    zStream.avail_in = (uInt) strlen(a) + 1;
-//    zStream.next_in = (Bytef *) a;
-//    zStream.avail_out = (uInt) sizeof(b);
-//    zStream.next_out = (Bytef *) b;
-//
-//    // COMPRESS
-//    deflateInit(&zStream, Z_BEST_COMPRESSION);
-//    deflate(&zStream, Z_FINISH);
-//    deflateEnd(&zStream);
-//
-//    std::cout << "Compressed size: " << strlen(b) << std::endl;
-//    std::cout << "Compressed string: " << b << std::endl;
-
-
     // ----DEV AREA
     // Instantiate XStore obj
-//    XStore myStore;
+    XStore myStore;
 
     // Create DB
 //    XStore_Proto::createDB_REP create_db_rep = myStore.createDB("TSLA", XStore_Proto::timeUnit::SECOND, 128);
@@ -115,12 +90,44 @@ int main(int argc, char *argv[]) {
 
     // UNARY INSERT
 //    XStore_Proto::rowData oneRow;
-//    XStore_Proto::fieldData *field1 = oneRow.add_fdata();
-//    field1->set_int32data(191239);
-//    XStore_Proto::fieldData *field2 = oneRow.add_fdata();
+//    XStore_Proto::fData *field1 = oneRow.add_fielddata();
+//    field1->set_stringdata("191239");
+//    XStore_Proto::fData *field2 = oneRow.add_fielddata();
 //    field2->set_stringdata("191239");
-//    XStore_Proto::fieldData *field22 = oneRow.add_fdata();
+//    XStore_Proto::fData *field22 = oneRow.add_fielddata();
+//    field22->set_stringdata("33.3333333333333");
+
+//    XStore_Proto::rowData oneRow;
+//    XStore_Proto::fData *field1 = oneRow.add_fielddata();
+//    field1->set_int32data(191239);
+//    XStore_Proto::fData *field2 = oneRow.add_fielddata();
+//    field2->set_floatdata(2344234.2343224);
+//    XStore_Proto::fData *field22 = oneRow.add_fielddata();
 //    field22->set_doubledata(33.3333333333333);
+
+//    XStore_Proto::rowData oneRow;
+//    XStore_Proto::fData *field1 = oneRow.add_fielddata();
+//    field1->set_int32data(191239);
+//    XStore_Proto::fData *field2 = oneRow.add_fielddata();
+//    field2->set_int32data(2344234);
+//    XStore_Proto::fData *field3 = oneRow.add_fielddata();
+//    field3->set_int32data(333333333);
+//    XStore_Proto::fData *field4 = oneRow.add_fielddata();
+//    field4->set_int32data(123123);
+//    XStore_Proto::fData *field5 = oneRow.add_fielddata();
+//    field5->set_int32data(354345352);
+//    XStore_Proto::fData *field6 = oneRow.add_fielddata();
+//    field6->set_int32data(982347812);
+//
+//    std::string testStr = &oneRow.SerializeAsString()[0];
+//    std::string compressedStr = zstdpp::compress(&testStr[0], 22);
+//    std::cout << "OG data: " << testStr << std::endl;
+//    std::cout << "OG size: " << testStr.size() << std::endl;
+//    std::cout << "Compressed size: " << compressedStr.size() << std::endl;
+//
+//    std::string decompStr = zstdpp::decompress(compressedStr);
+//    XStore_Proto::rowData decompRow;
+//    decompRow.ParseFromString(&decompStr[0]);
 
 //    XStore_Proto::rowData twoRow;
 //    XStore_Proto::fieldData *field3 = twoRow.add_fdata();

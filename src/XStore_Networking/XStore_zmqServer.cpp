@@ -1,4 +1,4 @@
-#include "include/XStore_Networking/XStore_zmqServer.h"
+#include "include/Networking/XStore_zmqServer.h"
 
 struct threadArgs {
     zmq::context_t *zmqCtx;

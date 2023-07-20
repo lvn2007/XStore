@@ -3,10 +3,10 @@
 
 #include <include/XStore/XStore.h>
 #include <pthread.h>
-#include "include/XStore_Networking/zmq.hpp"
+#include "include/Networking/zmq.hpp"
 #include "XStore.pb.h"
-#include "include/XStore_Networking/zmq_addon.hpp"
-#include "include/XStore_Networking/zstdpp.hpp"
+#include "include/Networking/zmq_addon.hpp"
+#include "include/Networking/zstdpp.hpp"
 
 class XStore_zmqServer {
     private:
