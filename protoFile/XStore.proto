@@ -56,6 +56,10 @@ message rowData {
   repeated fData fieldData = 1;
 }
 
+message multipleRowData {
+  repeated rowData rData = 1;
+}
+
 message reqCMD {
   requestType rType = 1;
 }

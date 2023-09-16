@@ -6,7 +6,6 @@
 #include "include/Networking/zmq.hpp"
 #include "XStore.pb.h"
 #include "include/Networking/zmq_addon.hpp"
-#include "include/Networking/zstdpp.hpp"
 
 class XStore_zmqServer {
     private:

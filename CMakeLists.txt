@@ -68,8 +68,8 @@ add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h
         include/dataStructs/fileStruct.h include/Networking/zmq.hpp include/Networking/zmq_addon.hpp
         include/Networking/XStore_zmqServer.h src/XStore_Networking/XStore_zmqServer.cpp
         include/Networking/zhelpers.hpp src/dataStructs/configStruct.cpp include/dataStructs/configStruct.h
-        include/dataStructs/timeStruct.h src/dataStructs/timeStruct.cpp include/Networking/zstdpp.hpp
-        include/Compression/zstd_seekable.h)
+        include/dataStructs/timeStruct.h src/dataStructs/timeStruct.cpp
+        include/Compression/shoco.h src/Compression/shoco.cpp include/Compression/shoco_model.h include/Compression/zstdpp.hpp)
 
 add_compile_options(-O3)
 target_link_libraries(XStore PUBLIC "zstd" "stdc++fs" ${Protobuf_LIBRARIES} "zmq" Threads::Threads)
