@@ -3,71 +3,149 @@
 #include "include/XStore/XStore.h"
 #include <cmath>
 #include <variant>
-#include "zlib.h"
+#include "include/Compression/zstdpp.hpp"
+#include "include/Compression/shoco.h"
+#include <fstream>
+#include <bitset>
 
-double meanCalc(std::vector<double> inputVector) {
-    double totalSum = 0;
+// Clock init
+std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
+std::chrono::duration<double> diff;
 
-    for (int i = 0; i < inputVector.size(); i++) {
-        totalSum += inputVector.at(i);
+struct benchData {
+    double usec;
+    size_t OGLength;
+    size_t compLength;
+
+    benchData(double usecTimeTaken, size_t originalLength, size_t compressedLength) {
+        usec = usecTimeTaken;
+        OGLength = originalLength;
+        compLength = compressedLength;
     }
 
-    return totalSum / inputVector.size();
+    std::string toString() {
+        return std::to_string(usec) + "," + std::to_string(OGLength) + "," + std::to_string(compLength) + "\n";
+    }
+};
+
+benchData shoco(std::string &inputData, bool benchComp) {
+    char output[inputData.length() + 1];
+
+    if (benchComp) {
+        // Clear caches
+        system("free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null");
+
+        // Start timer
+        start = std::chrono::high_resolution_clock::now();
+
+        // --- COMPRESS
+        size_t compressLength = shoco_compress(inputData.data(), 0, output, inputData.length() + 1);
+
+        // End timer
+        end = std::chrono::high_resolution_clock::now();
+        diff = end - start;
+//        std::cout << "Shoco compress: " << std::chrono::duration<double, std::micro> (diff).count() << " (usec)" << std::endl;
+//        std::cout << "Original size: " << inputData.length() << std::endl;
+//        std::cout << "Shoco compressed size: " << strlen(output) << std::endl;
+    }
+    else {
+        // --- COMPRESS
+        size_t compressLength = shoco_compress(inputData.data(), 0, output, inputData.length() + 1);
+
+        // --- DE-COMPRESS
+        char decomp[inputData.length() + 1];
+
+        // Clear caches
+        system("free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null");
+
+        // Start timer
+        start = std::chrono::high_resolution_clock::now();
+        size_t decompressLength = shoco_decompress(output, inputData.length() + 1, &decomp[0], inputData.length() + 1);
+
+        // End timer
+        end = std::chrono::high_resolution_clock::now();
+
+        diff = end - start;
+//        std::cout << "Shoco de-compress: " << std::chrono::duration<double, std::micro> (diff).count() << " (usec)" << std::endl;
+//        XStore_Proto::rowData rData;
+//        rData.ParseFromArray(decomp, strlen(decomp));
+//        rData.PrintDebugString();
+//        XStore_Proto::multipleRowData rowData;
+//        rowData.ParseFromArray(decomp, strlen(decomp));
+//        rowData.PrintDebugString();
+    }
+    // Assemble benchData
+    int trueSize = (sizeof(output) / sizeof(char)) - 1;
+    std::string toString = std::string(output);
+    std::cout << "String len: " << toString.length() << std::endl;
+    std::cout << sizeof(output) << std::endl;
+    benchData thisBench(std::chrono::duration<double, std::micro> (diff).count(), inputData.length(), trueSize);
+    return thisBench;
 }
 
-double stdCalc(std::vector<double> inputVector) {
-    double totalSum = 0;
-    double mean = 0;
-    double std = 0;
+benchData zstd(std::string &inputData, bool benchComp) {
+    std::string output;
 
-    for (int i = 0; i < inputVector.size(); i++) {
-        totalSum += inputVector.at(i);
+    if (benchComp) {
+        // Clear caches
+        system("free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null");
+
+        // Start timer
+        start = std::chrono::high_resolution_clock::now();
+
+        // --- COMPRESS
+        zstdpp::buff_compress(inputData, output, 22);
+
+        // End timer
+        end = std::chrono::high_resolution_clock::now();
+
+        diff = end - start;
+//        std::cout << "Shoco compress: " << std::chrono::duration<double, std::micro> (diff).count() << " (usec)" << std::endl;
+//        std::cout << "Original size: " << inputData.length() << std::endl;
+//        std::cout << "ZSTD compressed size: " << output.length() << std::endl;
     }
+    else {
+        // --- COMPRESS
+        zstdpp::buff_compress(inputData, output, 22);
 
-    mean = totalSum / inputVector.size();
+        // --- DE-COMPRESS
+        std::string decomp;
 
-    for (int i = 0; i < inputVector.size(); i++) {
-        std += pow(inputVector.at(i) - mean, 2);
+        // Clear caches
+        system("free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null");
+
+        // Start timer
+        start = std::chrono::high_resolution_clock::now();
+        zstdpp::buff_decompress(output, decomp);
+
+        // End timer
+        end = std::chrono::high_resolution_clock::now();
+
+        diff = end - start;
+//        std::cout << "ZSTD de-compress: " << std::chrono::duration<double, std::micro> (diff).count() << " (usec)" << std::endl;
     }
-
-    return sqrt(std / inputVector.size());
+    // Assemble benchData
+    benchData thisBench(std::chrono::duration<double, std::micro> (diff).count(), inputData.length(), output.length());
+    return thisBench;
 }
 
-double getMin(std::vector<double> inputVector) {
-    double minVal = inputVector.at(0);
+// for string delimiter
+std::vector<std::string> split(std::string s, std::string delimiter) {
+    size_t pos_start = 0, pos_end, delim_len = delimiter.length();
+    std::string token;
+    std::vector<std::string> res;
 
-    for (int i = 1; i < inputVector.size(); i++) {
-        if (inputVector.at(i) < minVal) {
-            minVal = inputVector.at(0);
-        }
+    while ((pos_end = s.find(delimiter, pos_start)) != std::string::npos) {
+        token = s.substr (pos_start, pos_end - pos_start);
+        pos_start = pos_end + delim_len;
+        res.push_back (token);
     }
 
-    return minVal;
-}
-
-double getMax(std::vector<double> inputVector) {
-    double maxVal = inputVector.at(0);
-
-    for (int i = 1; i < inputVector.size(); i++) {
-        if (inputVector.at(i) > maxVal) {
-            maxVal = inputVector.at(i);
-        }
-    }
-    return maxVal;
+    res.push_back (s.substr (pos_start));
+    return res;
 }
 
 int main(int argc, char *argv[]) {
-//    FILE *bFile;
-//    bFile = fopen("usingFWRITE.ttt", "wb+");
-//    oneRow.SerializeToFileDescriptor(fileno(bFile));
-//    std::fwrite(oneRow.SerializeAsString().c_str(), 128, 1, bFile);
-
-//    std::cout << "TEST READING ---- " << std::endl;
-//    XStore_Proto::data someRow;
-//    bFile = fopen("usingFWRITE.ttt", "rb");
-//    someRow.ParseFromFileDescriptor(fileno(bFile));
-//    someRow.PrintDebugString();
-
     // Handle arguments
     if (argc < 4) {
         std::cout << "[ERROR] [BOOT] - Missing required (2) arguments" << std::endl;
@@ -85,57 +163,128 @@ int main(int argc, char *argv[]) {
     XStore myStore;
 
     // Create DB
-//    XStore_Proto::createDB_REP create_db_rep = myStore.createDB("TSLA", XStore_Proto::timeUnit::SECOND, 128);
-//    create_db_rep.PrintDebugString();
+    XStore_Proto::createDB_REP create_db_rep = myStore.createDB("TSLA", XStore_Proto::timeUnit::SECOND, 128);
+    create_db_rep.PrintDebugString();
 
-    // UNARY INSERT
-//    XStore_Proto::rowData oneRow;
-//    XStore_Proto::fData *field1 = oneRow.add_fielddata();
-//    field1->set_stringdata("191239");
-//    XStore_Proto::fData *field2 = oneRow.add_fielddata();
-//    field2->set_stringdata("191239");
-//    XStore_Proto::fData *field22 = oneRow.add_fielddata();
-//    field22->set_stringdata("33.3333333333333");
+//    XStore_Proto::rowData firstRow;
+//    XStore_Proto::fData *field1 = firstRow.add_fielddata();
+//    field1->set_floatdata(4689.89);
+//    XStore_Proto::fData *field2 = firstRow.add_fielddata();
+//    field2->set_doubledata(0.053417);
+//    XStore_Proto::fData *field3 = firstRow.add_fielddata();
+//    field3->set_int32data(61458);
+//    XStore_Proto::fData *field4 = firstRow.add_fielddata();
+//    field4->set_int32data(69180);
+//    XStore_Proto::fData *field5 = firstRow.add_fielddata();
+//    field5->set_int32data(69180);
+//    XStore_Proto::fData *field6 = firstRow.add_fielddata();
+//    field6->set_booldata(true);
 
-//    XStore_Proto::rowData oneRow;
-//    XStore_Proto::fData *field1 = oneRow.add_fielddata();
-//    field1->set_int32data(191239);
-//    XStore_Proto::fData *field2 = oneRow.add_fielddata();
-//    field2->set_floatdata(2344234.2343224);
-//    XStore_Proto::fData *field22 = oneRow.add_fielddata();
-//    field22->set_doubledata(33.3333333333333);
+//    std::string input = firstRow.SerializeAsString();
 
-//    XStore_Proto::rowData oneRow;
-//    XStore_Proto::fData *field1 = oneRow.add_fielddata();
-//    field1->set_int32data(191239);
-//    XStore_Proto::fData *field2 = oneRow.add_fielddata();
-//    field2->set_int32data(2344234);
-//    XStore_Proto::fData *field3 = oneRow.add_fielddata();
-//    field3->set_int32data(333333333);
-//    XStore_Proto::fData *field4 = oneRow.add_fielddata();
-//    field4->set_int32data(123123);
-//    XStore_Proto::fData *field5 = oneRow.add_fielddata();
-//    field5->set_int32data(354345352);
-//    XStore_Proto::fData *field6 = oneRow.add_fielddata();
-//    field6->set_int32data(982347812);
+//    std::ifstream file;
+//    file.open("/home/ubuntu/candlesticks-S_cleaned.csv");
+//    std::vector<std::string> splittedString;
+//    std::string serializedString;
+//    int count = 0;
 //
-//    std::string testStr = &oneRow.SerializeAsString()[0];
-//    std::string compressedStr = zstdpp::compress(&testStr[0], 22);
-//    std::cout << "OG data: " << testStr << std::endl;
-//    std::cout << "OG size: " << testStr.size() << std::endl;
-//    std::cout << "Compressed size: " << compressedStr.size() << std::endl;
+//    // Write to file
+//    std::ofstream outFile;
+////    outFile.open("shoco_compress.csv");
+//    outFile << "Time Taken (usec),Original Length,Compressed Length\n";
 //
-//    std::string decompStr = zstdpp::decompress(compressedStr);
-//    XStore_Proto::rowData decompRow;
-//    decompRow.ParseFromString(&decompStr[0]);
+//    XStore_Proto::multipleRowData multiRows;
+//    for (std::string line; std::getline(file, line); ) {
+//        size_t pos;
+////        std::cout << line << std::endl;
+//        splittedString = split(line, ",");
+//
+//        XStore_Proto::rowData *oneRow;
+//        oneRow = multiRows.add_rdata();
+//        XStore_Proto::fData *field1 = oneRow->add_fielddata();
+//        field1->set_floatdata(std::stof(splittedString.at(1)));
+//        XStore_Proto::fData *field2 = oneRow->add_fielddata();
+//        field2->set_floatdata(std::stof(splittedString.at(2)));
+//        XStore_Proto::fData *field3 = oneRow->add_fielddata();
+//        field3->set_floatdata(std::stof(splittedString.at(3)));
+//        XStore_Proto::fData *field4 = oneRow->add_fielddata();
+//        field4->set_floatdata(std::stof(splittedString.at(4)));
+//        XStore_Proto::fData *field5 = oneRow->add_fielddata();
+//        field5->set_doubledata(std::stod(splittedString.at(5)));
+//
+//        serializedString = oneRow->SerializeAsString();
+//
+//        // Shoco -- Compress
+//        benchData bData = shoco(serializedString, true);
+//
+//        // ZSTD -- Compress
+////        benchData bData = zstd(serializedString, false);
+//
+////        std::cout << "Time taken: " << bData.usec << std::endl;
+////        std::cout << "OG Length: " << bData.OGLength << std::endl;
+////        std::cout << "Compressed Length: " << bData.compLength << std::endl;
+////        std::cout << "----------------------------" << std::endl;
+////        outFile << bData.toString();
+//
+//        count++;
+//        if (count >= 2) {
+//            break;
+//        }
+//    }
 
-//    XStore_Proto::rowData twoRow;
-//    XStore_Proto::fieldData *field3 = twoRow.add_fdata();
-//    field3->set_int32data(39123923);
-//    XStore_Proto::fieldData *field4 = twoRow.add_fdata();
-//    field4->set_stringdata("39123923");
-//    XStore_Proto::unaryInsert_REP unary_insert_rep_1 = myStore.unaryInsert(1451606401, oneRow, "TSLA");
-//    unary_insert_rep_1.PrintDebugString();
+//    std::vector<int> iterRange {128000};
+//    for (int i = 0; i < iterRange.size(); i++) {
+//        for (int j = 0; j < 10; j++) {
+//            for (std::string line; std::getline(file, line); ) {
+//                splittedString = split(line, ",");
+//                XStore_Proto::rowData *oneRow;
+//                oneRow = multiRows.add_rdata();
+//                XStore_Proto::fData *field1 = oneRow->add_fielddata();
+//                field1->set_floatdata(std::stof(splittedString.at(1)));
+//                XStore_Proto::fData *field2 = oneRow->add_fielddata();
+//                field2->set_floatdata(std::stof(splittedString.at(2)));
+//                XStore_Proto::fData *field3 = oneRow->add_fielddata();
+//                field3->set_floatdata(std::stof(splittedString.at(3)));
+//                XStore_Proto::fData *field4 = oneRow->add_fielddata();
+//                field4->set_floatdata(std::stof(splittedString.at(4)));
+//                XStore_Proto::fData *field5 = oneRow->add_fielddata();
+//                field5->set_doubledata(std::stod(splittedString.at(5)));
+//
+//                count++;
+//                if (count >= iterRange.at(i)) {
+//                    break;
+//                }
+//            }
+//
+//            serializedString = multiRows.SerializeAsString();
+//
+//            // Shoco -- Compress
+//            benchData bData = shoco(serializedString, false);
+//
+//            // ZSTD -- Compress
+////            benchData bData = zstd(serializedString, false);
+//
+////        std::cout << "Time taken: " << bData.usec << std::endl;
+////        std::cout << "OG Length: " << bData.OGLength << std::endl;
+////        std::cout << "Compressed Length: " << bData.compLength << std::endl;
+////        std::cout << "----------------------------" << std::endl;
+//        outFile << bData.toString();
+//        }
+//    }
+
+//    multiRows.PrintDebugString();
+
+//    outFile.close();
+
+//    XStore_Proto::rowData firstHash;
+//    XStore_Proto::fData *field1 = firstHash.add_fielddata();
+//    field1->set_stringdata("aaaabbbb04b73bc0fcdefad9fd3ed7ab");
+//
+//    firstHash.PrintDebugString();
+//
+//    std::string input = firstHash.SerializeAsString();
+//
+//    shoco(input, true);
 
     // UNARY QUERY
 //    XStore_Proto::unaryQuery_REP unary_query_rep = myStore.unaryQuery(1451606401, "TSLA");

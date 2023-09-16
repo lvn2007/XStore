@@ -304,22 +304,14 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 // Compress
                 std::string protoAsStr = protoToClient.SerializeAsString();
-                auto compressed = zstdpp::compress(protoAsStr, 22);
-
-                std::cout << "Un-compressed size: " << protoAsStr.size() << std::endl;
-                std::cout << "Un-compressed data: " << protoAsStr << std::endl;
-
-                std::cout << "Compressed size: " << compressed.size() << std::endl;
-                std::cout << "Compressed data: " << compressed << std::endl;
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
                 zmq::message_t responseToClient(protoToClientSize);
 
                 //  Serialize & Dispatch msg to CLIENT
-//                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
-//                socket.send(responseToClient, zmq::send_flags::none);
-                socket.send(zmq::message_t(compressed), zmq::send_flags::none);
+                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
+                socket.send(responseToClient, zmq::send_flags::none);
                 break;
             }
 
