@@ -3,7 +3,7 @@
 
 #include "XStore.pb.h"
 #include "XStore_Client.h"
-#include "../Base_Adapter.h"
+#include "../include/Base_Adapter.h"
 
 class XStore_Adapter: public Base_Adapter {
     XStore_Client xstoreClient;

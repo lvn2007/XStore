@@ -43,6 +43,7 @@ std::vector<double> XStore_Adapter::queryB(int nIterations, long int startTime, 
     for (int i = 0; i < nIterations; i++) {
         // Generate random within start/end range
         targetTime = rangeDistribution(seedGenerator);
+        std::cout << targetTime << std::endl;
         start = std::chrono::high_resolution_clock::now();
 
         // Dispatch query

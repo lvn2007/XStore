@@ -30,7 +30,8 @@ include_directories(.)
 
 
 # WITHOUT gRPC
-add_executable(benchmarkClient ${PROTO_SRCS} ${PROTO_HDRS} XStore_Client.h main.cpp zmq.hpp zmq_addon.hpp
-        Base_Adapter.h XStore/XStore_Adapter.h XStore/XStore_Adapter.cpp MongoDB/MongoDB_Adapter.h MongoDB/MongoDB_Adapter.cpp
+add_executable(benchmarkClient ${PROTO_SRCS} ${PROTO_HDRS} include/XStore_Client.h main.cpp include/zmq.hpp include/zmq_addon.hpp
+        include/utilities.h include/Base_Adapter.h include/BS_thread_pool.hpp
+        XStore/XStore_Adapter.h XStore/XStore_Adapter.cpp MongoDB/MongoDB_Adapter.h MongoDB/MongoDB_Adapter.cpp
         )
-target_link_libraries(benchmarkClient PUBLIC ${Protobuf_LIBRARIES} "zmq" Threads::Threads)
+target_link_libraries(benchmarkClient PUBLIC ${Protobuf_LIBRARIES} "zmq")
