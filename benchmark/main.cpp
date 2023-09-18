@@ -1,22 +1,6 @@
-#include <algorithm>
 #include "XStore/XStore_Adapter.h"
 #include "../include/utilities.h"
-#include "../include/BS_thread_pool.hpp"
-
-// Threading library
-BS::thread_pool pool;
-
-std::vector<double> queryA_XStore(std::string SERVER_ADDR, std::string SERVER_PORT, int nIterations) {
-    XStore_Adapter xStoreAdapter = XStore_Adapter(SERVER_ADDR, SERVER_PORT);
-    std::vector<double> toReturn = xStoreAdapter.queryA(nIterations);
-    return toReturn;
-}
-
-std::vector<double> queryB_XStore(std::string SERVER_ADDR, std::string SERVER_PORT, int nIterations, long int startTime, long int endTime) {
-    XStore_Adapter xStoreAdapter = XStore_Adapter(SERVER_ADDR, SERVER_PORT);
-    std::vector<double> toReturn = xStoreAdapter.queryB(nIterations, startTime, endTime);
-    return toReturn;
-}
+#include <thread>
 
 int main(int argc, char const *argv[])
 {
@@ -34,7 +18,7 @@ int main(int argc, char const *argv[])
     std::string SERVER_PORT = argv[2];
     std::string EXPERIMENT_TYPE = argv[3];
     std::string TARGET_DB = argv[4];
-    int NUM_THREADS = atoi(argv[5]);
+    int NUM_THREAD = atoi(argv[5]);
 
     const std::string ALLOWED_EXPERIMENT[] = {"QUERY_A", "QUERY_B"};
     if (std::find(std::begin(ALLOWED_EXPERIMENT), std::end(ALLOWED_EXPERIMENT), EXPERIMENT_TYPE) == std::end(ALLOWED_EXPERIMENT)) {
@@ -50,53 +34,42 @@ int main(int argc, char const *argv[])
         exit(1);
     }
 
-    BS::multi_future<std::vector<double>> multiFuture;
-    std::vector<std::vector<double>> nestedVector;
+    // NUM_THREAD checking
+    unsigned int availableHT = std::thread::hardware_concurrency();
+    if (NUM_THREAD < 1 || NUM_THREAD > availableHT) {
+        std::cerr << "[ERROR - Arguments] -- Invalid NUM THREAD" << std::endl;
+        std::cerr << "Expecting: 1 <= NUM_THREAD <= " << availableHT << std::endl;
+        exit(1);
+    }
+
+    // Benchmark data will be stored here
+    std::vector<double> timeCost;
 
     if (EXPERIMENT_TYPE == "QUERY_A") {
-        int N_ITERATIONS = 1000;
+        int N_ITERATION = 1000;
         std::cout << "----- [QUERY_A] -----" << std::endl;
+        std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
         std::cout << "[BENCHMARK] Performing sequential READ" << std::endl;
-        std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
-        std::cout << "[BENCHMARK] Thread: " << NUM_THREADS << std::endl;
+        std::cout << "[BENCHMARK] Iterations: " << N_ITERATION << std::endl;
+        std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
 
         if (TARGET_DB == "XSTORE") {
-            for (int i = 0; i < NUM_THREADS; i++) {
-                multiFuture.push_back(pool.submit(queryA_XStore, SERVER_ADDR, SERVER_PORT, N_ITERATIONS));
-            }
+            timeCost = XStore_Adapter::queryA(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATION, 1451606400);
         }
     }
     else if (EXPERIMENT_TYPE == "QUERY_B") {
         int N_ITERATIONS = 1000;
         std::cout << "----- [QUERY_B] -----" << std::endl;
+        std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
         std::cout << "[BENCHMARK] Performing random READ" << std::endl;
         std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
-        std::cout << "[BENCHMARK] Thread: " << NUM_THREADS << std::endl;
+        std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
 
         if (TARGET_DB == "XSTORE") {
-            XStore_Adapter XStoreAdapter = XStore_Adapter(SERVER_ADDR, SERVER_PORT);
-//            timeCost = XStoreAdapter.queryB(N_ITERATIONS, 123, 12345);
+            timeCost = XStore_Adapter::queryB(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, 1451606400, 1451606400 + 1000000);
         }
     }
 
-    // Wait till all threads finishes
-    for (std::vector<double> i : multiFuture.get()) {
-        nestedVector.push_back(i);
-    }
-
     // Display benchmark statistics
-    std::vector<double> timeCost;
-
-    // Flattening nested vector
-    for (int i = 0; i < nestedVector.size(); i++) {
-        std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
-    }
-
-    std::cout << "\n----- [STATISTICS] -----" << std::endl;
-    std::cout << "  - Clients: " << NUM_THREADS << std::endl;
-    std::cout << "  Total: " << std::reduce(timeCost.begin(), timeCost.end()) << " (ms)" << std::endl;
-    std::cout << "  Mean:  " << meanCalc(timeCost) << " (ms)" << std::endl;
-    std::cout << "  Min:   " << getMin(timeCost) << " (ms)" << std::endl;
-    std::cout << "  Max:   " << getMax(timeCost) << " (ms)" << std::endl;
-    std::cout << "  Stdev: " << stdCalc(timeCost) << " (ms)" << std::endl;
+    printStatistics(timeCost);
 }

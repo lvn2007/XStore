@@ -7,10 +7,14 @@
 class Base_Adapter {
     public:
         // Query A -- Unary SEQ query 1k times
-        std::vector<double> queryA(int nIterations);
+        virtual std::vector<double> queryA();
 
         // Query B -- Unary RAND query 1k times
-        std::vector<double> queryB(int nIterations, long int startTime, long int endTime);
+        virtual std::vector<double> queryB();
+
+    private:
+        virtual std::vector<double> queryA_singleThread();
+        virtual std::vector<double> queryB_singleThread();
 };
 
 #endif //XSTORE_BASE_ADAPTER_H

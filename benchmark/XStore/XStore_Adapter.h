@@ -6,17 +6,16 @@
 #include "../include/Base_Adapter.h"
 
 class XStore_Adapter: public Base_Adapter {
-    XStore_Client xstoreClient;
-
     public:
-        // Initialization & Connect to XStore server
-        XStore_Adapter(std::string SERVER_ADDR, std::string SERVER_PORT);
-
         // Query A -- Unary SEQ query 1k times
-        std::vector<double> queryA(int nIterations);
+        static std::vector<double> queryA(std::string SERVER_ADDR, std::string SERVER_PORT, int NUM_THREAD, int N_ITERATION, long int startTime);
 
         // Query B -- Unary RAND query 1k times
-        std::vector<double> queryB(int nIterations, long int startTime, long int endTime);
+        static std::vector<double> queryB(std::string SERVER_ADDR, std::string SERVER_PORT, int NUM_THREAD, int N_ITERATION, long int startTime, long int endTime);
+
+    private:
+        static std::vector<double> queryA_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int NUM_THREAD, int N_ITERATION, long int startTime);
+        static std::vector<double> queryB_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int NUM_THREAD, int N_ITERATION, long int startTime, long int endTime);
 };
 
 #endif //XSTORE_XSTORE_ADAPTER_H
