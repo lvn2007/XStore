@@ -21,19 +21,13 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Begin working on C++ benchmarking code">
-      <change afterPath="$PROJECT_DIR$/benchmark/include/BS_thread_pool.hpp" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/benchmark/include/utilities.h" afterDir="false" />
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Threaded benchmark &amp; Some re-organization">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/Base_Adapter.h" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/include/Base_Adapter.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/CMakeLists.txt" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/CMakeLists.txt" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/benchmark/XStore/XStore_Adapter.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/XStore_Adapter.cpp" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/benchmark/XStore/XStore_Adapter.h" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/XStore_Adapter.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/XStore_Client.h" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/include/XStore_Client.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/include/Base_Adapter.h" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/include/Base_Adapter.h" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/benchmark/include/utilities.h" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/include/utilities.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/benchmark/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/main.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/zhelpers.hpp" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/include/zhelpers.hpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/zmq.hpp" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/include/zmq.hpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/zmq_addon.hpp" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/include/zmq_addon.hpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -415,14 +409,7 @@
       <workItem from="1693838367713" duration="9527000" />
       <workItem from="1693949513180" duration="6939000" />
       <workItem from="1694738951878" duration="29225000" />
-      <workItem from="1694896179911" duration="8910000" />
-    </task>
-    <task id="LOCAL-00237" summary="Updated removeDBFiles">
-      <created>1668915949704</created>
-      <option name="number" value="00237" />
-      <option name="presentableId" value="LOCAL-00237" />
-      <option name="project" value="LOCAL" />
-      <updated>1668915949704</updated>
+      <workItem from="1694896179911" duration="17758000" />
     </task>
     <task id="LOCAL-00238" summary="cfgMap for createDB &amp; unaryQuery. WIP: removeDB &amp; batchInsert">
       <created>1668934432981</created>
@@ -760,7 +747,14 @@
       <option name="project" value="LOCAL" />
       <updated>1694827579610</updated>
     </task>
-    <option name="localTasksCounter" value="286" />
+    <task id="LOCAL-00286" summary="Threaded benchmark &amp; Some re-organization">
+      <created>1694941036779</created>
+      <option name="number" value="00286" />
+      <option name="presentableId" value="LOCAL-00286" />
+      <option name="project" value="LOCAL" />
+      <updated>1694941036779</updated>
+    </task>
+    <option name="localTasksCounter" value="287" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -867,7 +861,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Implemented unaryDelete" />
     <MESSAGE value="Enabled unaryDelete in Server" />
     <MESSAGE value="Implemented batchQuery" />
     <MESSAGE value="Implemented batchDelete" />
@@ -892,7 +885,8 @@
     <MESSAGE value="Test commit" />
     <MESSAGE value="Testing ZSTD" />
     <MESSAGE value="Begin working on C++ benchmarking code" />
-    <option name="LAST_COMMIT_MESSAGE" value="Begin working on C++ benchmarking code" />
+    <MESSAGE value="Threaded benchmark &amp; Some re-organization" />
+    <option name="LAST_COMMIT_MESSAGE" value="Threaded benchmark &amp; Some re-organization" />
   </component>
   <component name="XSLT-Support.FileAssociations.UIState">
     <expand />

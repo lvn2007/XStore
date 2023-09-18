@@ -75,4 +75,13 @@ void writeCSV(std::string fName, std::string colName, std::vector<double> inputs
     myFile.close();
 }
 
+void printStatistics(std::vector<double> &inputVector) {
+    std::cout << "\n----- [STATISTICS] -----" << std::endl;
+    std::cout << "  Total: " << std::reduce(inputVector.begin(), inputVector.end()) << " (ms)" << std::endl;
+    std::cout << "  Mean:  " << meanCalc(inputVector) << " (ms)" << std::endl;
+    std::cout << "  Min:   " << getMin(inputVector) << " (ms)" << std::endl;
+    std::cout << "  Max:   " << getMax(inputVector) << " (ms)" << std::endl;
+    std::cout << "  Stdev: " << stdCalc(inputVector) << " (ms)" << std::endl;
+}
+
 #endif //XSTORE_UTILITIES_H
