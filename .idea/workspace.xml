@@ -21,13 +21,9 @@
     </configurations>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Threaded benchmark &amp; Some re-organization">
+    <list default="true" id="35b5c0cb-a9f6-4897-9ed0-3e8f25c3ae0e" name="Changes" comment="Minimizing threaded benchmark">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/XStore/XStore_Adapter.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/XStore_Adapter.cpp" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/XStore/XStore_Adapter.h" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/XStore/XStore_Adapter.h" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/benchmark/include/Base_Adapter.h" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/include/Base_Adapter.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/include/utilities.h" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/include/utilities.h" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/benchmark/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/benchmark/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -409,14 +405,11 @@
       <workItem from="1693838367713" duration="9527000" />
       <workItem from="1693949513180" duration="6939000" />
       <workItem from="1694738951878" duration="29225000" />
-      <workItem from="1694896179911" duration="17758000" />
-    </task>
-    <task id="LOCAL-00238" summary="cfgMap for createDB &amp; unaryQuery. WIP: removeDB &amp; batchInsert">
-      <created>1668934432981</created>
-      <option name="number" value="00238" />
-      <option name="presentableId" value="LOCAL-00238" />
-      <option name="project" value="LOCAL" />
-      <updated>1668934432982</updated>
+      <workItem from="1694896179911" duration="18965000" />
+      <workItem from="1695042173923" duration="1010000" />
+      <workItem from="1695327517223" duration="630000" />
+      <workItem from="1695832620530" duration="1548000" />
+      <workItem from="1695919488610" duration="4000" />
     </task>
     <task id="LOCAL-00239" summary="Remove cfgMap element in removeDB &amp; Prohibit the removal of .CFG in removeDBFiles">
       <created>1669066993464</created>
@@ -754,7 +747,14 @@
       <option name="project" value="LOCAL" />
       <updated>1694941036779</updated>
     </task>
-    <option name="localTasksCounter" value="287" />
+    <task id="LOCAL-00287" summary="Minimizing threaded benchmark">
+      <created>1695000188553</created>
+      <option name="number" value="00287" />
+      <option name="presentableId" value="LOCAL-00287" />
+      <option name="project" value="LOCAL" />
+      <updated>1695000188553</updated>
+    </task>
+    <option name="localTasksCounter" value="288" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -861,7 +861,6 @@
       <path value="$PROJECT_DIR$/grpc/third_party/opentelemetry" />
       <path value="$PROJECT_DIR$/grpc/third_party/protoc-gen-validate" />
     </ignored-roots>
-    <MESSAGE value="Enabled unaryDelete in Server" />
     <MESSAGE value="Implemented batchQuery" />
     <MESSAGE value="Implemented batchDelete" />
     <MESSAGE value="Update C++ Client Proto" />
@@ -886,7 +885,8 @@
     <MESSAGE value="Testing ZSTD" />
     <MESSAGE value="Begin working on C++ benchmarking code" />
     <MESSAGE value="Threaded benchmark &amp; Some re-organization" />
-    <option name="LAST_COMMIT_MESSAGE" value="Threaded benchmark &amp; Some re-organization" />
+    <MESSAGE value="Minimizing threaded benchmark" />
+    <option name="LAST_COMMIT_MESSAGE" value="Minimizing threaded benchmark" />
   </component>
   <component name="XSLT-Support.FileAssociations.UIState">
     <expand />
