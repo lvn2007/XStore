@@ -6,8 +6,9 @@
 #include <iostream>
 #include <fstream>
 #include <algorithm>
+#include <variant>
 
-double meanCalc(std::vector<double> inputVector) {
+static double meanCalc(std::vector<double> inputVector) {
     double totalSum = 0;
 
     for (int i = 0; i < inputVector.size(); i++) {
@@ -17,7 +18,7 @@ double meanCalc(std::vector<double> inputVector) {
     return totalSum / inputVector.size();
 }
 
-double stdCalc(std::vector<double> inputVector) {
+static double stdCalc(std::vector<double> inputVector) {
     double totalSum = 0;
     double mean = 0;
     double std = 0;
@@ -35,7 +36,7 @@ double stdCalc(std::vector<double> inputVector) {
     return sqrt(std / inputVector.size());
 }
 
-double getMin(std::vector<double> inputVector) {
+static double getMin(std::vector<double> inputVector) {
     double minVal = inputVector.at(0);
 
     for (int i = 1; i < inputVector.size(); i++) {
@@ -47,7 +48,7 @@ double getMin(std::vector<double> inputVector) {
     return minVal;
 }
 
-double getMax(std::vector<double> inputVector) {
+static double getMax(std::vector<double> inputVector) {
     double maxVal = inputVector.at(0);
 
     for (int i = 1; i < inputVector.size(); i++) {
@@ -58,7 +59,7 @@ double getMax(std::vector<double> inputVector) {
     return maxVal;
 }
 
-void writeCSV(std::string fName, std::string colName, std::vector<double> inputs) {
+static void writeCSV(std::string fName, std::string colName, std::vector<double> &inputs) {
     // Create an output filestream object
     std::ofstream myFile(fName);
 
@@ -75,7 +76,15 @@ void writeCSV(std::string fName, std::string colName, std::vector<double> inputs
     myFile.close();
 }
 
-void printStatistics(std::vector<double> &inputVector) {
+static std::string toUpper(std::string inputStr) {
+    std::string toReturn;
+    for (int i = 0; i < inputStr.size(); i++) {
+        toReturn += toupper(inputStr[i]);
+    }
+    return toReturn;
+}
+
+static void printStatistics(std::vector<double> &inputVector) {
     std::cout << "\n----- [STATISTICS] -----" << std::endl;
     std::cout << "  Total: " << std::reduce(inputVector.begin(), inputVector.end()) << " (ms)" << std::endl;
     std::cout << "  Mean:  " << meanCalc(inputVector) << " (ms)" << std::endl;
