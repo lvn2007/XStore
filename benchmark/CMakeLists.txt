@@ -12,7 +12,9 @@ include(FetchContent)
 
 # Protobuf-compiler
 find_package(Protobuf REQUIRED)
+find_package(Arrow REQUIRED)
 message(STATUS "Using protobuf ${Protobuf_VERSION}")
+
 
 # Proto file
 get_filename_component(XStore_Proto "XStore.proto" ABSOLUTE)
@@ -28,10 +30,9 @@ include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 
 include_directories(.)
 
-
-# WITHOUT gRPC
 add_executable(benchmarkClient ${PROTO_SRCS} ${PROTO_HDRS} include/XStore_Client.h main.cpp include/zmq.hpp include/zmq_addon.hpp
-        include/utilities.h include/Base_Adapter.h include/BS_thread_pool.hpp
+        include/utilities.h include/Base_Adapter.h include/BS_thread_pool.hpp include/csv.hpp include/md5.h include/argparse.hpp
+        DataManager/Data_Manager.h DataManager/Data_Manager.cpp
         XStore/XStore_Adapter.h XStore/XStore_Adapter.cpp MongoDB/MongoDB_Adapter.h MongoDB/MongoDB_Adapter.cpp
         )
-target_link_libraries(benchmarkClient PUBLIC ${Protobuf_LIBRARIES} "zmq")
+target_link_libraries(benchmarkClient PUBLIC ${Protobuf_LIBRARIES} "zmq" "parquet" "arrow") # libparquet-dev
