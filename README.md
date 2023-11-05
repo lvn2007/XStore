@@ -4,6 +4,7 @@
 Source code for project XStore and its related work.
 
 Author: Lan Nguyen (Lnguyen18@hawk.iit.edu)
+
 Advisor: Ioan Raicu (iraicu@iit.edu)
 
 This work has been published to:
