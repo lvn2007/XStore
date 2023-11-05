@@ -3,8 +3,10 @@
 # Description
 Source code for project XStore and its related work.
 
-Author: Lan Nguyen (Lnguyen18@hawk.iit.edu)
+**Illinois Institute of Technology**  
+**Data-Intensive Distributed Systems Laboratory**
 
+Author: Lan Nguyen (Lnguyen18@hawk.iit.edu)</br>
 Advisor: Ioan Raicu (iraicu@iit.edu)
 
 This work has been published to:
