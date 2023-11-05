@@ -28,10 +28,9 @@ IEEE/ACM Supercomputing/SC 2023
 * Google Protocol Buffer v3.18.1 or higher
 * ZeroMQ CPP v4.8.1 or higher
 
-# Documentation
-## How to Install
+# How to Install
 * Please refer to [Installation Wiki](https://gitlab.com/lvn2007/XStore/-/wikis/installation)
 
-## How to Use
+# How to Use
 * [XStore API](https://gitlab.com/lvn2007/XStore/-/wikis/api)
 * [Data Structure](https://gitlab.com/lvn2007/XStore/-/wikis/Data%20Structure)
