@@ -32,7 +32,7 @@ IEEE/ACM Supercomputing/SC 2023
 * ZeroMQ CPP v4.8.1 or higher
 
 # How to Install
-* Please refer to [Installation Wiki](https://gitlab.com/lvn2007/XStore/-/wikis/installation)
+* [Installation Wiki](https://gitlab.com/lvn2007/XStore/-/wikis/installation)
 
 # How to Use
 * [XStore API](https://gitlab.com/lvn2007/XStore/-/wikis/api)
