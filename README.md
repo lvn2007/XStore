@@ -19,8 +19,8 @@ Lan Nguyen, Ioan Raicu.
 IEEE/ACM Supercomputing/SC 2023
 ```
 
-* Poster: 
-* 2-page Summary: 
+* Poster: [Link to Poster](https://sc23.supercomputing.org/proceedings/src_poster/poster_files/spostg124s3-file1.pdf)
+* 2-page Summary: [Link to Extended Abstract](https://sc23.supercomputing.org/proceedings/src_poster/poster_files/spostg124s3-file2.pdf) 
 * Presentation: 
 
 </details>
