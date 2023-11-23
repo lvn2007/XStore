@@ -1,20 +1,20 @@
 #include "Data_Manager.h"
 
-std::vector<std::vector<std::any>> DataManager::generateHashData(long int startTime, long int endTime, int nColumns) {
+std::vector<std::vector<std::any>> DataManager::generateHashData(unsigned long int startTime, unsigned long int endTime, int nColumns) {
     // Returning vector contains rows of data
     std::vector<std::vector<std::any>> toReturn;
 
     // Placeholder for data generation
-    long int currTime;
+    long unsigned int currTime;
     std::vector<std::any> rowData;
     std::string hashValue;
 
     // Loop through & Generate data for each unique timestamp starting from startTime
-    for (long int i = 0; i < (endTime - startTime); i++) {
+    for (long unsigned int i = 0; i < (endTime - startTime); i++) {
         currTime = startTime + i;
 
         // Append timestamp
-        rowData.emplace_back(std::to_string(currTime));
+        rowData.emplace_back(currTime);
 
         // Loop through each column and create hash value
         for (int numCol = 0; numCol < nColumns; numCol++) {
@@ -29,6 +29,59 @@ std::vector<std::vector<std::any>> DataManager::generateHashData(long int startT
         rowData.clear();
     }
     return toReturn;
+}
+
+arrow::Status DataManager::writeParquet(std::vector<std::vector<std::any>> *inputVector, std::string &outfileName) {
+    // Create schema for output file
+    arrow::FieldVector fields;
+
+    //  First column will always be timestamp
+    fields.push_back(arrow::field("timestamp", arrow::uint64()));
+
+    //  Loop through the rest of columns
+    for (int i = 1; i < inputVector->at(0).size(); i++)
+    {
+        fields.push_back(arrow::field("col" + std::to_string(i), arrow::utf8()));
+    }
+    std::shared_ptr<arrow::Schema> schema = arrow::schema(fields);
+
+    // Store data into arrow::Table for output
+    arrow::ArrayVector array_vector;
+
+    std::shared_ptr<arrow::Array> data_array;
+    arrow::UInt64Builder iBuilder;
+
+    for (int i = 0; i < inputVector->size(); i++)
+    {
+        ARROW_RETURN_NOT_OK(iBuilder.Append(std::any_cast<long unsigned int>(inputVector->at(i).at(0))));
+    }
+    ARROW_RETURN_NOT_OK(iBuilder.Finish(&data_array));
+    array_vector.push_back(data_array);
+
+    for (int i = 1; i < inputVector->at(0).size(); i++) {
+        arrow::StringBuilder sBuilder;
+        std::shared_ptr<arrow::Array> dataArray;
+
+        for (int j = 0; j < inputVector->size(); j++) {
+            ARROW_RETURN_NOT_OK(sBuilder.Append(std::any_cast<std::string>(inputVector->at(j).at(i))));
+        }
+        ARROW_RETURN_NOT_OK(sBuilder.Finish(&dataArray));
+        array_vector.push_back(dataArray);
+    }
+
+    std::shared_ptr<arrow::Table> table = arrow::Table::Make(schema, array_vector);
+
+    // Compression
+    std::shared_ptr<parquet::WriterProperties> props = parquet::WriterProperties::Builder().compression(arrow::Compression::GZIP)->build();
+    std::shared_ptr<parquet::ArrowWriterProperties> arrow_props = parquet::ArrowWriterProperties::Builder().store_schema()->build();
+
+    // Write table to output file
+    std::shared_ptr<arrow::io::FileOutputStream> outfile;
+    ARROW_ASSIGN_OR_RAISE(outfile, arrow::io::FileOutputStream::Open(outfileName + ".parquet"));
+//    ARROW_RETURN_NOT_OK(parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), 3, outfile, props, arrow_props));
+    ARROW_RETURN_NOT_OK(parquet::arrow::WriteTable(*table.get(), arrow::default_memory_pool(), outfile, /*chunk_size=*/10240, props, arrow_props));
+
+    return outfile->Close();
 }
 
 void DataManager::writeCSV(std::vector<std::vector<std::any>> inputVector, std::string outfileName) {
@@ -177,7 +230,7 @@ arrow::Status DataManager::readParquet(std::string parquetFilename, std::vector<
     // Placeholder for returning data
     int numChunks = table->column(0)->num_chunks();
     for (int i = 0; i < numChunks; i++) {
-        auto timestampArray = std::dynamic_pointer_cast<arrow::Int64Array>(table->column(0)->chunk(i));
+        auto timestampArray = std::dynamic_pointer_cast<arrow::UInt64Array>(table->column(0)->chunk(i));
 
         for (int rowIdx = 0; rowIdx < timestampArray->length(); rowIdx++) {
             outputVector->emplace_back(std::vector<std::any>{static_cast<unsigned long int>(timestampArray->Value(rowIdx))});

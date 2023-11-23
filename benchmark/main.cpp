@@ -33,7 +33,7 @@ int main(int argc, char const *argv[])
     //  Output file name
     dataGenerator.add_argument("-o", "--outfile_name").required()
         .help("Name of the generated CSV data file")
-        .default_value("hashData.csv").nargs(1);
+        .default_value("hashData.parquet").nargs(1);
 
     // ---- Benchmark runner (READ)
     argparse::ArgumentParser readBench("readBench");
@@ -145,7 +145,7 @@ int main(int argc, char const *argv[])
 
         DataManager dataManager;
         std::vector<std::vector<std::any>> hashData = dataManager.generateHashData(startTime, endTime, columnCount);
-        dataManager.writeCSV(hashData, outfile_name);
+        arrow::Status writeStatus = dataManager.writeParquet(&hashData, outfile_name);
     }
     else if (program.is_subcommand_used(readBench)) {
         std::string SERVER_ADDR = readBench.get<std::string>("-i");
@@ -245,7 +245,6 @@ int main(int argc, char const *argv[])
             DataManager dataManager;
             std::vector<std::vector<std::any>> insertData;
 
-//            insertData = dataManager.readCSV("hashData.csv", N_ITERATIONS * NUM_THREAD);
             arrow::Status readData = dataManager.readParquet(DATASET, &insertData);
 
             // Check if dataset is large enough to complete experiment
