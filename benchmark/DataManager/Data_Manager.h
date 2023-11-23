@@ -16,7 +16,6 @@
 #include <arrow/table.h>
 #include <parquet/arrow/writer.h>
 #include <parquet/arrow/reader.h>
-
 #include <arrow/api.h>
 
 // Stream
@@ -26,7 +25,8 @@
 class DataManager {
 public:
     //    std::vector<std::vector<std::any>>readCSV(std::string filePath);
-    std::vector<std::vector<std::any>> generateHashData(long int startTime, long int endTime, int nColumns);
+    std::vector<std::vector<std::any>> generateHashData(unsigned long int startTime, unsigned long int endTime, int nColumns);
+    arrow::Status writeParquet(std::vector<std::vector<std::any>> *inputVector, std::string &outfileName);
     void writeCSV(std::vector<std::vector<std::any>> inputVector, std::string outfileName);
 
     // Read test dataset
@@ -45,6 +45,5 @@ private:
         return true;
     }
 };
-
 
 #endif //XSTORE_DATAMANAGER_H
