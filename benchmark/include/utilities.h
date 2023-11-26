@@ -7,6 +7,9 @@
 #include <fstream>
 #include <algorithm>
 #include <variant>
+#include <ctime>
+#include <chrono>
+#include <thread>
 
 static double meanCalc(std::vector<double> inputVector) {
     double totalSum = 0;
@@ -91,6 +94,17 @@ static void printStatistics(std::vector<double> &inputVector) {
     std::cout << "  Min:   " << getMin(inputVector) << " (ms)" << std::endl;
     std::cout << "  Max:   " << getMax(inputVector) << " (ms)" << std::endl;
     std::cout << "  Stdev: " << stdCalc(inputVector) << " (ms)" << std::endl;
+}
+
+static void epochPoller(int targetTime) {
+    while (true) {
+        std::time_t currTime = std::time(nullptr);
+
+        if (currTime >= targetTime) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
 }
 
 #endif //XSTORE_UTILITIES_H
