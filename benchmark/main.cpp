@@ -83,6 +83,10 @@ int main(int argc, char const *argv[])
             .default_value(946'784'800).nargs(1)
             .scan<'i', unsigned long int>();
 
+    readBench.add_argument("-ia", "--invoke_at").required()
+            .help("Invoke benchmark at specific time (epoch time)")
+            .scan<'i', unsigned int>();
+
     // ---- Benchmark runner (WRITE)
     argparse::ArgumentParser writeBench("writeBench");
     writeBench.add_description("X-Bench – CRUD Benchmarking Suites for Time-Series database (WRITE)");
@@ -156,6 +160,7 @@ int main(int argc, char const *argv[])
         unsigned int N_ITERATIONS = readBench.get<unsigned int>("-n");
         unsigned int START_TIME = readBench.get<unsigned long int>("-s");
         unsigned int END_TIME = readBench.get<unsigned long int>("-en");
+        unsigned int INVOKE_AT = readBench.get<unsigned int>("-ia");
 
         // NUM_THREAD checking
         short unsigned int availableHT = std::thread::hardware_concurrency();
@@ -182,7 +187,12 @@ int main(int argc, char const *argv[])
             std::cout << "[BENCHMARK] Performing sequential READ" << std::endl;
             std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
             std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
-            std::cout << "[BENCHMARK] Start time: " << START_TIME << std::endl;
+            std::cout << "[BENCHMARK] Start time range: " << START_TIME << std::endl;
+            std::cout << "[BENCHMARK] End time range: " << END_TIME << std::endl;
+            std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
+
+            // Poll till
+            epochPoller(INVOKE_AT);
 
             if (TARGET_DB == "XSTORE") {
                 timeCost = XStore_Adapter::queryA(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, START_TIME);
