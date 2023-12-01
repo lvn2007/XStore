@@ -6,7 +6,7 @@ arrayLength=${#targetNodes[@]}
 
 # Pre-sets of libraries
 updateUpgrade="sudo apt update && sudo apt upgrade -y"
-commonLibs="sudo apt install libparquet-dev"
+xbenchLibs='sudo apt install -y ca-certificates lsb-release wget && wget https://apache.jfrog.io/artifactory/arrow/$(lsb_release --id --short | tr "A-Z" "a-z")/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb && sudo apt install -y ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb && sudo apt update && sudo apt install -y libparquet-dev'
 
 function initTmux() {
   # Start new tmux session
@@ -114,14 +114,14 @@ do
     exit
   fi
 
-  # 3. Sending custom commands
+  # 3. Installing XBench libs
   if [ $inputChoice -eq 3 ]
     then
     # Initializing tmux window according to list of targetNodes
     initSSH
 
     # Copy over XBench
-    sendCMD "${commonLibs}"
+    sendCMD "${xbenchLibs}"
 
     # Once work is done -> Attach to master session
     tmux attach -t XBench
