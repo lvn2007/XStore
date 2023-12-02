@@ -103,7 +103,7 @@ public:
       return fromServer;
   }
 
-  XStore_Proto::createDB_REP createDB(std::string &dbName, XStore_Proto::timeUnit &timeResolution, short int &rowLength) {
+  XStore_Proto::createDB_REP createDB(std::string dbName, XStore_Proto::timeUnit &timeResolution, short int &rowLength) {
       XStore_Proto::createDB_REQ toServer;
       toServer.set_rtype(XStore_Proto::CREATEDB);
       toServer.set_dbname(dbName);
@@ -148,6 +148,28 @@ public:
 
       // Received structs
       XStore_Proto::unaryInsert_REP fromServer;
+
+      fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
+      return fromServer;
+  }
+
+  XStore_Proto::rangeInsert_REP rangeInsert(XStore_Proto::rangeInsert_REQ &toServer, std::string dbName) {
+      toServer.set_rtype(XStore_Proto::RANGEINSERT);
+      toServer.set_dbname(dbName);
+
+      // Config msg and send
+      size_t byteSize = toServer.ByteSizeLong();
+      zmq::message_t z_out(byteSize);
+      toServer.SerializeToArray(z_out.data(), byteSize);
+      sock.send(z_out, zmq::send_flags::none);
+
+      // RECEIVING
+      std::vector<zmq::message_t> recv_msgs;
+      zmq::message_t zFromServer;
+      zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
+
+      // Received structs
+      XStore_Proto::rangeInsert_REP fromServer;
 
       fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
       return fromServer;

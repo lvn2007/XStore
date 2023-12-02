@@ -4,6 +4,8 @@
 #include <thread>
 #include "DataManager/Data_Manager.h"
 
+const std::string ALLOWED_DB[] = {"XSTORE", "MONGODB"};
+
 int main(int argc, char const *argv[])
 {
     argparse::ArgumentParser program("X-Bench");
@@ -35,9 +37,39 @@ int main(int argc, char const *argv[])
         .help("Name of the generated CSV data file")
         .default_value("hashData.parquet").nargs(1);
 
+    // ---- Data LOAD ALL
+    argparse::ArgumentParser dataLoader("loader");
+    dataLoader.add_description("Data Loader – Loading all data from file to DB");
+
+    //  Server IP address
+    dataLoader.add_argument("-i", "--ip_address").required()
+            .help("IP address of target DB server")
+            .default_value("127.0.0.1").nargs(1);
+
+    //  Server Port number
+    dataLoader.add_argument("-p", "--port_number").required()
+            .help("Port number of target DB server")
+            .default_value("12345").nargs(1);
+
+    //  Target DB
+    dataLoader.add_argument("-d", "--db_name").required()
+            .help("Target DB Name")
+            .default_value("XSTORE").nargs(1);
+
+    //  Number of Threads
+    dataLoader.add_argument("-t", "--thread_count").required()
+            .help("Number of client thread")
+            .default_value(1).nargs(1)
+            .scan<'i', short unsigned int>().nargs(1);
+
+    //  Data file name to be read
+    dataLoader.add_argument("-f", "--file_name").required()
+            .help("Data file name (.parquet format)")
+            .default_value("hashData.parquet").nargs(1);
+
     // ---- Benchmark runner (READ)
     argparse::ArgumentParser readBench("readBench");
-    readBench.add_description("X-Bench – CRUD Benchmarking Suites for Time-Series database (READ)");
+    readBench.add_description("XBench – CRUD Benchmarking Suites for Time-Series database (READ)");
 
     //  Server IP address
     readBench.add_argument("-i", "--ip_address").required()
@@ -89,7 +121,7 @@ int main(int argc, char const *argv[])
 
     // ---- Benchmark runner (WRITE)
     argparse::ArgumentParser writeBench("writeBench");
-    writeBench.add_description("X-Bench – CRUD Benchmarking Suites for Time-Series database (WRITE)");
+    writeBench.add_description("XBench – CRUD Benchmarking Suites for Time-Series database (WRITE)");
 
     //  Server IP address
     writeBench.add_argument("-i", "--ip_address").required()
@@ -129,6 +161,7 @@ int main(int argc, char const *argv[])
             .default_value("hashData.parquet").nargs(1);
 
     program.add_subparser(dataGenerator);
+    program.add_subparser(dataLoader);
     program.add_subparser(readBench);
     program.add_subparser(writeBench);
 
@@ -151,6 +184,48 @@ int main(int argc, char const *argv[])
         std::vector<std::vector<std::any>> hashData = dataManager.generateHashData(startTime, endTime, columnCount);
         arrow::Status writeStatus = dataManager.writeParquet(&hashData, outfile_name);
     }
+    else if (program.is_subcommand_used(dataLoader)) {
+        std::string SERVER_ADDR = dataLoader.get<std::string>("-i");
+        std::string SERVER_PORT = dataLoader.get<std::string>("-p");
+        std::string TARGET_DB = toUpper(dataLoader.get<std::string>("-d"));
+        short unsigned int NUM_THREAD = dataLoader.get<unsigned short int>("-t");
+        std::string DATASET = dataLoader.get<std::string>("-f");
+
+        // NUM_THREAD checking
+        short unsigned int availableHT = std::thread::hardware_concurrency();
+        if (NUM_THREAD < 1 || NUM_THREAD > availableHT) {
+            std::cerr << "[ERROR - Arguments] -- Invalid NUM THREAD" << std::endl;
+            std::cerr << "Expecting: 1 <= NUM_THREAD <= " << availableHT << std::endl;
+            exit(1);
+        }
+
+        // Target DB checking
+        if (std::find(std::begin(ALLOWED_DB), std::end(ALLOWED_DB), TARGET_DB) == std::end(ALLOWED_DB)) {
+            std::cerr << "[ERROR - Arguments] -- Invalid TARGET DB" << std::endl;
+            std::cerr << "Available TARGET DB: \n   - XSTORE\n   - MONGODB" << std::endl;
+            exit(1);
+        }
+
+        // Benchmark data will be stored here
+        std::vector<double> timeCost;
+
+        std::cout << "----- [DATA LOADING] -----" << std::endl;
+        std::cout << "[LOAD] Target DB: " << TARGET_DB << std::endl;
+        std::cout << "[LOAD] Performing sequential WRITE" << std::endl;
+        std::cout << "[LOAD] Thread: " << NUM_THREAD << std::endl;
+        std::cout << "[LOAD] Dataset: " << DATASET << std::endl;
+
+        // Spawning Data Manager
+        DataManager dataManager;
+        std::vector<std::vector<std::any>> insertData;
+
+        // Read data from parquet file
+        arrow::Status readData = dataManager.readParquet(DATASET, &insertData);
+
+        if (TARGET_DB == "XSTORE") {
+            timeCost = XStore_Adapter::loadAll(SERVER_ADDR, SERVER_PORT, NUM_THREAD, insertData);
+        }
+    }
     else if (program.is_subcommand_used(readBench)) {
         std::string SERVER_ADDR = readBench.get<std::string>("-i");
         std::string SERVER_PORT = readBench.get<std::string>("-p");
@@ -171,7 +246,6 @@ int main(int argc, char const *argv[])
         }
 
         // Target DB checking
-        const std::string ALLOWED_DB[] = {"XSTORE", "MONGODB"};
         if (std::find(std::begin(ALLOWED_DB), std::end(ALLOWED_DB), TARGET_DB) == std::end(ALLOWED_DB)) {
             std::cerr << "[ERROR - Arguments] -- Invalid TARGET DB" << std::endl;
             std::cerr << "Available TARGET DB: \n   - XSTORE\n   - MONGODB" << std::endl;
@@ -233,7 +307,6 @@ int main(int argc, char const *argv[])
         }
 
         // Target DB checking
-        const std::string ALLOWED_DB[] = {"XSTORE", "MONGODB"};
         if (std::find(std::begin(ALLOWED_DB), std::end(ALLOWED_DB), TARGET_DB) == std::end(ALLOWED_DB)) {
             std::cerr << "[ERROR - Arguments] -- Invalid TARGET DB" << std::endl;
             std::cerr << "Available TARGET DB: \n   - XSTORE\n   - MONGODB" << std::endl;
@@ -255,6 +328,7 @@ int main(int argc, char const *argv[])
             DataManager dataManager;
             std::vector<std::vector<std::any>> insertData;
 
+            // Read data from parquet file
             arrow::Status readData = dataManager.readParquet(DATASET, &insertData);
 
             // Check if dataset is large enough to complete experiment
