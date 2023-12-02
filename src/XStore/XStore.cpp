@@ -116,6 +116,8 @@ XStore_Proto::createDB_REP XStore::createDB(std::string dbName, XStore_Proto::ti
 
             //  Close file & Release lock after write
             std::fclose(bFile);
+            fsync(fileno(bFile));
+
             flock(fileno(bFile), LOCK_UN);
 
             //  Add this cfgStruct to cfgMap
@@ -798,7 +800,7 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
         FILE *cFile;
         std::string cfgPath = dbBasePath + dbName + ".CFG";
         cFile = std::fopen(cfgPath.c_str(), "rb");
-        fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
+        cfgStruct.ParseFromFileDescriptor(fileno(cFile));
         std::fclose(cFile);
         cfgMap[dbName] = cfgStruct;
     }
@@ -885,7 +887,6 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
     // Return insert status
     std::string successMsg = "[SUCCESS] [RANGE INSERT] [DB: " + dbName + "] - Inserted " + std::to_string(protoFromClient->rangeinsert_data_size()) + " elements successfully";
     toReturn.set_insertstatus(successMsg);
-
     return toReturn;
 }
 

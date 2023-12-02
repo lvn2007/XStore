@@ -83,6 +83,7 @@ do
   echo " 3. Install XBench libraries"
   echo " 4. Transfer over benchmarkClient binary"
   echo " 5. Generate hash data at all target nodes"
+  echo " 6. LOAD all data"
   echo " 6. READ benchmarks"
   echo " 7. WRITE benchmarks"
   echo " 0. Exit"
@@ -163,8 +164,30 @@ do
     exit
   fi
 
-  # 6. READ benchmark
+  # 6. LOAD all data
   if [ $inputChoice -eq 6 ]
+      then
+        # Initializing tmux window according to list of targetNodes
+        initSSH
+
+        # Specific parameters of Generate hash
+        echo "--- Load All data from file"
+        echo "Data loader parameter:"
+        read -p "Server IP Addr: " ipAddr
+        read -p "Server Port No.: " portNo
+        read -p "DB Name: " dbName
+        read -p "Thread Count: " threadCount
+        read -p "Filename: " fileName
+
+        sendCMD_Singular "Node 0" "./benchmarkClient readBench -i $ipAddr -p $portNo -d $dbName -t $threadCount -f $fileName"
+
+        # Once work is done -> Attach to master session
+        tmux attach -t XBench
+        exit
+    fi
+
+  # 7. READ benchmark
+  if [ $inputChoice -eq 7 ]
     then
       # Initializing tmux window according to list of targetNodes
       initSSH
