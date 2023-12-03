@@ -205,10 +205,7 @@ do
       read -p "End time range: " endTime
       read -p "Invoke at: " invokeAt
 
-#        sendCMD "./benchmarkClient readBench -i $ipAddr -p $portNo -d $dbName -t $threadCount -e $experimentType -n $nIteration -s $startTime -en $endTime -ia $invokeAt"
-
-      # Remove when done testing
-      sendCMD "./benchmarkClient readBench -i 192.168.1.147 -p 12345 -d XSTORE -t 4 -e QUERY_A -n 1000 -s 946684800 -en 946694800 -ia 1700989990"
+      sendCMD "./benchmarkClient readBench -i $ipAddr -p $portNo -d $dbName -t $threadCount -e $experimentType -n $nIteration -s $startTime -en $endTime -ia $invokeAt"
 
       # Download benchmark results from all target nodes back into Master
       scpRecvBenchResults
