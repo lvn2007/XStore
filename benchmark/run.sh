@@ -6,7 +6,7 @@ arrayLength=${#targetNodes[@]}
 
 # Pre-sets of libraries
 updateUpgrade="sudo apt update && sudo apt upgrade -y"
-xbenchLibs='sudo apt install -y ca-certificates lsb-release wget && wget https://apache.jfrog.io/artifactory/arrow/$(lsb_release --id --short | tr "A-Z" "a-z")/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb && sudo apt install -y ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb && sudo apt update && sudo apt install -y libparquet-dev'
+xbenchLibs='sudo apt install -y ca-certificates lsb-release wget && wget https://apache.jfrog.io/artifactory/arrow/$(lsb_release --id --short | tr "A-Z" "a-z")/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb && sudo apt install -y ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb && sudo apt update && sudo apt install -y libparquet-dev && sudo apt install -y cmake g++ protobuf-compiler libprotobuf-dev libzmq3-dev'
 
 function initTmux() {
   # Start new tmux session
@@ -81,11 +81,11 @@ do
   echo " 1. List all target nodes"
   echo " 2. Send commands"
   echo " 3. Install XBench libraries"
-  echo " 4. Transfer over benchmarkClient binary"
+  echo " 4. Fetch & Compile benchmarkClient binary"
   echo " 5. Generate hash data at all target nodes"
   echo " 6. LOAD all data"
-  echo " 6. READ benchmarks"
-  echo " 7. WRITE benchmarks"
+  echo " 7. READ benchmarks"
+  echo " 8. WRITE benchmarks"
   echo " 0. Exit"
   read -p "" inputChoice
 
@@ -133,10 +133,10 @@ do
   if [ $inputChoice -eq 4 ]
   then
     # Initializing tmux window according to list of targetNodes
-    initTmux
+    initSSH
 
     # Copy over XBench
-    scpSendFiles "~/XStore/benchmark/build/benchmarkClient"
+    sendCMD "git clone https://gitlab.com/lvn2007/XStore.git; cd XStore/benchmark && mkdir -p build && cd build && cmake .. && make && cp benchmarkClient ~"
 
     # Once work is done -> Attach to master session
     tmux attach -t XBench

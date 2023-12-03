@@ -117,7 +117,7 @@ int main(int argc, char const *argv[])
 
     readBench.add_argument("-ia", "--invoke_at").required()
             .help("Invoke benchmark at specific time (epoch time)")
-            .scan<'i', unsigned int>();
+            .scan<'i', unsigned long int>();
 
     // ---- Benchmark runner (WRITE)
     argparse::ArgumentParser writeBench("writeBench");
@@ -235,7 +235,7 @@ int main(int argc, char const *argv[])
         unsigned int N_ITERATIONS = readBench.get<unsigned int>("-n");
         unsigned int START_TIME = readBench.get<unsigned long int>("-s");
         unsigned int END_TIME = readBench.get<unsigned long int>("-en");
-        unsigned int INVOKE_AT = readBench.get<unsigned int>("-ia");
+        unsigned int INVOKE_AT = readBench.get<unsigned long int>("-ia");
 
         // NUM_THREAD checking
         short unsigned int availableHT = std::thread::hardware_concurrency();
