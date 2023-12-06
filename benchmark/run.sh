@@ -192,6 +192,12 @@ do
       # Initializing tmux window according to list of targetNodes
       initSSH
 
+      # Remove any existing bench results
+      sendCMD "rm *.csv"
+
+      # Drop any cache at client side
+      sendCMD "free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null"
+
       # Specific parameters of Generate hash
       echo "--- READ Benchmark"
       echo "READ Benchmark parameter configurations:"
@@ -206,6 +212,17 @@ do
       read -p "Invoke at: " invokeAt
 
       sendCMD "./benchmarkClient readBench -i $ipAddr -p $portNo -d $dbName -t $threadCount -e $experimentType -n $nIteration -s $startTime -en $endTime -ia $invokeAt"
+
+      # Poll until user tells to fetch bench results
+      while :
+      do
+        read -p "Press (y) to fetch bench results: " fetchBench
+
+        if [ "$fetchBench" = "y" ]
+        then
+          break
+        fi
+      done
 
       # Download benchmark results from all target nodes back into Master
       scpRecvBenchResults
