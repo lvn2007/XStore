@@ -58,7 +58,7 @@ arrow::Status DataManager::writeParquet(unsigned long int startTime, unsigned lo
 
     ARROW_ASSIGN_OR_RAISE(writer, parquet::arrow::FileWriter::Open(*(schema), arrow::default_memory_pool(), outfile, props, arrow_props));
 
-    unsigned long int currentEndTime;
+    unsigned long int currentEndTime = startTime;
     for (unsigned long int idx = 0; idx < totalLoop; idx++) {
         currentEndTime = startTime + (chunkSize * idx) + chunkSize;
         std::vector<std::vector<std::any>> hashData = this->generateHashData(startTime + (chunkSize * idx), currentEndTime, nColumns);
