@@ -24,7 +24,7 @@
 
 class DataManager {
 public:
-    unsigned int chunkSize = 131'072;    // 2^17 ==> 131,072
+    unsigned int chunkSize = 1'000'000;    // Optimal chunks = 1M rows
     //    std::vector<std::vector<std::any>>readCSV(std::string filePath);
     arrow::Status writeParquet(unsigned long int startTime, unsigned long int endTime, int nColumns, std::string &outfileName);
     void writeCSV(std::vector<std::vector<std::any>> inputVector, std::string outfileName);
