@@ -31,7 +31,18 @@ std::vector<std::vector<std::any>> DataManager::generateHashData(unsigned long i
     return toReturn;
 }
 
-arrow::Status DataManager::writeParquet(std::vector<std::vector<std::any>> *inputVector, std::string &outfileName) {
+arrow::Status DataManager::writeParquet(unsigned long int startTime, unsigned long int endTime, int nColumns, std::string &outfileName) {
+    // Open Parquet file & Other properties
+    std::shared_ptr<arrow::io::FileOutputStream> outfile;
+    std::unique_ptr<parquet::arrow::FileWriter> writer;
+    ARROW_ASSIGN_OR_RAISE(outfile, arrow::io::FileOutputStream::Open(outfileName + ".parquet"));
+
+    // Parquet compression
+    std::shared_ptr<parquet::WriterProperties> props = parquet::WriterProperties::Builder().compression(arrow::Compression::GZIP)->build();
+    std::shared_ptr<parquet::ArrowWriterProperties> arrow_props = parquet::ArrowWriterProperties::Builder().store_schema()->build();
+
+    unsigned long int totalLoop = (endTime - startTime) / chunkSize;
+
     // Create schema for output file
     arrow::FieldVector fields;
 
@@ -39,49 +50,83 @@ arrow::Status DataManager::writeParquet(std::vector<std::vector<std::any>> *inpu
     fields.push_back(arrow::field("timestamp", arrow::uint64()));
 
     //  Loop through the rest of columns
-    for (int i = 1; i < inputVector->at(0).size(); i++)
+    for (int i = 0; i < nColumns; i++)
     {
         fields.push_back(arrow::field("col" + std::to_string(i), arrow::utf8()));
     }
     std::shared_ptr<arrow::Schema> schema = arrow::schema(fields);
 
-    // Store data into arrow::Table for output
-    arrow::ArrayVector array_vector;
+    ARROW_ASSIGN_OR_RAISE(writer, parquet::arrow::FileWriter::Open(*(schema), arrow::default_memory_pool(), outfile, props, arrow_props));
 
-    std::shared_ptr<arrow::Array> data_array;
-    arrow::UInt64Builder iBuilder;
+    unsigned long int currentEndTime;
+    for (unsigned long int idx = 0; idx < totalLoop; idx++) {
+        currentEndTime = startTime + (chunkSize * idx) + chunkSize;
+        std::vector<std::vector<std::any>> hashData = this->generateHashData(startTime + (chunkSize * idx), currentEndTime, nColumns);
 
-    for (int i = 0; i < inputVector->size(); i++)
-    {
-        ARROW_RETURN_NOT_OK(iBuilder.Append(std::any_cast<long unsigned int>(inputVector->at(i).at(0))));
-    }
-    ARROW_RETURN_NOT_OK(iBuilder.Finish(&data_array));
-    array_vector.push_back(data_array);
+        // Store data into arrow::Table for output
+        arrow::ArrayVector array_vector;
 
-    for (int i = 1; i < inputVector->at(0).size(); i++) {
-        arrow::StringBuilder sBuilder;
-        std::shared_ptr<arrow::Array> dataArray;
+        std::shared_ptr<arrow::Array> data_array;
+        arrow::UInt64Builder iBuilder;
 
-        for (int j = 0; j < inputVector->size(); j++) {
-            ARROW_RETURN_NOT_OK(sBuilder.Append(std::any_cast<std::string>(inputVector->at(j).at(i))));
+        for (int i = 0; i < hashData.size(); i++)
+        {
+            ARROW_RETURN_NOT_OK(iBuilder.Append(std::any_cast<unsigned long int>(hashData.at(i).at(0))));
         }
-        ARROW_RETURN_NOT_OK(sBuilder.Finish(&dataArray));
-        array_vector.push_back(dataArray);
+        ARROW_RETURN_NOT_OK(iBuilder.Finish(&data_array));
+        array_vector.push_back(data_array);
+
+        for (int i = 1; i < hashData.at(0).size(); i++) {
+            arrow::StringBuilder sBuilder;
+            std::shared_ptr<arrow::Array> dataArray;
+
+            for (int j = 0; j < hashData.size(); j++) {
+                ARROW_RETURN_NOT_OK(sBuilder.Append(std::any_cast<std::string>(hashData.at(j).at(i))));
+            }
+            ARROW_RETURN_NOT_OK(sBuilder.Finish(&dataArray));
+            array_vector.push_back(dataArray);
+        }
+
+        std::shared_ptr<arrow::Table> table = arrow::Table::Make(schema, array_vector);
+
+        // Write table to output file
+        ARROW_RETURN_NOT_OK(writer->WriteTable(*table.get(), chunkSize));
     }
 
-    std::shared_ptr<arrow::Table> table = arrow::Table::Make(schema, array_vector);
+    // Write remainder
+    if (currentEndTime < endTime) {
+        std::vector<std::vector<std::any>> hashData = this->generateHashData(currentEndTime, endTime, nColumns);
 
-    // Compression
-    std::shared_ptr<parquet::WriterProperties> props = parquet::WriterProperties::Builder().compression(arrow::Compression::GZIP)->build();
-    std::shared_ptr<parquet::ArrowWriterProperties> arrow_props = parquet::ArrowWriterProperties::Builder().store_schema()->build();
+        // Store data into arrow::Table for output
+        arrow::ArrayVector array_vector;
 
-    // Write table to output file
-    std::shared_ptr<arrow::io::FileOutputStream> outfile;
-    ARROW_ASSIGN_OR_RAISE(outfile, arrow::io::FileOutputStream::Open(outfileName + ".parquet"));
-//    ARROW_RETURN_NOT_OK(parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), 3, outfile, props, arrow_props));
-    ARROW_RETURN_NOT_OK(parquet::arrow::WriteTable(*table.get(), arrow::default_memory_pool(), outfile, /*chunk_size=*/10240, props, arrow_props));
+        std::shared_ptr<arrow::Array> data_array;
+        arrow::UInt64Builder iBuilder;
 
-    return outfile->Close();
+        for (int i = 0; i < hashData.size(); i++)
+        {
+            ARROW_RETURN_NOT_OK(iBuilder.Append(std::any_cast<long unsigned int>(hashData.at(i).at(0))));
+        }
+        ARROW_RETURN_NOT_OK(iBuilder.Finish(&data_array));
+        array_vector.push_back(data_array);
+
+        for (int i = 1; i < hashData.at(0).size(); i++) {
+            arrow::StringBuilder sBuilder;
+            std::shared_ptr<arrow::Array> dataArray;
+
+            for (int j = 0; j < hashData.size(); j++) {
+                ARROW_RETURN_NOT_OK(sBuilder.Append(std::any_cast<std::string>(hashData.at(j).at(i))));
+            }
+            ARROW_RETURN_NOT_OK(sBuilder.Finish(&dataArray));
+            array_vector.push_back(dataArray);
+        }
+
+        std::shared_ptr<arrow::Table> table = arrow::Table::Make(schema, array_vector);
+
+        // Write table to output file
+        ARROW_RETURN_NOT_OK(writer->WriteTable(*table.get(), chunkSize));
+    }
+    return writer->Close();
 }
 
 void DataManager::writeCSV(std::vector<std::vector<std::any>> inputVector, std::string outfileName) {

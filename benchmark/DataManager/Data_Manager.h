@@ -24,9 +24,9 @@
 
 class DataManager {
 public:
+    unsigned int chunkSize = 131'072;    // 2^17 ==> 131,072
     //    std::vector<std::vector<std::any>>readCSV(std::string filePath);
-    std::vector<std::vector<std::any>> generateHashData(unsigned long int startTime, unsigned long int endTime, int nColumns);
-    arrow::Status writeParquet(std::vector<std::vector<std::any>> *inputVector, std::string &outfileName);
+    arrow::Status writeParquet(unsigned long int startTime, unsigned long int endTime, int nColumns, std::string &outfileName);
     void writeCSV(std::vector<std::vector<std::any>> inputVector, std::string outfileName);
 
     // Read test dataset
@@ -38,6 +38,8 @@ public:
     arrow::Status readParquet(std::string parquetFilename, std::vector<std::vector<std::any>> *outputVector);
 
 private:
+    std::vector<std::vector<std::any>> generateHashData(unsigned long int startTime, unsigned long int endTime, int nColumns);
+
     bool isDecimal(long double number) {
         if (std::ceil(number) == std::floor(number)) {
             return false;

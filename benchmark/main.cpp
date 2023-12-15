@@ -181,8 +181,7 @@ int main(int argc, char const *argv[])
         std::string outfile_name = dataGenerator.get<std::string>("-o");
 
         DataManager dataManager;
-        std::vector<std::vector<std::any>> hashData = dataManager.generateHashData(startTime, endTime, columnCount);
-        arrow::Status writeStatus = dataManager.writeParquet(&hashData, outfile_name);
+        arrow::Status writeStatus = dataManager.writeParquet(startTime, endTime + 1, columnCount, outfile_name);
     }
     else if (program.is_subcommand_used(dataLoader)) {
         std::string SERVER_ADDR = dataLoader.get<std::string>("-i");
