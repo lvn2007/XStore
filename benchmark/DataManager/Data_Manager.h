@@ -17,8 +17,6 @@
 #include <parquet/arrow/writer.h>
 #include <parquet/arrow/reader.h>
 #include <arrow/api.h>
-
-// Stream
 #include <arrow/io/file.h>
 #include <parquet/stream_reader.h>
 
@@ -27,6 +25,7 @@ public:
     unsigned int chunkSize = 1'000'000;    // Optimal chunks = 1M rows
     //    std::vector<std::vector<std::any>>readCSV(std::string filePath);
     arrow::Status writeParquet(unsigned long int startTime, unsigned long int endTime, int nColumns, std::string &outfileName);
+    arrow::Status writeParquetNew(unsigned long int startTime, unsigned long int endTime, int nColumns, std::string &outfileName);
     void writeCSV(std::vector<std::vector<std::any>> inputVector, std::string outfileName);
 
     // Read test dataset
@@ -45,6 +44,28 @@ private:
             return false;
         }
         return true;
+    }
+
+    std::string hashFromTimestamp(long int timestamp, int columnIdx) {
+        return GetMD5String(std::to_string(timestamp) + "-" + std::to_string(columnIdx));
+    }
+
+    static std::shared_ptr<parquet::schema::GroupNode> SetupSchema(int nColumns) {
+        parquet::schema::NodeVector fields;
+        // Create a primitive node named 'boolean_field' with type:BOOLEAN,
+        // repetition:REQUIRED
+
+        // First column will always be timestamp
+        fields.push_back(parquet::schema::PrimitiveNode::Make("timestamp", parquet::Repetition::REQUIRED, parquet::Type::INT64, parquet::ConvertedType::UINT_64));
+
+        // The rest of columns will be string type
+        for (int i = 1; i < nColumns; i++) {
+            fields.push_back(parquet::schema::PrimitiveNode::Make("col-" + std::to_string(i), parquet::Repetition::REQUIRED, parquet::Type::BYTE_ARRAY, parquet::ConvertedType::UTF8));
+        }
+
+        // Create a GroupNode named 'schema' using the primitive nodes defined above
+        // This GroupNode is the root node of the schema tree
+        return std::static_pointer_cast<parquet::schema::GroupNode>(parquet::schema::GroupNode::Make("schema", parquet::Repetition::REQUIRED, fields));
     }
 };
 

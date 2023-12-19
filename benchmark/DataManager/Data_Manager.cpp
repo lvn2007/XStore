@@ -60,6 +60,8 @@ arrow::Status DataManager::writeParquet(unsigned long int startTime, unsigned lo
 
     unsigned long int currentEndTime = startTime;
     for (unsigned long int idx = 0; idx < totalLoop; idx++) {
+        std::cout << "Chunk: " << idx << std::endl;
+
         currentEndTime = startTime + (chunkSize * idx) + chunkSize;
         std::vector<std::vector<std::any>> hashData = this->generateHashData(startTime + (chunkSize * idx), currentEndTime, nColumns);
 
@@ -73,7 +75,7 @@ arrow::Status DataManager::writeParquet(unsigned long int startTime, unsigned lo
         {
             ARROW_RETURN_NOT_OK(iBuilder.Append(std::any_cast<unsigned long int>(hashData.at(i).at(0))));
         }
-        ARROW_RETURN_NOT_OK(iBuilder.Finish(&data_array));
+        ARROW_ASSIGN_OR_RAISE(data_array, iBuilder.Finish());
         array_vector.push_back(data_array);
 
         for (int i = 1; i < hashData.at(0).size(); i++) {
@@ -83,14 +85,14 @@ arrow::Status DataManager::writeParquet(unsigned long int startTime, unsigned lo
             for (int j = 0; j < hashData.size(); j++) {
                 ARROW_RETURN_NOT_OK(sBuilder.Append(std::any_cast<std::string>(hashData.at(j).at(i))));
             }
-            ARROW_RETURN_NOT_OK(sBuilder.Finish(&dataArray));
+            ARROW_ASSIGN_OR_RAISE(dataArray, sBuilder.Finish())
             array_vector.push_back(dataArray);
         }
 
         std::shared_ptr<arrow::Table> table = arrow::Table::Make(schema, array_vector);
 
         // Write table to output file
-        ARROW_RETURN_NOT_OK(writer->WriteTable(*table.get(), chunkSize));
+        PARQUET_THROW_NOT_OK(writer->WriteTable(*table, chunkSize));
     }
 
     // Write remainder
@@ -127,6 +129,81 @@ arrow::Status DataManager::writeParquet(unsigned long int startTime, unsigned lo
         ARROW_RETURN_NOT_OK(writer->WriteTable(*table.get(), chunkSize));
     }
     return writer->Close();
+}
+
+arrow::Status DataManager::writeParquetNew(unsigned long int startTime, unsigned long int endTime, int nColumns, std::string &outfileName) {
+    // File output stream
+    std::shared_ptr<arrow::io::FileOutputStream> outfile;
+    PARQUET_ASSIGN_OR_THROW(outfile, arrow::io::FileOutputStream::Open(outfileName + ".parquet"));
+
+    // Parquet schema
+    std::shared_ptr<parquet::schema::GroupNode> schema = SetupSchema(nColumns);
+
+    // Writer properties
+    parquet::WriterProperties::Builder builder;
+    builder.compression(parquet::Compression::GZIP);
+    std::shared_ptr<parquet::WriterProperties> props = builder.build();
+
+    // Create a ParquetFileWriter instance
+    std::shared_ptr<parquet::ParquetFileWriter> file_writer = parquet::ParquetFileWriter::Open(outfile, schema, props);
+
+    unsigned long int totalLoop = (endTime - startTime) / chunkSize;
+
+    unsigned long int currentEndTime = startTime;
+
+    // Gen hash on-demand
+    for (unsigned long int idx = 0; idx < totalLoop; idx++) {
+        // Append a RowGroup with a specific number of rows.
+        parquet::RowGroupWriter* rg_writer = file_writer->AppendRowGroup();
+
+        currentEndTime = startTime + (chunkSize * idx) + chunkSize;
+
+        // Writing timestamp column
+        parquet::Int64Writer* int64_writer = static_cast<parquet::Int64Writer*>(rg_writer->NextColumn());
+        for (long int timestamp = (startTime + (chunkSize * idx)); timestamp < currentEndTime; timestamp++) {
+            int64_writer->WriteBatch(1, nullptr, nullptr, &timestamp);
+        }
+
+        // Writing hash columns
+        std::string currentStr;
+        parquet::ByteArray value;
+        for (int colIdx = 1; colIdx < nColumns; colIdx++) {
+            parquet::ByteArrayWriter* ba_writer = static_cast<parquet::ByteArrayWriter*>(rg_writer->NextColumn());
+            for (long int timestamp = (startTime + (chunkSize * idx)); timestamp < currentEndTime; timestamp++) {
+                currentStr = this->hashFromTimestamp(timestamp, colIdx);
+                value.ptr = reinterpret_cast<const uint8_t*>(currentStr.c_str());
+                value.len = currentStr.length();
+                ba_writer->WriteBatch(1, nullptr, nullptr, &value);
+            }
+        }
+    }
+
+    if (currentEndTime < endTime) {
+        // Append a RowGroup with a specific number of rows.
+        parquet::RowGroupWriter* rg_writer = file_writer->AppendRowGroup();
+
+        // Writing timestamp column
+        parquet::Int64Writer* int64_writer = static_cast<parquet::Int64Writer*>(rg_writer->NextColumn());
+        for (long int timestamp = currentEndTime; timestamp < endTime; timestamp++) {
+            int64_writer->WriteBatch(1, nullptr, nullptr, &timestamp);
+        }
+
+        // Writing hash columns
+        std::string currentStr;
+        parquet::ByteArray value;
+        for (int colIdx = 1; colIdx < nColumns; colIdx++) {
+            parquet::ByteArrayWriter* ba_writer = static_cast<parquet::ByteArrayWriter*>(rg_writer->NextColumn());
+            for (long int timestamp = currentEndTime; timestamp < endTime; timestamp++) {
+                currentStr = this->hashFromTimestamp(timestamp, colIdx);
+                value.ptr = reinterpret_cast<const uint8_t*>(currentStr.c_str());
+                value.len = currentStr.length();
+                ba_writer->WriteBatch(1, nullptr, nullptr, &value);
+            }
+        }
+    }
+
+    file_writer->Close();
+    return outfile->Close();
 }
 
 void DataManager::writeCSV(std::vector<std::vector<std::any>> inputVector, std::string outfileName) {
