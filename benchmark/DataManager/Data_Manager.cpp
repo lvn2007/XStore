@@ -145,7 +145,7 @@ arrow::Status DataManager::writeParquetNew(unsigned long int startTime, unsigned
     std::shared_ptr<parquet::WriterProperties> props = builder.build();
 
     // Create a ParquetFileWriter instance
-    std::shared_ptr<parquet::ParquetFileWriter> file_writer = parquet::ParquetFileWriter::Open(outfile, schema, props);
+    std::shared_ptr<parquet::ParquetFileWriter> file_writer = parquet::ParquetFileWriter::Open(outfile, schema);
 
     unsigned long int totalLoop = (endTime - startTime) / chunkSize;
 

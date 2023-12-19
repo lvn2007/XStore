@@ -181,8 +181,8 @@ int main(int argc, char const *argv[])
         std::string outfile_name = dataGenerator.get<std::string>("-o");
 
         DataManager dataManager;
-//        arrow::Status writeStatus = dataManager.writeParquet(startTime, endTime + 1, columnCount, outfile_name);
-        arrow::Status writeStatus = dataManager.writeParquetNew(startTime, endTime + 1, columnCount, outfile_name);
+        arrow::Status writeStatus = dataManager.writeParquet(startTime, endTime + 1, columnCount, outfile_name);
+//        arrow::Status writeStatus = dataManager.writeParquetNew(startTime, endTime + 1, columnCount, outfile_name);
     }
     else if (program.is_subcommand_used(dataLoader)) {
         std::string SERVER_ADDR = dataLoader.get<std::string>("-i");

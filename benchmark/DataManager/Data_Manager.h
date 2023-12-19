@@ -20,6 +20,9 @@
 #include <arrow/io/file.h>
 #include <parquet/stream_reader.h>
 
+#include "../include/parquet_writer.h"
+#include "../include/json.hpp"
+
 class DataManager {
 public:
     unsigned int chunkSize = 1'000'000;    // Optimal chunks = 1M rows
