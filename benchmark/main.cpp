@@ -181,7 +181,8 @@ int main(int argc, char const *argv[])
         std::string outfile_name = dataGenerator.get<std::string>("-o");
 
         DataManager dataManager;
-        arrow::Status writeStatus = dataManager.writeParquet(startTime, endTime + 1, columnCount, outfile_name);
+//        arrow::Status writeStatus = dataManager.writeParquet(startTime, endTime + 1, columnCount, outfile_name);
+        arrow::Status writeStatus = dataManager.writeParquetNew(startTime, endTime + 1, columnCount, outfile_name);
     }
     else if (program.is_subcommand_used(dataLoader)) {
         std::string SERVER_ADDR = dataLoader.get<std::string>("-i");
@@ -329,6 +330,8 @@ int main(int argc, char const *argv[])
 
             // Read data from parquet file
             arrow::Status readData = dataManager.readParquet(DATASET, &insertData);
+            std::cout << std::any_cast<unsigned long int >(insertData.at(0).at(0)) << std::endl;
+            std::cout << std::any_cast<std::string>(insertData.at(0).at(1)) << std::endl;
 
             // Check if dataset is large enough to complete experiment
             if (insertData.size() < (N_ITERATIONS * NUM_THREAD)) {
