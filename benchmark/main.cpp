@@ -16,26 +16,26 @@ int main(int argc, char const *argv[])
 
     //  Start time parsing
     dataGenerator.add_argument("-s", "--start_time").required()
-        .help("Start time in Epoch time format")
-        .scan<'i', unsigned long int>().nargs(1)
-        .default_value(946'684'800);
+            .help("Start time in Epoch time format")
+            .scan<'i', unsigned long int>().nargs(1)
+            .default_value(946'684'800);
 
     //  End time parsing
     dataGenerator.add_argument("-e", "--end_time").required()
-        .help("End time in Epoch time format")
-        .scan<'i', unsigned long int>().nargs(1)
-        .default_value(947'684'800);
+            .help("End time in Epoch time format")
+            .scan<'i', unsigned long int>().nargs(1)
+            .default_value(947'684'800);
 
     //  Number of column parsing
     dataGenerator.add_argument("-c", "--column_count").required()
-        .help("Number of columns")
-        .scan<'i', unsigned short int>().nargs(1)
-        .default_value(8);
+            .help("Number of columns")
+            .scan<'i', unsigned short int>().nargs(1)
+            .default_value(8);
 
     //  Output file name
     dataGenerator.add_argument("-o", "--outfile_name").required()
-        .help("Name of the generated CSV data file")
-        .default_value("hashData.parquet").nargs(1);
+            .help("Name of the generated CSV data file")
+            .default_value("hashData.parquet").nargs(1);
 
     // ---- Data LOAD ALL
     argparse::ArgumentParser dataLoader("loader");
@@ -73,29 +73,29 @@ int main(int argc, char const *argv[])
 
     //  Server IP address
     readBench.add_argument("-i", "--ip_address").required()
-        .help("IP address of target DB server")
-        .default_value("127.0.0.1").nargs(1);
+            .help("IP address of target DB server")
+            .default_value("127.0.0.1").nargs(1);
 
     //  Server Port number
     readBench.add_argument("-p", "--port_number").required()
-        .help("Port number of target DB server")
-        .default_value("12345").nargs(1);
+            .help("Port number of target DB server")
+            .default_value("12345").nargs(1);
 
     //  Target DB
     readBench.add_argument("-d", "--db_name").required()
-        .help("Target DB Name")
-        .default_value("XSTORE").nargs(1);
+            .help("Target DB Name")
+            .default_value("XSTORE").nargs(1);
 
     //  Number of Threads
     readBench.add_argument("-t", "--thread_count").required()
-        .help("Number of client thread")
-        .default_value(1).nargs(1)
-        .scan<'i', unsigned short int>();
+            .help("Number of client thread")
+            .default_value(1).nargs(1)
+            .scan<'i', unsigned short int>();
 
     //  Type of Experiment
     readBench.add_argument("-e", "--experiment_type").required()
-        .help("Experiment type")
-        .default_value("QUERY_A").nargs(1);
+            .help("Experiment type")
+            .default_value("QUERY_A").nargs(1);
 
     //  Number of Iterations
     readBench.add_argument("-n", "--n_iteration").required()
@@ -182,7 +182,6 @@ int main(int argc, char const *argv[])
 
         DataManager dataManager;
         arrow::Status writeStatus = dataManager.writeParquet(startTime, endTime + 1, columnCount, outfile_name);
-//        arrow::Status writeStatus = dataManager.writeParquetNew(startTime, endTime + 1, columnCount, outfile_name);
     }
     else if (program.is_subcommand_used(dataLoader)) {
         std::string SERVER_ADDR = dataLoader.get<std::string>("-i");
