@@ -1,7 +1,5 @@
 # All target machines for experiments are declared here
-#targetNodes=("ubuntu@192.168.1.223")
-targetNodes=("cc@129.114.108.188" "cc@129.114.109.135" "cc@129.114.108.134" "cc@129.114.108.255" "cc@129.114.109.86"
-"cc@129.114.109.158" "cc@129.114.109.131" "cc@129.114.109.98")
+targetNodes=("cc@129.114.108.188" "cc@129.114.109.135" "cc@129.114.108.134")
 arrayLength=${#targetNodes[@]}
 
 # Pre-sets of libraries
