@@ -72,4 +72,4 @@ add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h
         include/Compression/shoco.h src/Compression/shoco.cpp include/Compression/shoco_model.h include/Compression/zstdpp.hpp)
 
 add_compile_options(-O3)
-target_link_libraries(XStore PUBLIC "zstd" "stdc++fs" ${Protobuf_LIBRARIES} "zmq" Threads::Threads)
+target_link_libraries(XStore PUBLIC "stdc++fs" ${Protobuf_LIBRARIES} "zmq" Threads::Threads)

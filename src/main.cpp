@@ -3,7 +3,7 @@
 #include "include/XStore/XStore.h"
 #include <cmath>
 #include <variant>
-#include "include/Compression/zstdpp.hpp"
+//#include "include/Compression/zstdpp.hpp"
 #include "include/Compression/shoco.h"
 #include <fstream>
 #include <bitset>
@@ -83,51 +83,51 @@ benchData shoco(std::string &inputData, bool benchComp) {
     return thisBench;
 }
 
-benchData zstd(std::string &inputData, bool benchComp) {
-    std::string output;
-
-    if (benchComp) {
-        // Clear caches
-        system("free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null");
-
-        // Start timer
-        start = std::chrono::high_resolution_clock::now();
-
-        // --- COMPRESS
-        zstdpp::buff_compress(inputData, output, 22);
-
-        // End timer
-        end = std::chrono::high_resolution_clock::now();
-
-        diff = end - start;
-//        std::cout << "Shoco compress: " << std::chrono::duration<double, std::micro> (diff).count() << " (usec)" << std::endl;
-//        std::cout << "Original size: " << inputData.length() << std::endl;
-//        std::cout << "ZSTD compressed size: " << output.length() << std::endl;
-    }
-    else {
-        // --- COMPRESS
-        zstdpp::buff_compress(inputData, output, 22);
-
-        // --- DE-COMPRESS
-        std::string decomp;
-
-        // Clear caches
-        system("free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null");
-
-        // Start timer
-        start = std::chrono::high_resolution_clock::now();
-        zstdpp::buff_decompress(output, decomp);
-
-        // End timer
-        end = std::chrono::high_resolution_clock::now();
-
-        diff = end - start;
-//        std::cout << "ZSTD de-compress: " << std::chrono::duration<double, std::micro> (diff).count() << " (usec)" << std::endl;
-    }
-    // Assemble benchData
-    benchData thisBench(std::chrono::duration<double, std::micro> (diff).count(), inputData.length(), output.length());
-    return thisBench;
-}
+//benchData zstd(std::string &inputData, bool benchComp) {
+//    std::string output;
+//
+//    if (benchComp) {
+//        // Clear caches
+//        system("free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null");
+//
+//        // Start timer
+//        start = std::chrono::high_resolution_clock::now();
+//
+//        // --- COMPRESS
+//        zstdpp::buff_compress(inputData, output, 22);
+//
+//        // End timer
+//        end = std::chrono::high_resolution_clock::now();
+//
+//        diff = end - start;
+////        std::cout << "Shoco compress: " << std::chrono::duration<double, std::micro> (diff).count() << " (usec)" << std::endl;
+////        std::cout << "Original size: " << inputData.length() << std::endl;
+////        std::cout << "ZSTD compressed size: " << output.length() << std::endl;
+//    }
+//    else {
+//        // --- COMPRESS
+//        zstdpp::buff_compress(inputData, output, 22);
+//
+//        // --- DE-COMPRESS
+//        std::string decomp;
+//
+//        // Clear caches
+//        system("free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null");
+//
+//        // Start timer
+//        start = std::chrono::high_resolution_clock::now();
+//        zstdpp::buff_decompress(output, decomp);
+//
+//        // End timer
+//        end = std::chrono::high_resolution_clock::now();
+//
+//        diff = end - start;
+////        std::cout << "ZSTD de-compress: " << std::chrono::duration<double, std::micro> (diff).count() << " (usec)" << std::endl;
+//    }
+//    // Assemble benchData
+//    benchData thisBench(std::chrono::duration<double, std::micro> (diff).count(), inputData.length(), output.length());
+//    return thisBench;
+//}
 
 // for string delimiter
 std::vector<std::string> split(std::string s, std::string delimiter) {
