@@ -240,9 +240,19 @@ arrow::Status DataManager::readParquet(std::string parquetFilename, std::vector<
     std::shared_ptr<arrow::io::RandomAccessFile> input;
     ARROW_ASSIGN_OR_RAISE(input, arrow::io::ReadableFile::Open(parquetFilename));
 
+    // Reader properties
+    parquet::ArrowReaderProperties arrow_reader_properties = parquet::default_arrow_reader_properties();
+    arrow_reader_properties.set_pre_buffer(true);
+    arrow_reader_properties.set_use_threads(true);
+    parquet::ReaderProperties reader_properties = parquet::default_reader_properties();
+
     // Open Parquet file reader
     std::unique_ptr<parquet::arrow::FileReader> arrow_reader;
-    ARROW_RETURN_NOT_OK(parquet::arrow::OpenFile(input, pool, &arrow_reader));
+    auto reader_builder = parquet::arrow::FileReaderBuilder();
+    reader_builder.properties(arrow_reader_properties);
+    reader_builder.Open(input, reader_properties);
+
+    ARROW_RETURN_NOT_OK(reader_builder.Build(&arrow_reader));
 
     // Read entire file as a single Arrow table
     std::shared_ptr<arrow::Table> table;

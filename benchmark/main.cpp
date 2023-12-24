@@ -34,7 +34,7 @@ int main(int argc, char const *argv[])
 
     //  Output file name
     dataGenerator.add_argument("-o", "--outfile_name").required()
-            .help("Name of the generated CSV data file")
+            .help("Name of the generated Parquet data file (With .parquet extension)")
             .default_value("hashData.parquet").nargs(1);
 
     // ---- Data LOAD ALL
@@ -329,8 +329,6 @@ int main(int argc, char const *argv[])
 
             // Read data from parquet file
             arrow::Status readData = dataManager.readParquet(DATASET, &insertData);
-            std::cout << std::any_cast<unsigned long int >(insertData.at(0).at(0)) << std::endl;
-            std::cout << std::any_cast<std::string>(insertData.at(0).at(1)) << std::endl;
 
             // Check if dataset is large enough to complete experiment
             if (insertData.size() < (N_ITERATIONS * NUM_THREAD)) {
