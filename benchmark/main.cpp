@@ -3,6 +3,7 @@
 #include "include/argparse.hpp"
 #include <thread>
 #include "DataManager/Data_Manager.h"
+#include <filesystem>
 
 const std::string ALLOWED_DB[] = {"XSTORE", "MONGODB"};
 
@@ -68,102 +69,90 @@ int main(int argc, char const *argv[])
             .default_value("hashData.parquet").nargs(1);
 
     // ---- Benchmark runner (READ)
-    argparse::ArgumentParser readBench("readBench");
-    readBench.add_description("XBench – CRUD Benchmarking Suites for Time-Series database (READ)");
+    argparse::ArgumentParser queryBench("queryBench");
+    queryBench.add_description("XBench – CRUD Benchmarking Suites for Time-Series database (QUERY)");
 
     //  Server IP address
-    readBench.add_argument("-i", "--ip_address").required()
+    queryBench.add_argument("-i", "--ip_address").required()
             .help("IP address of target DB server")
             .default_value("127.0.0.1").nargs(1);
 
     //  Server Port number
-    readBench.add_argument("-p", "--port_number").required()
+    queryBench.add_argument("-p", "--port_number").required()
             .help("Port number of target DB server")
             .default_value("12345").nargs(1);
 
     //  Target DB
-    readBench.add_argument("-d", "--db_name").required()
+    queryBench.add_argument("-d", "--db_name").required()
             .help("Target DB Name")
             .default_value("XSTORE").nargs(1);
 
     //  Number of Threads
-    readBench.add_argument("-t", "--thread_count").required()
+    queryBench.add_argument("-t", "--thread_count").required()
             .help("Number of client thread")
             .default_value(1).nargs(1)
             .scan<'i', unsigned short int>();
 
     //  Type of Experiment
-    readBench.add_argument("-e", "--experiment_type").required()
+    queryBench.add_argument("-e", "--experiment_type").required()
             .help("Experiment type")
             .default_value("QUERY_A").nargs(1);
 
     //  Number of Iterations
-    readBench.add_argument("-n", "--n_iteration").required()
+    queryBench.add_argument("-n", "--n_iteration").required()
             .help("Number of iterations")
             .default_value(1).nargs(1)
             .scan<'i', unsigned int>();
 
-    //  Start time
-    readBench.add_argument("-s", "--start_time").required()
-            .help("Start time in Epoch time format")
-            .default_value(946'684'800).nargs(1)
-            .scan<'i', unsigned long int>();
-
-    //  End time
-    readBench.add_argument("-en", "--end_time").required()
-            .help("End time in Epoch time format")
-            .default_value(946'784'800).nargs(1)
-            .scan<'i', unsigned long int>();
-
-    readBench.add_argument("-ia", "--invoke_at").required()
+    queryBench.add_argument("-ia", "--invoke_at").required()
             .help("Invoke benchmark at specific time (epoch time)")
             .scan<'i', unsigned long int>();
 
     // ---- Benchmark runner (WRITE)
-    argparse::ArgumentParser writeBench("writeBench");
-    writeBench.add_description("XBench – CRUD Benchmarking Suites for Time-Series database (WRITE)");
+    argparse::ArgumentParser insertBench("insertBench");
+    insertBench.add_description("XBench – CRUD Benchmarking Suites for Time-Series database (INSERT)");
 
     //  Server IP address
-    writeBench.add_argument("-i", "--ip_address").required()
+    insertBench.add_argument("-i", "--ip_address").required()
             .help("IP address of target DB server")
             .default_value("127.0.0.1").nargs(1);
 
     //  Server Port number
-    writeBench.add_argument("-p", "--port_number").required()
+    insertBench.add_argument("-p", "--port_number").required()
             .help("Port number of target DB server")
             .default_value("12345").nargs(1);
 
     //  Target DB
-    writeBench.add_argument("-d", "--db_name").required()
+    insertBench.add_argument("-d", "--db_name").required()
             .help("Target DB Name")
             .default_value("XSTORE").nargs(1);
 
     //  Number of Threads
-    writeBench.add_argument("-t", "--thread_count").required()
+    insertBench.add_argument("-t", "--thread_count").required()
             .help("Number of client thread")
             .default_value(1).nargs(1)
             .scan<'i', short unsigned int>().nargs(1);
 
     //  Type of Experiment
-    writeBench.add_argument("-e", "--experiment_type").required()
+    insertBench.add_argument("-e", "--experiment_type").required()
             .help("Experiment type")
             .default_value("INSERT_A").nargs(1);
 
     //  Number of Iterations
-    writeBench.add_argument("-n", "--n_iteration").required()
+    insertBench.add_argument("-n", "--n_iteration").required()
             .help("Number of iterations")
             .default_value(1).nargs(1)
             .scan<'i', unsigned int>();
 
     //  Data file name to be read
-    writeBench.add_argument("-f", "--file_name").required()
+    insertBench.add_argument("-f", "--file_name").required()
             .help("Data file name (.parquet format)")
             .default_value("hashData.parquet").nargs(1);
 
     program.add_subparser(dataGenerator);
     program.add_subparser(dataLoader);
-    program.add_subparser(readBench);
-    program.add_subparser(writeBench);
+    program.add_subparser(queryBench);
+    program.add_subparser(insertBench);
 
     try {
         program.parse_args(argc, argv);
@@ -225,16 +214,14 @@ int main(int argc, char const *argv[])
             timeCost = XStore_Adapter::loadAll(SERVER_ADDR, SERVER_PORT, NUM_THREAD, insertData);
         }
     }
-    else if (program.is_subcommand_used(readBench)) {
-        std::string SERVER_ADDR = readBench.get<std::string>("-i");
-        std::string SERVER_PORT = readBench.get<std::string>("-p");
-        std::string TARGET_DB = toUpper(readBench.get<std::string>("-d"));
-        std::string EXPERIMENT_TYPE = toUpper(readBench.get<std::string>("-e"));
-        short unsigned int NUM_THREAD = readBench.get<unsigned short int>("-t");
-        unsigned int N_ITERATIONS = readBench.get<unsigned int>("-n");
-        unsigned int START_TIME = readBench.get<unsigned long int>("-s");
-        unsigned int END_TIME = readBench.get<unsigned long int>("-en");
-        unsigned int INVOKE_AT = readBench.get<unsigned long int>("-ia");
+    else if (program.is_subcommand_used(queryBench)) {
+        std::string SERVER_ADDR = queryBench.get<std::string>("-i");
+        std::string SERVER_PORT = queryBench.get<std::string>("-p");
+        std::string TARGET_DB = toUpper(queryBench.get<std::string>("-d"));
+        std::string EXPERIMENT_TYPE = toUpper(queryBench.get<std::string>("-e"));
+        short unsigned int NUM_THREAD = queryBench.get<unsigned short int>("-t");
+        unsigned int N_ITERATIONS = queryBench.get<unsigned int>("-n");
+        unsigned int INVOKE_AT = queryBench.get<unsigned long int>("-ia");
 
         // NUM_THREAD checking
         short unsigned int availableHT = std::thread::hardware_concurrency();
@@ -251,51 +238,59 @@ int main(int argc, char const *argv[])
             exit(1);
         }
 
+        // Spawning Data Manager
+        DataManager dataManager;
+
         // Benchmark data will be stored here
         std::vector<double> timeCost;
 
-        if (EXPERIMENT_TYPE == "QUERY_A") {
+        if (EXPERIMENT_TYPE == "SEQ") {
             std::cout << "----- [QUERY_A] -----" << std::endl;
             std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
             std::cout << "[BENCHMARK] Performing sequential READ" << std::endl;
             std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
             std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
-            std::cout << "[BENCHMARK] Start time range: " << START_TIME << std::endl;
-            std::cout << "[BENCHMARK] End time range: " << END_TIME << std::endl;
             std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
+
+            // Read data from parquet file
+            std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-SEQ_Client-", NUM_THREAD, N_ITERATIONS);
 
             // Poll till
             epochPoller(INVOKE_AT);
 
             if (TARGET_DB == "XSTORE") {
-                timeCost = XStore_Adapter::queryA(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, START_TIME);
+                timeCost = XStore_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE);
             }
         }
-        else if (EXPERIMENT_TYPE == "QUERY_B") {
+        else if (EXPERIMENT_TYPE == "RAND") {
             std::cout << "----- [QUERY_B] -----" << std::endl;
             std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
             std::cout << "[BENCHMARK] Performing random READ" << std::endl;
             std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
             std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
-            std::cout << "[BENCHMARK] Start time: " << START_TIME << std::endl;
-            std::cout << "[BENCHMARK] End time: " << END_TIME << std::endl;
+
+            // Read data from parquet file
+            std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-RAND_Client-", NUM_THREAD, N_ITERATIONS);
+
+            // Poll till
+            epochPoller(INVOKE_AT);
 
             if (TARGET_DB == "XSTORE") {
-                timeCost = XStore_Adapter::queryB(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, START_TIME, END_TIME);
+                timeCost = XStore_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE);
             }
         }
 
         // Display benchmark statistics
         printStatistics(timeCost);
     }
-    else if (program.is_subcommand_used(writeBench)) {
-        std::string SERVER_ADDR = writeBench.get<std::string>("-i");
-        std::string SERVER_PORT = writeBench.get<std::string>("-p");
-        std::string TARGET_DB = toUpper(writeBench.get<std::string>("-d"));
-        std::string EXPERIMENT_TYPE = toUpper(writeBench.get<std::string>("-e"));
-        short unsigned int NUM_THREAD = writeBench.get<unsigned short int>("-t");
-        unsigned int N_ITERATIONS = writeBench.get<unsigned int>("-n");
-        std::string DATASET = writeBench.get<std::string>("-f");
+    else if (program.is_subcommand_used(insertBench)) {
+        std::string SERVER_ADDR = insertBench.get<std::string>("-i");
+        std::string SERVER_PORT = insertBench.get<std::string>("-p");
+        std::string TARGET_DB = toUpper(insertBench.get<std::string>("-d"));
+        std::string EXPERIMENT_TYPE = toUpper(insertBench.get<std::string>("-e"));
+        short unsigned int NUM_THREAD = insertBench.get<unsigned short int>("-t");
+        unsigned int N_ITERATIONS = insertBench.get<unsigned int>("-n");
+        std::string DATASET = insertBench.get<std::string>("-f");
 
         // NUM_THREAD checking
         short unsigned int availableHT = std::thread::hardware_concurrency();
