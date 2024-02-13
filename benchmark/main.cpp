@@ -245,9 +245,9 @@ int main(int argc, char const *argv[])
         std::vector<double> timeCost;
 
         if (EXPERIMENT_TYPE == "SEQ") {
-            std::cout << "----- [QUERY_A] -----" << std::endl;
+            std::cout << "----- [UNARY QUERY] -----" << std::endl;
             std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
-            std::cout << "[BENCHMARK] Performing sequential READ" << std::endl;
+            std::cout << "[BENCHMARK] Pattern: Sequential" << std::endl;
             std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
             std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
             std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
@@ -263,11 +263,12 @@ int main(int argc, char const *argv[])
             }
         }
         else if (EXPERIMENT_TYPE == "RAND") {
-            std::cout << "----- [QUERY_B] -----" << std::endl;
+            std::cout << "----- [UNARY QUERY] -----" << std::endl;
             std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
-            std::cout << "[BENCHMARK] Performing random READ" << std::endl;
+            std::cout << "[BENCHMARK] Pattern: Random" << std::endl;
             std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
             std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
+            std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
 
             // Read data from parquet file
             std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-RAND_Client-", NUM_THREAD, N_ITERATIONS);
@@ -278,6 +279,14 @@ int main(int argc, char const *argv[])
             if (TARGET_DB == "XSTORE") {
                 timeCost = XStore_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE);
             }
+        }
+        else if (EXPERIMENT_TYPE == "RANGE") {
+            std::cout << "----- [UNARY QUERY] -----" << std::endl;
+            std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
+            std::cout << "[BENCHMARK] Pattern: Random" << std::endl;
+            std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
+            std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
+            std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
         }
 
         // Display benchmark statistics
