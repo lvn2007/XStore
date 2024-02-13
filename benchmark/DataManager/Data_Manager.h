@@ -5,10 +5,12 @@
 #include <random>
 #include <variant>
 #include <fstream>
+#include <iostream>
 #include <any>
 #include <map>
 #include "include/md5.h"
 #include "include/csv.hpp"
+#include "include/utilities.h"
 #include <arrow/io/api.h>
 #include <arrow/array/builder_primitive.h>
 #include <arrow/result.h>
@@ -34,6 +36,9 @@ public:
 
     //  Arrow Parquet
     arrow::Status readParquet(std::string parquetFilename, std::vector<std::vector<std::any>> *outputVector);
+
+    //  READ query workload
+    std::vector<std::vector<std::vector<std::any>>> readQueryWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations);
 
 private:
     std::vector<std::vector<std::any>> generateHashData(unsigned long int startTime, unsigned long int endTime, int nColumns);

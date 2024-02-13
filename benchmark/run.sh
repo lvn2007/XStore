@@ -4,7 +4,7 @@ arrayLength=${#targetNodes[@]}
 
 # Pre-sets of libraries
 updateUpgrade="sudo apt update && sudo apt upgrade -y"
-xbenchLibs='sudo apt install -y ca-certificates lsb-release wget && wget https://apache.jfrog.io/artifactory/arrow/$(lsb_release --id --short | tr "A-Z" "a-z")/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb && sudo apt install -y ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb && sudo apt update && sudo apt install -y libparquet-dev && sudo apt install -y cmake g++ protobuf-compiler libprotobuf-dev libzmq3-dev'
+xbenchLibs='sudo apt install -y ca-certificates lsb-release wget && wget https://apache.jfrog.io/artifactory/arrow/$(lsb_release --id --short | tr "A-Z" "a-z")/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb && sudo apt install -y ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb && sudo apt update && sudo apt install -y libparquet-dev && sudo apt install -y cmake g++ protobuf-compiler libprotobuf-dev libzmq3-dev && pip3 install pandas fastparquet'
 
 function initTmux() {
   # Start new tmux session
@@ -81,25 +81,26 @@ do
   echo " 3. Install XBench libraries"
   echo " 4. Fetch & Compile benchmarkClient binary"
   echo " 5. Generate hash data at all target nodes"
-  echo " 6. LOAD all data"
-  echo " 7. READ benchmarks"
-  echo " 8. WRITE benchmarks"
+  echo " 6. Generate workload"
+  echo " 7. LOAD all data"
+  echo " 8. READ benchmarks"
+  echo " 9. WRITE benchmarks"
   echo " 0. Exit"
   read -p "" inputChoice
 
-  if [ $inputChoice -eq 0 ]
+  if [ "$inputChoice" -eq 0 ]
   then
     break
   fi
 
   # 1. List all target nodes
-  if [ $inputChoice -eq 1 ]
+  if [ "$inputChoice" -eq 1 ]
   then
     listTargetNodes
   fi
 
   # 2. Sending custom commands
-  if [ $inputChoice -eq 2 ]
+  if [ "$inputChoice" -eq 2 ]
     then
     # Initializing tmux window according to list of targetNodes
     initSSH
@@ -114,7 +115,7 @@ do
   fi
 
   # 3. Installing XBench libs
-  if [ $inputChoice -eq 3 ]
+  if [ "$inputChoice" -eq 3 ]
     then
     # Initializing tmux window according to list of targetNodes
     initSSH
@@ -128,7 +129,7 @@ do
   fi
 
   # 4. Transfer over benchmarkClient binary
-  if [ $inputChoice -eq 4 ]
+  if [ "$inputChoice" -eq 4 ]
   then
     # Initializing tmux window according to list of targetNodes
     initSSH
@@ -142,7 +143,7 @@ do
   fi
 
   # 5. Generate hash data at all target nodes
-  if [ $inputChoice -eq 5 ]
+  if [ "$inputChoice" -eq 5 ]
   then
     # Initializing tmux window according to list of targetNodes
     initSSH
@@ -155,15 +156,48 @@ do
     read -p "Column count: " columnCount
     read -p "Outfile name: " outfileName
 
-    sendCMD "./benchmarkClient generate -s $startTime -e $endTime -c $columnCount -o $outfileName"
+    sendCMD "./parquetOPS.py generate -s $startTime -e $endTime -c $columnCount -o $outfileName"
 
     # Once work is done -> Attach to master session
     tmux attach -t XBench
     exit
   fi
 
-  # 6. LOAD all data
-  if [ $inputChoice -eq 6 ]
+  # 6. Generate workload
+  if [ "$inputChoice" -eq 6 ]
+  then
+    # Initializing tmux window
+    initSSH
+
+    # Specific parameters of Generate hash
+    echo "Operation type: "
+    echo " 1. Query"
+    echo " 2. Insert"
+    read -p "" operationType
+
+    # QUERY workloads
+    if [ "$operationType" = "1" ]
+    then
+      echo "--- "
+      read -r -p "Workload type: " workloadType
+      read -r -p "Offset: " offset
+      read -r -p "Sample size: " sampleSize
+      read -r -p "Number of clients: " numClients
+      read -r -p "Start time: " startTime
+      read -r -p "End time: " endTime
+      read -r -p "Batch iter: " batchIter
+
+      echo "./parquetOPS.py queryWorkload -t $workloadType -o $offset -s $sampleSize -n $numClients -st $startTime -et $endTime -b $batchIter"
+#      sendCMD "./parquetOPS.py queryWorkload -t $workloadType -o $offset -s $sampleSize -n $numClients -st $startTime -et $endTime -b $batchIter"
+    fi
+
+    # Once work is done -> Attach to master session
+    tmux attach -t XBench
+    exit
+  fi
+
+  # 7. LOAD all data
+  if [ "$inputChoice" -eq 7 ]
       then
         # Initializing tmux window according to list of targetNodes
         initSSH
@@ -184,8 +218,8 @@ do
         exit
     fi
 
-  # 7. READ benchmark
-  if [ $inputChoice -eq 7 ]
+  # 8. READ benchmark
+  if [ "$inputChoice" -eq 8 ]
     then
       # Initializing tmux window according to list of targetNodes
       initSSH

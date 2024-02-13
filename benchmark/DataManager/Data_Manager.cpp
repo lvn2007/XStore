@@ -264,7 +264,7 @@ arrow::Status DataManager::readParquet(std::string parquetFilename, std::vector<
     for (int i = 0; i < numChunks; i++) {
         auto timestampArray = std::dynamic_pointer_cast<arrow::UInt64Array>(table->column(0)->chunk(i));
 
-        for (int rowIdx = 0; rowIdx < timestampArray->length(); rowIdx++) {
+        for (unsigned long int rowIdx = 0; rowIdx < timestampArray->length(); rowIdx++) {
             outputVector->emplace_back(std::vector<std::any>{static_cast<unsigned long int>(timestampArray->Value(rowIdx))});
         }
     }
@@ -289,7 +289,7 @@ arrow::Status DataManager::readParquet(std::string parquetFilename, std::vector<
             for (int j = 0; j < numChunks; j++) {
                 auto stringArray = std::dynamic_pointer_cast<arrow::StringArray>(table->column(i)->chunk(j));
 
-                for (int rowIdx = 0; rowIdx < stringArray->length(); rowIdx++) {
+                for (unsigned long int rowIdx = 0; rowIdx < stringArray->length(); rowIdx++) {
                     outputVector->at(rowIdx + localIdx).emplace_back(static_cast<std::string>(stringArray->GetString(rowIdx + localIdx)));
                 }
                 localIdx += stringArray->length();
@@ -301,7 +301,7 @@ arrow::Status DataManager::readParquet(std::string parquetFilename, std::vector<
             for (int j = 0; j < numChunks; j++) {
                 auto floatArray = std::dynamic_pointer_cast<arrow::FloatArray>(table->column(i)->chunk(j));
 
-                for (int rowIdx = 0; rowIdx < floatArray->length(); rowIdx++) {
+                for (unsigned long int rowIdx = 0; rowIdx < floatArray->length(); rowIdx++) {
                     outputVector->at(rowIdx + localIdx).emplace_back(static_cast<double>(floatArray->Value(rowIdx + localIdx)));
                 }
                 localIdx += floatArray->length();
@@ -313,7 +313,7 @@ arrow::Status DataManager::readParquet(std::string parquetFilename, std::vector<
             for (int j = 0; j < numChunks; j++) {
                 auto doubleArray = std::dynamic_pointer_cast<arrow::DoubleArray>(table->column(i)->chunk(j));
 
-                for (int rowIdx = 0; rowIdx < doubleArray->length(); rowIdx++) {
+                for (unsigned long int rowIdx = 0; rowIdx < doubleArray->length(); rowIdx++) {
                     outputVector->at(rowIdx + localIdx).emplace_back(static_cast<double>(doubleArray->Value(rowIdx + localIdx)));
                 }
                 localIdx += doubleArray->length();
@@ -321,4 +321,55 @@ arrow::Status DataManager::readParquet(std::string parquetFilename, std::vector<
         }
     }
     return arrow::Status::OK();
+}
+
+std::vector<std::vector<std::vector<std::any>>> DataManager::readQueryWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations) {
+    // Containing all data for all threads
+    std::vector<std::vector<std::vector<std::any>>> toReturn;
+    std::vector<std::vector<std::any>> tempVector;
+
+    // Get list of files
+    std::vector<std::string> targetFileNames = listFiles(nameBeginsWith);
+
+    // Sort list of filename ASC
+    std::sort(targetFileNames.begin(), targetFileNames.end(), std::less<>());
+
+    // Check if files match bench criteria
+    //  Expecting nThreads == N number of files
+    if (targetFileNames.size() < nThreads) {
+        std::cerr << "[ERROR - BENCHMARK] -- Insufficient test dataset" << std::endl;
+        exit(1);
+    }
+
+    //  Expecting correct sample size
+    for (int i = 0; i < nThreads; i++) {
+        // File name
+        std::string currFile = targetFileNames.at(i);
+
+        // Parse embedded sample size from filename
+        unsigned int parsedSampleSize = std::stoul(splitByDelim(currFile, "_").at(2));
+
+        // Expecting nIterations == Parsed sample size
+        if (parsedSampleSize != nIterations) {
+            std::cerr << "[ERROR - BENCHMARK] -- Unexpected sample size" << std::endl;
+            exit(1);
+        }
+    }
+
+    // Reading each parquet workload files
+    for (int i = 0; i < nThreads; i++) {
+        // File name
+        std::string currFile = targetFileNames.at(i);
+
+        // Read workload into temp vector
+        this->readParquet(currFile, &tempVector);
+
+        // Add to master vector
+        toReturn.emplace_back(tempVector);
+
+        // Clear temp vector
+        tempVector.clear();
+    }
+
+    return toReturn;
 }

@@ -10,6 +10,7 @@
 #include <ctime>
 #include <chrono>
 #include <thread>
+#include <filesystem>
 
 static double meanCalc(std::vector<double> inputVector) {
     double totalSum = 0;
@@ -105,6 +106,33 @@ static void epochPoller(int targetTime) {
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+}
+
+static std::vector<std::string> listFiles(std::string beginsWith, std::string path = "") {
+    std::vector<std::string> toReturn;
+
+    std::string currDir = (path == "") ? std::filesystem::current_path().string() + "/" + path : std::filesystem::current_path().string() + "/" + path + "/";
+
+    for (auto& file : std::filesystem::directory_iterator(currDir)) {
+        std::string currFile = file.path().string().erase(0, currDir.size());
+
+        if (currFile.rfind(beginsWith, 0) == 0) {
+            toReturn.emplace_back(currFile);
+        }
+    }
+    return toReturn;
+}
+
+static std::vector<std::string> splitByDelim(const std::string& str, const std::string& delim)
+{
+    std::vector<std::string> vs;
+    size_t pos {};
+
+    for (size_t fd = 0; (fd = str.find(delim, pos)) != std::string::npos; pos = fd + delim.size())
+        vs.emplace_back(str.data() + pos, str.data() + fd);
+
+    vs.emplace_back(str.data() + pos, str.data() + str.size());
+    return vs;
 }
 
 #endif //XSTORE_UTILITIES_H
