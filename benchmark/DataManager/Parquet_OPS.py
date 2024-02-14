@@ -126,6 +126,7 @@ class ParquetOPS:
 
                 # Prepare DF to write
                 toWrite = pd.DataFrame(targetList, columns=['timestamp'])
+                toWrite['timestamp'] = toWrite['timestamp'].astype(np.uint64)
 
                 # Write to file
                 toWrite.to_parquet(f'BASIC-QUERY-RAND_Client-{i}_{sampleSize}_{startTime}-{endTime}.parquet', engine='fastparquet', compression='zstd')
@@ -139,9 +140,11 @@ class ParquetOPS:
 
                 # Prepare DF to write
                 toWrite = pd.DataFrame(zip(sTime, eTime), columns=['startTime', 'endTime'])
+                toWrite['startTime'] = toWrite['startTime'].astype(np.uint64)
+                toWrite['endTime'] = toWrite['endTime'].astype(np.uint64)
 
                 # Write to file
-                toWrite.to_parquet(f'BASIC-QUERY-RANGE_Client-{i}_{sampleSize}-{batchIter}_{startTime}-{endTime}.parquet', engine='fastparquet', compression='zstd')
+                toWrite.to_parquet(f'BASIC-QUERY-RANGE_Client-{i}_{batchIter}-{sampleSize}_{startTime}-{endTime}.parquet', engine='fastparquet', compression='zstd')
 
         elif queryType == 'BATCH':
             # Data for all N clients
@@ -156,10 +159,11 @@ class ParquetOPS:
 
                 # Prepare DF to write
                 toWrite = pd.DataFrame(targetList)
+                toWrite = toWrite.astype(np.uint64)
                 toWrite.columns = toWrite.columns.astype(str)
 
                 # Write to file
-                toWrite.to_parquet(f'BASIC-QUERY-BATCH_Client-{i}_{sampleSize}-{batchIter}_{startTime}-{endTime}.parquet', engine='fastparquet', compression='zstd')
+                toWrite.to_parquet(f'BASIC-QUERY-BATCH_Client-{i}_{batchIter}-{sampleSize}_{startTime}-{endTime}.parquet', engine='fastparquet', compression='zstd')
 
     def createBasicInsert(self, offset, sampleSize, nClients, inputFile, insertType='SEQ', batchIter=None):
         if batchIter is None:

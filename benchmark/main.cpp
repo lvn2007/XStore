@@ -281,12 +281,39 @@ int main(int argc, char const *argv[])
             }
         }
         else if (EXPERIMENT_TYPE == "RANGE") {
-            std::cout << "----- [UNARY QUERY] -----" << std::endl;
+            std::cout << "----- [RANGE QUERY] -----" << std::endl;
             std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
-            std::cout << "[BENCHMARK] Pattern: Random" << std::endl;
+            std::cout << "[BENCHMARK] Pattern: SEQUENTIAL" << std::endl;
             std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
             std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
             std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
+
+            // Read data from parquet file
+            std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-RANGE_Client-", NUM_THREAD, N_ITERATIONS);
+
+            // Poll till
+            epochPoller(INVOKE_AT);
+
+            if (TARGET_DB == "XSTORE") {
+                timeCost = XStore_Adapter::rangeQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE);
+            }
+        }
+        else if (EXPERIMENT_TYPE == "BATCH") {
+            std::cout << "----- [BATCH QUERY] -----" << std::endl;
+            std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
+            std::cout << "[BENCHMARK] Pattern: RANDOM" << std::endl;
+            std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
+            std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
+            std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
+
+            // Read data from parquet file
+            std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-BATCH_Client-", NUM_THREAD, N_ITERATIONS);
+
+            // Poll till
+            epochPoller(INVOKE_AT);
+            if (TARGET_DB == "XSTORE") {
+                timeCost = XStore_Adapter::batchQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE);
+            }
         }
 
         // Display benchmark statistics
