@@ -20,7 +20,57 @@ std::vector<double> XStore_Adapter::unaryQuery(std::string SERVER_ADDR, std::str
     std::vector<double> timeCost;
 
     // Flattening nested vector
-    std::string fileName = "Query-A_Client-";
+    std::string fileName = "Query_Client-";
+    for (int i = 0; i < nestedVector.size(); i++) {
+        // Write experiment result to CSV
+        writeCSV(fileName + std::to_string(i) + "_" + pattern + ".csv", "Time taken (ms)", nestedVector.at(i));
+        std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
+    }
+    return timeCost;
+}
+
+std::vector<double> XStore_Adapter::rangeQuery(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *queryData, std::string pattern) {
+    BS::multi_future<std::vector<double>> multiFuture;
+    std::vector<std::vector<double>> nestedVector;
+
+    for (int i = 0; i < NUM_THREAD; i++) {
+        multiFuture.push_back(threadPool.submit(XStore_Adapter::rangeQuery_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &queryData->at(i)));
+    }
+
+    // Wait till all threads finishes
+    for (std::vector<double> i : multiFuture.get()) {
+        nestedVector.push_back(i);
+    }
+
+    std::vector<double> timeCost;
+
+    // Flattening nested vector
+    std::string fileName = "Query_Client-";
+    for (int i = 0; i < nestedVector.size(); i++) {
+        // Write experiment result to CSV
+        writeCSV(fileName + std::to_string(i) + "_" + pattern + ".csv", "Time taken (ms)", nestedVector.at(i));
+        std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
+    }
+    return timeCost;
+}
+
+std::vector<double> XStore_Adapter::batchQuery(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *queryData, std::string pattern) {
+    BS::multi_future<std::vector<double>> multiFuture;
+    std::vector<std::vector<double>> nestedVector;
+
+    for (int i = 0; i < NUM_THREAD; i++) {
+        multiFuture.push_back(threadPool.submit(XStore_Adapter::batchQuery_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &queryData->at(i)));
+    }
+
+    // Wait till all threads finishes
+    for (std::vector<double> i : multiFuture.get()) {
+        nestedVector.push_back(i);
+    }
+
+    std::vector<double> timeCost;
+
+    // Flattening nested vector
+    std::string fileName = "Query_Client-";
     for (int i = 0; i < nestedVector.size(); i++) {
         // Write experiment result to CSV
         writeCSV(fileName + std::to_string(i) + "_" + pattern + ".csv", "Time taken (ms)", nestedVector.at(i));
@@ -127,11 +177,71 @@ std::vector<double> XStore_Adapter::unaryQuery_singleThread(std::string SERVER_A
     unsigned long int queryTargetTime;
     for (int i = 0; i < N_ITERATION; i++) {
         queryTargetTime = std::any_cast<unsigned long int>(queryData->at(i).at(0));
-        start = std::chrono::high_resolution_clock::now();
 
         // Dispatch query
+        start = std::chrono::high_resolution_clock::now();
         unaryQueryRep = xstoreClient.unaryQuery(queryTargetTime, "BENCH_DB");
+        end = std::chrono::high_resolution_clock::now();
+        timeCost = end - start;
+        toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+    }
+    return toReturn;
+}
 
+std::vector<double> XStore_Adapter::rangeQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData) {
+    std::vector<double> toReturn;
+
+    // Init client obj
+    XStore_Client xstoreClient;
+    xstoreClient.connect(SERVER_ADDR, SERVER_PORT);
+
+    // Clock init
+    std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
+    std::chrono::duration<double> timeCost;
+
+    // Query response placeholder
+    XStore_Proto::rangeQuery_REP rangeQueryRep;
+    unsigned long int queryStartTime, queryEndTime;
+
+    for (int i = 0; i < N_ITERATION; i++) {
+        queryStartTime = std::any_cast<unsigned long int>(queryData->at(i).at(0));
+        queryEndTime = std::any_cast<unsigned long int>(queryData->at(i).at(1));
+
+        // Dispatch query
+        start = std::chrono::high_resolution_clock::now();
+        rangeQueryRep = xstoreClient.rangeQuery(queryStartTime, queryEndTime, "BENCH_DB");
+        end = std::chrono::high_resolution_clock::now();
+        timeCost = end - start;
+        toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+    }
+    return toReturn;
+}
+
+std::vector<double> XStore_Adapter::batchQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData) {
+    std::vector<double> toReturn;
+
+    // Init client obj
+    XStore_Client xstoreClient;
+    xstoreClient.connect(SERVER_ADDR, SERVER_PORT);
+
+    // Clock init
+    std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
+    std::chrono::duration<double> timeCost;
+
+    // Query response placeholder
+    XStore_Proto::batchQuery_REP batchQueryRep;
+
+    for (int i = 0; i < N_ITERATION; i++) {
+        std::vector<unsigned long int> timeList;
+
+        // Extract target time into timeList - timeList can be seen as a batch of targets
+        for (int j = 0; j < queryData->at(i).size(); j++) {
+            timeList.emplace_back(std::any_cast<unsigned long int>(queryData->at(i).at(j)));
+        }
+
+        // Dispatch query
+        start = std::chrono::high_resolution_clock::now();
+        batchQueryRep = xstoreClient.batchQuery(timeList, "BENCH_DB");
         end = std::chrono::high_resolution_clock::now();
         timeCost = end - start;
         toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());

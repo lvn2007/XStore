@@ -234,7 +234,7 @@ std::vector<std::vector<std::any>> DataManager::readCSV(std::string filePath, in
 
 arrow::Status DataManager::readParquet(std::string parquetFilename, std::vector<std::vector<std::any>> *outputVector) {
     // Allowed data-types
-    std::string ALLOWED_DTYPES[] = {"utf8", "string", "int", "float", "double"};
+    std::string ALLOWED_DTYPES[] = {"utf8", "string", "int", "uint64", "float", "double"};
 
     arrow::MemoryPool* pool = arrow::default_memory_pool();
     std::shared_ptr<arrow::io::RandomAccessFile> input;
@@ -282,10 +282,9 @@ arrow::Status DataManager::readParquet(std::string parquetFilename, std::vector<
 
         // Each array specifics
         int localIdx = 0;
+        numChunks = table->column(i)->num_chunks();
 
         if (currentType == "utf8") {
-            numChunks = table->column(i)->num_chunks();
-
             for (int j = 0; j < numChunks; j++) {
                 auto stringArray = std::dynamic_pointer_cast<arrow::StringArray>(table->column(i)->chunk(j));
 
@@ -295,9 +294,17 @@ arrow::Status DataManager::readParquet(std::string parquetFilename, std::vector<
                 localIdx += stringArray->length();
             }
         }
-        else if (currentType == "float") {
-            numChunks = table->column(i)->num_chunks();
+        else if (currentType == "uint64") {
+            for (int j = 0; j < numChunks; j++) {
+                auto uint64Array = std::dynamic_pointer_cast<arrow::UInt64Array>(table->column(i)->chunk(j));
 
+                for (unsigned long int rowIdx = 0; rowIdx < uint64Array->length(); rowIdx++) {
+                    outputVector->at(rowIdx + localIdx).emplace_back(static_cast<unsigned long int>(uint64Array->Value(rowIdx + localIdx)));
+                }
+                localIdx += uint64Array->length();
+            }
+        }
+        else if (currentType == "float") {
             for (int j = 0; j < numChunks; j++) {
                 auto floatArray = std::dynamic_pointer_cast<arrow::FloatArray>(table->column(i)->chunk(j));
 
@@ -308,8 +315,6 @@ arrow::Status DataManager::readParquet(std::string parquetFilename, std::vector<
             }
         }
         else if (currentType == "double") {
-            numChunks = table->column(i)->num_chunks();
-
             for (int j = 0; j < numChunks; j++) {
                 auto doubleArray = std::dynamic_pointer_cast<arrow::DoubleArray>(table->column(i)->chunk(j));
 
@@ -324,6 +329,9 @@ arrow::Status DataManager::readParquet(std::string parquetFilename, std::vector<
 }
 
 std::vector<std::vector<std::vector<std::any>>> DataManager::readQueryWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations) {
+    // Filter outputs display
+    std::string UNARY_WORKLOADS[] = {"SEQ", "RAND"};
+
     // Containing all data for all threads
     std::vector<std::vector<std::vector<std::any>>> toReturn;
     std::vector<std::vector<std::any>> tempVector;
@@ -342,19 +350,24 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readQueryWorkload(s
     }
 
     //  Expecting correct sample size
+    unsigned int parsedSampleSize;
     for (int i = 0; i < nThreads; i++) {
         // File name
         std::string currFile = targetFileNames.at(i);
 
-        // Parse embedded sample size from filename
-        unsigned int parsedSampleSize = std::stoul(splitByDelim(currFile, "_").at(2));
-
+        // Parse embedded sample size from filename with filter
+        parsedSampleSize = std::stoul(splitByDelim(currFile, "_").at(2));
         // Expecting nIterations == Parsed sample size
         if (parsedSampleSize != nIterations) {
             std::cerr << "[ERROR - BENCHMARK] -- Unexpected sample size" << std::endl;
             exit(1);
         }
     }
+
+//    // Display IFF batch workloads
+//    if (nameBeginsWith.find("BATCH") != std::string::npos || nameBeginsWith.find("RANGE") != std::string::npos) {
+//        std::cout << "[BENCHMARK] Batch size: " << parsedSampleSize << std::endl;
+//    }
 
     // Reading each parquet workload files
     for (int i = 0; i < nThreads; i++) {
