@@ -5,38 +5,9 @@
 #include "DataManager/Data_Manager.h"
 #include <filesystem>
 
-const std::string ALLOWED_DB[] = {"XSTORE", "MONGODB"};
-
 int main(int argc, char const *argv[])
 {
     argparse::ArgumentParser program("X-Bench");
-
-    // ---- Data generator
-    argparse::ArgumentParser dataGenerator("generate");
-    dataGenerator.add_description("Synthetic data generator for benchmarking suite");
-
-    //  Start time parsing
-    dataGenerator.add_argument("-s", "--start_time").required()
-            .help("Start time in Epoch time format")
-            .scan<'i', unsigned long int>().nargs(1)
-            .default_value(946'684'800);
-
-    //  End time parsing
-    dataGenerator.add_argument("-e", "--end_time").required()
-            .help("End time in Epoch time format")
-            .scan<'i', unsigned long int>().nargs(1)
-            .default_value(947'684'800);
-
-    //  Number of column parsing
-    dataGenerator.add_argument("-c", "--column_count").required()
-            .help("Number of columns")
-            .scan<'i', unsigned short int>().nargs(1)
-            .default_value(8);
-
-    //  Output file name
-    dataGenerator.add_argument("-o", "--outfile_name").required()
-            .help("Name of the generated Parquet data file (With .parquet extension)")
-            .default_value("hashData.parquet").nargs(1);
 
     // ---- Data LOAD ALL
     argparse::ArgumentParser dataLoader("loader");
@@ -68,7 +39,7 @@ int main(int argc, char const *argv[])
             .help("Data file name (.parquet format)")
             .default_value("hashData.parquet").nargs(1);
 
-    // ---- Benchmark runner (READ)
+    // ---- Benchmark runner (QUERY)
     argparse::ArgumentParser queryBench("queryBench");
     queryBench.add_description("XBench – CRUD Benchmarking Suites for Time-Series database (QUERY)");
 
@@ -85,7 +56,8 @@ int main(int argc, char const *argv[])
     //  Target DB
     queryBench.add_argument("-d", "--db_name").required()
             .help("Target DB Name")
-            .default_value("XSTORE").nargs(1);
+            .default_value("XSTORE").nargs(1)
+            .choices("XSTORE", "MONGODB");
 
     //  Number of Threads
     queryBench.add_argument("-t", "--thread_count").required()
@@ -96,7 +68,8 @@ int main(int argc, char const *argv[])
     //  Type of Experiment
     queryBench.add_argument("-e", "--experiment_type").required()
             .help("Experiment type")
-            .default_value("QUERY_A").nargs(1);
+            .default_value("UNARY_SEQ").nargs(1)
+            .choices("UNARY_SEQ", "UNARY_RAND", "BATCH_SEQ", "BATCH_RAND");
 
     //  Number of Iterations
     queryBench.add_argument("-n", "--n_iteration").required()
@@ -106,9 +79,10 @@ int main(int argc, char const *argv[])
 
     queryBench.add_argument("-ia", "--invoke_at").required()
             .help("Invoke benchmark at specific time (epoch time)")
+            .default_value(0).nargs(1)
             .scan<'i', unsigned long int>();
 
-    // ---- Benchmark runner (WRITE)
+    // ---- Benchmark runner (INSERT)
     argparse::ArgumentParser insertBench("insertBench");
     insertBench.add_description("XBench – CRUD Benchmarking Suites for Time-Series database (INSERT)");
 
@@ -125,7 +99,8 @@ int main(int argc, char const *argv[])
     //  Target DB
     insertBench.add_argument("-d", "--db_name").required()
             .help("Target DB Name")
-            .default_value("XSTORE").nargs(1);
+            .default_value("XSTORE").nargs(1)
+            .choices("XSTORE", "MONGODB");
 
     //  Number of Threads
     insertBench.add_argument("-t", "--thread_count").required()
@@ -136,7 +111,8 @@ int main(int argc, char const *argv[])
     //  Type of Experiment
     insertBench.add_argument("-e", "--experiment_type").required()
             .help("Experiment type")
-            .default_value("INSERT_A").nargs(1);
+            .default_value("UNARY_SEQ").nargs(1)
+            .choices("UNARY_SEQ", "UNARY_RAND", "BATCH_SEQ", "BATCH_RAND");
 
     //  Number of Iterations
     insertBench.add_argument("-n", "--n_iteration").required()
@@ -144,12 +120,11 @@ int main(int argc, char const *argv[])
             .default_value(1).nargs(1)
             .scan<'i', unsigned int>();
 
-    //  Data file name to be read
-    insertBench.add_argument("-f", "--file_name").required()
-            .help("Data file name (.parquet format)")
-            .default_value("hashData.parquet").nargs(1);
+    insertBench.add_argument("-ia", "--invoke_at").required()
+            .help("Invoke benchmark at specific time (epoch time)")
+            .default_value(0).nargs(1)
+            .scan<'i', unsigned long int>();
 
-    program.add_subparser(dataGenerator);
     program.add_subparser(dataLoader);
     program.add_subparser(queryBench);
     program.add_subparser(insertBench);
@@ -163,16 +138,7 @@ int main(int argc, char const *argv[])
         return 1;
     }
 
-    if (program.is_subcommand_used(dataGenerator)) {
-        unsigned long int startTime = dataGenerator.get<unsigned long int>("-s");
-        unsigned long int endTime = dataGenerator.get<unsigned long int>("-e");
-        unsigned short int columnCount = dataGenerator.get<unsigned short int>("-c");
-        std::string outfile_name = dataGenerator.get<std::string>("-o");
-
-        DataManager dataManager;
-        arrow::Status writeStatus = dataManager.writeParquet(startTime, endTime + 1, columnCount, outfile_name);
-    }
-    else if (program.is_subcommand_used(dataLoader)) {
+    if (program.is_subcommand_used(dataLoader)) {
         std::string SERVER_ADDR = dataLoader.get<std::string>("-i");
         std::string SERVER_PORT = dataLoader.get<std::string>("-p");
         std::string TARGET_DB = toUpper(dataLoader.get<std::string>("-d"));
@@ -182,15 +148,8 @@ int main(int argc, char const *argv[])
         // NUM_THREAD checking
         short unsigned int availableHT = std::thread::hardware_concurrency();
         if (NUM_THREAD < 1 || NUM_THREAD > availableHT) {
-            std::cerr << "[ERROR - Arguments] -- Invalid NUM THREAD" << std::endl;
+            std::cerr << "[ERROR - ARGUMENTS] -- Invalid NUM THREAD" << std::endl;
             std::cerr << "Expecting: 1 <= NUM_THREAD <= " << availableHT << std::endl;
-            exit(1);
-        }
-
-        // Target DB checking
-        if (std::find(std::begin(ALLOWED_DB), std::end(ALLOWED_DB), TARGET_DB) == std::end(ALLOWED_DB)) {
-            std::cerr << "[ERROR - Arguments] -- Invalid TARGET DB" << std::endl;
-            std::cerr << "Available TARGET DB: \n   - XSTORE\n   - MONGODB" << std::endl;
             exit(1);
         }
 
@@ -226,15 +185,8 @@ int main(int argc, char const *argv[])
         // NUM_THREAD checking
         short unsigned int availableHT = std::thread::hardware_concurrency();
         if (NUM_THREAD < 1 || NUM_THREAD > availableHT) {
-            std::cerr << "[ERROR - Arguments] -- Invalid NUM THREAD" << std::endl;
+            std::cerr << "[ERROR - ARGUMENTS] -- Invalid NUM THREAD" << std::endl;
             std::cerr << "Expecting: 1 <= NUM_THREAD <= " << availableHT << std::endl;
-            exit(1);
-        }
-
-        // Target DB checking
-        if (std::find(std::begin(ALLOWED_DB), std::end(ALLOWED_DB), TARGET_DB) == std::end(ALLOWED_DB)) {
-            std::cerr << "[ERROR - Arguments] -- Invalid TARGET DB" << std::endl;
-            std::cerr << "Available TARGET DB: \n   - XSTORE\n   - MONGODB" << std::endl;
             exit(1);
         }
 
@@ -244,44 +196,8 @@ int main(int argc, char const *argv[])
         // Benchmark data will be stored here
         std::vector<double> timeCost;
 
-        if (EXPERIMENT_TYPE == "SEQ") {
+        if (EXPERIMENT_TYPE == "UNARY_SEQ") {
             std::cout << "----- [UNARY QUERY] -----" << std::endl;
-            std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
-            std::cout << "[BENCHMARK] Pattern: Sequential" << std::endl;
-            std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
-            std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
-            std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
-
-            // Read data from parquet file
-            std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-SEQ_Client-", NUM_THREAD, N_ITERATIONS);
-
-            // Poll till
-            epochPoller(INVOKE_AT);
-
-            if (TARGET_DB == "XSTORE") {
-                timeCost = XStore_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE);
-            }
-        }
-        else if (EXPERIMENT_TYPE == "RAND") {
-            std::cout << "----- [UNARY QUERY] -----" << std::endl;
-            std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
-            std::cout << "[BENCHMARK] Pattern: Random" << std::endl;
-            std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
-            std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
-            std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
-
-            // Read data from parquet file
-            std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-RAND_Client-", NUM_THREAD, N_ITERATIONS);
-
-            // Poll till
-            epochPoller(INVOKE_AT);
-
-            if (TARGET_DB == "XSTORE") {
-                timeCost = XStore_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE);
-            }
-        }
-        else if (EXPERIMENT_TYPE == "RANGE") {
-            std::cout << "----- [RANGE QUERY] -----" << std::endl;
             std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
             std::cout << "[BENCHMARK] Pattern: SEQUENTIAL" << std::endl;
             std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
@@ -289,7 +205,43 @@ int main(int argc, char const *argv[])
             std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
 
             // Read data from parquet file
-            std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-RANGE_Client-", NUM_THREAD, N_ITERATIONS);
+            std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-UNARY-SEQ_Client-", NUM_THREAD, N_ITERATIONS);
+
+            // Poll till
+            epochPoller(INVOKE_AT);
+
+            if (TARGET_DB == "XSTORE") {
+                timeCost = XStore_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE);
+            }
+        }
+        else if (EXPERIMENT_TYPE == "UNARY_RAND") {
+            std::cout << "----- [UNARY QUERY] -----" << std::endl;
+            std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
+            std::cout << "[BENCHMARK] Pattern: RANDOM" << std::endl;
+            std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
+            std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
+            std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
+
+            // Read data from parquet file
+            std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-UNARY-RAND_Client-", NUM_THREAD, N_ITERATIONS);
+
+            // Poll till
+            epochPoller(INVOKE_AT);
+
+            if (TARGET_DB == "XSTORE") {
+                timeCost = XStore_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE);
+            }
+        }
+        else if (EXPERIMENT_TYPE == "BATCH_SEQ") {
+            std::cout << "----- [BATCH QUERY] -----" << std::endl;
+            std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
+            std::cout << "[BENCHMARK] Pattern: SEQUENTIAL" << std::endl;
+            std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
+            std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
+            std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
+
+            // Read data from parquet file
+            std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-BATCH-SEQ_Client-", NUM_THREAD, N_ITERATIONS);
 
             // Poll till
             epochPoller(INVOKE_AT);
@@ -298,7 +250,7 @@ int main(int argc, char const *argv[])
                 timeCost = XStore_Adapter::rangeQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE);
             }
         }
-        else if (EXPERIMENT_TYPE == "BATCH") {
+        else if (EXPERIMENT_TYPE == "BATCH_RAND") {
             std::cout << "----- [BATCH QUERY] -----" << std::endl;
             std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
             std::cout << "[BENCHMARK] Pattern: RANDOM" << std::endl;
@@ -307,13 +259,18 @@ int main(int argc, char const *argv[])
             std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
 
             // Read data from parquet file
-            std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-BATCH_Client-", NUM_THREAD, N_ITERATIONS);
+            std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-BATCH-RAND_Client-", NUM_THREAD, N_ITERATIONS);
 
             // Poll till
             epochPoller(INVOKE_AT);
+
             if (TARGET_DB == "XSTORE") {
                 timeCost = XStore_Adapter::batchQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE);
             }
+        }
+        else {
+            std::cerr << "[ERROR - BENCHMARK] Error encountered. Workload is not defined" << std::endl;
+            exit(1);
         }
 
         // Display benchmark statistics
@@ -326,50 +283,65 @@ int main(int argc, char const *argv[])
         std::string EXPERIMENT_TYPE = toUpper(insertBench.get<std::string>("-e"));
         short unsigned int NUM_THREAD = insertBench.get<unsigned short int>("-t");
         unsigned int N_ITERATIONS = insertBench.get<unsigned int>("-n");
-        std::string DATASET = insertBench.get<std::string>("-f");
+        unsigned int INVOKE_AT = insertBench.get<unsigned long int>("-ia");
 
         // NUM_THREAD checking
         short unsigned int availableHT = std::thread::hardware_concurrency();
         if (NUM_THREAD < 1 || NUM_THREAD > availableHT) {
-            std::cerr << "[ERROR - Arguments] -- Invalid NUM THREAD" << std::endl;
+            std::cerr << "[ERROR - ARGUMENTS] -- Invalid NUM THREAD" << std::endl;
             std::cerr << "Expecting: 1 <= NUM_THREAD <= " << availableHT << std::endl;
-            exit(1);
-        }
-
-        // Target DB checking
-        if (std::find(std::begin(ALLOWED_DB), std::end(ALLOWED_DB), TARGET_DB) == std::end(ALLOWED_DB)) {
-            std::cerr << "[ERROR - Arguments] -- Invalid TARGET DB" << std::endl;
-            std::cerr << "Available TARGET DB: \n   - XSTORE\n   - MONGODB" << std::endl;
             exit(1);
         }
 
         // Benchmark data will be stored here
         std::vector<double> timeCost;
 
-        if (EXPERIMENT_TYPE == "INSERT_A") {
-            std::cout << "----- [INSERT_A] -----" << std::endl;
+        // Spawning Data Manager
+        DataManager dataManager;
+
+        if (EXPERIMENT_TYPE == "UNARY_SEQ") {
+            std::cout << "----- [UNARY INSERT] -----" << std::endl;
             std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
-            std::cout << "[BENCHMARK] Performing sequential WRITE" << std::endl;
+            std::cout << "[BENCHMARK] Pattern: SEQUENTIAL" << std::endl;
             std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
             std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
-            std::cout << "[BENCHMARK] Dataset: " << DATASET << std::endl;
+            std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
 
-            // Spawning Data Manager
-            DataManager dataManager;
             std::vector<std::vector<std::any>> insertData;
 
             // Read data from parquet file
-            arrow::Status readData = dataManager.readParquet(DATASET, &insertData);
+            std::vector<std::vector<std::vector<std::any>>> insertWorkload = dataManager.readInsertWorkload("BASIC-INSERT-UNARY-SEQ_Client-", NUM_THREAD, N_ITERATIONS);
 
-            // Check if dataset is large enough to complete experiment
-            if (insertData.size() < (N_ITERATIONS * NUM_THREAD)) {
-                std::cerr << "[ERROR - Benchmark] -- Dataset is not large enough to complete INSERT_A" << std::endl;
-                exit(1);
-            }
+            // Poll till
+            epochPoller(INVOKE_AT);
 
             if (TARGET_DB == "XSTORE") {
-                timeCost = XStore_Adapter::insertA(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, insertData);
+                timeCost = XStore_Adapter::unaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE);
             }
+        }
+        else if (EXPERIMENT_TYPE == "UNARY_RAND") {
+            std::cout << "----- [UNARY INSERT] -----" << std::endl;
+            std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
+            std::cout << "[BENCHMARK] Pattern: RANDOM" << std::endl;
+            std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
+            std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
+            std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
+
+            std::vector<std::vector<std::any>> insertData;
+
+            // Read data from parquet file
+            std::vector<std::vector<std::vector<std::any>>> insertWorkload = dataManager.readInsertWorkload("BASIC-INSERT-UNARY-RAND_Client-", NUM_THREAD, N_ITERATIONS);
+
+            // Poll till
+            epochPoller(INVOKE_AT);
+
+            if (TARGET_DB == "XSTORE") {
+                timeCost = XStore_Adapter::unaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE);
+            }
+        }
+        else {
+            std::cerr << "[ERROR - BENCHMARK] Error encountered. Workload is not defined" << std::endl;
+            exit(1);
         }
 
         // Display benchmark statistics

@@ -11,6 +11,7 @@
 #include <chrono>
 #include <thread>
 #include <filesystem>
+#include <numeric>
 
 static double meanCalc(std::vector<double> inputVector) {
     double totalSum = 0;

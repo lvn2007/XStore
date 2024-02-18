@@ -357,6 +357,7 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readQueryWorkload(s
 
         // Parse embedded sample size from filename with filter
         parsedSampleSize = std::stoul(splitByDelim(currFile, "_").at(2));
+
         // Expecting nIterations == Parsed sample size
         if (parsedSampleSize != nIterations) {
             std::cerr << "[ERROR - BENCHMARK] -- Unexpected sample size" << std::endl;
@@ -383,6 +384,64 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readQueryWorkload(s
         // Clear temp vector
         tempVector.clear();
     }
+    return toReturn;
+}
 
+std::vector<std::vector<std::vector<std::any>>> DataManager::readInsertWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations) {
+    // Filter outputs display
+    std::string UNARY_WORKLOADS[] = {"SEQ", "RAND"};
+
+    // Containing all data for all threads
+    std::vector<std::vector<std::vector<std::any>>> toReturn;
+    std::vector<std::vector<std::any>> tempVector;
+
+    // Get list of files
+    std::vector<std::string> targetFileNames = listFiles(nameBeginsWith);
+
+    // Sort list of filename ASC
+    std::sort(targetFileNames.begin(), targetFileNames.end(), std::less<>());
+
+    // Check if files match bench criteria
+    //  Expecting nThreads == N number of files
+    if (targetFileNames.size() < nThreads) {
+        std::cerr << "[ERROR - BENCHMARK] -- Insufficient test dataset" << std::endl;
+        exit(1);
+    }
+
+    //  Expecting correct sample size
+    unsigned int parsedSampleSize;
+    for (int i = 0; i < nThreads; i++) {
+        // File name
+        std::string currFile = targetFileNames.at(i);
+
+        // Parse embedded sample size from filename with filter
+        parsedSampleSize = std::stoul(splitByDelim(currFile, "_").at(2));
+
+        // Expecting nIterations == Parsed sample size
+        if (parsedSampleSize != nIterations) {
+            std::cerr << "[ERROR - BENCHMARK] -- Unexpected sample size" << std::endl;
+            exit(1);
+        }
+    }
+
+//    // Display IFF batch workloads
+//    if (nameBeginsWith.find("BATCH") != std::string::npos || nameBeginsWith.find("RANGE") != std::string::npos) {
+//        std::cout << "[BENCHMARK] Batch size: " << parsedSampleSize << std::endl;
+//    }
+
+    // Reading each parquet workload files
+    for (int i = 0; i < nThreads; i++) {
+        // File name
+        std::string currFile = targetFileNames.at(i);
+
+        // Read workload into temp vector
+        this->readParquet(currFile, &tempVector);
+
+        // Add to master vector
+        toReturn.emplace_back(tempVector);
+
+        // Clear temp vector
+        tempVector.clear();
+    }
     return toReturn;
 }

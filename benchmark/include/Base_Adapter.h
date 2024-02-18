@@ -2,20 +2,35 @@
 #define XSTORE_BASE_ADAPTER_H
 
 #include <vector>
-#include <random>
 #include <any>
+#include <string>
 
 class Base_Adapter {
     public:
-        // Query A -- Unary SEQ query 1k times
-        virtual std::vector<double> queryA() = 0;
+        // UNARY QUERY
+        //  Supports both SEQ & RAND access patterns
+        virtual std::vector<double> unaryQuery() = 0;
 
-        // Query B -- Unary RAND query 1k times
-        virtual std::vector<double> queryB() = 0;
+        // RANGE QUERY
+        //  A batch of queries with SEQ access pattern
+        virtual std::vector<double> rangeQuery() = 0;
+
+        // BATCH QUERY
+        //  A batch of queries with RAND access pattern
+        virtual std::vector<double> batchQuery() = 0;
+
+        // UNARY INSERT
+        //  Supports both SEQ & RAND access patterns
+        virtual std::vector<double> unaryInsert() = 0;
 
     private:
-        virtual std::vector<double> queryA_singleThread() = 0;
-        virtual std::vector<double> queryB_singleThread() = 0;
+        virtual std::vector<double> unaryQuery_singleThread() = 0;
+        virtual std::vector<double> rangeQuery_singleThread() = 0;
+        virtual std::vector<double> batchQuery_singleThread() = 0;
+
+        virtual std::vector<double> unaryInsert_singleThread() = 0;
+        virtual std::vector<double> rangeInsert_singleThread() = 0;
+        virtual std::vector<double> batchInsert_singleThread() = 0;
 };
 
 #endif //XSTORE_BASE_ADAPTER_H
