@@ -4,6 +4,7 @@
 #include "zmq.hpp"
 #include "zmq_addon.hpp"
 #include "XStore.pb.h"
+#include <any>
 
 struct dbInfo {
     std::string dbName;
@@ -179,12 +180,38 @@ class XStore_Client {
             return fromServer;
         }
 
-        XStore_Proto::unaryInsert_REP unaryInsert(long int insertUnixTime, XStore_Proto::rowData data, std::string dbName) {
+        XStore_Proto::unaryInsert_REP unaryInsert(long int insertUnixTime, std::vector<std::any> *insertData, std::string dbName) {
             XStore_Proto::unaryInsert_REQ toServer;
             toServer.set_rtype(XStore_Proto::UNARYINSERT);
             toServer.set_timestamp(insertUnixTime);
-            *toServer.mutable_data() = data;
             toServer.set_dbname(dbName);
+
+            // Row data
+            XStore_Proto::rowData rowData;
+            std::any currentMetric;
+
+            // Loop through each item in a row -> Identify type and build rowData
+            //  Skipping first element (timestamp) in a row
+            for (int i = 1; i < insertData->size(); i++) {
+                XStore_Proto::fData *field = rowData.add_fielddata();
+                currentMetric = insertData->at(i);
+
+                if (currentMetric.type() == typeid(std::string)) {
+                    field->set_stringdata(std::any_cast<std::string>(currentMetric));
+                    continue;
+                }
+                else if (currentMetric.type() == typeid(int)) {
+                    field->set_int32data(std::any_cast<int>(currentMetric));
+                    continue;
+                }
+                else if (currentMetric.type() == typeid(double)) {
+                    field->set_doubledata(std::any_cast<double>(currentMetric));
+                    continue;
+                }
+            }
+
+            // Add row data into Proto UNARY INSERT msg
+            *toServer.mutable_data() = rowData;
 
             // Config msg and send
             size_t byteSize = toServer.ByteSizeLong();

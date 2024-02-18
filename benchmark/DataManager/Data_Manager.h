@@ -37,8 +37,11 @@ public:
     //  Arrow Parquet
     arrow::Status readParquet(std::string parquetFilename, std::vector<std::vector<std::any>> *outputVector);
 
-    //  READ query workload
+    //  Reading QUERY workload
     std::vector<std::vector<std::vector<std::any>>> readQueryWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations);
+
+    //  Reading INSERT workload
+    std::vector<std::vector<std::vector<std::any>>> readInsertWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations);
 
 private:
     std::vector<std::vector<std::any>> generateHashData(unsigned long int startTime, unsigned long int endTime, int nColumns);

@@ -100,7 +100,7 @@ class ParquetOPS:
         if batchIter is None:
             batchIter = 10
 
-        if queryType == 'SEQ':
+        if queryType == 'UNARY_SEQ':
             for i in range(nClients):
                 startTime = (startTime + offset) + (i * sampleSize)
 
@@ -112,9 +112,9 @@ class ParquetOPS:
                 toWrite['timestamp'] = toWrite['timestamp'].astype(np.uint64)
 
                 # Write to file
-                toWrite.to_parquet(f'BASIC-QUERY-SEQ_Client-{i}_{sampleSize}_{startTime}.parquet', engine='fastparquet', compression='zstd')
+                toWrite.to_parquet(f'BASIC-QUERY-UNARY-SEQ_Client-{i}_{sampleSize}_{startTime}.parquet', engine='fastparquet', compression='zstd')
 
-        elif queryType == 'RAND':
+        elif queryType == 'UNARY_RAND':
             # Data for all N clients
             randData = random.sample(range(startTime, endTime), nClients * sampleSize)
 
@@ -129,9 +129,9 @@ class ParquetOPS:
                 toWrite['timestamp'] = toWrite['timestamp'].astype(np.uint64)
 
                 # Write to file
-                toWrite.to_parquet(f'BASIC-QUERY-RAND_Client-{i}_{sampleSize}_{startTime}-{endTime}.parquet', engine='fastparquet', compression='zstd')
+                toWrite.to_parquet(f'BASIC-QUERY-UNARY-RAND_Client-{i}_{sampleSize}_{startTime}-{endTime}.parquet', engine='fastparquet', compression='zstd')
 
-        elif queryType == 'RANGE':
+        elif queryType == 'BATCH_SEQ':
             for i in range(nClients):
                 startTime = (startTime + offset) + (i * sampleSize * batchIter)
 
@@ -144,9 +144,9 @@ class ParquetOPS:
                 toWrite['endTime'] = toWrite['endTime'].astype(np.uint64)
 
                 # Write to file
-                toWrite.to_parquet(f'BASIC-QUERY-RANGE_Client-{i}_{batchIter}-{sampleSize}_{startTime}-{endTime}.parquet', engine='fastparquet', compression='zstd')
+                toWrite.to_parquet(f'BASIC-QUERY-BATCH-SEQ_Client-{i}_{batchIter}-{sampleSize}_{startTime}-{endTime}.parquet', engine='fastparquet', compression='zstd')
 
-        elif queryType == 'BATCH':
+        elif queryType == 'BATCH_RAND':
             # Data for all N clients
             randData = random.sample(range(startTime, endTime), nClients * sampleSize * batchIter)
 
@@ -163,7 +163,7 @@ class ParquetOPS:
                 toWrite.columns = toWrite.columns.astype(str)
 
                 # Write to file
-                toWrite.to_parquet(f'BASIC-QUERY-BATCH_Client-{i}_{batchIter}-{sampleSize}_{startTime}-{endTime}.parquet', engine='fastparquet', compression='zstd')
+                toWrite.to_parquet(f'BASIC-QUERY-BATCH-RAND_Client-{i}_{batchIter}-{sampleSize}_{startTime}-{endTime}.parquet', engine='fastparquet', compression='zstd')
 
     def createBasicInsert(self, offset, sampleSize, nClients, inputFile, insertType='SEQ', batchIter=None):
         if batchIter is None:
@@ -177,18 +177,19 @@ class ParquetOPS:
         self.numGroups = len(self.df.row_groups)
         self.rowsPerGroup = self.df[0].count()
 
-        if insertType == 'SEQ':
+        if insertType == 'UNARY_SEQ':
             for i in range(nClients):
                 startRange = offset + (i * sampleSize)
                 targetList = [i for i in range(startRange, startRange + sampleSize)]
 
                 # Extract data from main DF based on targetList
                 toWrite = self.__extractDataFromIdx(targetList)
+                toWrite['timestamp'] = toWrite['timestamp'].astype(np.uint64)
 
                 # Write to file
-                toWrite.to_parquet(f'BASIC-INSERT-SEQ_Client-{i}_{startRange}.parquet', engine='fastparquet', compression='zstd')
+                toWrite.to_parquet(f'BASIC-INSERT-UNARY-SEQ_Client-{i}_{sampleSize}_{startRange}.parquet', engine='fastparquet', compression='zstd')
 
-        elif insertType == 'RAND':
+        elif insertType == 'UNARY_RAND':
             # Random indexes for all N clients
             randData = random.sample(range(0, self.numRows), nClients * sampleSize)
 
@@ -199,11 +200,12 @@ class ParquetOPS:
 
                 # Extract data from main DF based on targetList
                 toWrite = self.__extractDataFromIdx(targetList)
+                toWrite['timestamp'] = toWrite['timestamp'].astype(np.uint64)
 
                 # Write to file
-                toWrite.to_parquet(f'BASIC-INSERT-RAND_Client-{i}_{0}-{self.numRows}.parquet', engine='fastparquet', compression='zstd')
+                toWrite.to_parquet(f'BASIC-INSERT-UNARY-RAND_Client-{i}_{sampleSize}_{0}-{self.numRows}.parquet', engine='fastparquet', compression='zstd')
 
-        elif insertType == 'RANGE':
+        elif insertType == 'BATCH_SEQ':
             for i in range(nClients):
                 startRange = offset + (i * sampleSize * batchIter)
                 endRange = startRange + (sampleSize * batchIter)
@@ -214,9 +216,9 @@ class ParquetOPS:
                 toWrite = self.__extractDataFromIdx(targetList)
 
                 # Write to file
-                toWrite.to_parquet(f'BASIC-INSERT-RANGE_Client-{i}_{0}-{startRange}-{endRange}.parquet', engine='fastparquet', compression='zstd')
+                toWrite.to_parquet(f'BASIC-INSERT-BATCH-SEQ_Client-{i}_{0}-{startRange}-{endRange}.parquet', engine='fastparquet', compression='zstd')
 
-        elif insertType == 'BATCH':
+        elif insertType == 'BATCH_RAND':
             # Random indexes timestamp for all N clients
             randData = random.sample(range(0, self.numRows), nClients * sampleSize * batchIter)
 
@@ -230,7 +232,7 @@ class ParquetOPS:
                 toWrite = self.__extractDataFromIdx(targetList)
 
                 # Write to file
-                toWrite.to_parquet(f'BASIC-INSERT-BATCH_Client-{i}_{0}-{startRange}-{endRange}.parquet', engine='fastparquet', compression='zstd')
+                toWrite.to_parquet(f'BASIC-INSERT-BATCH-RAND_Client-{i}_{0}-{startRange}-{endRange}.parquet', engine='fastparquet', compression='zstd')
 
 
 if __name__ == '__main__':
@@ -247,7 +249,7 @@ if __name__ == '__main__':
     # Data preparer
     #   READ workload
     readWorkload = subParser.add_parser('queryWorkload', add_help=True, description='Data preparer for READ workloads')
-    readWorkload.add_argument('-t', '--type', type=str, required=True, help='Workload type', choices=['SEQ', 'RAND', 'RANGE', 'BATCH'])
+    readWorkload.add_argument('-t', '--type', type=str, required=True, help='Workload type', choices=['UNARY_SEQ', 'UNARY_RAND', 'BATCH_SEQ', 'BATCH_RAND'])
     readWorkload.add_argument('-o', '--offset', type=int, required=True, help='Offset/Skip N timestamps')
     readWorkload.add_argument('-s', '--sample-size', type=int, required=True, help='Number of timestamps')
     readWorkload.add_argument('-n', '--num-client', type=int, required=True, help='Number of client (Each client has its own input data file)')
@@ -257,7 +259,7 @@ if __name__ == '__main__':
 
     #   WRITE workload
     writeWorkload = subParser.add_parser('insertWorkload', add_help=True, description='Data preparer for WRITE workloads')
-    writeWorkload.add_argument('-t', '--type', type=str, required=True, help='Workload type', choices=['SEQ', 'RAND', 'RANGE', 'BATCH'])
+    writeWorkload.add_argument('-t', '--type', type=str, required=True, help='Workload type', choices=['UNARY_SEQ', 'UNARY_RAND', 'BATCH_SEQ', 'BATCH_RAND'])
     writeWorkload.add_argument('-o', '--offset', type=int, required=True, help='Offset/Skip N number of rows')
     writeWorkload.add_argument('-s', '--sample-size', type=int, required=True, help='Number of rows')
     writeWorkload.add_argument('-n', '--num-client', type=int, required=True, help='Number of client (Each client has its own input data file)')

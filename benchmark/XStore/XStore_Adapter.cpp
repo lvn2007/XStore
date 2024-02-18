@@ -79,23 +79,17 @@ std::vector<double> XStore_Adapter::batchQuery(std::string SERVER_ADDR, std::str
     return timeCost;
 }
 
-std::vector<double> XStore_Adapter::insertA(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::any>> &insertData) {
+std::vector<double> XStore_Adapter::unaryInsert(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *insertData, std::string pattern) {
     BS::multi_future<std::vector<double>> multiFuture;
     std::vector<std::vector<double>> nestedVector;
 
     // Pre-emptively delete & create BENCH_DB
     std::string dbName = "BENCH_DB";
-    XStore_Adapter::createAndRemoveDB(SERVER_ADDR, SERVER_PORT, dbName, insertData.at(0));
+    XStore_Adapter::createAndRemoveDB(SERVER_ADDR, SERVER_PORT, dbName, &insertData->at(0).at(0));
 
     // Extracting insertData so that each thread will have unique insert data
-    std::vector<std::vector<std::vector<std::any>>> threadInsertData;
     for (int i = 0; i < NUM_THREAD; i++) {
-        std::vector<std::vector<std::any>> subVector = std::vector<std::vector<std::any>>(insertData.begin() + (i * N_ITERATION), insertData.begin() + (i * N_ITERATION) + N_ITERATION);
-        threadInsertData.emplace_back(subVector);
-    }
-
-    for (int i = 0; i < NUM_THREAD; i++) {
-        multiFuture.push_back(threadPool.submit(XStore_Adapter::insertA_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, threadInsertData.at(i)));
+        multiFuture.push_back(threadPool.submit(XStore_Adapter::unaryInsert_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &insertData->at(i)));
     }
 
     // Wait till all threads finishes
@@ -121,7 +115,7 @@ std::vector<double> XStore_Adapter::loadAll(std::string SERVER_ADDR, std::string
 
     // Pre-emptively delete & create BENCH_DB
     std::string dbName = "BENCH_DB";
-    XStore_Adapter::createAndRemoveDB(SERVER_ADDR, SERVER_PORT, dbName, insertData.at(0));
+//    XStore_Adapter::createAndRemoveDB(SERVER_ADDR, SERVER_PORT, dbName, &insertData.at(0));
 
     // Extracting insertData so that each thread will have unique insert data
     std::vector<std::vector<std::vector<std::any>>> threadInsertData;
@@ -249,7 +243,7 @@ std::vector<double> XStore_Adapter::batchQuery_singleThread(std::string SERVER_A
     return toReturn;
 }
 
-std::vector<double> XStore_Adapter::insertA_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> insertData) {
+std::vector<double> XStore_Adapter::unaryInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData) {
     std::vector<double> toReturn;
 
     // Init client obj
@@ -261,34 +255,12 @@ std::vector<double> XStore_Adapter::insertA_singleThread(std::string SERVER_ADDR
     std::chrono::duration<double> timeCost;
 
     for (int i = 0; i < N_ITERATION; i++) {
-        start = std::chrono::high_resolution_clock::now();
-
-        // Build rowData
-        XStore_Proto::rowData rowData;
-        std::any currentMetric;
-
-        for (int j = 1; j < insertData.at(i).size(); j++) {
-            XStore_Proto::fData *field = rowData.add_fielddata();
-            currentMetric = insertData.at(i).at(j);
-
-            if (currentMetric.type() == typeid(std::string)) {
-                field->set_stringdata(std::any_cast<std::string>(currentMetric));
-                continue;
-            }
-            else if (currentMetric.type() == typeid(int)) {
-                field->set_int32data(std::any_cast<int>(currentMetric));
-                continue;
-            }
-            else if (currentMetric.type() == typeid(double)) {
-                field->set_doubledata(std::any_cast<double>(currentMetric));
-                continue;
-            }
-        }
-
         // Dispatch insert
-        XStore_Proto::unaryInsert_REP unaryInsertRep = xstoreClient.unaryInsert(std::any_cast<long unsigned int>(insertData.at(i).at(0)), rowData, "BENCH_DB");
+        start = std::chrono::high_resolution_clock::now();
+        XStore_Proto::unaryInsert_REP unaryInsertRep = xstoreClient.unaryInsert(std::any_cast<long unsigned int>(insertData->at(i).at(0)), &insertData->at(i), "BENCH_DB");
         end = std::chrono::high_resolution_clock::now();
         timeCost = end - start;
+
         toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
     }
     return toReturn;
@@ -348,7 +320,7 @@ std::vector<double> XStore_Adapter::loadAll_singleThread(std::string SERVER_ADDR
     return toReturn;
 }
 
-void XStore_Adapter::createAndRemoveDB(std::string SERVER_ADDR, std::string SERVER_PORT, std::string dbName, std::vector<std::any> &singleRowData) {
+void XStore_Adapter::createAndRemoveDB(std::string SERVER_ADDR, std::string SERVER_PORT, std::string dbName, std::vector<std::any> *singleRowData) {
     XStore_Client xstoreClient;
     xstoreClient.connect(SERVER_ADDR, SERVER_PORT);
     xstoreClient.removeDB(dbName);
@@ -357,7 +329,7 @@ void XStore_Adapter::createAndRemoveDB(std::string SERVER_ADDR, std::string SERV
     short int rowLength = XStore_Adapter::computeRowLength(singleRowData);
 
     // Granularity
-    XStore_Proto::timeUnit granularity = XStore_Adapter::getTimeResolution(std::any_cast<long unsigned int>(singleRowData.at(0)));
+    XStore_Proto::timeUnit granularity = XStore_Adapter::getTimeResolution(std::any_cast<long unsigned int>(singleRowData->at(0)));
 
     // Create BENCH_DB
     XStore_Proto::createDB_REP createDbRep = xstoreClient.createDB(dbName, granularity, rowLength);
@@ -382,12 +354,12 @@ XStore_Proto::timeUnit XStore_Adapter::getTimeResolution(long int timestamp) {
     }
 }
 
-short int XStore_Adapter::computeRowLength(std::vector<std::any> &singleRowData) {
+short int XStore_Adapter::computeRowLength(std::vector<std::any> *singleRowData) {
     short int rowSize = 0;
 
     std::any currentMetric;
-    for (int i = 1; i < singleRowData.size(); i++) {
-        currentMetric = singleRowData.at(i);
+    for (int i = 1; i < singleRowData->size(); i++) {
+        currentMetric = singleRowData->at(i);
         if (currentMetric.type() == typeid(std::string)) {
             rowSize += (std::any_cast<std::string>(currentMetric).size());
             continue;
