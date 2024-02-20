@@ -23,6 +23,13 @@ class Base_Adapter {
         //  Supports both SEQ & RAND access patterns
         virtual std::vector<double> unaryInsert() = 0;
 
+        // RANGE INSERT
+        //  A batch of inserts with SEQ access pattern
+        virtual std::vector<double> rangeInsert() = 0;
+
+        // BATCH INSERT
+        virtual std::vector<double> batchInsert() = 0;
+
     private:
         virtual std::vector<double> unaryQuery_singleThread() = 0;
         virtual std::vector<double> rangeQuery_singleThread() = 0;

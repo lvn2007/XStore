@@ -214,9 +214,10 @@ class ParquetOPS:
 
                 # Extract data from main DF based on targetList
                 toWrite = self.__extractDataFromIdx(targetList)
+                toWrite['timestamp'] = toWrite['timestamp'].astype(np.uint64)
 
                 # Write to file
-                toWrite.to_parquet(f'BASIC-INSERT-BATCH-SEQ_Client-{i}_{0}-{startRange}-{endRange}.parquet', engine='fastparquet', compression='zstd')
+                toWrite.to_parquet(f'BASIC-INSERT-BATCH-SEQ_Client-{i}_{batchIter}-{sampleSize}_{startRange}-{endRange}.parquet', engine='fastparquet', compression='zstd')
 
         elif insertType == 'BATCH_RAND':
             # Random indexes timestamp for all N clients
@@ -230,9 +231,10 @@ class ParquetOPS:
 
                 # Extract data from main DF based on targetList
                 toWrite = self.__extractDataFromIdx(targetList)
+                toWrite['timestamp'] = toWrite['timestamp'].astype(np.uint64)
 
                 # Write to file
-                toWrite.to_parquet(f'BASIC-INSERT-BATCH-RAND_Client-{i}_{0}-{startRange}-{endRange}.parquet', engine='fastparquet', compression='zstd')
+                toWrite.to_parquet(f'BASIC-INSERT-BATCH-RAND_Client-{i}_{batchIter}{sampleSize}_{startRange}-{endRange}.parquet', engine='fastparquet', compression='zstd')
 
 
 if __name__ == '__main__':

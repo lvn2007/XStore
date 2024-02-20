@@ -134,7 +134,7 @@ message batchDelete_REQ {
 // --- RANGE INSERT (DATA)
 message rangeInsert_DATA {
   uint64 timestamp = 1;
-  string data = 2;
+  rowData data = 2;
 }
 
 // --- RANGE INSERT

@@ -160,11 +160,7 @@ int main(int argc, char *argv[]) {
 
     // ----DEV AREA
     // Instantiate XStore obj
-    XStore myStore;
-
-    // Create DB
-    XStore_Proto::createDB_REP create_db_rep = myStore.createDB("TSLA", XStore_Proto::timeUnit::SECOND, 128);
-    create_db_rep.PrintDebugString();
+//    XStore myStore;
 
 //    XStore_Proto::rowData firstRow;
 //    XStore_Proto::fData *field1 = firstRow.add_fielddata();

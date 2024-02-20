@@ -231,9 +231,44 @@ class XStore_Client {
             return fromServer;
         }
 
-        XStore_Proto::rangeInsert_REP rangeInsert(XStore_Proto::rangeInsert_REQ &toServer, std::string dbName) {
+        XStore_Proto::rangeInsert_REP rangeInsert(std::vector<std::vector<std::any>> *insertData, std::string dbName) {
+            XStore_Proto::rangeInsert_REQ toServer;
             toServer.set_rtype(XStore_Proto::RANGEINSERT);
             toServer.set_dbname(dbName);
+
+            // Loop through each row
+            for (int i = 0; i < insertData->size(); i++) {
+                XStore_Proto::rangeInsert_DATA *rangeInsertData = toServer.add_rangeinsert_data();
+
+                // Build timestamp for current row of data
+                rangeInsertData->set_timestamp(std::any_cast<unsigned long int>(insertData->at(i).at(0)));
+
+                // Placeholder for rowData
+                XStore_Proto::rowData rowData;
+                std::any currentMetric;
+
+                // Loop through each "column" in a row
+                for (int j = 1; j < insertData->at(i).size(); j++) {
+                    XStore_Proto::fData *field = rowData.add_fielddata();
+                    currentMetric = insertData->at(i).at(j);
+
+                    if (currentMetric.type() == typeid(std::string)) {
+                        field->set_stringdata(std::any_cast<std::string>(currentMetric));
+                        continue;
+                    }
+                    else if (currentMetric.type() == typeid(int)) {
+                        field->set_int32data(std::any_cast<int>(currentMetric));
+                        continue;
+                    }
+                    else if (currentMetric.type() == typeid(double)) {
+                        field->set_doubledata(std::any_cast<double>(currentMetric));
+                        continue;
+                    }
+                }
+
+                // Merge message
+                rangeInsertData->mutable_data()->MergeFrom(rowData);
+            }
 
             // Config msg and send
             size_t byteSize = toServer.ByteSizeLong();
