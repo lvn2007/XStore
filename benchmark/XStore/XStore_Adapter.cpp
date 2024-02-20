@@ -109,6 +109,36 @@ std::vector<double> XStore_Adapter::unaryInsert(std::string SERVER_ADDR, std::st
     return timeCost;
 }
 
+std::vector<double> XStore_Adapter::rangeInsert(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *insertData, std::string pattern) {
+    BS::multi_future<std::vector<double>> multiFuture;
+    std::vector<std::vector<double>> nestedVector;
+
+    // Pre-emptively delete & create BENCH_DB
+    std::string dbName = "BENCH_DB";
+    XStore_Adapter::createAndRemoveDB(SERVER_ADDR, SERVER_PORT, dbName, &insertData->at(0).at(0));
+
+    // Extracting insertData so that each thread will have unique insert data
+    for (int i = 0; i < NUM_THREAD; i++) {
+        multiFuture.push_back(threadPool.submit(XStore_Adapter::rangeInsert_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &insertData->at(i)));
+    }
+
+    // Wait till all threads finishes
+    for (std::vector<double> i : multiFuture.get()) {
+        nestedVector.push_back(i);
+    }
+
+    std::vector<double> timeCost;
+
+    // Flattening nested vector
+    std::string fileName = "Insert-A_Client-";
+    for (int i = 0; i < nestedVector.size(); i++) {
+        // Write experiment result to CSV
+        writeCSV(fileName + std::to_string(i) + ".csv", "Time taken (ms)", nestedVector.at(i));
+        std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
+    }
+    return timeCost;
+}
+
 std::vector<double> XStore_Adapter::loadAll(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, std::vector<std::vector<std::any>> &insertData) {
     BS::multi_future<std::vector<double>> multiFuture;
     std::vector<std::vector<double>> nestedVector;
@@ -266,6 +296,29 @@ std::vector<double> XStore_Adapter::unaryInsert_singleThread(std::string SERVER_
     return toReturn;
 }
 
+std::vector<double> XStore_Adapter::rangeInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData) {
+    std::vector<double> toReturn;
+
+    // Init client obj
+    XStore_Client xstoreClient;
+    xstoreClient.connect(SERVER_ADDR, SERVER_PORT);
+
+    // Clock init
+    std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
+    std::chrono::duration<double> timeCost;
+
+    for (int i = 0; i < N_ITERATION; i++) {
+        // Dispatch insert
+        start = std::chrono::high_resolution_clock::now();
+        XStore_Proto::rangeInsert_REP rangeInsertRep = xstoreClient.rangeInsert(insertData, "BENCH_DB");
+        end = std::chrono::high_resolution_clock::now();
+        timeCost = end - start;
+
+        toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+    }
+    return toReturn;
+}
+
 std::vector<double> XStore_Adapter::loadAll_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, std::vector<std::vector<std::any>> insertData) {
     std::vector<double> toReturn;
 
@@ -312,7 +365,7 @@ std::vector<double> XStore_Adapter::loadAll_singleThread(std::string SERVER_ADDR
     }
 
     // Dispatch insert
-    XStore_Proto::rangeInsert_REP rangeInsertRep = xstoreClient.rangeInsert(rangeInsertReq, "BENCH_DB");
+//    XStore_Proto::rangeInsert_REP rangeInsertRep = xstoreClient.rangeInsert(rangeInsertReq, "BENCH_DB");
 
     end = std::chrono::high_resolution_clock::now();
     timeCost = end - start;

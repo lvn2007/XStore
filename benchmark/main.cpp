@@ -339,6 +339,26 @@ int main(int argc, char const *argv[])
                 timeCost = XStore_Adapter::unaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE);
             }
         }
+        else if (EXPERIMENT_TYPE == "BATCH_SEQ") {
+            std::cout << "----- [BATCH INSERT] -----" << std::endl;
+            std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
+            std::cout << "[BENCHMARK] Pattern: SEQUENTIAL" << std::endl;
+            std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
+            std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
+            std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
+
+            std::vector<std::vector<std::any>> insertData;
+
+            // Read data from parquet file
+            std::vector<std::vector<std::vector<std::any>>> insertWorkload = dataManager.readInsertWorkload("BASIC-INSERT-BATCH-SEQ_Client-", NUM_THREAD, N_ITERATIONS);
+
+            // Poll till
+            epochPoller(INVOKE_AT);
+
+            if (TARGET_DB == "XSTORE") {
+                timeCost = XStore_Adapter::rangeInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE);
+            }
+        }
         else {
             std::cerr << "[ERROR - BENCHMARK] Error encountered. Workload is not defined" << std::endl;
             exit(1);
