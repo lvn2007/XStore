@@ -275,6 +275,49 @@ class XStore_Client {
             return fromServer;
         }
 
+        XStore_Proto::batchInsert_REP batchInsert(std::vector<std::vector<std::any>> *insertData, std::string dbName) {
+            XStore_Proto::batchInsert_REQ toServer;
+            toServer.set_rtype(XStore_Proto::BATCHINSERT);
+            toServer.set_dbname(dbName);
+
+            // Loop through each row
+            for (int i = 0; i < insertData->size(); i++) {
+                XStore_Proto::batchInsert_DATA *batchInsertData = toServer.add_batchinsert_data();
+
+                // Build timestamp for current row of data
+                batchInsertData->set_timestamp(std::any_cast<unsigned long int>(insertData->at(i).at(0)));
+
+                // Placeholder for rowData
+                XStore_Proto::rowData rowData;
+
+                // Loop through each "column" in a row
+                for (int j = 1; j < insertData->at(i).size(); j++) {
+                    XStore_Proto::fData *field = rowData.add_fielddata();
+                    setFieldData(field, &insertData->at(i).at(j));
+                }
+
+                // Merge message
+                batchInsertData->mutable_data()->MergeFrom(rowData);
+            }
+
+            // Config msg and send
+            size_t byteSize = toServer.ByteSizeLong();
+            zmq::message_t z_out(byteSize);
+            toServer.SerializeToArray(z_out.data(), byteSize);
+            sock.send(z_out, zmq::send_flags::none);
+
+            // RECEIVING
+            std::vector<zmq::message_t> recv_msgs;
+            zmq::message_t zFromServer;
+            zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
+
+            // Received structs
+            XStore_Proto::batchInsert_REP fromServer;
+
+            fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
+            return fromServer;
+        }
+
         XStore_Proto::removeDB_REP removeDB(std::string dbName) {
             XStore_Proto::removeDB_REQ toServer;
             toServer.set_rtype(XStore_Proto::REMOVEDB);

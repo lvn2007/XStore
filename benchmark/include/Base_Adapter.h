@@ -28,6 +28,7 @@ class Base_Adapter {
         virtual std::vector<double> rangeInsert() = 0;
 
         // BATCH INSERT
+        //  A batch of inserts with RAND access pattern
         virtual std::vector<double> batchInsert() = 0;
 
     private:
