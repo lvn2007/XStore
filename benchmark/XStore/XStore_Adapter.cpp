@@ -365,7 +365,6 @@ std::vector<double> XStore_Adapter::batchInsert_singleThread(std::string SERVER_
         start = std::chrono::high_resolution_clock::now();
         XStore_Proto::batchInsert_REP batchInsertRep = xstoreClient.batchInsert(insertData, "BENCH_DB");
         end = std::chrono::high_resolution_clock::now();
-        batchInsertRep.PrintDebugString();
         timeCost = end - start;
 
         toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
