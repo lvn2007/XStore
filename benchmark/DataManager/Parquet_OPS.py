@@ -234,7 +234,7 @@ class ParquetOPS:
                 toWrite['timestamp'] = toWrite['timestamp'].astype(np.uint64)
 
                 # Write to file
-                toWrite.to_parquet(f'BASIC-INSERT-BATCH-RAND_Client-{i}_{batchIter}{sampleSize}_{startRange}-{endRange}.parquet', engine='fastparquet', compression='zstd')
+                toWrite.to_parquet(f'BASIC-INSERT-BATCH-RAND_Client-{i}_{batchIter}-{sampleSize}_{startRange}-{endRange}.parquet', engine='fastparquet', compression='zstd')
 
 
 if __name__ == '__main__':
