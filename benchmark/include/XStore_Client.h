@@ -24,6 +24,21 @@ class XStore_Client {
         zmq::context_t ctx;
         zmq::socket_t sock { ctx, zmq::socket_type::req };
 
+        void setFieldData(XStore_Proto::fData *field, std::any *currentMetric) {
+            if (currentMetric->type() == typeid(std::string)) {
+                field->set_stringdata(std::any_cast<std::string>(*currentMetric));
+                return;
+            }
+            else if (currentMetric->type() == typeid(int)) {
+                field->set_int32data(std::any_cast<int>(*currentMetric));
+                return;
+            }
+            else if (currentMetric->type() == typeid(double)) {
+                field->set_doubledata(std::any_cast<double>(*currentMetric));
+                return;
+            }
+        }
+
     public:
         void connect(std::string SERVER_ADDR, std::string SERVER_PORT) {
             std::string fullAddr = "tcp://" + SERVER_ADDR + ":" + SERVER_PORT;
@@ -188,26 +203,12 @@ class XStore_Client {
 
             // Row data
             XStore_Proto::rowData rowData;
-            std::any currentMetric;
 
             // Loop through each item in a row -> Identify type and build rowData
             //  Skipping first element (timestamp) in a row
             for (int i = 1; i < insertData->size(); i++) {
                 XStore_Proto::fData *field = rowData.add_fielddata();
-                currentMetric = insertData->at(i);
-
-                if (currentMetric.type() == typeid(std::string)) {
-                    field->set_stringdata(std::any_cast<std::string>(currentMetric));
-                    continue;
-                }
-                else if (currentMetric.type() == typeid(int)) {
-                    field->set_int32data(std::any_cast<int>(currentMetric));
-                    continue;
-                }
-                else if (currentMetric.type() == typeid(double)) {
-                    field->set_doubledata(std::any_cast<double>(currentMetric));
-                    continue;
-                }
+                setFieldData(field, &insertData->at(i));
             }
 
             // Add row data into Proto UNARY INSERT msg
@@ -245,25 +246,11 @@ class XStore_Client {
 
                 // Placeholder for rowData
                 XStore_Proto::rowData rowData;
-                std::any currentMetric;
 
                 // Loop through each "column" in a row
                 for (int j = 1; j < insertData->at(i).size(); j++) {
                     XStore_Proto::fData *field = rowData.add_fielddata();
-                    currentMetric = insertData->at(i).at(j);
-
-                    if (currentMetric.type() == typeid(std::string)) {
-                        field->set_stringdata(std::any_cast<std::string>(currentMetric));
-                        continue;
-                    }
-                    else if (currentMetric.type() == typeid(int)) {
-                        field->set_int32data(std::any_cast<int>(currentMetric));
-                        continue;
-                    }
-                    else if (currentMetric.type() == typeid(double)) {
-                        field->set_doubledata(std::any_cast<double>(currentMetric));
-                        continue;
-                    }
+                    setFieldData(field, &insertData->at(i).at(j));
                 }
 
                 // Merge message
