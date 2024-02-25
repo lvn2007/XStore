@@ -321,7 +321,7 @@ XStore_Proto::unaryDelete_REP XStore::unaryDelete(std::time_t epochTime, std::st
         FILE *cFile;
         std::string cfgPath = dbBasePath + dbName + ".CFG";
         cFile = std::fopen(cfgPath.c_str(), "rb");
-        fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
+        cfgStruct.ParseFromFileDescriptor(fileno(cFile));
         std::fclose(cFile);
         cfgMap[dbName] = cfgStruct;
     }
@@ -364,17 +364,8 @@ XStore_Proto::unaryDelete_REP XStore::unaryDelete(std::time_t epochTime, std::st
     // Seek to target offset prior to read
     fseeko64(bFile, offset, SEEK_SET);
 
-    // A single line of data will be read into here
-    char bufferIn[cfgStruct.rowlength()];
-
-    // Find how many bytes occupied
-    fread(&bufferIn[0], 1, cfgStruct.rowlength(), bFile);
-
-    // Seek to target offset prior to write
-    fseeko64(bFile, offset, SEEK_SET);
-
-    // Nullify data based on N number of bytes available at that data point
-    fwrite(std::string(strlen(bufferIn), '\0').data(), cfgStruct.rowlength(), 1, bFile);
+    // Deallocate data according to N bytes from rowLength
+    fallocate(fileno(bFile), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfgStruct.rowlength());
 
     // Close file & Release lock after write
     std::fclose(bFile);
