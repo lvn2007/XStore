@@ -361,11 +361,8 @@ XStore_Proto::unaryDelete_REP XStore::unaryDelete(std::time_t epochTime, std::st
     long long int diff = epochTime - currTS.firstEpoch;
     long long int offset = diff * cfgStruct.rowlength();
 
-    // Seek to target offset prior to read
-    fseeko64(bFile, offset, SEEK_SET);
-
     // Deallocate data according to N bytes from rowLength
-    fallocate(fileno(bFile), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfgStruct.rowlength());
+    fallocate64(fileno(bFile), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfgStruct.rowlength());
 
     // Close file & Release lock after write
     std::fclose(bFile);
@@ -655,7 +652,7 @@ XStore_Proto::batchDelete_REP XStore::batchDelete(XStore_Proto::batchDelete_REQ 
 
         // Read & Add cfgStruct to cfgMap
         FILE *cFile = std::fopen(cfgPath.c_str(), "rb");
-        fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
+        cfgStruct.ParseFromFileDescriptor(fileno(cFile));
         std::fclose(cFile);
         cfgMap[dbName] = cfgStruct;
     }
@@ -733,23 +730,8 @@ XStore_Proto::batchDelete_REP XStore::batchDelete(XStore_Proto::batchDelete_REQ 
             diff = protoFromClient->timestamp(dataMap[yearKey].at(i)) - thisTS.firstEpoch;
             offset = diff * cfgStruct.rowlength();
 
-            // Seek to target offset prior to read
-            fseeko64(bFile, offset, SEEK_SET);
-
-            // Extract N bytes of data according to N bytes from .CFG file
-            //  .CFG file is set by user when creating DB
-            fread(&bufferIn[0], 1, cfgStruct.rowlength(), bFile);
-
-            // IF fetched data contains nothing
-            //  -> Skip to next iteration
-            if (strlen(bufferIn) == 0) {
-                continue;
-            }
-            // Seek to target offset prior to write
-            fseeko64(bFile, offset, SEEK_SET);
-
-            // Nullify data based on N number of bytes available at that data point
-            fwrite(std::string(strlen(bufferIn), '\0').data(), cfgStruct.rowlength(), 1, bFile);
+            // Deallocate data according to N bytes from rowLength
+            fallocate64(fileno(bFile), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfgStruct.rowlength());
             deleteCount++;
         }
 
@@ -1128,7 +1110,7 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
 
         // Read & Add cfgStruct to cfgMap
         FILE *cFile = std::fopen(cfgPath.c_str(), "rb");
-        fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
+        cfgStruct.ParseFromFileDescriptor(fileno(cFile));
         std::fclose(cFile);
         cfgMap[dbName] = cfgStruct;
     }
@@ -1167,8 +1149,7 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
     // Placeholder for READ op
     FILE *bFile;
     std::string targetFilePath;
-    long long int diff, offset;
-    char bufferIn[cfgStruct.rowlength()];
+    long long int diff, offset, rangeCount;
 
     // IF query range is within 1-year
     if (currTS.lastEpoch >= endEpochT) {
@@ -1188,32 +1169,14 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
         // Lock file prior to reading
         flock(fileno(bFile), LOCK_EX);
 
-        // Iterate over range of query data & add queried data and status
-        for (long epochTime = startEpochT; epochTime <= endEpochT; epochTime++) {
-            // Computes diff & offset
-            diff = epochTime - currTS.firstEpoch;
-            offset = diff * cfgStruct.rowlength();
+        // Compute diff & offset
+        diff = startEpochT - currTS.firstEpoch;
+        offset = diff * cfgStruct.rowlength();
+        rangeCount = endEpochT - startEpochT;
 
-            // Seek to computed offset
-            fseeko64(bFile, offset, SEEK_SET);
-
-            // Extract N bytes of data according to N bytes from .CFG file
-            //  .CFG file is set by user when creating DB
-            fread(&bufferIn[0], 1, cfgStruct.rowlength(), bFile);
-
-            // IF fetched data contains nothing
-            //  -> Skip to next iteration
-            if (strlen(bufferIn) == 0) {
-                continue;
-            }
-
-            // Seek to target offset prior to write
-            fseeko64(bFile, offset, SEEK_SET);
-
-            // Nullify data based on N number of bytes available at that data point
-            fwrite(std::string(strlen(bufferIn), '\0').data(), cfgStruct.rowlength(), 1, bFile);
-            deleteCount++;
-        }
+        // Deallocate data according to N bytes from rowLength
+        fallocate64(fileno(bFile), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfgStruct.rowlength() * rangeCount);
+        deleteCount += rangeCount;
 
         // Close & Release file lock after reading
         fclose(bFile);
@@ -1241,32 +1204,14 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
                 bFile = std::fopen(targetFilePath.c_str(), "rb");
                 flock(fileno(bFile), LOCK_EX);
 
-                // Iterate over range of query data & add queried data and status
-                for (long long int epochTime = startEpoch; epochTime <= currTS.lastEpoch; epochTime++, startEpoch++) {
-                    // Computes diff & offset
-                    diff = epochTime - currTS.firstEpoch;
-                    offset = diff * cfgStruct.rowlength();
+                // Computes diff & offset
+                diff = startEpoch - currTS.firstEpoch;
+                offset = diff * cfgStruct.rowlength();
+                rangeCount = currTS.lastEpoch - startEpoch;
 
-                    // Seek to computed offset
-                    fseeko64(bFile, offset, SEEK_SET);
-
-                    // Extract N bytes of data according to N bytes from .CFG file
-                    //  .CFG file is set by user when creating DB
-                    fread(&bufferIn[0], 1, cfgStruct.rowlength(), bFile);
-
-                    // IF fetched data contains nothing
-                    //  -> Skip to next iteration
-                    if (strlen(bufferIn) == 0) {
-                        continue;
-                    }
-
-                    // Seek to target offset prior to write
-                    fseeko64(bFile, offset, SEEK_SET);
-
-                    // Nullify data based on N number of bytes available at that data point
-                    fwrite(std::string(strlen(bufferIn), '\0').data(), cfgStruct.rowlength(), 1, bFile);
-                    deleteCount++;
-                }
+                // Deallocate data according to N bytes from rowLength
+                fallocate64(fileno(bFile), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfgStruct.rowlength() * rangeCount);
+                deleteCount += rangeCount;
 
                 // Update currTS with latest startEpoch after incrementing
                 currTS = timeStruct(startEpoch);
@@ -1287,32 +1232,14 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
                 bFile = std::fopen(targetFilePath.c_str(), "rb");
                 flock(fileno(bFile), LOCK_EX);
 
-                // Iterate over range of query data & add queried data and status
-                for (long long int epochTime = startEpoch; epochTime <= endEpochT; epochTime++, startEpoch++) {
-                    // Computes diff & offset
-                    diff = epochTime - currTS.firstEpoch;
-                    offset = diff * cfgStruct.rowlength();
+                // Computes diff & offset
+                diff = startEpoch - currTS.firstEpoch;
+                offset = diff * cfgStruct.rowlength();
+                rangeCount = endEpochT - startEpoch;
 
-                    // Seek to computed offset
-                    fseeko64(bFile, offset, SEEK_SET);
-
-                    // Extract N bytes of data according to N bytes from .CFG file
-                    //  .CFG file is set by user when creating DB
-                    fread(&bufferIn[0], 1, cfgStruct.rowlength(), bFile);
-
-                    // IF fetched data contains nothing
-                    //  -> Skip to next iteration
-                    if (strlen(bufferIn) == 0) {
-                        continue;
-                    }
-
-                    // Seek to target offset prior to write
-                    fseeko64(bFile, offset, SEEK_SET);
-
-                    // Nullify data based on N number of bytes available at that data point
-                    fwrite(std::string(strlen(bufferIn), '\0').data(), cfgStruct.rowlength(), 1, bFile);
-                    deleteCount++;
-                }
+                // Deallocate data according to N bytes from rowLength
+                fallocate64(fileno(bFile), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfgStruct.rowlength() * rangeCount);
+                deleteCount += rangeCount;
 
                 // Update currTS with latest startEpoch after incrementing
                 currTS = timeStruct(startEpoch);
