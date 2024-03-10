@@ -1164,7 +1164,7 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
             return toReturn;
         }
 
-        bFile = std::fopen(targetFilePath.c_str(), "rb");
+        bFile = std::fopen(targetFilePath.c_str(), "rb+");
 
         // Lock file prior to reading
         flock(fileno(bFile), LOCK_EX);
@@ -1201,7 +1201,7 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
                 }
 
                 // Open & Lock file prior to reading
-                bFile = std::fopen(targetFilePath.c_str(), "rb");
+                bFile = std::fopen(targetFilePath.c_str(), "rb+");
                 flock(fileno(bFile), LOCK_EX);
 
                 // Computes diff & offset
@@ -1229,7 +1229,7 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
                 }
 
                 // Open & Lock file prior to reading
-                bFile = std::fopen(targetFilePath.c_str(), "rb");
+                bFile = std::fopen(targetFilePath.c_str(), "rb+");
                 flock(fileno(bFile), LOCK_EX);
 
                 // Computes diff & offset
