@@ -120,6 +120,12 @@ int main(int argc, char const *argv[])
             .default_value(1).nargs(1)
             .scan<'i', unsigned int>();
 
+    //  Number of Batch Iterations
+    insertBench.add_argument("-b", "--batch_iteration")
+            .help("Number of batch iterations (Only applicable to RANGE/BATCH workloads)")
+            .default_value(10).nargs(1)
+            .scan<'i', unsigned int>();
+
     insertBench.add_argument("-ia", "--invoke_at").required()
             .help("Invoke benchmark at specific time (epoch time)")
             .default_value(0).nargs(1)
@@ -167,10 +173,10 @@ int main(int argc, char const *argv[])
         std::vector<std::vector<std::any>> insertData;
 
         // Read data from parquet file
-        arrow::Status readData = dataManager.readParquet(DATASET, &insertData);
+        dataManager.readParquet("1yTest.parquet", &insertData);
 
         if (TARGET_DB == "XSTORE") {
-            timeCost = XStore_Adapter::loadAll(SERVER_ADDR, SERVER_PORT, NUM_THREAD, insertData);
+            timeCost = XStore_Adapter::loadAll(SERVER_ADDR, SERVER_PORT, NUM_THREAD, &insertData);
         }
     }
     else if (program.is_subcommand_used(queryBench)) {
@@ -283,6 +289,7 @@ int main(int argc, char const *argv[])
         std::string EXPERIMENT_TYPE = toUpper(insertBench.get<std::string>("-e"));
         short unsigned int NUM_THREAD = insertBench.get<unsigned short int>("-t");
         unsigned int N_ITERATIONS = insertBench.get<unsigned int>("-n");
+        unsigned int B_ITERATIONS = insertBench.get<unsigned int>("-b");
         unsigned int INVOKE_AT = insertBench.get<unsigned long int>("-ia");
 
         // NUM_THREAD checking
@@ -344,19 +351,20 @@ int main(int argc, char const *argv[])
             std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
             std::cout << "[BENCHMARK] Pattern: SEQUENTIAL" << std::endl;
             std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
+            std::cout << "[BENCHMARK] Batch Iterations: " << B_ITERATIONS << std::endl;
             std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
             std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
 
             std::vector<std::vector<std::any>> insertData;
 
             // Read data from parquet file
-            std::vector<std::vector<std::vector<std::any>>> insertWorkload = dataManager.readInsertWorkload("BASIC-INSERT-BATCH-SEQ_Client-", NUM_THREAD, N_ITERATIONS);
+            std::vector<std::vector<std::vector<std::any>>> insertWorkload = dataManager.readInsertWorkload("BASIC-INSERT-BATCH-SEQ_Client-", NUM_THREAD, N_ITERATIONS, B_ITERATIONS);
 
             // Poll till
             epochPoller(INVOKE_AT);
 
             if (TARGET_DB == "XSTORE") {
-                timeCost = XStore_Adapter::rangeInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE);
+                timeCost = XStore_Adapter::rangeInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE);
             }
         }
         else if (EXPERIMENT_TYPE == "BATCH_RAND") {
@@ -364,19 +372,20 @@ int main(int argc, char const *argv[])
             std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
             std::cout << "[BENCHMARK] Pattern: RANDOM" << std::endl;
             std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
+            std::cout << "[BENCHMARK] Batch Iterations: " << B_ITERATIONS << std::endl;
             std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
             std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
 
             std::vector<std::vector<std::any>> insertData;
 
             // Read data from parquet file
-            std::vector<std::vector<std::vector<std::any>>> insertWorkload = dataManager.readInsertWorkload("BASIC-INSERT-BATCH-RAND_Client-", NUM_THREAD, N_ITERATIONS);
+            std::vector<std::vector<std::vector<std::any>>> insertWorkload = dataManager.readInsertWorkload("BASIC-INSERT-BATCH-RAND_Client-", NUM_THREAD, N_ITERATIONS, B_ITERATIONS);
 
             // Poll till
             epochPoller(INVOKE_AT);
 
             if (TARGET_DB == "XSTORE") {
-                timeCost = XStore_Adapter::batchInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE);
+                timeCost = XStore_Adapter::batchInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE);
             }
         }
         else {

@@ -33,7 +33,7 @@ class XStore_Adapter: public Base_Adapter {
         static std::vector<double> batchInsert(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *insertData, std::string pattern);
 
         // LOAD ALL
-        static std::vector<double> loadAll(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, std::vector<std::vector<std::any>> &insertData);
+        static std::vector<double> loadAll(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, std::vector<std::vector<std::any>> *insertData);
 
     private:
         // QUERY
@@ -51,7 +51,7 @@ class XStore_Adapter: public Base_Adapter {
         static short int computeRowLength(std::vector<std::any> *singleRowData);
 
         // LOAD ALL
-        static std::vector<double> loadAll_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, std::vector<std::vector<std::any>> insertData);
+        static std::vector<double> loadAll_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, std::vector<std::vector<std::any>> *insertData);
 };
 
 #endif //XSTORE_XSTORE_ADAPTER_H

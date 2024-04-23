@@ -20,10 +20,10 @@ std::vector<double> XStore_Adapter::unaryQuery(std::string SERVER_ADDR, std::str
     std::vector<double> timeCost;
 
     // Flattening nested vector
-    std::string fileName = "Query_Client-";
+    std::string fileName = "Client-";
     for (int i = 0; i < nestedVector.size(); i++) {
         // Write experiment result to CSV
-        writeCSV(fileName + std::to_string(i) + "_" + pattern + ".csv", "Time taken (ms)", nestedVector.at(i));
+        writeCSV("QUERY-" + pattern + "_" + fileName + std::to_string(i) + ".csv", "Time taken (ms)", nestedVector.at(i));
         std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
     }
     return timeCost;
@@ -45,10 +45,10 @@ std::vector<double> XStore_Adapter::rangeQuery(std::string SERVER_ADDR, std::str
     std::vector<double> timeCost;
 
     // Flattening nested vector
-    std::string fileName = "Query_Client-";
+    std::string fileName = "Client-";
     for (int i = 0; i < nestedVector.size(); i++) {
         // Write experiment result to CSV
-        writeCSV(fileName + std::to_string(i) + "_" + pattern + ".csv", "Time taken (ms)", nestedVector.at(i));
+        writeCSV("QUERY-" + pattern + "_" + fileName + std::to_string(i) + ".csv", "Time taken (ms)", nestedVector.at(i));
         std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
     }
     return timeCost;
@@ -70,10 +70,10 @@ std::vector<double> XStore_Adapter::batchQuery(std::string SERVER_ADDR, std::str
     std::vector<double> timeCost;
 
     // Flattening nested vector
-    std::string fileName = "Query_Client-";
+    std::string fileName = "Client-";
     for (int i = 0; i < nestedVector.size(); i++) {
         // Write experiment result to CSV
-        writeCSV(fileName + std::to_string(i) + "_" + pattern + ".csv", "Time taken (ms)", nestedVector.at(i));
+        writeCSV("QUERY-" + pattern + "_" + fileName + std::to_string(i) + ".csv", "Time taken (ms)", nestedVector.at(i));
         std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
     }
     return timeCost;
@@ -100,10 +100,10 @@ std::vector<double> XStore_Adapter::unaryInsert(std::string SERVER_ADDR, std::st
     std::vector<double> timeCost;
 
     // Flattening nested vector
-    std::string fileName = "Insert-A_Client-";
+    std::string fileName = "Client-";
     for (int i = 0; i < nestedVector.size(); i++) {
         // Write experiment result to CSV
-        writeCSV(fileName + std::to_string(i) + ".csv", "Time taken (ms)", nestedVector.at(i));
+        writeCSV("INSERT-" + pattern + "_" + fileName + std::to_string(i) + ".csv", "Time taken (ms)", nestedVector.at(i));
         std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
     }
     return timeCost;
@@ -130,10 +130,10 @@ std::vector<double> XStore_Adapter::rangeInsert(std::string SERVER_ADDR, std::st
     std::vector<double> timeCost;
 
     // Flattening nested vector
-    std::string fileName = "Insert-A_Client-";
+    std::string fileName = "Client-";
     for (int i = 0; i < nestedVector.size(); i++) {
         // Write experiment result to CSV
-        writeCSV(fileName + std::to_string(i) + ".csv", "Time taken (ms)", nestedVector.at(i));
+        writeCSV("INSERT-" + pattern + "_" + fileName + std::to_string(i) + ".csv", "Time taken (ms)", nestedVector.at(i));
         std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
     }
     return timeCost;
@@ -160,58 +160,61 @@ std::vector<double> XStore_Adapter::batchInsert(std::string SERVER_ADDR, std::st
     std::vector<double> timeCost;
 
     // Flattening nested vector
-    std::string fileName = "Insert-A_Client-";
+    std::string fileName = "Client-";
     for (int i = 0; i < nestedVector.size(); i++) {
         // Write experiment result to CSV
-        writeCSV(fileName + std::to_string(i) + ".csv", "Time taken (ms)", nestedVector.at(i));
+        writeCSV("INSERT-" + pattern + "_" + fileName + std::to_string(i) + ".csv", "Time taken (ms)", nestedVector.at(i));
         std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
     }
     return timeCost;
 }
 
-std::vector<double> XStore_Adapter::loadAll(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, std::vector<std::vector<std::any>> &insertData) {
+std::vector<double> XStore_Adapter::loadAll(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, std::vector<std::vector<std::any>> *insertData) {
     BS::multi_future<std::vector<double>> multiFuture;
     std::vector<std::vector<double>> nestedVector;
 
     // Pre-emptively delete & create BENCH_DB
     std::string dbName = "BENCH_DB";
-//    XStore_Adapter::createAndRemoveDB(SERVER_ADDR, SERVER_PORT, dbName, &insertData.at(0));
+    XStore_Adapter::createAndRemoveDB(SERVER_ADDR, SERVER_PORT, dbName, &insertData->at(1));
 
     // Extracting insertData so that each thread will have unique insert data
-    std::vector<std::vector<std::vector<std::any>>> threadInsertData;
-    long int rowCount = insertData.size();
-    long int rowPerThread = rowCount / NUM_THREAD;
-    long int lastRowIdx = 0;
+//    std::vector<std::vector<std::vector<std::any>>> threadInsertData;
+//    long int rowCount = insertData.size();
+//    long int rowPerThread = rowCount / NUM_THREAD;
+//    long int lastRowIdx = 0;
 
     // Split data into chunks corresponding to each thread
-    for (int i = 0; i < NUM_THREAD - 1; i++) {
-        std::vector<std::vector<std::any>> subVector = std::vector<std::vector<std::any>>(insertData.begin() + (i * rowPerThread), insertData.begin() + (i * rowPerThread) + rowPerThread);
-        threadInsertData.emplace_back(subVector);
-        lastRowIdx = 0 + (i * rowPerThread) + rowPerThread;
-    }
+//    for (int i = 0; i < NUM_THREAD - 1; i++) {
+//        std::vector<std::vector<std::any>> subVector = std::vector<std::vector<std::any>>(insertData.begin() + (i * rowPerThread), insertDatabegin() + (i * rowPerThread) + rowPerThread);
+//        threadInsertData.emplace_back(subVector);
+//        lastRowIdx = 0 + (i * rowPerThread) + rowPerThread;
+//    }
+//
+//    // Last thread will ingest its portion + remaining
+//    std::vector<std::vector<std::any>> subVector = std::vector<std::vector<std::any>>(insertData.begin() + lastRowIdx, insertData.begin() + rowCount);
+//    threadInsertData.emplace_back(subVector);
 
-    // Last thread will ingest its portion + remaining
-    std::vector<std::vector<std::any>> subVector = std::vector<std::vector<std::any>>(insertData.begin() + lastRowIdx, insertData.begin() + rowCount);
-    threadInsertData.emplace_back(subVector);
-
-    for (int i = 0; i < NUM_THREAD; i++) {
-        multiFuture.push_back(threadPool.submit(XStore_Adapter::loadAll_singleThread, SERVER_ADDR, SERVER_PORT, threadInsertData.at(i)));
-    }
-
-    // Wait till all threads finishes
-    for (std::vector<double> i : multiFuture.get()) {
-        nestedVector.push_back(i);
-    }
-
+    // Divide big into chunks of 100k
+    unsigned long int chunkCount = insertData->size() / 100'000;
+    std::cout << chunkCount << std::endl;
+//    for (int i = 0; i < NUM_THREAD; i++) {
+//        multiFuture.push_back(threadPool.submit(XStore_Adapter::loadAll_singleThread, SERVER_ADDR, SERVER_PORT, insertData));
+//    }
+//
+//    // Wait till all threads finishes
+//    for (std::vector<double> i : multiFuture.get()) {
+//        nestedVector.push_back(i);
+//    }
+//
     std::vector<double> timeCost;
-
-    // Flattening nested vector
-    std::string fileName = "Load-All_Client-";
-    for (int i = 0; i < nestedVector.size(); i++) {
-        // Write experiment result to CSV
-        writeCSV(fileName + std::to_string(i) + ".csv", "Time taken (ms)", nestedVector.at(i));
-        std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
-    }
+//
+//    // Flattening nested vector
+//    std::string fileName = "Load-All_Client-";
+//    for (int i = 0; i < nestedVector.size(); i++) {
+//        // Write experiment result to CSV
+//        writeCSV(fileName + std::to_string(i) + ".csv", "Time taken (ms)", nestedVector.at(i));
+//        std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
+//    }
     return timeCost;
 }
 
@@ -372,7 +375,7 @@ std::vector<double> XStore_Adapter::batchInsert_singleThread(std::string SERVER_
     return toReturn;
 }
 
-std::vector<double> XStore_Adapter::loadAll_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, std::vector<std::vector<std::any>> insertData) {
+std::vector<double> XStore_Adapter::loadAll_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, std::vector<std::vector<std::any>> *insertData) {
     std::vector<double> toReturn;
 
     // Init client obj
@@ -381,48 +384,10 @@ std::vector<double> XStore_Adapter::loadAll_singleThread(std::string SERVER_ADDR
 
     // Clock init
     std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
-    std::chrono::duration<double> timeCost;
 
-    XStore_Proto::rangeInsert_REQ rangeInsertReq;
-
-    for (int i = 0; i < insertData.size(); i++) {
-        start = std::chrono::high_resolution_clock::now();
-
-        // Build rangeInsert_DATA
-        XStore_Proto::rangeInsert_DATA *rangeInsertData = rangeInsertReq.add_rangeinsert_data();
-        rangeInsertData->set_timestamp(std::any_cast<unsigned long int>(insertData.at(i).at(0)));
-
-        // Build rowData
-        XStore_Proto::rowData rowData;
-        std::any currentMetric;
-
-        for (int j = 1; j < insertData.at(i).size(); j++) {
-            XStore_Proto::fData *field = rowData.add_fielddata();
-            currentMetric = insertData.at(i).at(j);
-
-            if (currentMetric.type() == typeid(std::string)) {
-                field->set_stringdata(std::any_cast<std::string>(currentMetric));
-                continue;
-            }
-            else if (currentMetric.type() == typeid(int)) {
-                field->set_int32data(std::any_cast<int>(currentMetric));
-                continue;
-            }
-            else if (currentMetric.type() == typeid(double)) {
-                field->set_doubledata(std::any_cast<double>(currentMetric));
-                continue;
-            }
-        }
-
-        rangeInsertData->mutable_data()->MergeFrom(rowData);
+    for (int i = 0; i < insertData->size(); i++) {
+        XStore_Proto::rangeInsert_REP rangeInsertRep = xstoreClient.rangeInsert(insertData, "BENCH_DB");
     }
-
-    // Dispatch insert
-//    XStore_Proto::rangeInsert_REP rangeInsertRep = xstoreClient.rangeInsert(rangeInsertReq, "BENCH_DB");
-
-    end = std::chrono::high_resolution_clock::now();
-    timeCost = end - start;
-    toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
     return toReturn;
 }
 
