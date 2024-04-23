@@ -13,7 +13,6 @@ import json
 # pd.set_option('display.max_columns', None)
 # pd.set_option('expand_frame_repr', False)
 
-
 class ParquetOPS:
     def __init__(self):
         self.df = self.numRows = self.numGroups = self.rowsPerGroup = None
@@ -95,7 +94,7 @@ class ParquetOPS:
         else:
             df.to_parquet(outfileName, engine='fastparquet', compression='zstd', append=True)
 
-    def createBasicQuery(self, offset, sampleSize, nClients, startTime, endTime, queryType='QUERY_A', batchIter=None):
+    def createBasicQuery(self, offset, sampleSize, nClients, startTime, endTime, queryType='UNARY_SEQ', batchIter=None):
         # Batch size default
         if batchIter is None:
             batchIter = 10
@@ -187,7 +186,9 @@ class ParquetOPS:
                 toWrite['timestamp'] = toWrite['timestamp'].astype(np.uint64)
 
                 # Write to file
-                toWrite.to_parquet(f'BASIC-INSERT-UNARY-SEQ_Client-{i}_{sampleSize}_{startRange}.parquet', engine='fastparquet', compression='zstd')
+                fName = f'BASIC-INSERT-UNARY-SEQ_Client-{i}_{sampleSize}_{startRange}.parquet'
+                toWrite.to_parquet(fName, engine='fastparquet', compression='zstd')
+                print(f'File written: {fName}')
 
         elif insertType == 'UNARY_RAND':
             # Random indexes for all N clients
@@ -203,7 +204,9 @@ class ParquetOPS:
                 toWrite['timestamp'] = toWrite['timestamp'].astype(np.uint64)
 
                 # Write to file
-                toWrite.to_parquet(f'BASIC-INSERT-UNARY-RAND_Client-{i}_{sampleSize}_{0}-{self.numRows}.parquet', engine='fastparquet', compression='zstd')
+                fName = f'BASIC-INSERT-UNARY-RAND_Client-{i}_{sampleSize}_{0}-{self.numRows}.parquet'
+                toWrite.to_parquet(fName, engine='fastparquet', compression='zstd')
+                print(f'File written: {fName}')
 
         elif insertType == 'BATCH_SEQ':
             for i in range(nClients):
@@ -217,7 +220,9 @@ class ParquetOPS:
                 toWrite['timestamp'] = toWrite['timestamp'].astype(np.uint64)
 
                 # Write to file
-                toWrite.to_parquet(f'BASIC-INSERT-BATCH-SEQ_Client-{i}_{batchIter}-{sampleSize}_{startRange}-{endRange}.parquet', engine='fastparquet', compression='zstd')
+                fName = f'BASIC-INSERT-BATCH-SEQ_Client-{i}_{batchIter}-{sampleSize}_{startRange}-{endRange}.parquet'
+                toWrite.to_parquet(fName, engine='fastparquet', compression='zstd')
+                print(f'File written: {fName}')
 
         elif insertType == 'BATCH_RAND':
             # Random indexes timestamp for all N clients
@@ -234,7 +239,9 @@ class ParquetOPS:
                 toWrite['timestamp'] = toWrite['timestamp'].astype(np.uint64)
 
                 # Write to file
-                toWrite.to_parquet(f'BASIC-INSERT-BATCH-RAND_Client-{i}_{batchIter}-{sampleSize}_{startRange}-{endRange}.parquet', engine='fastparquet', compression='zstd')
+                fName = f'BASIC-INSERT-BATCH-RAND_Client-{i}_{batchIter}-{sampleSize}_{startRange}-{endRange}.parquet'
+                toWrite.to_parquet(fName, engine='fastparquet', compression='zstd')
+                print(f'File written: {fName}')
 
 
 if __name__ == '__main__':
@@ -266,7 +273,7 @@ if __name__ == '__main__':
     writeWorkload.add_argument('-s', '--sample-size', type=int, required=True, help='Number of rows')
     writeWorkload.add_argument('-n', '--num-client', type=int, required=True, help='Number of client (Each client has its own input data file)')
     writeWorkload.add_argument('-i', '--input-data', type=str, required=True, help='Input parquet file')
-    writeWorkload.add_argument('-b', '--batch-iter', type=int, required=False, help='Batch iteration (Only applicable to RANGE/BATCH workloads')
+    writeWorkload.add_argument('-b', '--batch-iter', type=int, required=False, help='Batch iteration (Only applicable to RANGE/BATCH workloads)')
 
     # If no argument given -> Print help msg
     if len(sys.argv) == 1:

@@ -41,7 +41,10 @@ public:
     std::vector<std::vector<std::vector<std::any>>> readQueryWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations);
 
     //  Reading INSERT workload
+    //      SEQ
     std::vector<std::vector<std::vector<std::any>>> readInsertWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations);
+    //      RAND
+    std::vector<std::vector<std::vector<std::any>>> readInsertWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations, unsigned int bIterations);
 
 private:
     std::vector<std::vector<std::any>> generateHashData(unsigned long int startTime, unsigned long int endTime, int nColumns);

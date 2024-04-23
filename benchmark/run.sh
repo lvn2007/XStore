@@ -135,7 +135,7 @@ do
     initSSH
 
     # Copy over XBench
-    sendCMD "git clone https://gitlab.com/lvn2007/XStore.git; cd XStore/benchmark && mkdir -p build && cd build && cmake .. && make && cp benchmarkClient ~"
+    sendCMD "git clone https://gitlab.com/lvn2007/XStore.git; cd XStore/benchmark && mkdir -p build && cd build && cmake .. && make && cp benchmarkClient ~ && cp ../DataManager/Parquet_OPS.py ~"
 
     # Once work is done -> Attach to master session
     tmux attach -t XBench
@@ -156,7 +156,7 @@ do
     read -p "Column count: " columnCount
     read -p "Outfile name: " outfileName
 
-    sendCMD "./parquetOPS.py generate -s $startTime -e $endTime -c $columnCount -o $outfileName"
+    sendCMD "python3 Parquet_OPS.py generate -s $startTime -e $endTime -c $columnCount -o $outfileName"
 
     # Once work is done -> Attach to master session
     tmux attach -t XBench
