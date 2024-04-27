@@ -46,7 +46,7 @@ class XStore_Adapter: public Base_Adapter {
         static std::vector<double> rangeInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData);
         static std::vector<double> batchInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData);
 
-        static void createAndRemoveDB(std::string SERVER_ADDR, std::string SERVER_PORT, std::string dbName, std::vector<std::any> *singleRowData);
+        static void createDB(std::string SERVER_ADDR, std::string SERVER_PORT, std::string dbName, std::vector<std::any> *singleRowData);
         static XStore_Proto::timeUnit getTimeResolution(long int timestamp);
         static short int computeRowLength(std::vector<std::any> *singleRowData);
 
