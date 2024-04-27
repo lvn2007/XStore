@@ -83,6 +83,10 @@ std::vector<double> XStore_Adapter::unaryInsert(std::string SERVER_ADDR, std::st
     BS::multi_future<std::vector<double>> multiFuture;
     std::vector<std::vector<double>> nestedVector;
 
+    // Pre-emptively delete & create BENCH_DB
+    std::string dbName = "BENCH_DB";
+    XStore_Adapter::createDB(SERVER_ADDR, SERVER_PORT, dbName, &insertData->at(0).at(0));
+
     // Extracting insertData so that each thread will have unique insert data
     for (int i = 0; i < NUM_THREAD; i++) {
         multiFuture.push_back(threadPool.submit(XStore_Adapter::unaryInsert_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &insertData->at(i)));
@@ -109,6 +113,10 @@ std::vector<double> XStore_Adapter::rangeInsert(std::string SERVER_ADDR, std::st
     BS::multi_future<std::vector<double>> multiFuture;
     std::vector<std::vector<double>> nestedVector;
 
+    // Pre-emptively delete & create BENCH_DB
+    std::string dbName = "BENCH_DB";
+    XStore_Adapter::createDB(SERVER_ADDR, SERVER_PORT, dbName, &insertData->at(0).at(0));
+
     // Extracting insertData so that each thread will have unique insert data
     for (int i = 0; i < NUM_THREAD; i++) {
         multiFuture.push_back(threadPool.submit(XStore_Adapter::rangeInsert_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &insertData->at(i)));
@@ -134,6 +142,10 @@ std::vector<double> XStore_Adapter::rangeInsert(std::string SERVER_ADDR, std::st
 std::vector<double> XStore_Adapter::batchInsert(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *insertData, std::string pattern) {
     BS::multi_future<std::vector<double>> multiFuture;
     std::vector<std::vector<double>> nestedVector;
+
+    // Pre-emptively delete & create BENCH_DB
+    std::string dbName = "BENCH_DB";
+    XStore_Adapter::createDB(SERVER_ADDR, SERVER_PORT, dbName, &insertData->at(0).at(0));
 
     // Extracting insertData so that each thread will have unique insert data
     for (int i = 0; i < NUM_THREAD; i++) {
@@ -163,7 +175,7 @@ std::vector<double> XStore_Adapter::loadAll(std::string SERVER_ADDR, std::string
 
     // Pre-emptively delete & create BENCH_DB
     std::string dbName = "BENCH_DB";
-    XStore_Adapter::createAndRemoveDB(SERVER_ADDR, SERVER_PORT, dbName, &insertData->at(1));
+    XStore_Adapter::createDB(SERVER_ADDR, SERVER_PORT, dbName, &insertData->at(1));
 
     // Extracting insertData so that each thread will have unique insert data
 //    std::vector<std::vector<std::vector<std::any>>> threadInsertData;
@@ -379,10 +391,9 @@ std::vector<double> XStore_Adapter::loadAll_singleThread(std::string SERVER_ADDR
     return toReturn;
 }
 
-void XStore_Adapter::createAndRemoveDB(std::string SERVER_ADDR, std::string SERVER_PORT, std::string dbName, std::vector<std::any> *singleRowData) {
+void XStore_Adapter::createDB(std::string SERVER_ADDR, std::string SERVER_PORT, std::string dbName, std::vector<std::any> *singleRowData) {
     XStore_Client xstoreClient;
     xstoreClient.connect(SERVER_ADDR, SERVER_PORT);
-    xstoreClient.removeDB(dbName);
 
     // Analyze first row of data to determine row size
     short int rowLength = XStore_Adapter::computeRowLength(singleRowData);
