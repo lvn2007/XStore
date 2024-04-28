@@ -1,5 +1,5 @@
 # All target machines for experiments are declared here
-targetNodes=("cc@129.114.108.188" "cc@129.114.109.135" "cc@129.114.108.134")
+targetNodes=("ubuntu@172.16.6.6" "ubuntu@172.16.6.7" "ubuntu@172.16.6.8" "ubuntu@172.16.6.9")
 arrayLength=${#targetNodes[@]}
 
 # Pre-sets of libraries
@@ -239,11 +239,9 @@ do
       read -p "Thread Count: " threadCount
       read -p "Experiment type: " experimentType
       read -p "No. of Iterations: " nIteration
-      read -p "Start time range: " startTime
-      read -p "End time range: " endTime
       read -p "Invoke at: " invokeAt
 
-      sendCMD "./benchmarkClient readBench -i $ipAddr -p $portNo -d $dbName -t $threadCount -e $experimentType -n $nIteration -s $startTime -en $endTime -ia $invokeAt"
+      sendCMD "./benchmarkClient queryBench -i $ipAddr -p $portNo -d $dbName -t $threadCount -e $experimentType -n $nIteration -ia $invokeAt"
 
       # Poll until user tells to fetch bench results
       while :
@@ -263,4 +261,50 @@ do
       tmux attach -t XBench
       exit
   fi
+
+  # 9. WRITE benchmark
+  if [ "$inputChoice" -eq 9 ]
+    then
+      # Initializing tmux window according to list of targetNodes
+      initSSH
+
+      # Remove any existing bench results
+      sendCMD "rm *.csv"
+
+      # Drop any cache at client side
+      sendCMD "free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null"
+
+      # Specific parameters of Generate hash
+      echo "--- WRITE Benchmark"
+      echo "WRITE Benchmark parameter configurations:"
+      read -p "Server IP Addr: " ipAddr
+      read -p "Server Port No.: " portNo
+      read -p "DB Name: " dbName
+      read -p "Thread Count: " threadCount
+      read -p "Experiment type: " experimentType
+      read -p "No. of Iterations: " nIteration
+      read -p "No. of Batch Iterations: " bIteration
+      read -p "Invoke at: " invokeAt
+
+      sendCMD "./benchmarkClient insertBench -i $ipAddr -p $portNo -d $dbName -t $threadCount -e $experimentType -n $nIteration -b $bIteration -ia $invokeAt"
+
+      # Poll until user tells to fetch bench results
+      while :
+      do
+        read -p "Press (y) to fetch bench results: " fetchBench
+
+        if [ "$fetchBench" = "y" ]
+        then
+          break
+        fi
+      done
+
+      # Download benchmark results from all target nodes back into Master
+      scpRecvBenchResults
+
+      # Once work is done -> Attach to master session
+      tmux attach -t XBench
+      exit
+  fi
+
 done

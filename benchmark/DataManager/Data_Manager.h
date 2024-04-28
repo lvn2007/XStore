@@ -38,7 +38,10 @@ public:
     arrow::Status readParquet(std::string parquetFilename, std::vector<std::vector<std::any>> *outputVector);
 
     //  Reading QUERY workload
+    //      SEQ
     std::vector<std::vector<std::vector<std::any>>> readQueryWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations);
+    //      RAND
+    std::vector<std::vector<std::vector<std::any>>> readQueryWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations, unsigned int bIterations);
 
     //  Reading INSERT workload
     //      SEQ
