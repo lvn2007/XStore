@@ -239,9 +239,10 @@ do
       read -p "Thread Count: " threadCount
       read -p "Experiment type: " experimentType
       read -p "No. of Iterations: " nIteration
+      read -p "No. of Batch Iterations: " bIteration
       read -p "Invoke at: " invokeAt
 
-      sendCMD "./benchmarkClient queryBench -i $ipAddr -p $portNo -d $dbName -t $threadCount -e $experimentType -n $nIteration -ia $invokeAt"
+      sendCMD "./benchmarkClient queryBench -i $ipAddr -p $portNo -d $dbName -t $threadCount -e $experimentType -n $nIteration -b $bIteration -ia $invokeAt"
 
       # Poll until user tells to fetch bench results
       while :
