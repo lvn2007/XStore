@@ -86,6 +86,11 @@ class XStore {
         bool hasDB();
 
         bool hasDBFile(std::string filePath);
+
+        // File locks
+        void wrLockFile(FILE *bFile, unsigned long int startRange, unsigned long int endRange);
+        void rdLockFile(FILE *bFile, unsigned long int startRange, unsigned long int endRange);
+        void unlockFile(FILE *bFile, unsigned long int startRange, unsigned long int endRange);
 };
 
 #endif //XSTORE_XSTORE_H
