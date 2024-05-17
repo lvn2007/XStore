@@ -109,16 +109,14 @@ XStore_Proto::createDB_REP XStore::createDB(std::string dbName, XStore_Proto::ti
             bFile = std::fopen(cfgPath.c_str(), "wb+");
 
             // Lock prior to writing
-            flock(fileno(bFile), LOCK_EX);
+            wrLockFile(bFile, 0, 0);
 
             // Writing actual data to disk
             cfgStruct.SerializeToFileDescriptor(fileno(bFile));
 
             //  Close file & Release lock after write
+            unlockFile(bFile, 0, 0);
             std::fclose(bFile);
-            fsync(fileno(bFile));
-
-            flock(fileno(bFile), LOCK_UN);
 
             //  Add this cfgStruct to cfgMap
             cfgMap[dbName] = cfgStruct;
@@ -190,21 +188,22 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, XStore_P
         bFile = std::fopen(targetFile.c_str(), "wb+");
 
         // Lock prior to file OP
-        flock(fileno(bFile), LOCK_EX);
+        XStore::wrLockFile(bFile, 0, 0);
         ftruncate(fileno(bFile), (currTS.lastEpoch - currTS.firstEpoch) * cfgStruct.rowlength());
+        XStore::unlockFile(bFile, 0, 0);
     }
     else {
         // ELSE - Target file DOES exist
         //  Open in append mode
         bFile = std::fopen(targetFile.c_str(), "rb+");
-
-        // Lock prior to file OP
-        flock(fileno(bFile), LOCK_EX);
     }
 
     //  Computes diff & offset
     long long int diff = unixTime - currTS.firstEpoch;
     long long int offset = diff * cfgStruct.rowlength();
+
+    // Lock prior to file OP
+    XStore::wrLockFile(bFile, offset, cfgStruct.rowlength());
 
     //  Seek to target offset prior to write
     fseeko64(bFile, offset, SEEK_SET);
@@ -212,9 +211,9 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, XStore_P
     //  Writing actual data to disk
     fwrite(data.SerializeAsString().data(), cfgStruct.rowlength(), 1, bFile);
 
-    //  Close file & Release lock after write
+    //  Release lock & Close file after write
+    XStore::unlockFile(bFile, offset, cfgStruct.rowlength());
     std::fclose(bFile);
-    flock(fileno(bFile), LOCK_UN);
 
     std::string successMsg = "[SUCCESS] [UNARY INSERT] [DB: " + dbName + "] - Inserted " + std::to_string(unixTime) + " to " + std::to_string(currTS.year) + ".XSTORE";
     toReturn.set_insertstatus(successMsg);
@@ -259,9 +258,6 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery(std::time_t unixTime, std::strin
     FILE *bFile;
     bFile = std::fopen(targetFilePath.c_str(), "rb");
 
-    //  Lock file prior to reading
-    flock(fileno(bFile), LOCK_SH);
-
     // Obtain file size
     //  Computes diff & offset
     long long int diff = unixTime - currTS.firstEpoch;
@@ -271,6 +267,9 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery(std::time_t unixTime, std::strin
     char bufferIn[cfgStruct.rowlength()];
     XStore_Proto::rowData tempData;
 
+    //  Lock file prior to reading
+    rdLockFile(bFile, offset, cfgStruct.rowlength());
+
     //  Seek to computed offset
     fseeko64(bFile, offset, SEEK_SET);
 
@@ -278,14 +277,13 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery(std::time_t unixTime, std::strin
     //  .CFG file is set by user when creating DB
     fread(&bufferIn[0], 1, cfgStruct.rowlength(), bFile);
 
-    // Close file & release lock after reading
+    // Release lock & close file after reading
+    unlockFile(bFile, offset, cfgStruct.rowlength());
     fclose(bFile);
-    flock(fileno(bFile), LOCK_UN);
 
     // Set data fetched from XStore to returning Protobuf obj
     tempData.ParseFromArray(&bufferIn, cfgStruct.rowlength());
     *toReturn.mutable_data() = tempData;
-
     return toReturn;
 }
 
@@ -354,19 +352,19 @@ XStore_Proto::unaryDelete_REP XStore::unaryDelete(std::time_t epochTime, std::st
     //  Open in append mode
     bFile = std::fopen(targetFilePath.c_str(), "rb+");
 
-    // Lock prior to file OP
-    flock(fileno(bFile), LOCK_EX);
-
     //  Computes diff & offset
     long long int diff = epochTime - currTS.firstEpoch;
     long long int offset = diff * cfgStruct.rowlength();
+
+    // Lock prior to file OP
+    wrLockFile(bFile, offset, cfgStruct.rowlength());
 
     // Deallocate data according to N bytes from rowLength
     fallocate64(fileno(bFile), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfgStruct.rowlength());
 
     // Close file & Release lock after write
+    unlockFile(bFile, offset, cfgStruct.rowlength());
     std::fclose(bFile);
-    flock(fileno(bFile), LOCK_UN);
 
     std::string successMsg = "[SUCCESS] [UNARY DELETE] [DB: " + dbName + "] - Deleted " + std::to_string(epochTime) + " in " + targetFileName;
     toReturn.set_deletestatus(successMsg);
@@ -456,16 +454,14 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
             bFile = std::fopen(targetFile.c_str(), "wb+");
 
             // Lock prior to file OP
-            flock(fileno(bFile), LOCK_EX);
+            wrLockFile(bFile, 0, 0);
             ftruncate(fileno(bFile), (thisTS.lastEpoch - thisTS.firstEpoch) * cfgStruct.rowlength());
+            unlockFile(bFile, 0, 0);
         }
         else {
             // ELSE - Target file DOES exist
             //  Open in append mode
             bFile = std::fopen(targetFile.c_str(), "rb+");
-
-            // Lock prior to file OP
-            flock(fileno(bFile), LOCK_EX);
         }
 
         long long int diff, offset;
@@ -480,16 +476,21 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
             diff = unixTime - thisTS.firstEpoch;
             offset = diff * cfgStruct.rowlength();
 
+            // Lock prior to file OP
+            wrLockFile(bFile, offset, cfgStruct.rowlength());
+
             // Seek to target offset prior to write
             fseeko64(bFile, offset, SEEK_SET);
 
             // Writing actual data to disk
             fwrite(data.SerializeAsString().data(), cfgStruct.rowlength(), 1, bFile);
+
+            // Unlock after write
+            unlockFile(bFile, offset, cfgStruct.rowlength());
         }
 
-        // Close file & Release lock after write
+        // Close file after write
         std::fclose(bFile);
-        flock(fileno(bFile), LOCK_UN);
     }
 
     // Return insert status
@@ -584,9 +585,6 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
             // ELSE - Target file DOES exist
             //  Open in read mode
             bFile = std::fopen(targetFile.c_str(), "rb");
-
-            // Lock prior to file OP
-            flock(fileno(bFile), LOCK_SH);
         }
 
         // Time-related & Auxiliary
@@ -599,12 +597,18 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
             diff = protoFromClient->timestamp(dataMap[yearKey].at(i)) - thisTS.firstEpoch;
             offset = diff * cfgStruct.rowlength();
 
+            // Lock prior to file OP
+            rdLockFile(bFile, offset, cfgStruct.rowlength());
+
             // Seek to target offset prior to read
             fseeko64(bFile, offset, SEEK_SET);
 
             // Extract N bytes of data according to N bytes from .CFG file
             //  .CFG file is set by user when creating DB
             fread(&bufferIn[0], 1, cfgStruct.rowlength(), bFile);
+
+            // Unlock after read
+            unlockFile(bFile, offset, cfgStruct.rowlength());
 
             // IF fetched data contains nothing
             //  -> Skip to next iteration
@@ -621,7 +625,6 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
 
         // Close file & Release lock after read
         std::fclose(bFile);
-        flock(fileno(bFile), LOCK_UN);
     }
     return toReturn;
 }
@@ -715,9 +718,6 @@ XStore_Proto::batchDelete_REP XStore::batchDelete(XStore_Proto::batchDelete_REQ 
             // ELSE - Target file DOES exist
             //  Open in read mode
             bFile = std::fopen(targetFile.c_str(), "rb+");
-
-            // Lock prior to file OP
-            flock(fileno(bFile), LOCK_EX);
         }
 
         // Time-related & Auxiliary
@@ -730,14 +730,19 @@ XStore_Proto::batchDelete_REP XStore::batchDelete(XStore_Proto::batchDelete_REQ 
             diff = protoFromClient->timestamp(dataMap[yearKey].at(i)) - thisTS.firstEpoch;
             offset = diff * cfgStruct.rowlength();
 
+            // Lock prior to file OP
+            wrLockFile(bFile, offset, cfgStruct.rowlength());
+
             // Deallocate data according to N bytes from rowLength
             fallocate64(fileno(bFile), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfgStruct.rowlength());
+
+            // Unlock after file OP
+            unlockFile(bFile, offset, cfgStruct.rowlength());
             deleteCount++;
         }
 
         // Close file & Release lock after read
         std::fclose(bFile);
-        flock(fileno(bFile), LOCK_UN);
     }
     std::string successMsg = "[SUCCESS] [BATCH DELETE] [DB: " + dbName + "] - Deleted " + std::to_string(deleteCount) + " items";
     toReturn.set_deletestatus(successMsg);
@@ -821,17 +826,24 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
             bFile = std::fopen(targetFile.c_str(), "wb+");
 
             // Lock prior to file OP
-            flock(fileno(bFile), LOCK_EX);
+            wrLockFile(bFile, 0, 0);
             ftruncate(fileno(bFile), (thisTS.lastEpoch - thisTS.firstEpoch) * cfgStruct.rowlength());
+            unlockFile(bFile, 0, 0);
         }
         else {
             // ELSE - Target file DOES exist
             //  Open in append mode
             bFile = std::fopen(targetFile.c_str(), "rb+");
-
-            // Lock prior to file OP
-            flock(fileno(bFile), LOCK_EX);
         }
+
+        // Metadata of first datapoint
+        XStore_Proto::rangeInsert_DATA firstInsertData = protoFromClient->rangeinsert_data(dataMap[yearKey].at(0));
+        const std::time_t &firstUnixTime = firstInsertData.timestamp();
+        const long long unsigned int firstOffset = (firstUnixTime - thisTS.firstEpoch) * cfgStruct.rowlength();
+        const long long unsigned int regionLength = cfgStruct.rowlength() * dataMap[yearKey].size();
+
+        // Lock prior to file OP
+        wrLockFile(bFile, firstOffset, regionLength);
 
         long long int diff, offset;
         // Iterate through each YEAR of inserting data
@@ -853,8 +865,8 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
         }
 
         // Close file & Release lock after write
+        unlockFile(bFile, firstOffset, regionLength);
         std::fclose(bFile);
-        flock(fileno(bFile), LOCK_UN);
     }
 
     // Return insert status
@@ -945,8 +957,12 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
 
         bFile = std::fopen(targetFilePath.c_str(), "rb");
 
+        // Metadata of first datapoint
+        const long long unsigned int firstOffset = (startEpochT - currTS.firstEpoch) * cfgStruct.rowlength();
+        const long long unsigned int regionLength = cfgStruct.rowlength() * (endEpochT - startEpochT);
+
         // Lock file prior to reading
-        flock(fileno(bFile), LOCK_SH);
+        rdLockFile(bFile, firstOffset, regionLength);
 
         // Iterate over range of query data & add queried data and status
         for (long epochTime = startEpochT; epochTime <= endEpochT; epochTime++) {
@@ -975,8 +991,8 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
         }
 
         // Close & Release file lock after reading
+        unlockFile(bFile, firstOffset, regionLength);
         fclose(bFile);
-        flock(fileno(bFile), LOCK_UN);
     }
     // Otherwise -> Involves multi-year
     else {
@@ -996,9 +1012,14 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
                     continue;
                 }
 
-                // Open & Lock file prior to reading
                 bFile = std::fopen(targetFilePath.c_str(), "rb");
-                flock(fileno(bFile), LOCK_SH);
+
+                // Metadata of first datapoint
+                const long long unsigned int firstOffset = (startEpoch - currTS.firstEpoch) * cfgStruct.rowlength();
+                const long long unsigned int regionLength = cfgStruct.rowlength() * (currTS.lastEpoch - startEpoch);
+
+                // Lock file prior to reading
+                rdLockFile(bFile, firstOffset, regionLength);
 
                 // Iterate over range of query data & add queried data and status
                 for (long long int epochTime = startEpoch; epochTime <= currTS.lastEpoch; epochTime++, startEpoch++) {
@@ -1030,8 +1051,8 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
                 currTS = timeStruct(startEpoch);
 
                 // Close file & Release lock after write
+                unlockFile(bFile, firstOffset, regionLength);
                 std::fclose(bFile);
-                flock(fileno(bFile), LOCK_UN);
             }
             else {
                 // IF target YEAR.XSTORE does NOT exist
@@ -1041,9 +1062,14 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
                     continue;
                 }
 
-                // Open & Lock file prior to reading
                 bFile = std::fopen(targetFilePath.c_str(), "rb");
-                flock(fileno(bFile), LOCK_SH);
+
+                // Metadata of first datapoint
+                const long long unsigned int firstOffset = (startEpoch - currTS.firstEpoch) * cfgStruct.rowlength();
+                const long long unsigned int regionLength = cfgStruct.rowlength() * (endEpochT - startEpoch);
+
+                // Lock file prior to reading
+                rdLockFile(bFile, firstOffset, regionLength);
 
                 // Iterate over range of query data & add queried data and status
                 for (long long int epochTime = startEpoch; epochTime <= endEpochT; epochTime++, startEpoch++) {
@@ -1075,8 +1101,8 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
                 currTS = timeStruct(startEpoch);
 
                 // Close file & Release lock after read
+                unlockFile(bFile, firstOffset, regionLength);
                 std::fclose(bFile);
-                flock(fileno(bFile), LOCK_UN);
                 break;
             }
         }
@@ -1166,21 +1192,21 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
 
         bFile = std::fopen(targetFilePath.c_str(), "rb+");
 
-        // Lock file prior to reading
-        flock(fileno(bFile), LOCK_EX);
-
         // Compute diff & offset
         diff = startEpochT - currTS.firstEpoch;
         offset = diff * cfgStruct.rowlength();
         rangeCount = endEpochT - startEpochT;
 
+        // Lock file prior to deleting
+        wrLockFile(bFile, offset, cfgStruct.rowlength() * rangeCount);
+
         // Deallocate data according to N bytes from rowLength
         fallocate64(fileno(bFile), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfgStruct.rowlength() * rangeCount);
         deleteCount += rangeCount;
 
-        // Close & Release file lock after reading
+        // Release lock & Close file after delete
+        unlockFile(bFile, offset, cfgStruct.rowlength() * rangeCount);
         fclose(bFile);
-        flock(fileno(bFile), LOCK_UN);
     }
     // Otherwise -> Involves multi-year
     else {
@@ -1200,14 +1226,15 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
                     continue;
                 }
 
-                // Open & Lock file prior to reading
                 bFile = std::fopen(targetFilePath.c_str(), "rb+");
-                flock(fileno(bFile), LOCK_EX);
 
                 // Computes diff & offset
                 diff = startEpoch - currTS.firstEpoch;
                 offset = diff * cfgStruct.rowlength();
                 rangeCount = currTS.lastEpoch - startEpoch;
+
+                // Lock file prior to deleting
+                wrLockFile(bFile, offset, cfgStruct.rowlength() * rangeCount);
 
                 // Deallocate data according to N bytes from rowLength
                 fallocate64(fileno(bFile), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfgStruct.rowlength() * rangeCount);
@@ -1216,9 +1243,9 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
                 // Update currTS with latest startEpoch after incrementing
                 currTS = timeStruct(startEpoch);
 
-                // Close file & Release lock after write
+                // Release lock & Close file after delete
+                unlockFile(bFile, offset, cfgStruct.rowlength() * rangeCount);
                 std::fclose(bFile);
-                flock(fileno(bFile), LOCK_UN);
             }
             else {
                 // IF target YEAR.XSTORE does NOT exist
@@ -1228,14 +1255,15 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
                     continue;
                 }
 
-                // Open & Lock file prior to reading
                 bFile = std::fopen(targetFilePath.c_str(), "rb+");
-                flock(fileno(bFile), LOCK_EX);
 
                 // Computes diff & offset
                 diff = startEpoch - currTS.firstEpoch;
                 offset = diff * cfgStruct.rowlength();
                 rangeCount = endEpochT - startEpoch;
+
+                // Lock file prior to reading
+                wrLockFile(bFile, offset, cfgStruct.rowlength() * rangeCount);
 
                 // Deallocate data according to N bytes from rowLength
                 fallocate64(fileno(bFile), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfgStruct.rowlength() * rangeCount);
@@ -1244,9 +1272,9 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
                 // Update currTS with latest startEpoch after incrementing
                 currTS = timeStruct(startEpoch);
 
-                // Close file & Release lock after read
+                // Release lock & Close file after delete
+                unlockFile(bFile, offset, cfgStruct.rowlength() * rangeCount);
                 std::fclose(bFile);
-                flock(fileno(bFile), LOCK_UN);
                 break;
             }
         }
@@ -1366,4 +1394,50 @@ bool XStore::hasDB() {
 bool XStore::hasDBFile(std::string filePath) {
     struct stat buffer;
     return (stat(filePath.c_str(), &buffer) == 0);
+}
+
+void XStore::wrLockFile(FILE *bFile, unsigned long int startRange, unsigned long int length) {
+    struct flock64 fl;
+    fl.l_type = F_WRLCK;
+    fl.l_whence = SEEK_SET;
+    fl.l_start = startRange;
+    fl.l_len = (length > 0) ? length + 1 : length;
+
+    if (fcntl64(fileno(bFile), F_SETLKW64, &fl) == -1) {
+        if (errno == EACCES || errno == EAGAIN) {
+            std::cout << "[ERROR] [WR LOCK] - Unable to obtain lock" << std::endl;
+        }
+        else {
+            std::cout << "[ERROR] [WR LOCK] - Unexpected lock error" << std::endl;
+        }
+    }
+}
+
+void XStore::rdLockFile(FILE *bFile, unsigned long int startRange, unsigned long int length) {
+    struct flock64 fl;
+    fl.l_type = F_RDLCK;
+    fl.l_whence = SEEK_SET;
+    fl.l_start = startRange;
+    fl.l_len = (length > 0) ? length + 1 : length;
+
+    if (fcntl64(fileno(bFile), F_SETLKW64, &fl) == -1) {
+        if (errno == EACCES || errno == EAGAIN) {
+            std::cout << "[ERROR] [RD LOCK] - Unable to obtain lock" << std::endl;
+        }
+        else {
+            std::cout << "[ERROR] [RD LOCK] - Unexpected lock error" << std::endl;
+        }
+    }
+}
+
+void XStore::unlockFile(FILE *bFile, unsigned long int startRange, unsigned long int length) {
+    struct flock64 fl;
+    fl.l_type = F_UNLCK;
+    fl.l_whence = SEEK_SET;
+    fl.l_start = startRange;
+    fl.l_len = (length > 0) ? length + 1 : length;
+
+    if (fcntl64(fileno(bFile), F_SETLKW64, &fl) == -1) {
+        std::cout << "[ERROR] [FILE UNLOCK] - Unable to release lock" << std::endl;
+    }
 }
