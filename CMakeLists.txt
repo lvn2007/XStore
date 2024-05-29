@@ -72,7 +72,7 @@ add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h
         include/Networking/zhelpers.hpp src/dataStructs/configStruct.cpp include/dataStructs/configStruct.h
         include/dataStructs/timeStruct.h src/dataStructs/timeStruct.cpp
         include/Compression/shoco.h src/Compression/shoco.cpp include/Compression/shoco_model.h include/Compression/zstdpp.hpp
-        include/Logger/Logger.h src/Logger/Logger.cpp)
+        include/Logger/Logger.h)
 
 add_compile_options(-O3)
 target_link_libraries(XStore PUBLIC "stdc++fs" protobuf::libprotobuf "zmq" Threads::Threads)
