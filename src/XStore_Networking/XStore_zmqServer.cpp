@@ -22,7 +22,7 @@ void XStore_zmqServer::startServer(std::string listenAddr, std::string listenPor
     this->serverAddr = serverAddr;
 
     clientSocket.bind(serverAddr);
-    std::cout << "[INFO - Networking] -- Listening on: " << serverAddr << std::endl;
+    spdlog::info("[NETWORKING] - Listening on: {}", serverAddr);
 
     //  Socket to talk to WORKERS
     zmq::socket_t workerSocket(ctx, zmq::socket_type::dealer);
@@ -40,10 +40,10 @@ void XStore_zmqServer::startServer(std::string listenAddr, std::string listenPor
         pthread_t worker;
         pthread_create(&worker, NULL, XStore_zmqServer::workerRoutine, &tArgs);
     }
-    std::cout << "[INFO - Networking] -- Launched " << numThreads << " worker thread(s)" << std::endl;
+    spdlog::info("[NETWORKING] - Launched: {0:d} worker thread", numThreads);
 
     // Connect WORKER threads to CLIENT threads via queue
-    zmq::proxy(static_cast<void *> (clientSocket), static_cast<void *> (workerSocket), nullptr);
+    zmq::proxy(static_cast<void*>(clientSocket), static_cast<void*>(workerSocket), nullptr);
 }
 
 void* XStore_zmqServer::workerRoutine(void *args) {

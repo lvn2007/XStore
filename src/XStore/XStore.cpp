@@ -73,27 +73,29 @@ XStore_Proto::createDB_REP XStore::createDB(std::string dbName, XStore_Proto::ti
     }
 
     if (rowLength < 4) {
-        createDBStatus = "[ERROR] [CREATE DB] [DB: " + dbName + "] - Row length must be >= 4";
+        createDBStatus = fmt::format("[ERROR] [CREATE DB] [DB: {}] - Row length must be >= 4", dbName);
         toReturn.set_createdbstatus(createDBStatus);
+        spdlog::error(createDBStatus.substr(ERROR_LEN));
         return toReturn;
     }
 
     // Target directory of a given DB name
-    std::string targetPath = baseDir + "dataStore/" + dbName + "/";
+    std::string targetPath = fmt::format("{}dataStore/{}/", baseDir, dbName);
 
     // IF folder for dbName is already created
     //  -> Inform user about the error
     if (std::filesystem::is_directory(targetPath) == 0) {
         // Check if within permitted time resolution bounds
         if (std::find(std::begin(permittedTimeResolution), std::end(permittedTimeResolution), XStore_Proto::timeUnit_Name(timeResolution)) == std::end(permittedTimeResolution)) {
-            createDBStatus = "[ERROR] [CREATE DB] [DB: " + dbName + "] - Invalid time resolution";
+            createDBStatus = fmt::format("[ERROR] [CREATE DB] [DB: {}] - Invalid time resolution", dbName);
             toReturn.set_createdbstatus(createDBStatus);
+            spdlog::error(createDBStatus.substr(ERROR_LEN));
             return toReturn;
         }
 
         // Create DB directory
         if (std::filesystem::create_directory(targetPath) == 1) {
-            std::string successMsg = "[SUCCESS] [CREATE DB] [DB: " + dbName + "] - Created DB";
+            std::string successMsg = fmt::format("[INFO] [CREATE DB] [DB: {}] - Created DB", dbName);
             toReturn.set_createdbstatus(successMsg);
 
             // Dumps DB configurations info to disk
@@ -105,7 +107,7 @@ XStore_Proto::createDB_REP XStore::createDB(std::string dbName, XStore_Proto::ti
 
             // Writing cfgStruct to file
             FILE *bFile;
-            std::string cfgPath  = targetPath + dbName + ".CFG";
+            std::string cfgPath  = fmt::format("{}{}.CFG", targetPath, dbName);
             bFile = std::fopen(cfgPath.c_str(), "wb+");
 
             // Lock prior to writing
@@ -120,12 +122,15 @@ XStore_Proto::createDB_REP XStore::createDB(std::string dbName, XStore_Proto::ti
 
             //  Add this cfgStruct to cfgMap
             cfgMap[dbName] = cfgStruct;
+
+            spdlog::info(successMsg.substr(INFO_LEN));
             return toReturn;
         }
     }
 
-    createDBStatus = "[ERROR] [CREATE DB] [DB: " + dbName + "] - Already existed";
+    createDBStatus = fmt::format("[ERROR] [CREATE DB] [DB: {}] - Already existed", dbName);
     toReturn.set_createdbstatus(createDBStatus);
+    spdlog::error(createDBStatus.substr(ERROR_LEN));
     return toReturn;
 }
 
@@ -145,12 +150,13 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, XStore_P
     }
 
     // Base directory of a DB
-    std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
+    std::string dbBasePath = fmt::format("{}dataStore/{}/", baseDir, dbName);
 
     // IF db directory does not exist
     if (std::filesystem::is_directory(dbBasePath) == 0) {
-        std::string errMsg = "[ERROR] [UNARY INSERT] [DB: " + dbName + "] - DB does not exist";
+        std::string errMsg = fmt::format("[ERROR] [UNARY INSERT] [DB: {}] - DB does not exist", dbName);
         toReturn.set_insertstatus(errMsg);
+        spdlog::error(errMsg.substr(ERROR_LEN));
         return toReturn;
     }
 
@@ -159,7 +165,7 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, XStore_P
     if (cfgMap.find(dbName) == cfgMap.end()) {
         // Read & add cfgStruct to cfgMap
         FILE *cFile;
-        std::string cfgPath = dbBasePath + dbName + ".CFG";
+        std::string cfgPath = fmt::format("{}{}.CFG", dbBasePath, dbName);
         cFile = std::fopen(cfgPath.c_str(), "rb");
         cfgStruct.ParseFromFileDescriptor(fileno(cFile));
         std::fclose(cFile);
@@ -173,14 +179,15 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, XStore_P
     // Enforce time granularity
     std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
     if (currTS.timeResolution != expectedTimeResolution) {
-        std::string errMsg = "[ERROR] [UNARY INSERT] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + expectedTimeResolution;
+        std::string errMsg = fmt::format("[ERROR] [UNARY INSERT] [DB: {}] - Invalid time resolution. Expecting: {}", dbName, expectedTimeResolution);
         toReturn.set_insertstatus(errMsg);
+        spdlog::error(errMsg.substr(ERROR_LEN));
         return toReturn;
     }
 
     // Prepare to write
     FILE *bFile;
-    std::string targetFile = dbBasePath + std::to_string(currTS.year) + ".XSTORE";
+    std::string targetFile = fmt::format("{}{}.XSTORE", dbBasePath, currTS.year);
 
     // IF target file does NOT exist
     if (std::filesystem::exists(targetFile) == 0) {
@@ -215,8 +222,9 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, XStore_P
     XStore::unlockFile(bFile, offset, cfgStruct.rowlength());
     std::fclose(bFile);
 
-    std::string successMsg = "[SUCCESS] [UNARY INSERT] [DB: " + dbName + "] - Inserted " + std::to_string(unixTime) + " to " + std::to_string(currTS.year) + ".XSTORE";
+    std::string successMsg = fmt::format("[INFO] [UNARY INSERT] [DB: {}] - Inserted {} to {}.XSTORE", dbName, unixTime, currTS.year);
     toReturn.set_insertstatus(successMsg);
+    spdlog::info(successMsg.substr(INFO_LEN));
     return toReturn;
 }
 
@@ -237,19 +245,26 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery(std::time_t unixTime, std::strin
     timeStruct currTS{unixTime};
 
     // Base directory of a DB & Target path of file to READ
-    std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
-    std::string targetFilePath = dbBasePath + std::to_string(currTS.year) + ".XSTORE";
+    std::string dbBasePath = fmt::format("{}dataStore/{}/", baseDir, dbName);
+    std::string targetFilePath = fmt::format("{}{}.XSTORE", dbBasePath, currTS.year);
 
     // IF target year file DOES NOT exist
     if (std::filesystem::exists(targetFilePath) == 0) {
+        std::string errMsg = fmt::format("[ERROR] [UNARY QUERY] [DB: {}] - DB does not exist", dbName);
+        toReturn.set_querystatus(errMsg);
+        spdlog::error(errMsg.substr(ERROR_LEN));
         return toReturn;
     }
 
     // Enforce time resolution
-    std::string configPath = dbBasePath + dbName + ".CFG";
+    std::string configPath = fmt::format("{}{}.CFG", dbBasePath, dbName);
     XStore_Proto::configStruct cfgStruct = cfgMap[dbName];
 
-    if (currTS.timeResolution != XStore_Proto::timeUnit_Name(cfgStruct.timeresolution())) {
+    std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
+    if (currTS.timeResolution != expectedTimeResolution) {
+        std::string errMsg = fmt::format("[ERROR] [UNARY QUERY] [DB: {}] - Invalid time resolution. Expecting: {}", dbName, expectedTimeResolution);
+        toReturn.set_querystatus(errMsg);
+        spdlog::error(errMsg.substr(ERROR_LEN));
         return toReturn;
     }
 
@@ -303,12 +318,13 @@ XStore_Proto::unaryDelete_REP XStore::unaryDelete(std::time_t epochTime, std::st
     }
 
     // Base directory of a DB
-    std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
+    std::string dbBasePath = fmt::format("{}dataStore/{}/", baseDir, dbName);
 
     // IF db directory does not exist
     if (std::filesystem::is_directory(dbBasePath) == 0) {
-        std::string errMsg = "[ERROR] [UNARY DELETE] [DB: " + dbName + "] - DB does not exist";
+        std::string errMsg = fmt::format("[ERROR] [UNARY DELETE] [DB: {}] - DB does not exist", dbName);
         toReturn.set_deletestatus(errMsg);
+        spdlog::error(errMsg.substr(ERROR_LEN));
         return toReturn;
     }
 
@@ -317,7 +333,7 @@ XStore_Proto::unaryDelete_REP XStore::unaryDelete(std::time_t epochTime, std::st
     if (cfgMap.find(dbName) == cfgMap.end()) {
         // Read & add cfgStruct to cfgMap
         FILE *cFile;
-        std::string cfgPath = dbBasePath + dbName + ".CFG";
+        std::string cfgPath = fmt::format("{}{}.CFG", dbBasePath, dbName);
         cFile = std::fopen(cfgPath.c_str(), "rb");
         cfgStruct.ParseFromFileDescriptor(fileno(cFile));
         std::fclose(cFile);
@@ -331,20 +347,22 @@ XStore_Proto::unaryDelete_REP XStore::unaryDelete(std::time_t epochTime, std::st
     // Enforce time granularity
     std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
     if (currTS.timeResolution != expectedTimeResolution) {
-        std::string errMsg = "[ERROR] [UNARY DELETE] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + expectedTimeResolution;
+        std::string errMsg = fmt::format("[ERROR] [UNARY DELETE] [DB: {}] - Invalid time resolution. Expecting: {}", dbName, expectedTimeResolution);
         toReturn.set_deletestatus(errMsg);
+        spdlog::error(errMsg.substr(ERROR_LEN));
         return toReturn;
     }
 
     // Prepare to delete (Writing NULL byte)
     FILE *bFile;
-    std::string targetFileName = std::to_string(currTS.year) + ".XSTORE";
-    std::string targetFilePath = dbBasePath + targetFileName;
+    std::string targetFileName = fmt::format("{}.XSTORE", currTS.year);
+    std::string targetFilePath = fmt::format("{}{}", dbBasePath, targetFileName);
 
     // IF target file does NOT exist
     if (std::filesystem::exists(targetFilePath) == 0) {
-        std::string errMsg = "[ERROR] [UNARY DELETE] [DB: " + dbName + "] - " + targetFileName + " does not exist";
+        std::string errMsg = fmt::format("[ERROR] [UNARY DELETE] [DB: {}] - {} does not exist", dbName, targetFileName);
         toReturn.set_deletestatus(errMsg);
+        spdlog::error(errMsg.substr(ERROR_LEN));
         return toReturn;
     }
 
@@ -366,8 +384,9 @@ XStore_Proto::unaryDelete_REP XStore::unaryDelete(std::time_t epochTime, std::st
     unlockFile(bFile, offset, cfgStruct.rowlength());
     std::fclose(bFile);
 
-    std::string successMsg = "[SUCCESS] [UNARY DELETE] [DB: " + dbName + "] - Deleted " + std::to_string(epochTime) + " in " + targetFileName;
+    std::string successMsg = fmt::format("[INFO] [UNARY DELETE] [DB: {}] - Deleted {} in {}", dbName, epochTime, targetFileName);
     toReturn.set_deletestatus(successMsg);
+    spdlog::info(successMsg.substr(INFO_LEN));
     return toReturn;
 }
 
@@ -384,12 +403,13 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
     }
 
     // Base directory of a DB
-    std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
+    std::string dbBasePath = fmt::format("{}dataStore/{}/", baseDir, dbName);
 
     // IF db directory does not exist
     if (std::filesystem::is_directory(dbBasePath) == 0) {
-        std::string errMsg = "[ERROR] [BATCH INSERT] [DB: " + dbName + "] - DB does not exist";
+        std::string errMsg = fmt::format("[ERROR] [BATCH INSERT] [DB: {}] - DB does not exist", dbName);
         toReturn.set_insertstatus(errMsg);
+        spdlog::error(errMsg.substr(ERROR_LEN));
         return toReturn;
     }
 
@@ -398,7 +418,7 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
     if (cfgMap.find(dbName) == cfgMap.end()) {
         // Read & Add cfgStruct to cfgMap
         FILE *cFile;
-        std::string cfgPath = dbBasePath + dbName + ".CFG";
+        std::string cfgPath = fmt::format("{}{}.CFG", dbBasePath, dbName);
         cFile = std::fopen(cfgPath.c_str(), "rb");
         cfgStruct.ParseFromFileDescriptor(fileno(cFile));
         std::fclose(cFile);
@@ -422,7 +442,7 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
     std::time_t currTime;
     std::map<unsigned short int, std::vector<unsigned long long int>> dataMap;
     std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
-    std::string granularityErrMsg = "[ERROR] [BATCH INSERT] [DB: " + dbName + "] - Invalid time granularity. Expecting: " + expectedTimeResolution;
+    std::string granularityErrMsg;
 
     // Granularity check
     for (int i = 0; i < protoFromClient->batchinsert_data_size(); i++) {
@@ -433,7 +453,9 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
         // Halt execution & Return as long as there's an error in time granularity
         timeStruct currTS {currTime};
         if (currTS.timeResolution != expectedTimeResolution) {
+            granularityErrMsg = fmt::format("[ERROR] [BATCH INSERT] [DB: {}] - Invalid time granularity. Expecting: {}", dbName, expectedTimeResolution);
             toReturn.set_insertstatus(granularityErrMsg);
+            spdlog::error(granularityErrMsg.substr(ERROR_LEN));
             return toReturn;
         }
     }
@@ -442,7 +464,7 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
     for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& pair : dataMap) {
         unsigned short int yearKey = pair.first;
         FILE *bFile;
-        std::string targetFile = dbBasePath + std::to_string(yearKey) + ".XSTORE";
+        std::string targetFile = fmt::format("{}{}.XSTORE", dbBasePath, yearKey);
 
         // Grab first inserting element for timeStruct purposes
         //  Get length of time to truncate
@@ -494,9 +516,9 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
     }
 
     // Return insert status
-    std::string successMsg = "[SUCCESS] [BATCH INSERT] [DB: " + dbName + "] - Inserted " + std::to_string(protoFromClient->batchinsert_data_size()) + " elements successfully";
+    std::string successMsg = fmt::format("[INFO] [BATCH INSERT] [DB: {}] - Inserted {} elements successfully", dbName, protoFromClient->batchinsert_data_size());
     toReturn.set_insertstatus(successMsg);
-
+    spdlog::info(successMsg.substr(INFO_LEN));
     return toReturn;
 }
 
@@ -513,14 +535,17 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
     }
 
     // Base directory of a DB
-    std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
+    std::string dbBasePath = fmt::format("{}dataStore/{}/", baseDir, dbName);
 
     // Check if cfgMap NOT contains cfgStruct
     XStore_Proto::configStruct cfgStruct;
     if (cfgMap.find(dbName) == cfgMap.end()) {
-        std::string cfgPath = dbBasePath + dbName + ".CFG";
+        std::string cfgPath = fmt::format("{}{}.CFG", dbBasePath, dbName);
 
         if (std::filesystem::exists(cfgPath) == 0) {
+            std::string errMsg = fmt::format("[ERROR] [BATCH QUERY] [DB: {}] - {}.CFG does not exist", dbName, dbName);
+            toReturn.set_querystatus(errMsg);
+            spdlog::error(errMsg.substr(ERROR_LEN));
             return toReturn;
         }
 
@@ -537,11 +562,17 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
 
     // IF query range > 2GB limit of Protobuf or Empty
     if ((protoFromClient->timestamp_size() * cfgStruct.rowlength()) > 2000000000 || protoFromClient->timestamp_size() < 0) {
+        std::string errMsg = fmt::format("[ERROR] [BATCH QUERY] [DB: {}] - Query results is larger than 2GB or empty", dbName);
+        toReturn.set_querystatus(errMsg);
+        spdlog::error(errMsg.substr(ERROR_LEN));
         return toReturn;
     }
 
     // IF db directory does not exist
     if (std::filesystem::is_directory(dbBasePath) == 0) {
+        std::string errMsg = fmt::format("[ERROR] [BATCH QUERY] [DB: {}] - DB does not exist", dbName);
+        toReturn.set_querystatus(errMsg);
+        spdlog::error(errMsg.substr(ERROR_LEN));
         return toReturn;
     }
 
@@ -566,6 +597,9 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
 
         // Halt execution & Return as long as there's an error in time granularity
         if (currTS.timeResolution != expectedTimeResolution) {
+            std::string errMsg = fmt::format("[ERROR] [BATCH QUERY] [DB: {}] - Invalid time resolution. Expecting: {}", dbName, expectedTimeResolution);
+            toReturn.set_querystatus(errMsg);
+            spdlog::error(errMsg.substr(ERROR_LEN));
             return toReturn;
         }
     }
@@ -574,11 +608,14 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
     for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& pair : dataMap) {
         FILE *bFile;
         unsigned short int yearKey = pair.first;
-        std::string targetFile = dbBasePath + std::to_string(yearKey) + ".XSTORE";
+        std::string targetFile = fmt::format("{}{}.XSTORE", dbBasePath, yearKey);
 
         // IF target file does NOT exist
         if (std::filesystem::exists(targetFile) == 0) {
             // Skip to next iteration
+            std::string warnMsg = fmt::format("[WARNING] [BATCH QUERY] [DB: {}] - {}.XSTORE does not exist", dbName, yearKey);
+            toReturn.set_querystatus(warnMsg);
+            spdlog::warn(warnMsg.substr(WARNING_LEN));
             continue;
         }
         else {
@@ -642,14 +679,17 @@ XStore_Proto::batchDelete_REP XStore::batchDelete(XStore_Proto::batchDelete_REQ 
     }
 
     // Base directory of a DB
-    std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
+    std::string dbBasePath = fmt::format("{}dataStore/{}/", baseDir, dbName);
 
     // Check if cfgMap NOT contains cfgStruct
     XStore_Proto::configStruct cfgStruct;
     if (cfgMap.find(dbName) == cfgMap.end()) {
-        std::string cfgPath = dbBasePath + dbName + ".CFG";
+        std::string cfgPath = fmt::format("{}{}.CFG", dbBasePath, dbName);
 
         if (std::filesystem::exists(cfgPath) == 0) {
+            std::string errMsg = fmt::format("[ERROR] [BATCH DELETE] [DB: {}] - {}.CFG does not exist", dbName, dbName);
+            toReturn.set_deletestatus(errMsg);
+            spdlog::error(errMsg.substr(ERROR_LEN));
             return toReturn;
         }
 
@@ -666,13 +706,15 @@ XStore_Proto::batchDelete_REP XStore::batchDelete(XStore_Proto::batchDelete_REQ 
 
     // IF target delete timestamp(s) is empty OR db directory does not exist
     if (protoFromClient->timestamp_size() < 0) {
-        std::string errMsg = "[ERROR] [BATCH DELETE] [DB: " + dbName + "] - Empty target timestamp(s)";
+        std::string errMsg = fmt::format("[ERROR] [BATCH DELETE] [DB: {}] - Empty target timestamp(s)", dbName);
         toReturn.set_deletestatus(errMsg);
+        spdlog::error(errMsg.substr(ERROR_LEN));
         return toReturn;
     }
     else if (std::filesystem::is_directory(dbBasePath) == 0) {
-        std::string errMsg = "[ERROR] [BATCH DELETE] [DB: " + dbName + "] - DB does not exist";
+        std::string errMsg = fmt::format("[ERROR] [BATCH DELETE] [DB: {}] - DB does not exist", dbName);
         toReturn.set_deletestatus(errMsg);
+        spdlog::error(errMsg.substr(ERROR_LEN));
         return toReturn;
     }
 
@@ -697,8 +739,9 @@ XStore_Proto::batchDelete_REP XStore::batchDelete(XStore_Proto::batchDelete_REQ 
 
         // Halt execution & Return as long as there's an error in time granularity
         if (currTS.timeResolution != expectedTimeResolution) {
-            std::string errMsg = "[ERROR] [BATCH DELETE] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + expectedTimeResolution;
+            std::string errMsg = fmt::format("[ERROR] [BATCH DELETE] [DB: {}] - Invalid time resolution. Expecting: {}", dbName, expectedTimeResolution);
             toReturn.set_deletestatus(errMsg);
+            spdlog::error(errMsg.substr(ERROR_LEN));
             return toReturn;
         }
     }
@@ -707,7 +750,7 @@ XStore_Proto::batchDelete_REP XStore::batchDelete(XStore_Proto::batchDelete_REQ 
     for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& pair : dataMap) {
         FILE *bFile;
         unsigned short int yearKey = pair.first;
-        std::string targetFile = dbBasePath + std::to_string(yearKey) + ".XSTORE";
+        std::string targetFile = fmt::format("{}{}.XSTORE", dbBasePath, yearKey);
 
         // IF target file does NOT exist
         if (std::filesystem::exists(targetFile) == 0) {
@@ -722,7 +765,6 @@ XStore_Proto::batchDelete_REP XStore::batchDelete(XStore_Proto::batchDelete_REQ 
 
         // Time-related & Auxiliary
         long long int diff, offset;
-        char bufferIn[cfgStruct.rowlength()];
         timeStruct thisTS{static_cast<time_t>(protoFromClient->timestamp(dataMap[yearKey].at(0)))};
 
         for (int i = 0; i < dataMap[yearKey].size(); i++) {
@@ -744,8 +786,9 @@ XStore_Proto::batchDelete_REP XStore::batchDelete(XStore_Proto::batchDelete_REQ 
         // Close file & Release lock after read
         std::fclose(bFile);
     }
-    std::string successMsg = "[SUCCESS] [BATCH DELETE] [DB: " + dbName + "] - Deleted " + std::to_string(deleteCount) + " items";
-    toReturn.set_deletestatus(successMsg);
+    std::string infoMsg = fmt::format("[INFO] [BATCH DELETE] [DB: {}] - Deleted {} items", dbName, deleteCount);
+    toReturn.set_deletestatus(infoMsg);
+    spdlog::info(infoMsg.substr(INFO_LEN));
     return toReturn;
 }
 
@@ -762,12 +805,13 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
     }
 
     // Base directory of a DB
-    std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
+    std::string dbBasePath = fmt::format("{}dataStore/{}/", baseDir, dbName);
 
     // IF db directory does not exist
     if (std::filesystem::is_directory(dbBasePath) == 0) {
-        std::string errMsg = "[ERROR] [RANGE INSERT] [DB: " + dbName + "] - DB does not exist";
+        std::string errMsg = fmt::format("[ERROR] [RANGE INSERT] [DB: {}] - DB does not exist", dbName);
         toReturn.set_insertstatus(errMsg);
+        spdlog::error(errMsg.substr(ERROR_LEN));
         return toReturn;
     }
 
@@ -776,7 +820,7 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
     if (cfgMap.find(dbName) == cfgMap.end()) {
         // Read & Add cfgStruct to cfgMap
         FILE *cFile;
-        std::string cfgPath = dbBasePath + dbName + ".CFG";
+        std::string cfgPath = fmt::format("{}{}.CFG", dbBasePath, dbName);
         cFile = std::fopen(cfgPath.c_str(), "rb");
         cfgStruct.ParseFromFileDescriptor(fileno(cFile));
         std::fclose(cFile);
@@ -794,7 +838,6 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
     std::time_t currTime;
     std::map<unsigned short int, std::vector<unsigned long long int>> dataMap;
     std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
-    std::string granularityErrMsg = "[ERROR] [RANGE INSERT] [DB: " + dbName + "] - Invalid time granularity. Expecting: " + expectedTimeResolution;
 
     // Granularity check
     for (int i = 0; i < protoFromClient->rangeinsert_data_size(); i++) {
@@ -805,7 +848,9 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
         // Halt execution & Return as long as there's an error in time granularity
         timeStruct currTS {currTime};
         if (currTS.timeResolution != expectedTimeResolution) {
+            std::string granularityErrMsg = fmt::format("[ERROR] [RANGE INSERT] [DB: {}] - Invalid time granularity. Expecting: {}", dbName, expectedTimeResolution);
             toReturn.set_insertstatus(granularityErrMsg);
+            spdlog::error(granularityErrMsg.substr(ERROR_LEN));
             return toReturn;
         }
     }
@@ -814,7 +859,7 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
     for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& pair : dataMap) {
         unsigned short int yearKey = pair.first;
         FILE *bFile;
-        std::string targetFile = dbBasePath + std::to_string(yearKey) + ".XSTORE";
+        std::string targetFile = fmt::format("{}{}.XSTORE", dbBasePath, yearKey);
 
         // Grab first inserting element for timeStruct purposes
         //  Get length of time to truncate
@@ -870,8 +915,9 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
     }
 
     // Return insert status
-    std::string successMsg = "[SUCCESS] [RANGE INSERT] [DB: " + dbName + "] - Inserted " + std::to_string(protoFromClient->rangeinsert_data_size()) + " elements successfully";
-    toReturn.set_insertstatus(successMsg);
+    std::string infoMsg = fmt::format("[INFO] [RANGE INSERT] [DB: {}] - Inserted {} elements successfully", dbName, protoFromClient->rangeinsert_data_size());
+    toReturn.set_insertstatus(infoMsg);
+    spdlog::info(infoMsg.substr(INFO_LEN));
     return toReturn;
 }
 
@@ -889,7 +935,7 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
     }
 
     // Base directory of a DB
-    std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
+    std::string dbBasePath = fmt::format("{}dataStore/{}/", baseDir, dbName);
 
     // Check if cfgMap NOT contains cfgStruct
     XStore_Proto::configStruct cfgStruct;
@@ -897,6 +943,9 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
         std::string cfgPath = dbBasePath + dbName + ".CFG";
 
         if (std::filesystem::exists(cfgPath) == 0) {
+            std::string errMsg = fmt::format("[ERROR] [RANGE QUERY] [DB: {}] - {}.CFG does not exist", dbName, dbName);
+            toReturn.set_querystatus(errMsg);
+            spdlog::error(errMsg.substr(ERROR_LEN));
             return toReturn;
         }
 
@@ -913,15 +962,24 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
 
     // IF query range > 2GB limit of Protobuf
     if ((endEpochT - startEpochT) * cfgStruct.rowlength() > 2000000000) {
+        std::string errMsg = fmt::format("[ERROR] [RANGE QUERY] [DB: {}] - Query results is larger than 2GB", dbName);
+        toReturn.set_querystatus(errMsg);
+        spdlog::error(errMsg.substr(ERROR_LEN));
         return toReturn;
     }
 
     if ((endEpochT - startEpochT) < 0) {
+        std::string errMsg = fmt::format("[ERROR] [RANGE QUERY] [DB: {}] - Target end time must be after start time", dbName);
+        toReturn.set_querystatus(errMsg);
+        spdlog::error(errMsg.substr(ERROR_LEN));
         return toReturn;
     }
 
     // IF db directory does not exist
     if (std::filesystem::is_directory(dbBasePath) == 0) {
+        std::string errMsg = fmt::format("[ERROR] [RANGE QUERY] [DB: {}] - DB does not exist", dbName);
+        toReturn.set_querystatus(errMsg);
+        spdlog::error(errMsg.substr(ERROR_LEN));
         return toReturn;
     }
 
@@ -930,6 +988,9 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
     timeStruct endTimeStruct{endEpochT};
     std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
     if (startTimeStruct.timeResolution != expectedTimeResolution || endTimeStruct.timeResolution != expectedTimeResolution) {
+        std::string errMsg = fmt::format("[ERROR] [RANGE QUERY] [DB: {}] - Invalid time resolution. Expecting {}", dbName, expectedTimeResolution);
+        toReturn.set_querystatus(errMsg);
+        spdlog::error(errMsg.substr(ERROR_LEN));
         return toReturn;
     }
 
@@ -947,11 +1008,14 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
     // IF query range is within 1-year
     if (currTS.lastEpoch >= endEpochT) {
         // Open file prior to reading
-        targetFilePath = dbBasePath + std::to_string(currTS.year) + ".XSTORE";
+        targetFilePath = fmt::format("{}{}.XSTORE", dbBasePath, currTS.year);
 
         // IF target YEAR.XSTORE does NOT exist
         if (std::filesystem::exists(targetFilePath) == 0) {
             // Return without error
+            std::string warningMsg = fmt::format("[WARNING] [RANGE QUERY] [DB: {}] - {}.XSTORE does not exist", dbName, currTS.year);
+            toReturn.set_querystatus(warningMsg);
+            spdlog::warn(warningMsg.substr(WARNING_LEN));
             return toReturn;
         }
 
@@ -1001,12 +1065,16 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
 
         // Loop through each year individually
         while (startEpoch < endEpochT) {
-            targetFilePath = dbBasePath + std::to_string(currTS.year) + ".XSTORE";
+            targetFilePath = fmt::format("{}{}.XSTORE", dbBasePath, currTS.year);
 
             // IF the requested start epoch spans ONLY 1 year
             if (currTS.lastEpoch < endEpochT) {
                 // IF target YEAR.XSTORE does NOT exist
                 if (std::filesystem::exists(targetFilePath) == 0) {
+                    std::string warningMsg = fmt::format("[WARNING] [RANGE QUERY] [DB: {}] - {}.XSTORE does not exist", dbName, currTS.year);
+                    toReturn.set_querystatus(warningMsg);
+                    spdlog::warn(warningMsg.substr(WARNING_LEN));
+
                     // Update currTS with latest startEpoch after incrementing
                     currTS = timeStruct(startEpoch + (currTS.lastEpoch - startEpoch));
                     continue;
@@ -1057,6 +1125,10 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
             else {
                 // IF target YEAR.XSTORE does NOT exist
                 if (std::filesystem::exists(targetFilePath) == 0) {
+                    std::string warningMsg = fmt::format("[WARNING] [RANGE QUERY] [DB: {}] - {}.XSTORE does not exist", dbName, currTS.year);
+                    toReturn.set_querystatus(warningMsg);
+                    spdlog::warn(warningMsg.substr(WARNING_LEN));
+
                     // Update currTS with latest startEpoch after incrementing
                     currTS = timeStruct(startEpoch + (endEpochT - startEpoch));
                     continue;
@@ -1123,14 +1195,17 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
     }
 
     // Base directory of a DB
-    std::string dbBasePath = baseDir + "dataStore/" + dbName + "/";
+    std::string dbBasePath = fmt::format("{}dataStore/{}/", baseDir, dbName);
 
     // Check if cfgMap NOT contains cfgStruct
     XStore_Proto::configStruct cfgStruct;
     if (cfgMap.find(dbName) == cfgMap.end()) {
-        std::string cfgPath = dbBasePath + dbName + ".CFG";
+        std::string cfgPath = fmt::format("{}{}.CFG", dbBasePath, dbName);
 
         if (std::filesystem::exists(cfgPath) == 0) {
+            std::string errMsg = fmt::format("[ERROR] [RANGE DELETE] [DB: {}] - {}.CFG does not exist", dbName, dbName);
+            toReturn.set_deletestatus(errMsg);
+            spdlog::error(errMsg.substr(ERROR_LEN));
             return toReturn;
         }
 
@@ -1146,15 +1221,17 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
     }
 
     if ((endEpochT - startEpochT) < 0) {
-        std::string errMsg = "[ERROR] [RANGE DELETE] [DB: " + dbName + "] - Invalid range";
+        std::string errMsg = fmt::format("[ERROR] [RANGE DELETE] [DB: {}] - Target end time must be after start time", dbName);
         toReturn.set_deletestatus(errMsg);
+        spdlog::error(errMsg.substr(ERROR_LEN));
         return toReturn;
     }
 
     // IF db directory does not exist
     if (std::filesystem::is_directory(dbBasePath) == 0) {
-        std::string errMsg = "[ERROR] [RANGE DELETE] [DB: " + dbName + "] - DB does not exist";
+        std::string errMsg = fmt::format("[ERROR] [RANGE DELETE] [DB: {}] - DB does not exist", dbName);
         toReturn.set_deletestatus(errMsg);
+        spdlog::error(errMsg.substr(ERROR_LEN));
         return toReturn;
     }
 
@@ -1163,8 +1240,9 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
     timeStruct endTimeStruct{endEpochT};
     std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
     if (startTimeStruct.timeResolution != expectedTimeResolution || endTimeStruct.timeResolution != expectedTimeResolution) {
-        std::string errMsg = "[ERROR] [RANGE DELETE] [DB: " + dbName + "] - Invalid time resolution. Expecting: " + expectedTimeResolution;
+        std::string errMsg = fmt::format("[ERROR] [RANGE DELETE] [DB: {}] - Invalid time resolution. Expecting: {}", dbName, expectedTimeResolution);
         toReturn.set_deletestatus(errMsg);
+        spdlog::error(errMsg.substr(ERROR_LEN));
         return toReturn;
     }
 
@@ -1180,13 +1258,14 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
     // IF query range is within 1-year
     if (currTS.lastEpoch >= endEpochT) {
         // Open file prior to reading
-        targetFilePath = dbBasePath + std::to_string(currTS.year) + ".XSTORE";
+        targetFilePath = fmt::format("{}{}.XSTORE", dbBasePath, currTS.year);
 
         // IF target YEAR.XSTORE does NOT exist
         if (std::filesystem::exists(targetFilePath) == 0) {
             // Return without error
-            std::string successMsg = "[SUCCESS] [RANGE DELETE] [DB: " + dbName + "] - Deleted " + std::to_string(deleteCount) + " items";
-            toReturn.set_deletestatus(successMsg);
+            std::string errorMsg = fmt::format("[ERROR] [RANGE DELETE] [DB: {}] - DB does not exist", dbName);
+            toReturn.set_deletestatus(errorMsg);
+            spdlog::error(errorMsg.substr(ERROR_LEN));
             return toReturn;
         }
 
@@ -1215,12 +1294,16 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
 
         // Loop through each year individually
         while (startEpoch < endEpochT) {
-            targetFilePath = dbBasePath + std::to_string(currTS.year) + ".XSTORE";
+            targetFilePath = fmt::format("{}{}.XSTORE", dbBasePath, currTS.year);
 
             // IF the requested start epoch spans ONLY 1 year
             if (currTS.lastEpoch < endEpochT) {
                 // IF target YEAR.XSTORE does NOT exist
                 if (std::filesystem::exists(targetFilePath) == 0) {
+                    std::string warningMsg = fmt::format("[WARNING] [RANGE DELETE] [DB: {}] - {}.XSTORE does not exist", dbName, currTS.year);
+                    toReturn.set_deletestatus(warningMsg);
+                    spdlog::warn(warningMsg.substr(WARNING_LEN));
+
                     // Update currTS with latest startEpoch after incrementing
                     currTS = timeStruct(startEpoch + (currTS.lastEpoch - startEpoch));
                     continue;
@@ -1250,6 +1333,10 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
             else {
                 // IF target YEAR.XSTORE does NOT exist
                 if (std::filesystem::exists(targetFilePath) == 0) {
+                    std::string warningMsg = fmt::format("[WARNING] [RANGE DELETE] [DB: {}] - {}.XSTORE does not exist", dbName, currTS.year);
+                    toReturn.set_deletestatus(warningMsg);
+                    spdlog::warn(warningMsg.substr(WARNING_LEN));
+
                     // Update currTS with latest startEpoch after incrementing
                     currTS = timeStruct(startEpoch + (endEpochT - startEpoch));
                     continue;
@@ -1279,8 +1366,9 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
             }
         }
     }
-    std::string successMsg = "[SUCCESS] [RANGE DELETE] [DB: " + dbName + "] - Deleted " + std::to_string(deleteCount) + " items";
-    toReturn.set_deletestatus(successMsg);
+    std::string infoMsg = fmt::format("[INFO] [RANGE DELETE] [DB: {}] - Deleted {} items", dbName, deleteCount);
+    toReturn.set_deletestatus(infoMsg);
+    spdlog::info(infoMsg.substr(INFO_LEN));
     return toReturn;
 }
 
@@ -1295,13 +1383,14 @@ XStore_Proto::removeDB_REP XStore::removeDB(std::string dbName) {
     }
 
     // Location of DB
-    std::string dbLoc = dataStoreDir + dbName;
+    std::string dbLoc = fmt::format("{}{}", dataStoreDir, dbName);
 
     // IF DB does NOT exist
     //  -> Return remove error
     if (!std::filesystem::exists(dbLoc)) {
-        removeStatus = "[ERROR] [REMOVE DB] [DB: " + dbName + "] - Does not exists";
+        removeStatus = fmt::format("[ERROR] [REMOVE DB] [DB: {}] - DB does not exists", dbName);
         toReturn.set_removestatus(removeStatus);
+        spdlog::error(removeStatus.substr(ERROR_LEN));
         return toReturn;
     }
 
@@ -1310,7 +1399,10 @@ XStore_Proto::removeDB_REP XStore::removeDB(std::string dbName) {
 
     // Remove DB from cfgMap
     cfgMap.erase(dbName);
-    toReturn.set_removestatus("[SUCCESS] [REMOVE DB] [DB: " + dbName + "] - Removed DB with name: " + dbName);
+
+    removeStatus = fmt::format("[INFO] [REMOVE DB] [DB: {}] - Removed DB with name: {}", dbName, dbName);
+    toReturn.set_removestatus(removeStatus);
+    spdlog::info(removeStatus.substr(INFO_LEN));
     return toReturn;
 }
 
@@ -1325,29 +1417,36 @@ XStore_Proto::removeDBFiles_REP XStore::removeDBFiles(XStore_Proto::removeDBFile
     }
 
     // Location of DB
-    std::string dbLoc = dataStoreDir + dbName;
+    std::string dbLoc = fmt::format("{}{}", dataStoreDir, dbName);
 
     if (!std::filesystem::exists(dbLoc)) {
-        removeStatus = "[ERROR] [REMOVE DB FILES] [DB: " + dbName + "] -- Unable to remove ";
         for (int i = 0; i < protoFromClient->filename_size(); i++) {
+            removeStatus = fmt::format("[ERROR] [REMOVE DB FILES] [DB: {}] -- Unable to remove {}", dbName, protoFromClient->filename(i));
             toReturn.add_removestatus(removeStatus + protoFromClient->filename(i));
+            spdlog::error(removeStatus.substr(ERROR_LEN));
         }
         return toReturn;
     }
 
     // Loop through each requested file name
     for (int i = 0; i < protoFromClient->filename_size(); i++) {
-        std::filesystem::path targetPath = dataStoreDir + dbName + "/" + protoFromClient->filename(i);
-        if (protoFromClient->filename(i) == (dbName + ".CFG")) {
-            toReturn.add_removestatus("[ERROR] [REMOVE DB FILES] [DB: " + dbName + "] - " + protoFromClient->filename(i) + " is prohibited to remove");
+        std::filesystem::path targetPath = fmt::format("{}{}/{}", dataStoreDir, dbName, protoFromClient->filename(i));
+        if (protoFromClient->filename(i) == fmt::format("{}.CFG", dbName)) {
+            std::string warnMsg = fmt::format("[WARNING] [REMOVE DB FILES] [DB: {}] - {} is prohibited from remove", dbName, protoFromClient->filename(i));
+            toReturn.add_removestatus(warnMsg);
+            spdlog::warn(warnMsg.substr(WARNING_LEN));
             continue;
         }
         bool currRemove = std::filesystem::remove(targetPath);
         if (currRemove) {
-            toReturn.add_removestatus("[SUCCESS] [REMOVE DB FILES] [DB: " + dbName + "] - Removed " + protoFromClient->filename(i));
+            std::string infoMsg = fmt::format("[SUCCESS] [REMOVE DB FILES] [DB: {}] - Removed {}", dbName, protoFromClient->filename(i));
+            toReturn.add_removestatus(infoMsg);
+            spdlog::info(infoMsg.substr(INFO_LEN));
         }
         else {
-            toReturn.add_removestatus("[ERROR] [REMOVE DB FILES] [DB: " + dbName + "] - Unable to remove " + protoFromClient->filename(i));
+            std::string errMsg = fmt::format("[ERROR] [REMOVE DB FILES] [DB: {}] - Unable to remove {}", dbName, protoFromClient->filename(i));
+            toReturn.add_removestatus(errMsg);
+            spdlog::error(errMsg.substr(ERROR_LEN));
         }
     }
     return toReturn;
@@ -1364,11 +1463,11 @@ void XStore::initDB() {
         std::string currDBName = currDBPath.erase(0, dataStoreDir.size());
 
         // Open & Read cfgStruct of all DB currently exists
-        std::string cfgFilePath = p.path().string() + "/" + currDBName + ".CFG";
+        std::string cfgFilePath = fmt::format("{}/{}.CFG", p.path().string(), currDBName);
+
         XStore_Proto::configStruct cfgStruct;
         FILE *cFile = std::fopen(cfgFilePath.c_str(), "rb");
         cfgStruct.ParseFromFileDescriptor(fileno(cFile));
-//        fread(&cfgStruct, sizeof(struct configStruct), 1, cFile);
         cfgMap[currDBName] = cfgStruct;
     }
 }
