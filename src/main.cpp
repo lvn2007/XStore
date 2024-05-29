@@ -343,7 +343,7 @@ int main(int argc, char *argv[]) {
 //    batch_insert_rep.PrintDebugString();
 
     // ----DEV AREA
-    spdlog::level::level_enum CONSOLE_LEVEL = spdlog::level::trace;
+    spdlog::level::level_enum CONSOLE_LEVEL = spdlog::level::warn;
     spdlog::level::level_enum FILE_LEVEL = spdlog::level::trace;
     Logger logger = Logger(CONSOLE_LEVEL, FILE_LEVEL);
 

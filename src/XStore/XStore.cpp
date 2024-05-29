@@ -1504,10 +1504,10 @@ void XStore::wrLockFile(FILE *bFile, unsigned long int startRange, unsigned long
 
     if (fcntl64(fileno(bFile), F_SETLKW64, &fl) == -1) {
         if (errno == EACCES || errno == EAGAIN) {
-            std::cout << "[ERROR] [WR LOCK] - Unable to obtain lock" << std::endl;
+            spdlog::error("[WR LOCK] - Unable to obtain lock");
         }
         else {
-            std::cout << "[ERROR] [WR LOCK] - Unexpected lock error" << std::endl;
+            spdlog::error("[WR LOCK] - Unexpected lock error");
         }
     }
 }
@@ -1521,10 +1521,10 @@ void XStore::rdLockFile(FILE *bFile, unsigned long int startRange, unsigned long
 
     if (fcntl64(fileno(bFile), F_SETLKW64, &fl) == -1) {
         if (errno == EACCES || errno == EAGAIN) {
-            std::cout << "[ERROR] [RD LOCK] - Unable to obtain lock" << std::endl;
+            spdlog::error("[RD LOCK] - Unable to obtain lock");
         }
         else {
-            std::cout << "[ERROR] [RD LOCK] - Unexpected lock error" << std::endl;
+            spdlog::error("[RD LOCK] - Unexpected lock error");
         }
     }
 }
@@ -1537,6 +1537,6 @@ void XStore::unlockFile(FILE *bFile, unsigned long int startRange, unsigned long
     fl.l_len = (length > 0) ? length + 1 : length;
 
     if (fcntl64(fileno(bFile), F_SETLKW64, &fl) == -1) {
-        std::cout << "[ERROR] [FILE UNLOCK] - Unable to release lock" << std::endl;
+        spdlog::error("[FILE UNLOCK] - Unable to release lock");
     }
 }
