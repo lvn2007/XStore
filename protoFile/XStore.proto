@@ -204,6 +204,7 @@ message unaryInsert_REP {
 message unaryQuery_REP {
   uint64 timestamp = 1;
   rowData data = 2;
+  optional string queryStatus = 3;
 }
 
 // --- UNARY DELETE
@@ -219,6 +220,7 @@ message batchInsert_REP {
 // --- BATCH QUERY
 message batchQuery_REP {
   repeated unaryQuery_REP queryResponse = 1;
+  optional string queryStatus = 3;
 }
 
 // --- BATCH DELETE
@@ -234,6 +236,7 @@ message rangeInsert_REP {
 // --- RANGE QUERY
 message rangeQuery_REP {
   repeated unaryQuery_REP queryResponse = 1;
+  optional string queryStatus = 3;
 }
 
 // --- RANGE DELETE

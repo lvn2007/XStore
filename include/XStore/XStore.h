@@ -20,6 +20,16 @@
 #include "include/dataStructs/dataStruct.h"
 #include "include/dataStructs/fileStruct.h"
 #include "include/dataStructs/configStruct.h"
+#include "include/Logger/spdlog/fmt/fmt.h"
+#include "include/Logger/Logger.h"
+
+// Length of msg header
+#define TRACE_LEN 8
+#define DEBUG_LEN 8
+#define INFO_LEN 7
+#define WARNING_LEN 10
+#define ERROR_LEN 8
+#define CRITICAL_LEN 11
 
 class XStore {
     public:
