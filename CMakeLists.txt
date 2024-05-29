@@ -11,6 +11,9 @@ project(XStore)
 set(CMAKE_CXX_STANDARD 17)
 message(STATUS "Using C++ Standard: ${CMAKE_CXX_STANDARD}")
 
+# Definitions for large files support
+add_definitions(-D_LARGEFILE_SOURCE -D_LARGE_FILES -D_FILE_OFFSET_BITS=64)
+
 include(FetchContent)
 
 # ZStandard - sudo apt install libzstd-dev
