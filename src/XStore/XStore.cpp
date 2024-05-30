@@ -111,13 +111,13 @@ XStore_Proto::createDB_REP XStore::createDB(std::string dbName, XStore_Proto::ti
             bFile = std::fopen(cfgPath.c_str(), "wb+");
 
             // Lock prior to writing
-            wrLockFile(bFile, 0, 0);
+            wrLockFile(bFile, 0, cfgStruct.ByteSizeLong());
 
             // Writing actual data to disk
             cfgStruct.SerializeToFileDescriptor(fileno(bFile));
 
             //  Close file & Release lock after write
-            unlockFile(bFile, 0, 0);
+            unlockFile(bFile, 0, cfgStruct.ByteSizeLong());
             std::fclose(bFile);
 
             //  Add this cfgStruct to cfgMap
@@ -195,9 +195,10 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, XStore_P
         bFile = std::fopen(targetFile.c_str(), "wb+");
 
         // Lock prior to file OP
-        XStore::wrLockFile(bFile, 0, 0);
-        ftruncate(fileno(bFile), (currTS.lastEpoch - currTS.firstEpoch) * cfgStruct.rowlength());
-        XStore::unlockFile(bFile, 0, 0);
+        unsigned long int lockRange = (currTS.lastEpoch - currTS.firstEpoch) * cfgStruct.rowlength();
+        XStore::wrLockFile(bFile, 0, lockRange);
+        ftruncate(fileno(bFile), lockRange);
+        XStore::unlockFile(bFile, 0, lockRange);
     }
     else {
         // ELSE - Target file DOES exist
@@ -476,9 +477,10 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
             bFile = std::fopen(targetFile.c_str(), "wb+");
 
             // Lock prior to file OP
-            wrLockFile(bFile, 0, 0);
-            ftruncate(fileno(bFile), (thisTS.lastEpoch - thisTS.firstEpoch) * cfgStruct.rowlength());
-            unlockFile(bFile, 0, 0);
+            unsigned long int lockRange = (thisTS.lastEpoch - thisTS.firstEpoch) * cfgStruct.rowlength();
+            wrLockFile(bFile, 0, lockRange);
+            ftruncate(fileno(bFile), lockRange);
+            unlockFile(bFile, 0, lockRange);
         }
         else {
             // ELSE - Target file DOES exist
@@ -871,9 +873,10 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
             bFile = std::fopen(targetFile.c_str(), "wb+");
 
             // Lock prior to file OP
-            wrLockFile(bFile, 0, 0);
-            ftruncate(fileno(bFile), (thisTS.lastEpoch - thisTS.firstEpoch) * cfgStruct.rowlength());
-            unlockFile(bFile, 0, 0);
+            unsigned long int lockRange = (thisTS.lastEpoch - thisTS.firstEpoch) * cfgStruct.rowlength();
+            wrLockFile(bFile, 0, lockRange);
+            ftruncate(fileno(bFile), lockRange);
+            unlockFile(bFile, 0, lockRange);
         }
         else {
             // ELSE - Target file DOES exist
@@ -1500,7 +1503,7 @@ void XStore::wrLockFile(FILE *bFile, unsigned long int startRange, unsigned long
     fl.l_type = F_WRLCK;
     fl.l_whence = SEEK_SET;
     fl.l_start = startRange;
-    fl.l_len = (length > 0) ? length + 1 : length;
+    fl.l_len = length;
 
     if (fcntl64(fileno(bFile), F_SETLKW64, &fl) == -1) {
         if (errno == EACCES || errno == EAGAIN) {
@@ -1517,7 +1520,7 @@ void XStore::rdLockFile(FILE *bFile, unsigned long int startRange, unsigned long
     fl.l_type = F_RDLCK;
     fl.l_whence = SEEK_SET;
     fl.l_start = startRange;
-    fl.l_len = (length > 0) ? length + 1 : length;
+    fl.l_len = length;
 
     if (fcntl64(fileno(bFile), F_SETLKW64, &fl) == -1) {
         if (errno == EACCES || errno == EAGAIN) {
@@ -1534,7 +1537,7 @@ void XStore::unlockFile(FILE *bFile, unsigned long int startRange, unsigned long
     fl.l_type = F_UNLCK;
     fl.l_whence = SEEK_SET;
     fl.l_start = startRange;
-    fl.l_len = (length > 0) ? length + 1 : length;
+    fl.l_len = length;
 
     if (fcntl64(fileno(bFile), F_SETLKW64, &fl) == -1) {
         spdlog::error("[FILE UNLOCK] - Unable to release lock");

@@ -14,7 +14,7 @@ class Logger {
             consoleSink->set_level(CONSOLE_LEVEL);
 
             // File outputs
-            std::shared_ptr<spdlog::sinks::sink> fileSink = std::make_shared<spdlog::sinks::basic_file_sink_mt>("logs/server.log", false);
+            std::shared_ptr<spdlog::sinks::sink> fileSink = std::make_shared<spdlog::sinks::basic_file_sink_mt>("logs/server.log", true);
             fileSink->set_level(FILE_LEVEL);
 
             // Group multi-sinks into one entity
