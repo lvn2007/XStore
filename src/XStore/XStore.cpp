@@ -1503,7 +1503,7 @@ void XStore::wrLockFile(FILE *bFile, unsigned long int startRange, unsigned long
     fl.l_type = F_WRLCK;
     fl.l_whence = SEEK_SET;
     fl.l_start = startRange;
-    fl.l_len = length;
+    fl.l_len = length + 1;
 
     if (fcntl64(fileno(bFile), F_SETLKW64, &fl) == -1) {
         if (errno == EACCES || errno == EAGAIN) {
@@ -1520,7 +1520,7 @@ void XStore::rdLockFile(FILE *bFile, unsigned long int startRange, unsigned long
     fl.l_type = F_RDLCK;
     fl.l_whence = SEEK_SET;
     fl.l_start = startRange;
-    fl.l_len = length;
+    fl.l_len = length + 1;
 
     if (fcntl64(fileno(bFile), F_SETLKW64, &fl) == -1) {
         if (errno == EACCES || errno == EAGAIN) {
@@ -1537,7 +1537,7 @@ void XStore::unlockFile(FILE *bFile, unsigned long int startRange, unsigned long
     fl.l_type = F_UNLCK;
     fl.l_whence = SEEK_SET;
     fl.l_start = startRange;
-    fl.l_len = length;
+    fl.l_len = length + 1;
 
     if (fcntl64(fileno(bFile), F_SETLKW64, &fl) == -1) {
         spdlog::error("[FILE UNLOCK] - Unable to release lock");
