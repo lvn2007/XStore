@@ -142,7 +142,7 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, XStore_P
 
     // Time structure contains all components per UNIXTIME:
     //  Year, month, day, hour, minute, sec, ...
-    timeStruct currTS{unixTime};
+    timeStruct currTS(unixTime);
 
     // Ensure dbName string is all capitalized
     for (int i = 0; i < dbName.size(); i++) {

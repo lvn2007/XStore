@@ -3,7 +3,7 @@
 
 #include <iostream>
 #include <ctime>
-#include <time.h>
+#include <ctime>
 
 // Data structure to hold time-value together
 struct timeStruct {

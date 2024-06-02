@@ -40,26 +40,28 @@ void timeStruct::getTimeResolution() {
 }
 
 void timeStruct::extractTimeComponents() {
-    tm* timePtr;
+    tm timePtr;
+    std::time_t choppedTime;
+
     if (this->timeResolution == "SECOND") {
-        timePtr = localtime(&this->unixTime);
+        localtime_r(&this->unixTime, &timePtr);
     }
     else if (this->timeResolution == "MILLISECOND") {
-        std::time_t choppedTime = this->unixTime / 1000;
-        timePtr = localtime(&choppedTime);
+        choppedTime = this->unixTime / 1000;
+        localtime_r(&choppedTime, &timePtr);
     }
     else if (this->timeResolution == "MICROSECOND") {
-        std::time_t choppedTime = this->unixTime / 1000000;
-        timePtr = localtime(&choppedTime);
+        choppedTime = this->unixTime / 1000000;
+        localtime_r(&choppedTime, &timePtr);
     }
 
     // Set time components
-    this->year = timePtr->tm_year + 1900;
-    this->month = timePtr->tm_mon + 1;
-    this->day = timePtr->tm_mday;
-    this->hour = timePtr->tm_hour;
-    this->minute = timePtr->tm_min;
-    this->second = timePtr->tm_sec;
+    this->year = timePtr.tm_year + 1900;
+    this->month = timePtr.tm_mon + 1;
+    this->day = timePtr.tm_mday;
+    this->hour = timePtr.tm_hour;
+    this->minute = timePtr.tm_min;
+    this->second = timePtr.tm_sec;
 
     // Set FIRST epoch
     firstEpochTimePtr.tm_year = this->year - 1900;
