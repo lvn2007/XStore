@@ -345,7 +345,8 @@ int main(int argc, char *argv[]) {
     // ----DEV AREA
     spdlog::level::level_enum CONSOLE_LEVEL = spdlog::level::warn;
     spdlog::level::level_enum FILE_LEVEL = spdlog::level::trace;
-    Logger logger = Logger(CONSOLE_LEVEL, FILE_LEVEL);
+    unsigned short int flushInterval = 5;
+    Logger logger = Logger(CONSOLE_LEVEL, FILE_LEVEL, flushInterval);
 
     // Spin ZMQ Server
     XStore_zmqServer xStoreZmqServer(THREAD_COUNT);
