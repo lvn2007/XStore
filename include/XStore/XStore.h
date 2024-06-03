@@ -101,6 +101,12 @@ class XStore {
         void wrLockFile(FILE *bFile, unsigned long int startRange, unsigned long int endRange);
         void rdLockFile(FILE *bFile, unsigned long int startRange, unsigned long int endRange);
         void unlockFile(FILE *bFile, unsigned long int startRange, unsigned long int endRange);
+
+        void toUpperCase(std::string::iterator begin, std::string::iterator end) {
+            for (auto it = begin; it != end; ++it) {
+                *it &= ~0x20;
+            }
+        };
 };
 
 #endif //XSTORE_XSTORE_H
