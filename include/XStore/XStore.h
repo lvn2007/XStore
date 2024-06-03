@@ -59,7 +59,7 @@ class XStore {
         XStore_Proto::removeDBFiles_REP removeDBFiles(XStore_Proto::removeDBFiles_REQ *protoFromClient, std::string dbName);
 
         // UNARY INSERT
-        XStore_Proto::unaryInsert_REP unaryInsert(std::time_t epochTime, XStore_Proto::rowData data, std::string dbName);
+        XStore_Proto::unaryInsert_REP unaryInsert(const unsigned long long int &epochTime, const XStore_Proto::rowData &data, std::string dbName);
 
         // UNARY QUERY
         XStore_Proto::unaryQuery_REP unaryQuery(std::time_t epochTime, std::string dbName);
