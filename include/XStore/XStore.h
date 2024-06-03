@@ -41,7 +41,7 @@ class XStore {
 
         int dbCount = 0;
         std::vector<std::string> dbNames = { };
-        std::map<std::string, long int> resolutionMap { {"SECOND", 31536000}, {"MILLISECOND", 31536000000}, {"MICROSECOND", 31536000000000}, {"NANOSECOND", 31536000000000000} };
+        std::map<std::string, unsigned long long int> resolutionMap { {"SECOND", 31'536'000}, {"MILLISECOND", 31'536'000'000}, {"MICROSECOND", 31'536'000'000'000}, {"NANOSECOND", 31'536'000'000'000'000} };
 
         // Initialization
         XStore();
@@ -62,10 +62,10 @@ class XStore {
         XStore_Proto::unaryInsert_REP unaryInsert(const unsigned long long int &epochTime, const XStore_Proto::rowData &data, std::string dbName);
 
         // UNARY QUERY
-        XStore_Proto::unaryQuery_REP unaryQuery(std::time_t epochTime, std::string dbName);
+        XStore_Proto::unaryQuery_REP unaryQuery(const unsigned long long int &epochTime, std::string dbName);
 
         // UNARY DELETE
-        XStore_Proto::unaryDelete_REP unaryDelete(std::time_t epochTime, std::string dbName);
+        XStore_Proto::unaryDelete_REP unaryDelete(const unsigned long long int &epochTime, std::string dbName);
 
         // BATCH INSERT
         XStore_Proto::batchInsert_REP batchInsert(XStore_Proto::batchInsert_REQ *protoFromClient);
@@ -77,13 +77,13 @@ class XStore {
         XStore_Proto::batchDelete_REP batchDelete(XStore_Proto::batchDelete_REQ *protoFromClient);
 
         // RANGE INSERT
-        XStore_Proto::rangeInsert_REP rangeInsert(XStore_Proto::rangeInsert_REQ *protoFromClient);
+        XStore_Proto::rangeInsert_REP rangeInsert(const XStore_Proto::rangeInsert_REQ *protoFromClient);
 
         // RANGE QUERY
-        XStore_Proto::rangeQuery_REP rangeQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName);
+        XStore_Proto::rangeQuery_REP rangeQuery(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName);
 
         // RANGE DELETE
-        XStore_Proto::rangeDelete_REP rangeDelete(std::time_t startEpochT, std::time_t endEpochT, std::string dbName);
+        XStore_Proto::rangeDelete_REP rangeDelete(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName);
 
         // Initialize DB
         void initDB();

@@ -225,7 +225,7 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(const unsigned long long int &
 }
 
 // UNARY QUERY
-XStore_Proto::unaryQuery_REP XStore::unaryQuery(std::time_t unixTime, std::string dbName) {
+XStore_Proto::unaryQuery_REP XStore::unaryQuery(const unsigned long long int &unixTime, std::string dbName) {
     // Protobuf obj to be returned
     std::string queryStatus;
     XStore_Proto::unaryQuery_REP toReturn;
@@ -236,7 +236,7 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery(std::time_t unixTime, std::strin
 
     //  Time structure contains all components per UNIXTIME:
     //      Year, month, day, hour, minute, sec, ...
-    timeStruct currTS{unixTime};
+    timeStruct currTS(unixTime);
 
     // Base directory of a DB & Target path of file to READ
     std::string dbBasePath = fmt::format("{}dataStore/{}/", baseDir, dbName);
@@ -269,8 +269,8 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery(std::time_t unixTime, std::strin
 
     // Obtain file size
     //  Computes diff & offset
-    long long int diff = unixTime - currTS.firstEpoch;
-    long long int offset = diff * cfgStruct.rowlength();
+    unsigned long long int diff = unixTime - currTS.firstEpoch;
+    unsigned long long int offset = diff * cfgStruct.rowlength();
 
     //  A single line data will be read into here
     char bufferIn[cfgStruct.rowlength()];
@@ -297,14 +297,14 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery(std::time_t unixTime, std::strin
 }
 
 // UNARY DELETE
-XStore_Proto::unaryDelete_REP XStore::unaryDelete(std::time_t epochTime, std::string dbName) {
+XStore_Proto::unaryDelete_REP XStore::unaryDelete(const unsigned long long int &epochTime, std::string dbName) {
     // Protobuf obj to be returned
     XStore_Proto::unaryDelete_REP toReturn;
     std::string deleteStatus;
 
     // Time structure contains all components per UNIXTIME:
     //  Year, month, day, hour, minute, sec, ...
-    timeStruct currTS{epochTime};
+    timeStruct currTS(epochTime);
 
     // Ensure dbName string is all capitalized
     toUpperCase(dbName.begin(), dbName.end());
@@ -363,8 +363,8 @@ XStore_Proto::unaryDelete_REP XStore::unaryDelete(std::time_t epochTime, std::st
     bFile = std::fopen(targetFilePath.c_str(), "rb+");
 
     //  Computes diff & offset
-    long long int diff = epochTime - currTS.firstEpoch;
-    long long int offset = diff * cfgStruct.rowlength();
+    unsigned long long int diff = epochTime - currTS.firstEpoch;
+    unsigned long long int offset = diff * cfgStruct.rowlength();
 
     // Lock prior to file OP
     wrLockFile(bFile, offset, cfgStruct.rowlength());
@@ -466,10 +466,9 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
             bFile = std::fopen(targetFile.c_str(), "wb+");
 
             // Lock prior to file OP
-            unsigned long int lockRange = (thisTS.lastEpoch - thisTS.firstEpoch) * cfgStruct.rowlength();
-            wrLockFile(bFile, 0, lockRange);
-            ftruncate(fileno(bFile), lockRange);
-            unlockFile(bFile, 0, lockRange);
+            wrLockFile(bFile, 0, 0);
+            ftruncate(fileno(bFile), (thisTS.lastEpoch - thisTS.firstEpoch) * cfgStruct.rowlength());
+            unlockFile(bFile, 0, 0);
         }
         else {
             // ELSE - Target file DOES exist
@@ -550,7 +549,7 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
     }
 
     // IF query range > 2GB limit of Protobuf or Empty
-    if ((protoFromClient->timestamp_size() * cfgStruct.rowlength()) > 2000000000 || protoFromClient->timestamp_size() < 0) {
+    if ((protoFromClient->timestamp_size() * cfgStruct.rowlength()) > 2'000'000'000 || protoFromClient->timestamp_size() < 0) {
         std::string errMsg = fmt::format("[ERROR] [BATCH QUERY] [DB: {}] - Query results is larger than 2GB or empty", dbName);
         toReturn.set_querystatus(errMsg);
         spdlog::error(errMsg.substr(ERROR_LEN));
@@ -574,14 +573,14 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
 
     // Organize incoming batch query into map
     //  dataMap[2016] = Vector {Index 0, Index 1, ...}
-    std::time_t currTime;
+    unsigned long long int currTime;
     std::map<unsigned short int, std::vector<unsigned long long int>> dataMap;
 
     // Granularity check
     std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
     for (int i = 0; i < protoFromClient->timestamp_size(); i++) {
         currTime = protoFromClient->timestamp(i);
-        struct timeStruct currTS{currTime};
+        struct timeStruct currTS(currTime);
         dataMap[currTS.year].push_back(i);
 
         // Halt execution & Return as long as there's an error in time granularity
@@ -614,7 +613,7 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
         }
 
         // Time-related & Auxiliary
-        long long int diff, offset;
+        unsigned long long int diff, offset;
         char bufferIn[cfgStruct.rowlength()];
         timeStruct thisTS{static_cast<time_t>(protoFromClient->timestamp(dataMap[yearKey].at(0)))};
 
@@ -714,14 +713,14 @@ XStore_Proto::batchDelete_REP XStore::batchDelete(XStore_Proto::batchDelete_REQ 
 
     // Organize incoming batch delete timestamp into map
     //  dataMap[2016] = Vector {Index 0, Index 1, ...}
-    std::time_t currTime;
+    unsigned long long int currTime;
     std::map<unsigned short int, std::vector<unsigned long long int>> dataMap;
 
     // Granularity check
     std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
     for (int i = 0; i < protoFromClient->timestamp_size(); i++) {
         currTime = protoFromClient->timestamp(i);
-        struct timeStruct currTS{currTime};
+        struct timeStruct currTS(currTime);
         dataMap[currTS.year].push_back(i);
 
         // Halt execution & Return as long as there's an error in time granularity
@@ -751,7 +750,7 @@ XStore_Proto::batchDelete_REP XStore::batchDelete(XStore_Proto::batchDelete_REQ 
         }
 
         // Time-related & Auxiliary
-        long long int diff, offset;
+        unsigned long long int diff, offset;
         timeStruct thisTS{static_cast<time_t>(protoFromClient->timestamp(dataMap[yearKey].at(0)))};
 
         for (int i = 0; i < dataMap[yearKey].size(); i++) {
@@ -780,7 +779,7 @@ XStore_Proto::batchDelete_REP XStore::batchDelete(XStore_Proto::batchDelete_REQ 
 }
 
 // RANGE INSERT
-XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ *protoFromClient) {
+XStore_Proto::rangeInsert_REP XStore::rangeInsert(const XStore_Proto::rangeInsert_REQ *protoFromClient) {
     // Protobuf obj to be returned
     XStore_Proto::rangeInsert_REP toReturn;
     std::string insertStatus;
@@ -819,7 +818,7 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
     // Assuming incoming data is sorted --> Skip sorting
     // Organize incoming data into map
     //  dataMap[2016] = Vector {Index 0, Index 1, ...}
-    struct tm* epochStruct;
+    tm epochStruct;
     std::time_t currTime;
     std::map<unsigned short int, std::vector<unsigned long long int>> dataMap;
     std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
@@ -827,11 +826,11 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
     // Granularity check
     for (int i = 0; i < protoFromClient->rangeinsert_data_size(); i++) {
         currTime = protoFromClient->rangeinsert_data(i).timestamp();
-        epochStruct = gmtime(&currTime);
-        dataMap[(epochStruct->tm_year + 1900)].push_back(i);
+        gmtime_r(&currTime, &epochStruct);
+        dataMap[(epochStruct.tm_year + 1900)].push_back(i);
 
         // Halt execution & Return as long as there's an error in time granularity
-        timeStruct currTS {currTime};
+        timeStruct currTS(currTime);
         if (currTS.timeResolution != expectedTimeResolution) {
             std::string granularityErrMsg = fmt::format("[ERROR] [RANGE INSERT] [DB: {}] - Invalid time granularity. Expecting: {}", dbName, expectedTimeResolution);
             toReturn.set_insertstatus(granularityErrMsg);
@@ -856,10 +855,9 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
             bFile = std::fopen(targetFile.c_str(), "wb+");
 
             // Lock prior to file OP
-            unsigned long int lockRange = (thisTS.lastEpoch - thisTS.firstEpoch) * cfgStruct.rowlength();
-            wrLockFile(bFile, 0, lockRange);
-            ftruncate(fileno(bFile), lockRange);
-            unlockFile(bFile, 0, lockRange);
+            wrLockFile(bFile, 0, 0);
+            ftruncate(fileno(bFile), (thisTS.lastEpoch - thisTS.firstEpoch) * cfgStruct.rowlength());
+            unlockFile(bFile, 0, 0);
         }
         else {
             // ELSE - Target file DOES exist
@@ -869,19 +867,19 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
 
         // Metadata of first datapoint
         XStore_Proto::rangeInsert_DATA firstInsertData = protoFromClient->rangeinsert_data(dataMap[yearKey].at(0));
-        const std::time_t &firstUnixTime = firstInsertData.timestamp();
-        const long long unsigned int firstOffset = (firstUnixTime - thisTS.firstEpoch) * cfgStruct.rowlength();
-        const long long unsigned int regionLength = cfgStruct.rowlength() * dataMap[yearKey].size();
+        const unsigned long long int &firstUnixTime = firstInsertData.timestamp();
+        const unsigned long long int firstOffset = (firstUnixTime - thisTS.firstEpoch) * cfgStruct.rowlength();
+        const unsigned long long int regionLength = cfgStruct.rowlength() * dataMap[yearKey].size();
 
         // Lock prior to file OP
         wrLockFile(bFile, firstOffset, regionLength);
 
-        long long int diff, offset;
+        unsigned long long int diff, offset;
         // Iterate through each YEAR of inserting data
         for (int i = 0; i < dataMap[yearKey].size(); i++) {
             // Parse each data in a batch collection
             XStore_Proto::rangeInsert_DATA currInsertData = protoFromClient->rangeinsert_data(dataMap[yearKey].at(i));
-            const std::time_t &unixTime = currInsertData.timestamp();
+            const unsigned long long int &unixTime = currInsertData.timestamp();
             const XStore_Proto::rowData &data = currInsertData.data();
 
             // Compute diff & offset
@@ -908,7 +906,7 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
 }
 
 // RANGE QUERY
-XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::time_t endEpochT, std::string dbName) {
+XStore_Proto::rangeQuery_REP XStore::rangeQuery(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName) {
     // Protobuf obj to be returned
     XStore_Proto::rangeQuery_REP toReturn;
     XStore_Proto::rowData tempData;
@@ -945,7 +943,7 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
     }
 
     // IF query range > 2GB limit of Protobuf
-    if ((endEpochT - startEpochT) * cfgStruct.rowlength() > 2000000000) {
+    if ((endEpochT - startEpochT) * cfgStruct.rowlength() > 2'000'000'000) {
         std::string errMsg = fmt::format("[ERROR] [RANGE QUERY] [DB: {}] - Query results is larger than 2GB", dbName);
         toReturn.set_querystatus(errMsg);
         spdlog::error(errMsg.substr(ERROR_LEN));
@@ -968,8 +966,8 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
     }
 
     // Time granularity check
-    timeStruct startTimeStruct{startEpochT};
-    timeStruct endTimeStruct{endEpochT};
+    timeStruct startTimeStruct(startEpochT);
+    timeStruct endTimeStruct(endEpochT);
     std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
     if (startTimeStruct.timeResolution != expectedTimeResolution || endTimeStruct.timeResolution != expectedTimeResolution) {
         std::string errMsg = fmt::format("[ERROR] [RANGE QUERY] [DB: {}] - Invalid time resolution. Expecting {}", dbName, expectedTimeResolution);
@@ -980,12 +978,12 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
 
     // Organize into timeStruct
     //  timeStruct provides many auxiliary vars/methods useful for read/write ops
-    timeStruct currTS{startEpochT};
+    timeStruct currTS(startEpochT);
 
     // Placeholder for READ op
     FILE *bFile;
     std::string targetFilePath;
-    long long int diff, offset;
+    unsigned long long int diff, offset;
     char bufferIn[cfgStruct.rowlength()];
     std::string successMsg;
 
@@ -1006,8 +1004,8 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
         bFile = std::fopen(targetFilePath.c_str(), "rb");
 
         // Metadata of first datapoint
-        const long long unsigned int firstOffset = (startEpochT - currTS.firstEpoch) * cfgStruct.rowlength();
-        const long long unsigned int regionLength = cfgStruct.rowlength() * (endEpochT - startEpochT);
+        const unsigned long long int firstOffset = (startEpochT - currTS.firstEpoch) * cfgStruct.rowlength();
+        const unsigned long long int regionLength = cfgStruct.rowlength() * (endEpochT - startEpochT);
 
         // Lock file prior to reading
         rdLockFile(bFile, firstOffset, regionLength);
@@ -1045,7 +1043,7 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
     // Otherwise -> Involves multi-year
     else {
         // Make a copy of start epoch time for incrementing
-        std::time_t startEpoch = startEpochT;
+        unsigned long long int startEpoch = startEpochT;
 
         // Loop through each year individually
         while (startEpoch < endEpochT) {
@@ -1067,14 +1065,14 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
                 bFile = std::fopen(targetFilePath.c_str(), "rb");
 
                 // Metadata of first datapoint
-                const long long unsigned int firstOffset = (startEpoch - currTS.firstEpoch) * cfgStruct.rowlength();
-                const long long unsigned int regionLength = cfgStruct.rowlength() * (currTS.lastEpoch - startEpoch);
+                const unsigned long long int firstOffset = (startEpoch - currTS.firstEpoch) * cfgStruct.rowlength();
+                const unsigned long long int regionLength = cfgStruct.rowlength() * (currTS.lastEpoch - startEpoch);
 
                 // Lock file prior to reading
                 rdLockFile(bFile, firstOffset, regionLength);
 
                 // Iterate over range of query data & add queried data and status
-                for (long long int epochTime = startEpoch; epochTime <= currTS.lastEpoch; epochTime++, startEpoch++) {
+                for (unsigned long long int epochTime = startEpoch; epochTime <= currTS.lastEpoch; epochTime++, startEpoch++) {
                     // Computes diff & offset
                     diff = epochTime - currTS.firstEpoch;
                     offset = diff * cfgStruct.rowlength();
@@ -1121,14 +1119,14 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
                 bFile = std::fopen(targetFilePath.c_str(), "rb");
 
                 // Metadata of first datapoint
-                const long long unsigned int firstOffset = (startEpoch - currTS.firstEpoch) * cfgStruct.rowlength();
-                const long long unsigned int regionLength = cfgStruct.rowlength() * (endEpochT - startEpoch);
+                const unsigned long long int firstOffset = (startEpoch - currTS.firstEpoch) * cfgStruct.rowlength();
+                const unsigned long long int regionLength = cfgStruct.rowlength() * (endEpochT - startEpoch);
 
                 // Lock file prior to reading
                 rdLockFile(bFile, firstOffset, regionLength);
 
                 // Iterate over range of query data & add queried data and status
-                for (long long int epochTime = startEpoch; epochTime <= endEpochT; epochTime++, startEpoch++) {
+                for (unsigned long long int epochTime = startEpoch; epochTime <= endEpochT; epochTime++, startEpoch++) {
                     // Computes diff & offset
                     diff = epochTime - currTS.firstEpoch;
                     offset = diff * cfgStruct.rowlength();
@@ -1167,7 +1165,7 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
 }
 
 // RANGE DELETE
-XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::time_t endEpochT, std::string dbName) {
+XStore_Proto::rangeDelete_REP XStore::rangeDelete(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName) {
     // Protobuf obj to be returned
     std::string queryStatus;
     XStore_Proto::rangeDelete_REP toReturn;
@@ -1218,8 +1216,8 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
     }
 
     // Time granularity check
-    timeStruct startTimeStruct{startEpochT};
-    timeStruct endTimeStruct{endEpochT};
+    timeStruct startTimeStruct(startEpochT);
+    timeStruct endTimeStruct(endEpochT);
     std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
     if (startTimeStruct.timeResolution != expectedTimeResolution || endTimeStruct.timeResolution != expectedTimeResolution) {
         std::string errMsg = fmt::format("[ERROR] [RANGE DELETE] [DB: {}] - Invalid time resolution. Expecting: {}", dbName, expectedTimeResolution);
@@ -1230,12 +1228,12 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
 
     // Organize into timeStruct
     //  timeStruct provides many auxiliary vars/methods useful for read/write ops
-    timeStruct currTS{startEpochT};
+    timeStruct currTS(startEpochT);
 
     // Placeholder for READ op
     FILE *bFile;
     std::string targetFilePath;
-    long long int diff, offset, rangeCount;
+    unsigned long long int diff, offset, rangeCount;
 
     // IF query range is within 1-year
     if (currTS.lastEpoch >= endEpochT) {
@@ -1272,7 +1270,7 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
     // Otherwise -> Involves multi-year
     else {
         // Make a copy of start epoch time for incrementing
-        std::time_t startEpoch = startEpochT;
+        unsigned long long int startEpoch = startEpochT;
 
         // Loop through each year individually
         while (startEpoch < endEpochT) {
@@ -1417,7 +1415,7 @@ XStore_Proto::removeDBFiles_REP XStore::removeDBFiles(XStore_Proto::removeDBFile
         }
         bool currRemove = std::filesystem::remove(targetPath);
         if (currRemove) {
-            std::string infoMsg = fmt::format("[SUCCESS] [REMOVE DB FILES] [DB: {}] - Removed {}", dbName, protoFromClient->filename(i));
+            std::string infoMsg = fmt::format("[INFO] [REMOVE DB FILES] [DB: {}] - Removed {}", dbName, protoFromClient->filename(i));
             toReturn.add_removestatus(infoMsg);
             spdlog::info(infoMsg.substr(INFO_LEN));
         }
