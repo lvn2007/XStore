@@ -195,10 +195,9 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, XStore_P
         bFile = std::fopen(targetFile.c_str(), "wb+");
 
         // Lock prior to file OP
-        unsigned long int lockRange = (currTS.lastEpoch - currTS.firstEpoch) * cfgStruct.rowlength();
-        XStore::wrLockFile(bFile, 0, lockRange);
-        ftruncate(fileno(bFile), lockRange);
-        XStore::unlockFile(bFile, 0, lockRange);
+        XStore::wrLockFile(bFile, 0, 0);
+        ftruncate(fileno(bFile), (currTS.lastEpoch - currTS.firstEpoch) * cfgStruct.rowlength());
+        XStore::unlockFile(bFile, 0, 0);
     }
     else {
         // ELSE - Target file DOES exist
@@ -1503,7 +1502,7 @@ void XStore::wrLockFile(FILE *bFile, unsigned long int startRange, unsigned long
     fl.l_type = F_WRLCK;
     fl.l_whence = SEEK_SET;
     fl.l_start = startRange;
-    fl.l_len = length + 1;
+    fl.l_len = (length > 0) ? length + 1 : length;
 
     if (fcntl64(fileno(bFile), F_SETLKW64, &fl) == -1) {
         if (errno == EACCES || errno == EAGAIN) {
@@ -1520,7 +1519,7 @@ void XStore::rdLockFile(FILE *bFile, unsigned long int startRange, unsigned long
     fl.l_type = F_RDLCK;
     fl.l_whence = SEEK_SET;
     fl.l_start = startRange;
-    fl.l_len = length + 1;
+    fl.l_len = (length > 0) ? length + 1 : length;
 
     if (fcntl64(fileno(bFile), F_SETLKW64, &fl) == -1) {
         if (errno == EACCES || errno == EAGAIN) {
@@ -1537,7 +1536,7 @@ void XStore::unlockFile(FILE *bFile, unsigned long int startRange, unsigned long
     fl.l_type = F_UNLCK;
     fl.l_whence = SEEK_SET;
     fl.l_start = startRange;
-    fl.l_len = length + 1;
+    fl.l_len = (length > 0) ? length + 1 : length;
 
     if (fcntl64(fileno(bFile), F_SETLKW64, &fl) == -1) {
         spdlog::error("[FILE UNLOCK] - Unable to release lock");
