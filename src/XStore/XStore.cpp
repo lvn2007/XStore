@@ -68,9 +68,7 @@ XStore_Proto::createDB_REP XStore::createDB(std::string dbName, XStore_Proto::ti
     std::string createDBStatus;
 
     // Ensure dbName & timeResolution string is all capitalized
-    for (int i = 0; i < dbName.size(); i++) {
-        dbName[i] = toupper(dbName[i]);
-    }
+    toUpperCase(dbName.begin(), dbName.end());
 
     if (rowLength < 4) {
         createDBStatus = fmt::format("[ERROR] [CREATE DB] [DB: {}] - Row length must be >= 4", dbName);
@@ -145,9 +143,7 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(const unsigned long long int &
     timeStruct currTS(unixTime);
 
     // Ensure dbName string is all capitalized
-    for (int i = 0; i < dbName.size(); i++) {
-        dbName[i] = toupper(dbName[i]);
-    }
+    toUpperCase(dbName.begin(), dbName.end());
 
     // Base directory of a DB
     std::string dbBasePath = fmt::format("{}dataStore/{}/", baseDir, dbName);
@@ -206,8 +202,8 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(const unsigned long long int &
     }
 
     //  Computes diff & offset
-    long long int diff = unixTime - currTS.firstEpoch;
-    long long int offset = diff * cfgStruct.rowlength();
+    unsigned long long int diff = unixTime - currTS.firstEpoch;
+    unsigned long long int offset = diff * cfgStruct.rowlength();
 
     // Lock prior to file OP
     XStore::wrLockFile(bFile, offset, cfgStruct.rowlength());
@@ -236,9 +232,7 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery(std::time_t unixTime, std::strin
     toReturn.set_timestamp(unixTime);
 
     // Ensure dbName string is all capitalized
-    for (int i = 0; i < dbName.size(); i++) {
-        dbName[i] = toupper(dbName[i]);
-    }
+    toUpperCase(dbName.begin(), dbName.end());
 
     //  Time structure contains all components per UNIXTIME:
     //      Year, month, day, hour, minute, sec, ...
@@ -313,9 +307,7 @@ XStore_Proto::unaryDelete_REP XStore::unaryDelete(std::time_t epochTime, std::st
     timeStruct currTS{epochTime};
 
     // Ensure dbName string is all capitalized
-    for (int i = 0; i < dbName.size(); i++) {
-        dbName[i] = toupper(dbName[i]);
-    }
+    toUpperCase(dbName.begin(), dbName.end());
 
     // Base directory of a DB
     std::string dbBasePath = fmt::format("{}dataStore/{}/", baseDir, dbName);
@@ -398,9 +390,7 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
 
     // Ensure DB Name string is all capitalized
     std::string dbName = protoFromClient->dbname();
-    for (int i = 0; i < dbName.size(); i++) {
-        dbName[i] = toupper(dbName[i]);
-    }
+    toUpperCase(dbName.begin(), dbName.end());
 
     // Base directory of a DB
     std::string dbBasePath = fmt::format("{}dataStore/{}/", baseDir, dbName);
@@ -528,12 +518,10 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
     // Protobuf obj to be returned
     XStore_Proto::batchQuery_REP toReturn;
     XStore_Proto::rowData tempData;
-    std::string dbName = protoFromClient->dbname();
 
     // Ensure dbName string is all capitalized
-    for (int i = 0; i < dbName.size(); i++) {
-        dbName[i] = toupper(dbName[i]);
-    }
+    std::string dbName = protoFromClient->dbname();
+    toUpperCase(dbName.begin(), dbName.end());
 
     // Base directory of a DB
     std::string dbBasePath = fmt::format("{}dataStore/{}/", baseDir, dbName);
@@ -675,9 +663,7 @@ XStore_Proto::batchDelete_REP XStore::batchDelete(XStore_Proto::batchDelete_REQ 
     int deleteCount = 0;
 
     // Ensure dbName string is all capitalized
-    for (int i = 0; i < dbName.size(); i++) {
-        dbName[i] = toupper(dbName[i]);
-    }
+    toUpperCase(dbName.begin(), dbName.end());
 
     // Base directory of a DB
     std::string dbBasePath = fmt::format("{}dataStore/{}/", baseDir, dbName);
@@ -801,9 +787,7 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(XStore_Proto::rangeInsert_REQ 
 
     // Ensure DB Name string is all capitalized
     std::string dbName = protoFromClient->dbname();
-    for (int i = 0; i < dbName.size(); i++) {
-        dbName[i] = toupper(dbName[i]);
-    }
+    toUpperCase(dbName.begin(), dbName.end());
 
     // Base directory of a DB
     std::string dbBasePath = fmt::format("{}dataStore/{}/", baseDir, dbName);
@@ -932,9 +916,7 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(std::time_t startEpochT, std::ti
     std::string queryStatus;
 
     // Ensure dbName string is all capitalized
-    for (int i = 0; i < dbName.size(); i++) {
-        dbName[i] = toupper(dbName[i]);
-    }
+    toUpperCase(dbName.begin(), dbName.end());
 
     // Base directory of a DB
     std::string dbBasePath = fmt::format("{}dataStore/{}/", baseDir, dbName);
@@ -1192,9 +1174,7 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(std::time_t startEpochT, std::
     int deleteCount = 0;
 
     // Ensure dbName string is all capitalized
-    for (int i = 0; i < dbName.size(); i++) {
-        dbName[i] = toupper(dbName[i]);
-    }
+    toUpperCase(dbName.begin(), dbName.end());
 
     // Base directory of a DB
     std::string dbBasePath = fmt::format("{}dataStore/{}/", baseDir, dbName);
@@ -1380,9 +1360,7 @@ XStore_Proto::removeDB_REP XStore::removeDB(std::string dbName) {
     XStore_Proto::removeDB_REP toReturn;
 
     // Ensure dbName string is all capitalized
-    for (int i = 0; i < dbName.size(); i++) {
-        dbName[i] = toupper(dbName[i]);
-    }
+    toUpperCase(dbName.begin(), dbName.end());
 
     // Location of DB
     std::string dbLoc = fmt::format("{}{}", dataStoreDir, dbName);
@@ -1414,9 +1392,7 @@ XStore_Proto::removeDBFiles_REP XStore::removeDBFiles(XStore_Proto::removeDBFile
     XStore_Proto::removeDBFiles_REP toReturn;
 
     // Ensure dbName string is all capitalized
-    for (int i = 0; i < dbName.size(); i++) {
-        dbName[i] = toupper(dbName[i]);
-    }
+    toUpperCase(dbName.begin(), dbName.end());
 
     // Location of DB
     std::string dbLoc = fmt::format("{}{}", dataStoreDir, dbName);
