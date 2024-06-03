@@ -135,7 +135,7 @@ XStore_Proto::createDB_REP XStore::createDB(std::string dbName, XStore_Proto::ti
 }
 
 // UNARY INSERT
-XStore_Proto::unaryInsert_REP XStore::unaryInsert(std::time_t unixTime, XStore_Proto::rowData data, std::string dbName) {
+XStore_Proto::unaryInsert_REP XStore::unaryInsert(const unsigned long long int &unixTime, const XStore_Proto::rowData &data, std::string dbName) {
     // Protobuf obj to be returned
     XStore_Proto::unaryInsert_REP toReturn;
     std::string insertStatus;
