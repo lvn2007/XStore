@@ -13,11 +13,14 @@ include(FetchContent)
 # Protobuf-compiler
 find_package(Protobuf REQUIRED)
 find_package(Arrow REQUIRED)
-message(STATUS "Using protobuf ${Protobuf_VERSION}")
+
+# Protobuf-compiler
+set(_PROTOBUF_PROTOC $<TARGET_FILE:protobuf::protoc>)
+message(STATUS "Using Protobuf ${Protobuf_VERSION}")
 
 # Proto file
-get_filename_component(XStore_Proto "XStore.proto" ABSOLUTE)
-get_filename_component(XStore_Proto "${XStore_Proto}" PATH)
+get_filename_component(XStore_proto "../protoFile/XStore.proto" ABSOLUTE)
+get_filename_component(XStore_proto_path "${XStore_proto}" PATH)
 
 set(PROTO_SRCS "${CMAKE_CURRENT_BINARY_DIR}/XStore.pb.cc")
 set(PROTO_HDRS "${CMAKE_CURRENT_BINARY_DIR}/XStore.pb.h")
@@ -44,4 +47,4 @@ add_executable(benchmarkClient ${PROTO_SRCS} ${PROTO_HDRS} include/XStore_Client
         )
 
 add_compile_options(-O3)
-target_link_libraries(benchmarkClient PUBLIC ${Protobuf_LIBRARIES} "zmq" "parquet" "arrow") # libparquet-dev
+target_link_libraries(benchmarkClient PUBLIC protobuf::libprotobuf "zmq" "parquet" "arrow") # libparquet-dev
