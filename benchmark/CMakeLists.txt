@@ -15,15 +15,22 @@ find_package(Protobuf REQUIRED)
 find_package(Arrow REQUIRED)
 message(STATUS "Using protobuf ${Protobuf_VERSION}")
 
-
 # Proto file
 get_filename_component(XStore_Proto "XStore.proto" ABSOLUTE)
 get_filename_component(XStore_Proto "${XStore_Proto}" PATH)
 
+set(PROTO_SRCS "${CMAKE_CURRENT_BINARY_DIR}/XStore.pb.cc")
+set(PROTO_HDRS "${CMAKE_CURRENT_BINARY_DIR}/XStore.pb.h")
+
+add_custom_command(
+        OUTPUT "${PROTO_SRCS}" "${PROTO_HDRS}"
+        COMMAND ${_PROTOBUF_PROTOC} "--experimental_allow_proto3_optional"
+        ARGS --cpp_out "${CMAKE_CURRENT_BINARY_DIR}"
+        -I "${XStore_proto_path}" "${XStore_proto}"
+        DEPENDS "${XStore_proto}")
+
 include_directories(${Protobuf_INCLUDE_DIRS})
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
-
-protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS ../protoFile/XStore.proto)
 
 # Include generated *.pb.h files
 include_directories("${CMAKE_CURRENT_BINARY_DIR}")
@@ -35,4 +42,6 @@ add_executable(benchmarkClient ${PROTO_SRCS} ${PROTO_HDRS} include/XStore_Client
         DataManager/Data_Manager.h DataManager/Data_Manager.cpp
         XStore/XStore_Adapter.h XStore/XStore_Adapter.cpp MongoDB/MongoDB_Adapter.h MongoDB/MongoDB_Adapter.cpp
         )
+
+add_compile_options(-O3)
 target_link_libraries(benchmarkClient PUBLIC ${Protobuf_LIBRARIES} "zmq" "parquet" "arrow") # libparquet-dev
