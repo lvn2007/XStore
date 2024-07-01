@@ -349,6 +349,6 @@ int main(int argc, char *argv[]) {
     Logger logger = Logger(CONSOLE_LEVEL, FILE_LEVEL, flushInterval);
 
     // Spin ZMQ Server
-    XStore_zmqServer xStoreZmqServer(THREAD_COUNT);
-    xStoreZmqServer.startServer(BIND_ADDR, BIND_PORT);
+    XStore_zmqServer XStoreZmqServer(THREAD_COUNT);
+    XStoreZmqServer.startServer(BIND_ADDR, BIND_PORT);
 }
