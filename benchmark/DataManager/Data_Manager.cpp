@@ -276,7 +276,8 @@ arrow::Status DataManager::readParquet(std::string parquetFilename, std::vector<
         // Permitted types: string, int, float, double
         //  Note: Float will be treated as double
         if (std::find(std::begin(ALLOWED_DTYPES), std::end(ALLOWED_DTYPES), currentType) == std::end(ALLOWED_DTYPES)) {
-            std::string typeErrorMsg = "Type: " + currentType + " is not supported!";
+            std::string typeErrorMsg = fmt::format("Type: {} is not supported!", currentType);
+            spdlog::error("[READ PARQUET] - {}", typeErrorMsg);
             return arrow::Status::TypeError(typeErrorMsg);
         }
 
@@ -345,7 +346,7 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readQueryWorkload(s
     // Check if files match bench criteria
     //  Expecting nThreads == N number of files
     if (targetFileNames.size() < nThreads) {
-        std::cerr << "[ERROR - BENCHMARK] -- Insufficient test dataset" << std::endl;
+        spdlog::error("[READ QUERY WORKLOAD] - Insufficient test dataset");
         exit(1);
     }
 
@@ -360,7 +361,7 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readQueryWorkload(s
 
         // Expecting nIterations == Parsed sample size
         if (parsedSampleSize != nIterations) {
-            std::cerr << "[ERROR - BENCHMARK] -- Unexpected sample size" << std::endl;
+            spdlog::error("[READ QUERY WORKLOAD] - Unexpected sample size");
             exit(1);
         }
     }
@@ -399,7 +400,7 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readQueryWorkload(s
     // Check if files match bench criteria
     //  Expecting nThreads == N number of files
     if (targetFileNames.size() < nThreads) {
-        std::cerr << "[ERROR - BENCHMARK] -- Insufficient test dataset" << std::endl;
+        spdlog::error("[READ QUERY WORKLOAD] - Insufficient test dataset");
         exit(1);
     }
 
@@ -417,13 +418,13 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readQueryWorkload(s
 
         // Expecting nIterations == Parsed sample size
         if (parsedSampleSize != nIterations) {
-            std::cerr << "[ERROR - BENCHMARK] -- Unexpected sample size" << std::endl;
+            spdlog::error("[READ QUERY WORKLOAD] - Unexpected sample size");
             exit(1);
         }
 
         // Expecting bIterations == Parsed batch size
         if (parsedBatchIter != bIterations) {
-            std::cerr << "[ERROR - BENCHMARK] -- Unexpected batch iteration" << std::endl;
+            spdlog::error("[READ QUERY WORKLOAD] - Unexpected batch iteration");
             exit(1);
         }
     }
@@ -462,7 +463,7 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readInsertWorkload(
     // Check if files match bench criteria
     //  Expecting nThreads == N number of files
     if (targetFileNames.size() < nThreads) {
-        std::cerr << "[ERROR - BENCHMARK] -- Insufficient test dataset" << std::endl;
+        spdlog::error("[READ INSERT WORKLOAD] - Insufficient test dataset");
         exit(1);
     }
 
@@ -477,7 +478,7 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readInsertWorkload(
 
         // Expecting nIterations == Parsed sample size
         if (parsedSampleSize != nIterations) {
-            std::cerr << "[ERROR - BENCHMARK] -- Unexpected sample size" << std::endl;
+            spdlog::error("[READ INSERT WORKLOAD] - Unexpected sample size");
             exit(1);
         }
     }
@@ -516,7 +517,7 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readInsertWorkload(
     // Check if files match bench criteria
     //  Expecting nThreads == N number of files
     if (targetFileNames.size() < nThreads) {
-        std::cerr << "[ERROR - BENCHMARK] -- Insufficient test dataset" << std::endl;
+        spdlog::error("[READ INSERT WORKLOAD] - Insufficient test dataset");
         exit(1);
     }
 
@@ -534,13 +535,13 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readInsertWorkload(
 
         // Expecting nIterations == Parsed sample size
         if (parsedSampleSize != nIterations) {
-            std::cerr << "[ERROR - BENCHMARK] -- Unexpected sample size" << std::endl;
+            spdlog::error("[READ INSERT WORKLOAD] - Unexpected sample size");
             exit(1);
         }
 
         // Expecting bIterations == Parsed batch size
         if (parsedBatchIter != bIterations) {
-            std::cerr << "[ERROR - BENCHMARK] -- Unexpected batch iteration" << std::endl;
+            spdlog::error("[READ INSERT WORKLOAD] - Unexpected batch iteration");
             exit(1);
         }
     }

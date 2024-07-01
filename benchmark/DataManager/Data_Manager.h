@@ -21,6 +21,8 @@
 #include <arrow/api.h>
 #include <arrow/io/file.h>
 #include <parquet/stream_reader.h>
+#include "include/Logger/spdlog/fmt/fmt.h"
+#include "include/Logger/Logger.h"
 
 class DataManager {
 public:
