@@ -101,17 +101,19 @@ class ParquetOPS:
 
         if queryType == 'UNARY_SEQ':
             for i in range(nClients):
-                startTime = (startTime + offset) + (i * sampleSize)
+                currStart = (startTime + offset) + (i * sampleSize)
 
                 # Sequential
-                targetList = [i for i in range(startTime, startTime + sampleSize)]
+                targetList = [i for i in range(currStart, currStart + sampleSize)]
 
                 # Prepare DF to write
                 toWrite = pd.DataFrame(targetList, columns=['timestamp'])
                 toWrite['timestamp'] = toWrite['timestamp'].astype(np.uint64)
 
                 # Write to file
-                toWrite.to_parquet(f'BASIC-QUERY-UNARY-SEQ_Client-{i}_{sampleSize}_{startTime}.parquet', engine='fastparquet', compression='zstd')
+                fName = f'BASIC-QUERY-UNARY-SEQ_Client-{i}_{sampleSize}_{currStart}.parquet'
+                toWrite.to_parquet(fName, engine='fastparquet', compression='zstd')
+                print(f'File written: {fName}')
 
         elif queryType == 'UNARY_RAND':
             # Data for all N clients
@@ -128,13 +130,15 @@ class ParquetOPS:
                 toWrite['timestamp'] = toWrite['timestamp'].astype(np.uint64)
 
                 # Write to file
-                toWrite.to_parquet(f'BASIC-QUERY-UNARY-RAND_Client-{i}_{sampleSize}_{startTime}-{endTime}.parquet', engine='fastparquet', compression='zstd')
+                fName = f'BASIC-QUERY-UNARY-RAND_Client-{i}_{sampleSize}_{startTime}-{endTime}.parquet'
+                toWrite.to_parquet(fName, engine='fastparquet', compression='zstd')
+                print(f'File written: {fName}')
 
         elif queryType == 'BATCH_SEQ':
             for i in range(nClients):
-                startTime = (startTime + offset) + (i * sampleSize * batchIter)
+                currStart = (startTime + offset) + (i * sampleSize * batchIter)
 
-                sTime = [startTime + (j * sampleSize) for j in range(batchIter)]
+                sTime = [currStart + (j * sampleSize) for j in range(batchIter)]
                 eTime = [j + sampleSize for j in sTime]
 
                 # Prepare DF to write
@@ -143,7 +147,9 @@ class ParquetOPS:
                 toWrite['endTime'] = toWrite['endTime'].astype(np.uint64)
 
                 # Write to file
-                toWrite.to_parquet(f'BASIC-QUERY-BATCH-SEQ_Client-{i}_{batchIter}-{sampleSize}_{startTime}-{endTime}.parquet', engine='fastparquet', compression='zstd')
+                fName = f'BASIC-QUERY-BATCH-SEQ_Client-{i}_{batchIter}-{sampleSize}_{currStart}-{endTime}.parquet'
+                toWrite.to_parquet(fName, engine='fastparquet', compression='zstd')
+                print(f'File written: {fName}')
 
         elif queryType == 'BATCH_RAND':
             # Data for all N clients
@@ -162,7 +168,9 @@ class ParquetOPS:
                 toWrite.columns = toWrite.columns.astype(str)
 
                 # Write to file
-                toWrite.to_parquet(f'BASIC-QUERY-BATCH-RAND_Client-{i}_{batchIter}-{sampleSize}_{startTime}-{endTime}.parquet', engine='fastparquet', compression='zstd')
+                fName = f'BASIC-QUERY-BATCH-RAND_Client-{i}_{batchIter}-{sampleSize}_{startTime}-{endTime}.parquet'
+                toWrite.to_parquet(fName, engine='fastparquet', compression='zstd')
+                print(f'File written: {fName}')
 
     def createBasicInsert(self, offset, sampleSize, nClients, inputFile, insertType='SEQ', batchIter=None):
         if batchIter is None:
@@ -292,6 +300,6 @@ if __name__ == '__main__':
     elif args.command == 'queryWorkload':
         parquetOps.createBasicQuery(offset=args.offset, sampleSize=args.sample_size, nClients=args.num_client, startTime=args.start_time, endTime=args.end_time, queryType=args.type, batchIter=args.batch_iter)
 
-    # BASIC ISNERTS
+    # BASIC INSERTS
     elif args.command == 'insertWorkload':
         parquetOps.createBasicInsert(offset=args.offset, sampleSize=args.sample_size, nClients=args.num_client, inputFile=args.input_data, insertType=args.type, batchIter=args.batch_iter)
