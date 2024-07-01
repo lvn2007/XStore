@@ -2,9 +2,13 @@
 #define XSTORE_XSTORE_ADAPTER_H
 
 #include "XStore.pb.h"
+#include <google/protobuf/util/json_util.h>
+
 #include "../include/XStore_Client.h"
 #include "../include/Base_Adapter.h"
 #include "../include/utilities.h"
+#include "include/Logger/spdlog/fmt/fmt.h"
+#include "include/Logger/Logger.h"
 
 class XStore_Adapter: public Base_Adapter {
     public:

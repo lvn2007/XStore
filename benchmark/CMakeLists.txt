@@ -14,6 +14,9 @@ include(FetchContent)
 find_package(Protobuf REQUIRED)
 find_package(Arrow REQUIRED)
 
+# Logging library - spdlog
+include_directories(include/Logger)
+
 # Protobuf-compiler
 set(_PROTOBUF_PROTOC $<TARGET_FILE:protobuf::protoc>)
 message(STATUS "Using Protobuf ${Protobuf_VERSION}")
@@ -42,7 +45,7 @@ include_directories(.)
 
 add_executable(benchmarkClient ${PROTO_SRCS} ${PROTO_HDRS} include/XStore_Client.h main.cpp include/zmq.hpp include/zmq_addon.hpp
         include/utilities.h include/Base_Adapter.h include/BS_thread_pool.hpp include/csv.hpp include/md5.h include/argparse.hpp
-        DataManager/Data_Manager.h DataManager/Data_Manager.cpp
+        include/Logger/Logger.h DataManager/Data_Manager.h DataManager/Data_Manager.cpp
         XStore/XStore_Adapter.h XStore/XStore_Adapter.cpp MongoDB/MongoDB_Adapter.h MongoDB/MongoDB_Adapter.cpp
         )
 

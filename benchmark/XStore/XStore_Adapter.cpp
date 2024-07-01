@@ -20,10 +20,9 @@ std::vector<double> XStore_Adapter::unaryQuery(std::string SERVER_ADDR, std::str
     std::vector<double> timeCost;
 
     // Flattening nested vector
-    std::string fileName = "Client-";
     for (int i = 0; i < nestedVector.size(); i++) {
         // Write experiment result to CSV
-        writeCSV("QUERY-" + pattern + "_" + fileName + std::to_string(i) + ".csv", "Time taken (ms)", nestedVector.at(i));
+        writeCSV(fmt::format("QUERY-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
         std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
     }
     return timeCost;
@@ -45,10 +44,9 @@ std::vector<double> XStore_Adapter::rangeQuery(std::string SERVER_ADDR, std::str
     std::vector<double> timeCost;
 
     // Flattening nested vector
-    std::string fileName = "Client-";
     for (int i = 0; i < nestedVector.size(); i++) {
         // Write experiment result to CSV
-        writeCSV("QUERY-" + pattern + "_" + fileName + std::to_string(i) + ".csv", "Time taken (ms)", nestedVector.at(i));
+        writeCSV(fmt::format("QUERY-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
         std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
     }
     return timeCost;
@@ -73,7 +71,7 @@ std::vector<double> XStore_Adapter::batchQuery(std::string SERVER_ADDR, std::str
     std::string fileName = "Client-";
     for (int i = 0; i < nestedVector.size(); i++) {
         // Write experiment result to CSV
-        writeCSV("QUERY-" + pattern + "_" + fileName + std::to_string(i) + ".csv", "Time taken (ms)", nestedVector.at(i));
+        writeCSV(fmt::format("QUERY-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
         std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
     }
     return timeCost;
@@ -100,10 +98,9 @@ std::vector<double> XStore_Adapter::unaryInsert(std::string SERVER_ADDR, std::st
     std::vector<double> timeCost;
 
     // Flattening nested vector
-    std::string fileName = "Client-";
     for (int i = 0; i < nestedVector.size(); i++) {
         // Write experiment result to CSV
-        writeCSV("INSERT-" + pattern + "_" + fileName + std::to_string(i) + ".csv", "Time taken (ms)", nestedVector.at(i));
+        writeCSV(fmt::format("INSERT-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
         std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
     }
     return timeCost;
@@ -130,10 +127,9 @@ std::vector<double> XStore_Adapter::rangeInsert(std::string SERVER_ADDR, std::st
     std::vector<double> timeCost;
 
     // Flattening nested vector
-    std::string fileName = "Client-";
     for (int i = 0; i < nestedVector.size(); i++) {
         // Write experiment result to CSV
-        writeCSV("INSERT-" + pattern + "_" + fileName + std::to_string(i) + ".csv", "Time taken (ms)", nestedVector.at(i));
+        writeCSV(fmt::format("INSERT-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
         std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
     }
     return timeCost;
@@ -160,10 +156,9 @@ std::vector<double> XStore_Adapter::batchInsert(std::string SERVER_ADDR, std::st
     std::vector<double> timeCost;
 
     // Flattening nested vector
-    std::string fileName = "Client-";
     for (int i = 0; i < nestedVector.size(); i++) {
         // Write experiment result to CSV
-        writeCSV("INSERT-" + pattern + "_" + fileName + std::to_string(i) + ".csv", "Time taken (ms)", nestedVector.at(i));
+        writeCSV(fmt::format("INSERT-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
         std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
     }
     return timeCost;
@@ -300,6 +295,7 @@ std::vector<double> XStore_Adapter::batchQuery_singleThread(std::string SERVER_A
         start = std::chrono::high_resolution_clock::now();
         batchQueryRep = xstoreClient.batchQuery(timeList, "BENCH_DB");
         end = std::chrono::high_resolution_clock::now();
+        batchQueryRep.PrintDebugString();
         timeCost = end - start;
         toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
     }

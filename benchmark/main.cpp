@@ -7,6 +7,12 @@
 
 int main(int argc, char const *argv[])
 {
+    // Logging
+    spdlog::level::level_enum CONSOLE_LEVEL = spdlog::level::info;
+    spdlog::level::level_enum FILE_LEVEL = spdlog::level::trace;
+    unsigned short int flushInterval = 10;
+    Logger logger = Logger(CONSOLE_LEVEL, FILE_LEVEL, flushInterval);
+
     argparse::ArgumentParser program("X-Bench");
 
     // ---- Data LOAD ALL
@@ -198,8 +204,7 @@ int main(int argc, char const *argv[])
         // NUM_THREAD checking
         short unsigned int availableHT = std::thread::hardware_concurrency();
         if (NUM_THREAD < 1 || NUM_THREAD > availableHT) {
-            std::cerr << "[ERROR - ARGUMENTS] -- Invalid NUM THREAD" << std::endl;
-            std::cerr << "Expecting: 1 <= NUM_THREAD <= " << availableHT << std::endl;
+            spdlog::error("[ARGUMENTS] - Invalid THREAD_COUNT. Expecting: 1 <= THREAD_COUNT <= {}", availableHT);
             exit(1);
         }
 
@@ -210,12 +215,11 @@ int main(int argc, char const *argv[])
         std::vector<double> timeCost;
 
         if (EXPERIMENT_TYPE == "UNARY_SEQ") {
-            std::cout << "----- [UNARY QUERY] -----" << std::endl;
-            std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
-            std::cout << "[BENCHMARK] Pattern: SEQUENTIAL" << std::endl;
-            std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
-            std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
-            std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
+            spdlog::info("[UNARY QUERY] Target DB: {}", TARGET_DB);
+            spdlog::info("[UNARY QUERY] Pattern: SEQUENTIAL");
+            spdlog::info("[UNARY QUERY] Iterations: {}", N_ITERATIONS);
+            spdlog::info("[UNARY QUERY] Thread: {}", NUM_THREAD);
+            spdlog::info("[UNARY QUERY] Invoke at: {}", INVOKE_AT);
 
             // Read data from parquet file
             std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-UNARY-SEQ_Client-", NUM_THREAD, N_ITERATIONS);
@@ -228,12 +232,11 @@ int main(int argc, char const *argv[])
             }
         }
         else if (EXPERIMENT_TYPE == "UNARY_RAND") {
-            std::cout << "----- [UNARY QUERY] -----" << std::endl;
-            std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
-            std::cout << "[BENCHMARK] Pattern: RANDOM" << std::endl;
-            std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
-            std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
-            std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
+            spdlog::info("[UNARY QUERY] Target DB: {}", TARGET_DB);
+            spdlog::info("[UNARY QUERY] Pattern: RANDOM");
+            spdlog::info("[UNARY QUERY] Iterations: {}", N_ITERATIONS);
+            spdlog::info("[UNARY QUERY] Thread: {}", NUM_THREAD);
+            spdlog::info("[UNARY QUERY] Invoke at: {}", INVOKE_AT);
 
             // Read data from parquet file
             std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-UNARY-RAND_Client-", NUM_THREAD, N_ITERATIONS);
@@ -246,13 +249,12 @@ int main(int argc, char const *argv[])
             }
         }
         else if (EXPERIMENT_TYPE == "BATCH_SEQ") {
-            std::cout << "----- [BATCH QUERY] -----" << std::endl;
-            std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
-            std::cout << "[BENCHMARK] Pattern: SEQUENTIAL" << std::endl;
-            std::cout << "[BENCHMARK] Sample Size: " << N_ITERATIONS << std::endl;
-            std::cout << "[BENCHMARK] Batch Iterations: " << B_ITERATIONS << std::endl;
-            std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
-            std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
+            spdlog::info("[BATCH QUERY] Target DB: {}", TARGET_DB);
+            spdlog::info("[BATCH QUERY] Pattern: SEQUENTIAL");
+            spdlog::info("[BATCH QUERY] Iterations: {}", N_ITERATIONS);
+            spdlog::info("[BATCH QUERY] Batch Iterations: {}", B_ITERATIONS);
+            spdlog::info("[BATCH QUERY] Thread: {}", NUM_THREAD);
+            spdlog::info("[BATCH QUERY] Invoke at: {}", INVOKE_AT);
 
             // Read data from parquet file
             std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-BATCH-SEQ_Client-", NUM_THREAD, N_ITERATIONS, B_ITERATIONS);
@@ -265,13 +267,12 @@ int main(int argc, char const *argv[])
             }
         }
         else if (EXPERIMENT_TYPE == "BATCH_RAND") {
-            std::cout << "----- [BATCH QUERY] -----" << std::endl;
-            std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
-            std::cout << "[BENCHMARK] Pattern: RANDOM" << std::endl;
-            std::cout << "[BENCHMARK] Sample Size: " << N_ITERATIONS << std::endl;
-            std::cout << "[BENCHMARK] Batch Iterations: " << B_ITERATIONS << std::endl;
-            std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
-            std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
+            spdlog::info("[BATCH QUERY] Target DB: {}", TARGET_DB);
+            spdlog::info("[BATCH QUERY] Pattern: RANDOM");
+            spdlog::info("[BATCH QUERY] Iterations: {}", N_ITERATIONS);
+            spdlog::info("[BATCH QUERY] Batch Iterations: {}", B_ITERATIONS);
+            spdlog::info("[BATCH QUERY] Thread: {}", NUM_THREAD);
+            spdlog::info("[BATCH QUERY] Invoke at: {}", INVOKE_AT);
 
             // Read data from parquet file
             std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-BATCH-RAND_Client-", NUM_THREAD, N_ITERATIONS, B_ITERATIONS);
@@ -282,10 +283,6 @@ int main(int argc, char const *argv[])
             if (TARGET_DB == "XSTORE") {
                 timeCost = XStore_Adapter::batchQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE);
             }
-        }
-        else {
-            std::cerr << "[ERROR - BENCHMARK] Error encountered. Workload is not defined" << std::endl;
-            exit(1);
         }
 
         // Display benchmark statistics
@@ -304,8 +301,7 @@ int main(int argc, char const *argv[])
         // NUM_THREAD checking
         short unsigned int availableHT = std::thread::hardware_concurrency();
         if (NUM_THREAD < 1 || NUM_THREAD > availableHT) {
-            std::cerr << "[ERROR - ARGUMENTS] -- Invalid NUM THREAD" << std::endl;
-            std::cerr << "Expecting: 1 <= NUM_THREAD <= " << availableHT << std::endl;
+            spdlog::error("[ARGUMENTS] - Invalid THREAD_COUNT. Expecting: 1 <= THREAD_COUNT <= {}", availableHT);
             exit(1);
         }
 
@@ -316,12 +312,11 @@ int main(int argc, char const *argv[])
         DataManager dataManager;
 
         if (EXPERIMENT_TYPE == "UNARY_SEQ") {
-            std::cout << "----- [UNARY INSERT] -----" << std::endl;
-            std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
-            std::cout << "[BENCHMARK] Pattern: SEQUENTIAL" << std::endl;
-            std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
-            std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
-            std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
+            spdlog::info("[UNARY INSERT] Target DB: {}", TARGET_DB);
+            spdlog::info("[UNARY INSERT] Pattern: SEQUENTIAL");
+            spdlog::info("[UNARY INSERT] Iterations: {}", N_ITERATIONS);
+            spdlog::info("[UNARY INSERT] Thread: {}", NUM_THREAD);
+            spdlog::info("[UNARY INSERT] Invoke at: {}", INVOKE_AT);
 
             std::vector<std::vector<std::any>> insertData;
 
@@ -336,12 +331,11 @@ int main(int argc, char const *argv[])
             }
         }
         else if (EXPERIMENT_TYPE == "UNARY_RAND") {
-            std::cout << "----- [UNARY INSERT] -----" << std::endl;
-            std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
-            std::cout << "[BENCHMARK] Pattern: RANDOM" << std::endl;
-            std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
-            std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
-            std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
+            spdlog::info("[UNARY INSERT] Target DB: {}", TARGET_DB);
+            spdlog::info("[UNARY INSERT] Pattern: RANDOM");
+            spdlog::info("[UNARY INSERT] Iterations: {}", N_ITERATIONS);
+            spdlog::info("[UNARY INSERT] Thread: {}", NUM_THREAD);
+            spdlog::info("[UNARY INSERT] Invoke at: {}", INVOKE_AT);
 
             std::vector<std::vector<std::any>> insertData;
 
@@ -356,13 +350,12 @@ int main(int argc, char const *argv[])
             }
         }
         else if (EXPERIMENT_TYPE == "BATCH_SEQ") {
-            std::cout << "----- [BATCH INSERT] -----" << std::endl;
-            std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
-            std::cout << "[BENCHMARK] Pattern: SEQUENTIAL" << std::endl;
-            std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
-            std::cout << "[BENCHMARK] Batch Iterations: " << B_ITERATIONS << std::endl;
-            std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
-            std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
+            spdlog::info("[BATCH INSERT] Target DB: {}", TARGET_DB);
+            spdlog::info("[BATCH INSERT] Pattern: SEQUENTIAL");
+            spdlog::info("[BATCH INSERT] Iterations: {}", N_ITERATIONS);
+            spdlog::info("[BATCH INSERT] Batch Iterations: {}", B_ITERATIONS);
+            spdlog::info("[BATCH INSERT] Thread: {}", NUM_THREAD);
+            spdlog::info("[BATCH INSERT] Invoke at: {}", INVOKE_AT);
 
             std::vector<std::vector<std::any>> insertData;
 
@@ -377,13 +370,12 @@ int main(int argc, char const *argv[])
             }
         }
         else if (EXPERIMENT_TYPE == "BATCH_RAND") {
-            std::cout << "----- [BATCH INSERT] -----" << std::endl;
-            std::cout << "[BENCHMARK] Target DB: " << TARGET_DB << std::endl;
-            std::cout << "[BENCHMARK] Pattern: RANDOM" << std::endl;
-            std::cout << "[BENCHMARK] Iterations: " << N_ITERATIONS << std::endl;
-            std::cout << "[BENCHMARK] Batch Iterations: " << B_ITERATIONS << std::endl;
-            std::cout << "[BENCHMARK] Thread: " << NUM_THREAD << std::endl;
-            std::cout << "[BENCHMARK] Invoke at: " << INVOKE_AT << std::endl;
+            spdlog::info("[BATCH INSERT] Target DB: {}", TARGET_DB);
+            spdlog::info("[BATCH INSERT] Pattern: RANDOM");
+            spdlog::info("[BATCH INSERT] Iterations: {}", N_ITERATIONS);
+            spdlog::info("[BATCH INSERT] Batch Iterations: {}", B_ITERATIONS);
+            spdlog::info("[BATCH INSERT] Thread: {}", NUM_THREAD);
+            spdlog::info("[BATCH INSERT] Invoke at: {}", INVOKE_AT);
 
             std::vector<std::vector<std::any>> insertData;
 
@@ -396,10 +388,6 @@ int main(int argc, char const *argv[])
             if (TARGET_DB == "XSTORE") {
                 timeCost = XStore_Adapter::batchInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE);
             }
-        }
-        else {
-            std::cerr << "[ERROR - BENCHMARK] Error encountered. Workload is not defined" << std::endl;
-            exit(1);
         }
 
         // Display benchmark statistics

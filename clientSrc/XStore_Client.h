@@ -26,7 +26,6 @@ class XStore_Client {
   XStore_Client(std::string SERVER_ADDR, std::string SERVER_PORT) {
       std::string fullAddr = "tcp://" + SERVER_ADDR + ":" + SERVER_PORT;
       sock.connect(fullAddr);
-      std::cout << "[INFO] - Connected to " + fullAddr << std::endl;
   }
 
   std::string getCurrDT() {
