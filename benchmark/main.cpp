@@ -94,8 +94,7 @@ int main(int argc, char const *argv[])
             .default_value(0).nargs(1)
             .scan<'i', unsigned long int>();
 
-    queryBench.add_argument("-dbg", "--debug_on")
-            .help("Debug mode")
+    queryBench.add_argument("--debug").help("Debug mode")
             .default_value(false).implicit_value(true);
 
     // ---- Benchmark runner (INSERT)
@@ -147,6 +146,9 @@ int main(int argc, char const *argv[])
             .default_value(0).nargs(1)
             .scan<'i', unsigned long int>();
 
+    insertBench.add_argument("--debug").help("Debug mode")
+            .default_value(false).implicit_value(true);
+
     program.add_subparser(dataLoader);
     program.add_subparser(queryBench);
     program.add_subparser(insertBench);
@@ -163,7 +165,8 @@ int main(int argc, char const *argv[])
     if (program.is_subcommand_used(dataLoader)) {
         std::string SERVER_ADDR = dataLoader.get<std::string>("-i");
         std::string SERVER_PORT = dataLoader.get<std::string>("-p");
-        std::string TARGET_DB = toUpper(dataLoader.get<std::string>("-d"));
+        std::string TARGET_DB = dataLoader.get<std::string>("-d");
+        toUpperCase(TARGET_DB.begin(), TARGET_DB.end());
         short unsigned int NUM_THREAD = dataLoader.get<unsigned short int>("-t");
         std::string DATASET = dataLoader.get<std::string>("-f");
 
@@ -198,13 +201,15 @@ int main(int argc, char const *argv[])
     else if (program.is_subcommand_used(queryBench)) {
         std::string SERVER_ADDR = queryBench.get<std::string>("-i");
         std::string SERVER_PORT = queryBench.get<std::string>("-p");
-        std::string TARGET_DB = toUpper(queryBench.get<std::string>("-d"));
-        std::string EXPERIMENT_TYPE = toUpper(queryBench.get<std::string>("-e"));
+        std::string TARGET_DB = queryBench.get<std::string>("-d");
+        toUpperCase(TARGET_DB.begin(), TARGET_DB.end());
+        std::string EXPERIMENT_TYPE = queryBench.get<std::string>("-e");
+        toUpperCase(EXPERIMENT_TYPE.begin(), EXPERIMENT_TYPE.end());
         short unsigned int NUM_THREAD = queryBench.get<unsigned short int>("-t");
         unsigned int N_ITERATIONS = queryBench.get<unsigned int>("-n");
         unsigned int B_ITERATIONS = queryBench.get<unsigned int>("-b");
         unsigned int INVOKE_AT = queryBench.get<unsigned long int>("-ia");
-        bool IS_DEBUG = queryBench.get<bool>("-dbg");
+        bool IS_DEBUG = queryBench.get<bool>("--debug");
 
         // NUM_THREAD checking
         short unsigned int availableHT = std::thread::hardware_concurrency();
@@ -243,6 +248,7 @@ int main(int argc, char const *argv[])
             spdlog::info("[UNARY QUERY] Iterations: {}", N_ITERATIONS);
             spdlog::info("[UNARY QUERY] Thread: {}", NUM_THREAD);
             spdlog::info("[UNARY QUERY] Invoke at: {}", INVOKE_AT);
+            spdlog::info("[UNARY QUERY] Debug: {}", IS_DEBUG);
 
             // Read data from parquet file
             std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-UNARY-RAND_Client-", NUM_THREAD, N_ITERATIONS);
@@ -251,7 +257,7 @@ int main(int argc, char const *argv[])
             epochPoller(INVOKE_AT);
 
             if (TARGET_DB == "XSTORE") {
-                timeCost = XStore_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE);
+                timeCost = XStore_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
         }
         else if (EXPERIMENT_TYPE == "BATCH_SEQ") {
@@ -261,6 +267,7 @@ int main(int argc, char const *argv[])
             spdlog::info("[BATCH QUERY] Batch Iterations: {}", B_ITERATIONS);
             spdlog::info("[BATCH QUERY] Thread: {}", NUM_THREAD);
             spdlog::info("[BATCH QUERY] Invoke at: {}", INVOKE_AT);
+            spdlog::info("[BATCH QUERY] Debug: {}", IS_DEBUG);
 
             // Read data from parquet file
             std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-BATCH-SEQ_Client-", NUM_THREAD, N_ITERATIONS, B_ITERATIONS);
@@ -269,7 +276,7 @@ int main(int argc, char const *argv[])
             epochPoller(INVOKE_AT);
 
             if (TARGET_DB == "XSTORE") {
-                timeCost = XStore_Adapter::rangeQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE);
+                timeCost = XStore_Adapter::rangeQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
         }
         else if (EXPERIMENT_TYPE == "BATCH_RAND") {
@@ -279,6 +286,7 @@ int main(int argc, char const *argv[])
             spdlog::info("[BATCH QUERY] Batch Iterations: {}", B_ITERATIONS);
             spdlog::info("[BATCH QUERY] Thread: {}", NUM_THREAD);
             spdlog::info("[BATCH QUERY] Invoke at: {}", INVOKE_AT);
+            spdlog::info("[BATCH QUERY] Debug: {}", IS_DEBUG);
 
             // Read data from parquet file
             std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-BATCH-RAND_Client-", NUM_THREAD, N_ITERATIONS, B_ITERATIONS);
@@ -287,7 +295,7 @@ int main(int argc, char const *argv[])
             epochPoller(INVOKE_AT);
 
             if (TARGET_DB == "XSTORE") {
-                timeCost = XStore_Adapter::batchQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE);
+                timeCost = XStore_Adapter::batchQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
         }
 
@@ -297,12 +305,15 @@ int main(int argc, char const *argv[])
     else if (program.is_subcommand_used(insertBench)) {
         std::string SERVER_ADDR = insertBench.get<std::string>("-i");
         std::string SERVER_PORT = insertBench.get<std::string>("-p");
-        std::string TARGET_DB = toUpper(insertBench.get<std::string>("-d"));
-        std::string EXPERIMENT_TYPE = toUpper(insertBench.get<std::string>("-e"));
+        std::string TARGET_DB = insertBench.get<std::string>("-d");
+        toUpperCase(TARGET_DB.begin(), TARGET_DB.end());
+        std::string EXPERIMENT_TYPE = insertBench.get<std::string>("-e");
+        toUpperCase(EXPERIMENT_TYPE.begin(), EXPERIMENT_TYPE.end());
         short unsigned int NUM_THREAD = insertBench.get<unsigned short int>("-t");
         unsigned int N_ITERATIONS = insertBench.get<unsigned int>("-n");
         unsigned int B_ITERATIONS = insertBench.get<unsigned int>("-b");
         unsigned int INVOKE_AT = insertBench.get<unsigned long int>("-ia");
+        bool IS_DEBUG = insertBench.get<bool>("--debug");
 
         // NUM_THREAD checking
         short unsigned int availableHT = std::thread::hardware_concurrency();
@@ -323,6 +334,7 @@ int main(int argc, char const *argv[])
             spdlog::info("[UNARY INSERT] Iterations: {}", N_ITERATIONS);
             spdlog::info("[UNARY INSERT] Thread: {}", NUM_THREAD);
             spdlog::info("[UNARY INSERT] Invoke at: {}", INVOKE_AT);
+            spdlog::info("[UNARY INSERT] Debug: {}", IS_DEBUG);
 
             std::vector<std::vector<std::any>> insertData;
 
@@ -333,7 +345,7 @@ int main(int argc, char const *argv[])
             epochPoller(INVOKE_AT);
 
             if (TARGET_DB == "XSTORE") {
-                timeCost = XStore_Adapter::unaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE);
+                timeCost = XStore_Adapter::unaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
         }
         else if (EXPERIMENT_TYPE == "UNARY_RAND") {
@@ -342,6 +354,7 @@ int main(int argc, char const *argv[])
             spdlog::info("[UNARY INSERT] Iterations: {}", N_ITERATIONS);
             spdlog::info("[UNARY INSERT] Thread: {}", NUM_THREAD);
             spdlog::info("[UNARY INSERT] Invoke at: {}", INVOKE_AT);
+            spdlog::info("[UNARY INSERT] Debug: {}", IS_DEBUG);
 
             std::vector<std::vector<std::any>> insertData;
 
@@ -352,7 +365,7 @@ int main(int argc, char const *argv[])
             epochPoller(INVOKE_AT);
 
             if (TARGET_DB == "XSTORE") {
-                timeCost = XStore_Adapter::unaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE);
+                timeCost = XStore_Adapter::unaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
         }
         else if (EXPERIMENT_TYPE == "BATCH_SEQ") {
@@ -362,6 +375,7 @@ int main(int argc, char const *argv[])
             spdlog::info("[BATCH INSERT] Batch Iterations: {}", B_ITERATIONS);
             spdlog::info("[BATCH INSERT] Thread: {}", NUM_THREAD);
             spdlog::info("[BATCH INSERT] Invoke at: {}", INVOKE_AT);
+            spdlog::info("[BATCH INSERT] Debug: {}", IS_DEBUG);
 
             std::vector<std::vector<std::any>> insertData;
 
@@ -372,7 +386,7 @@ int main(int argc, char const *argv[])
             epochPoller(INVOKE_AT);
 
             if (TARGET_DB == "XSTORE") {
-                timeCost = XStore_Adapter::rangeInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE);
+                timeCost = XStore_Adapter::rangeInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
         }
         else if (EXPERIMENT_TYPE == "BATCH_RAND") {
@@ -382,6 +396,7 @@ int main(int argc, char const *argv[])
             spdlog::info("[BATCH INSERT] Batch Iterations: {}", B_ITERATIONS);
             spdlog::info("[BATCH INSERT] Thread: {}", NUM_THREAD);
             spdlog::info("[BATCH INSERT] Invoke at: {}", INVOKE_AT);
+            spdlog::info("[BATCH INSERT] Debug: {}", IS_DEBUG);
 
             std::vector<std::vector<std::any>> insertData;
 
@@ -392,7 +407,7 @@ int main(int argc, char const *argv[])
             epochPoller(INVOKE_AT);
 
             if (TARGET_DB == "XSTORE") {
-                timeCost = XStore_Adapter::batchInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE);
+                timeCost = XStore_Adapter::batchInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
         }
 

@@ -28,12 +28,12 @@ std::vector<double> XStore_Adapter::unaryQuery(std::string SERVER_ADDR, std::str
     return timeCost;
 }
 
-std::vector<double> XStore_Adapter::rangeQuery(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *queryData, std::string pattern) {
+std::vector<double> XStore_Adapter::rangeQuery(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *queryData, std::string pattern, bool isDebug) {
     BS::multi_future<std::vector<double>> multiFuture;
     std::vector<std::vector<double>> nestedVector;
 
     for (int i = 0; i < NUM_THREAD; i++) {
-        multiFuture.push_back(threadPool.submit(XStore_Adapter::rangeQuery_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &queryData->at(i)));
+        multiFuture.push_back(threadPool.submit(XStore_Adapter::rangeQuery_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &queryData->at(i), isDebug));
     }
 
     // Wait till all threads finishes
@@ -52,12 +52,12 @@ std::vector<double> XStore_Adapter::rangeQuery(std::string SERVER_ADDR, std::str
     return timeCost;
 }
 
-std::vector<double> XStore_Adapter::batchQuery(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *queryData, std::string pattern) {
+std::vector<double> XStore_Adapter::batchQuery(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *queryData, std::string pattern, bool isDebug) {
     BS::multi_future<std::vector<double>> multiFuture;
     std::vector<std::vector<double>> nestedVector;
 
     for (int i = 0; i < NUM_THREAD; i++) {
-        multiFuture.push_back(threadPool.submit(XStore_Adapter::batchQuery_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &queryData->at(i)));
+        multiFuture.push_back(threadPool.submit(XStore_Adapter::batchQuery_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &queryData->at(i), isDebug));
     }
 
     // Wait till all threads finishes
@@ -77,7 +77,7 @@ std::vector<double> XStore_Adapter::batchQuery(std::string SERVER_ADDR, std::str
     return timeCost;
 }
 
-std::vector<double> XStore_Adapter::unaryInsert(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *insertData, std::string pattern) {
+std::vector<double> XStore_Adapter::unaryInsert(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *insertData, std::string pattern, bool isDebug) {
     BS::multi_future<std::vector<double>> multiFuture;
     std::vector<std::vector<double>> nestedVector;
 
@@ -87,7 +87,7 @@ std::vector<double> XStore_Adapter::unaryInsert(std::string SERVER_ADDR, std::st
 
     // Extracting insertData so that each thread will have unique insert data
     for (int i = 0; i < NUM_THREAD; i++) {
-        multiFuture.push_back(threadPool.submit(XStore_Adapter::unaryInsert_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &insertData->at(i)));
+        multiFuture.push_back(threadPool.submit(XStore_Adapter::unaryInsert_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &insertData->at(i), isDebug));
     }
 
     // Wait till all threads finishes
@@ -106,7 +106,7 @@ std::vector<double> XStore_Adapter::unaryInsert(std::string SERVER_ADDR, std::st
     return timeCost;
 }
 
-std::vector<double> XStore_Adapter::rangeInsert(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *insertData, std::string pattern) {
+std::vector<double> XStore_Adapter::rangeInsert(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *insertData, std::string pattern, bool isDebug) {
     BS::multi_future<std::vector<double>> multiFuture;
     std::vector<std::vector<double>> nestedVector;
 
@@ -116,7 +116,7 @@ std::vector<double> XStore_Adapter::rangeInsert(std::string SERVER_ADDR, std::st
 
     // Extracting insertData so that each thread will have unique insert data
     for (int i = 0; i < NUM_THREAD; i++) {
-        multiFuture.push_back(threadPool.submit(XStore_Adapter::rangeInsert_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &insertData->at(i)));
+        multiFuture.push_back(threadPool.submit(XStore_Adapter::rangeInsert_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &insertData->at(i), isDebug));
     }
 
     // Wait till all threads finishes
@@ -135,7 +135,7 @@ std::vector<double> XStore_Adapter::rangeInsert(std::string SERVER_ADDR, std::st
     return timeCost;
 }
 
-std::vector<double> XStore_Adapter::batchInsert(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *insertData, std::string pattern) {
+std::vector<double> XStore_Adapter::batchInsert(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *insertData, std::string pattern, bool isDebug) {
     BS::multi_future<std::vector<double>> multiFuture;
     std::vector<std::vector<double>> nestedVector;
 
@@ -145,7 +145,7 @@ std::vector<double> XStore_Adapter::batchInsert(std::string SERVER_ADDR, std::st
 
     // Extracting insertData so that each thread will have unique insert data
     for (int i = 0; i < NUM_THREAD; i++) {
-        multiFuture.push_back(threadPool.submit(XStore_Adapter::batchInsert_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &insertData->at(i)));
+        multiFuture.push_back(threadPool.submit(XStore_Adapter::batchInsert_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &insertData->at(i), isDebug));
     }
 
     // Wait till all threads finishes
@@ -228,7 +228,7 @@ std::vector<double> XStore_Adapter::unaryQuery_singleThread(std::string SERVER_A
     XStore_Proto::unaryQuery_REP unaryQueryRep;
     unsigned long int queryTargetTime;
 
-    // DEBUG MODE
+    // DEBUG mode
     if (isDebug) {
         for (int i = 0; i < N_ITERATION; i++) {
             queryTargetTime = std::any_cast<unsigned long int>(queryData->at(i).at(0));
@@ -243,7 +243,7 @@ std::vector<double> XStore_Adapter::unaryQuery_singleThread(std::string SERVER_A
             // Debug
             std::string debugMsg;
             google::protobuf::util::MessageToJsonString(unaryQueryRep, &debugMsg);
-            spdlog::trace("[DEBUG] [UNARY QUERY] - Querying: {} | Data: {}", queryTargetTime, debugMsg);
+            spdlog::debug("[UNARY QUERY] - Querying: {} | Result Data: {}", queryTargetTime, debugMsg);
         }
     }
     // NOT a debug mode
@@ -262,7 +262,7 @@ std::vector<double> XStore_Adapter::unaryQuery_singleThread(std::string SERVER_A
     return toReturn;
 }
 
-std::vector<double> XStore_Adapter::rangeQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData) {
+std::vector<double> XStore_Adapter::rangeQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData, bool isDebug) {
     std::vector<double> toReturn;
 
     // Init client obj
@@ -277,21 +277,43 @@ std::vector<double> XStore_Adapter::rangeQuery_singleThread(std::string SERVER_A
     XStore_Proto::rangeQuery_REP rangeQueryRep;
     unsigned long int queryStartTime, queryEndTime;
 
-    for (int i = 0; i < N_ITERATION; i++) {
-        queryStartTime = std::any_cast<unsigned long int>(queryData->at(i).at(0));
-        queryEndTime = std::any_cast<unsigned long int>(queryData->at(i).at(1));
+    // DEBUG mode
+    if (isDebug) {
+        for (int i = 0; i < N_ITERATION; i++) {
+            queryStartTime = std::any_cast<unsigned long int>(queryData->at(i).at(0));
+            queryEndTime = std::any_cast<unsigned long int>(queryData->at(i).at(1));
 
-        // Dispatch query
-        start = std::chrono::high_resolution_clock::now();
-        rangeQueryRep = xstoreClient.rangeQuery(queryStartTime, queryEndTime, "BENCH_DB");
-        end = std::chrono::high_resolution_clock::now();
-        timeCost = end - start;
-        toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+            // Dispatch query
+            start = std::chrono::high_resolution_clock::now();
+            rangeQueryRep = xstoreClient.rangeQuery(queryStartTime, queryEndTime, "BENCH_DB");
+            end = std::chrono::high_resolution_clock::now();
+            timeCost = end - start;
+            toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+
+            // Debug
+            std::string debugMsg;
+            google::protobuf::util::MessageToJsonString(rangeQueryRep, &debugMsg);
+            spdlog::debug("[RANGE QUERY] - From: {} to {} | Result Data: {}", queryStartTime, queryEndTime, debugMsg);
+        }
+    }
+    // NOT a debug mode
+    else {
+        for (int i = 0; i < N_ITERATION; i++) {
+            queryStartTime = std::any_cast<unsigned long int>(queryData->at(i).at(0));
+            queryEndTime = std::any_cast<unsigned long int>(queryData->at(i).at(1));
+
+            // Dispatch query
+            start = std::chrono::high_resolution_clock::now();
+            rangeQueryRep = xstoreClient.rangeQuery(queryStartTime, queryEndTime, "BENCH_DB");
+            end = std::chrono::high_resolution_clock::now();
+            timeCost = end - start;
+            toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+        }
     }
     return toReturn;
 }
 
-std::vector<double> XStore_Adapter::batchQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData) {
+std::vector<double> XStore_Adapter::batchQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData, bool isDebug) {
     std::vector<double> toReturn;
 
     // Init client obj
@@ -305,26 +327,51 @@ std::vector<double> XStore_Adapter::batchQuery_singleThread(std::string SERVER_A
     // Query response placeholder
     XStore_Proto::batchQuery_REP batchQueryRep;
 
-    for (int i = 0; i < N_ITERATION; i++) {
-        std::vector<unsigned long int> timeList;
+    // DEBUG mode
+    if (isDebug) {
+        for (int i = 0; i < N_ITERATION; i++) {
+            std::vector<unsigned long int> timeList;
 
-        // Extract target time into timeList - timeList can be seen as a batch of targets
-        for (int j = 0; j < queryData->at(i).size(); j++) {
-            timeList.emplace_back(std::any_cast<unsigned long int>(queryData->at(i).at(j)));
+            // Extract target time into timeList - timeList can be seen as a batch of targets
+            for (int j = 0; j < queryData->at(i).size(); j++) {
+                timeList.emplace_back(std::any_cast<unsigned long int>(queryData->at(i).at(j)));
+            }
+
+            // Dispatch query
+            start = std::chrono::high_resolution_clock::now();
+            batchQueryRep = xstoreClient.batchQuery(timeList, "BENCH_DB");
+            end = std::chrono::high_resolution_clock::now();
+            timeCost = end - start;
+            toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+
+            // Debug
+            std::string debugMsg;
+            google::protobuf::util::MessageToJsonString(batchQueryRep, &debugMsg);
+            spdlog::debug("[BATCH QUERY] - Result Data: {}", debugMsg);
         }
+    }
+    // NOT a debug mode
+    else {
+        for (int i = 0; i < N_ITERATION; i++) {
+            std::vector<unsigned long int> timeList;
 
-        // Dispatch query
-        start = std::chrono::high_resolution_clock::now();
-        batchQueryRep = xstoreClient.batchQuery(timeList, "BENCH_DB");
-        end = std::chrono::high_resolution_clock::now();
-        batchQueryRep.PrintDebugString();
-        timeCost = end - start;
-        toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+            // Extract target time into timeList - timeList can be seen as a batch of targets
+            for (int j = 0; j < queryData->at(i).size(); j++) {
+                timeList.emplace_back(std::any_cast<unsigned long int>(queryData->at(i).at(j)));
+            }
+
+            // Dispatch query
+            start = std::chrono::high_resolution_clock::now();
+            batchQueryRep = xstoreClient.batchQuery(timeList, "BENCH_DB");
+            end = std::chrono::high_resolution_clock::now();
+            timeCost = end - start;
+            toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+        }
     }
     return toReturn;
 }
 
-std::vector<double> XStore_Adapter::unaryInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData) {
+std::vector<double> XStore_Adapter::unaryInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData, bool isDebug) {
     std::vector<double> toReturn;
 
     // Init client obj
@@ -335,19 +382,37 @@ std::vector<double> XStore_Adapter::unaryInsert_singleThread(std::string SERVER_
     std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
     std::chrono::duration<double> timeCost;
 
-    for (int i = 0; i < N_ITERATION; i++) {
-        // Dispatch insert
-        start = std::chrono::high_resolution_clock::now();
-        XStore_Proto::unaryInsert_REP unaryInsertRep = xstoreClient.unaryInsert(std::any_cast<long unsigned int>(insertData->at(i).at(0)), &insertData->at(i), "BENCH_DB");
-        end = std::chrono::high_resolution_clock::now();
-        timeCost = end - start;
+    // DEBUG mode
+    if (isDebug) {
+        for (int i = 0; i < N_ITERATION; i++) {
+            // Dispatch insert
+            start = std::chrono::high_resolution_clock::now();
+            XStore_Proto::unaryInsert_REP unaryInsertRep = xstoreClient.unaryInsert(std::any_cast<long unsigned int>(insertData->at(i).at(0)), &insertData->at(i), "BENCH_DB");
+            end = std::chrono::high_resolution_clock::now();
+            timeCost = end - start;
+            toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
 
-        toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+            // Debug
+            std::string debugMsg;
+            google::protobuf::util::MessageToJsonString(unaryInsertRep, &debugMsg);
+            spdlog::debug("[UNARY INSERT] - Insert Time: {} | Result Data: {}", std::any_cast<long unsigned int>(insertData->at(i).at(0)), debugMsg);
+        }
+    }
+    // NOT a debug mode
+    else {
+        for (int i = 0; i < N_ITERATION; i++) {
+            // Dispatch insert
+            start = std::chrono::high_resolution_clock::now();
+            XStore_Proto::unaryInsert_REP unaryInsertRep = xstoreClient.unaryInsert(std::any_cast<long unsigned int>(insertData->at(i).at(0)), &insertData->at(i), "BENCH_DB");
+            end = std::chrono::high_resolution_clock::now();
+            timeCost = end - start;
+            toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+        }
     }
     return toReturn;
 }
 
-std::vector<double> XStore_Adapter::rangeInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData) {
+std::vector<double> XStore_Adapter::rangeInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData, bool isDebug) {
     std::vector<double> toReturn;
 
     // Init client obj
@@ -358,19 +423,38 @@ std::vector<double> XStore_Adapter::rangeInsert_singleThread(std::string SERVER_
     std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
     std::chrono::duration<double> timeCost;
 
-    for (int i = 0; i < N_ITERATION; i++) {
-        // Dispatch insert
-        start = std::chrono::high_resolution_clock::now();
-        XStore_Proto::rangeInsert_REP rangeInsertRep = xstoreClient.rangeInsert(insertData, "BENCH_DB");
-        end = std::chrono::high_resolution_clock::now();
-        timeCost = end - start;
+    // DEBUG mode
+    if (isDebug) {
+        for (int i = 0; i < N_ITERATION; i++) {
+            // Dispatch insert
+            start = std::chrono::high_resolution_clock::now();
+            XStore_Proto::rangeInsert_REP rangeInsertRep = xstoreClient.rangeInsert(insertData, "BENCH_DB");
+            end = std::chrono::high_resolution_clock::now();
+            timeCost = end - start;
+            toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
 
-        toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+            // Debug
+            std::string debugMsg;
+            google::protobuf::util::MessageToJsonString(rangeInsertRep, &debugMsg);
+            spdlog::debug("[RANGE INSERT] - Result Data: {}", debugMsg);
+        }
+    }
+    // NOT a debug mode
+    else {
+        for (int i = 0; i < N_ITERATION; i++) {
+            // Dispatch insert
+            start = std::chrono::high_resolution_clock::now();
+            XStore_Proto::rangeInsert_REP rangeInsertRep = xstoreClient.rangeInsert(insertData, "BENCH_DB");
+            end = std::chrono::high_resolution_clock::now();
+            timeCost = end - start;
+
+            toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+        }
     }
     return toReturn;
 }
 
-std::vector<double> XStore_Adapter::batchInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData) {
+std::vector<double> XStore_Adapter::batchInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData, bool isDebug) {
     std::vector<double> toReturn;
 
     // Init client obj
@@ -381,14 +465,33 @@ std::vector<double> XStore_Adapter::batchInsert_singleThread(std::string SERVER_
     std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
     std::chrono::duration<double> timeCost;
 
-    for (int i = 0; i < N_ITERATION; i++) {
-        // Dispatch insert
-        start = std::chrono::high_resolution_clock::now();
-        XStore_Proto::batchInsert_REP batchInsertRep = xstoreClient.batchInsert(insertData, "BENCH_DB");
-        end = std::chrono::high_resolution_clock::now();
-        timeCost = end - start;
+    // DEBUG mode
+    if (isDebug) {
+        for (int i = 0; i < N_ITERATION; i++) {
+            // Dispatch insert
+            start = std::chrono::high_resolution_clock::now();
+            XStore_Proto::batchInsert_REP batchInsertRep = xstoreClient.batchInsert(insertData, "BENCH_DB");
+            end = std::chrono::high_resolution_clock::now();
+            timeCost = end - start;
+            toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
 
-        toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+            // Debug
+            std::string debugMsg;
+            google::protobuf::util::MessageToJsonString(batchInsertRep, &debugMsg);
+            spdlog::debug("[BATCH INSERT] - Result Data: {}", debugMsg);
+        }
+    }
+    // NOT a debug mode
+    else
+    {
+        for (int i = 0; i < N_ITERATION; i++) {
+            // Dispatch insert
+            start = std::chrono::high_resolution_clock::now();
+            XStore_Proto::batchInsert_REP batchInsertRep = xstoreClient.batchInsert(insertData, "BENCH_DB");
+            end = std::chrono::high_resolution_clock::now();
+            timeCost = end - start;
+            toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+        }
     }
     return toReturn;
 }
