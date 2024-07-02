@@ -94,6 +94,10 @@ int main(int argc, char const *argv[])
             .default_value(0).nargs(1)
             .scan<'i', unsigned long int>();
 
+    queryBench.add_argument("-dbg", "--debug_on")
+            .help("Debug mode")
+            .default_value(false).implicit_value(true);
+
     // ---- Benchmark runner (INSERT)
     argparse::ArgumentParser insertBench("insertBench");
     insertBench.add_description("XBench – CRUD Benchmarking Suites for Time-Series database (INSERT)");
@@ -200,6 +204,7 @@ int main(int argc, char const *argv[])
         unsigned int N_ITERATIONS = queryBench.get<unsigned int>("-n");
         unsigned int B_ITERATIONS = queryBench.get<unsigned int>("-b");
         unsigned int INVOKE_AT = queryBench.get<unsigned long int>("-ia");
+        bool IS_DEBUG = queryBench.get<bool>("-dbg");
 
         // NUM_THREAD checking
         short unsigned int availableHT = std::thread::hardware_concurrency();
@@ -220,6 +225,7 @@ int main(int argc, char const *argv[])
             spdlog::info("[UNARY QUERY] Iterations: {}", N_ITERATIONS);
             spdlog::info("[UNARY QUERY] Thread: {}", NUM_THREAD);
             spdlog::info("[UNARY QUERY] Invoke at: {}", INVOKE_AT);
+            spdlog::info("[UNARY QUERY] Debug: {}", IS_DEBUG);
 
             // Read data from parquet file
             std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-UNARY-SEQ_Client-", NUM_THREAD, N_ITERATIONS);
@@ -228,7 +234,7 @@ int main(int argc, char const *argv[])
             epochPoller(INVOKE_AT);
 
             if (TARGET_DB == "XSTORE") {
-                timeCost = XStore_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE);
+                timeCost = XStore_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
         }
         else if (EXPERIMENT_TYPE == "UNARY_RAND") {

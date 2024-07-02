@@ -4,12 +4,12 @@
 // Threading library
 static BS::thread_pool threadPool;
 
-std::vector<double> XStore_Adapter::unaryQuery(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *queryData, std::string pattern) {
+std::vector<double> XStore_Adapter::unaryQuery(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *queryData, std::string pattern, bool isDebug) {
     BS::multi_future<std::vector<double>> multiFuture;
     std::vector<std::vector<double>> nestedVector;
 
     for (int i = 0; i < NUM_THREAD; i++) {
-        multiFuture.push_back(threadPool.submit(XStore_Adapter::unaryQuery_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &queryData->at(i)));
+        multiFuture.push_back(threadPool.submit(XStore_Adapter::unaryQuery_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &queryData->at(i), isDebug));
     }
 
     // Wait till all threads finishes
@@ -213,7 +213,7 @@ std::vector<double> XStore_Adapter::loadAll(std::string SERVER_ADDR, std::string
     return timeCost;
 }
 
-std::vector<double> XStore_Adapter::unaryQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData) {
+std::vector<double> XStore_Adapter::unaryQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData, bool isDebug) {
     std::vector<double> toReturn;
 
     // Init client obj
@@ -227,15 +227,37 @@ std::vector<double> XStore_Adapter::unaryQuery_singleThread(std::string SERVER_A
     // Query response placeholder
     XStore_Proto::unaryQuery_REP unaryQueryRep;
     unsigned long int queryTargetTime;
-    for (int i = 0; i < N_ITERATION; i++) {
-        queryTargetTime = std::any_cast<unsigned long int>(queryData->at(i).at(0));
 
-        // Dispatch query
-        start = std::chrono::high_resolution_clock::now();
-        unaryQueryRep = xstoreClient.unaryQuery(queryTargetTime, "BENCH_DB");
-        end = std::chrono::high_resolution_clock::now();
-        timeCost = end - start;
-        toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+    // DEBUG MODE
+    if (isDebug) {
+        for (int i = 0; i < N_ITERATION; i++) {
+            queryTargetTime = std::any_cast<unsigned long int>(queryData->at(i).at(0));
+
+            // Dispatch query
+            start = std::chrono::high_resolution_clock::now();
+            unaryQueryRep = xstoreClient.unaryQuery(queryTargetTime, "BENCH_DB");
+            end = std::chrono::high_resolution_clock::now();
+            timeCost = end - start;
+            toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+
+            // Debug
+            std::string debugMsg;
+            google::protobuf::util::MessageToJsonString(unaryQueryRep, &debugMsg);
+            spdlog::trace("[DEBUG] [UNARY QUERY] - Querying: {} | Data: {}", queryTargetTime, debugMsg);
+        }
+    }
+    // NOT a debug mode
+    else {
+        for (int i = 0; i < N_ITERATION; i++) {
+            queryTargetTime = std::any_cast<unsigned long int>(queryData->at(i).at(0));
+
+            // Dispatch query
+            start = std::chrono::high_resolution_clock::now();
+            unaryQueryRep = xstoreClient.unaryQuery(queryTargetTime, "BENCH_DB");
+            end = std::chrono::high_resolution_clock::now();
+            timeCost = end - start;
+            toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+        }
     }
     return toReturn;
 }
