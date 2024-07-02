@@ -12,8 +12,10 @@
 #include <thread>
 #include <filesystem>
 #include <numeric>
+#include "include/Logger/spdlog/fmt/fmt.h"
+#include "include/Logger/Logger.h"
 
-static double meanCalc(std::vector<double> inputVector) {
+static double meanCalc(std::vector<double> &inputVector) {
     double totalSum = 0;
 
     for (int i = 0; i < inputVector.size(); i++) {
@@ -23,7 +25,7 @@ static double meanCalc(std::vector<double> inputVector) {
     return totalSum / inputVector.size();
 }
 
-static double stdCalc(std::vector<double> inputVector) {
+static double stdCalc(std::vector<double> &inputVector) {
     double totalSum = 0;
     double mean = 0;
     double std = 0;
@@ -41,7 +43,7 @@ static double stdCalc(std::vector<double> inputVector) {
     return sqrt(std / inputVector.size());
 }
 
-static double getMin(std::vector<double> inputVector) {
+static double getMin(std::vector<double> &inputVector) {
     double minVal = inputVector.at(0);
 
     for (int i = 1; i < inputVector.size(); i++) {
@@ -53,7 +55,7 @@ static double getMin(std::vector<double> inputVector) {
     return minVal;
 }
 
-static double getMax(std::vector<double> inputVector) {
+static double getMax(std::vector<double> &inputVector) {
     double maxVal = inputVector.at(0);
 
     for (int i = 1; i < inputVector.size(); i++) {
@@ -81,21 +83,18 @@ static void writeCSV(std::string fName, std::string colName, std::vector<double>
     myFile.close();
 }
 
-static std::string toUpper(std::string inputStr) {
-    std::string toReturn;
-    for (int i = 0; i < inputStr.size(); i++) {
-        toReturn += toupper(inputStr[i]);
+static void toUpperCase(std::string::iterator begin, std::string::iterator end) {
+    for (auto it = begin; it != end; ++it) {
+        *it &= ~0x20;
     }
-    return toReturn;
-}
+};
 
 static void printStatistics(std::vector<double> &inputVector) {
-    std::cout << "\n----- [STATISTICS] -----" << std::endl;
-    std::cout << "  Total: " << std::reduce(inputVector.begin(), inputVector.end()) << " (ms)" << std::endl;
-    std::cout << "  Mean:  " << meanCalc(inputVector) << " (ms)" << std::endl;
-    std::cout << "  Min:   " << getMin(inputVector) << " (ms)" << std::endl;
-    std::cout << "  Max:   " << getMax(inputVector) << " (ms)" << std::endl;
-    std::cout << "  Stdev: " << stdCalc(inputVector) << " (ms)" << std::endl;
+    spdlog::info("[STATISTICS] Total: {} (ms)", std::reduce(inputVector.begin(), inputVector.end()));
+    spdlog::info("[STATISTICS]  Mean: {} (ms)", meanCalc(inputVector));
+    spdlog::info("[STATISTICS]   Min: {} (ms)", getMin(inputVector));
+    spdlog::info("[STATISTICS]   Max: {} (ms)", getMax(inputVector));
+    spdlog::info("[STATISTICS] STDev: {} (ms)", stdCalc(inputVector));
 }
 
 static void epochPoller(int targetTime) {
