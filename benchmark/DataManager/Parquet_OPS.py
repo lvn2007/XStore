@@ -8,7 +8,15 @@ import pandas as pd
 import numpy as np
 import os
 from fastparquet import ParquetFile
+import pyarrow.parquet as pq
 import json
+from datetime import datetime
+
+# Client libraries
+from XStore import XStoreClient
+import XStore_pb2 as XStore_Proto
+import pymongo
+from pymongo import MongoClient
 
 # pd.set_option('display.max_columns', None)
 # pd.set_option('expand_frame_repr', False)
@@ -93,6 +101,47 @@ class ParquetOPS:
             df.to_parquet(outfileName, engine='fastparquet', compression='zstd')
         else:
             df.to_parquet(outfileName, engine='fastparquet', compression='zstd', append=True)
+
+    def ingestAll(self, db_name, ip_address, port_number, filename):
+        port_number = int(port_number)
+        masterDF = pq.ParquetFile(filename)
+
+        if db_name == "XSTORE":
+            xstoreClient = XStoreClient(ip_address, port_number)
+
+            for df in masterDF.iter_batches(batch_size=256_000):
+                dataList = []
+                tempDF = df.to_pandas()
+
+                for i in tempDF.itertuples():
+                    timestamp = i[1]
+                    data = [item for item in i[2:]]
+                    currRow = {'timestamp': timestamp, 'data': data}
+                    dataList.append(currRow)
+                insertResult = xstoreClient.rangeInsert(dataList, "BENCH_DB")
+                print(insertResult)
+
+        elif db_name == "MONGODB":
+            mongoClient = MongoClient(host=ip_address, port=port_number)
+            mongoDB = mongoClient['BENCH_DB']
+
+            # Create TS collection
+            try:
+                mongoClient.drop_database('BENCH_DB')
+                mongoDB.create_collection('BENCH_DB', timeseries={'timeField': 'timestamp'})
+            except pymongo.errors.CollectionInvalid:
+                print("Time-series collection is already existed")
+            mongoCollection = mongoDB['BENCH_DB']
+
+            for df in masterDF.iter_batches(batch_size=256_000):
+                tempDF = df.to_pandas()
+                tempDF['json'] = tempDF.apply(lambda x: x.to_json(), axis=1)
+                dataList = [json.loads(i) for i in tempDF['json'].tolist()]
+                for i in range(len(dataList)):
+                    dataList[i]['timestamp'] = datetime.fromtimestamp(dataList[i]['timestamp'])
+                insertResult = mongoCollection.insert_many(dataList)
+                print(insertResult)
+
 
     def createBasicQuery(self, offset, sampleSize, nClients, startTime, endTime, queryType='UNARY_SEQ', batchIter=None):
         # Batch size default
@@ -283,6 +332,12 @@ if __name__ == '__main__':
     writeWorkload.add_argument('-i', '--input-data', type=str, required=True, help='Input parquet file')
     writeWorkload.add_argument('-b', '--batch-iter', type=int, required=False, help='Batch iteration (Only applicable to RANGE/BATCH workloads)')
 
+    ingestAll = subParser.add_parser('ingestAll', add_help=True, description='Data ingestor for benchmarking suite')
+    ingestAll.add_argument('-d', '--db_name', type=str, required=True, help='DB name', choices=['XSTORE', 'MONGODB'])
+    ingestAll.add_argument('-i', '--ip_address', type=str, required=True, help='IP address of DB server')
+    ingestAll.add_argument('-p', '--port_number', type=int, required=True, help='Port number of DB server')
+    ingestAll.add_argument('-f', '--file_name', type=str, required=True, help='Parquet data file use to insert to DB')
+
     # If no argument given -> Print help msg
     if len(sys.argv) == 1:
         parser.print_help()
@@ -295,6 +350,9 @@ if __name__ == '__main__':
     # HANDLE data generator
     if args.command == 'generate':
         parquetOps.genData(args.start_time, args.end_time, args.column_count, args.outfile_name)
+
+    elif args.command == 'ingestAll':
+        parquetOps.ingestAll(db_name=args.db_name, ip_address=args.ip_address, port_number=args.port_number, filename=args.file_name)
 
     # BASIC QUERIES
     elif args.command == 'queryWorkload':
