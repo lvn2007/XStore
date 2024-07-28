@@ -21,6 +21,10 @@ include_directories(include/Logger)
 set(_PROTOBUF_PROTOC $<TARGET_FILE:protobuf::protoc>)
 message(STATUS "Using Protobuf ${Protobuf_VERSION}")
 
+# MongoDB
+find_package(mongocxx REQUIRED)
+find_package(bsoncxx REQUIRED)
+
 # Proto file
 get_filename_component(XStore_proto "../protoFile/XStore.proto" ABSOLUTE)
 get_filename_component(XStore_proto_path "${XStore_proto}" PATH)
@@ -50,4 +54,4 @@ add_executable(benchmarkClient ${PROTO_SRCS} ${PROTO_HDRS} include/XStore_Client
         )
 
 add_compile_options(-O3)
-target_link_libraries(benchmarkClient PUBLIC protobuf::libprotobuf "zmq" "parquet" "arrow") # libparquet-dev
+target_link_libraries(benchmarkClient PUBLIC protobuf::libprotobuf "zmq" "parquet" "arrow" "mongo::mongocxx_shared" "mongo::bsoncxx_shared") # libparquet-dev

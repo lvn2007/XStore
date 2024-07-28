@@ -81,7 +81,7 @@ std::vector<double> XStore_Adapter::unaryInsert(std::string SERVER_ADDR, std::st
     BS::multi_future<std::vector<double>> multiFuture;
     std::vector<std::vector<double>> nestedVector;
 
-    // Pre-emptively delete & create BENCH_DB
+    // Create BENCH_DB
     std::string dbName = "BENCH_DB";
     XStore_Adapter::createDB(SERVER_ADDR, SERVER_PORT, dbName, &insertData->at(0).at(0));
 
@@ -110,7 +110,7 @@ std::vector<double> XStore_Adapter::rangeInsert(std::string SERVER_ADDR, std::st
     BS::multi_future<std::vector<double>> multiFuture;
     std::vector<std::vector<double>> nestedVector;
 
-    // Pre-emptively delete & create BENCH_DB
+    // Create BENCH_DB
     std::string dbName = "BENCH_DB";
     XStore_Adapter::createDB(SERVER_ADDR, SERVER_PORT, dbName, &insertData->at(0).at(0));
 
@@ -139,7 +139,7 @@ std::vector<double> XStore_Adapter::batchInsert(std::string SERVER_ADDR, std::st
     BS::multi_future<std::vector<double>> multiFuture;
     std::vector<std::vector<double>> nestedVector;
 
-    // Pre-emptively delete & create BENCH_DB
+    // Create BENCH_DB
     std::string dbName = "BENCH_DB";
     XStore_Adapter::createDB(SERVER_ADDR, SERVER_PORT, dbName, &insertData->at(0).at(0));
 
@@ -161,55 +161,6 @@ std::vector<double> XStore_Adapter::batchInsert(std::string SERVER_ADDR, std::st
         writeCSV(fmt::format("INSERT-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
         std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
     }
-    return timeCost;
-}
-
-std::vector<double> XStore_Adapter::loadAll(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, std::vector<std::vector<std::any>> *insertData) {
-    BS::multi_future<std::vector<double>> multiFuture;
-    std::vector<std::vector<double>> nestedVector;
-
-    // Pre-emptively delete & create BENCH_DB
-    std::string dbName = "BENCH_DB";
-    XStore_Adapter::createDB(SERVER_ADDR, SERVER_PORT, dbName, &insertData->at(1));
-
-    // Extracting insertData so that each thread will have unique insert data
-//    std::vector<std::vector<std::vector<std::any>>> threadInsertData;
-//    long int rowCount = insertData.size();
-//    long int rowPerThread = rowCount / NUM_THREAD;
-//    long int lastRowIdx = 0;
-
-    // Split data into chunks corresponding to each thread
-//    for (int i = 0; i < NUM_THREAD - 1; i++) {
-//        std::vector<std::vector<std::any>> subVector = std::vector<std::vector<std::any>>(insertData.begin() + (i * rowPerThread), insertDatabegin() + (i * rowPerThread) + rowPerThread);
-//        threadInsertData.emplace_back(subVector);
-//        lastRowIdx = 0 + (i * rowPerThread) + rowPerThread;
-//    }
-//
-//    // Last thread will ingest its portion + remaining
-//    std::vector<std::vector<std::any>> subVector = std::vector<std::vector<std::any>>(insertData.begin() + lastRowIdx, insertData.begin() + rowCount);
-//    threadInsertData.emplace_back(subVector);
-
-    // Divide big into chunks of 100k
-    unsigned long int chunkCount = insertData->size() / 100'000;
-    std::cout << chunkCount << std::endl;
-//    for (int i = 0; i < NUM_THREAD; i++) {
-//        multiFuture.push_back(threadPool.submit(XStore_Adapter::loadAll_singleThread, SERVER_ADDR, SERVER_PORT, insertData));
-//    }
-//
-//    // Wait till all threads finishes
-//    for (std::vector<double> i : multiFuture.get()) {
-//        nestedVector.push_back(i);
-//    }
-//
-    std::vector<double> timeCost;
-//
-//    // Flattening nested vector
-//    std::string fileName = "Load-All_Client-";
-//    for (int i = 0; i < nestedVector.size(); i++) {
-//        // Write experiment result to CSV
-//        writeCSV(fileName + std::to_string(i) + ".csv", "Time taken (ms)", nestedVector.at(i));
-//        std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
-//    }
     return timeCost;
 }
 
@@ -243,7 +194,7 @@ std::vector<double> XStore_Adapter::unaryQuery_singleThread(std::string SERVER_A
             // Debug
             std::string debugMsg;
             google::protobuf::util::MessageToJsonString(unaryQueryRep, &debugMsg);
-            spdlog::debug("[UNARY QUERY] - Querying: {} | Result Data: {}", queryTargetTime, debugMsg);
+            spdlog::debug("[UNARY QUERY] - Querying: {} | Query Result: {}", queryTargetTime, debugMsg);
         }
     }
     // NOT a debug mode
@@ -293,7 +244,7 @@ std::vector<double> XStore_Adapter::rangeQuery_singleThread(std::string SERVER_A
             // Debug
             std::string debugMsg;
             google::protobuf::util::MessageToJsonString(rangeQueryRep, &debugMsg);
-            spdlog::debug("[RANGE QUERY] - From: {} to {} | Result Data: {}", queryStartTime, queryEndTime, debugMsg);
+            spdlog::debug("[RANGE QUERY] - From: {} to {} | Query Result: {}", queryStartTime, queryEndTime, debugMsg);
         }
     }
     // NOT a debug mode
@@ -347,7 +298,7 @@ std::vector<double> XStore_Adapter::batchQuery_singleThread(std::string SERVER_A
             // Debug
             std::string debugMsg;
             google::protobuf::util::MessageToJsonString(batchQueryRep, &debugMsg);
-            spdlog::debug("[BATCH QUERY] - Result Data: {}", debugMsg);
+            spdlog::debug("[BATCH QUERY] - Query Result: {}", debugMsg);
         }
     }
     // NOT a debug mode
@@ -395,7 +346,7 @@ std::vector<double> XStore_Adapter::unaryInsert_singleThread(std::string SERVER_
             // Debug
             std::string debugMsg;
             google::protobuf::util::MessageToJsonString(unaryInsertRep, &debugMsg);
-            spdlog::debug("[UNARY INSERT] - Insert Time: {} | Result Data: {}", std::any_cast<long unsigned int>(insertData->at(i).at(0)), debugMsg);
+            spdlog::debug("[UNARY INSERT] - Insert Time: {} | Insert Result: {}", std::any_cast<long unsigned int>(insertData->at(i).at(0)), debugMsg);
         }
     }
     // NOT a debug mode
@@ -436,7 +387,7 @@ std::vector<double> XStore_Adapter::rangeInsert_singleThread(std::string SERVER_
             // Debug
             std::string debugMsg;
             google::protobuf::util::MessageToJsonString(rangeInsertRep, &debugMsg);
-            spdlog::debug("[RANGE INSERT] - Result Data: {}", debugMsg);
+            spdlog::debug("[RANGE INSERT] - Insert Result: {}", debugMsg);
         }
     }
     // NOT a debug mode
@@ -478,7 +429,7 @@ std::vector<double> XStore_Adapter::batchInsert_singleThread(std::string SERVER_
             // Debug
             std::string debugMsg;
             google::protobuf::util::MessageToJsonString(batchInsertRep, &debugMsg);
-            spdlog::debug("[BATCH INSERT] - Result Data: {}", debugMsg);
+            spdlog::debug("[BATCH INSERT] - Insert Result: {}", debugMsg);
         }
     }
     // NOT a debug mode
@@ -496,22 +447,6 @@ std::vector<double> XStore_Adapter::batchInsert_singleThread(std::string SERVER_
     return toReturn;
 }
 
-std::vector<double> XStore_Adapter::loadAll_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, std::vector<std::vector<std::any>> *insertData) {
-    std::vector<double> toReturn;
-
-    // Init client obj
-    XStore_Client xstoreClient;
-    xstoreClient.connect(SERVER_ADDR, SERVER_PORT);
-
-    // Clock init
-    std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
-
-    for (int i = 0; i < insertData->size(); i++) {
-        XStore_Proto::rangeInsert_REP rangeInsertRep = xstoreClient.rangeInsert(insertData, "BENCH_DB");
-    }
-    return toReturn;
-}
-
 void XStore_Adapter::createDB(std::string SERVER_ADDR, std::string SERVER_PORT, std::string dbName, std::vector<std::any> *singleRowData) {
     XStore_Client xstoreClient;
     xstoreClient.connect(SERVER_ADDR, SERVER_PORT);
@@ -520,13 +455,13 @@ void XStore_Adapter::createDB(std::string SERVER_ADDR, std::string SERVER_PORT, 
     short int rowLength = XStore_Adapter::computeRowLength(singleRowData);
 
     // Granularity
-    XStore_Proto::timeUnit granularity = XStore_Adapter::getTimeResolution(std::any_cast<long unsigned int>(singleRowData->at(0)));
+    XStore_Proto::timeUnit granularity = XStore_Adapter::getTimeResolution(std::any_cast<unsigned long int>(singleRowData->at(0)));
 
     // Create BENCH_DB
     XStore_Proto::createDB_REP createDbRep = xstoreClient.createDB(dbName, granularity, rowLength);
 }
 
-XStore_Proto::timeUnit XStore_Adapter::getTimeResolution(long int timestamp) {
+XStore_Proto::timeUnit XStore_Adapter::getTimeResolution(unsigned long int timestamp) {
     int count = 0;
 
     while (timestamp != 0) {

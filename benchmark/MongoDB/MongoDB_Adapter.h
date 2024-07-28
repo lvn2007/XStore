@@ -1,21 +1,57 @@
 #ifndef XSTORE_MONGODB_ADAPTER_H
 #define XSTORE_MONGODB_ADAPTER_H
 
-#include <vector>
-#include <string>
+
 #include "../include/Base_Adapter.h"
+#include "../include/utilities.h"
+#include <bsoncxx/builder/basic/document.hpp>
+#include <bsoncxx/builder/list.hpp>
+#include <bsoncxx/json.hpp>
+#include <mongocxx/client.hpp>
+#include <mongocxx/instance.hpp>
+#include <mongocxx/stdx.hpp>
+#include <mongocxx/uri.hpp>
+#include "include/Logger/spdlog/fmt/fmt.h"
+#include "include/Logger/Logger.h"
 
 class MongoDB_Adapter: public Base_Adapter {
 public:
-    // Query A -- Unary SEQ query 1k times
-    static std::vector<double> queryA(const std::string& SERVER_ADDR, const std::string& SERVER_PORT, int NUM_THREAD, int N_ITERATION, long int startTime);
+    // UNARY QUERY
+    //  Supports both SEQ & RAND access patterns
+    static std::vector<double> unaryQuery(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *queryData, std::string pattern, bool isDebug=false);
 
-    // Query B -- Unary RAND query 1k times
-    static std::vector<double> queryB(const std::string& SERVER_ADDR, const std::string& SERVER_PORT, int NUM_THREAD, int N_ITERATION, long int startTime, long int endTime);
+    // RANGE QUERY
+    //  A batch of queries with SEQ access pattern
+    static std::vector<double> rangeQuery(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *queryData, std::string pattern, bool isDebug=false);
+
+    // BATCH QUERY
+    //  A batch of queries with RAND access pattern
+    static std::vector<double> batchQuery(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *queryData, std::string pattern, bool isDebug=false);
+
+    // UNARY INSERT
+    //  Supports both SEQ & RAND access patterns
+    static std::vector<double> unaryInsert(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *insertData, std::string pattern, bool isDebug=false);
+
+    // BATCH INSERT
+    //  A batch of inserts with SEQ/RAND access pattern
+    static std::vector<double> batchInsert(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *insertData, std::string pattern, bool isDebug=false);
 
 private:
-    static std::vector<double> queryA_singleThread(const std::string& SERVER_ADDR, const std::string& SERVER_PORT, int NUM_THREAD, int N_ITERATION, long int startTime);
-    static std::vector<double> queryB_singleThread(const std::string& SERVER_ADDR, const std::string& SERVER_PORT, int NUM_THREAD, int N_ITERATION, long int startTime, long int endTime);
+    mongocxx::instance instance{};
+
+    // QUERY
+    static std::vector<double> unaryQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData, bool isDebug);
+    static std::vector<double> rangeQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData, bool isDebug);
+    static std::vector<double> batchQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData, bool isDebug);
+
+    // INSERT
+    static std::vector<double> unaryInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData, bool isDebug);
+    static std::vector<double> rangeInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData, bool isDebug);
+    static std::vector<double> batchInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData, bool isDebug);
+
+    static void createDB(std::string SERVER_ADDR, std::string SERVER_PORT, std::string dbName, std::vector<std::any> *singleRowData);
+    static std::string getTimeResolution(unsigned long int timestamp);
+    static bsoncxx::builder::basic::document makeSingleDocument(std::vector<std::any> *insertData);
 };
 
 #endif //XSTORE_MONGODB_ADAPTER_H
