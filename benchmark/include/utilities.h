@@ -90,11 +90,11 @@ static void toUpperCase(std::string::iterator begin, std::string::iterator end) 
 };
 
 static void printStatistics(std::vector<double> &inputVector) {
-    spdlog::info("[STATISTICS] Total: {} (ms)", std::reduce(inputVector.begin(), inputVector.end()));
-    spdlog::info("[STATISTICS]  Mean: {} (ms)", meanCalc(inputVector));
-    spdlog::info("[STATISTICS]   Min: {} (ms)", getMin(inputVector));
-    spdlog::info("[STATISTICS]   Max: {} (ms)", getMax(inputVector));
-    spdlog::info("[STATISTICS] STDev: {} (ms)", stdCalc(inputVector));
+    spdlog::info("[STATISTICS] Total: {:.2f} (ms)", std::reduce(inputVector.begin(), inputVector.end()));
+    spdlog::info("[STATISTICS]  Mean: {:.2f} (ms)", meanCalc(inputVector));
+    spdlog::info("[STATISTICS]   Min: {:.2f} (ms)", getMin(inputVector));
+    spdlog::info("[STATISTICS]   Max: {:.2f} (ms)", getMax(inputVector));
+    spdlog::info("[STATISTICS] STDev: {:.2f} (ms)", stdCalc(inputVector));
 }
 
 static void epochPoller(int targetTime) {

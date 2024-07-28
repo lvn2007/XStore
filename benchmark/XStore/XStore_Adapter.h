@@ -32,12 +32,9 @@ class XStore_Adapter: public Base_Adapter {
         //  A batch of inserts with SEQ access pattern
         static std::vector<double> rangeInsert(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *insertData, std::string pattern, bool isDebug=false);
 
-        // RANGE INSERT
+        // BATCH INSERT
         //  A batch of inserts with SEQ access pattern
         static std::vector<double> batchInsert(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *insertData, std::string pattern, bool isDebug=false);
-
-        // LOAD ALL
-        static std::vector<double> loadAll(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, std::vector<std::vector<std::any>> *insertData);
 
     private:
         // QUERY
@@ -51,11 +48,8 @@ class XStore_Adapter: public Base_Adapter {
         static std::vector<double> batchInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData, bool isDebug);
 
         static void createDB(std::string SERVER_ADDR, std::string SERVER_PORT, std::string dbName, std::vector<std::any> *singleRowData);
-        static XStore_Proto::timeUnit getTimeResolution(long int timestamp);
+        static XStore_Proto::timeUnit getTimeResolution(unsigned long int timestamp);
         static short int computeRowLength(std::vector<std::any> *singleRowData);
-
-        // LOAD ALL
-        static std::vector<double> loadAll_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, std::vector<std::vector<std::any>> *insertData);
 };
 
 #endif //XSTORE_XSTORE_ADAPTER_H

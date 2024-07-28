@@ -1,4 +1,5 @@
 #include "XStore/XStore_Adapter.h"
+#include "MongoDB/MongoDB_Adapter.h"
 #include "include/utilities.h"
 #include "include/argparse.hpp"
 #include <thread>
@@ -14,36 +15,6 @@ int main(int argc, char const *argv[])
     Logger logger = Logger(CONSOLE_LEVEL, FILE_LEVEL, flushInterval);
 
     argparse::ArgumentParser program("X-Bench");
-
-    // ---- Data LOAD ALL
-    argparse::ArgumentParser dataLoader("loader");
-    dataLoader.add_description("Data Loader – Loading all data from file to DB");
-
-    //  Server IP address
-    dataLoader.add_argument("-i", "--ip_address").required()
-            .help("IP address of target DB server")
-            .default_value("127.0.0.1").nargs(1);
-
-    //  Server Port number
-    dataLoader.add_argument("-p", "--port_number").required()
-            .help("Port number of target DB server")
-            .default_value("12345").nargs(1);
-
-    //  Target DB
-    dataLoader.add_argument("-d", "--db_name").required()
-            .help("Target DB Name")
-            .default_value("XSTORE").nargs(1);
-
-    //  Number of Threads
-    dataLoader.add_argument("-t", "--thread_count").required()
-            .help("Number of client thread")
-            .default_value(1).nargs(1)
-            .scan<'i', short unsigned int>().nargs(1);
-
-    //  Data file name to be read
-    dataLoader.add_argument("-f", "--file_name").required()
-            .help("Data file name (.parquet format)")
-            .default_value("hashData.parquet").nargs(1);
 
     // ---- Benchmark runner (QUERY)
     argparse::ArgumentParser queryBench("queryBench");
@@ -149,7 +120,6 @@ int main(int argc, char const *argv[])
     insertBench.add_argument("--debug").help("Debug mode")
             .default_value(false).implicit_value(true);
 
-    program.add_subparser(dataLoader);
     program.add_subparser(queryBench);
     program.add_subparser(insertBench);
 
@@ -162,43 +132,7 @@ int main(int argc, char const *argv[])
         return 1;
     }
 
-    if (program.is_subcommand_used(dataLoader)) {
-        std::string SERVER_ADDR = dataLoader.get<std::string>("-i");
-        std::string SERVER_PORT = dataLoader.get<std::string>("-p");
-        std::string TARGET_DB = dataLoader.get<std::string>("-d");
-        toUpperCase(TARGET_DB.begin(), TARGET_DB.end());
-        short unsigned int NUM_THREAD = dataLoader.get<unsigned short int>("-t");
-        std::string DATASET = dataLoader.get<std::string>("-f");
-
-        // NUM_THREAD checking
-        short unsigned int availableHT = std::thread::hardware_concurrency();
-        if (NUM_THREAD < 1 || NUM_THREAD > availableHT) {
-            std::cerr << "[ERROR - ARGUMENTS] -- Invalid NUM THREAD" << std::endl;
-            std::cerr << "Expecting: 1 <= NUM_THREAD <= " << availableHT << std::endl;
-            exit(1);
-        }
-
-        // Benchmark data will be stored here
-        std::vector<double> timeCost;
-
-        std::cout << "----- [DATA LOADING] -----" << std::endl;
-        std::cout << "[LOAD] Target DB: " << TARGET_DB << std::endl;
-        std::cout << "[LOAD] Performing sequential WRITE" << std::endl;
-        std::cout << "[LOAD] Thread: " << NUM_THREAD << std::endl;
-        std::cout << "[LOAD] Dataset: " << DATASET << std::endl;
-
-        // Spawning Data Manager
-        DataManager dataManager;
-        std::vector<std::vector<std::any>> insertData;
-
-        // Read data from parquet file
-        dataManager.readParquet("1yTest.parquet", &insertData);
-
-        if (TARGET_DB == "XSTORE") {
-            timeCost = XStore_Adapter::loadAll(SERVER_ADDR, SERVER_PORT, NUM_THREAD, &insertData);
-        }
-    }
-    else if (program.is_subcommand_used(queryBench)) {
+    if (program.is_subcommand_used(queryBench)) {
         std::string SERVER_ADDR = queryBench.get<std::string>("-i");
         std::string SERVER_PORT = queryBench.get<std::string>("-p");
         std::string TARGET_DB = queryBench.get<std::string>("-d");
@@ -225,12 +159,12 @@ int main(int argc, char const *argv[])
         std::vector<double> timeCost;
 
         if (EXPERIMENT_TYPE == "UNARY_SEQ") {
-            spdlog::info("[UNARY QUERY] Target DB: {}", TARGET_DB);
-            spdlog::info("[UNARY QUERY] Pattern: SEQUENTIAL");
+            spdlog::info("[UNARY QUERY]  Target DB: {}", TARGET_DB);
+            spdlog::info("[UNARY QUERY]    Pattern: SEQUENTIAL");
             spdlog::info("[UNARY QUERY] Iterations: {}", N_ITERATIONS);
-            spdlog::info("[UNARY QUERY] Thread: {}", NUM_THREAD);
-            spdlog::info("[UNARY QUERY] Invoke at: {}", INVOKE_AT);
-            spdlog::info("[UNARY QUERY] Debug: {}", IS_DEBUG);
+            spdlog::info("[UNARY QUERY]     Thread: {}", NUM_THREAD);
+            spdlog::info("[UNARY QUERY]  Invoke at: {}", INVOKE_AT);
+            spdlog::info("[UNARY QUERY]      Debug: {}", IS_DEBUG);
 
             // Read data from parquet file
             std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-UNARY-SEQ_Client-", NUM_THREAD, N_ITERATIONS);
@@ -241,14 +175,17 @@ int main(int argc, char const *argv[])
             if (TARGET_DB == "XSTORE") {
                 timeCost = XStore_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
+            else if (TARGET_DB == "MONGODB") {
+                timeCost = MongoDB_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+            }
         }
         else if (EXPERIMENT_TYPE == "UNARY_RAND") {
-            spdlog::info("[UNARY QUERY] Target DB: {}", TARGET_DB);
-            spdlog::info("[UNARY QUERY] Pattern: RANDOM");
+            spdlog::info("[UNARY QUERY]  Target DB: {}", TARGET_DB);
+            spdlog::info("[UNARY QUERY]    Pattern: RANDOM");
             spdlog::info("[UNARY QUERY] Iterations: {}", N_ITERATIONS);
-            spdlog::info("[UNARY QUERY] Thread: {}", NUM_THREAD);
-            spdlog::info("[UNARY QUERY] Invoke at: {}", INVOKE_AT);
-            spdlog::info("[UNARY QUERY] Debug: {}", IS_DEBUG);
+            spdlog::info("[UNARY QUERY]     Thread: {}", NUM_THREAD);
+            spdlog::info("[UNARY QUERY]  Invoke at: {}", INVOKE_AT);
+            spdlog::info("[UNARY QUERY]      Debug: {}", IS_DEBUG);
 
             // Read data from parquet file
             std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-UNARY-RAND_Client-", NUM_THREAD, N_ITERATIONS);
@@ -259,15 +196,18 @@ int main(int argc, char const *argv[])
             if (TARGET_DB == "XSTORE") {
                 timeCost = XStore_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
+            else if (TARGET_DB == "MONGODB") {
+                timeCost = MongoDB_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+            }
         }
         else if (EXPERIMENT_TYPE == "BATCH_SEQ") {
-            spdlog::info("[BATCH QUERY] Target DB: {}", TARGET_DB);
-            spdlog::info("[BATCH QUERY] Pattern: SEQUENTIAL");
-            spdlog::info("[BATCH QUERY] Iterations: {}", N_ITERATIONS);
+            spdlog::info("[BATCH QUERY]        Target DB: {}", TARGET_DB);
+            spdlog::info("[BATCH QUERY]          Pattern: SEQUENTIAL");
+            spdlog::info("[BATCH QUERY]       Iterations: {}", N_ITERATIONS);
             spdlog::info("[BATCH QUERY] Batch Iterations: {}", B_ITERATIONS);
-            spdlog::info("[BATCH QUERY] Thread: {}", NUM_THREAD);
-            spdlog::info("[BATCH QUERY] Invoke at: {}", INVOKE_AT);
-            spdlog::info("[BATCH QUERY] Debug: {}", IS_DEBUG);
+            spdlog::info("[BATCH QUERY]           Thread: {}", NUM_THREAD);
+            spdlog::info("[BATCH QUERY]        Invoke at: {}", INVOKE_AT);
+            spdlog::info("[BATCH QUERY]            Debug: {}", IS_DEBUG);
 
             // Read data from parquet file
             std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-BATCH-SEQ_Client-", NUM_THREAD, N_ITERATIONS, B_ITERATIONS);
@@ -278,15 +218,18 @@ int main(int argc, char const *argv[])
             if (TARGET_DB == "XSTORE") {
                 timeCost = XStore_Adapter::rangeQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
+            else if (TARGET_DB == "MONGODB") {
+                timeCost = MongoDB_Adapter::rangeQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+            }
         }
         else if (EXPERIMENT_TYPE == "BATCH_RAND") {
-            spdlog::info("[BATCH QUERY] Target DB: {}", TARGET_DB);
-            spdlog::info("[BATCH QUERY] Pattern: RANDOM");
-            spdlog::info("[BATCH QUERY] Iterations: {}", N_ITERATIONS);
+            spdlog::info("[BATCH QUERY]        Target DB: {}", TARGET_DB);
+            spdlog::info("[BATCH QUERY]          Pattern: RANDOM");
+            spdlog::info("[BATCH QUERY]       Iterations: {}", N_ITERATIONS);
             spdlog::info("[BATCH QUERY] Batch Iterations: {}", B_ITERATIONS);
-            spdlog::info("[BATCH QUERY] Thread: {}", NUM_THREAD);
-            spdlog::info("[BATCH QUERY] Invoke at: {}", INVOKE_AT);
-            spdlog::info("[BATCH QUERY] Debug: {}", IS_DEBUG);
+            spdlog::info("[BATCH QUERY]           Thread: {}", NUM_THREAD);
+            spdlog::info("[BATCH QUERY]        Invoke at: {}", INVOKE_AT);
+            spdlog::info("[BATCH QUERY]            Debug: {}", IS_DEBUG);
 
             // Read data from parquet file
             std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-BATCH-RAND_Client-", NUM_THREAD, N_ITERATIONS, B_ITERATIONS);
@@ -296,6 +239,9 @@ int main(int argc, char const *argv[])
 
             if (TARGET_DB == "XSTORE") {
                 timeCost = XStore_Adapter::batchQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+            }
+            else if (TARGET_DB == "MONGODB") {
+                timeCost = MongoDB_Adapter::batchQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
         }
 
@@ -329,12 +275,12 @@ int main(int argc, char const *argv[])
         DataManager dataManager;
 
         if (EXPERIMENT_TYPE == "UNARY_SEQ") {
-            spdlog::info("[UNARY INSERT] Target DB: {}", TARGET_DB);
-            spdlog::info("[UNARY INSERT] Pattern: SEQUENTIAL");
+            spdlog::info("[UNARY INSERT]  Target DB: {}", TARGET_DB);
+            spdlog::info("[UNARY INSERT]    Pattern: SEQUENTIAL");
             spdlog::info("[UNARY INSERT] Iterations: {}", N_ITERATIONS);
-            spdlog::info("[UNARY INSERT] Thread: {}", NUM_THREAD);
-            spdlog::info("[UNARY INSERT] Invoke at: {}", INVOKE_AT);
-            spdlog::info("[UNARY INSERT] Debug: {}", IS_DEBUG);
+            spdlog::info("[UNARY INSERT]     Thread: {}", NUM_THREAD);
+            spdlog::info("[UNARY INSERT]  Invoke at: {}", INVOKE_AT);
+            spdlog::info("[UNARY INSERT]      Debug: {}", IS_DEBUG);
 
             std::vector<std::vector<std::any>> insertData;
 
@@ -347,14 +293,17 @@ int main(int argc, char const *argv[])
             if (TARGET_DB == "XSTORE") {
                 timeCost = XStore_Adapter::unaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
+            else if (TARGET_DB == "MONGODB") {
+                timeCost = MongoDB_Adapter::unaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+            }
         }
         else if (EXPERIMENT_TYPE == "UNARY_RAND") {
-            spdlog::info("[UNARY INSERT] Target DB: {}", TARGET_DB);
-            spdlog::info("[UNARY INSERT] Pattern: RANDOM");
+            spdlog::info("[UNARY INSERT]  Target DB: {}", TARGET_DB);
+            spdlog::info("[UNARY INSERT]    Pattern: RANDOM");
             spdlog::info("[UNARY INSERT] Iterations: {}", N_ITERATIONS);
-            spdlog::info("[UNARY INSERT] Thread: {}", NUM_THREAD);
-            spdlog::info("[UNARY INSERT] Invoke at: {}", INVOKE_AT);
-            spdlog::info("[UNARY INSERT] Debug: {}", IS_DEBUG);
+            spdlog::info("[UNARY INSERT]     Thread: {}", NUM_THREAD);
+            spdlog::info("[UNARY INSERT]  Invoke at: {}", INVOKE_AT);
+            spdlog::info("[UNARY INSERT]      Debug: {}", IS_DEBUG);
 
             std::vector<std::vector<std::any>> insertData;
 
@@ -367,15 +316,18 @@ int main(int argc, char const *argv[])
             if (TARGET_DB == "XSTORE") {
                 timeCost = XStore_Adapter::unaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
+            else if (TARGET_DB == "MONGODB") {
+                timeCost = MongoDB_Adapter::unaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+            }
         }
         else if (EXPERIMENT_TYPE == "BATCH_SEQ") {
-            spdlog::info("[BATCH INSERT] Target DB: {}", TARGET_DB);
-            spdlog::info("[BATCH INSERT] Pattern: SEQUENTIAL");
-            spdlog::info("[BATCH INSERT] Iterations: {}", N_ITERATIONS);
+            spdlog::info("[BATCH INSERT]        Target DB: {}", TARGET_DB);
+            spdlog::info("[BATCH INSERT]          Pattern: SEQUENTIAL");
+            spdlog::info("[BATCH INSERT]       Iterations: {}", N_ITERATIONS);
             spdlog::info("[BATCH INSERT] Batch Iterations: {}", B_ITERATIONS);
-            spdlog::info("[BATCH INSERT] Thread: {}", NUM_THREAD);
-            spdlog::info("[BATCH INSERT] Invoke at: {}", INVOKE_AT);
-            spdlog::info("[BATCH INSERT] Debug: {}", IS_DEBUG);
+            spdlog::info("[BATCH INSERT]           Thread: {}", NUM_THREAD);
+            spdlog::info("[BATCH INSERT]        Invoke at: {}", INVOKE_AT);
+            spdlog::info("[BATCH INSERT]            Debug: {}", IS_DEBUG);
 
             std::vector<std::vector<std::any>> insertData;
 
@@ -388,15 +340,18 @@ int main(int argc, char const *argv[])
             if (TARGET_DB == "XSTORE") {
                 timeCost = XStore_Adapter::rangeInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
+            else if (TARGET_DB == "MONGODB") {
+                timeCost = MongoDB_Adapter::batchInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+            }
         }
         else if (EXPERIMENT_TYPE == "BATCH_RAND") {
-            spdlog::info("[BATCH INSERT] Target DB: {}", TARGET_DB);
-            spdlog::info("[BATCH INSERT] Pattern: RANDOM");
-            spdlog::info("[BATCH INSERT] Iterations: {}", N_ITERATIONS);
+            spdlog::info("[BATCH INSERT]        Target DB: {}", TARGET_DB);
+            spdlog::info("[BATCH INSERT]          Pattern: RANDOM");
+            spdlog::info("[BATCH INSERT]       Iterations: {}", N_ITERATIONS);
             spdlog::info("[BATCH INSERT] Batch Iterations: {}", B_ITERATIONS);
-            spdlog::info("[BATCH INSERT] Thread: {}", NUM_THREAD);
-            spdlog::info("[BATCH INSERT] Invoke at: {}", INVOKE_AT);
-            spdlog::info("[BATCH INSERT] Debug: {}", IS_DEBUG);
+            spdlog::info("[BATCH INSERT]           Thread: {}", NUM_THREAD);
+            spdlog::info("[BATCH INSERT]        Invoke at: {}", INVOKE_AT);
+            spdlog::info("[BATCH INSERT]            Debug: {}", IS_DEBUG);
 
             std::vector<std::vector<std::any>> insertData;
 
@@ -408,6 +363,9 @@ int main(int argc, char const *argv[])
 
             if (TARGET_DB == "XSTORE") {
                 timeCost = XStore_Adapter::batchInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+            }
+            else if (TARGET_DB == "MONGODB") {
+                timeCost = MongoDB_Adapter::batchInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
         }
 
