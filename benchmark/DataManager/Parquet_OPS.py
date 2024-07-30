@@ -102,14 +102,14 @@ class ParquetOPS:
         else:
             df.to_parquet(outfileName, engine='fastparquet', compression='zstd', append=True)
 
-    def ingestAll(self, db_name, ip_address, port_number, filename):
+    def ingestAll(self, db_name, ip_address, port_number, batchSize, filename):
         port_number = int(port_number)
         masterDF = pq.ParquetFile(filename)
 
         if db_name == "XSTORE":
             xstoreClient = XStoreClient(ip_address, port_number)
 
-            for df in masterDF.iter_batches(batch_size=256_000):
+            for df in masterDF.iter_batches(batch_size=batchSize):
                 dataList = []
                 tempDF = df.to_pandas()
 
@@ -133,14 +133,20 @@ class ParquetOPS:
                 print("Time-series collection is already existed")
             mongoCollection = mongoDB['BENCH_DB']
 
-            for df in masterDF.iter_batches(batch_size=256_000):
+            for df in masterDF.iter_batches(batch_size=batchSize):
                 tempDF = df.to_pandas()
                 tempDF['json'] = tempDF.apply(lambda x: x.to_json(), axis=1)
                 dataList = [json.loads(i) for i in tempDF['json'].tolist()]
                 for i in range(len(dataList)):
                     dataList[i]['timestamp'] = datetime.fromtimestamp(dataList[i]['timestamp'])
                 insertResult = mongoCollection.insert_many(dataList)
-                print(insertResult)
+
+                if insertResult.acknowledged == True:
+                    print(f"Inserted {batchSize} into DB")
+                else:
+                    print(f"Error on inserted into DB")
+                    exit(0)
+                break
 
 
     def createBasicQuery(self, offset, sampleSize, nClients, startTime, endTime, queryType='UNARY_SEQ', batchIter=None):
@@ -336,6 +342,7 @@ if __name__ == '__main__':
     ingestAll.add_argument('-d', '--db_name', type=str, required=True, help='DB name', choices=['XSTORE', 'MONGODB'])
     ingestAll.add_argument('-i', '--ip_address', type=str, required=True, help='IP address of DB server')
     ingestAll.add_argument('-p', '--port_number', type=int, required=True, help='Port number of DB server')
+    ingestAll.add_argument('-b', '--batch_size', type=int, required=True, help='Number of record per batch')
     ingestAll.add_argument('-f', '--file_name', type=str, required=True, help='Parquet data file use to insert to DB')
 
     # If no argument given -> Print help msg
@@ -352,7 +359,7 @@ if __name__ == '__main__':
         parquetOps.genData(args.start_time, args.end_time, args.column_count, args.outfile_name)
 
     elif args.command == 'ingestAll':
-        parquetOps.ingestAll(db_name=args.db_name, ip_address=args.ip_address, port_number=args.port_number, filename=args.file_name)
+        parquetOps.ingestAll(db_name=args.db_name, ip_address=args.ip_address, port_number=args.port_number, batchSize=args.batch_size, filename=args.file_name)
 
     # BASIC QUERIES
     elif args.command == 'queryWorkload':
