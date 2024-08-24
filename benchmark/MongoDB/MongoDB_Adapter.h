@@ -1,7 +1,6 @@
 #ifndef XSTORE_MONGODB_ADAPTER_H
 #define XSTORE_MONGODB_ADAPTER_H
 
-
 #include "../include/Base_Adapter.h"
 #include "../include/utilities.h"
 #include <bsoncxx/builder/basic/document.hpp>
