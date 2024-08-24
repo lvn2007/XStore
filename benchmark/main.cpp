@@ -1,5 +1,6 @@
 #include "XStore/XStore_Adapter.h"
 #include "MongoDB/MongoDB_Adapter.h"
+#include "InfluxDB/InfluxDB_Adapter.h"
 #include "include/utilities.h"
 #include "include/argparse.hpp"
 #include <thread>
@@ -34,7 +35,7 @@ int main(int argc, char const *argv[])
     queryBench.add_argument("-d", "--db_name").required()
             .help("Target DB Name")
             .default_value("XSTORE").nargs(1)
-            .choices("XSTORE", "MONGODB");
+            .choices("XSTORE", "MONGODB", "INFLUXDB");
 
     //  Number of Threads
     queryBench.add_argument("-t", "--thread_count").required()
@@ -86,7 +87,7 @@ int main(int argc, char const *argv[])
     insertBench.add_argument("-d", "--db_name").required()
             .help("Target DB Name")
             .default_value("XSTORE").nargs(1)
-            .choices("XSTORE", "MONGODB");
+            .choices("XSTORE", "MONGODB", "INFLUXDB");
 
     //  Number of Threads
     insertBench.add_argument("-t", "--thread_count").required()
@@ -178,6 +179,9 @@ int main(int argc, char const *argv[])
             else if (TARGET_DB == "MONGODB") {
                 timeCost = MongoDB_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
+            else if (TARGET_DB == "INFLUXDB") {
+                timeCost = InfluxDB_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+            }
         }
         else if (EXPERIMENT_TYPE == "UNARY_RAND") {
             spdlog::info("[UNARY QUERY]  Target DB: {}", TARGET_DB);
@@ -198,6 +202,9 @@ int main(int argc, char const *argv[])
             }
             else if (TARGET_DB == "MONGODB") {
                 timeCost = MongoDB_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+            }
+            else if (TARGET_DB == "INFLUXDB") {
+                timeCost = InfluxDB_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
         }
         else if (EXPERIMENT_TYPE == "BATCH_SEQ") {
@@ -221,6 +228,9 @@ int main(int argc, char const *argv[])
             else if (TARGET_DB == "MONGODB") {
                 timeCost = MongoDB_Adapter::rangeQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
+            else if (TARGET_DB == "INFLUXDB") {
+                timeCost = InfluxDB_Adapter::rangeQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+            }
         }
         else if (EXPERIMENT_TYPE == "BATCH_RAND") {
             spdlog::info("[BATCH QUERY]        Target DB: {}", TARGET_DB);
@@ -243,10 +253,17 @@ int main(int argc, char const *argv[])
             else if (TARGET_DB == "MONGODB") {
                 timeCost = MongoDB_Adapter::batchQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
+            else if (TARGET_DB == "INFLUXDB") {
+                spdlog::warn("[BATCH QUERY] InfluxQL doesn't support querying a batch of non-chronological timestamps");
+                spdlog::warn("[BATCH QUERY] REF 1: https://docs.influxdata.com/influxdb/v1/query_language/explore-data/#syntax-1");
+                spdlog::warn("[BATCH QUERY] REF 2: https://community.influxdata.com/t/querying-multiple-time-points/35388");
+            }
         }
 
         // Display benchmark statistics
-        printStatistics(timeCost);
+        if (timeCost.size() > 0) {
+            printStatistics(timeCost);
+        }
     }
     else if (program.is_subcommand_used(insertBench)) {
         std::string SERVER_ADDR = insertBench.get<std::string>("-i");
@@ -296,6 +313,9 @@ int main(int argc, char const *argv[])
             else if (TARGET_DB == "MONGODB") {
                 timeCost = MongoDB_Adapter::unaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
+            else if (TARGET_DB == "INFLUXDB") {
+                timeCost = InfluxDB_Adapter::unaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+            }
         }
         else if (EXPERIMENT_TYPE == "UNARY_RAND") {
             spdlog::info("[UNARY INSERT]  Target DB: {}", TARGET_DB);
@@ -318,6 +338,9 @@ int main(int argc, char const *argv[])
             }
             else if (TARGET_DB == "MONGODB") {
                 timeCost = MongoDB_Adapter::unaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+            }
+            else if (TARGET_DB == "INFLUXDB") {
+                timeCost = InfluxDB_Adapter::unaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
         }
         else if (EXPERIMENT_TYPE == "BATCH_SEQ") {
@@ -343,6 +366,9 @@ int main(int argc, char const *argv[])
             else if (TARGET_DB == "MONGODB") {
                 timeCost = MongoDB_Adapter::batchInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
+            else if (TARGET_DB == "INFLUXDB") {
+                timeCost = InfluxDB_Adapter::batchInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+            }
         }
         else if (EXPERIMENT_TYPE == "BATCH_RAND") {
             spdlog::info("[BATCH INSERT]        Target DB: {}", TARGET_DB);
@@ -367,9 +393,14 @@ int main(int argc, char const *argv[])
             else if (TARGET_DB == "MONGODB") {
                 timeCost = MongoDB_Adapter::batchInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
+            else if (TARGET_DB == "INFLUXDB") {
+                timeCost = InfluxDB_Adapter::batchInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+            }
         }
 
         // Display benchmark statistics
-        printStatistics(timeCost);
+        if (timeCost.size() > 0) {
+            printStatistics(timeCost);
+        }
     }
 }
