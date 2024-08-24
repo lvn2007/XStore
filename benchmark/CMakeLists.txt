@@ -24,6 +24,16 @@ message(STATUS "Using Protobuf ${Protobuf_VERSION}")
 # MongoDB
 find_package(mongocxx REQUIRED)
 find_package(bsoncxx REQUIRED)
+include_directories(${LIBMONGOCXX_INCLUDE_DIR})
+include_directories(${LIBBSONCXX_INCLUDE_DIR})
+include_directories("/usr/local/include/mongocxx/v_noabi")
+include_directories("/usr/local/include/bsoncxx/v_noabi")
+include_directories("/usr/local/include/libmongoc-1.0")
+include_directories("/usr/local/include/libbson-1.0")
+include_directories("/usr/local/lib")
+
+# InfluxDB
+find_package(InfluxDB)
 
 # Proto file
 get_filename_component(XStore_proto "../protoFile/XStore.proto" ABSOLUTE)
@@ -51,7 +61,10 @@ add_executable(benchmarkClient ${PROTO_SRCS} ${PROTO_HDRS} include/XStore_Client
         include/utilities.h include/Base_Adapter.h include/BS_thread_pool.hpp include/csv.hpp include/md5.h include/argparse.hpp
         include/Logger/Logger.h DataManager/Data_Manager.h DataManager/Data_Manager.cpp
         XStore/XStore_Adapter.h XStore/XStore_Adapter.cpp MongoDB/MongoDB_Adapter.h MongoDB/MongoDB_Adapter.cpp
+        InfluxDB/InfluxDB_Adapter.h InfluxDB/InfluxDB_Adapter.cpp
         )
 
-add_compile_options(-O3)
-target_link_libraries(benchmarkClient PUBLIC protobuf::libprotobuf "zmq" "parquet" "arrow" "mongo::mongocxx_shared" "mongo::bsoncxx_shared") # libparquet-dev
+add_compile_options(-O3)  # libparquet-dev
+target_link_libraries(benchmarkClient PUBLIC protobuf::libprotobuf "zmq" "parquet" "arrow"
+        "mongo::mongocxx_shared" "mongo::bsoncxx_shared"
+        InfluxData::InfluxDB)

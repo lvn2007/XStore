@@ -145,7 +145,7 @@ class ParquetOPS:
                     print(f"Inserted {batchSize} into DB")
                 else:
                     print(f"Error on inserted into DB")
-                    exit(0)
+                    exit(1)
 
 
     def createBasicQuery(self, offset, sampleSize, nClients, startTime, endTime, queryType='UNARY_SEQ', batchIter=None):
