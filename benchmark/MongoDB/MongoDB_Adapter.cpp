@@ -138,7 +138,7 @@ std::vector<double> MongoDB_Adapter::unaryQuery_singleThread(std::string SERVER_
     std::vector<double> toReturn;
 
     // Init MongoDB instances
-    mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=3600000", SERVER_ADDR, SERVER_PORT));
+    mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=86400000", SERVER_ADDR, SERVER_PORT));
     mongocxx::client mongoClient(uri);
 
     // Access DB and collection
@@ -198,7 +198,7 @@ std::vector<double> MongoDB_Adapter::rangeQuery_singleThread(std::string SERVER_
     std::vector<double> toReturn;
 
     // Init MongoDB instances
-    mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=3600000", SERVER_ADDR, SERVER_PORT));
+    mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=86400000", SERVER_ADDR, SERVER_PORT));
     mongocxx::client mongoClient(uri);
 
     // Access DB and collection
@@ -274,7 +274,7 @@ std::vector<double> MongoDB_Adapter::batchQuery_singleThread(std::string SERVER_
     std::vector<double> toReturn;
 
     // Init MongoDB instances
-    mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=3600000", SERVER_ADDR, SERVER_PORT));
+    mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=86400000", SERVER_ADDR, SERVER_PORT));
     mongocxx::client mongoClient(uri);
 
     // Access DB and collection
@@ -351,7 +351,7 @@ std::vector<double> MongoDB_Adapter::unaryInsert_singleThread(std::string SERVER
     std::vector<double> toReturn;
 
     // Init MongoDB instances
-    mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=3600000", SERVER_ADDR, SERVER_PORT));
+    mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=86400000", SERVER_ADDR, SERVER_PORT));
     mongocxx::client mongoClient(uri);
 
     // Access DB and collection
@@ -402,7 +402,7 @@ std::vector<double> MongoDB_Adapter::batchInsert_singleThread(std::string SERVER
     std::vector<double> toReturn;
 
     // Init MongoDB instances
-    mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=3600000", SERVER_ADDR, SERVER_PORT));
+    mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=86400000", SERVER_ADDR, SERVER_PORT));
     mongocxx::client mongoClient(uri);
 
     // Access DB and collection
@@ -460,7 +460,7 @@ std::vector<double> MongoDB_Adapter::batchInsert_singleThread(std::string SERVER
 
 void MongoDB_Adapter::createDB(std::string SERVER_ADDR, std::string SERVER_PORT, std::string dbName, std::vector<std::any> *singleRowData) {
     // Init MongoDB
-    mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=3600000", SERVER_ADDR, SERVER_PORT));
+    mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=86400000", SERVER_ADDR, SERVER_PORT));
     mongocxx::client mongoClient(uri);
 
     // Access/Create DB and collection
