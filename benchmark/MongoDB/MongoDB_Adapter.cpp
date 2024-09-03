@@ -459,28 +459,33 @@ std::vector<double> MongoDB_Adapter::batchInsert_singleThread(std::string SERVER
 }
 
 void MongoDB_Adapter::createDB(std::string SERVER_ADDR, std::string SERVER_PORT, std::string dbName, std::vector<std::any> *singleRowData) {
-    // Init MongoDB
-    mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=86400000", SERVER_ADDR, SERVER_PORT));
-    mongocxx::client mongoClient(uri);
+    try {
+        // Init MongoDB
+        mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=86400000", SERVER_ADDR, SERVER_PORT));
+        mongocxx::client mongoClient(uri);
 
-    // Access/Create DB and collection
-    mongocxx::database mongoDB = mongoClient[dbName];
+        // Access/Create DB and collection
+        mongocxx::database mongoDB = mongoClient[dbName];
 
-    // Granularity
-    std::string granularity = MongoDB_Adapter::getTimeResolution(std::any_cast<unsigned long int>(singleRowData->at(0)));
+        // Granularity
+        std::string granularity = MongoDB_Adapter::getTimeResolution(std::any_cast<unsigned long int>(singleRowData->at(0)));
 
-    // Setup Time Series collection options.
-    bsoncxx::builder::document timeSeriesCollectionOptions =
-    {
-        "timeseries",
-        {
-            "timeField", "timestamp",
-            "granularity", granularity
-        }
-    };
+        // Setup Time Series collection options.
+        bsoncxx::builder::document timeSeriesCollectionOptions =
+                {
+                        "timeseries",
+                        {
+                                "timeField", "timestamp",
+                                "granularity", granularity
+                        }
+                };
 
-    // Create time-series collection
-    const mongocxx::collection &mongoCollection = mongoDB.has_collection(dbName) ? mongoDB[dbName] : mongoDB.create_collection(dbName, timeSeriesCollectionOptions.view().get_document().value);
+        // Create time-series collection
+        const mongocxx::collection &mongoCollection = mongoDB.has_collection(dbName) ? mongoDB[dbName] : mongoDB.create_collection(dbName, timeSeriesCollectionOptions.view().get_document().value);
+    }
+    catch (...) {
+        spdlog::warn("[CREATE DB] - Failed to create {}", dbName);
+    }
 }
 
 bsoncxx::builder::basic::document MongoDB_Adapter::makeSingleDocument(std::vector<std::any> *insertData) {
