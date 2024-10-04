@@ -110,6 +110,10 @@ class ParquetOPS:
         if db_name == "XSTORE":
             xstoreClient = XStoreClient(ip_address, port_number)
 
+            # Create DB
+            createDBStatus = xstoreClient.createDB("BENCH_DB", XStore_Proto.timeUnit.Value("SECOND"), 64)
+            print(createDBStatus)
+
             for df in masterDF.iter_batches(batch_size=batchSize):
                 dataList = []
                 tempDF = df.to_pandas()
