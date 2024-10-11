@@ -176,7 +176,7 @@ std::vector<double> InfluxDB_Adapter::unaryQuery_singleThread(std::string SERVER
 
             // Dispatch query
             start = std::chrono::high_resolution_clock::now();
-            std::vector<influxdb::Point> unaryQueryRep = influxClient->query(fmt::format("SELECT * FROM BENCH_DB WHERE time = {}ms", queryTargetTime));
+            std::vector<influxdb::Point> unaryQueryRep = influxClient->query(fmt::format("SELECT * FROM BENCH_DB WHERE time = {}s", queryTargetTime));
             end = std::chrono::high_resolution_clock::now();
             timeCost = end - start;
             toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
@@ -194,7 +194,7 @@ std::vector<double> InfluxDB_Adapter::unaryQuery_singleThread(std::string SERVER
 
             // Dispatch query
             start = std::chrono::high_resolution_clock::now();
-            std::vector<influxdb::Point> unaryQueryRep = influxClient->query(fmt::format("SELECT * FROM BENCH_DB WHERE time = {}ms", queryTargetTime));
+            std::vector<influxdb::Point> unaryQueryRep = influxClient->query(fmt::format("SELECT * FROM BENCH_DB WHERE time = {}s", queryTargetTime));
             end = std::chrono::high_resolution_clock::now();
             timeCost = end - start;
             toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
@@ -224,7 +224,7 @@ std::vector<double> InfluxDB_Adapter::rangeQuery_singleThread(std::string SERVER
 
             // Dispatch query
             start = std::chrono::high_resolution_clock::now();
-            std::vector<influxdb::Point> rangeQueryRep = influxClient->query(fmt::format("SELECT * FROM BENCH_DB WHERE time >= {}ms AND time <= {}ms", queryStartTime, queryEndTime));
+            std::vector<influxdb::Point> rangeQueryRep = influxClient->query(fmt::format("SELECT * FROM BENCH_DB WHERE time >= {}s AND time <= {}s", queryStartTime, queryEndTime));
 
             end = std::chrono::high_resolution_clock::now();
             timeCost = end - start;
@@ -249,7 +249,7 @@ std::vector<double> InfluxDB_Adapter::rangeQuery_singleThread(std::string SERVER
 
             // Dispatch query
             start = std::chrono::high_resolution_clock::now();
-            std::vector<influxdb::Point> rangeQueryRep = influxClient->query(fmt::format("SELECT * FROM BENCH_DB WHERE time >= {}ms AND time <= {}ms", queryStartTime, queryEndTime));
+            std::vector<influxdb::Point> rangeQueryRep = influxClient->query(fmt::format("SELECT * FROM BENCH_DB WHERE time >= {}s AND time <= {}s", queryStartTime, queryEndTime));
 
             end = std::chrono::high_resolution_clock::now();
             timeCost = end - start;
