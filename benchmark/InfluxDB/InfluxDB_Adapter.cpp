@@ -232,6 +232,7 @@ std::vector<double> InfluxDB_Adapter::rangeQuery_singleThread(std::string SERVER
 
             // Debug
             std::vector<std::string> pointVector;
+            
             // Append returned points to str
             for (int j = 0; j < rangeQueryRep.size(); j++) {
                 pointVector.push_back(rangeQueryRep.at(j).getTags());
@@ -281,15 +282,21 @@ std::vector<double> InfluxDB_Adapter::batchInsert_singleThread(std::string SERVE
 
             // Dispatch insert
             start = std::chrono::high_resolution_clock::now();
-            influxClient->write(std::move(currPoints));
-            influxClient->flushBatch();
+            try {
+                influxClient->write(std::move(currPoints));
+                influxClient->flushBatch();
 
-            end = std::chrono::high_resolution_clock::now();
-            timeCost = end - start;
-            toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+                end = std::chrono::high_resolution_clock::now();
+                timeCost = end - start;
+                toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
 
-            // Debug
-            spdlog::debug("[BATCH INSERT] - Insert Result: OK");
+                // Debug
+                spdlog::debug("[BATCH INSERT] - Insert Result: OK");
+            }
+            catch (...) {
+                toReturn.push_back(0);
+                spdlog::warn("[BATCH INSERT] - There was an exception or operation has timed-out");
+            }
         }
     }
     // NOT a debug mode
@@ -305,12 +312,17 @@ std::vector<double> InfluxDB_Adapter::batchInsert_singleThread(std::string SERVE
 
             // Dispatch insert
             start = std::chrono::high_resolution_clock::now();
-            influxClient->write(std::move(currPoints));
-            influxClient->flushBatch();
+            try {
+                influxClient->write(std::move(currPoints));
+                influxClient->flushBatch();
 
-            end = std::chrono::high_resolution_clock::now();
-            timeCost = end - start;
-            toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+                end = std::chrono::high_resolution_clock::now();
+                timeCost = end - start;
+                toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+            }
+            catch (...) {
+                toReturn.push_back(0);
+            }
         }
     }
     return toReturn;
