@@ -218,9 +218,7 @@ class ParquetOPS:
 
         elif queryType == 'BATCH_SEQ':
             for i in range(nClients):
-                currStart = (startTime + offset) + (i * sampleSize * batchIter)
-
-                sTime = [currStart + (j * sampleSize) for j in range(batchIter)]
+                sTime = [random.randrange(startTime, endTime - (sampleSize * batchIter)) + (j * sampleSize) for j in range(batchIter)]
                 eTime = [j + sampleSize for j in sTime]
 
                 # Prepare DF to write
@@ -229,7 +227,7 @@ class ParquetOPS:
                 toWrite['endTime'] = toWrite['endTime'].astype(np.uint64)
 
                 # Write to file
-                fName = f'BASIC-QUERY-BATCH-SEQ_Client-{i}_{batchIter}-{sampleSize}_{currStart}-{endTime}.parquet'
+                fName = f'BASIC-QUERY-BATCH-SEQ_Client-{i}_{batchIter}-{sampleSize}_{startTime}-{endTime}.parquet'
                 toWrite.to_parquet(fName, engine='fastparquet', compression='zstd')
                 print(f'File written: {fName}')
 
