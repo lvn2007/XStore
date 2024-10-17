@@ -106,7 +106,7 @@ class XStore_Client {
             size_t byteSize = toServer.ByteSizeLong();
             zmq::message_t z_out(byteSize);
             toServer.SerializeToArray(z_out.data(), byteSize);
-            sock.send(z_out, zmq::send_flags::none);
+            sock.send(z_out, zmq::send_flags::dontwait);
 
             // RECEIVING
             std::vector<zmq::message_t> recv_msgs;
@@ -130,7 +130,7 @@ class XStore_Client {
             size_t byteSize = toServer.ByteSizeLong();
             zmq::message_t z_out(byteSize);
             toServer.SerializeToArray(z_out.data(), byteSize);
-            sock.send(z_out, zmq::send_flags::none);
+            sock.send(z_out, zmq::send_flags::dontwait);
 
             // RECEIVING
             std::vector<zmq::message_t> recv_msgs;
@@ -154,7 +154,7 @@ class XStore_Client {
             size_t byteSize = toServer.ByteSizeLong();
             zmq::message_t z_out(byteSize);
             toServer.SerializeToArray(z_out.data(), byteSize);
-            sock.send(z_out, zmq::send_flags::none);
+            sock.send(z_out, zmq::send_flags::dontwait);
 
             // RECEIVING
             std::vector<zmq::message_t> recv_msgs;
@@ -181,7 +181,7 @@ class XStore_Client {
             size_t byteSize = toServer.ByteSizeLong();
             zmq::message_t z_out(byteSize);
             toServer.SerializeToArray(z_out.data(), byteSize);
-            sock.send(z_out, zmq::send_flags::none);
+            sock.send(z_out, zmq::send_flags::dontwait);
 
             // RECEIVING
             std::vector<zmq::message_t> recv_msgs;
@@ -217,7 +217,7 @@ class XStore_Client {
             size_t byteSize = toServer.ByteSizeLong();
             zmq::message_t z_out(byteSize);
             toServer.SerializeToArray(z_out.data(), byteSize);
-            sock.send(z_out, zmq::send_flags::none);
+            sock.send(z_out, zmq::send_flags::dontwait);
 
             // RECEIVING
             std::vector<zmq::message_t> recv_msgs;
@@ -260,7 +260,7 @@ class XStore_Client {
             size_t byteSize = toServer.ByteSizeLong();
             zmq::message_t z_out(byteSize);
             toServer.SerializeToArray(z_out.data(), byteSize);
-            sock.send(z_out, zmq::send_flags::none);
+            sock.send(z_out, zmq::send_flags::dontwait);
 
             // RECEIVING
             std::vector<zmq::message_t> recv_msgs;
@@ -303,7 +303,7 @@ class XStore_Client {
             size_t byteSize = toServer.ByteSizeLong();
             zmq::message_t z_out(byteSize);
             toServer.SerializeToArray(z_out.data(), byteSize);
-            sock.send(z_out, zmq::send_flags::none);
+            sock.send(z_out, zmq::send_flags::dontwait);
 
             // RECEIVING
             std::vector<zmq::message_t> recv_msgs;
@@ -326,7 +326,7 @@ class XStore_Client {
             size_t byteSize = toServer.ByteSizeLong();
             zmq::message_t z_out(byteSize);
             toServer.SerializeToArray(z_out.data(), byteSize);
-            sock.send(z_out, zmq::send_flags::none);
+            sock.send(z_out, zmq::send_flags::dontwait);
 
             // RECEIVING
             std::vector<zmq::message_t> recv_msgs;

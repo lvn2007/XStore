@@ -3,7 +3,7 @@
 
 #include "../include/Base_Adapter.h"
 #include "../include/utilities.h"
-#include <InfluxDBFactory.h>
+#include <InfluxDB/InfluxDBFactory.h>
 #include "include/Logger/spdlog/fmt/fmt.h"
 #include "include/Logger/Logger.h"
 
