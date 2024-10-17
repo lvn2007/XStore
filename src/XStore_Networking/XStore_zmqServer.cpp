@@ -87,7 +87,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 //  Serialize & Dispatch msg to CLIENT
                 protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
-                socket.send(responseToClient, zmq::send_flags::none);
+                socket.send(responseToClient, zmq::send_flags::dontwait);
                 break;
             }
 
@@ -107,7 +107,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 //  Serialize & Dispatch msg to CLIENT
                 protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
-                socket.send(responseToClient, zmq::send_flags::none);
+                socket.send(responseToClient, zmq::send_flags::dontwait);
                 break;
             }
 
@@ -127,7 +127,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 //  Serialize & Dispatch msg to CLIENT
                 protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
-                socket.send(responseToClient, zmq::send_flags::none);
+                socket.send(responseToClient, zmq::send_flags::dontwait);
                 break;
             }
 
@@ -147,7 +147,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 //  Serialize & Dispatch msg to CLIENT
                 protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
-                socket.send(responseToClient, zmq::send_flags::none);
+                socket.send(responseToClient, zmq::send_flags::dontwait);
                 break;
             }
 
@@ -167,7 +167,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 //  Serialize & Dispatch msg to CLIENT
                 protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
-                socket.send(responseToClient, zmq::send_flags::none);
+                socket.send(responseToClient, zmq::send_flags::dontwait);
                 break;
             }
 
@@ -187,8 +187,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 //  Serialize & Dispatch msg to CLIENT
                 protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
-//                socket.send(zmq::message_t(compressed), zmq::send_flags::none);
-                socket.send(responseToClient, zmq::send_flags::none);
+                socket.send(responseToClient, zmq::send_flags::dontwait);
                 break;
             }
 
@@ -208,7 +207,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 //  Serialize & Dispatch msg to CLIENT
                 protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
-                socket.send(responseToClient, zmq::send_flags::none);
+                socket.send(responseToClient, zmq::send_flags::dontwait);
                 break;
             }
 
@@ -228,7 +227,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 //  Serialize & Dispatch msg to CLIENT
                 protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
-                socket.send(responseToClient, zmq::send_flags::none);
+                socket.send(responseToClient, zmq::send_flags::dontwait);
                 break;
             }
 
@@ -248,7 +247,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 //  Serialize & Dispatch msg to CLIENT
                 protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
-                socket.send(responseToClient, zmq::send_flags::none);
+                socket.send(responseToClient, zmq::send_flags::dontwait);
                 break;
             }
 
@@ -268,7 +267,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 //  Serialize & Dispatch msg to CLIENT
                 protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
-                socket.send(responseToClient, zmq::send_flags::none);
+                socket.send(responseToClient, zmq::send_flags::dontwait);
                 break;
             }
 
@@ -288,7 +287,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 //  Serialize & Dispatch msg to CLIENT
                 protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
-                socket.send(responseToClient, zmq::send_flags::none);
+                socket.send(responseToClient, zmq::send_flags::dontwait);
                 break;
             }
 
@@ -302,16 +301,13 @@ void* XStore_zmqServer::workerRoutine(void *args) {
                 //  Returning Protobuf obj
                 XStore_Proto::rangeQuery_REP protoToClient = myStore.rangeQuery(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname());
 
-                // Compress
-                std::string protoAsStr = protoToClient.SerializeAsString();
-
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
                 zmq::message_t responseToClient(protoToClientSize);
 
                 //  Serialize & Dispatch msg to CLIENT
                 protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
-                socket.send(responseToClient, zmq::send_flags::none);
+                socket.send(responseToClient, zmq::send_flags::dontwait);
                 break;
             }
 
@@ -331,7 +327,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 //  Serialize & Dispatch msg to CLIENT
                 protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
-                socket.send(responseToClient, zmq::send_flags::none);
+                socket.send(responseToClient, zmq::send_flags::dontwait);
                 break;
             }
         }
