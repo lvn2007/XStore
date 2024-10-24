@@ -7,8 +7,18 @@ add_definitions(-w)
 # Project
 project(XStore)
 
+# Optimization flag
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+set(CMAKE_CXX_FLAGS "-Wall -Wextra")
+set(CMAKE_CXX_FLAGS_DEBUG "-g")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3")
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # C++ standard
 set(CMAKE_CXX_STANDARD 17)
+message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Using C++ Standard: ${CMAKE_CXX_STANDARD}")
 
 # Definitions for large files support
@@ -77,5 +87,4 @@ add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h
         include/Compression/shoco.h src/Compression/shoco.cpp include/Compression/shoco_model.h include/Compression/zstdpp.hpp
         include/Logger/Logger.h)
 
-add_compile_options(-O3)
 target_link_libraries(XStore PUBLIC "stdc++fs" protobuf::libprotobuf "zmq" Threads::Threads)
