@@ -62,7 +62,7 @@ class XStore {
         XStore_Proto::unaryInsert_REP unaryInsert(const unsigned long long int &epochTime, const XStore_Proto::rowData &data, std::string dbName);
 
         // UNARY QUERY
-        XStore_Proto::unaryQuery_REP unaryQuery(const unsigned long long int &epochTime, std::string dbName);
+        void unaryQuery(const unsigned long long int &epochTime, std::string dbName, XStore_Proto::unaryQuery_REP *returnData);
 
         // UNARY DELETE
         XStore_Proto::unaryDelete_REP unaryDelete(const unsigned long long int &epochTime, std::string dbName);
@@ -71,7 +71,7 @@ class XStore {
         XStore_Proto::batchInsert_REP batchInsert(XStore_Proto::batchInsert_REQ *protoFromClient);
 
         // BATCH QUERY
-        XStore_Proto::batchQuery_REP batchQuery(XStore_Proto::batchQuery_REQ *protoFromClient);
+        void batchQuery(XStore_Proto::batchQuery_REQ *protoFromClient, XStore_Proto::batchQuery_REP *returnData);
 
         // BATCH DELETE
         XStore_Proto::batchDelete_REP batchDelete(XStore_Proto::batchDelete_REQ *protoFromClient);
@@ -80,7 +80,7 @@ class XStore {
         XStore_Proto::rangeInsert_REP rangeInsert(const XStore_Proto::rangeInsert_REQ *protoFromClient);
 
         // RANGE QUERY
-        XStore_Proto::rangeQuery_REP rangeQuery(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName);
+        void rangeQuery(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, XStore_Proto::rangeQuery_REP *returnData);
 
         // RANGE DELETE
         XStore_Proto::rangeDelete_REP rangeDelete(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName);

@@ -13,6 +13,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # C++ standard
 set(CMAKE_CXX_STANDARD 17)
+message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Using C++ Standard: ${CMAKE_CXX_STANDARD}")
 
 include(FetchContent)
