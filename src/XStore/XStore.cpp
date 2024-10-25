@@ -133,9 +133,8 @@ XStore_Proto::createDB_REP XStore::createDB(std::string dbName, XStore_Proto::ti
 }
 
 // UNARY INSERT
-XStore_Proto::unaryInsert_REP XStore::unaryInsert(const unsigned long long int &unixTime, const XStore_Proto::rowData &data, std::string dbName) {
+void XStore::unaryInsert(const unsigned long long int &unixTime, const XStore_Proto::rowData &data, std::string dbName, XStore_Proto::unaryInsert_REP *returnData) {
     // Protobuf obj to be returned
-    XStore_Proto::unaryInsert_REP toReturn;
     std::string insertStatus;
 
     // Time structure contains all components per UNIXTIME:
@@ -151,9 +150,9 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(const unsigned long long int &
     // IF db directory does not exist
     if (std::filesystem::is_directory(dbBasePath) == 0) {
         std::string errMsg = fmt::format("[ERROR] [UNARY INSERT] [DB: {}] - DB does not exist", dbName);
-        toReturn.set_insertstatus(errMsg);
+        returnData->set_insertstatus(errMsg);
         spdlog::error(errMsg.substr(ERROR_LEN));
-        return toReturn;
+        return;
     }
 
     // Check if cfgMap NOT contains cfgStruct
@@ -176,9 +175,9 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(const unsigned long long int &
     std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
     if (currTS.timeResolution != expectedTimeResolution) {
         std::string errMsg = fmt::format("[ERROR] [UNARY INSERT] [DB: {}] - Invalid time resolution. Expecting: {}", dbName, expectedTimeResolution);
-        toReturn.set_insertstatus(errMsg);
+        returnData->set_insertstatus(errMsg);
         spdlog::error(errMsg.substr(ERROR_LEN));
-        return toReturn;
+        return;
     }
 
     // Prepare to write
@@ -219,9 +218,9 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(const unsigned long long int &
     std::fclose(bFile);
 
     std::string successMsg = fmt::format("[INFO] [UNARY INSERT] [DB: {}] - Inserted {} to {}.XSTORE", dbName, unixTime, currTS.year);
-    toReturn.set_insertstatus(successMsg);
+    returnData->set_insertstatus(successMsg);
     spdlog::info(successMsg.substr(INFO_LEN));
-    return toReturn;
+    return;
 }
 
 // UNARY QUERY
@@ -381,9 +380,8 @@ XStore_Proto::unaryDelete_REP XStore::unaryDelete(const unsigned long long int &
 }
 
 // BATCH INSERT
-XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ *protoFromClient) {
+void XStore::batchInsert(XStore_Proto::batchInsert_REQ *protoFromClient, XStore_Proto::batchInsert_REP *returnData) {
     // Protobuf obj to be returned
-    XStore_Proto::batchInsert_REP toReturn;
     std::string insertStatus;
 
     // Ensure DB Name string is all capitalized
@@ -396,9 +394,9 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
     // IF db directory does not exist
     if (std::filesystem::is_directory(dbBasePath) == 0) {
         std::string errMsg = fmt::format("[ERROR] [BATCH INSERT] [DB: {}] - DB does not exist", dbName);
-        toReturn.set_insertstatus(errMsg);
+        returnData->set_insertstatus(errMsg);
         spdlog::error(errMsg.substr(ERROR_LEN));
-        return toReturn;
+        return;
     }
 
     // Check if cfgMap NOT contains cfgStruct
@@ -442,13 +440,15 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
         timeStruct currTS {currTime};
         if (currTS.timeResolution != expectedTimeResolution) {
             granularityErrMsg = fmt::format("[ERROR] [BATCH INSERT] [DB: {}] - Invalid time granularity. Expecting: {}", dbName, expectedTimeResolution);
-            toReturn.set_insertstatus(granularityErrMsg);
+            returnData->set_insertstatus(granularityErrMsg);
             spdlog::error(granularityErrMsg.substr(ERROR_LEN));
-            return toReturn;
+            return;
         }
     }
 
     // Iterate through each key (year) of dataMap
+    XStore_Proto::batchInsert_DATA currInsertData;
+    XStore_Proto::rowData data;
     for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& pair : dataMap) {
         unsigned short int yearKey = pair.first;
         FILE *bFile;
@@ -478,9 +478,9 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
         // Iterate through each YEAR of inserting data
         for (int i = 0; i < dataMap[yearKey].size(); i++) {
             // Parse each data in a batch collection
-            XStore_Proto::batchInsert_DATA currInsertData = protoFromClient->batchinsert_data(dataMap[yearKey].at(i));
+            currInsertData = protoFromClient->batchinsert_data(dataMap[yearKey].at(i));
             std::time_t unixTime = currInsertData.timestamp();
-            XStore_Proto::rowData data = currInsertData.data();
+            data = currInsertData.data();
 
             // Compute diff & offset
             diff = unixTime - thisTS.firstEpoch;
@@ -505,9 +505,8 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
 
     // Return insert status
     std::string successMsg = fmt::format("[INFO] [BATCH INSERT] [DB: {}] - Inserted {} elements successfully", dbName, protoFromClient->batchinsert_data_size());
-    toReturn.set_insertstatus(successMsg);
+    returnData->set_insertstatus(successMsg);
     spdlog::info(successMsg.substr(INFO_LEN));
-    return toReturn;
 }
 
 // BATCH QUERY
@@ -775,9 +774,8 @@ XStore_Proto::batchDelete_REP XStore::batchDelete(XStore_Proto::batchDelete_REQ 
 }
 
 // RANGE INSERT
-XStore_Proto::rangeInsert_REP XStore::rangeInsert(const XStore_Proto::rangeInsert_REQ *protoFromClient) {
+void XStore::rangeInsert(const XStore_Proto::rangeInsert_REQ *protoFromClient, XStore_Proto::rangeInsert_REP *returnData) {
     // Protobuf obj to be returned
-    XStore_Proto::rangeInsert_REP toReturn;
     std::string insertStatus;
 
     // Ensure DB Name string is all capitalized
@@ -790,9 +788,9 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(const XStore_Proto::rangeInser
     // IF db directory does not exist
     if (std::filesystem::is_directory(dbBasePath) == 0) {
         std::string errMsg = fmt::format("[ERROR] [RANGE INSERT] [DB: {}] - DB does not exist", dbName);
-        toReturn.set_insertstatus(errMsg);
+        returnData->set_insertstatus(errMsg);
         spdlog::error(errMsg.substr(ERROR_LEN));
-        return toReturn;
+        return;
     }
 
     // Check if cfgMap NOT contains cfgStruct
@@ -829,13 +827,14 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(const XStore_Proto::rangeInser
         timeStruct currTS(currTime);
         if (currTS.timeResolution != expectedTimeResolution) {
             std::string granularityErrMsg = fmt::format("[ERROR] [RANGE INSERT] [DB: {}] - Invalid time granularity. Expecting: {}", dbName, expectedTimeResolution);
-            toReturn.set_insertstatus(granularityErrMsg);
+            returnData->set_insertstatus(granularityErrMsg);
             spdlog::error(granularityErrMsg.substr(ERROR_LEN));
-            return toReturn;
+            return;
         }
     }
 
     // Iterate through each key (year) of dataMap
+    XStore_Proto::rangeInsert_DATA firstInsertData, currInsertData;
     for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& pair : dataMap) {
         unsigned short int yearKey = pair.first;
         FILE *bFile;
@@ -862,7 +861,7 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(const XStore_Proto::rangeInser
         }
 
         // Metadata of first datapoint
-        XStore_Proto::rangeInsert_DATA firstInsertData = protoFromClient->rangeinsert_data(dataMap[yearKey].at(0));
+        firstInsertData = protoFromClient->rangeinsert_data(dataMap[yearKey].at(0));
         const unsigned long long int &firstUnixTime = firstInsertData.timestamp();
         const unsigned long long int firstOffset = (firstUnixTime - thisTS.firstEpoch) * cfgStruct.rowlength();
         const unsigned long long int regionLength = cfgStruct.rowlength() * dataMap[yearKey].size();
@@ -874,7 +873,7 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(const XStore_Proto::rangeInser
         // Iterate through each YEAR of inserting data
         for (int i = 0; i < dataMap[yearKey].size(); i++) {
             // Parse each data in a batch collection
-            XStore_Proto::rangeInsert_DATA currInsertData = protoFromClient->rangeinsert_data(dataMap[yearKey].at(i));
+            currInsertData = protoFromClient->rangeinsert_data(dataMap[yearKey].at(i));
             const unsigned long long int &unixTime = currInsertData.timestamp();
             const XStore_Proto::rowData &data = currInsertData.data();
 
@@ -896,9 +895,8 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(const XStore_Proto::rangeInser
 
     // Return insert status
     std::string infoMsg = fmt::format("[INFO] [RANGE INSERT] [DB: {}] - Inserted {} elements successfully", dbName, protoFromClient->rangeinsert_data_size());
-    toReturn.set_insertstatus(infoMsg);
+    returnData->set_insertstatus(infoMsg);
     spdlog::info(infoMsg.substr(INFO_LEN));
-    return toReturn;
 }
 
 // RANGE QUERY
