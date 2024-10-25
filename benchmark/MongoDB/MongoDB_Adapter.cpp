@@ -331,10 +331,7 @@ std::vector<double> MongoDB_Adapter::batchQuery_singleThread(std::string SERVER_
                 // Iterate all elements in cursor without doing anything
                 //  This is because of lazy execution of cursor
                 std::vector<std::string> docVector;
-                for (bsoncxx::document::view currDoc : cursor) {
-                    docVector.push_back(bsoncxx::to_json(currDoc));
-                }
-
+                for (bsoncxx::document::view currDoc : cursor) { }
                 end = std::chrono::high_resolution_clock::now();
                 timeCost = end - start;
                 toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());

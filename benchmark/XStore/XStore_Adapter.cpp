@@ -186,7 +186,7 @@ std::vector<double> XStore_Adapter::unaryQuery_singleThread(std::string SERVER_A
 
             // Dispatch query
             start = std::chrono::high_resolution_clock::now();
-            unaryQueryRep = xstoreClient.unaryQuery(queryTargetTime, "BENCH_DB");
+            xstoreClient.unaryQuery(queryTargetTime, "BENCH_DB", &unaryQueryRep);
             end = std::chrono::high_resolution_clock::now();
             timeCost = end - start;
             toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
@@ -204,7 +204,7 @@ std::vector<double> XStore_Adapter::unaryQuery_singleThread(std::string SERVER_A
 
             // Dispatch query
             start = std::chrono::high_resolution_clock::now();
-            unaryQueryRep = xstoreClient.unaryQuery(queryTargetTime, "BENCH_DB");
+            xstoreClient.unaryQuery(queryTargetTime, "BENCH_DB", &unaryQueryRep);
             end = std::chrono::high_resolution_clock::now();
             timeCost = end - start;
             toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
@@ -236,7 +236,7 @@ std::vector<double> XStore_Adapter::rangeQuery_singleThread(std::string SERVER_A
 
             // Dispatch query
             start = std::chrono::high_resolution_clock::now();
-            rangeQueryRep = xstoreClient.rangeQuery(queryStartTime, queryEndTime, "BENCH_DB");
+            xstoreClient.rangeQuery(queryStartTime, queryEndTime, "BENCH_DB", &rangeQueryRep);
             end = std::chrono::high_resolution_clock::now();
             timeCost = end - start;
             toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
@@ -255,7 +255,7 @@ std::vector<double> XStore_Adapter::rangeQuery_singleThread(std::string SERVER_A
 
             // Dispatch query
             start = std::chrono::high_resolution_clock::now();
-            rangeQueryRep = xstoreClient.rangeQuery(queryStartTime, queryEndTime, "BENCH_DB");
+            xstoreClient.rangeQuery(queryStartTime, queryEndTime, "BENCH_DB", &rangeQueryRep);
             end = std::chrono::high_resolution_clock::now();
             timeCost = end - start;
             toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
@@ -290,7 +290,7 @@ std::vector<double> XStore_Adapter::batchQuery_singleThread(std::string SERVER_A
 
             // Dispatch query
             start = std::chrono::high_resolution_clock::now();
-            batchQueryRep = xstoreClient.batchQuery(timeList, "BENCH_DB");
+            xstoreClient.batchQuery(timeList, "BENCH_DB", &batchQueryRep);
             end = std::chrono::high_resolution_clock::now();
             timeCost = end - start;
             toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
@@ -313,7 +313,7 @@ std::vector<double> XStore_Adapter::batchQuery_singleThread(std::string SERVER_A
 
             // Dispatch query
             start = std::chrono::high_resolution_clock::now();
-            batchQueryRep = xstoreClient.batchQuery(timeList, "BENCH_DB");
+            xstoreClient.batchQuery(timeList, "BENCH_DB", &batchQueryRep);
             end = std::chrono::high_resolution_clock::now();
             timeCost = end - start;
             toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
