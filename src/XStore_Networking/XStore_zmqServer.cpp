@@ -179,7 +179,8 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 // XStore stuffs
                 //  Returning Protobuf obj
-                XStore_Proto::unaryQuery_REP protoToClient = myStore.unaryQuery(protoFromClient.timestamp(), protoFromClient.dbname());
+                XStore_Proto::unaryQuery_REP protoToClient;
+                myStore.unaryQuery(protoFromClient.timestamp(), protoFromClient.dbname(), &protoToClient);
 
                 //  Response message size
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
@@ -239,7 +240,8 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 // XStore stuffs
                 //  Returning Protobuf obj
-                XStore_Proto::batchQuery_REP protoToClient = myStore.batchQuery(&protoFromClient);
+                XStore_Proto::batchQuery_REP protoToClient;
+                myStore.batchQuery(&protoFromClient, &protoToClient);
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
@@ -299,7 +301,8 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
                 // XStore stuffs
                 //  Returning Protobuf obj
-                XStore_Proto::rangeQuery_REP protoToClient = myStore.rangeQuery(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname());
+                XStore_Proto::rangeQuery_REP protoToClient;
+                myStore.rangeQuery(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname(), &protoToClient);
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();

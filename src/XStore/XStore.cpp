@@ -225,11 +225,10 @@ XStore_Proto::unaryInsert_REP XStore::unaryInsert(const unsigned long long int &
 }
 
 // UNARY QUERY
-XStore_Proto::unaryQuery_REP XStore::unaryQuery(const unsigned long long int &unixTime, std::string dbName) {
+void XStore::unaryQuery(const unsigned long long int &unixTime, std::string dbName, XStore_Proto::unaryQuery_REP *returnData) {
     // Protobuf obj to be returned
     std::string queryStatus;
-    XStore_Proto::unaryQuery_REP toReturn;
-    toReturn.set_timestamp(unixTime);
+    returnData->set_timestamp(unixTime);
 
     // Ensure dbName string is all capitalized
     toUpperCase(dbName.begin(), dbName.end());
@@ -245,9 +244,9 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery(const unsigned long long int &un
     // IF target year file DOES NOT exist
     if (std::filesystem::exists(targetFilePath) == 0) {
         std::string errMsg = fmt::format("[ERROR] [UNARY QUERY] [DB: {}] - DB does not exist", dbName);
-        toReturn.set_querystatus(errMsg);
+        returnData->set_querystatus(errMsg);
         spdlog::error(errMsg.substr(ERROR_LEN));
-        return toReturn;
+        return;
     }
 
     // Enforce time resolution
@@ -257,9 +256,9 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery(const unsigned long long int &un
     std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
     if (currTS.timeResolution != expectedTimeResolution) {
         std::string errMsg = fmt::format("[ERROR] [UNARY QUERY] [DB: {}] - Invalid time resolution. Expecting: {}", dbName, expectedTimeResolution);
-        toReturn.set_querystatus(errMsg);
+        returnData->set_querystatus(errMsg);
         spdlog::error(errMsg.substr(ERROR_LEN));
-        return toReturn;
+        return;
     }
 
     // Target file IS EXISTED
@@ -292,8 +291,7 @@ XStore_Proto::unaryQuery_REP XStore::unaryQuery(const unsigned long long int &un
 
     // Set data fetched from XStore to returning Protobuf obj
     tempData.ParseFromArray(&bufferIn, cfgStruct.rowlength());
-    *toReturn.mutable_data() = tempData;
-    return toReturn;
+    *returnData->mutable_data() = tempData;
 }
 
 // UNARY DELETE
@@ -513,9 +511,8 @@ XStore_Proto::batchInsert_REP XStore::batchInsert(XStore_Proto::batchInsert_REQ 
 }
 
 // BATCH QUERY
-XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *protoFromClient) {
+void XStore::batchQuery(XStore_Proto::batchQuery_REQ *protoFromClient, XStore_Proto::batchQuery_REP *returnData) {
     // Protobuf obj to be returned
-    XStore_Proto::batchQuery_REP toReturn;
     XStore_Proto::rowData tempData;
 
     // Ensure dbName string is all capitalized
@@ -532,9 +529,9 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
 
         if (std::filesystem::exists(cfgPath) == 0) {
             std::string errMsg = fmt::format("[ERROR] [BATCH QUERY] [DB: {}] - {}.CFG does not exist", dbName, dbName);
-            toReturn.set_querystatus(errMsg);
+            returnData->set_querystatus(errMsg);
             spdlog::error(errMsg.substr(ERROR_LEN));
-            return toReturn;
+            return;
         }
 
         // Read & Add cfgStruct to cfgMap
@@ -551,17 +548,17 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
     // IF query range > 2GB limit of Protobuf or Empty
     if ((protoFromClient->timestamp_size() * cfgStruct.rowlength()) > 2'000'000'000 || protoFromClient->timestamp_size() < 0) {
         std::string errMsg = fmt::format("[ERROR] [BATCH QUERY] [DB: {}] - Query results is larger than 2GB or empty", dbName);
-        toReturn.set_querystatus(errMsg);
+        returnData->set_querystatus(errMsg);
         spdlog::error(errMsg.substr(ERROR_LEN));
-        return toReturn;
+        return;
     }
 
     // IF db directory does not exist
     if (std::filesystem::is_directory(dbBasePath) == 0) {
         std::string errMsg = fmt::format("[ERROR] [BATCH QUERY] [DB: {}] - DB does not exist", dbName);
-        toReturn.set_querystatus(errMsg);
+        returnData->set_querystatus(errMsg);
         spdlog::error(errMsg.substr(ERROR_LEN));
-        return toReturn;
+        return;
     }
 
     // Assuming incoming batch query is unsorted
@@ -586,9 +583,9 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
         // Halt execution & Return as long as there's an error in time granularity
         if (currTS.timeResolution != expectedTimeResolution) {
             std::string errMsg = fmt::format("[ERROR] [BATCH QUERY] [DB: {}] - Invalid time resolution. Expecting: {}", dbName, expectedTimeResolution);
-            toReturn.set_querystatus(errMsg);
+            returnData->set_querystatus(errMsg);
             spdlog::error(errMsg.substr(ERROR_LEN));
-            return toReturn;
+            return;
         }
     }
 
@@ -602,7 +599,7 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
         if (std::filesystem::exists(targetFile) == 0) {
             // Skip to next iteration
             std::string warnMsg = fmt::format("[WARNING] [BATCH QUERY] [DB: {}] - {}.XSTORE does not exist", dbName, yearKey);
-            toReturn.set_querystatus(warnMsg);
+            returnData->set_querystatus(warnMsg);
             spdlog::warn(warnMsg.substr(WARNING_LEN));
             continue;
         }
@@ -643,7 +640,7 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
 
             // Add fetched data to returning Protobuf obj
             tempData.ParseFromArray(&bufferIn, cfgStruct.rowlength());
-            XStore_Proto::unaryQuery_REP *currEntry = toReturn.add_queryresponse();
+            XStore_Proto::unaryQuery_REP *currEntry = returnData->add_queryresponse();
             currEntry->set_timestamp(protoFromClient->timestamp(dataMap[yearKey].at(i)));
             *currEntry->mutable_data() = tempData;
         }
@@ -651,7 +648,6 @@ XStore_Proto::batchQuery_REP XStore::batchQuery(XStore_Proto::batchQuery_REQ *pr
         // Close file & Release lock after read
         std::fclose(bFile);
     }
-    return toReturn;
 }
 
 // BATCH DELETE
@@ -906,9 +902,8 @@ XStore_Proto::rangeInsert_REP XStore::rangeInsert(const XStore_Proto::rangeInser
 }
 
 // RANGE QUERY
-XStore_Proto::rangeQuery_REP XStore::rangeQuery(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName) {
+void XStore::rangeQuery(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, XStore_Proto::rangeQuery_REP *returnData) {
     // Protobuf obj to be returned
-    XStore_Proto::rangeQuery_REP toReturn;
     XStore_Proto::rowData tempData;
     XStore_Proto::unaryQuery_REP *currEntry;
     std::string queryStatus;
@@ -926,9 +921,9 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(const unsigned long long int &st
 
         if (std::filesystem::exists(cfgPath) == 0) {
             std::string errMsg = fmt::format("[ERROR] [RANGE QUERY] [DB: {}] - {}.CFG does not exist", dbName, dbName);
-            toReturn.set_querystatus(errMsg);
+            returnData->set_querystatus(errMsg);
             spdlog::error(errMsg.substr(ERROR_LEN));
-            return toReturn;
+            return;
         }
 
         // Read & Add cfgStruct to cfgMap
@@ -945,24 +940,24 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(const unsigned long long int &st
     // IF query range > 2GB limit of Protobuf
     if ((endEpochT - startEpochT) * cfgStruct.rowlength() > 2'000'000'000) {
         std::string errMsg = fmt::format("[ERROR] [RANGE QUERY] [DB: {}] - Query results is larger than 2GB", dbName);
-        toReturn.set_querystatus(errMsg);
+        returnData->set_querystatus(errMsg);
         spdlog::error(errMsg.substr(ERROR_LEN));
-        return toReturn;
+        return;
     }
 
     if ((endEpochT - startEpochT) < 0) {
         std::string errMsg = fmt::format("[ERROR] [RANGE QUERY] [DB: {}] - Target end time must be after start time", dbName);
-        toReturn.set_querystatus(errMsg);
+        returnData->set_querystatus(errMsg);
         spdlog::error(errMsg.substr(ERROR_LEN));
-        return toReturn;
+        return;
     }
 
     // IF db directory does not exist
     if (std::filesystem::is_directory(dbBasePath) == 0) {
         std::string errMsg = fmt::format("[ERROR] [RANGE QUERY] [DB: {}] - DB does not exist", dbName);
-        toReturn.set_querystatus(errMsg);
+        returnData->set_querystatus(errMsg);
         spdlog::error(errMsg.substr(ERROR_LEN));
-        return toReturn;
+        return;
     }
 
     // Time granularity check
@@ -971,9 +966,9 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(const unsigned long long int &st
     std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
     if (startTimeStruct.timeResolution != expectedTimeResolution || endTimeStruct.timeResolution != expectedTimeResolution) {
         std::string errMsg = fmt::format("[ERROR] [RANGE QUERY] [DB: {}] - Invalid time resolution. Expecting {}", dbName, expectedTimeResolution);
-        toReturn.set_querystatus(errMsg);
+        returnData->set_querystatus(errMsg);
         spdlog::error(errMsg.substr(ERROR_LEN));
-        return toReturn;
+        return;
     }
 
     // Organize into timeStruct
@@ -996,9 +991,9 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(const unsigned long long int &st
         if (std::filesystem::exists(targetFilePath) == 0) {
             // Return without error
             std::string warningMsg = fmt::format("[WARNING] [RANGE QUERY] [DB: {}] - {}.XSTORE does not exist", dbName, currTS.year);
-            toReturn.set_querystatus(warningMsg);
+            returnData->set_querystatus(warningMsg);
             spdlog::warn(warningMsg.substr(WARNING_LEN));
-            return toReturn;
+            return;
         }
 
         bFile = std::fopen(targetFilePath.c_str(), "rb");
@@ -1031,7 +1026,7 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(const unsigned long long int &st
 
             // Add fetched data to returning Protobuf obj
             tempData.ParseFromArray(&bufferIn, cfgStruct.rowlength());
-            currEntry = toReturn.add_queryresponse();
+            currEntry = returnData->add_queryresponse();
             currEntry->set_timestamp(epochTime);
             *currEntry->mutable_data() = tempData;
         }
@@ -1054,7 +1049,7 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(const unsigned long long int &st
                 // IF target YEAR.XSTORE does NOT exist
                 if (std::filesystem::exists(targetFilePath) == 0) {
                     std::string warningMsg = fmt::format("[WARNING] [RANGE QUERY] [DB: {}] - {}.XSTORE does not exist", dbName, currTS.year);
-                    toReturn.set_querystatus(warningMsg);
+                    returnData->set_querystatus(warningMsg);
                     spdlog::warn(warningMsg.substr(WARNING_LEN));
 
                     // Update currTS with latest startEpoch after incrementing
@@ -1092,7 +1087,7 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(const unsigned long long int &st
 
                     // Add fetched data to returning Protobuf obj
                     tempData.ParseFromArray(&bufferIn, cfgStruct.rowlength());
-                    currEntry = toReturn.add_queryresponse();
+                    currEntry = returnData->add_queryresponse();
                     currEntry->set_timestamp(epochTime);
                     *currEntry->mutable_data() = tempData;
                 }
@@ -1108,7 +1103,7 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(const unsigned long long int &st
                 // IF target YEAR.XSTORE does NOT exist
                 if (std::filesystem::exists(targetFilePath) == 0) {
                     std::string warningMsg = fmt::format("[WARNING] [RANGE QUERY] [DB: {}] - {}.XSTORE does not exist", dbName, currTS.year);
-                    toReturn.set_querystatus(warningMsg);
+                    returnData->set_querystatus(warningMsg);
                     spdlog::warn(warningMsg.substr(WARNING_LEN));
 
                     // Update currTS with latest startEpoch after incrementing
@@ -1146,7 +1141,7 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(const unsigned long long int &st
 
                     // Add fetched data to returning Protobuf obj
                     tempData.ParseFromArray(&bufferIn, cfgStruct.rowlength());
-                    currEntry = toReturn.add_queryresponse();
+                    currEntry = returnData->add_queryresponse();
                     currEntry->set_timestamp(epochTime);
                     *currEntry->mutable_data() = tempData;
                 }
@@ -1161,7 +1156,6 @@ XStore_Proto::rangeQuery_REP XStore::rangeQuery(const unsigned long long int &st
             }
         }
     }
-    return toReturn;
 }
 
 // RANGE DELETE
