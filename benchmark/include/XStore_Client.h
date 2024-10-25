@@ -188,7 +188,7 @@ class XStore_Client {
             returnData->ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
         }
 
-        XStore_Proto::unaryInsert_REP unaryInsert(long int insertUnixTime, std::vector<std::any> *insertData, std::string dbName) {
+        void unaryInsert(long int insertUnixTime, std::vector<std::any> *insertData, std::string dbName, XStore_Proto::unaryInsert_REP *returnData) {
             XStore_Proto::unaryInsert_REQ toServer;
             toServer.set_rtype(XStore_Proto::UNARYINSERT);
             toServer.set_timestamp(insertUnixTime);
@@ -218,14 +218,11 @@ class XStore_Client {
             zmq::message_t zFromServer;
             zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
 
-            // Received structs
-            XStore_Proto::unaryInsert_REP fromServer;
-
-            fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
-            return fromServer;
+            // Insert result
+            returnData->ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
         }
 
-        XStore_Proto::rangeInsert_REP rangeInsert(std::vector<std::vector<std::any>> *insertData, std::string dbName) {
+        void rangeInsert(std::vector<std::vector<std::any>> *insertData, std::string dbName, XStore_Proto::rangeInsert_REP *returnData) {
             XStore_Proto::rangeInsert_REQ toServer;
             toServer.set_rtype(XStore_Proto::RANGEINSERT);
             toServer.set_dbname(dbName);
@@ -261,14 +258,11 @@ class XStore_Client {
             zmq::message_t zFromServer;
             zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
 
-            // Received structs
-            XStore_Proto::rangeInsert_REP fromServer;
-
-            fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
-            return fromServer;
+            // Insert results
+            returnData->ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
         }
 
-        XStore_Proto::batchInsert_REP batchInsert(std::vector<std::vector<std::any>> *insertData, std::string dbName) {
+        void batchInsert(std::vector<std::vector<std::any>> *insertData, std::string dbName, XStore_Proto::batchInsert_REP *returnData) {
             XStore_Proto::batchInsert_REQ toServer;
             toServer.set_rtype(XStore_Proto::BATCHINSERT);
             toServer.set_dbname(dbName);
@@ -304,11 +298,8 @@ class XStore_Client {
             zmq::message_t zFromServer;
             zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
 
-            // Received structs
-            XStore_Proto::batchInsert_REP fromServer;
-
-            fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
-            return fromServer;
+            // Insert results
+            returnData->ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
         }
 
         XStore_Proto::removeDB_REP removeDB(std::string dbName) {

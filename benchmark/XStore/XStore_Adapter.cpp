@@ -333,12 +333,15 @@ std::vector<double> XStore_Adapter::unaryInsert_singleThread(std::string SERVER_
     std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
     std::chrono::duration<double> timeCost;
 
+    // Placeholder for insert result
+    XStore_Proto::unaryInsert_REP unaryInsertRep;
+
     // DEBUG mode
     if (isDebug) {
         for (int i = 0; i < N_ITERATION; i++) {
             // Dispatch insert
             start = std::chrono::high_resolution_clock::now();
-            XStore_Proto::unaryInsert_REP unaryInsertRep = xstoreClient.unaryInsert(std::any_cast<long unsigned int>(insertData->at(i).at(0)), &insertData->at(i), "BENCH_DB");
+            xstoreClient.unaryInsert(std::any_cast<long unsigned int>(insertData->at(i).at(0)), &insertData->at(i), "BENCH_DB", &unaryInsertRep);
             end = std::chrono::high_resolution_clock::now();
             timeCost = end - start;
             toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
@@ -354,7 +357,7 @@ std::vector<double> XStore_Adapter::unaryInsert_singleThread(std::string SERVER_
         for (int i = 0; i < N_ITERATION; i++) {
             // Dispatch insert
             start = std::chrono::high_resolution_clock::now();
-            XStore_Proto::unaryInsert_REP unaryInsertRep = xstoreClient.unaryInsert(std::any_cast<long unsigned int>(insertData->at(i).at(0)), &insertData->at(i), "BENCH_DB");
+            xstoreClient.unaryInsert(std::any_cast<long unsigned int>(insertData->at(i).at(0)), &insertData->at(i), "BENCH_DB", &unaryInsertRep);
             end = std::chrono::high_resolution_clock::now();
             timeCost = end - start;
             toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
@@ -374,12 +377,15 @@ std::vector<double> XStore_Adapter::rangeInsert_singleThread(std::string SERVER_
     std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
     std::chrono::duration<double> timeCost;
 
+    // Placeholder for insert results
+    XStore_Proto::rangeInsert_REP rangeInsertRep;
+
     // DEBUG mode
     if (isDebug) {
         for (int i = 0; i < N_ITERATION; i++) {
             // Dispatch insert
             start = std::chrono::high_resolution_clock::now();
-            XStore_Proto::rangeInsert_REP rangeInsertRep = xstoreClient.rangeInsert(insertData, "BENCH_DB");
+            xstoreClient.rangeInsert(insertData, "BENCH_DB", &rangeInsertRep);
             end = std::chrono::high_resolution_clock::now();
             timeCost = end - start;
             toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
@@ -395,7 +401,7 @@ std::vector<double> XStore_Adapter::rangeInsert_singleThread(std::string SERVER_
         for (int i = 0; i < N_ITERATION; i++) {
             // Dispatch insert
             start = std::chrono::high_resolution_clock::now();
-            XStore_Proto::rangeInsert_REP rangeInsertRep = xstoreClient.rangeInsert(insertData, "BENCH_DB");
+            xstoreClient.rangeInsert(insertData, "BENCH_DB", &rangeInsertRep);
             end = std::chrono::high_resolution_clock::now();
             timeCost = end - start;
 
@@ -416,12 +422,15 @@ std::vector<double> XStore_Adapter::batchInsert_singleThread(std::string SERVER_
     std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
     std::chrono::duration<double> timeCost;
 
+    // Placeholder for insert results
+    XStore_Proto::batchInsert_REP batchInsertRep;
+
     // DEBUG mode
     if (isDebug) {
         for (int i = 0; i < N_ITERATION; i++) {
             // Dispatch insert
             start = std::chrono::high_resolution_clock::now();
-            XStore_Proto::batchInsert_REP batchInsertRep = xstoreClient.batchInsert(insertData, "BENCH_DB");
+            xstoreClient.batchInsert(insertData, "BENCH_DB", &batchInsertRep);
             end = std::chrono::high_resolution_clock::now();
             timeCost = end - start;
             toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
@@ -438,7 +447,7 @@ std::vector<double> XStore_Adapter::batchInsert_singleThread(std::string SERVER_
         for (int i = 0; i < N_ITERATION; i++) {
             // Dispatch insert
             start = std::chrono::high_resolution_clock::now();
-            XStore_Proto::batchInsert_REP batchInsertRep = xstoreClient.batchInsert(insertData, "BENCH_DB");
+            xstoreClient.batchInsert(insertData, "BENCH_DB", &batchInsertRep);
             end = std::chrono::high_resolution_clock::now();
             timeCost = end - start;
             toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
