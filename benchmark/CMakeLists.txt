@@ -4,6 +4,13 @@ cmake_minimum_required(VERSION 3.20)
 # Project
 project(benchmarkClient)
 
+# Optimization flag
+if(NOT CMAKE_BUILD_TYPE)
+        set(CMAKE_BUILD_TYPE Release)
+endif()
+set(CMAKE_CXX_FLAGS_RELEASE "-O3")
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # C++ standard
 set(CMAKE_CXX_STANDARD 17)
 message(STATUS "Using C++ Standard: ${CMAKE_CXX_STANDARD}")
@@ -64,7 +71,6 @@ add_executable(benchmarkClient ${PROTO_SRCS} ${PROTO_HDRS} include/XStore_Client
         InfluxDB/InfluxDB_Adapter.h InfluxDB/InfluxDB_Adapter.cpp
         )
 
-add_compile_options(-O3)  # libparquet-dev
 target_link_libraries(benchmarkClient PUBLIC protobuf::libprotobuf "zmq" "parquet" "arrow"
         "mongo::mongocxx_shared" "mongo::bsoncxx_shared"
         InfluxData::InfluxDB)

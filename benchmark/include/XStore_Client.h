@@ -120,7 +120,7 @@ class XStore_Client {
             return fromServer;
         }
 
-        XStore_Proto::unaryQuery_REP unaryQuery(long int targetUnixTime, std::string targetDBName) {
+        void unaryQuery(long int targetUnixTime, std::string targetDBName, XStore_Proto::unaryQuery_REP *returnData) {
             XStore_Proto::unaryQuery_REQ toServer;
             toServer.set_rtype(XStore_Proto::UNARYQUERY);
             toServer.set_timestamp(targetUnixTime);
@@ -137,13 +137,11 @@ class XStore_Client {
             zmq::message_t zFromServer;
             zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
 
-            // Received structs
-            XStore_Proto::unaryQuery_REP fromServer;
-            fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
-            return fromServer;
+            // Query data
+            returnData->ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
         }
 
-        XStore_Proto::rangeQuery_REP rangeQuery(unsigned long int startTime, unsigned long int endTime, std::string targetDBName) {
+        void rangeQuery(unsigned long int startTime, unsigned long int endTime, std::string targetDBName, XStore_Proto::rangeQuery_REP *returnData) {
             XStore_Proto::rangeQuery_REQ toServer;
             toServer.set_rtype(XStore_Proto::RANGEQUERY);
             toServer.set_starttime(startTime);
@@ -161,13 +159,11 @@ class XStore_Client {
             zmq::message_t zFromServer;
             zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
 
-            // Received structs
-            XStore_Proto::rangeQuery_REP fromServer;
-            fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
-            return fromServer;
+            // Query data
+            returnData->ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
         }
 
-        XStore_Proto::batchQuery_REP batchQuery(std::vector<unsigned long int> timeList, std::string targetDBName) {
+        void batchQuery(std::vector<unsigned long int> timeList, std::string targetDBName, XStore_Proto::batchQuery_REP *returnData) {
             XStore_Proto::batchQuery_REQ toServer;
             toServer.set_rtype(XStore_Proto::BATCHQUERY);
             toServer.set_dbname(targetDBName);
@@ -188,10 +184,8 @@ class XStore_Client {
             zmq::message_t zFromServer;
             zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
 
-            // Received structs
-            XStore_Proto::batchQuery_REP fromServer;
-            fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
-            return fromServer;
+            // Query data
+            returnData->ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
         }
 
         XStore_Proto::unaryInsert_REP unaryInsert(long int insertUnixTime, std::vector<std::any> *insertData, std::string dbName) {
