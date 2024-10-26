@@ -367,6 +367,11 @@ std::vector<double> XStore_Adapter::unaryInsert_singleThread(std::string SERVER_
             std::string debugMsg;
             google::protobuf::util::MessageToJsonString(unaryInsertRep, &debugMsg);
             spdlog::debug("[UNARY INSERT] - Insert Time: {} | Insert Result: {}", std::any_cast<long unsigned int>(insertData->at(i).at(0)), debugMsg);
+
+            // Clear msg
+            toServer.Clear();
+            rowData.Clear();
+            unaryInsertRep.Clear();
         }
     }
     // NOT a debug mode
@@ -393,6 +398,11 @@ std::vector<double> XStore_Adapter::unaryInsert_singleThread(std::string SERVER_
             end = std::chrono::high_resolution_clock::now();
             timeCost = end - start;
             toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+
+            // Clear msg
+            toServer.Clear();
+            rowData.Clear();
+            unaryInsertRep.Clear();
         }
     }
     return toReturn;
