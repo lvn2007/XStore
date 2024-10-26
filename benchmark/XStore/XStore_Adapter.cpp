@@ -348,8 +348,9 @@ std::vector<double> XStore_Adapter::unaryInsert_singleThread(std::string SERVER_
 
             // Loop through each item in a row -> Identify type and build rowData
             //  Skipping first element (timestamp) in a row
+            XStore_Proto::fData *field;
             for (int j = 1; j < insertData->at(i).size(); j++) {
-                XStore_Proto::fData *field = rowData.add_fielddata();
+                field = rowData.add_fielddata();
                 xstoreClient.setFieldData(field, &insertData->at(i).at(j));
             }
 
@@ -384,8 +385,9 @@ std::vector<double> XStore_Adapter::unaryInsert_singleThread(std::string SERVER_
 
             // Loop through each item in a row -> Identify type and build rowData
             //  Skipping first element (timestamp) in a row
+            XStore_Proto::fData *field;
             for (int j = 1; j < insertData->at(i).size(); j++) {
-                XStore_Proto::fData *field = rowData.add_fielddata();
+                field = rowData.add_fielddata();
                 xstoreClient.setFieldData(field, &insertData->at(i).at(j));
             }
 
@@ -420,14 +422,39 @@ std::vector<double> XStore_Adapter::rangeInsert_singleThread(std::string SERVER_
     std::chrono::duration<double> timeCost;
 
     // Placeholder for insert results
+    XStore_Proto::rangeInsert_REQ toServer;
+    XStore_Proto::rangeInsert_DATA *rangeInsertData;
+    XStore_Proto::rowData rowData;
     XStore_Proto::rangeInsert_REP rangeInsertRep;
 
     // DEBUG mode
     if (isDebug) {
         for (int i = 0; i < N_ITERATION; i++) {
+            // Build insert msg
+            toServer.set_rtype(XStore_Proto::RANGEINSERT);
+            toServer.set_dbname("BENCH_DB");
+
+            // Loop through each row
+            for (int j = 0; j < insertData->size(); j++) {
+                rangeInsertData = toServer.add_rangeinsert_data();
+
+                // Build timestamp for current row of data
+                rangeInsertData->set_timestamp(std::any_cast<unsigned long int>(insertData->at(j).at(0)));
+
+                // Loop through each "column" in a row
+                XStore_Proto::fData *field;
+                for (int k = 1; k < insertData->at(j).size(); k++) {
+                    field = rowData.add_fielddata();
+                    xstoreClient.setFieldData(field, &insertData->at(j).at(k));
+                }
+
+                // Merge message
+                rangeInsertData->mutable_data()->MergeFrom(rowData);
+            }
+
             // Dispatch insert
             start = std::chrono::high_resolution_clock::now();
-            xstoreClient.rangeInsert(insertData, "BENCH_DB", &rangeInsertRep);
+            xstoreClient.rangeInsert(&toServer, &rangeInsertRep);
             end = std::chrono::high_resolution_clock::now();
             timeCost = end - start;
             toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
@@ -436,18 +463,51 @@ std::vector<double> XStore_Adapter::rangeInsert_singleThread(std::string SERVER_
             std::string debugMsg;
             google::protobuf::util::MessageToJsonString(rangeInsertRep, &debugMsg);
             spdlog::debug("[RANGE INSERT] - Insert Result: {}", debugMsg);
+
+            // Clear msg
+            toServer.Clear();
+            rangeInsertData->Clear();
+            rangeInsertRep.Clear();
+            rowData.Clear();
         }
     }
     // NOT a debug mode
     else {
         for (int i = 0; i < N_ITERATION; i++) {
+            // Build insert msg
+            toServer.set_rtype(XStore_Proto::RANGEINSERT);
+            toServer.set_dbname("BENCH_DB");
+
+            // Loop through each row
+            for (int j = 0; j < insertData->size(); j++) {
+                rangeInsertData = toServer.add_rangeinsert_data();
+
+                // Build timestamp for current row of data
+                rangeInsertData->set_timestamp(std::any_cast<unsigned long int>(insertData->at(j).at(0)));
+
+                // Loop through each "column" in a row
+                XStore_Proto::fData *field;
+                for (int k = 1; k < insertData->at(j).size(); k++) {
+                    field = rowData.add_fielddata();
+                    xstoreClient.setFieldData(field, &insertData->at(j).at(k));
+                }
+
+                // Merge message
+                rangeInsertData->mutable_data()->MergeFrom(rowData);
+            }
+
             // Dispatch insert
             start = std::chrono::high_resolution_clock::now();
-            xstoreClient.rangeInsert(insertData, "BENCH_DB", &rangeInsertRep);
+            xstoreClient.rangeInsert(&toServer, &rangeInsertRep);
             end = std::chrono::high_resolution_clock::now();
             timeCost = end - start;
-
             toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+
+            // Clear msg
+            toServer.Clear();
+            rangeInsertData->Clear();
+            rangeInsertRep.Clear();
+            rowData.Clear();
         }
     }
     return toReturn;

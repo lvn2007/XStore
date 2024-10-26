@@ -73,6 +73,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
 
         //  Parsed CMD from CLIENT
         int rType = clientReqCmd.rtype();
+        clientReqCmd.Clear();
 
         switch (rType) {
             // INFO
