@@ -24,6 +24,12 @@ class XStore_Client {
         zmq::context_t ctx;
         zmq::socket_t sock { ctx, zmq::socket_type::req };
 
+    public:
+        void connect(std::string SERVER_ADDR, std::string SERVER_PORT) {
+            std::string fullAddr = "tcp://" + SERVER_ADDR + ":" + SERVER_PORT;
+            sock.connect(fullAddr);
+        }
+
         void setFieldData(XStore_Proto::fData *field, std::any *currentMetric) {
             if (currentMetric->type() == typeid(std::string)) {
                 field->set_stringdata(std::any_cast<std::string>(*currentMetric));
@@ -37,12 +43,6 @@ class XStore_Client {
                 field->set_doubledata(std::any_cast<double>(*currentMetric));
                 return;
             }
-        }
-
-    public:
-        void connect(std::string SERVER_ADDR, std::string SERVER_PORT) {
-            std::string fullAddr = "tcp://" + SERVER_ADDR + ":" + SERVER_PORT;
-            sock.connect(fullAddr);
         }
 
 //  std::string getCurrDT() {
@@ -222,6 +222,22 @@ class XStore_Client {
             returnData->ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
         }
 
+        void unaryInsert(XStore_Proto::unaryInsert_REQ *insertData, XStore_Proto::unaryInsert_REP *returnData) {
+            // Config msg and send
+            size_t byteSize = insertData->ByteSizeLong();
+            zmq::message_t z_out(byteSize);
+            insertData->SerializeToArray(z_out.data(), byteSize);
+            sock.send(z_out, zmq::send_flags::dontwait);
+
+            // RECEIVING
+            std::vector<zmq::message_t> recv_msgs;
+            zmq::message_t zFromServer;
+            zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
+
+            // Insert result
+            returnData->ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
+        }
+
         void rangeInsert(std::vector<std::vector<std::any>> *insertData, std::string dbName, XStore_Proto::rangeInsert_REP *returnData) {
             XStore_Proto::rangeInsert_REQ toServer;
             toServer.set_rtype(XStore_Proto::RANGEINSERT);
@@ -262,6 +278,22 @@ class XStore_Client {
             returnData->ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
         }
 
+        void rangeInsert(XStore_Proto::rangeInsert_REQ *insertData, XStore_Proto::rangeInsert_REP *returnData) {
+            // Config msg and send
+            size_t byteSize = insertData->ByteSizeLong();
+            zmq::message_t z_out(byteSize);
+            insertData->SerializeToArray(z_out.data(), byteSize);
+            sock.send(z_out, zmq::send_flags::dontwait);
+
+            // RECEIVING
+            std::vector<zmq::message_t> recv_msgs;
+            zmq::message_t zFromServer;
+            zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
+
+            // Insert results
+            returnData->ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
+        }
+
         void batchInsert(std::vector<std::vector<std::any>> *insertData, std::string dbName, XStore_Proto::batchInsert_REP *returnData) {
             XStore_Proto::batchInsert_REQ toServer;
             toServer.set_rtype(XStore_Proto::BATCHINSERT);
@@ -291,6 +323,22 @@ class XStore_Client {
             size_t byteSize = toServer.ByteSizeLong();
             zmq::message_t z_out(byteSize);
             toServer.SerializeToArray(z_out.data(), byteSize);
+            sock.send(z_out, zmq::send_flags::dontwait);
+
+            // RECEIVING
+            std::vector<zmq::message_t> recv_msgs;
+            zmq::message_t zFromServer;
+            zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
+
+            // Insert results
+            returnData->ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
+        }
+
+        void batchInsert(XStore_Proto::batchInsert_REQ *insertData, XStore_Proto::batchInsert_REP *returnData) {
+            // Config msg and send
+            size_t byteSize = insertData->ByteSizeLong();
+            zmq::message_t z_out(byteSize);
+            insertData->SerializeToArray(z_out.data(), byteSize);
             sock.send(z_out, zmq::send_flags::dontwait);
 
             // RECEIVING

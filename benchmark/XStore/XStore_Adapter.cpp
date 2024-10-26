@@ -333,15 +333,32 @@ std::vector<double> XStore_Adapter::unaryInsert_singleThread(std::string SERVER_
     std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
     std::chrono::duration<double> timeCost;
 
-    // Placeholder for insert result
+    // Placeholder
+    XStore_Proto::unaryInsert_REQ toServer;
+    XStore_Proto::rowData rowData;
     XStore_Proto::unaryInsert_REP unaryInsertRep;
 
     // DEBUG mode
     if (isDebug) {
         for (int i = 0; i < N_ITERATION; i++) {
+            // Build insert msg
+            toServer.set_rtype(XStore_Proto::UNARYINSERT);
+            toServer.set_timestamp(std::any_cast<long unsigned int>(insertData->at(i).at(0)));
+            toServer.set_dbname("BENCH_DB");
+
+            // Loop through each item in a row -> Identify type and build rowData
+            //  Skipping first element (timestamp) in a row
+            for (int j = 1; j < insertData->at(i).size(); j++) {
+                XStore_Proto::fData *field = rowData.add_fielddata();
+                xstoreClient.setFieldData(field, &insertData->at(i).at(j));
+            }
+
+            // Add row data into Proto UNARY INSERT msg
+            *toServer.mutable_data() = rowData;
+
             // Dispatch insert
             start = std::chrono::high_resolution_clock::now();
-            xstoreClient.unaryInsert(std::any_cast<long unsigned int>(insertData->at(i).at(0)), &insertData->at(i), "BENCH_DB", &unaryInsertRep);
+            xstoreClient.unaryInsert(&toServer, &unaryInsertRep);
             end = std::chrono::high_resolution_clock::now();
             timeCost = end - start;
             toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
@@ -355,9 +372,24 @@ std::vector<double> XStore_Adapter::unaryInsert_singleThread(std::string SERVER_
     // NOT a debug mode
     else {
         for (int i = 0; i < N_ITERATION; i++) {
+            // Build insert msg
+            toServer.set_rtype(XStore_Proto::UNARYINSERT);
+            toServer.set_timestamp(std::any_cast<long unsigned int>(insertData->at(i).at(0)));
+            toServer.set_dbname("BENCH_DB");
+
+            // Loop through each item in a row -> Identify type and build rowData
+            //  Skipping first element (timestamp) in a row
+            for (int j = 1; j < insertData->at(i).size(); j++) {
+                XStore_Proto::fData *field = rowData.add_fielddata();
+                xstoreClient.setFieldData(field, &insertData->at(i).at(j));
+            }
+
+            // Add row data into Proto UNARY INSERT msg
+            *toServer.mutable_data() = rowData;
+
             // Dispatch insert
             start = std::chrono::high_resolution_clock::now();
-            xstoreClient.unaryInsert(std::any_cast<long unsigned int>(insertData->at(i).at(0)), &insertData->at(i), "BENCH_DB", &unaryInsertRep);
+            xstoreClient.unaryInsert(&toServer, &unaryInsertRep);
             end = std::chrono::high_resolution_clock::now();
             timeCost = end - start;
             toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
