@@ -426,6 +426,7 @@ std::vector<double> XStore_Adapter::rangeInsert_singleThread(std::string SERVER_
     XStore_Proto::rangeInsert_DATA *rangeInsertData;
     XStore_Proto::rowData rowData;
     XStore_Proto::rangeInsert_REP rangeInsertRep;
+    XStore_Proto::fData *field;
 
     // DEBUG mode
     if (isDebug) {
@@ -442,7 +443,6 @@ std::vector<double> XStore_Adapter::rangeInsert_singleThread(std::string SERVER_
                 rangeInsertData->set_timestamp(std::any_cast<unsigned long int>(insertData->at(j).at(0)));
 
                 // Loop through each "column" in a row
-                XStore_Proto::fData *field;
                 for (int k = 1; k < insertData->at(j).size(); k++) {
                     field = rowData.add_fielddata();
                     xstoreClient.setFieldData(field, &insertData->at(j).at(k));
@@ -450,6 +450,7 @@ std::vector<double> XStore_Adapter::rangeInsert_singleThread(std::string SERVER_
 
                 // Merge message
                 rangeInsertData->mutable_data()->MergeFrom(rowData);
+                field->Clear();
                 rowData.Clear();
             }
 
@@ -486,7 +487,6 @@ std::vector<double> XStore_Adapter::rangeInsert_singleThread(std::string SERVER_
                 rangeInsertData->set_timestamp(std::any_cast<unsigned long int>(insertData->at(j).at(0)));
 
                 // Loop through each "column" in a row
-                XStore_Proto::fData *field;
                 for (int k = 1; k < insertData->at(j).size(); k++) {
                     field = rowData.add_fielddata();
                     xstoreClient.setFieldData(field, &insertData->at(j).at(k));
@@ -494,6 +494,7 @@ std::vector<double> XStore_Adapter::rangeInsert_singleThread(std::string SERVER_
 
                 // Merge message
                 rangeInsertData->mutable_data()->MergeFrom(rowData);
+                field->Clear();
                 rowData.Clear();
             }
 
