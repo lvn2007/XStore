@@ -450,6 +450,7 @@ std::vector<double> XStore_Adapter::rangeInsert_singleThread(std::string SERVER_
 
                 // Merge message
                 rangeInsertData->mutable_data()->MergeFrom(rowData);
+                rowData.Clear();
             }
 
             // Dispatch insert
@@ -468,7 +469,6 @@ std::vector<double> XStore_Adapter::rangeInsert_singleThread(std::string SERVER_
             toServer.Clear();
             rangeInsertData->Clear();
             rangeInsertRep.Clear();
-            rowData.Clear();
         }
     }
     // NOT a debug mode
@@ -494,6 +494,7 @@ std::vector<double> XStore_Adapter::rangeInsert_singleThread(std::string SERVER_
 
                 // Merge message
                 rangeInsertData->mutable_data()->MergeFrom(rowData);
+                rowData.Clear();
             }
 
             // Dispatch insert
@@ -507,7 +508,6 @@ std::vector<double> XStore_Adapter::rangeInsert_singleThread(std::string SERVER_
             toServer.Clear();
             rangeInsertData->Clear();
             rangeInsertRep.Clear();
-            rowData.Clear();
         }
     }
     return toReturn;
