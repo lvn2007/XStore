@@ -1,9 +1,9 @@
 #include "include/dataStructs/timeStruct.h"
 
 // Constructor
-timeStruct::timeStruct(std::time_t unixTime) {
+timeStruct::timeStruct(std::time_t unixTime, XStore_Proto::timeUnit timeResolution) {
     this->unixTime = unixTime;
-    this->getTimeResolution();
+    this->timeResolution = timeResolution;
     this->extractTimeComponents();
 }
 
@@ -15,43 +15,23 @@ bool timeStruct::isLeapYear() {
     return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
 }
 
-void timeStruct::getTimeResolution() {
-    int count = 0;
-    std::time_t localUnixTime = this->unixTime;
-
-    while (localUnixTime != 0) {
-        localUnixTime /= 10;
-        ++count;
-    }
-
-    if (count < 13) {
-        this->timeResolution = "SECOND";
-        return;
-    }
-    else if (count >= 13 && count < 16) {
-        this->timeResolution = "MILLISECOND";
-        return;
-    }
-    else if (count >= 16) {
-        this->timeResolution = "MICROSECOND";
-        return;
-    }
-    this->timeResolution = "NULL";
-}
-
 void timeStruct::extractTimeComponents() {
     tm timePtr;
     std::time_t choppedTime;
 
-    if (this->timeResolution == "SECOND") {
+    if (this->timeResolution == XStore_Proto::SECOND) {
         localtime_r(&this->unixTime, &timePtr);
     }
-    else if (this->timeResolution == "MILLISECOND") {
-        choppedTime = this->unixTime / 1000;
+    else if (this->timeResolution == XStore_Proto::MILLISECOND) {
+        choppedTime = this->unixTime / 1'000;
         localtime_r(&choppedTime, &timePtr);
     }
-    else if (this->timeResolution == "MICROSECOND") {
-        choppedTime = this->unixTime / 1000000;
+    else if (this->timeResolution == XStore_Proto::MICROSECOND) {
+        choppedTime = this->unixTime / 1'000'000;
+        localtime_r(&choppedTime, &timePtr);
+    }
+    else if (this->timeResolution == XStore_Proto::NANOSECOND) {
+        choppedTime = this->unixTime / 1'000'000'000;
         localtime_r(&choppedTime, &timePtr);
     }
 
@@ -79,16 +59,20 @@ void timeStruct::extractTimeComponents() {
     lastEpochTimePtr.tm_min = 59;
     lastEpochTimePtr.tm_sec = 59;
 
-    if (this->timeResolution == "SECOND") {
+    if (this->timeResolution == XStore_Proto::SECOND) {
         firstEpoch = mktime(&firstEpochTimePtr);
         lastEpoch = mktime(&lastEpochTimePtr);
     }
-    else if (this->timeResolution == "MILLISECOND") {
-        firstEpoch = mktime(&firstEpochTimePtr) * 1000;
-        lastEpoch = mktime(&lastEpochTimePtr) * 1000 + 999;
+    else if (this->timeResolution == XStore_Proto::MILLISECOND) {
+        firstEpoch = mktime(&firstEpochTimePtr) * 1'000;
+        lastEpoch = mktime(&lastEpochTimePtr) * 1'000 + 999;
     }
-    else if (this->timeResolution == "MICROSECOND") {
-        firstEpoch = mktime(&firstEpochTimePtr) * 1000000;
-        lastEpoch = mktime(&lastEpochTimePtr) * 1000000 + 999999;
+    else if (this->timeResolution == XStore_Proto::MICROSECOND) {
+        firstEpoch = mktime(&firstEpochTimePtr) * 1'000'000;
+        lastEpoch = mktime(&lastEpochTimePtr) * 1'000'000 + 999999;
+    }
+    else if (this->timeResolution == XStore_Proto::NANOSECOND) {
+        firstEpoch = mktime(&firstEpochTimePtr) * 1'000'000'000;
+        lastEpoch = mktime(&lastEpochTimePtr) * 1'000'000'000 + 999999999;
     }
 }
