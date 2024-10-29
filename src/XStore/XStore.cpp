@@ -137,10 +137,6 @@ void XStore::unaryInsert(const unsigned long long int &unixTime, const XStore_Pr
     // Protobuf obj to be returned
     std::string insertStatus;
 
-    // Time structure contains all components per UNIXTIME:
-    //  Year, month, day, hour, minute, sec, ...
-    timeStruct currTS(unixTime);
-
     // Ensure dbName string is all capitalized
     toUpperCase(dbName.begin(), dbName.end());
 
@@ -171,14 +167,9 @@ void XStore::unaryInsert(const unsigned long long int &unixTime, const XStore_Pr
         cfgStruct = cfgMap[dbName];
     }
 
-    // Enforce time granularity
-    std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
-    if (currTS.timeResolution != expectedTimeResolution) {
-        std::string errMsg = fmt::format("[ERROR] [UNARY INSERT] [DB: {}] - Invalid time resolution. Expecting: {}", dbName, expectedTimeResolution);
-        returnData->set_insertstatus(errMsg);
-        spdlog::error(errMsg.substr(ERROR_LEN));
-        return;
-    }
+    // Time structure contains all components per UNIXTIME:
+    //  Year, month, day, hour, minute, sec, ...
+    timeStruct currTS(unixTime, cfgStruct.timeresolution());
 
     // Prepare to write
     FILE *bFile;
@@ -232,29 +223,35 @@ void XStore::unaryQuery(const unsigned long long int &unixTime, std::string dbNa
     // Ensure dbName string is all capitalized
     toUpperCase(dbName.begin(), dbName.end());
 
+    // Base directory of a DB
+    std::string dbBasePath = fmt::format("{}dataStore/{}/", baseDir, dbName);
+
+    // Check if cfgMap NOT contains cfgStruct
+    XStore_Proto::configStruct cfgStruct;
+    if (cfgMap.find(dbName) == cfgMap.end()) {
+        // Read & add cfgStruct to cfgMap
+        FILE *cFile;
+        std::string cfgPath = fmt::format("{}{}.CFG", dbBasePath, dbName);
+        cFile = std::fopen(cfgPath.c_str(), "rb");
+        cfgStruct.ParseFromFileDescriptor(fileno(cFile));
+        std::fclose(cFile);
+        cfgMap[dbName] = cfgStruct;
+    }
+    else {
+        // Otherwise -> Fetch cfgStruct from cfgMap
+        cfgStruct = cfgMap[dbName];
+    }
+
     //  Time structure contains all components per UNIXTIME:
     //      Year, month, day, hour, minute, sec, ...
-    timeStruct currTS(unixTime);
+    timeStruct currTS(unixTime, cfgStruct.timeresolution());
 
     // Base directory of a DB & Target path of file to READ
-    std::string dbBasePath = fmt::format("{}dataStore/{}/", baseDir, dbName);
     std::string targetFilePath = fmt::format("{}{}.XSTORE", dbBasePath, currTS.year);
 
     // IF target year file DOES NOT exist
     if (std::filesystem::exists(targetFilePath) == 0) {
         std::string errMsg = fmt::format("[ERROR] [UNARY QUERY] [DB: {}] - DB does not exist", dbName);
-        returnData->set_querystatus(errMsg);
-        spdlog::error(errMsg.substr(ERROR_LEN));
-        return;
-    }
-
-    // Enforce time resolution
-    std::string configPath = fmt::format("{}{}.CFG", dbBasePath, dbName);
-    XStore_Proto::configStruct cfgStruct = cfgMap[dbName];
-
-    std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
-    if (currTS.timeResolution != expectedTimeResolution) {
-        std::string errMsg = fmt::format("[ERROR] [UNARY QUERY] [DB: {}] - Invalid time resolution. Expecting: {}", dbName, expectedTimeResolution);
         returnData->set_querystatus(errMsg);
         spdlog::error(errMsg.substr(ERROR_LEN));
         return;
@@ -299,10 +296,6 @@ XStore_Proto::unaryDelete_REP XStore::unaryDelete(const unsigned long long int &
     XStore_Proto::unaryDelete_REP toReturn;
     std::string deleteStatus;
 
-    // Time structure contains all components per UNIXTIME:
-    //  Year, month, day, hour, minute, sec, ...
-    timeStruct currTS(epochTime);
-
     // Ensure dbName string is all capitalized
     toUpperCase(dbName.begin(), dbName.end());
 
@@ -333,14 +326,9 @@ XStore_Proto::unaryDelete_REP XStore::unaryDelete(const unsigned long long int &
         cfgStruct = cfgMap[dbName];
     }
 
-    // Enforce time granularity
-    std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
-    if (currTS.timeResolution != expectedTimeResolution) {
-        std::string errMsg = fmt::format("[ERROR] [UNARY DELETE] [DB: {}] - Invalid time resolution. Expecting: {}", dbName, expectedTimeResolution);
-        toReturn.set_deletestatus(errMsg);
-        spdlog::error(errMsg.substr(ERROR_LEN));
-        return toReturn;
-    }
+    // Time structure contains all components per UNIXTIME:
+    //  Year, month, day, hour, minute, sec, ...
+    timeStruct currTS(epochTime, cfgStruct.timeresolution());
 
     // Prepare to delete (Writing NULL byte)
     FILE *bFile;
@@ -424,26 +412,15 @@ void XStore::batchInsert(XStore_Proto::batchInsert_REQ *protoFromClient, XStore_
 
     // Organize incoming data into map
     //  dataMap[2016] = Vector {Index 0, Index 1, ...}
-    struct tm* epochStruct;
     std::time_t currTime;
+    tm epochStruct;
     std::map<unsigned short int, std::vector<unsigned long long int>> dataMap;
-    std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
-    std::string granularityErrMsg;
 
     // Granularity check
     for (int i = 0; i < protoFromClient->batchinsert_data_size(); i++) {
         currTime = protoFromClient->batchinsert_data(i).timestamp();
-        epochStruct = gmtime(&currTime);
-        dataMap[(epochStruct->tm_year + 1900)].push_back(i);
-
-        // Halt execution & Return as long as there's an error in time granularity
-        timeStruct currTS {currTime};
-        if (currTS.timeResolution != expectedTimeResolution) {
-            granularityErrMsg = fmt::format("[ERROR] [BATCH INSERT] [DB: {}] - Invalid time granularity. Expecting: {}", dbName, expectedTimeResolution);
-            returnData->set_insertstatus(granularityErrMsg);
-            spdlog::error(granularityErrMsg.substr(ERROR_LEN));
-            return;
-        }
+        gmtime_r(&currTime, &epochStruct);
+        dataMap[(epochStruct.tm_year + 1900)].push_back(i);
     }
 
     // Iterate through each key (year) of dataMap
@@ -456,7 +433,7 @@ void XStore::batchInsert(XStore_Proto::batchInsert_REQ *protoFromClient, XStore_
 
         // Grab first inserting element for timeStruct purposes
         //  Get length of time to truncate
-        timeStruct thisTS{static_cast<time_t>(protoFromClient->batchinsert_data().at(dataMap[yearKey].at(0)).timestamp())};
+        timeStruct thisTS{static_cast<time_t>(protoFromClient->batchinsert_data().at(dataMap[yearKey].at(0)).timestamp()), cfgStruct.timeresolution()};
 
         // IF target file does NOT exist
         if (std::filesystem::exists(targetFile) == 0) {
@@ -573,19 +550,10 @@ void XStore::batchQuery(XStore_Proto::batchQuery_REQ *protoFromClient, XStore_Pr
     std::map<unsigned short int, std::vector<unsigned long long int>> dataMap;
 
     // Granularity check
-    std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
     for (int i = 0; i < protoFromClient->timestamp_size(); i++) {
         currTime = protoFromClient->timestamp(i);
-        struct timeStruct currTS(currTime);
+        struct timeStruct currTS(currTime, cfgStruct.timeresolution());
         dataMap[currTS.year].push_back(i);
-
-        // Halt execution & Return as long as there's an error in time granularity
-        if (currTS.timeResolution != expectedTimeResolution) {
-            std::string errMsg = fmt::format("[ERROR] [BATCH QUERY] [DB: {}] - Invalid time resolution. Expecting: {}", dbName, expectedTimeResolution);
-            returnData->set_querystatus(errMsg);
-            spdlog::error(errMsg.substr(ERROR_LEN));
-            return;
-        }
     }
 
     // Iterate through each key (year) of dataMap
@@ -611,7 +579,7 @@ void XStore::batchQuery(XStore_Proto::batchQuery_REQ *protoFromClient, XStore_Pr
         // Time-related & Auxiliary
         unsigned long long int diff, offset;
         char bufferIn[cfgStruct.rowlength()];
-        timeStruct thisTS{static_cast<time_t>(protoFromClient->timestamp(dataMap[yearKey].at(0)))};
+        timeStruct thisTS{static_cast<time_t>(protoFromClient->timestamp(dataMap[yearKey].at(0))), cfgStruct.timeresolution()};
 
         for (int i = 0; i < dataMap[yearKey].size(); i++) {
             // Computes diff & offset
@@ -708,23 +676,15 @@ XStore_Proto::batchDelete_REP XStore::batchDelete(XStore_Proto::batchDelete_REQ 
 
     // Organize incoming batch delete timestamp into map
     //  dataMap[2016] = Vector {Index 0, Index 1, ...}
-    unsigned long long int currTime;
+    std::time_t currTime;
+    tm epochStruct;
     std::map<unsigned short int, std::vector<unsigned long long int>> dataMap;
 
     // Granularity check
-    std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
     for (int i = 0; i < protoFromClient->timestamp_size(); i++) {
         currTime = protoFromClient->timestamp(i);
-        struct timeStruct currTS(currTime);
-        dataMap[currTS.year].push_back(i);
-
-        // Halt execution & Return as long as there's an error in time granularity
-        if (currTS.timeResolution != expectedTimeResolution) {
-            std::string errMsg = fmt::format("[ERROR] [BATCH DELETE] [DB: {}] - Invalid time resolution. Expecting: {}", dbName, expectedTimeResolution);
-            toReturn.set_deletestatus(errMsg);
-            spdlog::error(errMsg.substr(ERROR_LEN));
-            return toReturn;
-        }
+        gmtime_r(&currTime, &epochStruct);
+        dataMap[epochStruct.tm_year + 1900].push_back(i);
     }
 
     // Iterate through each key (year) of dataMap
@@ -746,7 +706,7 @@ XStore_Proto::batchDelete_REP XStore::batchDelete(XStore_Proto::batchDelete_REQ 
 
         // Time-related & Auxiliary
         unsigned long long int diff, offset;
-        timeStruct thisTS{static_cast<time_t>(protoFromClient->timestamp(dataMap[yearKey].at(0)))};
+        timeStruct thisTS{static_cast<time_t>(protoFromClient->timestamp(dataMap[yearKey].at(0))), cfgStruct.timeresolution()};
 
         for (int i = 0; i < dataMap[yearKey].size(); i++) {
             // Computes diff & offset
@@ -812,25 +772,15 @@ void XStore::rangeInsert(const XStore_Proto::rangeInsert_REQ *protoFromClient, X
     // Assuming incoming data is sorted --> Skip sorting
     // Organize incoming data into map
     //  dataMap[2016] = Vector {Index 0, Index 1, ...}
-    tm epochStruct;
     std::time_t currTime;
+    tm epochStruct;
     std::map<unsigned short int, std::vector<unsigned long long int>> dataMap;
-    std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
 
     // Granularity check
     for (int i = 0; i < protoFromClient->rangeinsert_data_size(); i++) {
         currTime = protoFromClient->rangeinsert_data(i).timestamp();
         gmtime_r(&currTime, &epochStruct);
         dataMap[(epochStruct.tm_year + 1900)].push_back(i);
-
-        // Halt execution & Return as long as there's an error in time granularity
-        timeStruct currTS(currTime);
-        if (currTS.timeResolution != expectedTimeResolution) {
-            std::string granularityErrMsg = fmt::format("[ERROR] [RANGE INSERT] [DB: {}] - Invalid time granularity. Expecting: {}", dbName, expectedTimeResolution);
-            returnData->set_insertstatus(granularityErrMsg);
-            spdlog::error(granularityErrMsg.substr(ERROR_LEN));
-            return;
-        }
     }
 
     // Iterate through each key (year) of dataMap
@@ -842,7 +792,7 @@ void XStore::rangeInsert(const XStore_Proto::rangeInsert_REQ *protoFromClient, X
 
         // Grab first inserting element for timeStruct purposes
         //  Get length of time to truncate
-        timeStruct thisTS{static_cast<time_t>(protoFromClient->rangeinsert_data().at(dataMap[yearKey].at(0)).timestamp())};
+        timeStruct thisTS{static_cast<time_t>(protoFromClient->rangeinsert_data().at(dataMap[yearKey].at(0)).timestamp()), cfgStruct.timeresolution()};
 
         // IF target file does NOT exist
         if (std::filesystem::exists(targetFile) == 0) {
@@ -958,20 +908,9 @@ void XStore::rangeQuery(const unsigned long long int &startEpochT, const unsigne
         return;
     }
 
-    // Time granularity check
-    timeStruct startTimeStruct(startEpochT);
-    timeStruct endTimeStruct(endEpochT);
-    std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
-    if (startTimeStruct.timeResolution != expectedTimeResolution || endTimeStruct.timeResolution != expectedTimeResolution) {
-        std::string errMsg = fmt::format("[ERROR] [RANGE QUERY] [DB: {}] - Invalid time resolution. Expecting {}", dbName, expectedTimeResolution);
-        returnData->set_querystatus(errMsg);
-        spdlog::error(errMsg.substr(ERROR_LEN));
-        return;
-    }
-
     // Organize into timeStruct
     //  timeStruct provides many auxiliary vars/methods useful for read/write ops
-    timeStruct currTS(startEpochT);
+    timeStruct currTS(startEpochT, cfgStruct.timeresolution());
 
     // Placeholder for READ op
     FILE *bFile;
@@ -1051,7 +990,7 @@ void XStore::rangeQuery(const unsigned long long int &startEpochT, const unsigne
                     spdlog::warn(warningMsg.substr(WARNING_LEN));
 
                     // Update currTS with latest startEpoch after incrementing
-                    currTS = timeStruct(startEpoch + (currTS.lastEpoch - startEpoch));
+                    currTS = timeStruct(startEpoch + (currTS.lastEpoch - startEpoch), cfgStruct.timeresolution());
                     continue;
                 }
 
@@ -1091,7 +1030,7 @@ void XStore::rangeQuery(const unsigned long long int &startEpochT, const unsigne
                 }
 
                 // Update currTS with latest startEpoch after incrementing
-                currTS = timeStruct(startEpoch);
+                currTS = timeStruct(startEpoch, cfgStruct.timeresolution());
 
                 // Close file & Release lock after write
                 unlockFile(bFile, firstOffset, regionLength);
@@ -1105,7 +1044,7 @@ void XStore::rangeQuery(const unsigned long long int &startEpochT, const unsigne
                     spdlog::warn(warningMsg.substr(WARNING_LEN));
 
                     // Update currTS with latest startEpoch after incrementing
-                    currTS = timeStruct(startEpoch + (endEpochT - startEpoch));
+                    currTS = timeStruct(startEpoch + (endEpochT - startEpoch), cfgStruct.timeresolution());
                     continue;
                 }
 
@@ -1143,9 +1082,6 @@ void XStore::rangeQuery(const unsigned long long int &startEpochT, const unsigne
                     currEntry->set_timestamp(epochTime);
                     *currEntry->mutable_data() = tempData;
                 }
-
-                // Update currTS with latest startEpoch after incrementing
-                currTS = timeStruct(startEpoch);
 
                 // Close file & Release lock after read
                 unlockFile(bFile, firstOffset, regionLength);
@@ -1207,20 +1143,9 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(const unsigned long long int &
         return toReturn;
     }
 
-    // Time granularity check
-    timeStruct startTimeStruct(startEpochT);
-    timeStruct endTimeStruct(endEpochT);
-    std::string expectedTimeResolution = XStore_Proto::timeUnit_Name(cfgStruct.timeresolution());
-    if (startTimeStruct.timeResolution != expectedTimeResolution || endTimeStruct.timeResolution != expectedTimeResolution) {
-        std::string errMsg = fmt::format("[ERROR] [RANGE DELETE] [DB: {}] - Invalid time resolution. Expecting: {}", dbName, expectedTimeResolution);
-        toReturn.set_deletestatus(errMsg);
-        spdlog::error(errMsg.substr(ERROR_LEN));
-        return toReturn;
-    }
-
     // Organize into timeStruct
     //  timeStruct provides many auxiliary vars/methods useful for read/write ops
-    timeStruct currTS(startEpochT);
+    timeStruct currTS(startEpochT, cfgStruct.timeresolution());
 
     // Placeholder for READ op
     FILE *bFile;
@@ -1277,7 +1202,7 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(const unsigned long long int &
                     spdlog::warn(warningMsg.substr(WARNING_LEN));
 
                     // Update currTS with latest startEpoch after incrementing
-                    currTS = timeStruct(startEpoch + (currTS.lastEpoch - startEpoch));
+                    currTS = timeStruct(startEpoch + (currTS.lastEpoch - startEpoch), cfgStruct.timeresolution());
                     continue;
                 }
 
@@ -1296,7 +1221,7 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(const unsigned long long int &
                 deleteCount += rangeCount;
 
                 // Update currTS with latest startEpoch after incrementing
-                currTS = timeStruct(startEpoch);
+                currTS = timeStruct(startEpoch, cfgStruct.timeresolution());
 
                 // Release lock & Close file after delete
                 unlockFile(bFile, offset, cfgStruct.rowlength() * rangeCount);
@@ -1310,7 +1235,7 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(const unsigned long long int &
                     spdlog::warn(warningMsg.substr(WARNING_LEN));
 
                     // Update currTS with latest startEpoch after incrementing
-                    currTS = timeStruct(startEpoch + (endEpochT - startEpoch));
+                    currTS = timeStruct(startEpoch + (endEpochT - startEpoch), cfgStruct.timeresolution());
                     continue;
                 }
 
@@ -1327,9 +1252,6 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(const unsigned long long int &
                 // Deallocate data according to N bytes from rowLength
                 fallocate64(fileno(bFile), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfgStruct.rowlength() * rangeCount);
                 deleteCount += rangeCount;
-
-                // Update currTS with latest startEpoch after incrementing
-                currTS = timeStruct(startEpoch);
 
                 // Release lock & Close file after delete
                 unlockFile(bFile, offset, cfgStruct.rowlength() * rangeCount);
