@@ -915,7 +915,7 @@ void XStore::rangeQuery(const unsigned long long int &startEpochT, const unsigne
     // Placeholder for READ op
     FILE *bFile;
     std::string targetFilePath;
-    unsigned long long int diff, offset;
+    unsigned long long int diff, offset, dataRead;
     char bufferIn[cfgStruct.rowlength()];
     std::string successMsg;
 
@@ -953,11 +953,11 @@ void XStore::rangeQuery(const unsigned long long int &startEpochT, const unsigne
 
             // Extract N bytes of data according to N bytes from .CFG file
             //  .CFG file is set by user when creating DB
-            fread(&bufferIn[0], 1, cfgStruct.rowlength(), bFile);
+            dataRead = fread(&bufferIn[0], 1, cfgStruct.rowlength(), bFile);
 
             // IF fetched data contains nothing
             //  -> Skip to next iteration
-            if (strlen(bufferIn) == 0) {
+            if (dataRead == 0) {
                 continue;
             }
 
@@ -1014,11 +1014,11 @@ void XStore::rangeQuery(const unsigned long long int &startEpochT, const unsigne
 
                     // Extract N bytes of data according to N bytes from .CFG file
                     //  .CFG file is set by user when creating DB
-                    fread(&bufferIn[0], 1, cfgStruct.rowlength(), bFile);
+                    dataRead = fread(&bufferIn[0], 1, cfgStruct.rowlength(), bFile);
 
                     // IF fetched data contains nothing
                     //  -> Skip to next iteration
-                    if (strlen(bufferIn) == 0) {
+                    if (dataRead == 0) {
                         continue;
                     }
 
@@ -1068,11 +1068,11 @@ void XStore::rangeQuery(const unsigned long long int &startEpochT, const unsigne
 
                     // Extract N bytes of data according to N bytes from .CFG file
                     //  .CFG file is set by user when creating DB
-                    fread(&bufferIn[0], 1, cfgStruct.rowlength(), bFile);
+                    dataRead = fread(&bufferIn[0], 1, cfgStruct.rowlength(), bFile);
 
                     // IF fetched data contains nothing
                     //  -> Skip to next iteration
-                    if (strlen(bufferIn) == 0) {
+                    if (dataRead == 0) {
                         continue;
                     }
 
