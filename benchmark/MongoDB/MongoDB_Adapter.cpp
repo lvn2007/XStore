@@ -136,9 +136,10 @@ std::vector<double> MongoDB_Adapter::batchInsert(std::string SERVER_ADDR, std::s
 
 std::vector<double> MongoDB_Adapter::unaryQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData, bool isDebug) {
     std::vector<double> toReturn;
+    bool timedOut = false;
 
     // Init MongoDB instances
-    mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=300000", SERVER_ADDR, SERVER_PORT));
+    mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=120000", SERVER_ADDR, SERVER_PORT));
     mongocxx::client mongoClient(uri);
 
     // Access DB and collection
@@ -160,6 +161,12 @@ std::vector<double> MongoDB_Adapter::unaryQuery_singleThread(std::string SERVER_
             // Create document
             const bsoncxx::document::value &currDocument = bsoncxx::builder::basic::make_document(bsoncxx::builder::basic::kvp("timestamp", bsoncxx::types::b_date(std::chrono::seconds(queryTargetTime))));
 
+            if (timedOut) {
+                spdlog::warn("[UNARY QUERY] - There was an exception or operation has timed-out");
+                toReturn.push_back(0);
+                continue;
+            }
+
             // Dispatch query
             start = std::chrono::high_resolution_clock::now();
             try {
@@ -176,6 +183,7 @@ std::vector<double> MongoDB_Adapter::unaryQuery_singleThread(std::string SERVER_
             catch (...) {
                 spdlog::warn("[UNARY QUERY] - There was an exception or operation has timed-out");
                 toReturn.push_back(0);
+                timedOut = true;        // Once 1 op is timed-out, the rest will also timed-out
             }
         }
     }
@@ -187,6 +195,11 @@ std::vector<double> MongoDB_Adapter::unaryQuery_singleThread(std::string SERVER_
             // Create document
             const bsoncxx::document::value &currDocument = bsoncxx::builder::basic::make_document(bsoncxx::builder::basic::kvp("timestamp", bsoncxx::types::b_date(std::chrono::seconds(queryTargetTime))));
 
+            if (timedOut) {
+                toReturn.push_back(0);
+                continue;
+            }
+
             // Dispatch query
             start = std::chrono::high_resolution_clock::now();
             try {
@@ -197,6 +210,7 @@ std::vector<double> MongoDB_Adapter::unaryQuery_singleThread(std::string SERVER_
             }
             catch (...) {
                 toReturn.push_back(0);
+                timedOut = true;        // Once 1 op is timed-out, the rest will also timed-out
             }
         }
     }
@@ -205,9 +219,10 @@ std::vector<double> MongoDB_Adapter::unaryQuery_singleThread(std::string SERVER_
 
 std::vector<double> MongoDB_Adapter::rangeQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData, bool isDebug) {
     std::vector<double> toReturn;
+    bool timedOut = false;
 
     // Init MongoDB instances
-    mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=300000", SERVER_ADDR, SERVER_PORT));
+    mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=120000", SERVER_ADDR, SERVER_PORT));
     mongocxx::client mongoClient(uri);
 
     // Access DB and collection
@@ -233,9 +248,14 @@ std::vector<double> MongoDB_Adapter::rangeQuery_singleThread(std::string SERVER_
                     bsoncxx::builder::basic::kvp("$gte", bsoncxx::types::b_date(std::chrono::seconds(queryStartTime))),
                     bsoncxx::builder::basic::kvp("$lte", bsoncxx::types::b_date(std::chrono::seconds(queryEndTime))))));
 
+            if (timedOut) {
+                spdlog::warn("[RANGE QUERY] - There was an exception or operation has timed-out");
+                toReturn.push_back(0);
+                continue;
+            }
+
             // Dispatch query
             start = std::chrono::high_resolution_clock::now();
-
             try {
                 mongocxx::cursor cursor = mongoCollection.find(currDocument.view());
 
@@ -256,6 +276,7 @@ std::vector<double> MongoDB_Adapter::rangeQuery_singleThread(std::string SERVER_
             catch (...) {
                 spdlog::warn("[RANGE QUERY] - There was an exception or operation has timed-out");
                 toReturn.push_back(0);
+                timedOut = true;        // Once 1 op is timed-out, the rest will also timed-out
             }
         }
     }
@@ -271,9 +292,13 @@ std::vector<double> MongoDB_Adapter::rangeQuery_singleThread(std::string SERVER_
                 bsoncxx::builder::basic::kvp("$gte", bsoncxx::types::b_date(std::chrono::seconds(queryStartTime))),
                 bsoncxx::builder::basic::kvp("$lte", bsoncxx::types::b_date(std::chrono::seconds(queryEndTime))))));
 
+            if (timedOut) {
+                toReturn.push_back(0);
+                continue;
+            }
+
             // Dispatch query
             start = std::chrono::high_resolution_clock::now();
-
             try {
                 mongocxx::cursor cursor = mongoCollection.find(currDocument.view());
 
@@ -286,6 +311,7 @@ std::vector<double> MongoDB_Adapter::rangeQuery_singleThread(std::string SERVER_
             }
             catch (...) {
                 toReturn.push_back(0);
+                timedOut = true;        // Once 1 op is timed-out, the rest will also timed-out
             }
         }
     }
@@ -294,9 +320,10 @@ std::vector<double> MongoDB_Adapter::rangeQuery_singleThread(std::string SERVER_
 
 std::vector<double> MongoDB_Adapter::batchQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData, bool isDebug) {
     std::vector<double> toReturn;
+    bool timedOut = false;
 
     // Init MongoDB instances
-    mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=300000", SERVER_ADDR, SERVER_PORT));
+    mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=120000", SERVER_ADDR, SERVER_PORT));
     mongocxx::client mongoClient(uri);
 
     // Access DB and collection
@@ -306,8 +333,6 @@ std::vector<double> MongoDB_Adapter::batchQuery_singleThread(std::string SERVER_
     // Clock init
     std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
     std::chrono::duration<double> timeCost;
-
-    // Query target time
 
     // DEBUG mode
     if (isDebug) {
@@ -322,9 +347,14 @@ std::vector<double> MongoDB_Adapter::batchQuery_singleThread(std::string SERVER_
             const bsoncxx::document::value &currDocument = bsoncxx::builder::basic::make_document(bsoncxx::builder::basic::kvp("timestamp",
                 bsoncxx::builder::basic::make_document(bsoncxx::builder::basic::kvp("$in", timeList))));
 
+            if (timedOut) {
+                spdlog::warn("[BATCH QUERY] - There was an exception or operation has timed-out");
+                toReturn.push_back(0);
+                continue;
+            }
+
             // Dispatch query
             start = std::chrono::high_resolution_clock::now();
-
             try {
                 mongocxx::cursor cursor = mongoCollection.find(currDocument.view());
 
@@ -340,8 +370,9 @@ std::vector<double> MongoDB_Adapter::batchQuery_singleThread(std::string SERVER_
                 spdlog::debug("[BATCH QUERY] - Query Result: {}", fmt::join(docVector, "\n"));
             }
             catch (...) {
-                toReturn.push_back(0);
                 spdlog::warn("[BATCH QUERY] - There was an exception or operation has timed-out");
+                toReturn.push_back(0);
+                timedOut = true;        // Once 1 op is timed-out, the rest will also timed-out
             }
         }
     }
@@ -358,6 +389,11 @@ std::vector<double> MongoDB_Adapter::batchQuery_singleThread(std::string SERVER_
             const bsoncxx::document::value &currDocument = bsoncxx::builder::basic::make_document(bsoncxx::builder::basic::kvp("timestamp",
                 bsoncxx::builder::basic::make_document(bsoncxx::builder::basic::kvp("$in", timeList))));
 
+            if (timedOut) {
+                toReturn.push_back(0);
+                continue;
+            }
+
             // Dispatch query
             start = std::chrono::high_resolution_clock::now();
             try {
@@ -372,6 +408,7 @@ std::vector<double> MongoDB_Adapter::batchQuery_singleThread(std::string SERVER_
             }
             catch (...) {
                 toReturn.push_back(0);
+                timedOut = true;        // Once 1 op is timed-out, the rest will also timed-out
             }
         }
     }
@@ -380,9 +417,10 @@ std::vector<double> MongoDB_Adapter::batchQuery_singleThread(std::string SERVER_
 
 std::vector<double> MongoDB_Adapter::unaryInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData, bool isDebug) {
     std::vector<double> toReturn;
+    bool timedOut = false;
 
     // Init MongoDB instances
-    mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=300000", SERVER_ADDR, SERVER_PORT));
+    mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=120000", SERVER_ADDR, SERVER_PORT));
     mongocxx::client mongoClient(uri);
     mongocxx::options::insert insertOptions;
     insertOptions.ordered(false);
@@ -401,6 +439,12 @@ std::vector<double> MongoDB_Adapter::unaryInsert_singleThread(std::string SERVER
             // Create document
             bsoncxx::builder::basic::document currDocument = makeSingleDocument(&insertData->at(i));
 
+            if (timedOut) {
+                spdlog::warn("[UNARY INSERT] - There was an exception or operation has timed-out");
+                toReturn.push_back(0);
+                continue;
+            }
+
             // Dispatch insert
             start = std::chrono::high_resolution_clock::now();
             try {
@@ -414,8 +458,9 @@ std::vector<double> MongoDB_Adapter::unaryInsert_singleThread(std::string SERVER
                 spdlog::debug("[UNARY INSERT] - Insert Time: {} | Insert Result: {}", std::any_cast<unsigned long int>(insertData->at(i).at(0)), insertResult->result().inserted_count());
             }
             catch (...) {
-                toReturn.push_back(0);
                 spdlog::warn("[UNARY INSERT] - There was an exception or operation has timed-out");
+                toReturn.push_back(0);
+                timedOut = true;        // Once 1 op is timed-out, the rest will also timed-out
             }
         }
     }
@@ -424,6 +469,11 @@ std::vector<double> MongoDB_Adapter::unaryInsert_singleThread(std::string SERVER
         for (int i = 0; i < N_ITERATION; i++) {
             // Create document
             bsoncxx::builder::basic::document currDocument = makeSingleDocument(&insertData->at(i));
+
+            if (timedOut) {
+                toReturn.push_back(0);
+                continue;
+            }
 
             // Dispatch insert
             start = std::chrono::high_resolution_clock::now();
@@ -436,6 +486,7 @@ std::vector<double> MongoDB_Adapter::unaryInsert_singleThread(std::string SERVER
             }
             catch (...) {
                 toReturn.push_back(0);
+                timedOut = true;        // Once 1 op is timed-out, the rest will also timed-out
             }
         }
     }
@@ -444,9 +495,10 @@ std::vector<double> MongoDB_Adapter::unaryInsert_singleThread(std::string SERVER
 
 std::vector<double> MongoDB_Adapter::batchInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData, bool isDebug) {
     std::vector<double> toReturn;
+    bool timedOut = false;
 
     // Init MongoDB instances
-    mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=300000", SERVER_ADDR, SERVER_PORT));
+    mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=120000", SERVER_ADDR, SERVER_PORT));
     mongocxx::client mongoClient(uri);
     mongocxx::options::insert insertOptions;
     insertOptions.ordered(false);
@@ -467,6 +519,12 @@ std::vector<double> MongoDB_Adapter::batchInsert_singleThread(std::string SERVER
 
             for (int j = 0; j < insertData->size(); j++) {
                 currDocuments.push_back(makeSingleDocument(&insertData->at(j)));
+            }
+
+            if (timedOut) {
+                spdlog::warn("[BATCH INSERT] - There was an exception or operation has timed-out");
+                toReturn.push_back(0);
+                continue;
             }
 
             // Dispatch insert
@@ -482,8 +540,9 @@ std::vector<double> MongoDB_Adapter::batchInsert_singleThread(std::string SERVER
                 spdlog::debug("[BATCH INSERT] - Insert Result: {}", insertResult->inserted_count());
             }
             catch (...) {
-                toReturn.push_back(0);
                 spdlog::warn("[BATCH INSERT] - There was an exception or operation has timed-out");
+                toReturn.push_back(0);
+                timedOut = true;        // Once 1 op is timed-out, the rest will also timed-out
             }
         }
     }
@@ -498,6 +557,11 @@ std::vector<double> MongoDB_Adapter::batchInsert_singleThread(std::string SERVER
                 currDocuments.push_back(makeSingleDocument(&insertData->at(j)));
             }
 
+            if (timedOut) {
+                toReturn.push_back(0);
+                continue;
+            }
+
             // Dispatch insert
             start = std::chrono::high_resolution_clock::now();
             try {
@@ -509,6 +573,7 @@ std::vector<double> MongoDB_Adapter::batchInsert_singleThread(std::string SERVER
             }
             catch (...) {
                 toReturn.push_back(0);
+                timedOut = true;        // Once 1 op is timed-out, the rest will also timed-out
             }
         }
     }
@@ -518,7 +583,7 @@ std::vector<double> MongoDB_Adapter::batchInsert_singleThread(std::string SERVER
 void MongoDB_Adapter::createDB(std::string SERVER_ADDR, std::string SERVER_PORT, std::string dbName, std::vector<std::any> *singleRowData) {
     try {
         // Init MongoDB
-        mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=300000", SERVER_ADDR, SERVER_PORT));
+        mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=120000", SERVER_ADDR, SERVER_PORT));
         mongocxx::client mongoClient(uri);
 
         // Access/Create DB and collection
