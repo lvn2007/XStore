@@ -526,14 +526,41 @@ std::vector<double> XStore_Adapter::batchInsert_singleThread(std::string SERVER_
     std::chrono::duration<double> timeCost;
 
     // Placeholder for insert results
+    XStore_Proto::batchInsert_REQ toServer;
+    XStore_Proto::batchInsert_DATA *batchInsertData;
+    XStore_Proto::rowData rowData;
     XStore_Proto::batchInsert_REP batchInsertRep;
+    XStore_Proto::fData *field;
 
     // DEBUG mode
     if (isDebug) {
         for (int i = 0; i < N_ITERATION; i++) {
+            // Build insert msg
+            toServer.set_rtype(XStore_Proto::BATCHINSERT);
+            toServer.set_dbname("BENCH_DB");
+
+            // Loop through each row
+            for (int j = 0; j < insertData->size(); j++) {
+                batchInsertData = toServer.add_batchinsert_data();
+
+                // Build timestamp for current row of data
+                batchInsertData->set_timestamp(std::any_cast<unsigned long int>(insertData->at(j).at(0)));
+
+                // Loop through each "column" in a row
+                for (int k = 1; k < insertData->at(j).size(); k++) {
+                    field = rowData.add_fielddata();
+                    xstoreClient.setFieldData(field, &insertData->at(j).at(k));
+                }
+
+                // Merge message
+                batchInsertData->mutable_data()->MergeFrom(rowData);
+                field->Clear();
+                rowData.Clear();
+            }
+
             // Dispatch insert
             start = std::chrono::high_resolution_clock::now();
-            xstoreClient.batchInsert(insertData, "BENCH_DB", &batchInsertRep);
+            xstoreClient.batchInsert(&toServer, &batchInsertRep);
             end = std::chrono::high_resolution_clock::now();
             timeCost = end - start;
             toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
@@ -542,18 +569,50 @@ std::vector<double> XStore_Adapter::batchInsert_singleThread(std::string SERVER_
             std::string debugMsg;
             google::protobuf::util::MessageToJsonString(batchInsertRep, &debugMsg);
             spdlog::debug("[BATCH INSERT] - Insert Result: {}", debugMsg);
+
+            // Clear msg
+            toServer.Clear();
+            batchInsertData->Clear();
+            batchInsertRep.Clear();
         }
     }
-    // NOT a debug mode
-    else
-    {
+        // NOT a debug mode
+    else {
         for (int i = 0; i < N_ITERATION; i++) {
+            // Build insert msg
+            toServer.set_rtype(XStore_Proto::BATCHINSERT);
+            toServer.set_dbname("BENCH_DB");
+
+            // Loop through each row
+            for (int j = 0; j < insertData->size(); j++) {
+                batchInsertData = toServer.add_batchinsert_data();
+
+                // Build timestamp for current row of data
+                batchInsertData->set_timestamp(std::any_cast<unsigned long int>(insertData->at(j).at(0)));
+
+                // Loop through each "column" in a row
+                for (int k = 1; k < insertData->at(j).size(); k++) {
+                    field = rowData.add_fielddata();
+                    xstoreClient.setFieldData(field, &insertData->at(j).at(k));
+                }
+
+                // Merge message
+                batchInsertData->mutable_data()->MergeFrom(rowData);
+                field->Clear();
+                rowData.Clear();
+            }
+
             // Dispatch insert
             start = std::chrono::high_resolution_clock::now();
-            xstoreClient.batchInsert(insertData, "BENCH_DB", &batchInsertRep);
+            xstoreClient.batchInsert(&toServer, &batchInsertRep);
             end = std::chrono::high_resolution_clock::now();
             timeCost = end - start;
             toReturn.push_back(std::chrono::duration<double, std::milli> (timeCost).count());
+
+            // Clear msg
+            toServer.Clear();
+            batchInsertData->Clear();
+            batchInsertRep.Clear();
         }
     }
     return toReturn;
