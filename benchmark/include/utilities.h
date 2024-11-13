@@ -12,6 +12,7 @@
 #include <thread>
 #include <filesystem>
 #include <numeric>
+#include <random>
 #include "include/Logger/spdlog/fmt/fmt.h"
 #include "include/Logger/Logger.h"
 
@@ -43,29 +44,6 @@ static double stdCalc(std::vector<double> &inputVector) {
     return sqrt(std / inputVector.size());
 }
 
-static double getMin(std::vector<double> &inputVector) {
-    double minVal = inputVector.at(0);
-
-    for (int i = 1; i < inputVector.size(); i++) {
-        if (inputVector.at(i) < minVal) {
-            minVal = inputVector.at(0);
-        }
-    }
-
-    return minVal;
-}
-
-static double getMax(std::vector<double> &inputVector) {
-    double maxVal = inputVector.at(0);
-
-    for (int i = 1; i < inputVector.size(); i++) {
-        if (inputVector.at(i) > maxVal) {
-            maxVal = inputVector.at(i);
-        }
-    }
-    return maxVal;
-}
-
 static void writeCSV(std::string fName, std::string colName, std::vector<double> &inputs) {
     // Create an output filestream object
     std::ofstream myFile(fName);
@@ -90,11 +68,11 @@ static void toUpperCase(std::string::iterator begin, std::string::iterator end) 
 };
 
 static void printStatistics(std::vector<double> &inputVector) {
-    spdlog::info("[STATISTICS] Total: {:.2f} (ms)", std::reduce(inputVector.begin(), inputVector.end()));
-    spdlog::info("[STATISTICS]  Mean: {:.2f} (ms)", meanCalc(inputVector));
-    spdlog::info("[STATISTICS]   Min: {:.2f} (ms)", getMin(inputVector));
-    spdlog::info("[STATISTICS]   Max: {:.2f} (ms)", getMax(inputVector));
-    spdlog::info("[STATISTICS] STDev: {:.2f} (ms)", stdCalc(inputVector));
+    spdlog::info("[STATISTICS] Total: {:.4f} (ms)", std::accumulate(inputVector.begin(), inputVector.end(), 0.0));
+    spdlog::info("[STATISTICS]  Mean: {:.4f} (ms)", meanCalc(inputVector));
+    spdlog::info("[STATISTICS]   Min: {:.4f} (ms)", *std::min_element(inputVector.begin(), inputVector.end()));
+    spdlog::info("[STATISTICS]   Max: {:.4f} (ms)", *std::max_element(inputVector.begin(), inputVector.end()));
+    spdlog::info("[STATISTICS] STDev: {:.4f} (ms)", stdCalc(inputVector));
 }
 
 static void epochPoller(int targetTime) {
@@ -133,6 +111,36 @@ static std::vector<std::string> splitByDelim(const std::string& str, const std::
 
     vs.emplace_back(str.data() + pos, str.data() + str.size());
     return vs;
+}
+
+// SRC: https://stackoverflow.com/questions/13445688/how-to-generate-a-random-number-in-c
+static int randInt(int startRange, int endRange) {
+    std::random_device dev;
+    std::mt19937 rng(dev());
+    std::uniform_int_distribution<std::mt19937::result_type> dist6(startRange, endRange); // distribution in range [1, 6]
+    return dist6(rng);
+}
+
+// SRC: https://inversepalindrome.com/blog/how-to-create-a-random-string-in-cpp
+static std::string randString(int strLen) {
+    const std::string CHARACTERS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+    std::random_device random_device;
+    std::mt19937 generator(random_device());
+    std::uniform_int_distribution<> distribution(0, CHARACTERS.size() - 1);
+
+    std::string random_string;
+
+    for (std::size_t i = 0; i < strLen; ++i)
+    {
+        random_string += CHARACTERS[distribution(generator)];
+    }
+
+    return random_string;
+}
+
+static void clearCaches() {
+    system("free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null");
 }
 
 #endif //XSTORE_UTILITIES_H

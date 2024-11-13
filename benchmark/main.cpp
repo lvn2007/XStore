@@ -1,6 +1,7 @@
 #include "XStore/XStore_Adapter.h"
 #include "MongoDB/MongoDB_Adapter.h"
 #include "InfluxDB/InfluxDB_Adapter.h"
+#include "ProtoBench/ProtoBench.h"
 #include "include/utilities.h"
 #include "include/argparse.hpp"
 #include <thread>
@@ -121,8 +122,31 @@ int main(int argc, char const *argv[])
     insertBench.add_argument("--debug").help("Debug mode")
             .default_value(false).implicit_value(true);
 
+    // ---- Protobuf benchmark
+    argparse::ArgumentParser protoBench("protoBench");
+    protoBench.add_description("XBench - Benchmarking Google Protocol Buffer");
+
+    //  Number of Entries
+    protoBench.add_argument("-e", "--entries").required()
+            .help("Number of entries")
+            .default_value(1).nargs(1)
+            .scan<'i', unsigned int>();
+
+    //  Byte per Entry
+    protoBench.add_argument("-s", "--byteSize")
+            .help("Byte per entry")
+            .default_value(32).nargs(1)
+            .scan<'i', unsigned int>();
+
+    //  Number of Iterations
+    protoBench.add_argument("-n", "--n_iteration").required()
+            .help("Number of iterations")
+            .default_value(1).nargs(1)
+            .scan<'i', unsigned int>();
+
     program.add_subparser(queryBench);
     program.add_subparser(insertBench);
+    program.add_subparser(protoBench);
 
     try {
         program.parse_args(argc, argv);
@@ -401,6 +425,29 @@ int main(int argc, char const *argv[])
         // Display benchmark statistics
         if (timeCost.size() > 0) {
             printStatistics(timeCost);
+        }
+    }
+    else if (program.is_subcommand_used(protoBench)) {
+        unsigned int N_ENTRIES = protoBench.get<unsigned int>("-e");
+        unsigned int BYTE_SIZE = protoBench.get<unsigned int>("-s");
+        unsigned int N_ITERATIONS = protoBench.get<unsigned int>("-n");
+
+        spdlog::info("[PROTO BENCH]     Entries: {}", N_ENTRIES);
+        spdlog::info("[PROTO BENCH]   Byte Size: {}", BYTE_SIZE);
+        spdlog::info("[PROTO BENCH]  Iterations: {}", N_ITERATIONS);
+        spdlog::info("[PROTO BENCH]    Row Size: {}B", 8 + (N_ENTRIES * BYTE_SIZE));
+
+        ProtoBench protoBench;
+        std::vector<std::vector<double>> protoCosts = protoBench.run(N_ENTRIES, BYTE_SIZE, N_ITERATIONS);
+
+        // Serialize cost statistics
+        if (protoCosts.at(0).size() > 0) {
+            spdlog::info("[PROTO BENCH] SERIALIZATION COST");
+            printStatistics(protoCosts.at(0));
+
+            // Deserialize cost statistics
+            spdlog::info("[PROTO BENCH] DE-SERIALIZATION COST");
+            printStatistics(protoCosts.at(1));
         }
     }
 }

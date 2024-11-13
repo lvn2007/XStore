@@ -70,7 +70,8 @@ add_executable(benchmarkClient ${PROTO_SRCS} ${PROTO_HDRS} include/XStore_Client
         include/Logger/Logger.h DataManager/Data_Manager.h DataManager/Data_Manager.cpp
         XStore/XStore_Adapter.h XStore/XStore_Adapter.cpp MongoDB/MongoDB_Adapter.h MongoDB/MongoDB_Adapter.cpp
         InfluxDB/InfluxDB_Adapter.h InfluxDB/InfluxDB_Adapter.cpp
-        )
+        ProtoBench/ProtoBench.h ProtoBench/ProtoBench.cpp
+)
 
 target_link_libraries(benchmarkClient PUBLIC protobuf::libprotobuf "zmq" "parquet" "arrow"
         "mongo::mongocxx_shared" "mongo::bsoncxx_shared"
