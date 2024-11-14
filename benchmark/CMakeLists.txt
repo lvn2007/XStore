@@ -20,7 +20,6 @@ include(FetchContent)
 
 # Protobuf-compiler
 find_package(Protobuf REQUIRED)
-find_package(absl REQUIRED)
 find_package(Arrow REQUIRED)
 
 # Logging library - spdlog
@@ -74,7 +73,6 @@ add_executable(benchmarkClient ${PROTO_SRCS} ${PROTO_HDRS} include/XStore_Client
         ProtoBench/ProtoBench.h ProtoBench/ProtoBench.cpp
 )
 
-target_link_libraries(benchmarkClient PUBLIC protobuf::libprotobuf absl::log_internal_check_op
-        "zmq" "parquet" "arrow"
+target_link_libraries(benchmarkClient PUBLIC protobuf::libprotobuf "zmq" "parquet" "arrow"
         "mongo::mongocxx_shared" "mongo::bsoncxx_shared"
         InfluxData::InfluxDB)
