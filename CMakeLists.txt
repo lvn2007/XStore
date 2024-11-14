@@ -41,7 +41,10 @@ if(NOT TARGET Zstd::Zstd)
             INTERFACE_INCLUDE_DIRECTORIES "${Zstd_INCLUDE_DIR}")
 endif()
 
+# Protobuf
 find_package(Protobuf REQUIRED)
+find_package(absl REQUIRED)
+
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
@@ -85,4 +88,4 @@ add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h
         include/Compression/shoco.h src/Compression/shoco.cpp include/Compression/shoco_model.h include/Compression/zstdpp.hpp
         include/Logger/Logger.h)
 
-target_link_libraries(XStore PUBLIC "stdc++fs" protobuf::libprotobuf "zmq" Threads::Threads)
+target_link_libraries(XStore PUBLIC "stdc++fs" protobuf::libprotobuf "zmq" Threads::Threads absl::log_internal_check_op)
