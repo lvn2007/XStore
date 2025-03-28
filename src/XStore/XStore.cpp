@@ -1318,10 +1318,9 @@ void XStore::minAggregate(const unsigned long long int &startEpochT, const unsig
             continue;
         }
 
-        currData = rawRangeData.queryresponse(i).data().fielddata(columnIdx);
-
         // Check if target column is numeric
         //  Not a numeric value
+        currData = rawRangeData.queryresponse(i).data().fielddata(columnIdx);
         if (currData.oneOfData_case() > 12) {
             opStatus = fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
             returnData->set_opstatus(opStatus);
@@ -1348,6 +1347,89 @@ void XStore::minAggregate(const unsigned long long int &startEpochT, const unsig
 
     // Assign min value to returning msg
     *returnData->mutable_opresult() = rawRangeData.queryresponse(minValue.index).data().fielddata(columnIdx);
+}
+
+void XStore::maxAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::max_REP *returnData) {
+    // Placeholder
+    std::string opStatus;
+
+    // Query target data
+    XStore_Proto::rangeQuery_REP rawRangeData;
+    XStore::rangeQuery(startEpochT, endEpochT, dbName, &rawRangeData);
+
+    // Check if there's no data (0 row)
+    if (rawRangeData.queryresponse_size() < 1) {
+        opStatus = fmt::format("[ERROR] [MAX AGGREGATE] [DB: {}] - Data is empty (0 row)", dbName, columnIdx);
+        returnData->set_opstatus(opStatus);
+        spdlog::error(opStatus.substr(ERROR_LEN));
+        return;
+    }
+
+    // Check if columnIdx is out of range
+    if (columnIdx >= rawRangeData.queryresponse(0).data().fielddata_size()) {
+        opStatus = fmt::format("[ERROR] [MAX AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
+        returnData->set_opstatus(opStatus);
+        spdlog::error(opStatus.substr(ERROR_LEN));
+        return;
+    }
+
+    // Check if target column is numeric
+    //  Not a numeric value
+    XStore_Proto::fData currData;
+    currData = rawRangeData.queryresponse(0).data().fielddata(columnIdx);
+    if (currData.oneOfData_case() > 12) {
+        opStatus = fmt::format("[ERROR] [MAX AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
+        returnData->set_opstatus(opStatus);
+        spdlog::error(opStatus.substr(ERROR_LEN));
+        return;
+    }
+
+    // Assuming 1st value is the maximum
+    valueStruct maxValue{};
+    XStore::getFDataValue(&currData, 0, &maxValue);
+
+    // Process the rest
+    valueStruct tempValue{};
+    for (int i = 1; i < rawRangeData.queryresponse_size(); i++) {
+        // Skip if data has 0 column
+        //  This doesn't mean there's an error but there's one row of data that has 0 column in it
+        //  EX: 1000 rows of data with row 999th has 0 column
+        if (rawRangeData.queryresponse(i).data().fielddata_size() == 0) {
+            opStatus = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - Row index {} has 0 column", dbName, i);
+            returnData->set_opstatus(opStatus);
+            spdlog::warn(opStatus.substr(WARNING_LEN));
+            continue;
+        }
+
+        // Check if target column is numeric
+        //  Not a numeric value
+        currData = rawRangeData.queryresponse(i).data().fielddata(columnIdx);
+        if (currData.oneOfData_case() > 12) {
+            opStatus = fmt::format("[ERROR] [MAX AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
+            returnData->set_opstatus(opStatus);
+            spdlog::error(opStatus.substr(ERROR_LEN));
+            return;
+        }
+
+        // Check if columnIdx is out of range
+        if (columnIdx >= rawRangeData.queryresponse(i).data().fielddata_size()) {
+            opStatus = fmt::format("[ERROR] [MAX AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
+            returnData->set_opstatus(opStatus);
+            spdlog::error(opStatus.substr(ERROR_LEN));
+            return;
+        }
+
+        // Extract value from fData
+        XStore::getFDataValue(&currData, i, &tempValue);
+
+        // Find max
+        if (maxValue.value < tempValue.value) {
+            maxValue = tempValue;
+        }
+    }
+
+    // Assign min value to returning msg
+    *returnData->mutable_opresult() = rawRangeData.queryresponse(maxValue.index).data().fielddata(columnIdx);
 }
 
 XStore_Proto::removeDB_REP XStore::removeDB(std::string dbName) {
@@ -1529,6 +1611,72 @@ void XStore::getFDataValue(XStore_Proto::fData *fDataInput, unsigned int columnI
         case (XStore_Proto::fData::OneOfDataCase::kDoubleData): {
             returnData->index = columnIdx;
             returnData->value = fDataInput->doubledata();
+            break;
+        }
+
+        case (XStore_Proto::fData::OneOfDataCase::kFloatData): {
+            returnData->index = columnIdx;
+            returnData->value = fDataInput->floatdata();
+            break;
+        }
+
+        case (XStore_Proto::fData::OneOfDataCase::kInt32Data): {
+            returnData->index = columnIdx;
+            returnData->value = fDataInput->int32data();
+            break;
+        }
+
+        case (XStore_Proto::fData::OneOfDataCase::kInt64Data): {
+            returnData->index = columnIdx;
+            returnData->value = fDataInput->int64data();
+            break;
+        }
+
+        case (XStore_Proto::fData::OneOfDataCase::kUint32Data): {
+            returnData->index = columnIdx;
+            returnData->value = fDataInput->uint32data();
+            break;
+        }
+
+        case (XStore_Proto::fData::OneOfDataCase::kUint64Data): {
+            returnData->index = columnIdx;
+            returnData->value = fDataInput->uint64data();
+            break;
+        }
+
+        case (XStore_Proto::fData::OneOfDataCase::kSint32Data): {
+            returnData->index = columnIdx;
+            returnData->value = fDataInput->sint32data();
+            break;
+        }
+
+        case (XStore_Proto::fData::OneOfDataCase::kSint64Data): {
+            returnData->index = columnIdx;
+            returnData->value = fDataInput->sint64data();
+            break;
+        }
+
+        case (XStore_Proto::fData::OneOfDataCase::kFixed32Data): {
+            returnData->index = columnIdx;
+            returnData->value = fDataInput->fixed32data();
+            break;
+        }
+
+        case (XStore_Proto::fData::OneOfDataCase::kFixed64Data): {
+            returnData->index = columnIdx;
+            returnData->value = fDataInput->fixed64data();
+            break;
+        }
+
+        case (XStore_Proto::fData::OneOfDataCase::kSfixed32Data): {
+            returnData->index = columnIdx;
+            returnData->value = fDataInput->sfixed32data();
+            break;
+        }
+
+        case (XStore_Proto::fData::OneOfDataCase::kSfixed64Data): {
+            returnData->index = columnIdx;
+            returnData->value = fDataInput->sfixed64data();
             break;
         }
     }
