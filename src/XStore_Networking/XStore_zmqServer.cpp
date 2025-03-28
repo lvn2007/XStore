@@ -337,6 +337,27 @@ void* XStore_zmqServer::workerRoutine(void *args) {
                 socket.send(responseToClient, zmq::send_flags::dontwait);
                 break;
             }
+
+            // MIN AGGREGATE
+            case XStore_Proto::MIN: {
+                // Properly parse Protobuf obj from CLIENT
+                XStore_Proto::min_REQ protoFromClient;
+                protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
+
+                // XStore stuffs
+                //  Returning Protobuf obj
+                XStore_Proto::min_REP protoToClient;
+                myStore.minAggregate(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname(), protoFromClient.columnidx(), &protoToClient);
+
+                //  Response message
+                size_t protoToClientSize = protoToClient.ByteSizeLong();
+                zmq::message_t responseToClient(protoToClientSize);
+
+                //  Serialize & Dispatch msg to CLIENT
+                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
+                socket.send(responseToClient, zmq::send_flags::dontwait);
+                break;
+            }
         }
     }
 }

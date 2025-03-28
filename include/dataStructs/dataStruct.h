@@ -22,4 +22,9 @@ struct dataStruct {
     void printData(bool humanTime);
 };
 
+struct valueStruct {
+    unsigned int index;
+    long double value;
+};
+
 #endif //XSTORE_DATASTRUCTS_H

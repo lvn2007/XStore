@@ -85,6 +85,9 @@ class XStore {
         // RANGE DELETE
         XStore_Proto::rangeDelete_REP rangeDelete(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName);
 
+        // MIN - AGGREGATE
+        void minAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::min_REP *returnData);
+
         // Initialize DB
         void initDB();
 
@@ -107,6 +110,9 @@ class XStore {
                 *it &= ~0x20;
             }
         };
+
+        void getFDataValue(XStore_Proto::fData *fDataInput, std::vector<long double> *returnData);
+        void getFDataValue(XStore_Proto::fData *fDataInput, unsigned int columnIdx, valueStruct *valueStruct);
 };
 
 #endif //XSTORE_XSTORE_H

@@ -161,6 +161,16 @@ int main(int argc, char *argv[]) {
     // ----DEV AREA
     // Instantiate XStore obj
 //    XStore myStore;
+//
+//    system("free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null");
+//    // AGG
+//    XStore_Proto::min_REP minRep;
+//    start = std::chrono::high_resolution_clock::now();
+//    myStore.minAggregate(946684800, 946684800 + 10000, "TSLA", 2, &minRep);
+//    end  = std::chrono::high_resolution_clock::now();
+//    minRep.PrintDebugString();
+//    std::cout << "Took: " << std::chrono::duration<double, std::milli> (end-start).count() << " (msec)" << std::endl;
+//    exit(0);
 
 //    XStore_Proto::rowData firstRow;
 //    XStore_Proto::fData *field1 = firstRow.add_fielddata();
