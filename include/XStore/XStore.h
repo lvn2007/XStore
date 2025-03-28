@@ -88,6 +88,9 @@ class XStore {
         // MIN - AGGREGATE
         void minAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::min_REP *returnData);
 
+        // MAX - AGGREGATE
+        void maxAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::max_REP *returnData);
+
         // Initialize DB
         void initDB();
 

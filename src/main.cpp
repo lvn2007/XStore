@@ -164,11 +164,11 @@ int main(int argc, char *argv[]) {
 //
 //    system("free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null");
 //    // AGG
-//    XStore_Proto::min_REP minRep;
+//    XStore_Proto::max_REP maxRep;
 //    start = std::chrono::high_resolution_clock::now();
-//    myStore.minAggregate(946684800, 946684800 + 10000, "TSLA", 2, &minRep);
+//    myStore.maxAggregate(946684800, 946684800 + 4, "TSLA", 0, &maxRep);
 //    end  = std::chrono::high_resolution_clock::now();
-//    minRep.PrintDebugString();
+//    maxRep.PrintDebugString();
 //    std::cout << "Took: " << std::chrono::duration<double, std::milli> (end-start).count() << " (msec)" << std::endl;
 //    exit(0);
 
