@@ -17,6 +17,7 @@ enum requestType {
   RANGEINSERT = 10;
   RANGEQUERY = 11;
   RANGEDELETE = 12;
+  MIN = 13;
 }
 
 enum timeUnit {
@@ -164,6 +165,15 @@ message rangeDelete_REQ {
   string dbName = 4;
 }
 
+// --- MIN
+message min_REQ {
+  requestType rType = 1;
+  uint64 startTime = 2;
+  uint64 endTime = 3;
+  string dbName = 4;
+  sint32 columnIdx = 5;
+}
+
 // ======== RESPONSE section ========
 // --- DB Stats & Info REP
 message dbStats {
@@ -242,4 +252,10 @@ message rangeQuery_REP {
 // --- RANGE DELETE
 message rangeDelete_REP {
   string deleteStatus = 1;
+}
+
+// --- MIN
+message min_REP {
+  fData opResult = 1;
+  string opStatus = 2;
 }

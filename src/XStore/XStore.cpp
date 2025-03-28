@@ -1266,6 +1266,90 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(const unsigned long long int &
     return toReturn;
 }
 
+void XStore::minAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::min_REP *returnData) {
+    // Placeholder
+    std::string opStatus;
+
+    // Query target data
+    XStore_Proto::rangeQuery_REP rawRangeData;
+    XStore::rangeQuery(startEpochT, endEpochT, dbName, &rawRangeData);
+
+    // Check if there's no data (0 row)
+    if (rawRangeData.queryresponse_size() < 1) {
+        opStatus = fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - Data is empty (0 row)", dbName, columnIdx);
+        returnData->set_opstatus(opStatus);
+        spdlog::error(opStatus.substr(ERROR_LEN));
+        return;
+    }
+
+    // Check if columnIdx is out of range
+    if (columnIdx >= rawRangeData.queryresponse(0).data().fielddata_size()) {
+        opStatus = fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
+        returnData->set_opstatus(opStatus);
+        spdlog::error(opStatus.substr(ERROR_LEN));
+        return;
+    }
+
+    // Check if target column is numeric
+    //  Not a numeric value
+    XStore_Proto::fData currData;
+    currData = rawRangeData.queryresponse(0).data().fielddata(columnIdx);
+    if (currData.oneOfData_case() > 12) {
+        opStatus = fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
+        returnData->set_opstatus(opStatus);
+        spdlog::error(opStatus.substr(ERROR_LEN));
+        return;
+    }
+
+    // Assuming 1st value is the minimum
+    valueStruct minValue{};
+    XStore::getFDataValue(&currData, 0, &minValue);
+
+    // Process the rest
+    valueStruct tempValue{};
+    for (int i = 1; i < rawRangeData.queryresponse_size(); i++) {
+        // Skip if data has 0 column
+        //  This doesn't mean there's an error but there's one row of data that has 0 column in it
+        //  EX: 1000 rows of data with row 999th has 0 column
+        if (rawRangeData.queryresponse(i).data().fielddata_size() == 0) {
+            opStatus = fmt::format("[WARNING] [MIN AGGREGATE] [DB: {}] - Row index {} has 0 column", dbName, i);
+            returnData->set_opstatus(opStatus);
+            spdlog::warn(opStatus.substr(WARNING_LEN));
+            continue;
+        }
+
+        currData = rawRangeData.queryresponse(i).data().fielddata(columnIdx);
+
+        // Check if target column is numeric
+        //  Not a numeric value
+        if (currData.oneOfData_case() > 12) {
+            opStatus = fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
+            returnData->set_opstatus(opStatus);
+            spdlog::error(opStatus.substr(ERROR_LEN));
+            return;
+        }
+
+        // Check if columnIdx is out of range
+        if (columnIdx >= rawRangeData.queryresponse(i).data().fielddata_size()) {
+            opStatus = fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
+            returnData->set_opstatus(opStatus);
+            spdlog::error(opStatus.substr(ERROR_LEN));
+            return;
+        }
+
+        // Extract value from fData
+        XStore::getFDataValue(&currData, i, &tempValue);
+
+        // Find min
+        if (minValue.value > tempValue.value) {
+            minValue = tempValue;
+        }
+    }
+
+    // Assign min value to returning msg
+    *returnData->mutable_opresult() = rawRangeData.queryresponse(minValue.index).data().fielddata(columnIdx);
+}
+
 XStore_Proto::removeDB_REP XStore::removeDB(std::string dbName) {
     // Protobuf obj to be returned
     std::string removeStatus;
@@ -1428,5 +1512,24 @@ void XStore::unlockFile(FILE *bFile, unsigned long int startRange, unsigned long
 
     if (fcntl64(fileno(bFile), F_SETLKW64, &fl) == -1) {
         spdlog::error("[FILE UNLOCK] - Unable to release lock");
+    }
+}
+
+void XStore::getFDataValue(XStore_Proto::fData *fDataInput, std::vector<long double> *returnData) {
+    switch (fDataInput->oneOfData_case()) {
+        case (XStore_Proto::fData::OneOfDataCase::kDoubleData): {
+            returnData->emplace_back(fDataInput->doubledata());
+            break;
+        }
+    }
+}
+
+void XStore::getFDataValue(XStore_Proto::fData *fDataInput, unsigned int columnIdx, valueStruct *returnData) {
+    switch (fDataInput->oneOfData_case()) {
+        case (XStore_Proto::fData::OneOfDataCase::kDoubleData): {
+            returnData->index = columnIdx;
+            returnData->value = fDataInput->doubledata();
+            break;
+        }
     }
 }
