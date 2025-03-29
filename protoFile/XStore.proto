@@ -19,6 +19,7 @@ enum requestType {
   RANGEDELETE = 12;
   MIN = 13;
   MAX = 14;
+  SUM = 15;
 }
 
 enum timeUnit {
@@ -184,6 +185,15 @@ message max_REQ {
   sint32 columnIdx = 5;
 }
 
+// --- SUM
+message sum_REQ {
+  requestType rType = 1;
+  uint64 startTime = 2;
+  uint64 endTime = 3;
+  string dbName = 4;
+  sint32 columnIdx = 5;
+}
+
 // ======== RESPONSE section ========
 // --- DB Stats & Info REP
 message dbStats {
@@ -273,5 +283,11 @@ message min_REP {
 // --- MAX
 message max_REP {
   fData opResult = 1;
+  string opStatus = 2;
+}
+
+// --- SUM
+message sum_REP {
+  double opResult = 1;
   string opStatus = 2;
 }
