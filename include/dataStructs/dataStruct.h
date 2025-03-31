@@ -25,6 +25,7 @@ struct dataStruct {
 struct valueStruct {
     unsigned int index;
     long double value;
+    bool isInitialized = false;
 };
 
 #endif //XSTORE_DATASTRUCTS_H

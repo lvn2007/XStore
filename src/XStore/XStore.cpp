@@ -1290,24 +1290,49 @@ void XStore::minAggregate(const unsigned long long int &startEpochT, const unsig
         return;
     }
 
-    // Check if target column is numeric
-    //  Not a numeric value
+    // Initialize minValue by finding first valid value
+    unsigned int iterIdx = 0;
     XStore_Proto::fData currData;
-    currData = rawRangeData.queryresponse(0).data().fielddata(columnIdx);
-    if (currData.oneOfData_case() > 12) {
-        opStatus = fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-        returnData->set_opstatus(opStatus);
-        spdlog::error(opStatus.substr(ERROR_LEN));
-        return;
+    valueStruct minValue, tempValue;
+
+    while (iterIdx < rawRangeData.queryresponse_size()) {
+        if (rawRangeData.queryresponse(iterIdx).data().fielddata_size() == 0) {
+            opStatus = fmt::format("[WARNING] [MIN AGGREGATE] [DB: {}] - Row index {} has 0 column", dbName, iterIdx);
+            returnData->set_opstatus(opStatus);
+            spdlog::warn(opStatus.substr(WARNING_LEN));
+            continue;
+        }
+
+        // Check if target column is numeric
+        //  Not a numeric value
+        currData = rawRangeData.queryresponse(iterIdx).data().fielddata(columnIdx);
+        if (currData.oneOfData_case() > 12) {
+            opStatus = fmt::format("[WARNING] [MIN AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
+            returnData->set_opstatus(opStatus);
+            spdlog::warn(opStatus.substr(WARNING_LEN));
+            continue;
+        }
+
+        // Check if columnIdx is out of range
+        if (columnIdx >= rawRangeData.queryresponse(iterIdx).data().fielddata_size()) {
+            opStatus = fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
+            returnData->set_opstatus(opStatus);
+            spdlog::error(opStatus.substr(ERROR_LEN));
+            return;
+        }
+
+        // Initialize minValue to currentValue
+        if (!minValue.isInitialized) {
+            XStore::getFDataValue(&currData, iterIdx, &minValue);
+            minValue.isInitialized = tempValue.isInitialized = true;
+            break;
+        }
+        iterIdx++;
     }
 
-    // Assuming 1st value is the minimum
-    valueStruct minValue{};
-    XStore::getFDataValue(&currData, 0, &minValue);
-
-    // Process the rest
-    valueStruct tempValue{};
-    for (int i = 1; i < rawRangeData.queryresponse_size(); i++) {
+    // With maxValue initialized -> Process the rest
+    //  The goal for 2 separate loops is to avoid excessive checking for initialization of maxValue
+    for (int i = iterIdx; i < rawRangeData.queryresponse_size(); i++) {
         // Skip if data has 0 column
         //  This doesn't mean there's an error but there's one row of data that has 0 column in it
         //  EX: 1000 rows of data with row 999th has 0 column
@@ -1322,10 +1347,10 @@ void XStore::minAggregate(const unsigned long long int &startEpochT, const unsig
         //  Not a numeric value
         currData = rawRangeData.queryresponse(i).data().fielddata(columnIdx);
         if (currData.oneOfData_case() > 12) {
-            opStatus = fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
+            opStatus = fmt::format("[WARNING] [MIN AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
             returnData->set_opstatus(opStatus);
-            spdlog::error(opStatus.substr(ERROR_LEN));
-            return;
+            spdlog::warn(opStatus.substr(WARNING_LEN));
+            continue;
         }
 
         // Check if columnIdx is out of range
@@ -1346,7 +1371,9 @@ void XStore::minAggregate(const unsigned long long int &startEpochT, const unsig
     }
 
     // Assign min value to returning msg
-    *returnData->mutable_opresult() = rawRangeData.queryresponse(minValue.index).data().fielddata(columnIdx);
+    if (minValue.isInitialized) {
+        *returnData->mutable_opresult() = rawRangeData.queryresponse(minValue.index).data().fielddata(columnIdx);
+    }
 }
 
 void XStore::maxAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::max_REP *returnData) {
@@ -1373,24 +1400,49 @@ void XStore::maxAggregate(const unsigned long long int &startEpochT, const unsig
         return;
     }
 
-    // Check if target column is numeric
-    //  Not a numeric value
+    // Initialize maxValue by finding first valid value
+    unsigned int iterIdx = 0;
     XStore_Proto::fData currData;
-    currData = rawRangeData.queryresponse(0).data().fielddata(columnIdx);
-    if (currData.oneOfData_case() > 12) {
-        opStatus = fmt::format("[ERROR] [MAX AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-        returnData->set_opstatus(opStatus);
-        spdlog::error(opStatus.substr(ERROR_LEN));
-        return;
+    valueStruct maxValue, tempValue;
+
+    while (iterIdx < rawRangeData.queryresponse_size()) {
+        if (rawRangeData.queryresponse(iterIdx).data().fielddata_size() == 0) {
+            opStatus = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - Row index {} has 0 column", dbName, iterIdx);
+            returnData->set_opstatus(opStatus);
+            spdlog::warn(opStatus.substr(WARNING_LEN));
+            continue;
+        }
+
+        // Check if target column is numeric
+        //  Not a numeric value
+        currData = rawRangeData.queryresponse(iterIdx).data().fielddata(columnIdx);
+        if (currData.oneOfData_case() > 12) {
+            opStatus = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
+            returnData->set_opstatus(opStatus);
+            spdlog::warn(opStatus.substr(WARNING_LEN));
+            continue;
+        }
+
+        // Check if columnIdx is out of range
+        if (columnIdx >= rawRangeData.queryresponse(iterIdx).data().fielddata_size()) {
+            opStatus = fmt::format("[ERROR] [MAX AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
+            returnData->set_opstatus(opStatus);
+            spdlog::error(opStatus.substr(ERROR_LEN));
+            return;
+        }
+
+        // Initialize maxValue to currentValue
+        if (!maxValue.isInitialized) {
+            XStore::getFDataValue(&currData, iterIdx, &maxValue);
+            maxValue.isInitialized = tempValue.isInitialized = true;
+            break;
+        }
+        iterIdx++;
     }
 
-    // Assuming 1st value is the maximum
-    valueStruct maxValue{};
-    XStore::getFDataValue(&currData, 0, &maxValue);
-
-    // Process the rest
-    valueStruct tempValue{};
-    for (int i = 1; i < rawRangeData.queryresponse_size(); i++) {
+    // With maxValue initialized -> Process the rest
+    //  The goal for 2 separate loops is to avoid excessive checking for initialization of maxValue
+    for (int i = iterIdx; i < rawRangeData.queryresponse_size(); i++) {
         // Skip if data has 0 column
         //  This doesn't mean there's an error but there's one row of data that has 0 column in it
         //  EX: 1000 rows of data with row 999th has 0 column
@@ -1405,10 +1457,10 @@ void XStore::maxAggregate(const unsigned long long int &startEpochT, const unsig
         //  Not a numeric value
         currData = rawRangeData.queryresponse(i).data().fielddata(columnIdx);
         if (currData.oneOfData_case() > 12) {
-            opStatus = fmt::format("[ERROR] [MAX AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
+            opStatus = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
             returnData->set_opstatus(opStatus);
-            spdlog::error(opStatus.substr(ERROR_LEN));
-            return;
+            spdlog::warn(opStatus.substr(WARNING_LEN));
+            continue;
         }
 
         // Check if columnIdx is out of range
@@ -1428,8 +1480,10 @@ void XStore::maxAggregate(const unsigned long long int &startEpochT, const unsig
         }
     }
 
-    // Assign min value to returning msg
-    *returnData->mutable_opresult() = rawRangeData.queryresponse(maxValue.index).data().fielddata(columnIdx);
+    // Assign max value to returning msg
+    if (maxValue.isInitialized) {
+        *returnData->mutable_opresult() = rawRangeData.queryresponse(maxValue.index).data().fielddata(columnIdx);
+    }
 }
 
 void XStore::sumAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::sum_REP *returnData) {
