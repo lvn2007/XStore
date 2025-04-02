@@ -1598,6 +1598,113 @@ void XStore::sumAggregate(const unsigned long long int &startEpochT, const unsig
     }
 }
 
+void XStore::avgAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::avg_REP *returnData) {
+    // Placeholder
+    std::string opStatus;
+
+    // Query target data
+    XStore_Proto::rangeQuery_REP rawRangeData;
+    XStore::rangeQuery(startEpochT, endEpochT, dbName, &rawRangeData);
+
+    // Check if there's no data (0 row)
+    if (rawRangeData.queryresponse_size() < 1) {
+        opStatus = fmt::format("[ERROR] [SUM AGGREGATE] [DB: {}] - Data is empty (0 row)", dbName, columnIdx);
+        returnData->set_opstatus(opStatus);
+        spdlog::error(opStatus.substr(ERROR_LEN));
+        return;
+    }
+
+    // Initialize avgValue by finding first valid value
+    unsigned int iterIdx = 0, count = 0;
+    XStore_Proto::fData currData;
+    valueStruct currValue;
+    double avgResult = 0;
+
+    while (iterIdx < rawRangeData.queryresponse_size()) {
+        if (rawRangeData.queryresponse(iterIdx).data().fielddata_size() == 0) {
+            opStatus = fmt::format("[WARNING] [AVG AGGREGATE] [DB: {}] - Row index {} has 0 column", dbName, iterIdx);
+            returnData->set_opstatus(opStatus);
+            spdlog::warn(opStatus.substr(WARNING_LEN));
+            continue;
+        }
+
+        // Check if target column is numeric
+        //  Not a numeric value
+        currData = rawRangeData.queryresponse(iterIdx).data().fielddata(columnIdx);
+        if (currData.oneOfData_case() > 12) {
+            opStatus = fmt::format("[WARNING] [AVG AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
+            returnData->set_opstatus(opStatus);
+            spdlog::warn(opStatus.substr(WARNING_LEN));
+            continue;
+        }
+
+        // Check if columnIdx is out of range
+        if (columnIdx >= rawRangeData.queryresponse(iterIdx).data().fielddata_size()) {
+            opStatus = fmt::format("[ERROR] [AVG AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
+            returnData->set_opstatus(opStatus);
+            spdlog::error(opStatus.substr(ERROR_LEN));
+            return;
+        }
+
+        // Initialize avgValue to currentValue
+        if (!currValue.isInitialized) {
+            XStore::getFDataValue(&currData, iterIdx, &currValue);
+            currValue.isInitialized = true;
+            avgResult += currValue.value;
+            count++;
+            iterIdx++;
+            break;
+        }
+        iterIdx++;
+    }
+
+    // With avgValue initialized -> Process the rest
+    //  The goal for 2 separate loops is to avoid excessive checking for initialization of sumValue
+    for (int i = iterIdx; i < rawRangeData.queryresponse_size(); i++) {
+        // Skip if data has 0 column
+        //  This doesn't mean there's an error but there's one row of data that has 0 column in it
+        //  EX: 1000 rows of data with row 999th has 0 column
+        if (rawRangeData.queryresponse(i).data().fielddata_size() == 0) {
+            opStatus = fmt::format("[WARNING] [AVG AGGREGATE] [DB: {}] - Row index {} has 0 column", dbName, i);
+            returnData->set_opstatus(opStatus);
+            spdlog::warn(opStatus.substr(WARNING_LEN));
+            continue;
+        }
+
+        // Check if target column is numeric
+        //  Not a numeric value
+        currData = rawRangeData.queryresponse(i).data().fielddata(columnIdx);
+        if (currData.oneOfData_case() > 12) {
+            opStatus = fmt::format("[ERROR] [AVG AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
+            returnData->set_opstatus(opStatus);
+            spdlog::error(opStatus.substr(ERROR_LEN));
+            return;
+        }
+
+        // Check if columnIdx is out of range
+        if (columnIdx >= rawRangeData.queryresponse(i).data().fielddata_size()) {
+            opStatus = fmt::format("[ERROR] [AVG AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
+            returnData->set_opstatus(opStatus);
+            spdlog::error(opStatus.substr(ERROR_LEN));
+            return;
+        }
+
+        // Extract value and accumulate sum
+        XStore::getFDataValue(&currData, i, &currValue);
+        avgResult += currValue.value;
+        count++;
+    }
+
+    // Assign avgValue to returning msg
+    if (currValue.isInitialized) {
+        // Compute avg
+        opStatus = fmt::format("[INFO] [AVG AGGREGATE] [DB: {}] - Processed column {} from {} to {}", dbName, columnIdx, startEpochT, endEpochT);
+        returnData->set_opstatus(opStatus);
+        returnData->set_opresult(avgResult / count);
+        spdlog::info(opStatus.substr(INFO_LEN));
+    }
+}
+
 XStore_Proto::removeDB_REP XStore::removeDB(std::string dbName) {
     // Protobuf obj to be returned
     std::string removeStatus;

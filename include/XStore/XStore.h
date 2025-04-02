@@ -94,6 +94,9 @@ class XStore {
         // SUM - AGGREGATE
         void sumAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::sum_REP *returnData);
 
+        // AVG - AGGREGATE
+        void avgAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::avg_REP *returnData);
+
         // Initialize DB
         void initDB();
 
