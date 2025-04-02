@@ -380,7 +380,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
                 break;
             }
 
-            // MAX AGGREGATE
+            // SUM AGGREGATE
             case XStore_Proto::SUM: {
                 // Properly parse Protobuf obj from CLIENT
                 XStore_Proto::sum_REQ protoFromClient;
@@ -389,6 +389,27 @@ void* XStore_zmqServer::workerRoutine(void *args) {
                 // XStore stuffs
                 //  Returning Protobuf obj
                 XStore_Proto::sum_REP protoToClient;
+                myStore.sumAggregate(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname(), protoFromClient.columnidx(), &protoToClient);
+
+                //  Response message
+                size_t protoToClientSize = protoToClient.ByteSizeLong();
+                zmq::message_t responseToClient(protoToClientSize);
+
+                //  Serialize & Dispatch msg to CLIENT
+                protoToClient.SerializeToArray(responseToClient.data(), protoToClientSize);
+                socket.send(responseToClient, zmq::send_flags::dontwait);
+                break;
+            }
+
+            // AVG AGGREGATE
+            case XStore_Proto::AVG: {
+                // Properly parse Protobuf obj from CLIENT
+                XStore_Proto::avg_REQ protoFromClient;
+                protoFromClient.ParseFromArray(clientMsgs.back().data(), clientMsgs.back().size());
+
+                // XStore stuffs
+                //  Returning Protobuf obj
+                XStore_Proto::avg_REP protoToClient;
                 myStore.sumAggregate(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname(), protoFromClient.columnidx(), &protoToClient);
 
                 //  Response message
