@@ -1325,13 +1325,14 @@ void XStore::minAggregate(const unsigned long long int &startEpochT, const unsig
         if (!minValue.isInitialized) {
             XStore::getFDataValue(&currData, iterIdx, &minValue);
             minValue.isInitialized = tempValue.isInitialized = true;
+            iterIdx++;
             break;
         }
         iterIdx++;
     }
 
-    // With maxValue initialized -> Process the rest
-    //  The goal for 2 separate loops is to avoid excessive checking for initialization of maxValue
+    // With minValue initialized -> Process the rest
+    //  The goal for 2 separate loops is to avoid excessive checking for initialization of minValue
     for (int i = iterIdx; i < rawRangeData.queryresponse_size(); i++) {
         // Skip if data has 0 column
         //  This doesn't mean there's an error but there's one row of data that has 0 column in it
@@ -1370,7 +1371,7 @@ void XStore::minAggregate(const unsigned long long int &startEpochT, const unsig
         }
     }
 
-    // Assign min value to returning msg
+    // Assign minValue to returning msg
     if (minValue.isInitialized) {
         *returnData->mutable_opresult() = rawRangeData.queryresponse(minValue.index).data().fielddata(columnIdx);
     }
@@ -1435,6 +1436,7 @@ void XStore::maxAggregate(const unsigned long long int &startEpochT, const unsig
         if (!maxValue.isInitialized) {
             XStore::getFDataValue(&currData, iterIdx, &maxValue);
             maxValue.isInitialized = tempValue.isInitialized = true;
+            iterIdx++;
             break;
         }
         iterIdx++;
@@ -1480,7 +1482,7 @@ void XStore::maxAggregate(const unsigned long long int &startEpochT, const unsig
         }
     }
 
-    // Assign max value to returning msg
+    // Assign maxValue to returning msg
     if (maxValue.isInitialized) {
         *returnData->mutable_opresult() = rawRangeData.queryresponse(maxValue.index).data().fielddata(columnIdx);
     }
@@ -1502,32 +1504,52 @@ void XStore::sumAggregate(const unsigned long long int &startEpochT, const unsig
         return;
     }
 
-    // Check if columnIdx is out of range
-    if (columnIdx >= rawRangeData.queryresponse(0).data().fielddata_size()) {
-        opStatus = fmt::format("[ERROR] [SUM AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-        returnData->set_opstatus(opStatus);
-        spdlog::error(opStatus.substr(ERROR_LEN));
-        return;
-    }
-
-    // Check if target column is numeric
-    //  Not a numeric value
+    // Initialize sumValue by finding first valid value
+    unsigned int iterIdx = 0;
     XStore_Proto::fData currData;
-    currData = rawRangeData.queryresponse(0).data().fielddata(columnIdx);
-    if (currData.oneOfData_case() > 12) {
-        opStatus = fmt::format("[ERROR] [SUM AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-        returnData->set_opstatus(opStatus);
-        spdlog::error(opStatus.substr(ERROR_LEN));
-        return;
+    valueStruct currValue;
+    double sumResult = 0;
+
+    while (iterIdx < rawRangeData.queryresponse_size()) {
+        if (rawRangeData.queryresponse(iterIdx).data().fielddata_size() == 0) {
+            opStatus = fmt::format("[WARNING] [SUM AGGREGATE] [DB: {}] - Row index {} has 0 column", dbName, iterIdx);
+            returnData->set_opstatus(opStatus);
+            spdlog::warn(opStatus.substr(WARNING_LEN));
+            continue;
+        }
+
+        // Check if target column is numeric
+        //  Not a numeric value
+        currData = rawRangeData.queryresponse(iterIdx).data().fielddata(columnIdx);
+        if (currData.oneOfData_case() > 12) {
+            opStatus = fmt::format("[WARNING] [SUM AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
+            returnData->set_opstatus(opStatus);
+            spdlog::warn(opStatus.substr(WARNING_LEN));
+            continue;
+        }
+
+        // Check if columnIdx is out of range
+        if (columnIdx >= rawRangeData.queryresponse(iterIdx).data().fielddata_size()) {
+            opStatus = fmt::format("[ERROR] [SUM AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
+            returnData->set_opstatus(opStatus);
+            spdlog::error(opStatus.substr(ERROR_LEN));
+            return;
+        }
+
+        // Initialize sumValue to currentValue
+        if (!currValue.isInitialized) {
+            XStore::getFDataValue(&currData, iterIdx, &currValue);
+            currValue.isInitialized = true;
+            sumResult += currValue.value;
+            iterIdx++;
+            break;
+        }
+        iterIdx++;
     }
 
-    // Assuming 1st value is the start of sum
-    valueStruct currValue{};
-    XStore::getFDataValue(&currData, 0, &currValue);
-    double sumResult = currValue.value;
-
-    // Process the rest
-    for (int i = 1; i < rawRangeData.queryresponse_size(); i++) {
+    // With sumValue initialized -> Process the rest
+    //  The goal for 2 separate loops is to avoid excessive checking for initialization of sumValue
+    for (int i = iterIdx; i < rawRangeData.queryresponse_size(); i++) {
         // Skip if data has 0 column
         //  This doesn't mean there's an error but there's one row of data that has 0 column in it
         //  EX: 1000 rows of data with row 999th has 0 column
@@ -1556,13 +1578,15 @@ void XStore::sumAggregate(const unsigned long long int &startEpochT, const unsig
             return;
         }
 
-        // Extract value and Accumulate sum
+        // Extract value and accumulate sum
         XStore::getFDataValue(&currData, i, &currValue);
         sumResult += currValue.value;
     }
 
-    // Assign min value to returning msg
-    returnData->set_opresult(sumResult);
+    // Assign sumValue to returning msg
+    if (currValue.isInitialized) {
+        returnData->set_opresult(sumResult);
+    }
 }
 
 XStore_Proto::removeDB_REP XStore::removeDB(std::string dbName) {
