@@ -1373,7 +1373,10 @@ void XStore::minAggregate(const unsigned long long int &startEpochT, const unsig
 
     // Assign minValue to returning msg
     if (minValue.isInitialized) {
+        opStatus = fmt::format("[INFO] [MIN AGGREGATE] [DB: {}] - Processed column {} from {} to {}", dbName, columnIdx, startEpochT, endEpochT);
+        returnData->set_opstatus(opStatus);
         *returnData->mutable_opresult() = rawRangeData.queryresponse(minValue.index).data().fielddata(columnIdx);
+        spdlog::info(opStatus.substr(INFO_LEN));
     }
 }
 
@@ -1484,7 +1487,10 @@ void XStore::maxAggregate(const unsigned long long int &startEpochT, const unsig
 
     // Assign maxValue to returning msg
     if (maxValue.isInitialized) {
+        opStatus = fmt::format("[INFO] [MAX AGGREGATE] [DB: {}] - Processed column {} from {} to {}", dbName, columnIdx, startEpochT, endEpochT);
+        returnData->set_opstatus(opStatus);
         *returnData->mutable_opresult() = rawRangeData.queryresponse(maxValue.index).data().fielddata(columnIdx);
+        spdlog::info(opStatus.substr(INFO_LEN));
     }
 }
 
@@ -1585,7 +1591,10 @@ void XStore::sumAggregate(const unsigned long long int &startEpochT, const unsig
 
     // Assign sumValue to returning msg
     if (currValue.isInitialized) {
+        opStatus = fmt::format("[INFO] [SUM AGGREGATE] [DB: {}] - Processed column {} from {} to {}", dbName, columnIdx, startEpochT, endEpochT);
+        returnData->set_opstatus(opStatus);
         returnData->set_opresult(sumResult);
+        spdlog::info(opStatus.substr(INFO_LEN));
     }
 }
 
