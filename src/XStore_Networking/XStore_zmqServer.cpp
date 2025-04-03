@@ -410,7 +410,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
                 // XStore stuffs
                 //  Returning Protobuf obj
                 XStore_Proto::avg_REP protoToClient;
-                myStore.sumAggregate(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname(), protoFromClient.columnidx(), &protoToClient);
+                myStore.avgAggregate(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname(), protoFromClient.columnidx(), &protoToClient);
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
