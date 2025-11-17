@@ -87,15 +87,19 @@ class XStore {
 
         // MIN - AGGREGATE
         void minAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::min_REP *returnData);
+        void minAggregateV2(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::min_REP *returnData);
 
         // MAX - AGGREGATE
         void maxAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::max_REP *returnData);
+        void maxAggregateV2(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::max_REP *returnData);
 
         // SUM - AGGREGATE
         void sumAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::sum_REP *returnData);
+        void sumAggregateV2(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::sum_REP *returnData);
 
         // AVG - AGGREGATE
         void avgAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::avg_REP *returnData);
+        void avgAggregateV2(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::avg_REP *returnData);
 
         // Initialize DB
         void initDB();
@@ -120,8 +124,8 @@ class XStore {
             }
         };
 
-        void getFDataValue(XStore_Proto::fData *fDataInput, std::vector<long double> *returnData);
         void getFDataValue(XStore_Proto::fData *fDataInput, unsigned int columnIdx, valueStruct *valueStruct);
+        void getFDataValue(XStore_Proto::fData *fDataInput, valueStruct *valueStruct);
 };
 
 #endif //XSTORE_XSTORE_H
