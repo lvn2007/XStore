@@ -347,7 +347,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
                 // XStore stuffs
                 //  Returning Protobuf obj
                 XStore_Proto::min_REP protoToClient;
-                myStore.minAggregate(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname(), protoFromClient.columnidx(), &protoToClient);
+                myStore.minAggregateV2(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname(), protoFromClient.columnidx(), &protoToClient);
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
@@ -368,7 +368,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
                 // XStore stuffs
                 //  Returning Protobuf obj
                 XStore_Proto::max_REP protoToClient;
-                myStore.maxAggregate(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname(), protoFromClient.columnidx(), &protoToClient);
+                myStore.maxAggregateV2(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname(), protoFromClient.columnidx(), &protoToClient);
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
@@ -389,7 +389,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
                 // XStore stuffs
                 //  Returning Protobuf obj
                 XStore_Proto::sum_REP protoToClient;
-                myStore.sumAggregate(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname(), protoFromClient.columnidx(), &protoToClient);
+                myStore.sumAggregateV2(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname(), protoFromClient.columnidx(), &protoToClient);
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
@@ -410,7 +410,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
                 // XStore stuffs
                 //  Returning Protobuf obj
                 XStore_Proto::avg_REP protoToClient;
-                myStore.avgAggregate(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname(), protoFromClient.columnidx(), &protoToClient);
+                myStore.avgAggregateV2(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname(), protoFromClient.columnidx(), &protoToClient);
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();
