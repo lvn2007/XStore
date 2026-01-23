@@ -160,8 +160,76 @@ int main(int argc, char *argv[]) {
 
     // ----DEV AREA
     // Instantiate XStore obj
-//    XStore myStore;
-//
+    // XStore myStore;
+    //
+    // int startTime = 946684800;
+    // int queryStart, queryEnd;
+    //
+    // for (int i = 0; i <= 12; i++)
+    // {
+    //     queryStart = startTime + (i * 2628000);
+    //     queryEnd = queryStart + 60;
+    //     // *---- MIN
+    //     // system("free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null");
+    //     // XStore_Proto::min_REP minRep;
+    //     // start = std::chrono::high_resolution_clock::now();
+    //     // myStore.minAggregate(queryStart, queryEnd, "BENCH_DB", 1, &minRep);
+    //     // end = std::chrono::high_resolution_clock::now();
+    //     // std::cout << "V1: " << std::chrono::duration<double, std::milli> (end-start).count() << " (msec)" << "- Result: " << minRep.opresult().DebugString();
+    //     //
+    //     // system("free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null");
+    //     // XStore_Proto::min_REP minRepV2;
+    //     // start = std::chrono::high_resolution_clock::now();
+    //     // myStore.minAggregateV2(queryStart, queryEnd, "BENCH_DB", 1, &minRepV2);
+    //     // end = std::chrono::high_resolution_clock::now();
+    //     // std::cout << "V2: " << std::chrono::duration<double, std::milli> (end-start).count() << " (msec)" << "- Result: " << minRepV2.opresult().DebugString() << std::endl;
+    //
+    //     // *---- MAX
+    //     // system("free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null");
+    //     // XStore_Proto::max_REP maxRep;
+    //     // start = std::chrono::high_resolution_clock::now();
+    //     // myStore.maxAggregate(queryStart, queryEnd, "BENCH_DB", 1, &maxRep);
+    //     // end = std::chrono::high_resolution_clock::now();
+    //     // std::cout << "V1: " << std::chrono::duration<double, std::milli> (end-start).count() << " (msec)" << "- Result: " << maxRep.opresult().DebugString();
+    //     //
+    //     // system("free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null");
+    //     // XStore_Proto::max_REP maxRepV2;
+    //     // start = std::chrono::high_resolution_clock::now();
+    //     // myStore.maxAggregateV2(queryStart, queryEnd, "BENCH_DB", 1, &maxRepV2);
+    //     // end = std::chrono::high_resolution_clock::now();
+    //     // std::cout << "V2: " << std::chrono::duration<double, std::milli> (end-start).count() << " (msec)" << "- Result: " << maxRepV2.opresult().DebugString() << std::endl;
+    //
+    //     // *---- SUM
+    //     // system("free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null");
+    //     // XStore_Proto::sum_REP sumRep;
+    //     // start = std::chrono::high_resolution_clock::now();
+    //     // myStore.sumAggregate(queryStart, queryEnd, "BENCH_DB", 1, &sumRep);
+    //     // end = std::chrono::high_resolution_clock::now();
+    //     // std::cout << "V1: " << std::chrono::duration<double, std::milli> (end-start).count() << " (msec)" << "- Result: " << sumRep.opresult() << std::endl;
+    //     //
+    //     // system("free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null");
+    //     // XStore_Proto::sum_REP sumRepV2;
+    //     // start = std::chrono::high_resolution_clock::now();
+    //     // myStore.sumAggregateV2(queryStart, queryEnd, "BENCH_DB", 1, &sumRepV2);
+    //     // end = std::chrono::high_resolution_clock::now();
+    //     // std::cout << "V2: " << std::chrono::duration<double, std::milli> (end-start).count() << " (msec)" << "- Result: " << sumRepV2.opresult() << "\n" << std::endl;
+    //
+    //     // *---- AVG
+    //     // system("free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null");
+    //     // XStore_Proto::avg_REP avgRep;
+    //     // start = std::chrono::high_resolution_clock::now();
+    //     // myStore.avgAggregate(queryStart, queryEnd, "BENCH_DB", 1, &avgRep);
+    //     // end = std::chrono::high_resolution_clock::now();
+    //     // std::cout << "V1: " << std::chrono::duration<double, std::milli> (end-start).count() << " (msec)" << "- Result: " << avgRep.opresult() << std::endl;
+    //     //
+    //     // system("free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null");
+    //     // XStore_Proto::avg_REP avgRepV2;
+    //     // start = std::chrono::high_resolution_clock::now();
+    //     // myStore.avgAggregateV2(queryStart, queryEnd, "BENCH_DB", 1, &avgRepV2);
+    //     // end = std::chrono::high_resolution_clock::now();
+    //     // std::cout << "V2: " << std::chrono::duration<double, std::milli> (end-start).count() << " (msec)" << "- Result: " << avgRepV2.opresult() << "\n" << std::endl;
+    // }
+
 //    system("free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null");
 //    // AGG
 //    XStore_Proto::avg_REP aggRep;
@@ -171,22 +239,6 @@ int main(int argc, char *argv[]) {
 //    aggRep.PrintDebugString();
 //    std::cout << "Took: " << std::chrono::duration<double, std::milli> (end-start).count() << " (msec)" << std::endl;
 //    exit(0);
-
-//    XStore_Proto::rowData firstRow;
-//    XStore_Proto::fData *field1 = firstRow.add_fielddata();
-//    field1->set_floatdata(4689.89);
-//    XStore_Proto::fData *field2 = firstRow.add_fielddata();
-//    field2->set_doubledata(0.053417);
-//    XStore_Proto::fData *field3 = firstRow.add_fielddata();
-//    field3->set_int32data(61458);
-//    XStore_Proto::fData *field4 = firstRow.add_fielddata();
-//    field4->set_int32data(69180);
-//    XStore_Proto::fData *field5 = firstRow.add_fielddata();
-//    field5->set_int32data(69180);
-//    XStore_Proto::fData *field6 = firstRow.add_fielddata();
-//    field6->set_booldata(true);
-
-//    std::string input = firstRow.SerializeAsString();
 
 //    std::ifstream file;
 //    file.open("/home/ubuntu/candlesticks-S_cleaned.csv");
