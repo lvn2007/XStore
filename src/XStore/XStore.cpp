@@ -3490,7 +3490,7 @@ void XStore::avgAggregate(const unsigned long long int &startEpochT, const unsig
 
     // Check if there's no data (0 row)
     if (rawRangeData.queryresponse_size() < 1) {
-        opStatus = fmt::format("[ERROR] [SUM AGGREGATE] [DB: {}] - Data is empty (0 row)", dbName, columnIdx);
+        opStatus = fmt::format("[ERROR] [AVG AGGREGATE] [DB: {}] - Data is empty (0 row)", dbName, columnIdx);
         returnData->set_opstatus(opStatus);
         spdlog::error(opStatus.substr(ERROR_LEN));
         return;
