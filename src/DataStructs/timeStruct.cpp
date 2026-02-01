@@ -1,7 +1,7 @@
-#include "include/dataStructs/timeStruct.h"
+#include "include/DataStructs/timeStruct.h"
 
 // Constructor
-timeStruct::timeStruct(std::time_t unixTime, XStore_Proto::timeUnit timeResolution) {
+timeStruct::timeStruct(std::time_t unixTime, XStore_Proto::TimeUnit timeResolution) {
     this->unixTime = unixTime;
     this->timeResolution = timeResolution;
     this->extractTimeComponents();

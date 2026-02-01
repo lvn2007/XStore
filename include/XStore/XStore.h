@@ -16,10 +16,10 @@
 #include <sys/file.h>
 #include <execution>
 #include "XStore.pb.h"
-#include "include/dataStructs/timeStruct.h"
-#include "include/dataStructs/dataStruct.h"
-#include "include/dataStructs/fileStruct.h"
-#include "include/dataStructs/configStruct.h"
+#include "include/DataStructs/timeStruct.h"
+#include "include/DataStructs/dataStruct.h"
+#include "include/DataStructs/fileStruct.h"
+#include "include/DataStructs/configStruct.h"
 #include "include/Logger/spdlog/fmt/fmt.h"
 #include "include/Logger/Logger.h"
 
@@ -50,7 +50,7 @@ class XStore {
         XStore_Proto::sysInfo_REP infoQuery(std::string serverAddr, int threadCount);
 
         // CREATING new DB instance with row length
-        XStore_Proto::createDB_REP createDB(std::string dbName, XStore_Proto::timeUnit timeResolution, short int rowLength);
+        XStore_Proto::API_Response CreateDB(std::string &DBName, XStore_Proto::TimeUnit TimeResolution, int RowLength);
 
         // REMOVE DB -- Removing an entire DB and its data files
         XStore_Proto::removeDB_REP removeDB(std::string dbName);

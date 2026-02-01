@@ -3,27 +3,65 @@ option optimize_for = SPEED;
 package XStore_Proto;
 
 // ======== COMMAND directives section ========
-enum requestType {
+enum RequestType {
   INFO = 0;
-  CREATEDB = 1;
-  REMOVEDB = 2;
-  REMOVEDBFILES = 3;
-  UNARYINSERT = 4;
-  UNARYQUERY = 5;
-  UNARYDELETE = 6;
-  BATCHINSERT = 7;
-  BATCHQUERY = 8;
-  BATCHDELETE = 9;
-  RANGEINSERT = 10;
-  RANGEQUERY = 11;
-  RANGEDELETE = 12;
-  MIN = 13;
-  MAX = 14;
-  SUM = 15;
-  AVG = 16;
+  CREATE_DB = 1;
+  REMOVE_DB = 2;
+  UNARYINSERT = 3;
+  UNARYQUERY = 4;
+  UNARYDELETE = 5;
+  BATCHINSERT = 6;
+  BATCHQUERY = 7;
+  BATCHDELETE = 8;
+  RANGEINSERT = 9;
+  RANGEQUERY = 10;
+  RANGEDELETE = 11;
+  MIN = 12;
+  MAX = 13;
+  SUM = 14;
+  AVG = 15;
+
+  // METADATA SERVER
+  METADATA_UPDATE = 16;
 }
 
-enum timeUnit {
+// ----- NEW
+message MonthYearTag {
+  repeated string MonthYearTag = 1;
+}
+
+message DataBase {
+  map<string, MonthYearTag> DataEntries= 1;
+}
+
+message DataNode {
+  string IpAddress = 1;
+  float CpuLoad = 2;
+  DataBase DataBases = 3;
+}
+
+message Metadata {
+  map<string, DataNode> DataNodeMap = 1;
+}
+
+message API_Response {
+  STATUS_CODE StatusCode = 1;
+  string details = 2;
+}
+
+enum STATUS_CODE {
+  SUCCESS = 0;
+  ERROR = 1;
+}
+
+message Metadata_Update_REQ {
+  RequestType RType = 1;
+  DataNode DataNode = 2;
+}
+
+//
+
+enum TimeUnit {
   SECOND = 0;
   MILLISECOND = 1;
   MICROSECOND = 2;
@@ -32,7 +70,7 @@ enum timeUnit {
 
 message configStruct {
   string dbName = 1;
-  timeUnit timeResolution = 2;
+  TimeUnit timeResolution = 2;
   sfixed32 rowLength = 3;
 }
 
@@ -64,35 +102,42 @@ message multipleRowData {
   repeated rowData rData = 1;
 }
 
-message reqCMD {
-  requestType rType = 1;
+message ReqCMD {
+  RequestType RType = 1;
 }
 
 // ======== REQUESTS section ========
 // --- CREATE DB request
+message CreateDB_REQ {
+  RequestType RType = 1;
+  string DBName = 2;
+  TimeUnit TimeResolution = 3;
+  uint32 RowLength = 4;
+}
+
 message createDB_REQ {
-  requestType rType = 1;
+  RequestType rType = 1;
   string dbName = 2;
-  timeUnit timeResolution = 3;
+  TimeUnit timeResolution = 3;
   uint32 rowLength = 4;
 }
 
 // --- REMOVE DB request
 message removeDB_REQ {
-  requestType rType = 1;
+  RequestType rType = 1;
   string dbName = 2;
 }
 
 // --- REMOVE DB FILES request
 message removeDBFiles_REQ {
-  requestType rType = 1;
+  RequestType rType = 1;
   string dbName = 2;
   repeated string fileName = 3;
 }
 
 // --- UNARY INSERT
 message unaryInsert_REQ {
-  requestType rType = 1;
+  RequestType rType = 1;
   uint64 timestamp = 2;
   rowData data = 3;
   string dbName = 4;
@@ -100,14 +145,14 @@ message unaryInsert_REQ {
 
 // --- UNARY QUERY
 message unaryQuery_REQ {
-  requestType rType = 1;
+  RequestType rType = 1;
   uint64 timestamp = 2;
   string dbName = 3;
 }
 
 // --- UNARY DELETE
 message unaryDelete_REQ {
-  requestType rType = 1;
+  RequestType rType = 1;
   uint64 timestamp = 2;
   string dbName = 3;
 }
@@ -120,21 +165,21 @@ message batchInsert_DATA {
 
 // --- BATCH INSERT
 message batchInsert_REQ {
-  requestType rType = 1;
+  RequestType rType = 1;
   string dbName = 2;
   repeated batchInsert_DATA batchInsert_DATA = 3;
 }
 
 // --- BATCH QUERY
 message batchQuery_REQ {
-  requestType rType = 1;
+  RequestType rType = 1;
   repeated uint64 timestamp = 2;
   string dbName = 3;
 }
 
 // --- BATCH DELETE
 message batchDelete_REQ {
-  requestType rType = 1;
+  RequestType rType = 1;
   repeated uint64 timestamp = 2;
   string dbName = 3;
 }
@@ -147,14 +192,14 @@ message rangeInsert_DATA {
 
 // --- RANGE INSERT
 message rangeInsert_REQ {
-  requestType rType = 1;
+  RequestType rType = 1;
   string dbName = 2;
   repeated rangeInsert_DATA rangeInsert_DATA = 3;
 }
 
 // --- RANGE QUERY
 message rangeQuery_REQ {
-  requestType rType = 1;
+  RequestType rType = 1;
   uint64 startTime = 2;
   uint64 endTime = 3;
   string dbName = 4;
@@ -162,7 +207,7 @@ message rangeQuery_REQ {
 
 // --- RANGE DELETE
 message rangeDelete_REQ {
-  requestType rType = 1;
+  RequestType rType = 1;
   uint64 startTime = 2;
   uint64 endTime = 3;
   string dbName = 4;
@@ -170,7 +215,7 @@ message rangeDelete_REQ {
 
 // --- MIN
 message min_REQ {
-  requestType rType = 1;
+  RequestType rType = 1;
   uint64 startTime = 2;
   uint64 endTime = 3;
   string dbName = 4;
@@ -179,7 +224,7 @@ message min_REQ {
 
 // --- MAX
 message max_REQ {
-  requestType rType = 1;
+  RequestType rType = 1;
   uint64 startTime = 2;
   uint64 endTime = 3;
   string dbName = 4;
@@ -188,7 +233,7 @@ message max_REQ {
 
 // --- SUM
 message sum_REQ {
-  requestType rType = 1;
+  RequestType rType = 1;
   uint64 startTime = 2;
   uint64 endTime = 3;
   string dbName = 4;
@@ -197,7 +242,7 @@ message sum_REQ {
 
 // --- AVG
 message avg_REQ {
-  requestType rType = 1;
+  RequestType rType = 1;
   uint64 startTime = 2;
   uint64 endTime = 3;
   string dbName = 4;
@@ -208,7 +253,7 @@ message avg_REQ {
 // --- DB Stats & Info REP
 message dbStats {
   string dbName = 1;
-  timeUnit dbResolution = 2;
+  TimeUnit dbResolution = 2;
   uint64 totalSizeInByte = 3;
   repeated string fileName = 4;
 }
@@ -218,11 +263,6 @@ message sysInfo_REP {
   string serverAddr = 1;
   int32 threadCount = 2;
   repeated dbStats dbInfo = 3;
-}
-
-// --- CREATE DB response
-message createDB_REP {
-  string createDBStatus = 1;
 }
 
 // --- REMOVE DB

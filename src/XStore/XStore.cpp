@@ -62,29 +62,30 @@ XStore_Proto::sysInfo_REP XStore::infoQuery(std::string serverAddr, int threadCo
     return toReturn;
 }
 
-XStore_Proto::createDB_REP XStore::createDB(std::string dbName, XStore_Proto::timeUnit timeResolution, short int rowLength) {
+XStore_Proto::API_Response XStore::CreateDB(std::string &DBName, XStore_Proto::TimeUnit TimeResolution, int RowLength) {
     // Protobuf obj to be returned
-    XStore_Proto::createDB_REP toReturn;
-    std::string createDBStatus;
+    XStore_Proto::API_Response ToReturn;
+    std::string CreateDBStatus;
 
     // Ensure dbName & timeResolution string is all capitalized
-    toUpperCase(dbName.begin(), dbName.end());
+    toUpperCase(DBName.begin(), DBName.end());
 
-    if (rowLength < 4) {
-        createDBStatus = fmt::format("[ERROR] [CREATE DB] [DB: {}] - Row length must be >= 4", dbName);
-        toReturn.set_createdbstatus(createDBStatus);
-        spdlog::error(createDBStatus.substr(ERROR_LEN));
-        return toReturn;
+    if (RowLength < 4) {
+        CreateDBStatus = fmt::format("[ERROR] [CREATE DB] [DB: {}] - Row length must be >= 4", DBName);
+        ToReturn.set_statuscode(XStore_Proto::ERROR);
+        ToReturn.set_details(CreateDBStatus);
+        spdlog::error(CreateDBStatus.substr(ERROR_LEN));
+        return ToReturn;
     }
 
     // Target directory of a given DB name
-    std::string targetPath = fmt::format("{}dataStore/{}/", baseDir, dbName);
+    std::string targetPath = fmt::format("{}DataStore/{}/", baseDir, DBName);
 
     // IF folder for dbName is already created
     //  -> Inform user about the error
     if (std::filesystem::is_directory(targetPath) == 0) {
         // Check if within permitted time resolution bounds
-        if (std::find(std::begin(permittedTimeResolution), std::end(permittedTimeResolution), XStore_Proto::timeUnit_Name(timeResolution)) == std::end(permittedTimeResolution)) {
+        if (std::find(std::begin(permittedTimeResolution), std::end(permittedTimeResolution), XStore_Proto::TimeUnit_Name(timeResolution)) == std::end(permittedTimeResolution)) {
             createDBStatus = fmt::format("[ERROR] [CREATE DB] [DB: {}] - Invalid time resolution", dbName);
             toReturn.set_createdbstatus(createDBStatus);
             spdlog::error(createDBStatus.substr(ERROR_LEN));

@@ -1,4 +1,4 @@
-#include "include/dataStructs/dataStruct.h"
+#include "include/DataStructs/dataStruct.h"
 
 // Constructor
 dataStruct::dataStruct(std::time_t unixTime, std::string data) {

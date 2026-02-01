@@ -1,0 +1,9 @@
+{
+  "MetadataNodes": [
+    "192.168.1.104:9497"
+  ],
+  "DataNodes": [
+    "192.168.1.104:1234"
+  ],
+  "ReplicationFactor": 1
+}

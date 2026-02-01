@@ -1,4 +1,4 @@
-#include "include/dataStructs/fileStruct.h"
+#include "include/DataStructs/fileStruct.h"
 
 // Constructor
 fileStruct::fileStruct(std::string dbName, std::string baseDir) {

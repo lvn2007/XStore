@@ -41,6 +41,9 @@ if(NOT TARGET Zstd::Zstd)
             INTERFACE_INCLUDE_DIRECTORIES "${Zstd_INCLUDE_DIR}")
 endif()
 
+# JSON
+include_directories(include/JSON/json.hpp)
+
 # Protobuf
 find_package(Protobuf REQUIRED)
 find_package(absl REQUIRED)
@@ -79,13 +82,16 @@ include_directories(.)
 include_directories(include)
 include_directories(src)
 
-add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h src/dataStructs/dataStruct.cpp
-        include/dataStructs/dataStruct.h ${PROTO_SRCS} ${PROTO_HDRS} src/dataStructs/fileStruct.cpp
-        include/dataStructs/fileStruct.h include/Networking/zmq.hpp include/Networking/zmq_addon.hpp
-        include/Networking/XStore_zmqServer.h src/XStore_Networking/XStore_zmqServer.cpp
-        include/Networking/zhelpers.hpp src/dataStructs/configStruct.cpp include/dataStructs/configStruct.h
-        include/dataStructs/timeStruct.h src/dataStructs/timeStruct.cpp
-        include/Compression/shoco.h src/Compression/shoco.cpp include/Compression/shoco_model.h include/Compression/zstdpp.hpp
-        include/Logger/Logger.h)
+add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h src/DataStructs/dataStruct.cpp
+        include/DataStructs/dataStruct.h ${PROTO_SRCS} ${PROTO_HDRS} src/DataStructs/fileStruct.cpp
+        include/DataStructs/fileStruct.h include/Networking/zmq.hpp include/Networking/zmq_addon.hpp
+        include/Networking/XStore_MetadataServer.h src/XStore_Networking/XStore_MetadataServer.cpp
+        include/Networking/XStore_DataServer.h src/XStore_Networking/XStore_DataServer.cpp
+        include/Networking/zhelpers.hpp src/DataStructs/configStruct.cpp include/DataStructs/configStruct.h
+        include/DataStructs/timeStruct.h src/DataStructs/timeStruct.cpp include/JSON/json.hpp
+        include/Utilities/Utilities.h src/Utilities/Utilities.cpp
+        include/Compression/zstdpp.hpp
+        include/Logger/Logger.h include/Argparse/argparse.hpp)
 
-target_link_libraries(XStore PUBLIC "stdc++fs" protobuf::libprotobuf "zmq" Threads::Threads absl::log_internal_check_op)
+#target_link_libraries(XStore PUBLIC "stdc++fs" protobuf::libprotobuf "zmq" Threads::Threads absl::log_internal_check_op)
+target_link_libraries(XStore PUBLIC "stdc++fs" protobuf::libprotobuf "zmq" Threads::Threads)

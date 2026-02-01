@@ -8,7 +8,7 @@
 
 class Logger {
     public:
-        Logger(spdlog::level::level_enum CONSOLE_LEVEL, spdlog::level::level_enum FILE_LEVEL, unsigned short int flushInterval = 5) {
+        Logger(const std::string& SERVER_NAME, spdlog::level::level_enum CONSOLE_LEVEL, spdlog::level::level_enum FILE_LEVEL, unsigned short int flushInterval = 5) {
             // Console outputs
             std::shared_ptr<spdlog::sinks::sink> consoleSink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
             consoleSink->set_level(CONSOLE_LEVEL);
@@ -18,7 +18,7 @@ class Logger {
             fileSink->set_level(FILE_LEVEL);
 
             // Group multi-sinks into one entity
-            std::shared_ptr<spdlog::logger> logger = std::make_shared<spdlog::logger>(spdlog::logger("SERVER", {consoleSink, fileSink}));
+            std::shared_ptr<spdlog::logger> logger = std::make_shared<spdlog::logger>(spdlog::logger(SERVER_NAME, {consoleSink, fileSink}));
             logger->set_level(spdlog::level::trace);
             spdlog::set_default_logger(logger);
             spdlog::flush_every(std::chrono::seconds(flushInterval));
