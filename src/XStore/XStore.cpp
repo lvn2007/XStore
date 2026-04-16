@@ -487,7 +487,7 @@ void XStore::batchInsert(XStore_Proto::batchInsert_REQ *protoFromClient, XStore_
 }
 
 // BATCH QUERY
-void XStore::batchQuery(XStore_Proto::batchQuery_REQ *protoFromClient, XStore_Proto::batchQuery_REP *returnData) {
+void XStore::batchQuery(XStore_Proto::batchQuery_REQ *protoFromClient, XStore_Proto::batchQuery_REP *returnData, bool SortTime) {
     // Protobuf obj to be returned
     XStore_Proto::rowData tempData;
 
@@ -539,10 +539,13 @@ void XStore::batchQuery(XStore_Proto::batchQuery_REQ *protoFromClient, XStore_Pr
 
     // Assuming incoming batch query is unsorted
     //  -> Ascending sort
-    std::sort(std::execution::par_unseq, protoFromClient->mutable_timestamp()->begin(), protoFromClient->mutable_timestamp()->end(),
-              [](const unsigned long long int& a, const unsigned long long int& b) {
-                return a < b;
-    });
+    if (SortTime)
+    {
+        std::sort(std::execution::par_unseq, protoFromClient->mutable_timestamp()->begin(), protoFromClient->mutable_timestamp()->end(),
+                      [](const unsigned long long int& a, const unsigned long long int& b) {
+                        return a < b;
+        });
+    }
 
     // Organize incoming batch query into map
     //  dataMap[2016] = Vector {Index 0, Index 1, ...}
