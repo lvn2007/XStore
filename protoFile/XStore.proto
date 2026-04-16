@@ -130,6 +130,7 @@ message batchQuery_REQ {
   requestType rType = 1;
   repeated uint64 timestamp = 2;
   string dbName = 3;
+  bool SortTime = 4;
 }
 
 // --- BATCH DELETE

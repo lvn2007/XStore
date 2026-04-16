@@ -274,7 +274,7 @@ class XStoreClient:
         # return QueryResults(queryResults, recvObj.queryStatus)
         return recvObj
 
-    def batchQuery(self, dataList, targetDBName):
+    def batchQuery(self, dataList, targetDBName, SortTime=False):
         """
         :param dataList:
         :param targetDBName:
@@ -284,6 +284,7 @@ class XStoreClient:
         batchQuery_REQ = XStore_Proto.batchQuery_REQ()
         batchQuery_REQ.rType = XStore_Proto.BATCHQUERY
         batchQuery_REQ.dbName = targetDBName
+        batchQuery_REQ.SortTime = SortTime
 
         # Loop through each data and add to batchQuery_REQ
         for targetTime in dataList:
