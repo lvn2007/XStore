@@ -347,7 +347,7 @@ void* XStore_zmqServer::workerRoutine(void *args) {
                 // XStore stuffs
                 //  Returning Protobuf obj
                 XStore_Proto::min_REP protoToClient;
-                myStore.minAggregateV2(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname(), protoFromClient.columnidx(), &protoToClient);
+                myStore.minAggregateV3(protoFromClient.starttime(), protoFromClient.endtime(), protoFromClient.dbname(), protoFromClient.columnidx(), &protoToClient);
 
                 //  Response message
                 size_t protoToClientSize = protoToClient.ByteSizeLong();

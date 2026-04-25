@@ -1269,6 +1269,133 @@ XStore_Proto::rangeDelete_REP XStore::rangeDelete(const unsigned long long int &
     return toReturn;
 }
 
+void XStore::processFileRange(FILE* bFile, unsigned long long startOffset, unsigned long long totalRows,
+                             size_t rowLen, unsigned short columnIdx,
+                             valueStruct& minValue, XStore_Proto::fData& minData) {
+
+    if (totalRows == 0) return;
+
+    int fd = fileno(bFile);
+    long pageSize = sysconf(_SC_PAGE_SIZE);
+
+    // 1. Calculate Page Alignment
+    unsigned long long alignedOffset = (startOffset / pageSize) * pageSize;
+    unsigned long long alignmentSlop = startOffset - alignedOffset;
+    size_t totalBytesToMap = (totalRows * rowLen) + alignmentSlop;
+
+    // 2. Map the file
+    void* mmappedPtr = mmap(NULL, totalBytesToMap, PROT_READ, MAP_SHARED, fd, alignedOffset);
+    if (mmappedPtr == MAP_FAILED) return;
+
+    // Use MADV_SEQUENTIAL to tell the RAID-0 array to pre-fetch aggressively
+    madvise(mmappedPtr, totalBytesToMap, MADV_SEQUENTIAL | MADV_WILLNEED);
+
+    const char* basePtr = static_cast<const char*>(mmappedPtr) + alignmentSlop;
+    XStore_Proto::rowData tempData;
+    valueStruct tempValue;
+
+    for (unsigned long long i = 0; i < totalRows; ++i) {
+        const char* rowPtr = basePtr + (i * rowLen);
+
+        // Instant skip for empty slots
+        if (rowPtr[0] == 0) continue;
+
+        tempData.Clear();
+
+        // 3. The Correct Parsing Strategy for Fixed-Width Rows
+        // We MUST use CodedInputStream to properly ignore trailing zeros in the 1536-byte slot
+        google::protobuf::io::ArrayInputStream arrayIn(rowPtr, (int)rowLen);
+        google::protobuf::io::CodedInputStream codedIn(&arrayIn);
+
+        // MergePartialFromCodedStream stops at the end of the message, ignoring padding
+        if (!tempData.MergePartialFromCodedStream(&codedIn)) {
+            continue;
+        }
+
+        if (columnIdx < (unsigned int)tempData.fielddata_size()) {
+            const auto& currData = tempData.fielddata(columnIdx);
+
+            if (currData.oneOfData_case() > 0 && currData.oneOfData_case() <= 12) {
+                XStore::getFDataValue(&currData, &tempValue);
+
+                if (!minValue.isInitialized || tempValue.value < minValue.value) {
+                    minValue.value = tempValue.value;
+                    minValue.isInitialized = true;
+                    minData = currData;
+                }
+            }
+        }
+    }
+
+    munmap(mmappedPtr, totalBytesToMap);
+}
+
+void XStore::minAggregateV3(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT,
+                            std::string dbName, unsigned short int columnIdx, XStore_Proto::min_REP *returnData) {
+
+    toUpperCase(dbName.begin(), dbName.end());
+    std::string dbBasePath = fmt::format("{}dataStore/{}/", baseDir, dbName);
+
+    // Config Fetching
+    XStore_Proto::configStruct cfgStruct;
+    if (cfgMap.find(dbName) == cfgMap.end()) {
+        std::string cfgPath = dbBasePath + dbName + ".CFG";
+        if (!std::filesystem::exists(cfgPath)) { /* Handle Error... */ return; }
+        FILE *cFile = std::fopen(cfgPath.c_str(), "rb");
+        cfgStruct.ParseFromFileDescriptor(fileno(cFile));
+        std::fclose(cFile);
+        cfgMap[dbName] = cfgStruct;
+    } else {
+        cfgStruct = cfgMap[dbName];
+    }
+
+    // Safety Checks
+    if (startEpochT > endEpochT) { /* Handle Error... */ return; }
+
+    valueStruct minValue;
+    minValue.isInitialized = false;
+    XStore_Proto::fData minData;
+
+    unsigned long long iterEpoch = startEpochT;
+
+    // The logic below handles both single-year and multi-year spans efficiently
+    while (iterEpoch <= endEpochT) {
+        timeStruct currTS(iterEpoch, cfgStruct.timeresolution());
+        std::string targetFilePath = fmt::format("{}{}.XSTORE", dbBasePath, currTS.year);
+
+        // Determine the end of the current file range
+        unsigned long long endOfCurrentFile = std::min(endEpochT, (unsigned long long)currTS.lastEpoch);
+        unsigned long long rowsToProcess = (endOfCurrentFile - iterEpoch) + 1;
+
+        if (std::filesystem::exists(targetFilePath)) {
+            FILE* bFile = std::fopen(targetFilePath.c_str(), "rb");
+            if (bFile) {
+                unsigned long long firstOffset = (iterEpoch - currTS.firstEpoch) * cfgStruct.rowlength();
+                unsigned long long regionLength = rowsToProcess * cfgStruct.rowlength();
+
+                rdLockFile(bFile, firstOffset, regionLength);
+
+                // CALL THE OPTIMIZED HELPER
+                processFileRange(bFile, firstOffset, rowsToProcess, cfgStruct.rowlength(), columnIdx, minValue, minData);
+
+                unlockFile(bFile, firstOffset, regionLength);
+                std::fclose(bFile);
+            }
+        }
+
+        // Move to the start of the next year
+        iterEpoch = endOfCurrentFile + 1;
+    }
+
+    // Return Results
+    if (minValue.isInitialized) {
+        returnData->set_opstatus("SUCCESS");
+        *returnData->mutable_opresult() = minData;
+    } else {
+        returnData->set_opstatus("ERROR: No valid data found");
+    }
+}
+
 void XStore::minAggregateV2(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::min_REP *returnData) {
     // Protobuf obj to be returned
     std::string opStatus;
