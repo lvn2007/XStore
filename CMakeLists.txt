@@ -56,7 +56,7 @@ set(_PROTOBUF_PROTOC $<TARGET_FILE:protobuf::protoc>)
 message(STATUS "Using Protobuf ${Protobuf_VERSION}")
 
 # Proto file
-get_filename_component(XStore_proto "protoFile/XStore.proto" ABSOLUTE)
+get_filename_component(XStore_proto "ProtoFile/XStore.proto" ABSOLUTE)
 get_filename_component(XStore_proto_path "${XStore_proto}" PATH)
 
 set(PROTO_SRCS "${CMAKE_CURRENT_BINARY_DIR}/XStore.pb.cc")

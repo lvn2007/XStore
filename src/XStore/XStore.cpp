@@ -3882,7 +3882,7 @@ void XStore::unlockFile(FILE *bFile, unsigned long int startRange, unsigned long
     }
 }
 
-void XStore::getFDataValue(XStore_Proto::fData *fDataInput, unsigned int columnIdx, valueStruct *returnData) {
+void XStore::getFDataValue(const XStore_Proto::fData *fDataInput, unsigned int columnIdx, valueStruct *returnData) {
     switch (fDataInput->oneOfData_case()) {
         case (XStore_Proto::fData::OneOfDataCase::kDoubleData): {
             returnData->index = columnIdx;
@@ -3958,7 +3958,7 @@ void XStore::getFDataValue(XStore_Proto::fData *fDataInput, unsigned int columnI
     }
 }
 
-void XStore::getFDataValue(XStore_Proto::fData *fDataInput, valueStruct *returnData) {
+void XStore::getFDataValue(const XStore_Proto::fData *fDataInput, valueStruct *returnData) {
     switch (fDataInput->oneOfData_case()) {
         case (XStore_Proto::fData::OneOfDataCase::kDoubleData): {
             returnData->value = fDataInput->doubledata();
