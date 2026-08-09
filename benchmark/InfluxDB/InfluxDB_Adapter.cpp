@@ -4,12 +4,12 @@
 // Threading library
 static BS::thread_pool threadPool;
 
-std::vector<double> InfluxDB_Adapter::unaryQuery(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *queryData, std::string pattern, bool isDebug) {
+std::vector<double> InfluxDB_Adapter::UnaryQuery(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *queryData, std::string pattern, bool isDebug) {
     BS::multi_future<std::vector<double>> multiFuture;
     std::vector<std::vector<double>> nestedVector;
 
     for (int i = 0; i < NUM_THREAD; i++) {
-        multiFuture.push_back(threadPool.submit(InfluxDB_Adapter::unaryQuery_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &queryData->at(i), isDebug));
+        multiFuture.push_back(threadPool.submit(InfluxDB_Adapter::UnaryQuery_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &queryData->at(i), isDebug));
     }
 
     // Wait till all threads finishes
@@ -22,18 +22,18 @@ std::vector<double> InfluxDB_Adapter::unaryQuery(std::string SERVER_ADDR, std::s
     // Flattening nested vector
     for (int i = 0; i < nestedVector.size(); i++) {
         // Write experiment result to CSV
-        writeCSV(fmt::format("QUERY-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
+        WriteCSV(fmt::format("QUERY-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
         std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
     }
     return timeCost;
 }
 
-std::vector<double> InfluxDB_Adapter::rangeQuery(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *queryData, std::string pattern, bool isDebug) {
+std::vector<double> InfluxDB_Adapter::RangeQuery(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *queryData, std::string pattern, bool isDebug) {
     BS::multi_future<std::vector<double>> multiFuture;
     std::vector<std::vector<double>> nestedVector;
 
     for (int i = 0; i < NUM_THREAD; i++) {
-        multiFuture.push_back(threadPool.submit(InfluxDB_Adapter::rangeQuery_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &queryData->at(i), isDebug));
+        multiFuture.push_back(threadPool.submit(InfluxDB_Adapter::RangeQuery_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &queryData->at(i), isDebug));
     }
 
     // Wait till all threads finishes
@@ -46,52 +46,23 @@ std::vector<double> InfluxDB_Adapter::rangeQuery(std::string SERVER_ADDR, std::s
     // Flattening nested vector
     for (int i = 0; i < nestedVector.size(); i++) {
         // Write experiment result to CSV
-        writeCSV(fmt::format("QUERY-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
+        WriteCSV(fmt::format("QUERY-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
         std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
     }
     return timeCost;
 }
 
-std::vector<double> InfluxDB_Adapter::unaryInsert(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *insertData, std::string pattern, bool isDebug) {
-    BS::multi_future<std::vector<double>> multiFuture;
-    std::vector<std::vector<double>> nestedVector;
-
-    // Create BENCH_DB
-    std::string dbName = "BENCH_DB";
-    InfluxDB_Adapter::createDB(SERVER_ADDR, SERVER_PORT, dbName, &insertData->at(0).at(0));
-
-    // Extracting insertData so that each thread will have unique insert data
-    for (int i = 0; i < NUM_THREAD; i++) {
-        multiFuture.push_back(threadPool.submit(InfluxDB_Adapter::unaryInsert_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &insertData->at(i), isDebug));
-    }
-
-    // Wait till all threads finishes
-    for (std::vector<double> i : multiFuture.get()) {
-        nestedVector.push_back(i);
-    }
-
-    std::vector<double> timeCost;
-
-    // Flattening nested vector
-    for (int i = 0; i < nestedVector.size(); i++) {
-        // Write experiment result to CSV
-        writeCSV(fmt::format("INSERT-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
-        std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
-    }
-    return timeCost;
-}
-
-std::vector<double> InfluxDB_Adapter::batchInsert(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *insertData, std::string pattern, bool isDebug) {
+std::vector<double> InfluxDB_Adapter::UnaryInsert(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *insertData, std::string pattern, bool isDebug) {
     BS::multi_future<std::vector<double>> multiFuture;
     std::vector<std::vector<double>> nestedVector;
 
     // Create BENCH_DB
     std::string dbName = "BENCH_DB";
-    InfluxDB_Adapter::createDB(SERVER_ADDR, SERVER_PORT, dbName, &insertData->at(0).at(0));
+    InfluxDB_Adapter::CreateDB(SERVER_ADDR, SERVER_PORT, dbName, &insertData->at(0).at(0));
 
     // Extracting insertData so that each thread will have unique insert data
     for (int i = 0; i < NUM_THREAD; i++) {
-        multiFuture.push_back(threadPool.submit(InfluxDB_Adapter::batchInsert_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &insertData->at(i), isDebug));
+        multiFuture.push_back(threadPool.submit(InfluxDB_Adapter::UnaryInsert_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &insertData->at(i), isDebug));
     }
 
     // Wait till all threads finishes
@@ -104,13 +75,42 @@ std::vector<double> InfluxDB_Adapter::batchInsert(std::string SERVER_ADDR, std::
     // Flattening nested vector
     for (int i = 0; i < nestedVector.size(); i++) {
         // Write experiment result to CSV
-        writeCSV(fmt::format("INSERT-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
+        WriteCSV(fmt::format("INSERT-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
         std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
     }
     return timeCost;
 }
 
-std::vector<double> InfluxDB_Adapter::unaryInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData, bool isDebug) {
+std::vector<double> InfluxDB_Adapter::BatchInsert(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *insertData, std::string pattern, bool isDebug) {
+    BS::multi_future<std::vector<double>> multiFuture;
+    std::vector<std::vector<double>> nestedVector;
+
+    // Create BENCH_DB
+    std::string dbName = "BENCH_DB";
+    InfluxDB_Adapter::CreateDB(SERVER_ADDR, SERVER_PORT, dbName, &insertData->at(0).at(0));
+
+    // Extracting insertData so that each thread will have unique insert data
+    for (int i = 0; i < NUM_THREAD; i++) {
+        multiFuture.push_back(threadPool.submit(InfluxDB_Adapter::BatchInsert_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &insertData->at(i), isDebug));
+    }
+
+    // Wait till all threads finishes
+    for (std::vector<double> i : multiFuture.get()) {
+        nestedVector.push_back(i);
+    }
+
+    std::vector<double> timeCost;
+
+    // Flattening nested vector
+    for (int i = 0; i < nestedVector.size(); i++) {
+        // Write experiment result to CSV
+        WriteCSV(fmt::format("INSERT-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
+        std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
+    }
+    return timeCost;
+}
+
+std::vector<double> InfluxDB_Adapter::UnaryInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData, bool isDebug) {
     std::vector<double> toReturn;
 
     // Init InfluxDB instances
@@ -124,7 +124,7 @@ std::vector<double> InfluxDB_Adapter::unaryInsert_singleThread(std::string SERVE
     if (isDebug) {
         for (int i = 0; i < N_ITERATION; i++) {
             // Create Point
-            influxdb::Point currPoint = makeSinglePoint(&insertData->at(i));
+            influxdb::Point currPoint = MakeSinglePoint(&insertData->at(i));
 
             // Dispatch insert
             start = std::chrono::high_resolution_clock::now();
@@ -142,7 +142,7 @@ std::vector<double> InfluxDB_Adapter::unaryInsert_singleThread(std::string SERVE
     else {
         for (int i = 0; i < N_ITERATION; i++) {
             // Create Point
-            influxdb::Point currPoint = makeSinglePoint(&insertData->at(i));
+            influxdb::Point currPoint = MakeSinglePoint(&insertData->at(i));
 
             // Dispatch insert
             start = std::chrono::high_resolution_clock::now();
@@ -156,7 +156,7 @@ std::vector<double> InfluxDB_Adapter::unaryInsert_singleThread(std::string SERVE
     return toReturn;
 }
 
-std::vector<double> InfluxDB_Adapter::unaryQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData, bool isDebug) {
+std::vector<double> InfluxDB_Adapter::UnaryQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData, bool isDebug) {
     std::vector<double> toReturn;
 
     // Init InfluxDB instances
@@ -203,7 +203,7 @@ std::vector<double> InfluxDB_Adapter::unaryQuery_singleThread(std::string SERVER
     return toReturn;
 }
 
-std::vector<double> InfluxDB_Adapter::rangeQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData, bool isDebug) {
+std::vector<double> InfluxDB_Adapter::RangeQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData, bool isDebug) {
     std::vector<double> toReturn;
 
     // Init InfluxDB instances
@@ -259,7 +259,7 @@ std::vector<double> InfluxDB_Adapter::rangeQuery_singleThread(std::string SERVER
     return toReturn;
 }
 
-std::vector<double> InfluxDB_Adapter::batchInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData, bool isDebug) {
+std::vector<double> InfluxDB_Adapter::BatchInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData, bool isDebug) {
     std::vector<double> toReturn;
 
     // Init InfluxDB instances
@@ -277,7 +277,7 @@ std::vector<double> InfluxDB_Adapter::batchInsert_singleThread(std::string SERVE
             std::vector<influxdb::Point> currPoints;
 
             for (int j = 0; j < insertData->size(); j++) {
-                currPoints.push_back(makeSinglePoint(&insertData->at(j)));
+                currPoints.push_back(MakeSinglePoint(&insertData->at(j)));
             }
 
             // Dispatch insert
@@ -307,7 +307,7 @@ std::vector<double> InfluxDB_Adapter::batchInsert_singleThread(std::string SERVE
             std::vector<influxdb::Point> currPoints;
 
             for (int j = 0; j < insertData->size(); j++) {
-                currPoints.push_back(makeSinglePoint(&insertData->at(j)));
+                currPoints.push_back(MakeSinglePoint(&insertData->at(j)));
             }
 
             // Dispatch insert
@@ -328,7 +328,7 @@ std::vector<double> InfluxDB_Adapter::batchInsert_singleThread(std::string SERVE
     return toReturn;
 }
 
-void InfluxDB_Adapter::createDB(std::string SERVER_ADDR, std::string SERVER_PORT, std::string dbName, std::vector<std::any> *singleRowData) {
+void InfluxDB_Adapter::CreateDB(std::string SERVER_ADDR, std::string SERVER_PORT, std::string dbName, std::vector<std::any> *singleRowData) {
     // Init InfluxDB instances
     auto db = influxdb::InfluxDBFactory::Get(fmt::format("http://{}:{}?db={}", SERVER_ADDR, SERVER_PORT, dbName));
 
@@ -336,7 +336,7 @@ void InfluxDB_Adapter::createDB(std::string SERVER_ADDR, std::string SERVER_PORT
     db->createDatabaseIfNotExists();
 }
 
-influxdb::Point InfluxDB_Adapter::makeSinglePoint(std::vector<std::any> *insertData) {
+influxdb::Point InfluxDB_Adapter::MakeSinglePoint(std::vector<std::any> *insertData) {
     influxdb::Point toReturn{"BENCH_DB"};
 
     // Timestamp -- Variable as long int since bsoncxx doesn't recognize unsigned long int

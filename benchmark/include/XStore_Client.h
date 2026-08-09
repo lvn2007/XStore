@@ -6,17 +6,17 @@
 #include "XStore.pb.h"
 #include <any>
 
-struct dbInfo {
+struct DbInfo {
     std::string dbName;
-    XStore_Proto::timeUnit dbResolution;
+    XStore_Proto::TimeUnit dbResolution;
     float totalSizeInByte;
     std::vector<std::string> fileName;
 };
 
-struct sysInfo {
+struct SysInfo {
     std::string serverAddr;
     int numThreads;
-    std::vector<dbInfo> db_Info;
+    std::vector<DbInfo> db_Info;
 };
 
 class XStore_Client {
@@ -30,7 +30,7 @@ class XStore_Client {
             sock.connect(fullAddr);
         }
 
-        void setFieldData(XStore_Proto::fData *field, std::any *currentMetric) {
+        void setFieldData(XStore_Proto::FData *field, std::any *currentMetric) {
             if (currentMetric->type() == typeid(std::string)) {
                 field->set_stringdata(std::any_cast<std::string>(*currentMetric));
                 return;
@@ -45,7 +45,7 @@ class XStore_Client {
             }
         }
 
-//  std::string getCurrDT() {
+//  std::string GetCurrDT() {
 //      std::stringstream formattedTime;
 //      std::time_t timeNow = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
 //      formattedTime << std::put_time(std::localtime(&timeNow), "%b %d, %Y %r");
@@ -53,8 +53,8 @@ class XStore_Client {
 //      return toReturn;
 //  }
 
-//  sysInfo infoRequest() {
-//      XStore_Proto::reqCMD toServer;
+//  SysInfo InfoRequest() {
+//      XStore_Proto::ReqCMD toServer;
 //      toServer.set_rtype(XStore_Proto::INFO);
 //
 //      // Config msg and send
@@ -69,8 +69,8 @@ class XStore_Client {
 //      zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
 //
 //      // Received structs
-//      XStore_Proto::sysInfo_REP fromServer;
-//      sysInfo toReturn;
+//      XStore_Proto::SysInfo_REP fromServer;
+//      SysInfo toReturn;
 //
 //      fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
 //
@@ -80,7 +80,7 @@ class XStore_Client {
 //
 //      // Loop through info of all DB exists in server
 //      for (int i = 0; i < fromServer.dbinfo_size(); i++) {
-//          dbInfo currDB;
+//          DbInfo currDB;
 //          currDB.dbName = fromServer.dbinfo(i).dbname();
 //          currDB.dbResolution = fromServer.dbinfo(i).dbresolution();
 //          currDB.totalSizeInByte = fromServer.dbinfo(i).totalsizeinbyte();
@@ -95,8 +95,8 @@ class XStore_Client {
 //      return toReturn;
 //  }
 
-        XStore_Proto::createDB_REP createDB(std::string dbName, XStore_Proto::timeUnit &timeResolution, short int &rowLength) {
-            XStore_Proto::createDB_REQ toServer;
+        XStore_Proto::CreateDB_REP CreateDB(std::string dbName, XStore_Proto::TimeUnit &timeResolution, short int &rowLength) {
+            XStore_Proto::CreateDB_REQ toServer;
             toServer.set_rtype(XStore_Proto::CREATEDB);
             toServer.set_dbname(dbName);
             toServer.set_timeresolution(timeResolution);
@@ -114,14 +114,14 @@ class XStore_Client {
             zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
 
             // Received structs
-            XStore_Proto::createDB_REP fromServer;
+            XStore_Proto::CreateDB_REP fromServer;
 
             fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
             return fromServer;
         }
 
-        void unaryQuery(long int targetUnixTime, std::string targetDBName, XStore_Proto::unaryQuery_REP *returnData) {
-            XStore_Proto::unaryQuery_REQ toServer;
+        void UnaryQuery(long int targetUnixTime, std::string targetDBName, XStore_Proto::UnaryQuery_REP *returnData) {
+            XStore_Proto::UnaryQuery_REQ toServer;
             toServer.set_rtype(XStore_Proto::UNARYQUERY);
             toServer.set_timestamp(targetUnixTime);
             toServer.set_dbname(targetDBName);
@@ -141,8 +141,8 @@ class XStore_Client {
             returnData->ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
         }
 
-        void rangeQuery(unsigned long int startTime, unsigned long int endTime, std::string targetDBName, XStore_Proto::rangeQuery_REP *returnData) {
-            XStore_Proto::rangeQuery_REQ toServer;
+        void RangeQuery(unsigned long int startTime, unsigned long int endTime, std::string targetDBName, XStore_Proto::RangeQuery_REP *returnData) {
+            XStore_Proto::RangeQuery_REQ toServer;
             toServer.set_rtype(XStore_Proto::RANGEQUERY);
             toServer.set_starttime(startTime);
             toServer.set_endtime(endTime);
@@ -163,8 +163,8 @@ class XStore_Client {
             returnData->ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
         }
 
-        void batchQuery(std::vector<unsigned long int> timeList, std::string targetDBName, XStore_Proto::batchQuery_REP *returnData) {
-            XStore_Proto::batchQuery_REQ toServer;
+        void BatchQuery(std::vector<unsigned long int> timeList, std::string targetDBName, XStore_Proto::BatchQuery_REP *returnData) {
+            XStore_Proto::BatchQuery_REQ toServer;
             toServer.set_rtype(XStore_Proto::BATCHQUERY);
             toServer.set_dbname(targetDBName);
 
@@ -188,24 +188,24 @@ class XStore_Client {
             returnData->ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
         }
 
-        void unaryInsert(long int insertUnixTime, std::vector<std::any> *insertData, std::string dbName, XStore_Proto::unaryInsert_REP *returnData) {
-            XStore_Proto::unaryInsert_REQ toServer;
+        void UnaryInsert(long int insertUnixTime, std::vector<std::any> *insertData, std::string dbName, XStore_Proto::UnaryInsert_REP *returnData) {
+            XStore_Proto::UnaryInsert_REQ toServer;
             toServer.set_rtype(XStore_Proto::UNARYINSERT);
             toServer.set_timestamp(insertUnixTime);
             toServer.set_dbname(dbName);
 
             // Row data
-            XStore_Proto::rowData rowData;
+            XStore_Proto::RowData RowData;
 
-            // Loop through each item in a row -> Identify type and build rowData
+            // Loop through each item in a row -> Identify type and build RowData
             //  Skipping first element (timestamp) in a row
             for (int i = 1; i < insertData->size(); i++) {
-                XStore_Proto::fData *field = rowData.add_fielddata();
+                XStore_Proto::FData *field = RowData.add_fielddata();
                 setFieldData(field, &insertData->at(i));
             }
 
             // Add row data into Proto UNARY INSERT msg
-            *toServer.mutable_data() = rowData;
+            *toServer.mutable_data() = RowData;
 
             // Config msg and send
             size_t byteSize = toServer.ByteSizeLong();
@@ -222,7 +222,7 @@ class XStore_Client {
             returnData->ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
         }
 
-        void unaryInsert(XStore_Proto::unaryInsert_REQ *insertData, XStore_Proto::unaryInsert_REP *returnData) {
+        void UnaryInsert(XStore_Proto::UnaryInsert_REQ *insertData, XStore_Proto::UnaryInsert_REP *returnData) {
             // Config msg and send
             size_t byteSize = insertData->ByteSizeLong();
             zmq::message_t z_out(byteSize);
@@ -238,29 +238,29 @@ class XStore_Client {
             returnData->ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
         }
 
-        void rangeInsert(std::vector<std::vector<std::any>> *insertData, std::string dbName, XStore_Proto::rangeInsert_REP *returnData) {
-            XStore_Proto::rangeInsert_REQ toServer;
+        void RangeInsert(std::vector<std::vector<std::any>> *insertData, std::string dbName, XStore_Proto::RangeInsert_REP *returnData) {
+            XStore_Proto::RangeInsert_REQ toServer;
             toServer.set_rtype(XStore_Proto::RANGEINSERT);
             toServer.set_dbname(dbName);
 
             // Loop through each row
             for (int i = 0; i < insertData->size(); i++) {
-                XStore_Proto::rangeInsert_DATA *rangeInsertData = toServer.add_rangeinsert_data();
+                XStore_Proto::RangeInsert_DATA *rangeInsertData = toServer.add_rangeinsert_data();
 
                 // Build timestamp for current row of data
                 rangeInsertData->set_timestamp(std::any_cast<unsigned long int>(insertData->at(i).at(0)));
 
-                // Placeholder for rowData
-                XStore_Proto::rowData rowData;
+                // Placeholder for RowData
+                XStore_Proto::RowData RowData;
 
                 // Loop through each "column" in a row
                 for (int j = 1; j < insertData->at(i).size(); j++) {
-                    XStore_Proto::fData *field = rowData.add_fielddata();
+                    XStore_Proto::FData *field = RowData.add_fielddata();
                     setFieldData(field, &insertData->at(i).at(j));
                 }
 
                 // Merge message
-                rangeInsertData->mutable_data()->MergeFrom(rowData);
+                rangeInsertData->mutable_data()->MergeFrom(RowData);
             }
 
             // Config msg and send
@@ -278,7 +278,7 @@ class XStore_Client {
             returnData->ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
         }
 
-        void rangeInsert(XStore_Proto::rangeInsert_REQ *insertData, XStore_Proto::rangeInsert_REP *returnData) {
+        void RangeInsert(XStore_Proto::RangeInsert_REQ *insertData, XStore_Proto::RangeInsert_REP *returnData) {
             // Config msg and send
             size_t byteSize = insertData->ByteSizeLong();
             zmq::message_t z_out(byteSize);
@@ -294,29 +294,29 @@ class XStore_Client {
             returnData->ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
         }
 
-        void batchInsert(std::vector<std::vector<std::any>> *insertData, std::string dbName, XStore_Proto::batchInsert_REP *returnData) {
-            XStore_Proto::batchInsert_REQ toServer;
+        void BatchInsert(std::vector<std::vector<std::any>> *insertData, std::string dbName, XStore_Proto::BatchInsert_REP *returnData) {
+            XStore_Proto::BatchInsert_REQ toServer;
             toServer.set_rtype(XStore_Proto::BATCHINSERT);
             toServer.set_dbname(dbName);
 
             // Loop through each row
             for (int i = 0; i < insertData->size(); i++) {
-                XStore_Proto::batchInsert_DATA *batchInsertData = toServer.add_batchinsert_data();
+                XStore_Proto::BatchInsert_DATA *batchInsertData = toServer.add_batchinsert_data();
 
                 // Build timestamp for current row of data
                 batchInsertData->set_timestamp(std::any_cast<unsigned long int>(insertData->at(i).at(0)));
 
-                // Placeholder for rowData
-                XStore_Proto::rowData rowData;
+                // Placeholder for RowData
+                XStore_Proto::RowData RowData;
 
                 // Loop through each "column" in a row
                 for (int j = 1; j < insertData->at(i).size(); j++) {
-                    XStore_Proto::fData *field = rowData.add_fielddata();
+                    XStore_Proto::FData *field = RowData.add_fielddata();
                     setFieldData(field, &insertData->at(i).at(j));
                 }
 
                 // Merge message
-                batchInsertData->mutable_data()->MergeFrom(rowData);
+                batchInsertData->mutable_data()->MergeFrom(RowData);
             }
 
             // Config msg and send
@@ -334,7 +334,7 @@ class XStore_Client {
             returnData->ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
         }
 
-        void batchInsert(XStore_Proto::batchInsert_REQ *insertData, XStore_Proto::batchInsert_REP *returnData) {
+        void BatchInsert(XStore_Proto::BatchInsert_REQ *insertData, XStore_Proto::BatchInsert_REP *returnData) {
             // Config msg and send
             size_t byteSize = insertData->ByteSizeLong();
             zmq::message_t z_out(byteSize);
@@ -350,8 +350,8 @@ class XStore_Client {
             returnData->ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
         }
 
-        XStore_Proto::removeDB_REP removeDB(std::string dbName) {
-            XStore_Proto::removeDB_REQ toServer;
+        XStore_Proto::RemoveDB_REP RemoveDB(std::string dbName) {
+            XStore_Proto::RemoveDB_REQ toServer;
             toServer.set_rtype(XStore_Proto::REMOVEDB);
             toServer.set_dbname(dbName);
 
@@ -367,7 +367,7 @@ class XStore_Client {
             zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
 
             // Received structs
-            XStore_Proto::removeDB_REP fromServer;
+            XStore_Proto::RemoveDB_REP fromServer;
 
             fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
             return fromServer;

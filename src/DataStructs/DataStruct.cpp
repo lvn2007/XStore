@@ -1,7 +1,7 @@
-#include "include/dataStructs/dataStruct.h"
+#include "include/DataStructs/DataStruct.h"
 
 // Constructor
-dataStruct::dataStruct(std::time_t unixTime, std::string data) {
+DataStruct::DataStruct(std::time_t unixTime, std::string data) {
     this->unixTime = unixTime;
     this->data = data;
 
@@ -11,12 +11,12 @@ dataStruct::dataStruct(std::time_t unixTime, std::string data) {
 
 // Returning a line
 //  i.e., unixTime, values
-std::string dataStruct::getData() {
+std::string DataStruct::GetData() {
     return data;
 }
 
 // Printing out time-value
-void dataStruct::printData(bool humanTime) {
+void DataStruct::PrintData(bool humanTime) {
     if (humanTime) {
         std::cout << "Timestamp: " << ctime(&unixTime) << " | Data: " << data << std::endl;
         return;

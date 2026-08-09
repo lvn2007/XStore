@@ -8,7 +8,7 @@
 #include <map>
 
 // Data structure to hold data for I/O
-struct fileStruct {
+struct FileStruct {
     std::string dbName;
     std::string baseDir;
 
@@ -17,19 +17,19 @@ struct fileStruct {
     std::map<int, int> bFileMap;
 
     // Constructor
-    fileStruct(std::string dbName, std::string baseDir);
+    FileStruct(std::string dbName, std::string baseDir);
 
-    std::string getDBName();
-    std::map<int, FILE*> getFfileMap();
-    std::map<int, int> getBfileMap();
-    bool hasYear(int inputYear);
+    std::string GetDBName();
+    std::map<int, FILE*> GetFfileMap();
+    std::map<int, int> GetBfileMap();
+    bool HasYear(int inputYear);
 
     // Printing out time-value
-    void printSummary();
+    void PrintSummary();
 
     private:
-        void openAllDBFiles();
-        int extractYear(std::string);
+        void OpenAllDBFiles();
+        int ExtractYear(std::string);
 };
 
 #endif //XSTORE_FILESTRUCTS_H

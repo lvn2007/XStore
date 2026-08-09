@@ -1,33 +1,33 @@
-#include "include/dataStructs/fileStruct.h"
+#include "include/DataStructs/FileStruct.h"
 
 // Constructor
-fileStruct::fileStruct(std::string dbName, std::string baseDir) {
+FileStruct::FileStruct(std::string dbName, std::string baseDir) {
     this->dbName = dbName;
     this->baseDir = baseDir;
-    openAllDBFiles();
+    OpenAllDBFiles();
 }
 
-std::string fileStruct::getDBName() {
+std::string FileStruct::GetDBName() {
     return this->dbName;
 }
 
-std::map<int, FILE*> fileStruct::getFfileMap() {
+std::map<int, FILE*> FileStruct::GetFfileMap() {
     return this->fFileMap;
 }
 
-std::map<int, int> fileStruct::getBfileMap() {
+std::map<int, int> FileStruct::GetBfileMap() {
     return this->bFileMap;
 }
 
-bool fileStruct::hasYear(int inputYear) {
+bool FileStruct::HasYear(int inputYear) {
     return (bFileMap.find(inputYear)->first == inputYear);
 }
 
-void fileStruct::printSummary() {
+void FileStruct::PrintSummary() {
 
 }
 
-void fileStruct::openAllDBFiles() {
+void FileStruct::OpenAllDBFiles() {
     // Placeholder
     FILE *fFile;
     int bFile;
@@ -36,13 +36,13 @@ void fileStruct::openAllDBFiles() {
     int currYear;
 
     // Directory contains all data file for a specific DB
-    std::filesystem::path dataPath = baseDir + "dataStore/" + dbName + "/";
+    std::filesystem::path dataPath = baseDir + "DataStore/" + dbName + "/";
 
     // Loop through each data file
     for (auto& p : std::filesystem::directory_iterator(dataPath))
     {
         // File path as string
-        //  i.e., /home/ubuntu/XStore/dataStore/tsla/2017.XSTORE
+        //  i.e., /home/ubuntu/XStore/DataStore/tsla/2017.XSTORE
         currDataFilePath = p.path().string();
 
         // IF meets with any file that's not .XSTORE
@@ -53,7 +53,7 @@ void fileStruct::openAllDBFiles() {
 
         // Extracted file name from path
         //  i.e., 2017
-        currYear = extractYear(currDataFilePath);
+        currYear = ExtractYear(currDataFilePath);
 
         // Open each file
         bFile = open(currDataFilePath.c_str(), O_RDONLY);
@@ -65,7 +65,7 @@ void fileStruct::openAllDBFiles() {
     }
 }
 
-int fileStruct::extractYear(std::string inputFileName) {
+int FileStruct::ExtractYear(std::string inputFileName) {
     // Index of base path up to dbName
     int dbNameIdx = inputFileName.find(dbName);
 

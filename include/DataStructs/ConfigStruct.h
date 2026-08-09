@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-struct configStruct {
+struct ConfigStruct {
     // Limit dbName to 256 chars
     char dbName[256];
     char timeResolution[12];
@@ -13,7 +13,7 @@ struct configStruct {
     std::vector<std::string> dTypeSchema;
 
     // Printing out configurations
-    void printData();
+    void PrintData();
 };
 
 

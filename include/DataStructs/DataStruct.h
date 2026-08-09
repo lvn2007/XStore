@@ -7,22 +7,22 @@
 #include <string>
 
 // Data structure to hold time-value together
-struct dataStruct {
+struct DataStruct {
     std::time_t unixTime;
     std::string data;
 
     // Constructor
-    dataStruct(std::time_t unixTime, std::string data);
+    DataStruct(std::time_t unixTime, std::string data);
 
     // Returning a line
     //  i.e., unixTime, values
-    std::string getData();
+    std::string GetData();
 
     // Printing out time-value
-    void printData(bool humanTime);
+    void PrintData(bool humanTime);
 };
 
-struct valueStruct {
+struct ValueStruct {
     unsigned int index;
     long double value;
     bool isInitialized = false;

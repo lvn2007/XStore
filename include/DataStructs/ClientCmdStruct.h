@@ -4,14 +4,14 @@
 #include <iostream>
 #include <filesystem>
 
-struct clientCmdStruct {
-    std::string requestType;
+struct ClientCmdStruct {
+    std::string RequestType;
     std::time_t startTime;
     std::time_t endTime;
     std::string dbName;
 
     // Constructor
-    clientCmdStruct(std::string requestType, std::time_t startTime, std::time_t endTime, std::string dbName);
+    ClientCmdStruct(std::string RequestType, std::time_t startTime, std::time_t endTime, std::string dbName);
 };
 
 #endif //XSTORE_CLIENTCMDSTRUCTS_H

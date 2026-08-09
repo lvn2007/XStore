@@ -11,12 +11,12 @@ project(XStore)
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -g")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # 3. ADD: Sanitizers for debugging (Uncomment when you need to find the bug)
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -fsanitize=address -fsanitize=undefined")
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address -fsanitize=undefined")
+# set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -fsanitize=address -fsanitize=undefined")
+# set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address -fsanitize=undefined")
 
 # C++ standard
 set(CMAKE_CXX_STANDARD 17)
@@ -84,13 +84,29 @@ include_directories(.)
 include_directories(include)
 include_directories(src)
 
-add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h src/dataStructs/dataStruct.cpp
-        include/dataStructs/dataStruct.h ${PROTO_SRCS} ${PROTO_HDRS} src/dataStructs/fileStruct.cpp
-        include/dataStructs/fileStruct.h include/Networking/zmq.hpp include/Networking/zmq_addon.hpp
-        include/Networking/XStore_zmqServer.h src/XStore_Networking/XStore_zmqServer.cpp
-        include/Networking/zhelpers.hpp src/dataStructs/configStruct.cpp include/dataStructs/configStruct.h
-        include/dataStructs/timeStruct.h src/dataStructs/timeStruct.cpp
-        include/Compression/shoco.h src/Compression/shoco.cpp include/Compression/shoco_model.h include/Compression/zstdpp.hpp
+add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h src/DataStructs/DataStruct.cpp
+        include/DataStructs/DataStruct.h ${PROTO_SRCS} ${PROTO_HDRS} src/DataStructs/FileStruct.cpp
+        include/DataStructs/FileStruct.h include/Networking/zmq.hpp include/Networking/zmq_addon.hpp
+        include/Networking/ZMQ_Server.h src/XStore_Networking/ZMQ_Server.cpp
+        include/Networking/zhelpers.hpp src/DataStructs/ConfigStruct.cpp include/DataStructs/ConfigStruct.h
+        include/DataStructs/TimeStruct.h src/DataStructs/TimeStruct.cpp
         include/Logger/Logger.h)
 
 target_link_libraries(XStore PUBLIC "stdc++fs" protobuf::libprotobuf "zmq" Threads::Threads)
+
+# ------------------------------------------------------------------
+# Tests
+# ------------------------------------------------------------------
+option(XSTORE_BUILD_TESTS "Build XStore test suite" ON)
+
+if(XSTORE_BUILD_TESTS)
+    FetchContent_Declare(
+            googletest
+            GIT_REPOSITORY https://github.com/google/googletest.git
+            GIT_TAG v1.17.0
+    )
+    FetchContent_MakeAvailable(googletest)
+
+    enable_testing()
+    add_subdirectory(tests)
+endif()

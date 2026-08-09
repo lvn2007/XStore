@@ -2,10 +2,10 @@
 #include "MongoDB/MongoDB_Adapter.h"
 #include "InfluxDB/InfluxDB_Adapter.h"
 #include "ProtoBench/ProtoBench.h"
-#include "include/utilities.h"
+#include "include/Utilities.h"
 #include "include/argparse.hpp"
 #include <thread>
-#include "DataManager/Data_Manager.h"
+#include "DataManager/DataManager.h"
 #include <filesystem>
 
 int main(int argc, char const *argv[])
@@ -161,9 +161,9 @@ int main(int argc, char const *argv[])
         std::string SERVER_ADDR = queryBench.get<std::string>("-i");
         std::string SERVER_PORT = queryBench.get<std::string>("-p");
         std::string TARGET_DB = queryBench.get<std::string>("-d");
-        toUpperCase(TARGET_DB.begin(), TARGET_DB.end());
+        ToUpperCase(TARGET_DB.begin(), TARGET_DB.end());
         std::string EXPERIMENT_TYPE = queryBench.get<std::string>("-e");
-        toUpperCase(EXPERIMENT_TYPE.begin(), EXPERIMENT_TYPE.end());
+        ToUpperCase(EXPERIMENT_TYPE.begin(), EXPERIMENT_TYPE.end());
         short unsigned int NUM_THREAD = queryBench.get<unsigned short int>("-t");
         unsigned int N_ITERATIONS = queryBench.get<unsigned int>("-n");
         unsigned int B_ITERATIONS = queryBench.get<unsigned int>("-b");
@@ -192,19 +192,19 @@ int main(int argc, char const *argv[])
             spdlog::info("[UNARY QUERY]      Debug: {}", IS_DEBUG);
 
             // Read data from parquet file
-            std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-UNARY-SEQ_Client-", NUM_THREAD, N_ITERATIONS);
+            std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.ReadQueryWorkload("BASIC-QUERY-UNARY-SEQ_Client-", NUM_THREAD, N_ITERATIONS);
 
             // Poll till
-            epochPoller(INVOKE_AT);
+            EpochPoller(INVOKE_AT);
 
             if (TARGET_DB == "XSTORE") {
-                timeCost = XStore_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+                timeCost = XStore_Adapter::UnaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
             else if (TARGET_DB == "MONGODB") {
-                timeCost = MongoDB_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+                timeCost = MongoDB_Adapter::UnaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
             else if (TARGET_DB == "INFLUXDB") {
-                timeCost = InfluxDB_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+                timeCost = InfluxDB_Adapter::UnaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
         }
         else if (EXPERIMENT_TYPE == "UNARY_RAND") {
@@ -216,19 +216,19 @@ int main(int argc, char const *argv[])
             spdlog::info("[UNARY QUERY]      Debug: {}", IS_DEBUG);
 
             // Read data from parquet file
-            std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-UNARY-RAND_Client-", NUM_THREAD, N_ITERATIONS);
+            std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.ReadQueryWorkload("BASIC-QUERY-UNARY-RAND_Client-", NUM_THREAD, N_ITERATIONS);
 
             // Poll till
-            epochPoller(INVOKE_AT);
+            EpochPoller(INVOKE_AT);
 
             if (TARGET_DB == "XSTORE") {
-                timeCost = XStore_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+                timeCost = XStore_Adapter::UnaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
             else if (TARGET_DB == "MONGODB") {
-                timeCost = MongoDB_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+                timeCost = MongoDB_Adapter::UnaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
             else if (TARGET_DB == "INFLUXDB") {
-                timeCost = InfluxDB_Adapter::unaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+                timeCost = InfluxDB_Adapter::UnaryQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
         }
         else if (EXPERIMENT_TYPE == "BATCH_SEQ") {
@@ -241,19 +241,19 @@ int main(int argc, char const *argv[])
             spdlog::info("[BATCH QUERY]            Debug: {}", IS_DEBUG);
 
             // Read data from parquet file
-            std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-BATCH-SEQ_Client-", NUM_THREAD, N_ITERATIONS, B_ITERATIONS);
+            std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.ReadQueryWorkload("BASIC-QUERY-BATCH-SEQ_Client-", NUM_THREAD, N_ITERATIONS, B_ITERATIONS);
 
             // Poll till
-            epochPoller(INVOKE_AT);
+            EpochPoller(INVOKE_AT);
 
             if (TARGET_DB == "XSTORE") {
-                timeCost = XStore_Adapter::rangeQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+                timeCost = XStore_Adapter::RangeQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
             else if (TARGET_DB == "MONGODB") {
-                timeCost = MongoDB_Adapter::rangeQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+                timeCost = MongoDB_Adapter::RangeQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
             else if (TARGET_DB == "INFLUXDB") {
-                timeCost = InfluxDB_Adapter::rangeQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+                timeCost = InfluxDB_Adapter::RangeQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
         }
         else if (EXPERIMENT_TYPE == "BATCH_RAND") {
@@ -266,16 +266,16 @@ int main(int argc, char const *argv[])
             spdlog::info("[BATCH QUERY]            Debug: {}", IS_DEBUG);
 
             // Read data from parquet file
-            std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.readQueryWorkload("BASIC-QUERY-BATCH-RAND_Client-", NUM_THREAD, N_ITERATIONS, B_ITERATIONS);
+            std::vector<std::vector<std::vector<std::any>>> queryWorkload = dataManager.ReadQueryWorkload("BASIC-QUERY-BATCH-RAND_Client-", NUM_THREAD, N_ITERATIONS, B_ITERATIONS);
 
             // Poll till
-            epochPoller(INVOKE_AT);
+            EpochPoller(INVOKE_AT);
 
             if (TARGET_DB == "XSTORE") {
-                timeCost = XStore_Adapter::batchQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+                timeCost = XStore_Adapter::BatchQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
             else if (TARGET_DB == "MONGODB") {
-                timeCost = MongoDB_Adapter::batchQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+                timeCost = MongoDB_Adapter::BatchQuery(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &queryWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
             else if (TARGET_DB == "INFLUXDB") {
                 spdlog::warn("[BATCH QUERY] InfluxQL doesn't support querying a batch of non-chronological timestamps");
@@ -286,16 +286,16 @@ int main(int argc, char const *argv[])
 
         // Display benchmark statistics
         if (timeCost.size() > 0) {
-            printStatistics(timeCost);
+            PrintStatistics(timeCost);
         }
     }
     else if (program.is_subcommand_used(insertBench)) {
         std::string SERVER_ADDR = insertBench.get<std::string>("-i");
         std::string SERVER_PORT = insertBench.get<std::string>("-p");
         std::string TARGET_DB = insertBench.get<std::string>("-d");
-        toUpperCase(TARGET_DB.begin(), TARGET_DB.end());
+        ToUpperCase(TARGET_DB.begin(), TARGET_DB.end());
         std::string EXPERIMENT_TYPE = insertBench.get<std::string>("-e");
-        toUpperCase(EXPERIMENT_TYPE.begin(), EXPERIMENT_TYPE.end());
+        ToUpperCase(EXPERIMENT_TYPE.begin(), EXPERIMENT_TYPE.end());
         short unsigned int NUM_THREAD = insertBench.get<unsigned short int>("-t");
         unsigned int N_ITERATIONS = insertBench.get<unsigned int>("-n");
         unsigned int B_ITERATIONS = insertBench.get<unsigned int>("-b");
@@ -326,19 +326,19 @@ int main(int argc, char const *argv[])
             std::vector<std::vector<std::any>> insertData;
 
             // Read data from parquet file
-            std::vector<std::vector<std::vector<std::any>>> insertWorkload = dataManager.readInsertWorkload("BASIC-INSERT-UNARY-SEQ_Client-", NUM_THREAD, N_ITERATIONS);
+            std::vector<std::vector<std::vector<std::any>>> insertWorkload = dataManager.ReadInsertWorkload("BASIC-INSERT-UNARY-SEQ_Client-", NUM_THREAD, N_ITERATIONS);
 
             // Poll till
-            epochPoller(INVOKE_AT);
+            EpochPoller(INVOKE_AT);
 
             if (TARGET_DB == "XSTORE") {
-                timeCost = XStore_Adapter::unaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+                timeCost = XStore_Adapter::UnaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
             else if (TARGET_DB == "MONGODB") {
-                timeCost = MongoDB_Adapter::unaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+                timeCost = MongoDB_Adapter::UnaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
             else if (TARGET_DB == "INFLUXDB") {
-                timeCost = InfluxDB_Adapter::unaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+                timeCost = InfluxDB_Adapter::UnaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
         }
         else if (EXPERIMENT_TYPE == "UNARY_RAND") {
@@ -352,19 +352,19 @@ int main(int argc, char const *argv[])
             std::vector<std::vector<std::any>> insertData;
 
             // Read data from parquet file
-            std::vector<std::vector<std::vector<std::any>>> insertWorkload = dataManager.readInsertWorkload("BASIC-INSERT-UNARY-RAND_Client-", NUM_THREAD, N_ITERATIONS);
+            std::vector<std::vector<std::vector<std::any>>> insertWorkload = dataManager.ReadInsertWorkload("BASIC-INSERT-UNARY-RAND_Client-", NUM_THREAD, N_ITERATIONS);
 
             // Poll till
-            epochPoller(INVOKE_AT);
+            EpochPoller(INVOKE_AT);
 
             if (TARGET_DB == "XSTORE") {
-                timeCost = XStore_Adapter::unaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+                timeCost = XStore_Adapter::UnaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
             else if (TARGET_DB == "MONGODB") {
-                timeCost = MongoDB_Adapter::unaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+                timeCost = MongoDB_Adapter::UnaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
             else if (TARGET_DB == "INFLUXDB") {
-                timeCost = InfluxDB_Adapter::unaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+                timeCost = InfluxDB_Adapter::UnaryInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, N_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
         }
         else if (EXPERIMENT_TYPE == "BATCH_SEQ") {
@@ -379,19 +379,19 @@ int main(int argc, char const *argv[])
             std::vector<std::vector<std::any>> insertData;
 
             // Read data from parquet file
-            std::vector<std::vector<std::vector<std::any>>> insertWorkload = dataManager.readInsertWorkload("BASIC-INSERT-BATCH-SEQ_Client-", NUM_THREAD, N_ITERATIONS, B_ITERATIONS);
+            std::vector<std::vector<std::vector<std::any>>> insertWorkload = dataManager.ReadInsertWorkload("BASIC-INSERT-BATCH-SEQ_Client-", NUM_THREAD, N_ITERATIONS, B_ITERATIONS);
 
             // Poll till
-            epochPoller(INVOKE_AT);
+            EpochPoller(INVOKE_AT);
 
             if (TARGET_DB == "XSTORE") {
-                timeCost = XStore_Adapter::rangeInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+                timeCost = XStore_Adapter::RangeInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
             else if (TARGET_DB == "MONGODB") {
-                timeCost = MongoDB_Adapter::batchInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+                timeCost = MongoDB_Adapter::BatchInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
             else if (TARGET_DB == "INFLUXDB") {
-                timeCost = InfluxDB_Adapter::batchInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+                timeCost = InfluxDB_Adapter::BatchInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
         }
         else if (EXPERIMENT_TYPE == "BATCH_RAND") {
@@ -406,25 +406,25 @@ int main(int argc, char const *argv[])
             std::vector<std::vector<std::any>> insertData;
 
             // Read data from parquet file
-            std::vector<std::vector<std::vector<std::any>>> insertWorkload = dataManager.readInsertWorkload("BASIC-INSERT-BATCH-RAND_Client-", NUM_THREAD, N_ITERATIONS, B_ITERATIONS);
+            std::vector<std::vector<std::vector<std::any>>> insertWorkload = dataManager.ReadInsertWorkload("BASIC-INSERT-BATCH-RAND_Client-", NUM_THREAD, N_ITERATIONS, B_ITERATIONS);
 
             // Poll till
-            epochPoller(INVOKE_AT);
+            EpochPoller(INVOKE_AT);
 
             if (TARGET_DB == "XSTORE") {
-                timeCost = XStore_Adapter::batchInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+                timeCost = XStore_Adapter::BatchInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
             else if (TARGET_DB == "MONGODB") {
-                timeCost = MongoDB_Adapter::batchInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+                timeCost = MongoDB_Adapter::BatchInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
             else if (TARGET_DB == "INFLUXDB") {
-                timeCost = InfluxDB_Adapter::batchInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
+                timeCost = InfluxDB_Adapter::BatchInsert(SERVER_ADDR, SERVER_PORT, NUM_THREAD, B_ITERATIONS, &insertWorkload, EXPERIMENT_TYPE, IS_DEBUG);
             }
         }
 
         // Display benchmark statistics
         if (timeCost.size() > 0) {
-            printStatistics(timeCost);
+            PrintStatistics(timeCost);
         }
     }
     else if (program.is_subcommand_used(protoBench)) {
@@ -438,16 +438,16 @@ int main(int argc, char const *argv[])
         spdlog::info("[PROTO BENCH]    Row Size: {}B", 8 + (N_ENTRIES * BYTE_SIZE));
 
         ProtoBench protoBench;
-        std::vector<std::vector<double>> protoCosts = protoBench.run(N_ENTRIES, BYTE_SIZE, N_ITERATIONS);
+        std::vector<std::vector<double>> protoCosts = protoBench.Run(N_ENTRIES, BYTE_SIZE, N_ITERATIONS);
 
         // Serialize cost statistics
         if (protoCosts.at(0).size() > 0) {
             spdlog::info("[PROTO BENCH] SERIALIZATION COST");
-            printStatistics(protoCosts.at(0));
+            PrintStatistics(protoCosts.at(0));
 
             // Deserialize cost statistics
             spdlog::info("[PROTO BENCH] DE-SERIALIZATION COST");
-            printStatistics(protoCosts.at(1));
+            PrintStatistics(protoCosts.at(1));
         }
     }
 }

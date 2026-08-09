@@ -17,10 +17,10 @@
 #include <sys/file.h>
 #include <execution>
 #include "XStore.pb.h"
-#include "include/dataStructs/timeStruct.h"
-#include "include/dataStructs/dataStruct.h"
-#include "include/dataStructs/fileStruct.h"
-#include "include/dataStructs/configStruct.h"
+#include "include/DataStructs/TimeStruct.h"
+#include "include/DataStructs/DataStruct.h"
+#include "include/DataStructs/FileStruct.h"
+#include "include/DataStructs/ConfigStruct.h"
 #include "include/Logger/spdlog/fmt/fmt.h"
 #include "include/Logger/Logger.h"
 
@@ -34,10 +34,10 @@
 
 class XStore {
     public:
-        std::string baseDir = getBaseDir();
-        std::string dataStoreDir = baseDir + "dataStore/";
-        std::map<std::string, fileStruct> dbMap;
-        std::map<std::string, XStore_Proto::configStruct> cfgMap;
+        std::string baseDir = GetBaseDir();
+        std::string dataStoreDir = baseDir + "DataStore/";
+        std::map<std::string, FileStruct> dbMap;
+        std::map<std::string, XStore_Proto::ConfigStruct> cfgMap;
         std::string permittedTimeResolution[3] = {"SECOND", "MILLISECOND", "MICROSECOND"};
 
         int dbCount = 0;
@@ -47,90 +47,90 @@ class XStore {
         // Initialization
         XStore();
 
-        // PROCESSING dbStats/info query
-        XStore_Proto::sysInfo_REP infoQuery(std::string serverAddr, int threadCount);
+        // PROCESSING DbStats/info query
+        XStore_Proto::SysInfo_REP InfoQuery(std::string serverAddr, int threadCount);
 
         // CREATING new DB instance with row length
-        XStore_Proto::createDB_REP createDB(std::string dbName, XStore_Proto::timeUnit timeResolution, short int rowLength);
+        XStore_Proto::CreateDB_REP CreateDB(std::string dbName, XStore_Proto::TimeUnit timeResolution, short int rowLength);
 
         // REMOVE DB -- Removing an entire DB and its data files
-        XStore_Proto::removeDB_REP removeDB(std::string dbName);
+        XStore_Proto::RemoveDB_REP RemoveDB(std::string dbName);
 
         // REMOVE DB FILES -- Removing file(s) based on name in a certain DB
-        XStore_Proto::removeDBFiles_REP removeDBFiles(XStore_Proto::removeDBFiles_REQ *protoFromClient, std::string dbName);
+        XStore_Proto::RemoveDBFiles_REP RemoveDBFiles(XStore_Proto::RemoveDBFiles_REQ *protoFromClient, std::string dbName);
 
         // UNARY INSERT
-        void unaryInsert(const unsigned long long int &epochTime, const XStore_Proto::rowData &data, std::string dbName, XStore_Proto::unaryInsert_REP *returnData);
+        void UnaryInsert(const unsigned long long int &epochTime, const XStore_Proto::RowData &data, std::string dbName, XStore_Proto::UnaryInsert_REP *returnData);
 
         // UNARY QUERY
-        void unaryQuery(const unsigned long long int &epochTime, std::string dbName, XStore_Proto::unaryQuery_REP *returnData);
+        void UnaryQuery(const unsigned long long int &epochTime, std::string dbName, XStore_Proto::UnaryQuery_REP *returnData);
 
         // UNARY DELETE
-        XStore_Proto::unaryDelete_REP unaryDelete(const unsigned long long int &epochTime, std::string dbName);
+        XStore_Proto::UnaryDelete_REP UnaryDelete(const unsigned long long int &epochTime, std::string dbName);
 
         // BATCH INSERT
-        void batchInsert(XStore_Proto::batchInsert_REQ *protoFromClient, XStore_Proto::batchInsert_REP *returnData);
+        void BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_Proto::BatchInsert_REP *returnData);
 
         // BATCH QUERY
-        void batchQuery(XStore_Proto::batchQuery_REQ *protoFromClient, XStore_Proto::batchQuery_REP *returnData, bool SortTime=true);
+        void BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Proto::BatchQuery_REP *returnData, bool SortTime=true);
 
         // BATCH DELETE
-        XStore_Proto::batchDelete_REP batchDelete(XStore_Proto::batchDelete_REQ *protoFromClient);
+        XStore_Proto::BatchDelete_REP BatchDelete(XStore_Proto::BatchDelete_REQ *protoFromClient);
 
         // RANGE INSERT
-        void rangeInsert(const XStore_Proto::rangeInsert_REQ *protoFromClient, XStore_Proto::rangeInsert_REP *returnData);
+        void RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, XStore_Proto::RangeInsert_REP *returnData);
 
         // RANGE QUERY
-        void rangeQuery(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, XStore_Proto::rangeQuery_REP *returnData);
+        void RangeQuery(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, XStore_Proto::RangeQuery_REP *returnData);
 
         // RANGE DELETE
-        XStore_Proto::rangeDelete_REP rangeDelete(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName);
+        XStore_Proto::RangeDelete_REP RangeDelete(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName);
 
         // MIN - AGGREGATE
-        void minAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::min_REP *returnData);
-        void minAggregateV2(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::min_REP *returnData);
-        void processFileRange(FILE* bFile, unsigned long long startOffset, unsigned long long totalRows,
+        void MinAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Min_REP *returnData);
+        void MinAggregateV2(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Min_REP *returnData);
+        void ProcessFileRange(FILE* bFile, unsigned long long startOffset, unsigned long long totalRows,
                              size_t rowLen, unsigned short columnIdx,
-                             valueStruct& minValue, XStore_Proto::fData& minData);
-        void minAggregateV3(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::min_REP *returnData);
+                             ValueStruct& minValue, XStore_Proto::FData& minData);
+        void MinAggregateV3(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Min_REP *returnData);
 
         // MAX - AGGREGATE
-        void maxAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::max_REP *returnData);
-        void maxAggregateV2(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::max_REP *returnData);
+        void MaxAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Max_REP *returnData);
+        void MaxAggregateV2(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Max_REP *returnData);
 
         // SUM - AGGREGATE
-        void sumAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::sum_REP *returnData);
-        void sumAggregateV2(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::sum_REP *returnData);
+        void SumAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Sum_REP *returnData);
+        void SumAggregateV2(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Sum_REP *returnData);
 
         // AVG - AGGREGATE
-        void avgAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::avg_REP *returnData);
-        void avgAggregateV2(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::avg_REP *returnData);
+        void AvgAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Avg_REP *returnData);
+        void AvgAggregateV2(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Avg_REP *returnData);
 
         // Initialize DB
-        void initDB();
+        void InitDB();
 
     private:
         // Get current base directory
-        std::string getBaseDir();
+        std::string GetBaseDir();
 
         // Check if there's any existing database
-        bool hasDB();
+        bool HasDB();
 
-        bool hasDBFile(std::string filePath);
+        bool HasDBFile(std::string filePath);
 
         // File locks
-        void wrLockFile(FILE *bFile, unsigned long int startRange, unsigned long int endRange);
-        void rdLockFile(FILE *bFile, unsigned long int startRange, unsigned long int endRange);
-        void unlockFile(FILE *bFile, unsigned long int startRange, unsigned long int endRange);
+        void WrLockFile(FILE *bFile, unsigned long int startRange, unsigned long int endRange);
+        void RdLockFile(FILE *bFile, unsigned long int startRange, unsigned long int endRange);
+        void UnlockFile(FILE *bFile, unsigned long int startRange, unsigned long int endRange);
 
-        void toUpperCase(std::string::iterator begin, std::string::iterator end) {
+        void ToUpperCase(std::string::iterator begin, std::string::iterator end) {
             for (auto it = begin; it != end; ++it) {
                 *it &= ~0x20;
             }
         };
 
-        void getFDataValue(const XStore_Proto::fData *fDataInput, unsigned int columnIdx, valueStruct *valueStruct);
-        void getFDataValue(const XStore_Proto::fData *fDataInput, valueStruct *valueStruct);
+        void GetFDataValue(const XStore_Proto::FData *fDataInput, unsigned int columnIdx, ValueStruct *ValueStruct);
+        void GetFDataValue(const XStore_Proto::FData *fDataInput, ValueStruct *ValueStruct);
 };
 
 #endif //XSTORE_XSTORE_H

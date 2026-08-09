@@ -44,7 +44,7 @@ include_directories("/usr/local/lib")
 find_package(InfluxDB)
 
 # Proto file
-get_filename_component(XStore_proto "../protoFile/XStore.proto" ABSOLUTE)
+get_filename_component(XStore_proto "../ProtoFile/XStore.proto" ABSOLUTE)
 get_filename_component(XStore_proto_path "${XStore_proto}" PATH)
 
 set(PROTO_SRCS "${CMAKE_CURRENT_BINARY_DIR}/XStore.pb.cc")
@@ -66,8 +66,8 @@ include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 include_directories(.)
 
 add_executable(benchmarkClient ${PROTO_SRCS} ${PROTO_HDRS} include/XStore_Client.h main.cpp include/zmq.hpp include/zmq_addon.hpp
-        include/utilities.h include/Base_Adapter.h include/BS_thread_pool.hpp include/csv.hpp include/md5.h include/argparse.hpp
-        include/Logger/Logger.h DataManager/Data_Manager.h DataManager/Data_Manager.cpp
+        include/Utilities.h include/Base_Adapter.h include/BS_thread_pool.hpp include/csv.hpp include/md5.h include/argparse.hpp
+        include/Logger/Logger.h DataManager/DataManager.h DataManager/DataManager.cpp
         XStore/XStore_Adapter.h XStore/XStore_Adapter.cpp MongoDB/MongoDB_Adapter.h MongoDB/MongoDB_Adapter.cpp
         InfluxDB/InfluxDB_Adapter.h InfluxDB/InfluxDB_Adapter.cpp
         ProtoBench/ProtoBench.h ProtoBench/ProtoBench.cpp

@@ -4,12 +4,12 @@
 // Threading library
 static BS::thread_pool threadPool;
 
-std::vector<double> MongoDB_Adapter::unaryQuery(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *queryData, std::string pattern, bool isDebug) {
+std::vector<double> MongoDB_Adapter::UnaryQuery(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *queryData, std::string pattern, bool isDebug) {
     BS::multi_future<std::vector<double>> multiFuture;
     std::vector<std::vector<double>> nestedVector;
 
     for (int i = 0; i < NUM_THREAD; i++) {
-        multiFuture.push_back(threadPool.submit(MongoDB_Adapter::unaryQuery_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &queryData->at(i), isDebug));
+        multiFuture.push_back(threadPool.submit(MongoDB_Adapter::UnaryQuery_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &queryData->at(i), isDebug));
     }
 
     // Wait till all threads finishes
@@ -22,18 +22,18 @@ std::vector<double> MongoDB_Adapter::unaryQuery(std::string SERVER_ADDR, std::st
     // Flattening nested vector
     for (int i = 0; i < nestedVector.size(); i++) {
         // Write experiment result to CSV
-        writeCSV(fmt::format("QUERY-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
+        WriteCSV(fmt::format("QUERY-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
         std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
     }
     return timeCost;
 }
 
-std::vector<double> MongoDB_Adapter::rangeQuery(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *queryData, std::string pattern, bool isDebug) {
+std::vector<double> MongoDB_Adapter::RangeQuery(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *queryData, std::string pattern, bool isDebug) {
     BS::multi_future<std::vector<double>> multiFuture;
     std::vector<std::vector<double>> nestedVector;
 
     for (int i = 0; i < NUM_THREAD; i++) {
-        multiFuture.push_back(threadPool.submit(MongoDB_Adapter::rangeQuery_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &queryData->at(i), isDebug));
+        multiFuture.push_back(threadPool.submit(MongoDB_Adapter::RangeQuery_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &queryData->at(i), isDebug));
     }
 
     // Wait till all threads finishes
@@ -46,18 +46,18 @@ std::vector<double> MongoDB_Adapter::rangeQuery(std::string SERVER_ADDR, std::st
     // Flattening nested vector
     for (int i = 0; i < nestedVector.size(); i++) {
         // Write experiment result to CSV
-        writeCSV(fmt::format("QUERY-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
+        WriteCSV(fmt::format("QUERY-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
         std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
     }
     return timeCost;
 }
 
-std::vector<double> MongoDB_Adapter::batchQuery(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *queryData, std::string pattern, bool isDebug) {
+std::vector<double> MongoDB_Adapter::BatchQuery(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *queryData, std::string pattern, bool isDebug) {
     BS::multi_future<std::vector<double>> multiFuture;
     std::vector<std::vector<double>> nestedVector;
 
     for (int i = 0; i < NUM_THREAD; i++) {
-        multiFuture.push_back(threadPool.submit(MongoDB_Adapter::batchQuery_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &queryData->at(i), isDebug));
+        multiFuture.push_back(threadPool.submit(MongoDB_Adapter::BatchQuery_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &queryData->at(i), isDebug));
     }
 
     // Wait till all threads finishes
@@ -70,52 +70,23 @@ std::vector<double> MongoDB_Adapter::batchQuery(std::string SERVER_ADDR, std::st
     // Flattening nested vector
     for (int i = 0; i < nestedVector.size(); i++) {
         // Write experiment result to CSV
-        writeCSV(fmt::format("QUERY-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
+        WriteCSV(fmt::format("QUERY-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
         std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
     }
     return timeCost;
 }
 
-std::vector<double> MongoDB_Adapter::unaryInsert(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *insertData, std::string pattern, bool isDebug) {
-    BS::multi_future<std::vector<double>> multiFuture;
-    std::vector<std::vector<double>> nestedVector;
-
-    // Create BENCH_DB
-    std::string dbName = "BENCH_DB";
-    MongoDB_Adapter::createDB(SERVER_ADDR, SERVER_PORT, dbName, &insertData->at(0).at(0));
-
-    // Extracting insertData so that each thread will have unique insert data
-    for (int i = 0; i < NUM_THREAD; i++) {
-        multiFuture.push_back(threadPool.submit(MongoDB_Adapter::unaryInsert_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &insertData->at(i), isDebug));
-    }
-
-    // Wait till all threads finishes
-    for (std::vector<double> i : multiFuture.get()) {
-        nestedVector.push_back(i);
-    }
-
-    std::vector<double> timeCost;
-
-    // Flattening nested vector
-    for (int i = 0; i < nestedVector.size(); i++) {
-        // Write experiment result to CSV
-        writeCSV(fmt::format("INSERT-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
-        std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
-    }
-    return timeCost;
-}
-
-std::vector<double> MongoDB_Adapter::batchInsert(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *insertData, std::string pattern, bool isDebug) {
+std::vector<double> MongoDB_Adapter::UnaryInsert(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *insertData, std::string pattern, bool isDebug) {
     BS::multi_future<std::vector<double>> multiFuture;
     std::vector<std::vector<double>> nestedVector;
 
     // Create BENCH_DB
     std::string dbName = "BENCH_DB";
-    MongoDB_Adapter::createDB(SERVER_ADDR, SERVER_PORT, dbName, &insertData->at(0).at(0));
+    MongoDB_Adapter::CreateDB(SERVER_ADDR, SERVER_PORT, dbName, &insertData->at(0).at(0));
 
     // Extracting insertData so that each thread will have unique insert data
     for (int i = 0; i < NUM_THREAD; i++) {
-        multiFuture.push_back(threadPool.submit(MongoDB_Adapter::batchInsert_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &insertData->at(i), isDebug));
+        multiFuture.push_back(threadPool.submit(MongoDB_Adapter::UnaryInsert_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &insertData->at(i), isDebug));
     }
 
     // Wait till all threads finishes
@@ -128,13 +99,42 @@ std::vector<double> MongoDB_Adapter::batchInsert(std::string SERVER_ADDR, std::s
     // Flattening nested vector
     for (int i = 0; i < nestedVector.size(); i++) {
         // Write experiment result to CSV
-        writeCSV(fmt::format("INSERT-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
+        WriteCSV(fmt::format("INSERT-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
         std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
     }
     return timeCost;
 }
 
-std::vector<double> MongoDB_Adapter::unaryQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData, bool isDebug) {
+std::vector<double> MongoDB_Adapter::BatchInsert(std::string SERVER_ADDR, std::string SERVER_PORT, short unsigned int NUM_THREAD, int N_ITERATION, std::vector<std::vector<std::vector<std::any>>> *insertData, std::string pattern, bool isDebug) {
+    BS::multi_future<std::vector<double>> multiFuture;
+    std::vector<std::vector<double>> nestedVector;
+
+    // Create BENCH_DB
+    std::string dbName = "BENCH_DB";
+    MongoDB_Adapter::CreateDB(SERVER_ADDR, SERVER_PORT, dbName, &insertData->at(0).at(0));
+
+    // Extracting insertData so that each thread will have unique insert data
+    for (int i = 0; i < NUM_THREAD; i++) {
+        multiFuture.push_back(threadPool.submit(MongoDB_Adapter::BatchInsert_singleThread, SERVER_ADDR, SERVER_PORT, N_ITERATION, &insertData->at(i), isDebug));
+    }
+
+    // Wait till all threads finishes
+    for (std::vector<double> i : multiFuture.get()) {
+        nestedVector.push_back(i);
+    }
+
+    std::vector<double> timeCost;
+
+    // Flattening nested vector
+    for (int i = 0; i < nestedVector.size(); i++) {
+        // Write experiment result to CSV
+        WriteCSV(fmt::format("INSERT-{}_Client-{}.csv", pattern, i), "Time taken (ms)", nestedVector.at(i));
+        std::move(nestedVector.at(i).begin(), nestedVector.at(i).end(), std::back_inserter(timeCost));
+    }
+    return timeCost;
+}
+
+std::vector<double> MongoDB_Adapter::UnaryQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData, bool isDebug) {
     std::vector<double> toReturn;
     bool timedOut = false;
 
@@ -217,7 +217,7 @@ std::vector<double> MongoDB_Adapter::unaryQuery_singleThread(std::string SERVER_
     return toReturn;
 }
 
-std::vector<double> MongoDB_Adapter::rangeQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData, bool isDebug) {
+std::vector<double> MongoDB_Adapter::RangeQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData, bool isDebug) {
     std::vector<double> toReturn;
     bool timedOut = false;
 
@@ -318,7 +318,7 @@ std::vector<double> MongoDB_Adapter::rangeQuery_singleThread(std::string SERVER_
     return toReturn;
 }
 
-std::vector<double> MongoDB_Adapter::batchQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData, bool isDebug) {
+std::vector<double> MongoDB_Adapter::BatchQuery_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *queryData, bool isDebug) {
     std::vector<double> toReturn;
     bool timedOut = false;
 
@@ -415,7 +415,7 @@ std::vector<double> MongoDB_Adapter::batchQuery_singleThread(std::string SERVER_
     return toReturn;
 }
 
-std::vector<double> MongoDB_Adapter::unaryInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData, bool isDebug) {
+std::vector<double> MongoDB_Adapter::UnaryInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData, bool isDebug) {
     std::vector<double> toReturn;
     bool timedOut = false;
 
@@ -437,7 +437,7 @@ std::vector<double> MongoDB_Adapter::unaryInsert_singleThread(std::string SERVER
     if (isDebug) {
         for (int i = 0; i < N_ITERATION; i++) {
             // Create document
-            bsoncxx::builder::basic::document currDocument = makeSingleDocument(&insertData->at(i));
+            bsoncxx::builder::basic::document currDocument = MakeSingleDocument(&insertData->at(i));
 
             if (timedOut) {
                 spdlog::warn("[UNARY INSERT] - There was an exception or operation has timed-out");
@@ -468,7 +468,7 @@ std::vector<double> MongoDB_Adapter::unaryInsert_singleThread(std::string SERVER
     else {
         for (int i = 0; i < N_ITERATION; i++) {
             // Create document
-            bsoncxx::builder::basic::document currDocument = makeSingleDocument(&insertData->at(i));
+            bsoncxx::builder::basic::document currDocument = MakeSingleDocument(&insertData->at(i));
 
             if (timedOut) {
                 toReturn.push_back(0);
@@ -493,7 +493,7 @@ std::vector<double> MongoDB_Adapter::unaryInsert_singleThread(std::string SERVER
     return toReturn;
 }
 
-std::vector<double> MongoDB_Adapter::batchInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData, bool isDebug) {
+std::vector<double> MongoDB_Adapter::BatchInsert_singleThread(std::string SERVER_ADDR, std::string SERVER_PORT, int N_ITERATION, std::vector<std::vector<std::any>> *insertData, bool isDebug) {
     std::vector<double> toReturn;
     bool timedOut = false;
 
@@ -518,7 +518,7 @@ std::vector<double> MongoDB_Adapter::batchInsert_singleThread(std::string SERVER
             std::vector<bsoncxx::builder::basic::document> currDocuments;
 
             for (int j = 0; j < insertData->size(); j++) {
-                currDocuments.push_back(makeSingleDocument(&insertData->at(j)));
+                currDocuments.push_back(MakeSingleDocument(&insertData->at(j)));
             }
 
             if (timedOut) {
@@ -554,7 +554,7 @@ std::vector<double> MongoDB_Adapter::batchInsert_singleThread(std::string SERVER
             std::vector<bsoncxx::builder::basic::document> currDocuments;
 
             for (int j = 0; j < insertData->size(); j++) {
-                currDocuments.push_back(makeSingleDocument(&insertData->at(j)));
+                currDocuments.push_back(MakeSingleDocument(&insertData->at(j)));
             }
 
             if (timedOut) {
@@ -580,7 +580,7 @@ std::vector<double> MongoDB_Adapter::batchInsert_singleThread(std::string SERVER
     return toReturn;
 }
 
-void MongoDB_Adapter::createDB(std::string SERVER_ADDR, std::string SERVER_PORT, std::string dbName, std::vector<std::any> *singleRowData) {
+void MongoDB_Adapter::CreateDB(std::string SERVER_ADDR, std::string SERVER_PORT, std::string dbName, std::vector<std::any> *singleRowData) {
     try {
         // Init MongoDB
         mongocxx::uri uri(fmt::format("mongodb://{}:{}/?socketTimeoutMS=120000", SERVER_ADDR, SERVER_PORT));
@@ -590,7 +590,7 @@ void MongoDB_Adapter::createDB(std::string SERVER_ADDR, std::string SERVER_PORT,
         mongocxx::database mongoDB = mongoClient[dbName];
 
         // Granularity
-        std::string granularity = MongoDB_Adapter::getTimeResolution(std::any_cast<unsigned long int>(singleRowData->at(0)));
+        std::string granularity = MongoDB_Adapter::GetTimeResolution(std::any_cast<unsigned long int>(singleRowData->at(0)));
 
         // Setup Time Series collection options.
         bsoncxx::builder::document timeSeriesCollectionOptions =
@@ -610,7 +610,7 @@ void MongoDB_Adapter::createDB(std::string SERVER_ADDR, std::string SERVER_PORT,
     }
 }
 
-bsoncxx::builder::basic::document MongoDB_Adapter::makeSingleDocument(std::vector<std::any> *insertData) {
+bsoncxx::builder::basic::document MongoDB_Adapter::MakeSingleDocument(std::vector<std::any> *insertData) {
     bsoncxx::builder::basic::document toReturn;
 
     // Timestamp -- Variable as long int since bsoncxx doesn't recognize unsigned long int
@@ -636,7 +636,7 @@ bsoncxx::builder::basic::document MongoDB_Adapter::makeSingleDocument(std::vecto
     return toReturn;
 }
 
-std::string MongoDB_Adapter::getTimeResolution(unsigned long int timestamp) {
+std::string MongoDB_Adapter::GetTimeResolution(unsigned long int timestamp) {
     int count = 0;
 
     while (timestamp != 0) {

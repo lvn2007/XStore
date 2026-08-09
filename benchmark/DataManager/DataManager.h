@@ -10,7 +10,7 @@
 #include <map>
 #include "include/md5.h"
 #include "include/csv.hpp"
-#include "include/utilities.h"
+#include "include/Utilities.h"
 #include <arrow/io/api.h>
 #include <arrow/array/builder_primitive.h>
 #include <arrow/result.h>
@@ -27,41 +27,41 @@
 class DataManager {
 public:
     unsigned int chunkSize = 1000;    // Optimal chunks = 1000 rows
-    arrow::Status writeParquet(unsigned long int startTime, unsigned long int endTime, int nColumns, std::string &outfileName);
-    arrow::Status writeParquetNew(unsigned long int startTime, unsigned long int endTime, int nColumns, std::string &outfileName);
-    void writeCSV(std::vector<std::vector<std::any>> inputVector, std::string outfileName);
+    arrow::Status WriteParquet(unsigned long int startTime, unsigned long int endTime, int nColumns, std::string &outfileName);
+    arrow::Status WriteParquetNew(unsigned long int startTime, unsigned long int endTime, int nColumns, std::string &outfileName);
+    void WriteCSV(std::vector<std::vector<std::any>> inputVector, std::string outfileName);
 
     // Read test dataset
     //  CSV
-    std::vector<std::vector<std::any>> readCSV(std::string csvFilename);
-    std::vector<std::vector<std::any>> readCSV(std::string csvFilename, int nRows); // This overloads prev. func.
+    std::vector<std::vector<std::any>> ReadCSV(std::string csvFilename);
+    std::vector<std::vector<std::any>> ReadCSV(std::string csvFilename, int nRows); // This overloads prev. func.
 
     //  Arrow Parquet
-    arrow::Status readParquet(std::string parquetFilename, std::vector<std::vector<std::any>> *outputVector);
+    arrow::Status ReadParquet(std::string parquetFilename, std::vector<std::vector<std::any>> *outputVector);
 
     //  Reading QUERY workload
     //      SEQ
-    std::vector<std::vector<std::vector<std::any>>> readQueryWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations);
+    std::vector<std::vector<std::vector<std::any>>> ReadQueryWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations);
     //      RAND
-    std::vector<std::vector<std::vector<std::any>>> readQueryWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations, unsigned int bIterations);
+    std::vector<std::vector<std::vector<std::any>>> ReadQueryWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations, unsigned int bIterations);
 
     //  Reading INSERT workload
     //      SEQ
-    std::vector<std::vector<std::vector<std::any>>> readInsertWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations);
+    std::vector<std::vector<std::vector<std::any>>> ReadInsertWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations);
     //      RAND
-    std::vector<std::vector<std::vector<std::any>>> readInsertWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations, unsigned int bIterations);
+    std::vector<std::vector<std::vector<std::any>>> ReadInsertWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations, unsigned int bIterations);
 
 private:
-    std::vector<std::vector<std::any>> generateHashData(unsigned long int startTime, unsigned long int endTime, int nColumns);
+    std::vector<std::vector<std::any>> GenerateHashData(unsigned long int startTime, unsigned long int endTime, int nColumns);
 
-    bool isDecimal(long double number) {
+    bool IsDecimal(long double number) {
         if (std::ceil(number) == std::floor(number)) {
             return false;
         }
         return true;
     }
 
-    std::string hashFromTimestamp(long int timestamp, int columnIdx) {
+    std::string HashFromTimestamp(long int timestamp, int columnIdx) {
         return GetMD5String(std::to_string(timestamp) + "-" + std::to_string(columnIdx));
     }
 

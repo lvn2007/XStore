@@ -1,21 +1,21 @@
-#include "include/dataStructs/timeStruct.h"
+#include "include/DataStructs/TimeStruct.h"
 
 // Constructor
-timeStruct::timeStruct(std::time_t unixTime, XStore_Proto::timeUnit timeResolution) {
+TimeStruct::TimeStruct(std::time_t unixTime, XStore_Proto::TimeUnit timeResolution) {
     this->unixTime = unixTime;
     this->timeResolution = timeResolution;
-    this->extractTimeComponents();
+    this->ExtractTimeComponents();
 }
 
-unsigned short int timeStruct::getLastDayOfMonth(unsigned short int iMonth) {
-    return iMonth != 2 ? ((iMonth ^ (iMonth >> 3))) | 30 : isLeapYear() ? 29 : 28;
+unsigned short int TimeStruct::GetLastDayOfMonth(unsigned short int iMonth) {
+    return iMonth != 2 ? ((iMonth ^ (iMonth >> 3))) | 30 : IsLeapYear() ? 29 : 28;
 }
 
-bool timeStruct::isLeapYear() {
+bool TimeStruct::IsLeapYear() {
     return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
 }
 
-void timeStruct::extractTimeComponents() {
+void TimeStruct::ExtractTimeComponents() {
     tm timePtr;
     std::time_t choppedTime;
 
@@ -54,7 +54,7 @@ void timeStruct::extractTimeComponents() {
     // Set LAST epoch
     lastEpochTimePtr.tm_year = this->year - 1900;
     lastEpochTimePtr.tm_mon = 12-1;
-    lastEpochTimePtr.tm_mday = this->getLastDayOfMonth(12);
+    lastEpochTimePtr.tm_mday = this->GetLastDayOfMonth(12);
     lastEpochTimePtr.tm_hour = 23;
     lastEpochTimePtr.tm_min = 59;
     lastEpochTimePtr.tm_sec = 59;

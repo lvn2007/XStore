@@ -7,23 +7,23 @@
 #include "XStore.pb.h"
 
 // Data structure to hold time-value together
-struct timeStruct {
+struct TimeStruct {
   std::time_t unixTime;
-  XStore_Proto::timeUnit timeResolution;
+  XStore_Proto::TimeUnit timeResolution;
   unsigned short int year, month, day, hour, minute, second;
   long firstEpoch, lastEpoch;
 
   // Constructor
-  timeStruct(std::time_t unixTime, XStore_Proto::timeUnit timeResolution);
+  TimeStruct(std::time_t unixTime, XStore_Proto::TimeUnit timeResolution);
 
   // Returns last day of a given month provided the year given in unixTime
-  unsigned short int getLastDayOfMonth(unsigned short int iMonth);
+  unsigned short int GetLastDayOfMonth(unsigned short int iMonth);
 
   private:
     tm firstEpochTimePtr{};
     tm lastEpochTimePtr{};
-    void extractTimeComponents();
-    bool isLeapYear();
+    void ExtractTimeComponents();
+    bool IsLeapYear();
 };
 
 #endif //XSTORE_TIMESTRUCTS_H

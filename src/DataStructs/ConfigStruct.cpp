@@ -1,5 +1,5 @@
-#include "include/dataStructs/configStruct.h"
+#include "include/DataStructs/ConfigStruct.h"
 
-void configStruct::printData() {
+void ConfigStruct::PrintData() {
     std::cout << "DB name: " << dbName << " | Time resolution: " << timeResolution << " | Row length: " << rowLength << std::endl;
 }

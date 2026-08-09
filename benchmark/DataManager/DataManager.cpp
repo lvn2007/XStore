@@ -1,12 +1,12 @@
-#include "Data_Manager.h"
+#include "DataManager.h"
 
-std::vector<std::vector<std::any>> DataManager::generateHashData(unsigned long int startTime, unsigned long int endTime, int nColumns) {
+std::vector<std::vector<std::any>> DataManager::GenerateHashData(unsigned long int startTime, unsigned long int endTime, int nColumns) {
     // Returning vector contains rows of data
     std::vector<std::vector<std::any>> toReturn;
 
     // Placeholder for data generation
     long unsigned int currTime;
-    std::vector<std::any> rowData;
+    std::vector<std::any> RowData;
     std::string hashValue;
 
     // Loop through & Generate data for each unique timestamp starting from startTime
@@ -14,24 +14,24 @@ std::vector<std::vector<std::any>> DataManager::generateHashData(unsigned long i
         currTime = startTime + i;
 
         // Append timestamp
-        rowData.emplace_back(currTime);
+        RowData.emplace_back(currTime);
 
         // Loop through each column and create hash value
         for (int numCol = 0; numCol < nColumns; numCol++) {
             hashValue = GetMD5String(std::to_string(currTime) + "-" + std::to_string(numCol + 1));
-            rowData.emplace_back(hashValue);
+            RowData.emplace_back(hashValue);
         }
 
         // Add current row to record;
-        toReturn.emplace_back(rowData);
+        toReturn.emplace_back(RowData);
 
-        // Reset rowData
-        rowData.clear();
+        // Reset RowData
+        RowData.clear();
     }
     return toReturn;
 }
 
-arrow::Status DataManager::writeParquet(unsigned long int startTime, unsigned long int endTime, int nColumns, std::string &outfileName) {
+arrow::Status DataManager::WriteParquet(unsigned long int startTime, unsigned long int endTime, int nColumns, std::string &outfileName) {
     // File output stream
     std::shared_ptr<arrow::io::FileOutputStream> outfile;
     PARQUET_ASSIGN_OR_THROW(outfile, arrow::io::FileOutputStream::Open(outfileName + ".parquet"));
@@ -69,7 +69,7 @@ arrow::Status DataManager::writeParquet(unsigned long int startTime, unsigned lo
         for (int colIdx = 1; colIdx < nColumns; colIdx++) {
             parquet::ByteArrayWriter* ba_writer = static_cast<parquet::ByteArrayWriter*>(rg_writer->NextColumn());
             for (long int timestamp = (startTime + (chunkSize * idx)); timestamp < currentEndTime; timestamp++) {
-                currentStr = this->hashFromTimestamp(timestamp, colIdx);
+                currentStr = this->HashFromTimestamp(timestamp, colIdx);
                 value.ptr = reinterpret_cast<const uint8_t*>(currentStr.c_str());
                 value.len = currentStr.length();
                 ba_writer->WriteBatch(1, nullptr, nullptr, &value);
@@ -93,7 +93,7 @@ arrow::Status DataManager::writeParquet(unsigned long int startTime, unsigned lo
         for (int colIdx = 1; colIdx < nColumns; colIdx++) {
             parquet::ByteArrayWriter* ba_writer = static_cast<parquet::ByteArrayWriter*>(rg_writer->NextColumn());
             for (long int timestamp = currentEndTime; timestamp < endTime; timestamp++) {
-                currentStr = this->hashFromTimestamp(timestamp, colIdx);
+                currentStr = this->HashFromTimestamp(timestamp, colIdx);
                 value.ptr = reinterpret_cast<const uint8_t*>(currentStr.c_str());
                 value.len = currentStr.length();
                 ba_writer->WriteBatch(1, nullptr, nullptr, &value);
@@ -106,7 +106,7 @@ arrow::Status DataManager::writeParquet(unsigned long int startTime, unsigned lo
 
 }
 
-void DataManager::writeCSV(std::vector<std::vector<std::any>> inputVector, std::string outfileName) {
+void DataManager::WriteCSV(std::vector<std::vector<std::any>> inputVector, std::string outfileName) {
     // OFStream object
     std::ofstream outFile(outfileName);
 
@@ -123,7 +123,7 @@ void DataManager::writeCSV(std::vector<std::vector<std::any>> inputVector, std::
     outFile.close();
 }
 
-std::vector<std::vector<std::any>> DataManager::readCSV(std::string filePath) {
+std::vector<std::vector<std::any>> DataManager::ReadCSV(std::string filePath) {
     // Returning vector contains rows of data
     std::vector<std::vector<std::any>> toReturn;
 
@@ -135,47 +135,47 @@ std::vector<std::vector<std::any>> DataManager::readCSV(std::string filePath) {
     csv::CSVReader reader(filePath, format);
 
     // Placeholder for each row
-    std::vector<std::any> rowData;
+    std::vector<std::any> RowData;
 
     // Loop through each row
     int i;
     for (csv::CSVRow& row : reader) {
         // First field is always timestamp
-        rowData.emplace_back(row[0].get<unsigned long int>());
+        RowData.emplace_back(row[0].get<unsigned long int>());
 
         for (i = 1; i < row.size(); i++) {
             // Metric == null
             if (row[i].is_null()) {
-                rowData.emplace_back("");
+                RowData.emplace_back("");
                 continue;
             }
                 // Metric == string
             else if (row[i].is_str()) {
-                rowData.emplace_back(row[i].get<std::string>());
+                RowData.emplace_back(row[i].get<std::string>());
                 continue;
             }
                 // Metric == integer
             else if (row[i].is_int()) {
-                rowData.emplace_back(row[i].get<int>());
+                RowData.emplace_back(row[i].get<int>());
                 continue;
             }
                 // Metric == floating point
             else if (row[i].is_float()) {
-                rowData.emplace_back(row[i].get<double>());
+                RowData.emplace_back(row[i].get<double>());
                 continue;
             }
         }
 
         // Append to record
-        toReturn.emplace_back(rowData);
+        toReturn.emplace_back(RowData);
 
-        // Clear rowData
-        rowData.clear();
+        // Clear RowData
+        RowData.clear();
     }
     return toReturn;
 }
 
-std::vector<std::vector<std::any>> DataManager::readCSV(std::string filePath, int nRows) {
+std::vector<std::vector<std::any>> DataManager::ReadCSV(std::string filePath, int nRows) {
     // Returning vector contains rows of data
     std::vector<std::vector<std::any>> toReturn;
 
@@ -187,42 +187,42 @@ std::vector<std::vector<std::any>> DataManager::readCSV(std::string filePath, in
     csv::CSVReader reader(filePath, format);
 
     // Placeholder for each row
-    std::vector<std::any> rowData;
+    std::vector<std::any> RowData;
 
     // Loop through each row
     int i;
     for (csv::CSVRow& row : reader) {
         // First field is always timestamp
-        rowData.emplace_back(row[0].get<unsigned long int>());
+        RowData.emplace_back(row[0].get<unsigned long int>());
 
         for (i = 1; i < row.size(); i++) {
             // Metric == null
             if (row[i].is_null()) {
-                rowData.emplace_back("");
+                RowData.emplace_back("");
                 continue;
             }
                 // Metric == string
             else if (row[i].is_str()) {
-                rowData.emplace_back(row[i].get<std::string>());
+                RowData.emplace_back(row[i].get<std::string>());
                 continue;
             }
                 // Metric == integer
             else if (row[i].is_int()) {
-                rowData.emplace_back(row[i].get<int>());
+                RowData.emplace_back(row[i].get<int>());
                 continue;
             }
                 // Metric == floating point
             else if (row[i].is_float()) {
-                rowData.emplace_back(row[i].get<double>());
+                RowData.emplace_back(row[i].get<double>());
                 continue;
             }
         }
 
         // Append to record
-        toReturn.emplace_back(rowData);
+        toReturn.emplace_back(RowData);
 
-        // Clear rowData
-        rowData.clear();
+        // Clear RowData
+        RowData.clear();
 
         // Keep track of items -- Suspend when >= nRows
         if (toReturn.size() >= nRows) {
@@ -232,7 +232,7 @@ std::vector<std::vector<std::any>> DataManager::readCSV(std::string filePath, in
     return toReturn;
 }
 
-arrow::Status DataManager::readParquet(std::string parquetFilename, std::vector<std::vector<std::any>> *outputVector) {
+arrow::Status DataManager::ReadParquet(std::string parquetFilename, std::vector<std::vector<std::any>> *outputVector) {
     // Allowed data-types
     std::string ALLOWED_DTYPES[] = {"utf8", "string", "int", "uint64", "float", "double"};
 
@@ -329,7 +329,7 @@ arrow::Status DataManager::readParquet(std::string parquetFilename, std::vector<
     return arrow::Status::OK();
 }
 
-std::vector<std::vector<std::vector<std::any>>> DataManager::readQueryWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations) {
+std::vector<std::vector<std::vector<std::any>>> DataManager::ReadQueryWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations) {
     // Filter outputs display
     std::string UNARY_WORKLOADS[] = {"SEQ", "RAND"};
 
@@ -338,7 +338,7 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readQueryWorkload(s
     std::vector<std::vector<std::any>> tempVector;
 
     // Get list of files
-    std::vector<std::string> targetFileNames = listFiles(nameBeginsWith);
+    std::vector<std::string> targetFileNames = ListFiles(nameBeginsWith);
 
     // Sort list of filename ASC
     std::sort(targetFileNames.begin(), targetFileNames.end(), std::less<>());
@@ -357,7 +357,7 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readQueryWorkload(s
         std::string currFile = targetFileNames.at(i);
 
         // Parse embedded sample size from filename with filter
-        parsedSampleSize = std::stoul(splitByDelim(currFile, "_").at(2));
+        parsedSampleSize = std::stoul(SplitByDelim(currFile, "_").at(2));
 
         // Expecting nIterations == Parsed sample size
         if (parsedSampleSize != nIterations) {
@@ -372,7 +372,7 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readQueryWorkload(s
         std::string currFile = targetFileNames.at(i);
 
         // Read workload into temp vector
-        this->readParquet(currFile, &tempVector);
+        this->ReadParquet(currFile, &tempVector);
 
         // Add to master vector
         toReturn.emplace_back(tempVector);
@@ -383,7 +383,7 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readQueryWorkload(s
     return toReturn;
 }
 
-std::vector<std::vector<std::vector<std::any>>> DataManager::readQueryWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations, unsigned int bIterations) {
+std::vector<std::vector<std::vector<std::any>>> DataManager::ReadQueryWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations, unsigned int bIterations) {
     // Filter outputs display
     std::string UNARY_WORKLOADS[] = {"SEQ", "RAND"};
 
@@ -392,7 +392,7 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readQueryWorkload(s
     std::vector<std::vector<std::any>> tempVector;
 
     // Get list of files
-    std::vector<std::string> targetFileNames = listFiles(nameBeginsWith);
+    std::vector<std::string> targetFileNames = ListFiles(nameBeginsWith);
 
     // Sort list of filename ASC
     std::sort(targetFileNames.begin(), targetFileNames.end(), std::less<>());
@@ -412,9 +412,9 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readQueryWorkload(s
         std::string currFile = targetFileNames.at(i);
 
         // Parse embedded sample size from filename with filter
-        toParse = splitByDelim(currFile, "_").at(2);
-        parsedSampleSize = std::stoul(splitByDelim(toParse, "-").at(1));
-        parsedBatchIter = std::stoul(splitByDelim(toParse, "-").at(0));
+        toParse = SplitByDelim(currFile, "_").at(2);
+        parsedSampleSize = std::stoul(SplitByDelim(toParse, "-").at(1));
+        parsedBatchIter = std::stoul(SplitByDelim(toParse, "-").at(0));
 
         // Expecting nIterations == Parsed sample size
         if (parsedSampleSize != nIterations) {
@@ -435,7 +435,7 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readQueryWorkload(s
         std::string currFile = targetFileNames.at(i);
 
         // Read workload into temp vector
-        this->readParquet(currFile, &tempVector);
+        this->ReadParquet(currFile, &tempVector);
 
         // Add to master vector
         toReturn.emplace_back(tempVector);
@@ -446,7 +446,7 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readQueryWorkload(s
     return toReturn;
 }
 
-std::vector<std::vector<std::vector<std::any>>> DataManager::readInsertWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations) {
+std::vector<std::vector<std::vector<std::any>>> DataManager::ReadInsertWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations) {
     // Filter outputs display
     std::string UNARY_WORKLOADS[] = {"SEQ", "RAND"};
 
@@ -455,7 +455,7 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readInsertWorkload(
     std::vector<std::vector<std::any>> tempVector;
 
     // Get list of files
-    std::vector<std::string> targetFileNames = listFiles(nameBeginsWith);
+    std::vector<std::string> targetFileNames = ListFiles(nameBeginsWith);
 
     // Sort list of filename ASC
     std::sort(targetFileNames.begin(), targetFileNames.end(), std::less<>());
@@ -474,7 +474,7 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readInsertWorkload(
         std::string currFile = targetFileNames.at(i);
 
         // Parse embedded sample size from filename with filter
-        parsedSampleSize = std::stoul(splitByDelim(currFile, "_").at(2));
+        parsedSampleSize = std::stoul(SplitByDelim(currFile, "_").at(2));
 
         // Expecting nIterations == Parsed sample size
         if (parsedSampleSize != nIterations) {
@@ -489,7 +489,7 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readInsertWorkload(
         std::string currFile = targetFileNames.at(i);
 
         // Read workload into temp vector
-        this->readParquet(currFile, &tempVector);
+        this->ReadParquet(currFile, &tempVector);
 
         // Add to master vector
         toReturn.emplace_back(tempVector);
@@ -500,7 +500,7 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readInsertWorkload(
     return toReturn;
 }
 
-std::vector<std::vector<std::vector<std::any>>> DataManager::readInsertWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations, unsigned int bIterations) {
+std::vector<std::vector<std::vector<std::any>>> DataManager::ReadInsertWorkload(std::string nameBeginsWith, unsigned int nThreads, unsigned int nIterations, unsigned int bIterations) {
     // Filter outputs display
     std::string UNARY_WORKLOADS[] = {"SEQ", "RAND"};
 
@@ -509,7 +509,7 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readInsertWorkload(
     std::vector<std::vector<std::any>> tempVector;
 
     // Get list of files
-    std::vector<std::string> targetFileNames = listFiles(nameBeginsWith);
+    std::vector<std::string> targetFileNames = ListFiles(nameBeginsWith);
 
     // Sort list of filename ASC
     std::sort(targetFileNames.begin(), targetFileNames.end(), std::less<>());
@@ -529,9 +529,9 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readInsertWorkload(
         std::string currFile = targetFileNames.at(i);
 
         // Parse embedded sample size from filename with filter
-        toParse = splitByDelim(currFile, "_").at(2);
-        parsedSampleSize = std::stoul(splitByDelim(toParse, "-").at(1));
-        parsedBatchIter = std::stoul(splitByDelim(toParse, "-").at(0));
+        toParse = SplitByDelim(currFile, "_").at(2);
+        parsedSampleSize = std::stoul(SplitByDelim(toParse, "-").at(1));
+        parsedBatchIter = std::stoul(SplitByDelim(toParse, "-").at(0));
 
         // Expecting nIterations == Parsed sample size
         if (parsedSampleSize != nIterations) {
@@ -552,7 +552,7 @@ std::vector<std::vector<std::vector<std::any>>> DataManager::readInsertWorkload(
         std::string currFile = targetFileNames.at(i);
 
         // Read workload into temp vector
-        this->readParquet(currFile, &tempVector);
+        this->ReadParquet(currFile, &tempVector);
 
         // Add to master vector
         toReturn.emplace_back(tempVector);

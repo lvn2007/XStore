@@ -16,7 +16,7 @@
 #include "include/Logger/spdlog/fmt/fmt.h"
 #include "include/Logger/Logger.h"
 
-static double meanCalc(std::vector<double> &inputVector) {
+static double MeanCalc(std::vector<double> &inputVector) {
     double totalSum = 0;
 
     for (int i = 0; i < inputVector.size(); i++) {
@@ -26,7 +26,7 @@ static double meanCalc(std::vector<double> &inputVector) {
     return totalSum / inputVector.size();
 }
 
-static double stdCalc(std::vector<double> &inputVector) {
+static double StdCalc(std::vector<double> &inputVector) {
     double totalSum = 0;
     double mean = 0;
     double std = 0;
@@ -44,7 +44,7 @@ static double stdCalc(std::vector<double> &inputVector) {
     return sqrt(std / inputVector.size());
 }
 
-static void writeCSV(std::string fName, std::string colName, std::vector<double> &inputs) {
+static void WriteCSV(std::string fName, std::string colName, std::vector<double> &inputs) {
     // Create an output filestream object
     std::ofstream myFile(fName);
 
@@ -61,21 +61,21 @@ static void writeCSV(std::string fName, std::string colName, std::vector<double>
     myFile.close();
 }
 
-static void toUpperCase(std::string::iterator begin, std::string::iterator end) {
+static void ToUpperCase(std::string::iterator begin, std::string::iterator end) {
     for (auto it = begin; it != end; ++it) {
         *it &= ~0x20;
     }
 };
 
-static void printStatistics(std::vector<double> &inputVector) {
+static void PrintStatistics(std::vector<double> &inputVector) {
     spdlog::info("[STATISTICS] Total: {:.4f} (ms)", std::accumulate(inputVector.begin(), inputVector.end(), 0.0));
-    spdlog::info("[STATISTICS]  Mean: {:.4f} (ms)", meanCalc(inputVector));
+    spdlog::info("[STATISTICS]  Mean: {:.4f} (ms)", MeanCalc(inputVector));
     spdlog::info("[STATISTICS]   Min: {:.4f} (ms)", *std::min_element(inputVector.begin(), inputVector.end()));
     spdlog::info("[STATISTICS]   Max: {:.4f} (ms)", *std::max_element(inputVector.begin(), inputVector.end()));
-    spdlog::info("[STATISTICS] STDev: {:.4f} (ms)", stdCalc(inputVector));
+    spdlog::info("[STATISTICS] STDev: {:.4f} (ms)", StdCalc(inputVector));
 }
 
-static void epochPoller(int targetTime) {
+static void EpochPoller(int targetTime) {
     while (true) {
         std::time_t currTime = std::time(nullptr);
 
@@ -86,7 +86,7 @@ static void epochPoller(int targetTime) {
     }
 }
 
-static std::vector<std::string> listFiles(std::string beginsWith, std::string path = "") {
+static std::vector<std::string> ListFiles(std::string beginsWith, std::string path = "") {
     std::vector<std::string> toReturn;
 
     std::string currDir = (path == "") ? std::filesystem::current_path().string() + "/" + path : std::filesystem::current_path().string() + "/" + path + "/";
@@ -101,7 +101,7 @@ static std::vector<std::string> listFiles(std::string beginsWith, std::string pa
     return toReturn;
 }
 
-static std::vector<std::string> splitByDelim(const std::string& str, const std::string& delim)
+static std::vector<std::string> SplitByDelim(const std::string& str, const std::string& delim)
 {
     std::vector<std::string> vs;
     size_t pos {};
@@ -114,7 +114,7 @@ static std::vector<std::string> splitByDelim(const std::string& str, const std::
 }
 
 // SRC: https://stackoverflow.com/questions/13445688/how-to-generate-a-random-number-in-c
-static int randInt(int startRange, int endRange) {
+static int RandInt(int startRange, int endRange) {
     std::random_device dev;
     std::mt19937 rng(dev());
     std::uniform_int_distribution<std::mt19937::result_type> dist6(startRange, endRange); // distribution in range [1, 6]
@@ -122,7 +122,7 @@ static int randInt(int startRange, int endRange) {
 }
 
 // SRC: https://inversepalindrome.com/blog/how-to-create-a-random-string-in-cpp
-static std::string randString(int strLen) {
+static std::string RandString(int strLen) {
     const std::string CHARACTERS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
     std::random_device random_device;
@@ -139,7 +139,7 @@ static std::string randString(int strLen) {
     return random_string;
 }
 
-static void clearCaches() {
+static void ClearCaches() {
     system("free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null");
 }
 
