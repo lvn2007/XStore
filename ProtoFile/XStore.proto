@@ -1,0 +1,310 @@
+syntax = "proto3";
+option optimize_for = SPEED;
+package XStore_Proto;
+
+// ======== COMMAND directives section ========
+enum RequestType {
+  INFO = 0;
+  CREATEDB = 1;
+  REMOVEDB = 2;
+  REMOVEDBFILES = 3;
+  UNARYINSERT = 4;
+  UNARYQUERY = 5;
+  UNARYDELETE = 6;
+  BATCHINSERT = 7;
+  BATCHQUERY = 8;
+  BATCHDELETE = 9;
+  RANGEINSERT = 10;
+  RANGEQUERY = 11;
+  RANGEDELETE = 12;
+  MIN = 13;
+  MAX = 14;
+  SUM = 15;
+  AVG = 16;
+}
+
+enum TimeUnit {
+  SECOND = 0;
+  MILLISECOND = 1;
+  MICROSECOND = 2;
+  NANOSECOND = 3;
+}
+
+message ConfigStruct {
+  string dbName = 1;
+  TimeUnit timeResolution = 2;
+  sfixed32 rowLength = 3;
+}
+
+message FData {
+  oneof oneOfData {
+    double doubleData = 1;
+    float floatData = 2;
+    int32 int32Data = 3;
+    int64 int64Data = 4;
+    uint32 uint32Data = 5;
+    uint64 uint64Data = 6;
+    sint32 sint32Data = 7;
+    sint64 sint64Data = 8;
+    fixed32 fixed32Data = 9;
+    fixed64 fixed64Data = 10;
+    sfixed32 sfixed32Data = 11;
+    sfixed64 sfixed64Data = 12;
+    bool boolData = 13;
+    string stringData = 14;
+    bytes bytesData = 15;
+  }
+}
+
+message RowData {
+  repeated FData fieldData = 1;
+}
+
+message MultipleRowData {
+  repeated RowData rData = 1;
+}
+
+message ReqCMD {
+  RequestType rType = 1;
+}
+
+// ======== REQUESTS section ========
+// --- CREATE DB request
+message CreateDB_REQ {
+  RequestType rType = 1;
+  string dbName = 2;
+  TimeUnit timeResolution = 3;
+  uint32 rowLength = 4;
+}
+
+// --- REMOVE DB request
+message RemoveDB_REQ {
+  RequestType rType = 1;
+  string dbName = 2;
+}
+
+// --- REMOVE DB FILES request
+message RemoveDBFiles_REQ {
+  RequestType rType = 1;
+  string dbName = 2;
+  repeated string fileName = 3;
+}
+
+// --- UNARY INSERT
+message UnaryInsert_REQ {
+  RequestType rType = 1;
+  uint64 timestamp = 2;
+  RowData data = 3;
+  string dbName = 4;
+}
+
+// --- UNARY QUERY
+message UnaryQuery_REQ {
+  RequestType rType = 1;
+  uint64 timestamp = 2;
+  string dbName = 3;
+}
+
+// --- UNARY DELETE
+message UnaryDelete_REQ {
+  RequestType rType = 1;
+  uint64 timestamp = 2;
+  string dbName = 3;
+}
+
+// --- BATCH INSERT (DATA)
+message BatchInsert_DATA {
+  uint64 timestamp = 1;
+  RowData data = 2;
+}
+
+// --- BATCH INSERT
+message BatchInsert_REQ {
+  RequestType rType = 1;
+  string dbName = 2;
+  repeated BatchInsert_DATA batchInsert_DATA = 3;
+}
+
+// --- BATCH QUERY
+message BatchQuery_REQ {
+  RequestType rType = 1;
+  repeated uint64 timestamp = 2;
+  string dbName = 3;
+  bool SortTime = 4;
+}
+
+// --- BATCH DELETE
+message BatchDelete_REQ {
+  RequestType rType = 1;
+  repeated uint64 timestamp = 2;
+  string dbName = 3;
+}
+
+// --- RANGE INSERT (DATA)
+message RangeInsert_DATA {
+  uint64 timestamp = 1;
+  RowData data = 2;
+}
+
+// --- RANGE INSERT
+message RangeInsert_REQ {
+  RequestType rType = 1;
+  string dbName = 2;
+  repeated RangeInsert_DATA rangeInsert_DATA = 3;
+}
+
+// --- RANGE QUERY
+message RangeQuery_REQ {
+  RequestType rType = 1;
+  uint64 startTime = 2;
+  uint64 endTime = 3;
+  string dbName = 4;
+}
+
+// --- RANGE DELETE
+message RangeDelete_REQ {
+  RequestType rType = 1;
+  uint64 startTime = 2;
+  uint64 endTime = 3;
+  string dbName = 4;
+}
+
+// --- MIN
+message Min_REQ {
+  RequestType rType = 1;
+  uint64 startTime = 2;
+  uint64 endTime = 3;
+  string dbName = 4;
+  sint32 columnIdx = 5;
+}
+
+// --- MAX
+message Max_REQ {
+  RequestType rType = 1;
+  uint64 startTime = 2;
+  uint64 endTime = 3;
+  string dbName = 4;
+  sint32 columnIdx = 5;
+}
+
+// --- SUM
+message Sum_REQ {
+  RequestType rType = 1;
+  uint64 startTime = 2;
+  uint64 endTime = 3;
+  string dbName = 4;
+  sint32 columnIdx = 5;
+}
+
+// --- AVG
+message Avg_REQ {
+  RequestType rType = 1;
+  uint64 startTime = 2;
+  uint64 endTime = 3;
+  string dbName = 4;
+  sint32 columnIdx = 5;
+}
+
+// ======== RESPONSE section ========
+// --- DB Stats & Info REP
+message DbStats {
+  string dbName = 1;
+  TimeUnit dbResolution = 2;
+  uint64 totalSizeInByte = 3;
+  repeated string fileName = 4;
+}
+
+// --- SYS INFO
+message SysInfo_REP {
+  string serverAddr = 1;
+  int32 threadCount = 2;
+  repeated DbStats dbInfo = 3;
+}
+
+// --- CREATE DB response
+message CreateDB_REP {
+  string createDBStatus = 1;
+}
+
+// --- REMOVE DB
+message RemoveDB_REP {
+  string removeStatus = 1;
+}
+
+// --- REMOVE DB FILES
+message RemoveDBFiles_REP {
+  repeated string removeStatus = 1;
+}
+
+// --- UNARY INSERT
+message UnaryInsert_REP {
+  string insertStatus = 1;
+}
+
+// --- UNARY QUERY
+message UnaryQuery_REP {
+  uint64 timestamp = 1;
+  RowData data = 2;
+  optional string queryStatus = 3;
+}
+
+// --- UNARY DELETE
+message UnaryDelete_REP {
+  string deleteStatus = 1;
+}
+
+// --- BATCH INSERT
+message BatchInsert_REP {
+  string insertStatus = 1;
+}
+
+// --- BATCH QUERY
+message BatchQuery_REP {
+  repeated UnaryQuery_REP queryResponse = 1;
+  optional string queryStatus = 3;
+}
+
+// --- BATCH DELETE
+message BatchDelete_REP {
+  string deleteStatus = 1;
+}
+
+// --- RANGE INSERT
+message RangeInsert_REP {
+  string insertStatus = 1;
+}
+
+// --- RANGE QUERY
+message RangeQuery_REP {
+  repeated UnaryQuery_REP queryResponse = 1;
+  optional string queryStatus = 3;
+}
+
+// --- RANGE DELETE
+message RangeDelete_REP {
+  string deleteStatus = 1;
+}
+
+// --- MIN
+message Min_REP {
+  FData opResult = 1;
+  string opStatus = 2;
+}
+
+// --- MAX
+message Max_REP {
+  FData opResult = 1;
+  string opStatus = 2;
+}
+
+// --- SUM
+message Sum_REP {
+  double opResult = 1;
+  string opStatus = 2;
+}
+
+// --- AVG
+message Avg_REP {
+  double opResult = 1;
+  string opStatus = 2;
+}

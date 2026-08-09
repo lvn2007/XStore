@@ -90,6 +90,7 @@ add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h
         include/Networking/ZMQ_Server.h src/XStore_Networking/ZMQ_Server.cpp
         include/Networking/zhelpers.hpp src/DataStructs/ConfigStruct.cpp include/DataStructs/ConfigStruct.h
         include/DataStructs/TimeStruct.h src/DataStructs/TimeStruct.cpp
+        include/DataStructs/FileRangeLock.h src/DataStructs/FileRangeLock.cpp
         include/Logger/Logger.h)
 
 target_link_libraries(XStore PUBLIC "stdc++fs" protobuf::libprotobuf "zmq" Threads::Threads)

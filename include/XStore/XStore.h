@@ -14,13 +14,13 @@
 #include <sys/stat.h>
 #include <algorithm>
 #include <sys/types.h>
-#include <sys/file.h>
 #include <execution>
 #include "XStore.pb.h"
 #include "include/DataStructs/TimeStruct.h"
 #include "include/DataStructs/DataStruct.h"
 #include "include/DataStructs/FileStruct.h"
 #include "include/DataStructs/ConfigStruct.h"
+#include "include/DataStructs/FileRangeLock.h"
 #include "include/Logger/spdlog/fmt/fmt.h"
 #include "include/Logger/Logger.h"
 
@@ -117,11 +117,6 @@ class XStore {
         bool HasDB();
 
         bool HasDBFile(std::string filePath);
-
-        // File locks
-        void WrLockFile(FILE *bFile, unsigned long int startRange, unsigned long int endRange);
-        void RdLockFile(FILE *bFile, unsigned long int startRange, unsigned long int endRange);
-        void UnlockFile(FILE *bFile, unsigned long int startRange, unsigned long int endRange);
 
         void ToUpperCase(std::string::iterator begin, std::string::iterator end) {
             for (auto it = begin; it != end; ++it) {
