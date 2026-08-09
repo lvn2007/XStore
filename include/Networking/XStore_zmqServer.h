@@ -10,6 +10,9 @@
 
 class XStore_zmqServer {
     private:
+        // Prepare ZMQ context & Sockets
+        zmq::context_t ctx;
+        
         int numThreads;
         std::string serverAddr;
 

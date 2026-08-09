@@ -11,9 +11,6 @@ XStore_zmqServer::XStore_zmqServer(int numThreads) {
 }
 
 void XStore_zmqServer::startServer(std::string listenAddr, std::string listenPort) {
-    // Prepare ZMQ context & Sockets
-    zmq::context_t ctx;
-
     //  Socket to talk to CLIENTS
     zmq::socket_t clientSocket(ctx, zmq::socket_type::router);
     std::string serverAddr = "tcp://" + listenAddr + ":" + listenPort;
@@ -31,14 +28,14 @@ void XStore_zmqServer::startServer(std::string listenAddr, std::string listenPor
     //  Launch pool of WORKER threads
     for (int i = 0; i < numThreads; i++) {
         // Pack args struct for each thread
-        threadArgs tArgs;
-        tArgs.zmqCtx = &ctx;
-        tArgs.numThreads = numThreads;
-        tArgs.serverAddr = serverAddr.substr(6, serverAddr.length());       // Proto string refuses to work with special char like ://
+        threadArgs* tArgs = new threadArgs(); 
+        tArgs->zmqCtx = &this->ctx;
+        tArgs->numThreads = numThreads;
+        tArgs->serverAddr = serverAddr.substr(6, serverAddr.length());       // Proto string refuses to work with special char like ://
 
         // Spawn thread
         pthread_t worker;
-        pthread_create(&worker, NULL, XStore_zmqServer::workerRoutine, &tArgs);
+        pthread_create(&worker, NULL, XStore_zmqServer::workerRoutine, tArgs);
     }
     spdlog::info("[NETWORKING] - Launched: {0:d} worker thread", numThreads);
 
