@@ -2,8 +2,8 @@
 
 // Constructor
 TimeStruct::TimeStruct(std::time_t unixTime, XStore_Proto::TimeUnit timeResolution) {
-    this->unixTime = unixTime;
-    this->timeResolution = timeResolution;
+    this->UnixTime = unixTime;
+    this->TimeResolution = timeResolution;
     this->ExtractTimeComponents();
 }
 
@@ -12,67 +12,67 @@ unsigned short int TimeStruct::GetLastDayOfMonth(unsigned short int iMonth) {
 }
 
 bool TimeStruct::IsLeapYear() {
-    return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    return Year % 4 == 0 && (Year % 100 != 0 || Year % 400 == 0);
 }
 
 void TimeStruct::ExtractTimeComponents() {
-    tm timePtr;
-    std::time_t choppedTime;
+    tm TimePtr;
+    std::time_t ChoppedTime;
 
-    if (this->timeResolution == XStore_Proto::SECOND) {
-        localtime_r(&this->unixTime, &timePtr);
+    if (this->TimeResolution == XStore_Proto::SECOND) {
+        localtime_r(&this->UnixTime, &TimePtr);
     }
-    else if (this->timeResolution == XStore_Proto::MILLISECOND) {
-        choppedTime = this->unixTime / 1'000;
-        localtime_r(&choppedTime, &timePtr);
+    else if (this->TimeResolution == XStore_Proto::MILLISECOND) {
+        ChoppedTime = this->UnixTime / 1'000;
+        localtime_r(&ChoppedTime, &TimePtr);
     }
-    else if (this->timeResolution == XStore_Proto::MICROSECOND) {
-        choppedTime = this->unixTime / 1'000'000;
-        localtime_r(&choppedTime, &timePtr);
+    else if (this->TimeResolution == XStore_Proto::MICROSECOND) {
+        ChoppedTime = this->UnixTime / 1'000'000;
+        localtime_r(&ChoppedTime, &TimePtr);
     }
-    else if (this->timeResolution == XStore_Proto::NANOSECOND) {
-        choppedTime = this->unixTime / 1'000'000'000;
-        localtime_r(&choppedTime, &timePtr);
+    else if (this->TimeResolution == XStore_Proto::NANOSECOND) {
+        ChoppedTime = this->UnixTime / 1'000'000'000;
+        localtime_r(&ChoppedTime, &TimePtr);
     }
 
     // Set time components
-    this->year = timePtr.tm_year + 1900;
-    this->month = timePtr.tm_mon + 1;
-    this->day = timePtr.tm_mday;
-    this->hour = timePtr.tm_hour;
-    this->minute = timePtr.tm_min;
-    this->second = timePtr.tm_sec;
+    this->Year = TimePtr.tm_year + 1900;
+    this->Month = TimePtr.tm_mon + 1;
+    this->Day = TimePtr.tm_mday;
+    this->Hour = TimePtr.tm_hour;
+    this->Minute = TimePtr.tm_min;
+    this->Second = TimePtr.tm_sec;
 
     // Set FIRST epoch
-    firstEpochTimePtr.tm_year = this->year - 1900;
-    firstEpochTimePtr.tm_mon = 1-1;
-    firstEpochTimePtr.tm_mday = 1;
-    firstEpochTimePtr.tm_hour = 0;
-    firstEpochTimePtr.tm_min = 0;
-    firstEpochTimePtr.tm_sec = 0;
+    FirstEpochTimePtr.tm_year = this->Year - 1900;
+    FirstEpochTimePtr.tm_mon = 1-1;
+    FirstEpochTimePtr.tm_mday = 1;
+    FirstEpochTimePtr.tm_hour = 0;
+    FirstEpochTimePtr.tm_min = 0;
+    FirstEpochTimePtr.tm_sec = 0;
 
     // Set LAST epoch
-    lastEpochTimePtr.tm_year = this->year - 1900;
-    lastEpochTimePtr.tm_mon = 12-1;
-    lastEpochTimePtr.tm_mday = this->GetLastDayOfMonth(12);
-    lastEpochTimePtr.tm_hour = 23;
-    lastEpochTimePtr.tm_min = 59;
-    lastEpochTimePtr.tm_sec = 59;
+    LastEpochTimePtr.tm_year = this->Year - 1900;
+    LastEpochTimePtr.tm_mon = 12-1;
+    LastEpochTimePtr.tm_mday = this->GetLastDayOfMonth(12);
+    LastEpochTimePtr.tm_hour = 23;
+    LastEpochTimePtr.tm_min = 59;
+    LastEpochTimePtr.tm_sec = 59;
 
-    if (this->timeResolution == XStore_Proto::SECOND) {
-        firstEpoch = mktime(&firstEpochTimePtr);
-        lastEpoch = mktime(&lastEpochTimePtr);
+    if (this->TimeResolution == XStore_Proto::SECOND) {
+        FirstEpoch = mktime(&FirstEpochTimePtr);
+        LastEpoch = mktime(&LastEpochTimePtr);
     }
-    else if (this->timeResolution == XStore_Proto::MILLISECOND) {
-        firstEpoch = mktime(&firstEpochTimePtr) * 1'000;
-        lastEpoch = mktime(&lastEpochTimePtr) * 1'000 + 999;
+    else if (this->TimeResolution == XStore_Proto::MILLISECOND) {
+        FirstEpoch = mktime(&FirstEpochTimePtr) * 1'000;
+        LastEpoch = mktime(&LastEpochTimePtr) * 1'000 + 999;
     }
-    else if (this->timeResolution == XStore_Proto::MICROSECOND) {
-        firstEpoch = mktime(&firstEpochTimePtr) * 1'000'000;
-        lastEpoch = mktime(&lastEpochTimePtr) * 1'000'000 + 999999;
+    else if (this->TimeResolution == XStore_Proto::MICROSECOND) {
+        FirstEpoch = mktime(&FirstEpochTimePtr) * 1'000'000;
+        LastEpoch = mktime(&LastEpochTimePtr) * 1'000'000 + 999999;
     }
-    else if (this->timeResolution == XStore_Proto::NANOSECOND) {
-        firstEpoch = mktime(&firstEpochTimePtr) * 1'000'000'000;
-        lastEpoch = mktime(&lastEpochTimePtr) * 1'000'000'000 + 999999999;
+    else if (this->TimeResolution == XStore_Proto::NANOSECOND) {
+        FirstEpoch = mktime(&FirstEpochTimePtr) * 1'000'000'000;
+        LastEpoch = mktime(&LastEpochTimePtr) * 1'000'000'000 + 999999999;
     }
 }

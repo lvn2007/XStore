@@ -7,10 +7,10 @@
 
 struct ConfigStruct {
     // Limit dbName to 256 chars
-    char dbName[256];
-    char timeResolution[12];
-    short int rowLength;
-    std::vector<std::string> dTypeSchema;
+    char DbName[256];
+    char TimeResolution[12];
+    short int RowLength;
+    std::vector<std::string> DTypeSchema;
 
     // Printing out configurations
     void PrintData();

@@ -2,3 +2,5 @@ build/
 cmake-build-Release/
 cmake-build-Debug/
 logs/
+graphify-out/
+.github/

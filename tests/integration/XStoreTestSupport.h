@@ -36,16 +36,16 @@ inline XStore_Proto::FData FBytes(const std::string &v)      { XStore_Proto::FDa
 // Builds a RowData out of a mix of column types/counts so tests can express
 // "1 column here, 3 columns there" without hand-rolling FData boilerplate.
 inline XStore_Proto::RowData MakeRow(const std::vector<XStore_Proto::FData> &fields) {
-    XStore_Proto::RowData row;
+    XStore_Proto::RowData Row;
     for (const auto &f : fields) {
-        *row.add_fielddata() = f;
+        *Row.add_fielddata() = f;
     }
-    return row;
+    return Row;
 }
 
 inline std::atomic<int> &DirCounter() {
-    static std::atomic<int> counter{0};
-    return counter;
+    static std::atomic<int> Counter{0};
+    return Counter;
 }
 
 // XStore::GetBaseDir() resolves baseDir as the PARENT of the process's current
@@ -54,22 +54,22 @@ inline std::atomic<int> &DirCounter() {
 // into "<tmp>/<prefix>_<pid>_<n>/build" and restores it on destruction.
 class ScratchDir {
 public:
-    fs::path originalCwd;
-    fs::path testRoot;
+    fs::path OriginalCwd;
+    fs::path TestRoot;
 
     explicit ScratchDir(const std::string &prefix) {
-        originalCwd = fs::current_path();
-        testRoot = fs::temp_directory_path() /
+        OriginalCwd = fs::current_path();
+        TestRoot = fs::temp_directory_path() /
             fs::path(prefix + "_" + std::to_string(getpid()) + "_" + std::to_string(DirCounter()++));
-        fs::create_directories(testRoot / "build");
-        fs::create_directories(testRoot / "DataStore");
-        fs::current_path(testRoot / "build");
+        fs::create_directories(TestRoot / "build");
+        fs::create_directories(TestRoot / "DataStore");
+        fs::current_path(TestRoot / "build");
     }
 
     ~ScratchDir() {
-        std::error_code ec;
-        fs::current_path(originalCwd, ec);
-        fs::remove_all(testRoot, ec);
+        std::error_code Ec;
+        fs::current_path(OriginalCwd, Ec);
+        fs::remove_all(TestRoot, Ec);
     }
 };
 

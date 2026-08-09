@@ -8,10 +8,10 @@
 
 // Data structure to hold time-value together
 struct TimeStruct {
-  std::time_t unixTime;
-  XStore_Proto::TimeUnit timeResolution;
-  unsigned short int year, month, day, hour, minute, second;
-  long firstEpoch, lastEpoch;
+  std::time_t UnixTime;
+  XStore_Proto::TimeUnit TimeResolution;
+  unsigned short int Year, Month, Day, Hour, Minute, Second;
+  long FirstEpoch, LastEpoch;
 
   // Constructor
   TimeStruct(std::time_t unixTime, XStore_Proto::TimeUnit timeResolution);
@@ -20,8 +20,8 @@ struct TimeStruct {
   unsigned short int GetLastDayOfMonth(unsigned short int iMonth);
 
   private:
-    tm firstEpochTimePtr{};
-    tm lastEpochTimePtr{};
+    tm FirstEpochTimePtr{};
+    tm LastEpochTimePtr{};
     void ExtractTimeComponents();
     bool IsLeapYear();
 };

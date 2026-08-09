@@ -47,14 +47,14 @@ constexpr unsigned long long RANDOM_RANGE_HIGH = 2'366'841'600ULL;
 
 class XStoreTest : public ::testing::Test {
  protected:
-  std::unique_ptr<ScratchDir> scratch;
+  std::unique_ptr<ScratchDir> Scratch;
 
   void SetUp() override {
-      scratch = std::make_unique<ScratchDir>("xstore_test");
+      Scratch = std::make_unique<ScratchDir>("xstore_test");
   }
 
   void TearDown() override {
-      scratch.reset();
+      Scratch.reset();
   }
 };
 
@@ -63,23 +63,23 @@ class XStoreTest : public ::testing::Test {
 // ---------------------------------------------------------------------
 
 TEST_F(XStoreTest, InfoQueryOnEmptyServerReturnsNoDatabases) {
-    XStore store;
-    XStore_Proto::SysInfo_REP info = store.InfoQuery("127.0.0.1", 4);
+    XStore Store;
+    XStore_Proto::SysInfo_REP Info = Store.InfoQuery("127.0.0.1", 4);
 
-    EXPECT_EQ(info.serveraddr(), "127.0.0.1");
-    EXPECT_EQ(info.threadcount(), 4);
-    EXPECT_EQ(info.dbinfo_size(), 0);
+    EXPECT_EQ(Info.serveraddr(), "127.0.0.1");
+    EXPECT_EQ(Info.threadcount(), 4);
+    EXPECT_EQ(Info.dbinfo_size(), 0);
 }
 
 TEST_F(XStoreTest, InfoQueryReflectsCreatedDatabase) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
-    XStore_Proto::SysInfo_REP info = store.InfoQuery("127.0.0.1", 2);
+    XStore_Proto::SysInfo_REP Info = Store.InfoQuery("127.0.0.1", 2);
 
-    ASSERT_EQ(info.dbinfo_size(), 1);
-    EXPECT_EQ(info.dbinfo(0).dbname(), "TESTDB");
-    EXPECT_EQ(info.dbinfo(0).dbresolution(), XStore_Proto::SECOND);
+    ASSERT_EQ(Info.dbinfo_size(), 1);
+    EXPECT_EQ(Info.dbinfo(0).dbname(), "TESTDB");
+    EXPECT_EQ(Info.dbinfo(0).dbresolution(), XStore_Proto::SECOND);
 }
 
 // ---------------------------------------------------------------------
@@ -87,26 +87,26 @@ TEST_F(XStoreTest, InfoQueryReflectsCreatedDatabase) {
 // ---------------------------------------------------------------------
 
 TEST_F(XStoreTest, CreateDBRejectsRowLengthBelowFour) {
-    XStore store;
-    XStore_Proto::CreateDB_REP rep = store.CreateDB("TESTDB", XStore_Proto::SECOND, 3);
+    XStore Store;
+    XStore_Proto::CreateDB_REP Rep = Store.CreateDB("TESTDB", XStore_Proto::SECOND, 3);
 
-    EXPECT_EQ(rep.createdbstatus(), "[ERROR] [CREATE DB] [DB: TESTDB] - Row length must be >= 4");
+    EXPECT_EQ(Rep.createdbstatus(), "[ERROR] [CREATE DB] [DB: TESTDB] - Row length must be >= 4");
 }
 
 TEST_F(XStoreTest, CreateDBSucceedsAndWritesConfigFile) {
-    XStore store;
-    XStore_Proto::CreateDB_REP rep = store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore Store;
+    XStore_Proto::CreateDB_REP Rep = Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
-    EXPECT_EQ(rep.createdbstatus(), "[INFO] [CREATE DB] [DB: TESTDB] - Created DB");
-    EXPECT_TRUE(fs::exists(scratch->testRoot / "DataStore" / "TESTDB" / "TESTDB.CFG"));
+    EXPECT_EQ(Rep.createdbstatus(), "[INFO] [CREATE DB] [DB: TESTDB] - Created DB");
+    EXPECT_TRUE(fs::exists(Scratch->TestRoot / "DataStore" / "TESTDB" / "TESTDB.CFG"));
 }
 
 TEST_F(XStoreTest, CreateDBRejectsDuplicateName) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
-    XStore_Proto::CreateDB_REP rep = store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore_Proto::CreateDB_REP Rep = Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
-    EXPECT_EQ(rep.createdbstatus(), "[ERROR] [CREATE DB] [DB: TESTDB] - Already existed");
+    EXPECT_EQ(Rep.createdbstatus(), "[ERROR] [CREATE DB] [DB: TESTDB] - Already existed");
 }
 
 // ---------------------------------------------------------------------
@@ -114,22 +114,22 @@ TEST_F(XStoreTest, CreateDBRejectsDuplicateName) {
 // ---------------------------------------------------------------------
 
 TEST_F(XStoreTest, RemoveDBOnMissingDBReturnsError) {
-    XStore store;
-    XStore_Proto::RemoveDB_REP rep = store.RemoveDB("TESTDB");
+    XStore Store;
+    XStore_Proto::RemoveDB_REP Rep = Store.RemoveDB("TESTDB");
 
-    EXPECT_EQ(rep.removestatus(), "[ERROR] [REMOVE DB] [DB: TESTDB] - DB does not exists");
+    EXPECT_EQ(Rep.removestatus(), "[ERROR] [REMOVE DB] [DB: TESTDB] - DB does not exists");
 }
 
 TEST_F(XStoreTest, RemoveDBDeletesDirectoryAndDropsFromInfoQuery) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
-    XStore_Proto::RemoveDB_REP rep = store.RemoveDB("TESTDB");
-    EXPECT_EQ(rep.removestatus(), "[INFO] [REMOVE DB] [DB: TESTDB] - Removed DB with name: TESTDB");
-    EXPECT_FALSE(fs::exists(scratch->testRoot / "DataStore" / "TESTDB"));
+    XStore_Proto::RemoveDB_REP Rep = Store.RemoveDB("TESTDB");
+    EXPECT_EQ(Rep.removestatus(), "[INFO] [REMOVE DB] [DB: TESTDB] - Removed DB with name: TESTDB");
+    EXPECT_FALSE(fs::exists(Scratch->TestRoot / "DataStore" / "TESTDB"));
 
-    XStore_Proto::SysInfo_REP info = store.InfoQuery("127.0.0.1", 1);
-    EXPECT_EQ(info.dbinfo_size(), 0);
+    XStore_Proto::SysInfo_REP Info = Store.InfoQuery("127.0.0.1", 1);
+    EXPECT_EQ(Info.dbinfo_size(), 0);
 }
 
 // ---------------------------------------------------------------------
@@ -137,23 +137,23 @@ TEST_F(XStoreTest, RemoveDBDeletesDirectoryAndDropsFromInfoQuery) {
 // ---------------------------------------------------------------------
 
 TEST_F(XStoreTest, RemoveDBFilesRemovesDataFileButProtectsConfig) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
-    XStore_Proto::UnaryInsert_REP insertRep;
-    store.UnaryInsert(TS_2016_MID, MakeRow({FString("hello")}), "TESTDB", &insertRep);
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore_Proto::UnaryInsert_REP InsertRep;
+    Store.UnaryInsert(TS_2016_MID, MakeRow({FString("hello")}), "TESTDB", &InsertRep);
 
-    XStore_Proto::RemoveDBFiles_REQ req;
-    req.add_filename("2016.XSTORE");
-    req.add_filename("TESTDB.CFG");
+    XStore_Proto::RemoveDBFiles_REQ Req;
+    Req.add_filename("2016.XSTORE");
+    Req.add_filename("TESTDB.CFG");
 
-    XStore_Proto::RemoveDBFiles_REP rep = store.RemoveDBFiles(&req, "TESTDB");
+    XStore_Proto::RemoveDBFiles_REP Rep = Store.RemoveDBFiles(&Req, "TESTDB");
 
-    ASSERT_EQ(rep.removestatus_size(), 2);
-    EXPECT_EQ(rep.removestatus(0), "[INFO] [REMOVE DB FILES] [DB: TESTDB] - Removed 2016.XSTORE");
-    EXPECT_EQ(rep.removestatus(1), "[WARNING] [REMOVE DB FILES] [DB: TESTDB] - TESTDB.CFG is prohibited from remove");
+    ASSERT_EQ(Rep.removestatus_size(), 2);
+    EXPECT_EQ(Rep.removestatus(0), "[INFO] [REMOVE DB FILES] [DB: TESTDB] - Removed 2016.XSTORE");
+    EXPECT_EQ(Rep.removestatus(1), "[WARNING] [REMOVE DB FILES] [DB: TESTDB] - TESTDB.CFG is prohibited from remove");
 
-    EXPECT_FALSE(fs::exists(scratch->testRoot / "DataStore" / "TESTDB" / "2016.XSTORE"));
-    EXPECT_TRUE(fs::exists(scratch->testRoot / "DataStore" / "TESTDB" / "TESTDB.CFG"));
+    EXPECT_FALSE(fs::exists(Scratch->TestRoot / "DataStore" / "TESTDB" / "2016.XSTORE"));
+    EXPECT_TRUE(fs::exists(Scratch->TestRoot / "DataStore" / "TESTDB" / "TESTDB.CFG"));
 }
 
 // ---------------------------------------------------------------------
@@ -161,39 +161,39 @@ TEST_F(XStoreTest, RemoveDBFilesRemovesDataFileButProtectsConfig) {
 // ---------------------------------------------------------------------
 
 TEST_F(XStoreTest, UnaryInsertOnMissingDBReturnsError) {
-    XStore store;
-    XStore_Proto::UnaryInsert_REP rep;
-    store.UnaryInsert(TS_2016_MID, MakeRow({FString("hello")}), "TESTDB", &rep);
+    XStore Store;
+    XStore_Proto::UnaryInsert_REP Rep;
+    Store.UnaryInsert(TS_2016_MID, MakeRow({FString("hello")}), "TESTDB", &Rep);
 
-    EXPECT_EQ(rep.insertstatus(), "[ERROR] [UNARY INSERT] [DB: TESTDB] - DB does not exist");
+    EXPECT_EQ(Rep.insertstatus(), "[ERROR] [UNARY INSERT] [DB: TESTDB] - DB does not exist");
 }
 
 TEST_F(XStoreTest, UnaryInsertExactTimestampHasInsertedData) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
-    XStore_Proto::UnaryInsert_REP insertRep;
-    store.UnaryInsert(TS_2016_MID, MakeRow({FDouble(3.14), FString("abc"), FBool(true)}), "TESTDB", &insertRep);
-    EXPECT_EQ(insertRep.insertstatus(), "[INFO] [UNARY INSERT] [DB: TESTDB] - Inserted 1482271200 to 2016.XSTORE");
+    XStore_Proto::UnaryInsert_REP InsertRep;
+    Store.UnaryInsert(TS_2016_MID, MakeRow({FDouble(3.14), FString("abc"), FBool(true)}), "TESTDB", &InsertRep);
+    EXPECT_EQ(InsertRep.insertstatus(), "[INFO] [UNARY INSERT] [DB: TESTDB] - Inserted 1482271200 to 2016.XSTORE");
 
-    XStore_Proto::UnaryQuery_REP queryRep;
-    store.UnaryQuery(TS_2016_MID, "TESTDB", &queryRep);
+    XStore_Proto::UnaryQuery_REP QueryRep;
+    Store.UnaryQuery(TS_2016_MID, "TESTDB", &QueryRep);
 
-    EXPECT_EQ(queryRep.timestamp(), TS_2016_MID);
-    ASSERT_EQ(queryRep.data().fielddata_size(), 3);
-    EXPECT_DOUBLE_EQ(queryRep.data().fielddata(0).doubledata(), 3.14);
-    EXPECT_EQ(queryRep.data().fielddata(1).stringdata(), "abc");
-    EXPECT_EQ(queryRep.data().fielddata(2).booldata(), true);
+    EXPECT_EQ(QueryRep.timestamp(), TS_2016_MID);
+    ASSERT_EQ(QueryRep.data().fielddata_size(), 3);
+    EXPECT_DOUBLE_EQ(QueryRep.data().fielddata(0).doubledata(), 3.14);
+    EXPECT_EQ(QueryRep.data().fielddata(1).stringdata(), "abc");
+    EXPECT_EQ(QueryRep.data().fielddata(2).booldata(), true);
 }
 
 TEST_F(XStoreTest, UnaryInsertAllProtoDataTypesRoundTrip) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 256);
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 256);
 
     // Exercises every branch of FData's oneof (see ProtoFile/XStore.proto),
     // not just the double/string/bool trio used elsewhere in this file.
-    XStore_Proto::UnaryInsert_REP insertRep;
-    store.UnaryInsert(TS_2016_MID, MakeRow({
+    XStore_Proto::UnaryInsert_REP InsertRep;
+    Store.UnaryInsert(TS_2016_MID, MakeRow({
         FDouble(3.1415926535),
         FFloat(2.5f),
         FInt32(-7),
@@ -209,14 +209,14 @@ TEST_F(XStoreTest, UnaryInsertAllProtoDataTypesRoundTrip) {
         FBool(true),
         FString("hello-world"),
         FBytes(std::string("\x00\x01\x02payload", 11)),
-    }), "TESTDB", &insertRep);
-    EXPECT_NE(insertRep.insertstatus().find("[INFO]"), std::string::npos);
+    }), "TESTDB", &InsertRep);
+    EXPECT_NE(InsertRep.insertstatus().find("[INFO]"), std::string::npos);
 
-    XStore_Proto::UnaryQuery_REP queryRep;
-    store.UnaryQuery(TS_2016_MID, "TESTDB", &queryRep);
+    XStore_Proto::UnaryQuery_REP QueryRep;
+    Store.UnaryQuery(TS_2016_MID, "TESTDB", &QueryRep);
 
-    ASSERT_EQ(queryRep.data().fielddata_size(), 15);
-    const auto &d = queryRep.data();
+    ASSERT_EQ(QueryRep.data().fielddata_size(), 15);
+    const auto &d = QueryRep.data();
     EXPECT_DOUBLE_EQ(d.fielddata(0).doubledata(), 3.1415926535);
     EXPECT_FLOAT_EQ(d.fielddata(1).floatdata(), 2.5f);
     EXPECT_EQ(d.fielddata(2).int32data(), -7);
@@ -235,52 +235,52 @@ TEST_F(XStoreTest, UnaryInsertAllProtoDataTypesRoundTrip) {
 }
 
 TEST_F(XStoreTest, UnaryQueryNeighboringUninsertedTimestampsReturnEmptyData) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
-    XStore_Proto::UnaryInsert_REP insertRep;
-    store.UnaryInsert(TS_2009_MID, MakeRow({FDouble(1.0)}), "TESTDB", &insertRep);
+    XStore_Proto::UnaryInsert_REP InsertRep;
+    Store.UnaryInsert(TS_2009_MID, MakeRow({FDouble(1.0)}), "TESTDB", &InsertRep);
 
     // Same year file exists, but nothing was ever written at these offsets --
     // this must come back as a normal (non-error) response with zero fields,
     // not as an error, since the file itself exists.
-    for (unsigned long long neighbor : {TS_2009_MID - 5, TS_2009_MID + 5, TS_2009_MID + 3600}) {
-        XStore_Proto::UnaryQuery_REP queryRep;
-        store.UnaryQuery(neighbor, "TESTDB", &queryRep);
-        EXPECT_EQ(queryRep.timestamp(), neighbor);
-        EXPECT_EQ(queryRep.data().fielddata_size(), 0) << "neighbor=" << neighbor;
+    for (unsigned long long Neighbor : {TS_2009_MID - 5, TS_2009_MID + 5, TS_2009_MID + 3600}) {
+        XStore_Proto::UnaryQuery_REP QueryRep;
+        Store.UnaryQuery(Neighbor, "TESTDB", &QueryRep);
+        EXPECT_EQ(QueryRep.timestamp(), Neighbor);
+        EXPECT_EQ(QueryRep.data().fielddata_size(), 0) << "neighbor=" << Neighbor;
     }
 
     // Sanity: the originally-inserted timestamp is unaffected by the reads above.
-    XStore_Proto::UnaryQuery_REP queryRep;
-    store.UnaryQuery(TS_2009_MID, "TESTDB", &queryRep);
-    ASSERT_EQ(queryRep.data().fielddata_size(), 1);
-    EXPECT_DOUBLE_EQ(queryRep.data().fielddata(0).doubledata(), 1.0);
+    XStore_Proto::UnaryQuery_REP QueryRep;
+    Store.UnaryQuery(TS_2009_MID, "TESTDB", &QueryRep);
+    ASSERT_EQ(QueryRep.data().fielddata_size(), 1);
+    EXPECT_DOUBLE_EQ(QueryRep.data().fielddata(0).doubledata(), 1.0);
 }
 
 TEST_F(XStoreTest, UnaryInsertOverwriteSameTimestampKeepsLatestValue) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
-    XStore_Proto::UnaryInsert_REP insertRep;
-    store.UnaryInsert(TS_2003_MID, MakeRow({FString("first")}), "TESTDB", &insertRep);
-    store.UnaryInsert(TS_2003_MID, MakeRow({FString("second")}), "TESTDB", &insertRep);
+    XStore_Proto::UnaryInsert_REP InsertRep;
+    Store.UnaryInsert(TS_2003_MID, MakeRow({FString("first")}), "TESTDB", &InsertRep);
+    Store.UnaryInsert(TS_2003_MID, MakeRow({FString("second")}), "TESTDB", &InsertRep);
 
-    XStore_Proto::UnaryQuery_REP queryRep;
-    store.UnaryQuery(TS_2003_MID, "TESTDB", &queryRep);
+    XStore_Proto::UnaryQuery_REP QueryRep;
+    Store.UnaryQuery(TS_2003_MID, "TESTDB", &QueryRep);
 
-    ASSERT_EQ(queryRep.data().fielddata_size(), 1);
-    EXPECT_EQ(queryRep.data().fielddata(0).stringdata(), "second");
+    ASSERT_EQ(QueryRep.data().fielddata_size(), 1);
+    EXPECT_EQ(QueryRep.data().fielddata(0).stringdata(), "second");
 }
 
 TEST_F(XStoreTest, UnaryQueryWithDbButNoYearFileReturnsError) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);  // DB exists, but nothing was ever inserted for TS_2016_MID's year
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);  // DB exists, but nothing was ever inserted for TS_2016_MID's year
 
-    XStore_Proto::UnaryQuery_REP queryRep;
-    store.UnaryQuery(TS_2016_MID, "TESTDB", &queryRep);
+    XStore_Proto::UnaryQuery_REP QueryRep;
+    Store.UnaryQuery(TS_2016_MID, "TESTDB", &QueryRep);
 
-    EXPECT_EQ(queryRep.querystatus(), "[ERROR] [UNARY QUERY] [DB: TESTDB] - DB does not exist");
+    EXPECT_EQ(QueryRep.querystatus(), "[ERROR] [UNARY QUERY] [DB: TESTDB] - DB does not exist");
 }
 
 // Unlike UnaryInsert/BatchQuery/RangeQuery (which all check the DB directory
@@ -289,74 +289,74 @@ TEST_F(XStoreTest, UnaryQueryWithDbButNoYearFileReturnsError) {
 // XStore instance querying a DB that was never created, that fopen() returns
 // NULL and the subsequent fileno(NULL) crashes instead of reporting an error.
 TEST_F(XStoreTest, UnaryQueryOnNeverCreatedDBReturnsErrorInsteadOfCrashing) {
-    XStore store;  // fresh instance: cfgMap starts empty, so this can't be masked by a warm cache
-    XStore_Proto::UnaryQuery_REP queryRep;
-    store.UnaryQuery(TS_2003_MID, "NEVER_CREATED_DB", &queryRep);
-    EXPECT_NE(queryRep.querystatus().find("[ERROR]"), std::string::npos);
+    XStore Store;  // fresh instance: cfgMap starts empty, so this can't be masked by a warm cache
+    XStore_Proto::UnaryQuery_REP QueryRep;
+    Store.UnaryQuery(TS_2003_MID, "NEVER_CREATED_DB", &QueryRep);
+    EXPECT_NE(QueryRep.querystatus().find("[ERROR]"), std::string::npos);
 }
 
 TEST_F(XStoreTest, UnaryInsertDbNameIsCaseInsensitive) {
-    XStore store;
-    store.CreateDB("testdb", XStore_Proto::SECOND, 128);
+    XStore Store;
+    Store.CreateDB("testdb", XStore_Proto::SECOND, 128);
 
-    XStore_Proto::UnaryInsert_REP insertRep;
-    store.UnaryInsert(TS_1998_MID, MakeRow({FString("mixed-case")}), "TestDb", &insertRep);
-    EXPECT_NE(insertRep.insertstatus().find("[INFO]"), std::string::npos);
+    XStore_Proto::UnaryInsert_REP InsertRep;
+    Store.UnaryInsert(TS_1998_MID, MakeRow({FString("mixed-case")}), "TestDb", &InsertRep);
+    EXPECT_NE(InsertRep.insertstatus().find("[INFO]"), std::string::npos);
 
-    XStore_Proto::UnaryQuery_REP queryRep;
-    store.UnaryQuery(TS_1998_MID, "TESTDB", &queryRep);
-    ASSERT_EQ(queryRep.data().fielddata_size(), 1);
-    EXPECT_EQ(queryRep.data().fielddata(0).stringdata(), "mixed-case");
+    XStore_Proto::UnaryQuery_REP QueryRep;
+    Store.UnaryQuery(TS_1998_MID, "TESTDB", &QueryRep);
+    ASSERT_EQ(QueryRep.data().fielddata_size(), 1);
+    EXPECT_EQ(QueryRep.data().fielddata(0).stringdata(), "mixed-case");
 }
 
 TEST_F(XStoreTest, UnaryInsertDifferentYearsWriteToSeparateFiles) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
-    XStore_Proto::UnaryInsert_REP insertRep;
-    store.UnaryInsert(TS_2016_MID, MakeRow({FString("year-2016")}), "TESTDB", &insertRep);
-    store.UnaryInsert(TS_2031_MID, MakeRow({FString("year-2031")}), "TESTDB", &insertRep);
+    XStore_Proto::UnaryInsert_REP InsertRep;
+    Store.UnaryInsert(TS_2016_MID, MakeRow({FString("year-2016")}), "TESTDB", &InsertRep);
+    Store.UnaryInsert(TS_2031_MID, MakeRow({FString("year-2031")}), "TESTDB", &InsertRep);
 
-    EXPECT_TRUE(fs::exists(scratch->testRoot / "DataStore" / "TESTDB" / "2016.XSTORE"));
-    EXPECT_TRUE(fs::exists(scratch->testRoot / "DataStore" / "TESTDB" / "2031.XSTORE"));
+    EXPECT_TRUE(fs::exists(Scratch->TestRoot / "DataStore" / "TESTDB" / "2016.XSTORE"));
+    EXPECT_TRUE(fs::exists(Scratch->TestRoot / "DataStore" / "TESTDB" / "2031.XSTORE"));
 
-    XStore_Proto::UnaryQuery_REP rep2016, rep2031;
-    store.UnaryQuery(TS_2016_MID, "TESTDB", &rep2016);
-    store.UnaryQuery(TS_2031_MID, "TESTDB", &rep2031);
+    XStore_Proto::UnaryQuery_REP Rep2016, Rep2031;
+    Store.UnaryQuery(TS_2016_MID, "TESTDB", &Rep2016);
+    Store.UnaryQuery(TS_2031_MID, "TESTDB", &Rep2031);
 
-    ASSERT_EQ(rep2016.data().fielddata_size(), 1);
-    ASSERT_EQ(rep2031.data().fielddata_size(), 1);
-    EXPECT_EQ(rep2016.data().fielddata(0).stringdata(), "year-2016");
-    EXPECT_EQ(rep2031.data().fielddata(0).stringdata(), "year-2031");
+    ASSERT_EQ(Rep2016.data().fielddata_size(), 1);
+    ASSERT_EQ(Rep2031.data().fielddata_size(), 1);
+    EXPECT_EQ(Rep2016.data().fielddata(0).stringdata(), "year-2016");
+    EXPECT_EQ(Rep2031.data().fielddata(0).stringdata(), "year-2031");
 }
 
 TEST_F(XStoreTest, UnaryDeletePunchesHoleThenUnaryQueryReturnsEmptyData) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
-    XStore_Proto::UnaryInsert_REP insertRep;
-    store.UnaryInsert(TS_2024_MID, MakeRow({FString("to-be-deleted")}), "TESTDB", &insertRep);
+    XStore_Proto::UnaryInsert_REP InsertRep;
+    Store.UnaryInsert(TS_2024_MID, MakeRow({FString("to-be-deleted")}), "TESTDB", &InsertRep);
 
-    XStore_Proto::UnaryDelete_REP deleteRep = store.UnaryDelete(TS_2024_MID, "TESTDB");
-    EXPECT_NE(deleteRep.deletestatus().find("[INFO]"), std::string::npos);
+    XStore_Proto::UnaryDelete_REP DeleteRep = Store.UnaryDelete(TS_2024_MID, "TESTDB");
+    EXPECT_NE(DeleteRep.deletestatus().find("[INFO]"), std::string::npos);
 
-    XStore_Proto::UnaryQuery_REP queryRep;
-    store.UnaryQuery(TS_2024_MID, "TESTDB", &queryRep);
-    EXPECT_EQ(queryRep.data().fielddata_size(), 0);
+    XStore_Proto::UnaryQuery_REP QueryRep;
+    Store.UnaryQuery(TS_2024_MID, "TESTDB", &QueryRep);
+    EXPECT_EQ(QueryRep.data().fielddata_size(), 0);
 }
 
 TEST_F(XStoreTest, UnaryDeleteOnMissingDBReturnsError) {
-    XStore store;
-    XStore_Proto::UnaryDelete_REP deleteRep = store.UnaryDelete(TS_2016_MID, "NOPE");
-    EXPECT_EQ(deleteRep.deletestatus(), "[ERROR] [UNARY DELETE] [DB: NOPE] - DB does not exist");
+    XStore Store;
+    XStore_Proto::UnaryDelete_REP DeleteRep = Store.UnaryDelete(TS_2016_MID, "NOPE");
+    EXPECT_EQ(DeleteRep.deletestatus(), "[ERROR] [UNARY DELETE] [DB: NOPE] - DB does not exist");
 }
 
 TEST_F(XStoreTest, UnaryDeleteOnMissingYearFileReturnsError) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
     // DB exists but nothing was ever inserted for this year -> no 2016.XSTORE file.
-    XStore_Proto::UnaryDelete_REP deleteRep = store.UnaryDelete(TS_2016_MID, "TESTDB");
-    EXPECT_EQ(deleteRep.deletestatus(), "[ERROR] [UNARY DELETE] [DB: TESTDB] - 2016.XSTORE does not exist");
+    XStore_Proto::UnaryDelete_REP DeleteRep = Store.UnaryDelete(TS_2016_MID, "TESTDB");
+    EXPECT_EQ(DeleteRep.deletestatus(), "[ERROR] [UNARY DELETE] [DB: TESTDB] - 2016.XSTORE does not exist");
 }
 
 // ---------------------------------------------------------------------
@@ -364,12 +364,12 @@ TEST_F(XStoreTest, UnaryDeleteOnMissingYearFileReturnsError) {
 // ---------------------------------------------------------------------
 
 TEST_F(XStoreTest, BatchInsertThenBatchQueryExactTimestampsRoundTrip) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
     // Spread across five different years (rather than one clustered block) so
     // this also exercises BatchInsert/BatchQuery's per-year file bucketing.
-    std::map<unsigned long long, std::string> expected = {
+    std::map<unsigned long long, std::string> Expected = {
         {TS_2031_MID, "e"},
         {TS_1998_MID, "a"},
         {TS_2016_MID, "d"},
@@ -377,256 +377,256 @@ TEST_F(XStoreTest, BatchInsertThenBatchQueryExactTimestampsRoundTrip) {
         {TS_2003_MID, "b"},
     };
 
-    XStore_Proto::BatchInsert_REQ insertReq;
-    insertReq.set_dbname("TESTDB");
-    for (auto &[ts, val] : expected) {
-        XStore_Proto::BatchInsert_DATA *entry = insertReq.add_batchinsert_data();
-        entry->set_timestamp(ts);
-        *entry->mutable_data() = MakeRow({FString(val)});
+    XStore_Proto::BatchInsert_REQ InsertReq;
+    InsertReq.set_dbname("TESTDB");
+    for (auto &[ts, val] : Expected) {
+        XStore_Proto::BatchInsert_DATA *Entry = InsertReq.add_batchinsert_data();
+        Entry->set_timestamp(ts);
+        *Entry->mutable_data() = MakeRow({FString(val)});
     }
-    XStore_Proto::BatchInsert_REP insertRep;
-    store.BatchInsert(&insertReq, &insertRep);
-    EXPECT_NE(insertRep.insertstatus().find("Inserted 5 elements"), std::string::npos);
+    XStore_Proto::BatchInsert_REP InsertRep;
+    Store.BatchInsert(&InsertReq, &InsertRep);
+    EXPECT_NE(InsertRep.insertstatus().find("Inserted 5 elements"), std::string::npos);
 
-    XStore_Proto::BatchQuery_REQ queryReq;
-    queryReq.set_dbname("TESTDB");
+    XStore_Proto::BatchQuery_REQ QueryReq;
+    QueryReq.set_dbname("TESTDB");
     // Deliberately shuffled/unsorted input -- BatchQuery must sort internally.
     for (unsigned long long ts : {TS_2016_MID, TS_1998_MID, TS_2031_MID, TS_2003_MID, TS_2009_MID}) {
-        queryReq.add_timestamp(ts);
+        QueryReq.add_timestamp(ts);
     }
 
-    XStore_Proto::BatchQuery_REP queryRep;
-    store.BatchQuery(&queryReq, &queryRep);
+    XStore_Proto::BatchQuery_REP QueryRep;
+    Store.BatchQuery(&QueryReq, &QueryRep);
 
-    ASSERT_EQ(queryRep.queryresponse_size(), 5);
-    for (int i = 0; i < queryRep.queryresponse_size(); i++) {
-        const auto &entry = queryRep.queryresponse(i);
-        ASSERT_TRUE(expected.count(entry.timestamp())) << "unexpected timestamp " << entry.timestamp();
-        ASSERT_EQ(entry.data().fielddata_size(), 1);
-        EXPECT_EQ(entry.data().fielddata(0).stringdata(), expected[entry.timestamp()]);
+    ASSERT_EQ(QueryRep.queryresponse_size(), 5);
+    for (int i = 0; i < QueryRep.queryresponse_size(); i++) {
+        const auto &Entry = QueryRep.queryresponse(i);
+        ASSERT_TRUE(Expected.count(Entry.timestamp())) << "unexpected timestamp " << Entry.timestamp();
+        ASSERT_EQ(Entry.data().fielddata_size(), 1);
+        EXPECT_EQ(Entry.data().fielddata(0).stringdata(), Expected[Entry.timestamp()]);
     }
 }
 
 TEST_F(XStoreTest, BatchQueryHolesAreOmittedFromResults) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
     // Two unrelated years, each with a small gap between its own points, so
     // hole-detection is verified without clustering all data into one year.
-    XStore_Proto::BatchInsert_REQ insertReq;
-    insertReq.set_dbname("TESTDB");
+    XStore_Proto::BatchInsert_REQ InsertReq;
+    InsertReq.set_dbname("TESTDB");
     for (unsigned long long ts : {TS_2009_MID, TS_2009_MID + 10, TS_2009_MID + 20,
                                    TS_2031_MID, TS_2031_MID + 15}) {
-        XStore_Proto::BatchInsert_DATA *entry = insertReq.add_batchinsert_data();
-        entry->set_timestamp(ts);
-        *entry->mutable_data() = MakeRow({FUInt32(1)});
+        XStore_Proto::BatchInsert_DATA *Entry = InsertReq.add_batchinsert_data();
+        Entry->set_timestamp(ts);
+        *Entry->mutable_data() = MakeRow({FUInt32(1)});
     }
-    XStore_Proto::BatchInsert_REP insertRep;
-    store.BatchInsert(&insertReq, &insertRep);
+    XStore_Proto::BatchInsert_REP InsertRep;
+    Store.BatchInsert(&InsertReq, &InsertRep);
 
     // Query the 5 inserted timestamps plus holes interleaved in both years --
     // holes must be silently omitted from queryresponse, not returned as empty rows.
-    XStore_Proto::BatchQuery_REQ queryReq;
-    queryReq.set_dbname("TESTDB");
+    XStore_Proto::BatchQuery_REQ QueryReq;
+    QueryReq.set_dbname("TESTDB");
     for (unsigned long long ts : {TS_2009_MID, TS_2009_MID + 5, TS_2009_MID + 10, TS_2009_MID + 15, TS_2009_MID + 20,
                                    TS_2031_MID, TS_2031_MID + 7, TS_2031_MID + 15}) {
-        queryReq.add_timestamp(ts);
+        QueryReq.add_timestamp(ts);
     }
 
-    XStore_Proto::BatchQuery_REP queryRep;
-    store.BatchQuery(&queryReq, &queryRep);
+    XStore_Proto::BatchQuery_REP QueryRep;
+    Store.BatchQuery(&QueryReq, &QueryRep);
 
-    ASSERT_EQ(queryRep.queryresponse_size(), 5);
-    std::set<unsigned long long> returned;
-    for (int i = 0; i < queryRep.queryresponse_size(); i++) {
-        returned.insert(queryRep.queryresponse(i).timestamp());
+    ASSERT_EQ(QueryRep.queryresponse_size(), 5);
+    std::set<unsigned long long> Returned;
+    for (int i = 0; i < QueryRep.queryresponse_size(); i++) {
+        Returned.insert(QueryRep.queryresponse(i).timestamp());
     }
-    EXPECT_EQ(returned, std::set<unsigned long long>(
+    EXPECT_EQ(Returned, std::set<unsigned long long>(
         {TS_2009_MID, TS_2009_MID + 10, TS_2009_MID + 20, TS_2031_MID, TS_2031_MID + 15}));
 }
 
 TEST_F(XStoreTest, BatchInsertMixedColumnCountsPerTimestamp) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
-    const unsigned long long ts1 = TS_1998_MID;              // 1 column
-    const unsigned long long ts2 = TS_2003_MID;               // 2 columns
-    const unsigned long long ts3 = TS_2009_MID;               // 3 columns
-    const unsigned long long ts4 = TS_2016_MID;               // 1 column
-    const unsigned long long tsHole = TS_2016_MID + 100000;   // never inserted, same year as ts4
+    const unsigned long long Ts1 = TS_1998_MID;              // 1 column
+    const unsigned long long Ts2 = TS_2003_MID;               // 2 columns
+    const unsigned long long Ts3 = TS_2009_MID;               // 3 columns
+    const unsigned long long Ts4 = TS_2016_MID;               // 1 column
+    const unsigned long long TsHole = TS_2016_MID + 100000;   // never inserted, same year as ts4
 
     // Deliberately spread across several different oneof branches (not just
     // double/string/bool) so column-count mixing is also type-diverse.
-    XStore_Proto::BatchInsert_REQ insertReq;
-    insertReq.set_dbname("TESTDB");
-    auto addEntry = [&](unsigned long long ts, const std::vector<XStore_Proto::FData> &vals) {
-        XStore_Proto::BatchInsert_DATA *entry = insertReq.add_batchinsert_data();
-        entry->set_timestamp(ts);
-        *entry->mutable_data() = MakeRow(vals);
+    XStore_Proto::BatchInsert_REQ InsertReq;
+    InsertReq.set_dbname("TESTDB");
+    auto AddEntry = [&](unsigned long long ts, const std::vector<XStore_Proto::FData> &vals) {
+        XStore_Proto::BatchInsert_DATA *Entry = InsertReq.add_batchinsert_data();
+        Entry->set_timestamp(ts);
+        *Entry->mutable_data() = MakeRow(vals);
     };
-    addEntry(ts1, {FUInt64(42)});
-    addEntry(ts2, {FFixed32(7), FBytes("payload-two")});
-    addEntry(ts3, {FSInt64(-123456789), FSFixed32(-42), FBool(true)});
-    addEntry(ts4, {FInt64(4)});
+    AddEntry(Ts1, {FUInt64(42)});
+    AddEntry(Ts2, {FFixed32(7), FBytes("payload-two")});
+    AddEntry(Ts3, {FSInt64(-123456789), FSFixed32(-42), FBool(true)});
+    AddEntry(Ts4, {FInt64(4)});
 
-    XStore_Proto::BatchInsert_REP insertRep;
-    store.BatchInsert(&insertReq, &insertRep);
+    XStore_Proto::BatchInsert_REP InsertRep;
+    Store.BatchInsert(&InsertReq, &InsertRep);
 
-    XStore_Proto::BatchQuery_REQ queryReq;
-    queryReq.set_dbname("TESTDB");
-    for (unsigned long long ts : {ts1, ts2, ts3, ts4, tsHole}) queryReq.add_timestamp(ts);
+    XStore_Proto::BatchQuery_REQ QueryReq;
+    QueryReq.set_dbname("TESTDB");
+    for (unsigned long long ts : {Ts1, Ts2, Ts3, Ts4, TsHole}) QueryReq.add_timestamp(ts);
 
-    XStore_Proto::BatchQuery_REP queryRep;
-    store.BatchQuery(&queryReq, &queryRep);
+    XStore_Proto::BatchQuery_REP QueryRep;
+    Store.BatchQuery(&QueryReq, &QueryRep);
 
-    ASSERT_EQ(queryRep.queryresponse_size(), 4);
-    std::map<unsigned long long, XStore_Proto::UnaryQuery_REP> byTs;
-    for (int i = 0; i < queryRep.queryresponse_size(); i++) {
-        byTs[queryRep.queryresponse(i).timestamp()] = queryRep.queryresponse(i);
+    ASSERT_EQ(QueryRep.queryresponse_size(), 4);
+    std::map<unsigned long long, XStore_Proto::UnaryQuery_REP> ByTs;
+    for (int i = 0; i < QueryRep.queryresponse_size(); i++) {
+        ByTs[QueryRep.queryresponse(i).timestamp()] = QueryRep.queryresponse(i);
     }
 
-    ASSERT_EQ(byTs.count(tsHole), 0u);
-    ASSERT_EQ(byTs[ts1].data().fielddata_size(), 1);
-    EXPECT_EQ(byTs[ts1].data().fielddata(0).uint64data(), 42u);
+    ASSERT_EQ(ByTs.count(TsHole), 0u);
+    ASSERT_EQ(ByTs[Ts1].data().fielddata_size(), 1);
+    EXPECT_EQ(ByTs[Ts1].data().fielddata(0).uint64data(), 42u);
 
-    ASSERT_EQ(byTs[ts2].data().fielddata_size(), 2);
-    EXPECT_EQ(byTs[ts2].data().fielddata(0).fixed32data(), 7u);
-    EXPECT_EQ(byTs[ts2].data().fielddata(1).bytesdata(), "payload-two");
+    ASSERT_EQ(ByTs[Ts2].data().fielddata_size(), 2);
+    EXPECT_EQ(ByTs[Ts2].data().fielddata(0).fixed32data(), 7u);
+    EXPECT_EQ(ByTs[Ts2].data().fielddata(1).bytesdata(), "payload-two");
 
-    ASSERT_EQ(byTs[ts3].data().fielddata_size(), 3);
-    EXPECT_EQ(byTs[ts3].data().fielddata(0).sint64data(), -123456789);
-    EXPECT_EQ(byTs[ts3].data().fielddata(1).sfixed32data(), -42);
-    EXPECT_EQ(byTs[ts3].data().fielddata(2).booldata(), true);
+    ASSERT_EQ(ByTs[Ts3].data().fielddata_size(), 3);
+    EXPECT_EQ(ByTs[Ts3].data().fielddata(0).sint64data(), -123456789);
+    EXPECT_EQ(ByTs[Ts3].data().fielddata(1).sfixed32data(), -42);
+    EXPECT_EQ(ByTs[Ts3].data().fielddata(2).booldata(), true);
 
-    ASSERT_EQ(byTs[ts4].data().fielddata_size(), 1);
-    EXPECT_EQ(byTs[ts4].data().fielddata(0).int64data(), 4);
+    ASSERT_EQ(ByTs[Ts4].data().fielddata_size(), 1);
+    EXPECT_EQ(ByTs[Ts4].data().fielddata(0).int64data(), 4);
 }
 
 TEST_F(XStoreTest, BatchInsertRandomTimestampsThenRandomBatchQuerySubset) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
-    std::mt19937 rng(12345);
-    std::uniform_int_distribution<unsigned long long> epochDist(RANDOM_RANGE_LOW, RANDOM_RANGE_HIGH);
+    std::mt19937 Rng(12345);
+    std::uniform_int_distribution<unsigned long long> EpochDist(RANDOM_RANGE_LOW, RANDOM_RANGE_HIGH);
 
     // Generate a random, deduplicated set of timestamps spread across ~70
     // years (not clustered in one year) and insert each one carrying its own
     // timestamp value as the payload so round-trip correctness can be
     // checked without a side table.
-    std::set<unsigned long long> insertedTimestamps;
-    while (insertedTimestamps.size() < 40) {
-        insertedTimestamps.insert(epochDist(rng));
+    std::set<unsigned long long> InsertedTimestamps;
+    while (InsertedTimestamps.size() < 40) {
+        InsertedTimestamps.insert(EpochDist(Rng));
     }
 
-    XStore_Proto::BatchInsert_REQ insertReq;
-    insertReq.set_dbname("TESTDB");
-    for (unsigned long long ts : insertedTimestamps) {
-        XStore_Proto::BatchInsert_DATA *entry = insertReq.add_batchinsert_data();
-        entry->set_timestamp(ts);
-        *entry->mutable_data() = MakeRow({FInt64((int64_t)ts)});
+    XStore_Proto::BatchInsert_REQ InsertReq;
+    InsertReq.set_dbname("TESTDB");
+    for (unsigned long long ts : InsertedTimestamps) {
+        XStore_Proto::BatchInsert_DATA *Entry = InsertReq.add_batchinsert_data();
+        Entry->set_timestamp(ts);
+        *Entry->mutable_data() = MakeRow({FInt64((int64_t)ts)});
     }
-    XStore_Proto::BatchInsert_REP insertRep;
-    store.BatchInsert(&insertReq, &insertRep);
+    XStore_Proto::BatchInsert_REP InsertRep;
+    Store.BatchInsert(&InsertReq, &InsertRep);
 
     // Sanity check: confirm the generated data really is dispersed across
     // several distinct year-files rather than accidentally clustering.
-    std::set<int> distinctYears;
-    for (unsigned long long ts : insertedTimestamps) {
+    std::set<int> DistinctYears;
+    for (unsigned long long ts : InsertedTimestamps) {
         std::time_t t = static_cast<std::time_t>(ts);
-        struct tm tmStruct;
-        gmtime_r(&t, &tmStruct);
-        distinctYears.insert(tmStruct.tm_year + 1900);
+        struct tm TmStruct;
+        gmtime_r(&t, &TmStruct);
+        DistinctYears.insert(TmStruct.tm_year + 1900);
     }
-    EXPECT_GE(distinctYears.size(), 10u) << "expected timestamps to span many distinct years";
+    EXPECT_GE(DistinctYears.size(), 10u) << "expected timestamps to span many distinct years";
 
     // Random query set: a mix of timestamps that were and weren't inserted.
-    std::vector<unsigned long long> insertedVec(insertedTimestamps.begin(), insertedTimestamps.end());
-    std::shuffle(insertedVec.begin(), insertedVec.end(), rng);
+    std::vector<unsigned long long> InsertedVec(InsertedTimestamps.begin(), InsertedTimestamps.end());
+    std::shuffle(InsertedVec.begin(), InsertedVec.end(), Rng);
 
-    std::set<unsigned long long> queriedSet;
-    for (int i = 0; i < 20; i++) queriedSet.insert(insertedVec[i]);   // known hits
-    while (queriedSet.size() < 60) {
-        queriedSet.insert(epochDist(rng));  // likely (not guaranteed) misses
+    std::set<unsigned long long> QueriedSet;
+    for (int i = 0; i < 20; i++) QueriedSet.insert(InsertedVec[i]);   // known hits
+    while (QueriedSet.size() < 60) {
+        QueriedSet.insert(EpochDist(Rng));  // likely (not guaranteed) misses
     }
 
-    XStore_Proto::BatchQuery_REQ queryReq;
-    queryReq.set_dbname("TESTDB");
-    for (unsigned long long ts : queriedSet) queryReq.add_timestamp(ts);
+    XStore_Proto::BatchQuery_REQ QueryReq;
+    QueryReq.set_dbname("TESTDB");
+    for (unsigned long long ts : QueriedSet) QueryReq.add_timestamp(ts);
 
-    XStore_Proto::BatchQuery_REP queryRep;
-    store.BatchQuery(&queryReq, &queryRep);
+    XStore_Proto::BatchQuery_REP QueryRep;
+    Store.BatchQuery(&QueryReq, &QueryRep);
 
-    std::set<unsigned long long> expectedHits;
-    for (unsigned long long ts : queriedSet) {
-        if (insertedTimestamps.count(ts)) expectedHits.insert(ts);
+    std::set<unsigned long long> ExpectedHits;
+    for (unsigned long long ts : QueriedSet) {
+        if (InsertedTimestamps.count(ts)) ExpectedHits.insert(ts);
     }
 
-    ASSERT_EQ(queryRep.queryresponse_size(), (int)expectedHits.size());
-    for (int i = 0; i < queryRep.queryresponse_size(); i++) {
-        const auto &entry = queryRep.queryresponse(i);
-        EXPECT_EQ(expectedHits.count(entry.timestamp()), 1u) << "ts=" << entry.timestamp();
-        ASSERT_EQ(entry.data().fielddata_size(), 1);
-        EXPECT_EQ(entry.data().fielddata(0).int64data(), (int64_t)entry.timestamp());
+    ASSERT_EQ(QueryRep.queryresponse_size(), (int)ExpectedHits.size());
+    for (int i = 0; i < QueryRep.queryresponse_size(); i++) {
+        const auto &Entry = QueryRep.queryresponse(i);
+        EXPECT_EQ(ExpectedHits.count(Entry.timestamp()), 1u) << "ts=" << Entry.timestamp();
+        ASSERT_EQ(Entry.data().fielddata_size(), 1);
+        EXPECT_EQ(Entry.data().fielddata(0).int64data(), (int64_t)Entry.timestamp());
     }
 }
 
 TEST_F(XStoreTest, BatchInsertToNonexistentDBReturnsError) {
-    XStore store;
-    XStore_Proto::BatchInsert_REQ insertReq;
-    insertReq.set_dbname("NOPE");
-    XStore_Proto::BatchInsert_DATA *entry = insertReq.add_batchinsert_data();
-    entry->set_timestamp(TS_2024_MID);
-    *entry->mutable_data() = MakeRow({FDouble(1.0)});
+    XStore Store;
+    XStore_Proto::BatchInsert_REQ InsertReq;
+    InsertReq.set_dbname("NOPE");
+    XStore_Proto::BatchInsert_DATA *Entry = InsertReq.add_batchinsert_data();
+    Entry->set_timestamp(TS_2024_MID);
+    *Entry->mutable_data() = MakeRow({FDouble(1.0)});
 
-    XStore_Proto::BatchInsert_REP insertRep;
-    store.BatchInsert(&insertReq, &insertRep);
-    EXPECT_EQ(insertRep.insertstatus(), "[ERROR] [BATCH INSERT] [DB: NOPE] - DB does not exist");
+    XStore_Proto::BatchInsert_REP InsertRep;
+    Store.BatchInsert(&InsertReq, &InsertRep);
+    EXPECT_EQ(InsertRep.insertstatus(), "[ERROR] [BATCH INSERT] [DB: NOPE] - DB does not exist");
 }
 
 TEST_F(XStoreTest, BatchInsertEmptyPayloadOnExistingDBSucceedsWithZeroInserted) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
-    XStore_Proto::BatchInsert_REQ insertReq;
-    insertReq.set_dbname("TESTDB");  // no batchinsert_data entries at all
+    XStore_Proto::BatchInsert_REQ InsertReq;
+    InsertReq.set_dbname("TESTDB");  // no batchinsert_data entries at all
 
-    XStore_Proto::BatchInsert_REP insertRep;
-    store.BatchInsert(&insertReq, &insertRep);
-    EXPECT_EQ(insertRep.insertstatus(), "[INFO] [BATCH INSERT] [DB: TESTDB] - Inserted 0 elements successfully");
+    XStore_Proto::BatchInsert_REP InsertRep;
+    Store.BatchInsert(&InsertReq, &InsertRep);
+    EXPECT_EQ(InsertRep.insertstatus(), "[INFO] [BATCH INSERT] [DB: TESTDB] - Inserted 0 elements successfully");
 }
 
 TEST_F(XStoreTest, BatchDeleteThenBatchQueryDeletedEntriesOmitted) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
     // Spread across two distinct years; only one entry (in the 2009 file) gets deleted.
-    XStore_Proto::BatchInsert_REQ insertReq;
-    insertReq.set_dbname("TESTDB");
+    XStore_Proto::BatchInsert_REQ InsertReq;
+    InsertReq.set_dbname("TESTDB");
     for (unsigned long long ts : {TS_2009_MID, TS_2009_MID + 10, TS_2031_MID}) {
-        XStore_Proto::BatchInsert_DATA *entry = insertReq.add_batchinsert_data();
-        entry->set_timestamp(ts);
-        *entry->mutable_data() = MakeRow({FBool(true)});
+        XStore_Proto::BatchInsert_DATA *Entry = InsertReq.add_batchinsert_data();
+        Entry->set_timestamp(ts);
+        *Entry->mutable_data() = MakeRow({FBool(true)});
     }
-    XStore_Proto::BatchInsert_REP insertRep;
-    store.BatchInsert(&insertReq, &insertRep);
+    XStore_Proto::BatchInsert_REP InsertRep;
+    Store.BatchInsert(&InsertReq, &InsertRep);
 
-    XStore_Proto::BatchDelete_REQ deleteReq;
-    deleteReq.set_dbname("TESTDB");
-    deleteReq.add_timestamp(TS_2009_MID + 10);
-    XStore_Proto::BatchDelete_REP deleteRep = store.BatchDelete(&deleteReq);
-    EXPECT_NE(deleteRep.deletestatus().find("Deleted 1 items"), std::string::npos);
+    XStore_Proto::BatchDelete_REQ DeleteReq;
+    DeleteReq.set_dbname("TESTDB");
+    DeleteReq.add_timestamp(TS_2009_MID + 10);
+    XStore_Proto::BatchDelete_REP DeleteRep = Store.BatchDelete(&DeleteReq);
+    EXPECT_NE(DeleteRep.deletestatus().find("Deleted 1 items"), std::string::npos);
 
-    XStore_Proto::BatchQuery_REQ queryReq;
-    queryReq.set_dbname("TESTDB");
-    for (unsigned long long ts : {TS_2009_MID, TS_2009_MID + 10, TS_2031_MID}) queryReq.add_timestamp(ts);
+    XStore_Proto::BatchQuery_REQ QueryReq;
+    QueryReq.set_dbname("TESTDB");
+    for (unsigned long long ts : {TS_2009_MID, TS_2009_MID + 10, TS_2031_MID}) QueryReq.add_timestamp(ts);
 
-    XStore_Proto::BatchQuery_REP queryRep;
-    store.BatchQuery(&queryReq, &queryRep);
+    XStore_Proto::BatchQuery_REP QueryRep;
+    Store.BatchQuery(&QueryReq, &QueryRep);
 
-    ASSERT_EQ(queryRep.queryresponse_size(), 2);
-    std::set<unsigned long long> returned;
-    for (int i = 0; i < queryRep.queryresponse_size(); i++) returned.insert(queryRep.queryresponse(i).timestamp());
-    EXPECT_EQ(returned, std::set<unsigned long long>({TS_2009_MID, TS_2031_MID}));
+    ASSERT_EQ(QueryRep.queryresponse_size(), 2);
+    std::set<unsigned long long> Returned;
+    for (int i = 0; i < QueryRep.queryresponse_size(); i++) Returned.insert(QueryRep.queryresponse(i).timestamp());
+    EXPECT_EQ(Returned, std::set<unsigned long long>({TS_2009_MID, TS_2031_MID}));
 }
 
 // ---------------------------------------------------------------------
@@ -634,115 +634,115 @@ TEST_F(XStoreTest, BatchDeleteThenBatchQueryDeletedEntriesOmitted) {
 // ---------------------------------------------------------------------
 
 TEST_F(XStoreTest, RangeInsertThenRangeQueryContiguousRangeAllPresent) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
-    XStore_Proto::RangeInsert_REQ insertReq;
-    insertReq.set_dbname("TESTDB");
+    XStore_Proto::RangeInsert_REQ InsertReq;
+    InsertReq.set_dbname("TESTDB");
     for (int i = 0; i < 10; i++) {
-        XStore_Proto::RangeInsert_DATA *entry = insertReq.add_rangeinsert_data();
-        entry->set_timestamp(TS_2031_MID + i);
-        *entry->mutable_data() = MakeRow({FInt64(i)});
+        XStore_Proto::RangeInsert_DATA *Entry = InsertReq.add_rangeinsert_data();
+        Entry->set_timestamp(TS_2031_MID + i);
+        *Entry->mutable_data() = MakeRow({FInt64(i)});
     }
-    XStore_Proto::RangeInsert_REP insertRep;
-    store.RangeInsert(&insertReq, &insertRep);
-    EXPECT_NE(insertRep.insertstatus().find("Inserted 10 elements"), std::string::npos);
+    XStore_Proto::RangeInsert_REP InsertRep;
+    Store.RangeInsert(&InsertReq, &InsertRep);
+    EXPECT_NE(InsertRep.insertstatus().find("Inserted 10 elements"), std::string::npos);
 
-    XStore_Proto::RangeQuery_REP queryRep;
-    store.RangeQuery(TS_2031_MID, TS_2031_MID + 9, "TESTDB", &queryRep);
+    XStore_Proto::RangeQuery_REP QueryRep;
+    Store.RangeQuery(TS_2031_MID, TS_2031_MID + 9, "TESTDB", &QueryRep);
 
-    ASSERT_EQ(queryRep.queryresponse_size(), 10);
+    ASSERT_EQ(QueryRep.queryresponse_size(), 10);
     for (int i = 0; i < 10; i++) {
-        EXPECT_EQ(queryRep.queryresponse(i).timestamp(), TS_2031_MID + i);
-        ASSERT_EQ(queryRep.queryresponse(i).data().fielddata_size(), 1);
-        EXPECT_EQ(queryRep.queryresponse(i).data().fielddata(0).int64data(), i);
+        EXPECT_EQ(QueryRep.queryresponse(i).timestamp(), TS_2031_MID + i);
+        ASSERT_EQ(QueryRep.queryresponse(i).data().fielddata_size(), 1);
+        EXPECT_EQ(QueryRep.queryresponse(i).data().fielddata(0).int64data(), i);
     }
 }
 
 TEST_F(XStoreTest, RangeQueryUninsertedTimestampsReturnEmptyEntriesNotOmitted) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
     // Sparse insert: only the two endpoints of a 5-wide window. Positions
     // +1, +2, +3 are holes (unallocated -- never written).
-    XStore_Proto::RangeInsert_REQ insertReq;
-    insertReq.set_dbname("TESTDB");
-    XStore_Proto::RangeInsert_DATA *first = insertReq.add_rangeinsert_data();
-    first->set_timestamp(TS_2009_MID);
-    *first->mutable_data() = MakeRow({FString("start")});
-    XStore_Proto::RangeInsert_DATA *last = insertReq.add_rangeinsert_data();
-    last->set_timestamp(TS_2009_MID + 4);
-    *last->mutable_data() = MakeRow({FString("end")});
+    XStore_Proto::RangeInsert_REQ InsertReq;
+    InsertReq.set_dbname("TESTDB");
+    XStore_Proto::RangeInsert_DATA *First = InsertReq.add_rangeinsert_data();
+    First->set_timestamp(TS_2009_MID);
+    *First->mutable_data() = MakeRow({FString("start")});
+    XStore_Proto::RangeInsert_DATA *Last = InsertReq.add_rangeinsert_data();
+    Last->set_timestamp(TS_2009_MID + 4);
+    *Last->mutable_data() = MakeRow({FString("end")});
 
-    XStore_Proto::RangeInsert_REP insertRep;
-    store.RangeInsert(&insertReq, &insertRep);
+    XStore_Proto::RangeInsert_REP InsertRep;
+    Store.RangeInsert(&InsertReq, &InsertRep);
 
-    XStore_Proto::RangeQuery_REP queryRep;
-    store.RangeQuery(TS_2009_MID, TS_2009_MID + 4, "TESTDB", &queryRep);
+    XStore_Proto::RangeQuery_REP QueryRep;
+    Store.RangeQuery(TS_2009_MID, TS_2009_MID + 4, "TESTDB", &QueryRep);
 
     // Unlike BatchQuery, RangeQuery does NOT omit holes -- every timestamp in
     // range gets an entry, with holes coming back as zero-field RowData.
-    ASSERT_EQ(queryRep.queryresponse_size(), 5);
-    EXPECT_EQ(queryRep.queryresponse(0).data().fielddata_size(), 1);
-    EXPECT_EQ(queryRep.queryresponse(0).data().fielddata(0).stringdata(), "start");
+    ASSERT_EQ(QueryRep.queryresponse_size(), 5);
+    EXPECT_EQ(QueryRep.queryresponse(0).data().fielddata_size(), 1);
+    EXPECT_EQ(QueryRep.queryresponse(0).data().fielddata(0).stringdata(), "start");
     for (int i = 1; i <= 3; i++) {
-        EXPECT_EQ(queryRep.queryresponse(i).timestamp(), TS_2009_MID + i);
-        EXPECT_EQ(queryRep.queryresponse(i).data().fielddata_size(), 0) << "hole at offset " << i;
+        EXPECT_EQ(QueryRep.queryresponse(i).timestamp(), TS_2009_MID + i);
+        EXPECT_EQ(QueryRep.queryresponse(i).data().fielddata_size(), 0) << "hole at offset " << i;
     }
-    EXPECT_EQ(queryRep.queryresponse(4).data().fielddata_size(), 1);
-    EXPECT_EQ(queryRep.queryresponse(4).data().fielddata(0).stringdata(), "end");
+    EXPECT_EQ(QueryRep.queryresponse(4).data().fielddata_size(), 1);
+    EXPECT_EQ(QueryRep.queryresponse(4).data().fielddata(0).stringdata(), "end");
 }
 
 TEST_F(XStoreTest, RangeQuerySpanningTwoYearBoundary) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
-    XStore_Proto::UnaryInsert_REP insertRep;
-    store.UnaryInsert(TS_2016_LAST, MakeRow({FString("last-of-2016")}), "TESTDB", &insertRep);
-    store.UnaryInsert(TS_2017_FIRST, MakeRow({FString("first-of-2017")}), "TESTDB", &insertRep);
+    XStore_Proto::UnaryInsert_REP InsertRep;
+    Store.UnaryInsert(TS_2016_LAST, MakeRow({FString("last-of-2016")}), "TESTDB", &InsertRep);
+    Store.UnaryInsert(TS_2017_FIRST, MakeRow({FString("first-of-2017")}), "TESTDB", &InsertRep);
 
-    XStore_Proto::RangeQuery_REP queryRep;
-    store.RangeQuery(TS_2016_LAST, TS_2017_FIRST, "TESTDB", &queryRep);
+    XStore_Proto::RangeQuery_REP QueryRep;
+    Store.RangeQuery(TS_2016_LAST, TS_2017_FIRST, "TESTDB", &QueryRep);
 
-    ASSERT_EQ(queryRep.queryresponse_size(), 2);
-    EXPECT_EQ(queryRep.queryresponse(0).timestamp(), TS_2016_LAST);
-    EXPECT_EQ(queryRep.queryresponse(0).data().fielddata(0).stringdata(), "last-of-2016");
-    EXPECT_EQ(queryRep.queryresponse(1).timestamp(), TS_2017_FIRST);
-    EXPECT_EQ(queryRep.queryresponse(1).data().fielddata(0).stringdata(), "first-of-2017");
+    ASSERT_EQ(QueryRep.queryresponse_size(), 2);
+    EXPECT_EQ(QueryRep.queryresponse(0).timestamp(), TS_2016_LAST);
+    EXPECT_EQ(QueryRep.queryresponse(0).data().fielddata(0).stringdata(), "last-of-2016");
+    EXPECT_EQ(QueryRep.queryresponse(1).timestamp(), TS_2017_FIRST);
+    EXPECT_EQ(QueryRep.queryresponse(1).data().fielddata(0).stringdata(), "first-of-2017");
 }
 
 TEST_F(XStoreTest, RangeInsertToNonexistentDBReturnsError) {
-    XStore store;
-    XStore_Proto::RangeInsert_REQ insertReq;
-    insertReq.set_dbname("NOPE");
-    XStore_Proto::RangeInsert_DATA *entry = insertReq.add_rangeinsert_data();
-    entry->set_timestamp(TS_2003_MID);
-    *entry->mutable_data() = MakeRow({FDouble(1.0)});
+    XStore Store;
+    XStore_Proto::RangeInsert_REQ InsertReq;
+    InsertReq.set_dbname("NOPE");
+    XStore_Proto::RangeInsert_DATA *Entry = InsertReq.add_rangeinsert_data();
+    Entry->set_timestamp(TS_2003_MID);
+    *Entry->mutable_data() = MakeRow({FDouble(1.0)});
 
-    XStore_Proto::RangeInsert_REP insertRep;
-    store.RangeInsert(&insertReq, &insertRep);
-    EXPECT_EQ(insertRep.insertstatus(), "[ERROR] [RANGE INSERT] [DB: NOPE] - DB does not exist");
+    XStore_Proto::RangeInsert_REP InsertRep;
+    Store.RangeInsert(&InsertReq, &InsertRep);
+    EXPECT_EQ(InsertRep.insertstatus(), "[ERROR] [RANGE INSERT] [DB: NOPE] - DB does not exist");
 }
 
 TEST_F(XStoreTest, RangeDeleteSpanningTwoYearBoundaryDeletesBothEndpoints) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
-    XStore_Proto::UnaryInsert_REP insertRep;
-    store.UnaryInsert(TS_2016_LAST, MakeRow({FString("last-of-2016")}), "TESTDB", &insertRep);
-    store.UnaryInsert(TS_2017_FIRST, MakeRow({FString("first-of-2017")}), "TESTDB", &insertRep);
+    XStore_Proto::UnaryInsert_REP InsertRep;
+    Store.UnaryInsert(TS_2016_LAST, MakeRow({FString("last-of-2016")}), "TESTDB", &InsertRep);
+    Store.UnaryInsert(TS_2017_FIRST, MakeRow({FString("first-of-2017")}), "TESTDB", &InsertRep);
 
     // Same shape as RangeQuery's year-boundary bug: a range whose end lands
     // exactly on the first second of a year used to leave that last point
     // (endEpochT itself) undeleted.
-    XStore_Proto::RangeDelete_REP deleteRep = store.RangeDelete(TS_2016_LAST, TS_2017_FIRST, "TESTDB");
-    EXPECT_NE(deleteRep.deletestatus().find("Deleted 2 items"), std::string::npos) << deleteRep.deletestatus();
+    XStore_Proto::RangeDelete_REP DeleteRep = Store.RangeDelete(TS_2016_LAST, TS_2017_FIRST, "TESTDB");
+    EXPECT_NE(DeleteRep.deletestatus().find("Deleted 2 items"), std::string::npos) << DeleteRep.deletestatus();
 
-    XStore_Proto::UnaryQuery_REP rep2016, rep2017;
-    store.UnaryQuery(TS_2016_LAST, "TESTDB", &rep2016);
-    store.UnaryQuery(TS_2017_FIRST, "TESTDB", &rep2017);
-    EXPECT_EQ(rep2016.data().fielddata_size(), 0);
-    EXPECT_EQ(rep2017.data().fielddata_size(), 0);
+    XStore_Proto::UnaryQuery_REP Rep2016, Rep2017;
+    Store.UnaryQuery(TS_2016_LAST, "TESTDB", &Rep2016);
+    Store.UnaryQuery(TS_2017_FIRST, "TESTDB", &Rep2017);
+    EXPECT_EQ(Rep2016.data().fielddata_size(), 0);
+    EXPECT_EQ(Rep2017.data().fielddata_size(), 0);
 }
 
 // ---------------------------------------------------------------------
@@ -751,51 +751,51 @@ TEST_F(XStoreTest, RangeDeleteSpanningTwoYearBoundaryDeletesBothEndpoints) {
 // ---------------------------------------------------------------------
 
 TEST_F(XStoreTest, AggregatesOverContiguousNumericColumn) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
-    const std::vector<double> values = {10.0, 3.0, 7.0, 20.0, 1.0};
-    XStore_Proto::RangeInsert_REQ insertReq;
-    insertReq.set_dbname("TESTDB");
-    for (size_t i = 0; i < values.size(); i++) {
-        XStore_Proto::RangeInsert_DATA *entry = insertReq.add_rangeinsert_data();
-        entry->set_timestamp(TS_2024_MID + i);
-        *entry->mutable_data() = MakeRow({FDouble(values[i])});
+    const std::vector<double> Values = {10.0, 3.0, 7.0, 20.0, 1.0};
+    XStore_Proto::RangeInsert_REQ InsertReq;
+    InsertReq.set_dbname("TESTDB");
+    for (size_t i = 0; i < Values.size(); i++) {
+        XStore_Proto::RangeInsert_DATA *Entry = InsertReq.add_rangeinsert_data();
+        Entry->set_timestamp(TS_2024_MID + i);
+        *Entry->mutable_data() = MakeRow({FDouble(Values[i])});
     }
-    XStore_Proto::RangeInsert_REP insertRep;
-    store.RangeInsert(&insertReq, &insertRep);
+    XStore_Proto::RangeInsert_REP InsertRep;
+    Store.RangeInsert(&InsertReq, &InsertRep);
 
-    const unsigned long long start = TS_2024_MID;
-    const unsigned long long end = TS_2024_MID + values.size() - 1;
+    const unsigned long long Start = TS_2024_MID;
+    const unsigned long long End = TS_2024_MID + Values.size() - 1;
 
-    XStore_Proto::Min_REP minRep;
-    store.MinAggregateV3(start, end, "TESTDB", 0, &minRep);
-    EXPECT_EQ(minRep.opstatus(), "SUCCESS");
-    EXPECT_DOUBLE_EQ(minRep.opresult().doubledata(), 1.0);
+    XStore_Proto::Min_REP MinRep;
+    Store.MinAggregateV3(Start, End, "TESTDB", 0, &MinRep);
+    EXPECT_EQ(MinRep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(MinRep.opresult().doubledata(), 1.0);
 
-    XStore_Proto::Max_REP maxRep;
-    store.MaxAggregateV2(start, end, "TESTDB", 0, &maxRep);
-    EXPECT_DOUBLE_EQ(maxRep.opresult().doubledata(), 20.0);
+    XStore_Proto::Max_REP MaxRep;
+    Store.MaxAggregateV2(Start, End, "TESTDB", 0, &MaxRep);
+    EXPECT_DOUBLE_EQ(MaxRep.opresult().doubledata(), 20.0);
 
-    XStore_Proto::Sum_REP sumRep;
-    store.SumAggregateV2(start, end, "TESTDB", 0, &sumRep);
-    EXPECT_DOUBLE_EQ(sumRep.opresult(), 41.0);
+    XStore_Proto::Sum_REP SumRep;
+    Store.SumAggregateV2(Start, End, "TESTDB", 0, &SumRep);
+    EXPECT_DOUBLE_EQ(SumRep.opresult(), 41.0);
 
-    XStore_Proto::Avg_REP avgRep;
-    store.AvgAggregateV2(start, end, "TESTDB", 0, &avgRep);
-    EXPECT_DOUBLE_EQ(avgRep.opresult(), 8.2);
+    XStore_Proto::Avg_REP AvgRep;
+    Store.AvgAggregateV2(Start, End, "TESTDB", 0, &AvgRep);
+    EXPECT_DOUBLE_EQ(AvgRep.opresult(), 8.2);
 }
 
 TEST_F(XStoreTest, MinAggregateColumnIndexOutOfRangeReturnsNoValidData) {
-    XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
-    XStore_Proto::UnaryInsert_REP insertRep;
-    store.UnaryInsert(TS_2031_MID, MakeRow({FDouble(1.0)}), "TESTDB", &insertRep);  // only column 0 exists
+    XStore_Proto::UnaryInsert_REP InsertRep;
+    Store.UnaryInsert(TS_2031_MID, MakeRow({FDouble(1.0)}), "TESTDB", &InsertRep);  // only column 0 exists
 
-    XStore_Proto::Min_REP minRep;
-    store.MinAggregateV3(TS_2031_MID, TS_2031_MID, "TESTDB", 5, &minRep);
-    EXPECT_EQ(minRep.opstatus(), "ERROR: No valid data found");
+    XStore_Proto::Min_REP MinRep;
+    Store.MinAggregateV3(TS_2031_MID, TS_2031_MID, "TESTDB", 5, &MinRep);
+    EXPECT_EQ(MinRep.opstatus(), "ERROR: No valid data found");
 }
 
 // ---------------------------------------------------------------------
@@ -808,106 +808,106 @@ TEST_F(XStoreTest, MinAggregateColumnIndexOutOfRangeReturnsNoValidData) {
 // ---------------------------------------------------------------------
 
 TEST_F(XStoreTest, ConcurrentWritesToSameRegionAreSerializedAndDoNotCorruptData) {
-    XStore seedStore;
-    seedStore.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
-    XStore_Proto::UnaryInsert_REP seedRep;
-    seedStore.UnaryInsert(TS_2024_MID, MakeRow({FInt64(-1)}), "TESTDB", &seedRep);  // pre-allocate the year file
+    XStore SeedStore;
+    SeedStore.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore_Proto::UnaryInsert_REP SeedRep;
+    SeedStore.UnaryInsert(TS_2024_MID, MakeRow({FInt64(-1)}), "TESTDB", &SeedRep);  // pre-allocate the year file
 
-    constexpr int kIterations = 500;
-    auto writer = [&](int threadId) {
-        XStore store;  // each thread gets its own XStore instance, matching ZMQ_Server's one-instance-per-worker design
-        for (int i = 0; i < kIterations; i++) {
-            XStore_Proto::UnaryInsert_REP rep;
-            store.UnaryInsert(TS_2024_MID, MakeRow({FInt64(threadId * 1'000'000LL + i)}), "TESTDB", &rep);
+    constexpr int KIterations = 500;
+    auto Writer = [&](int threadId) {
+        XStore Store;  // each thread gets its own XStore instance, matching ZMQ_Server's one-instance-per-worker design
+        for (int i = 0; i < KIterations; i++) {
+            XStore_Proto::UnaryInsert_REP Rep;
+            Store.UnaryInsert(TS_2024_MID, MakeRow({FInt64(threadId * 1'000'000LL + i)}), "TESTDB", &Rep);
         }
     };
 
-    std::thread t0(writer, 0);
-    std::thread t1(writer, 1);
-    t0.join();
-    t1.join();
+    std::thread T0(Writer, 0);
+    std::thread T1(Writer, 1);
+    T0.join();
+    T1.join();
 
-    XStore_Proto::UnaryQuery_REP queryRep;
-    seedStore.UnaryQuery(TS_2024_MID, "TESTDB", &queryRep);
+    XStore_Proto::UnaryQuery_REP QueryRep;
+    SeedStore.UnaryQuery(TS_2024_MID, "TESTDB", &QueryRep);
 
     // Every write locked the exact same [offset, offset+rowLength) range, so
     // whichever thread wrote last, the row must be a single, cleanly-parsed
     // value from one of the two threads -- never a torn mix of both.
-    ASSERT_EQ(queryRep.data().fielddata_size(), 1) << "row must parse as exactly one clean field, not torn/corrupted bytes";
-    int64_t finalValue = queryRep.data().fielddata(0).int64data();
-    int finalThread = finalValue / 1'000'000LL;
-    int finalIter = finalValue % 1'000'000LL;
-    EXPECT_TRUE(finalThread == 0 || finalThread == 1) << "finalValue=" << finalValue;
-    EXPECT_GE(finalIter, 0);
-    EXPECT_LT(finalIter, kIterations);
+    ASSERT_EQ(QueryRep.data().fielddata_size(), 1) << "row must parse as exactly one clean field, not torn/corrupted bytes";
+    int64_t FinalValue = QueryRep.data().fielddata(0).int64data();
+    int FinalThread = FinalValue / 1'000'000LL;
+    int FinalIter = FinalValue % 1'000'000LL;
+    EXPECT_TRUE(FinalThread == 0 || FinalThread == 1) << "finalValue=" << FinalValue;
+    EXPECT_GE(FinalIter, 0);
+    EXPECT_LT(FinalIter, KIterations);
 }
 
 TEST_F(XStoreTest, ConcurrentWritesToDifferentRegionsOfSameFileDoNotInterfere) {
-    XStore seedStore;
-    seedStore.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
-    XStore_Proto::UnaryInsert_REP seedRep;
-    seedStore.UnaryInsert(TS_2009_MID, MakeRow({FInt64(-1)}), "TESTDB", &seedRep);  // pre-allocate 2009.XSTORE once
+    XStore SeedStore;
+    SeedStore.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore_Proto::UnaryInsert_REP SeedRep;
+    SeedStore.UnaryInsert(TS_2009_MID, MakeRow({FInt64(-1)}), "TESTDB", &SeedRep);  // pre-allocate 2009.XSTORE once
 
-    constexpr int kCount = 100;
-    auto writer = [&](unsigned long long base) {
-        XStore store;
-        for (int i = 0; i < kCount; i++) {
-            XStore_Proto::UnaryInsert_REP rep;
-            store.UnaryInsert(base + i, MakeRow({FInt64((int64_t)(base + i))}), "TESTDB", &rep);
+    constexpr int KCount = 100;
+    auto Writer = [&](unsigned long long base) {
+        XStore Store;
+        for (int i = 0; i < KCount; i++) {
+            XStore_Proto::UnaryInsert_REP Rep;
+            Store.UnaryInsert(base + i, MakeRow({FInt64((int64_t)(base + i))}), "TESTDB", &Rep);
         }
     };
 
     // Both ranges live in the SAME underlying 2009.XSTORE file but never overlap.
-    const unsigned long long base0 = TS_2009_MID + 10;       // offsets [10, 110)
-    const unsigned long long base1 = TS_2009_MID + 100000;   // offsets [100000, 100100)
+    const unsigned long long Base0 = TS_2009_MID + 10;       // offsets [10, 110)
+    const unsigned long long Base1 = TS_2009_MID + 100000;   // offsets [100000, 100100)
 
-    std::thread t0(writer, base0);
-    std::thread t1(writer, base1);
-    t0.join();
-    t1.join();
+    std::thread T0(Writer, Base0);
+    std::thread T1(Writer, Base1);
+    T0.join();
+    T1.join();
 
-    for (int i = 0; i < kCount; i++) {
-        XStore_Proto::UnaryQuery_REP rep0, rep1;
-        seedStore.UnaryQuery(base0 + i, "TESTDB", &rep0);
-        seedStore.UnaryQuery(base1 + i, "TESTDB", &rep1);
-        ASSERT_EQ(rep0.data().fielddata_size(), 1) << "i=" << i;
-        ASSERT_EQ(rep1.data().fielddata_size(), 1) << "i=" << i;
-        EXPECT_EQ(rep0.data().fielddata(0).int64data(), (int64_t)(base0 + i));
-        EXPECT_EQ(rep1.data().fielddata(0).int64data(), (int64_t)(base1 + i));
+    for (int i = 0; i < KCount; i++) {
+        XStore_Proto::UnaryQuery_REP Rep0, Rep1;
+        SeedStore.UnaryQuery(Base0 + i, "TESTDB", &Rep0);
+        SeedStore.UnaryQuery(Base1 + i, "TESTDB", &Rep1);
+        ASSERT_EQ(Rep0.data().fielddata_size(), 1) << "i=" << i;
+        ASSERT_EQ(Rep1.data().fielddata_size(), 1) << "i=" << i;
+        EXPECT_EQ(Rep0.data().fielddata(0).int64data(), (int64_t)(Base0 + i));
+        EXPECT_EQ(Rep1.data().fielddata(0).int64data(), (int64_t)(Base1 + i));
     }
 }
 
 TEST_F(XStoreTest, ConcurrentWritesToDifferentYearFilesDoNotInterfere) {
-    XStore seedStore;
-    seedStore.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
-    XStore_Proto::UnaryInsert_REP seedRep;
-    seedStore.UnaryInsert(TS_1998_MID, MakeRow({FInt64(-1)}), "TESTDB", &seedRep);  // pre-allocate 1998.XSTORE
-    seedStore.UnaryInsert(TS_2031_MID, MakeRow({FInt64(-1)}), "TESTDB", &seedRep);  // pre-allocate 2031.XSTORE
+    XStore SeedStore;
+    SeedStore.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore_Proto::UnaryInsert_REP SeedRep;
+    SeedStore.UnaryInsert(TS_1998_MID, MakeRow({FInt64(-1)}), "TESTDB", &SeedRep);  // pre-allocate 1998.XSTORE
+    SeedStore.UnaryInsert(TS_2031_MID, MakeRow({FInt64(-1)}), "TESTDB", &SeedRep);  // pre-allocate 2031.XSTORE
 
-    constexpr int kCount = 100;
-    auto writer = [&](unsigned long long base) {
-        XStore store;
-        for (int i = 0; i < kCount; i++) {
-            XStore_Proto::UnaryInsert_REP rep;
-            store.UnaryInsert(base + i, MakeRow({FInt64((int64_t)(base + i))}), "TESTDB", &rep);
+    constexpr int KCount = 100;
+    auto Writer = [&](unsigned long long base) {
+        XStore Store;
+        for (int i = 0; i < KCount; i++) {
+            XStore_Proto::UnaryInsert_REP Rep;
+            Store.UnaryInsert(base + i, MakeRow({FInt64((int64_t)(base + i))}), "TESTDB", &Rep);
         }
     };
 
-    std::thread t0(writer, TS_1998_MID);
-    std::thread t1(writer, TS_2031_MID);
-    t0.join();
-    t1.join();
+    std::thread T0(Writer, TS_1998_MID);
+    std::thread T1(Writer, TS_2031_MID);
+    T0.join();
+    T1.join();
 
-    for (int i = 0; i < kCount; i++) {
-        XStore_Proto::UnaryQuery_REP rep0, rep1;
-        seedStore.UnaryQuery(TS_1998_MID + i, "TESTDB", &rep0);
-        seedStore.UnaryQuery(TS_2031_MID + i, "TESTDB", &rep1);
-        ASSERT_EQ(rep0.data().fielddata_size(), 1) << "i=" << i;
-        ASSERT_EQ(rep1.data().fielddata_size(), 1) << "i=" << i;
-        EXPECT_EQ(rep0.data().fielddata(0).int64data(), (int64_t)(TS_1998_MID + i));
-        EXPECT_EQ(rep1.data().fielddata(0).int64data(), (int64_t)(TS_2031_MID + i));
+    for (int i = 0; i < KCount; i++) {
+        XStore_Proto::UnaryQuery_REP Rep0, Rep1;
+        SeedStore.UnaryQuery(TS_1998_MID + i, "TESTDB", &Rep0);
+        SeedStore.UnaryQuery(TS_2031_MID + i, "TESTDB", &Rep1);
+        ASSERT_EQ(Rep0.data().fielddata_size(), 1) << "i=" << i;
+        ASSERT_EQ(Rep1.data().fielddata_size(), 1) << "i=" << i;
+        EXPECT_EQ(Rep0.data().fielddata(0).int64data(), (int64_t)(TS_1998_MID + i));
+        EXPECT_EQ(Rep1.data().fielddata(0).int64data(), (int64_t)(TS_2031_MID + i));
     }
 
-    EXPECT_TRUE(fs::exists(scratch->testRoot / "DataStore" / "TESTDB" / "1998.XSTORE"));
-    EXPECT_TRUE(fs::exists(scratch->testRoot / "DataStore" / "TESTDB" / "2031.XSTORE"));
+    EXPECT_TRUE(fs::exists(Scratch->TestRoot / "DataStore" / "TESTDB" / "1998.XSTORE"));
+    EXPECT_TRUE(fs::exists(Scratch->TestRoot / "DataStore" / "TESTDB" / "2031.XSTORE"));
 }

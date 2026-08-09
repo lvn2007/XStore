@@ -5,71 +5,71 @@
 #include "XStore_Client.h"
 
 double MeanCalc(std::vector<double> inputVector) {
-    double totalSum = 0;
+    double TotalSum = 0;
 
     for (int i = 0; i < inputVector.size(); i++) {
-        totalSum += inputVector.at(i);
+        TotalSum += inputVector.at(i);
     }
 
-    return totalSum / inputVector.size();
+    return TotalSum / inputVector.size();
 }
 
 double StdCalc(std::vector<double> inputVector) {
-    double totalSum = 0;
-    double mean = 0;
-    double std = 0;
+    double TotalSum = 0;
+    double Mean = 0;
+    double Std = 0;
 
     for (int i = 0; i < inputVector.size(); i++) {
-        totalSum += inputVector.at(i);
+        TotalSum += inputVector.at(i);
     }
 
-    mean = totalSum / inputVector.size();
+    Mean = TotalSum / inputVector.size();
 
     for (int i = 0; i < inputVector.size(); i++) {
-        std += pow(inputVector.at(i) - mean, 2);
+        Std += pow(inputVector.at(i) - Mean, 2);
     }
 
-    return sqrt(std / inputVector.size());
+    return sqrt(Std / inputVector.size());
 }
 
-double getMin(std::vector<double> inputVector) {
-    double minVal = inputVector.at(0);
+double GetMin(std::vector<double> inputVector) {
+    double MinVal = inputVector.at(0);
 
     for (int i = 1; i < inputVector.size(); i++) {
-        if (inputVector.at(i) < minVal) {
-            minVal = inputVector.at(0);
+        if (inputVector.at(i) < MinVal) {
+            MinVal = inputVector.at(0);
         }
     }
 
-    return minVal;
+    return MinVal;
 }
 
-double getMax(std::vector<double> inputVector) {
-    double maxVal = inputVector.at(0);
+double GetMax(std::vector<double> inputVector) {
+    double MaxVal = inputVector.at(0);
 
     for (int i = 1; i < inputVector.size(); i++) {
-        if (inputVector.at(i) > maxVal) {
-            maxVal = inputVector.at(i);
+        if (inputVector.at(i) > MaxVal) {
+            MaxVal = inputVector.at(i);
         }
     }
-    return maxVal;
+    return MaxVal;
 }
 
 void WriteCSV(std::string fName, std::string colName, std::vector<double> inputs) {
     // Create an output filestream object
-    std::ofstream myFile(fName);
+    std::ofstream MyFile(fName);
 
     // Send the column name to the stream
-    myFile << colName << "\n";
+    MyFile << colName << "\n";
 
     // Send data to the stream
     for(int i = 0; i < inputs.size(); ++i)
     {
-        myFile << inputs.at(i) << "\n";
+        MyFile << inputs.at(i) << "\n";
     }
 
     // Close the file
-    myFile.close();
+    MyFile.close();
 }
 
 int main(int argc, char const *argv[])
@@ -96,7 +96,7 @@ int main(int argc, char const *argv[])
     }
 
     // Init XStore Client object
-    XStore_Client xstoreClient = XStore_Client(SERVER_ADDR, SERVER_PORT);
+    XStore_Client XStoreClient = XStore_Client(SERVER_ADDR, SERVER_PORT);
 
     if (MODE == "TEST") {
         std::cout << "+------------------------------------------+" << std::endl;
@@ -105,7 +105,7 @@ int main(int argc, char const *argv[])
         if (OP_NAME == "BUILD") {
             std::cout << "|                   BUILD                  |" << std::endl;
             std::cout << "+------------------------------------------+\n" << std::endl;
-            std::cout <<  "[" + xstoreClient.GetCurrDT() + "] [INFO] [TEST]" + " Build ok" << std::endl;
+            std::cout <<  "[" + XStoreClient.GetCurrDT() + "] [INFO] [TEST]" + " Build ok" << std::endl;
             exit(0);
         }
 
@@ -114,41 +114,41 @@ int main(int argc, char const *argv[])
             std::cout << "+------------------------------------------+\n" << std::endl;
 
             // Const
-            std::string dbName = "SYS_INFO";
-            std::time_t dummyTime = 1482271200;
-            XStore_Proto::TimeUnit timeResolution = XStore_Proto::SECOND;
-            XStore_Proto::RowData dummyData;
-            XStore_Proto::FData *fieldData = dummyData.add_fielddata();
-            fieldData->set_stringdata("SYS INFO,TEST");
+            std::string DbName = "SYS_INFO";
+            std::time_t DummyTime = 1482271200;
+            XStore_Proto::TimeUnit TimeResolution = XStore_Proto::SECOND;
+            XStore_Proto::RowData DummyData;
+            XStore_Proto::FData *FieldData = DummyData.add_fielddata();
+            FieldData->set_stringdata("SYS INFO,TEST");
 
             // FIRST - CREATE_DB (DUMMY)
-            std::string createDB_statusMessage = xstoreClient.CreateDB(dbName, timeResolution, 128);
+            std::string CreateDbStatusMessage = XStoreClient.CreateDB(DbName, TimeResolution, 128);
 
             // SECOND - UNARY_INSERT (DUMMY)
-            std::string insertResult = xstoreClient.UnaryInsert(dummyTime, dummyData, dbName);
+            std::string InsertResult = XStoreClient.UnaryInsert(DummyTime, DummyData, DbName);
 
             // THIRD - SYS_INFO
-            SysInfo sysInfo_message = xstoreClient.InfoRequest();
-            std::cout << "Server address: " << sysInfo_message.serverAddr << std::endl;
-            std::cout << "Server thread count: " <<sysInfo_message.numThreads << std::endl;
+            SysInfo SysInfoMessage = XStoreClient.InfoRequest();
+            std::cout << "Server address: " << SysInfoMessage.SERVER_ADDR << std::endl;
+            std::cout << "Server thread count: " <<SysInfoMessage.NumThreads << std::endl;
 
             std::cout << "DB on server: " << std::endl;
-            for (int i = 0; i < sysInfo_message.db_Info.size(); i++) {
-                std::cout << "- DB Name: " << sysInfo_message.db_Info.at(i).dbName << std::endl;
-                std::cout << "  DB Resolution: " << sysInfo_message.db_Info.at(i).dbResolution << std::endl;
-                std::cout << "  Total size in Byte: " << sysInfo_message.db_Info.at(i).totalSizeInByte << std::endl;
+            for (int i = 0; i < SysInfoMessage.DbInfoList.size(); i++) {
+                std::cout << "- DB Name: " << SysInfoMessage.DbInfoList.at(i).DbName << std::endl;
+                std::cout << "  DB Resolution: " << SysInfoMessage.DbInfoList.at(i).DbResolution << std::endl;
+                std::cout << "  Total size in Byte: " << SysInfoMessage.DbInfoList.at(i).TotalSizeInByte << std::endl;
             }
 
             // Validate tests PASSED
-            assert(sysInfo_message.numThreads > 0);
-            assert(sysInfo_message.db_Info.at(0).dbName == dbName);
-            assert(sysInfo_message.db_Info.at(0).dbResolution == XStore_Proto::SECOND);
-            assert(sysInfo_message.db_Info.at(0).totalSizeInByte > 1);
-            assert(sysInfo_message.db_Info.at(0).fileName.at(0) == "2016.XSTORE");
+            assert(SysInfoMessage.NumThreads > 0);
+            assert(SysInfoMessage.DbInfoList.at(0).DbName == DbName);
+            assert(SysInfoMessage.DbInfoList.at(0).DbResolution == XStore_Proto::SECOND);
+            assert(SysInfoMessage.DbInfoList.at(0).TotalSizeInByte > 1);
+            assert(SysInfoMessage.DbInfoList.at(0).FileName.at(0) == "2016.XSTORE");
 
             // FINALLY - DELETE_DB (CLEANUP DUMMY)
-            std::string removeDBStatus = xstoreClient.RemoveDB(dbName);
-            assert(removeDBStatus == "[SUCCESS] [REMOVE DB] [DB: SYS_INFO] - Removed DB with name: SYS_INFO");
+            std::string RemoveDbStatus = XStoreClient.RemoveDB(DbName);
+            assert(RemoveDbStatus == "[SUCCESS] [REMOVE DB] [DB: SYS_INFO] - Removed DB with name: SYS_INFO");
         }
 
         else if (OP_NAME == "CREATE_DB") {
@@ -156,28 +156,28 @@ int main(int argc, char const *argv[])
             std::cout << "+------------------------------------------+\n" << std::endl;
 
             // Const
-            std::string dbName = "CREATE_DB";
-            XStore_Proto::TimeUnit timeResolution = XStore_Proto::SECOND;
-            short int rowLength = 128;
+            std::string DbName = "CREATE_DB";
+            XStore_Proto::TimeUnit TimeResolution = XStore_Proto::SECOND;
+            short int RowLength = 128;
 
             // CASE 1: Create error IF rowLength < 4
-            std::string createDB_statusMessage = xstoreClient.CreateDB(dbName, timeResolution, 3);
-            assert(createDB_statusMessage == ("[ERROR] [CREATE DB] [DB: " + dbName + "] - Row length must be >= 4"));
-            std::cout << createDB_statusMessage << std::endl;
+            std::string CreateDbStatusMessage = XStoreClient.CreateDB(DbName, TimeResolution, 3);
+            assert(CreateDbStatusMessage == ("[ERROR] [CREATE DB] [DB: " + DbName + "] - Row length must be >= 4"));
+            std::cout << CreateDbStatusMessage << std::endl;
 
             // CASE 2: Create ok IF not yet created
-            createDB_statusMessage = xstoreClient.CreateDB(dbName, timeResolution, rowLength);
-            assert(createDB_statusMessage == ("[SUCCESS] [CREATE DB] [DB: " + dbName + "] - Created DB"));
-            std::cout << createDB_statusMessage << std::endl;
+            CreateDbStatusMessage = XStoreClient.CreateDB(DbName, TimeResolution, RowLength);
+            assert(CreateDbStatusMessage == ("[SUCCESS] [CREATE DB] [DB: " + DbName + "] - Created DB"));
+            std::cout << CreateDbStatusMessage << std::endl;
 
             // CASE 3: Create error IF already created
-            createDB_statusMessage = xstoreClient.CreateDB(dbName, timeResolution, rowLength);
-            assert(createDB_statusMessage == ("[ERROR] [CREATE DB] [DB: " + dbName + "] - Already existed"));
-            std::cout << createDB_statusMessage << std::endl;
+            CreateDbStatusMessage = XStoreClient.CreateDB(DbName, TimeResolution, RowLength);
+            assert(CreateDbStatusMessage == ("[ERROR] [CREATE DB] [DB: " + DbName + "] - Already existed"));
+            std::cout << CreateDbStatusMessage << std::endl;
 
             // FINALLY - DELETE_DB (CLEANUP DUMMY)
-            std::string removeDBStatus = xstoreClient.RemoveDB(dbName);
-            assert(removeDBStatus == "[SUCCESS] [REMOVE DB] [DB: CREATE_DB] - Removed DB with name: CREATE_DB");
+            std::string RemoveDbStatus = XStoreClient.RemoveDB(DbName);
+            assert(RemoveDbStatus == "[SUCCESS] [REMOVE DB] [DB: CREATE_DB] - Removed DB with name: CREATE_DB");
         }
 
         else if (OP_NAME == "UNARY_OPS") {
@@ -185,43 +185,43 @@ int main(int argc, char const *argv[])
             std::cout << "+------------------------------------------+\n" << std::endl;
 
             // Const
-            std::string dbName = "UNARY_OPS";
-            std::vector<std::time_t> timeList {1482271200};
-            std::vector<XStore_Proto::TimeUnit> timeResolution {XStore_Proto::SECOND, XStore_Proto::MILLISECOND};
+            std::string DbName = "UNARY_OPS";
+            std::vector<std::time_t> TimeList {1482271200};
+            std::vector<XStore_Proto::TimeUnit> TimeResolution {XStore_Proto::SECOND, XStore_Proto::MILLISECOND};
 
             // FIRST data
-            XStore_Proto::RowData firstRow;
-            XStore_Proto::FData *fieldData = firstRow.add_fielddata();
-            fieldData->set_stringdata("SECOND,GRANULARITY");
+            XStore_Proto::RowData FirstRow;
+            XStore_Proto::FData *FieldData = FirstRow.add_fielddata();
+            FieldData->set_stringdata("SECOND,GRANULARITY");
 
             // SECOND data
-            XStore_Proto::RowData secondRow;
-            XStore_Proto::FData *sData = firstRow.add_fielddata();
-            sData->set_stringdata("MILLISECOND,GRANULARITY");
+            XStore_Proto::RowData SecondRow;
+            XStore_Proto::FData *SData = FirstRow.add_fielddata();
+            SData->set_stringdata("MILLISECOND,GRANULARITY");
 
-            std::vector<XStore_Proto::RowData> dataList {firstRow, secondRow};
+            std::vector<XStore_Proto::RowData> DataList {FirstRow, SecondRow};
 
-            for (int i = 0; i < timeList.size(); i++) {
-                std::cout << "Granularity: " << XStore_Proto::TimeUnit_Name(timeResolution.at(i)) << std::endl;
+            for (int i = 0; i < TimeList.size(); i++) {
+                std::cout << "Granularity: " << XStore_Proto::TimeUnit_Name(TimeResolution.at(i)) << std::endl;
                 // FIRST - CREATE DB
-                std::string createDB_message = xstoreClient.CreateDB(dbName, timeResolution.at(i), 128);
-                assert(createDB_message == ("[SUCCESS] [CREATE DB] [DB: UNARY_OPS] - Created DB"));
-                std::cout << createDB_message << std::endl;
+                std::string CreateDbMessage = XStoreClient.CreateDB(DbName, TimeResolution.at(i), 128);
+                assert(CreateDbMessage == ("[SUCCESS] [CREATE DB] [DB: UNARY_OPS] - Created DB"));
+                std::cout << CreateDbMessage << std::endl;
 
                 // SECOND - UNARY INSERT
-                std::string insertMessage = xstoreClient.UnaryInsert(timeList.at(i), dataList.at(i), dbName);
-                assert(insertMessage == ("[SUCCESS] [UNARY INSERT] [DB: UNARY_OPS] - Inserted " + std::to_string(timeList.at(i)) + " to 2016.XSTORE"));
-                std::cout << insertMessage << std::endl;
+                std::string InsertMessage = XStoreClient.UnaryInsert(TimeList.at(i), DataList.at(i), DbName);
+                assert(InsertMessage == ("[SUCCESS] [UNARY INSERT] [DB: UNARY_OPS] - Inserted " + std::to_string(TimeList.at(i)) + " to 2016.XSTORE"));
+                std::cout << InsertMessage << std::endl;
 
                 // THIRD - UNARY QUERY (To validate that insert is valid)
-                std::string queryMessage = xstoreClient.UnaryQuery(timeList.at(i), dbName);
-                assert(queryMessage == (std::to_string(timeList.at(i)) + "," + dataList.at(i).fielddata(0).stringdata()));
-                std::cout << "[SUCCESS] [UNARY QUERY] [DB: " << dbName << "] - Query time: " << timeList.at(i) << " | Result: " << queryMessage << std::endl;
+                std::string QueryMessage = XStoreClient.UnaryQuery(TimeList.at(i), DbName);
+                assert(QueryMessage == (std::to_string(TimeList.at(i)) + "," + DataList.at(i).fielddata(0).stringdata()));
+                std::cout << "[SUCCESS] [UNARY QUERY] [DB: " << DbName << "] - Query time: " << TimeList.at(i) << " | Result: " << QueryMessage << std::endl;
 
                 // FINALLY - DELETE_DB (CLEANUP DUMMY)
-                std::string removeDBStatus = xstoreClient.RemoveDB(dbName);
-                assert(removeDBStatus == ("[SUCCESS] [REMOVE DB] [DB: UNARY_OPS] - Removed DB with name: " + dbName));
-                std::cout << removeDBStatus << std::endl;
+                std::string RemoveDbStatus = XStoreClient.RemoveDB(DbName);
+                assert(RemoveDbStatus == ("[SUCCESS] [REMOVE DB] [DB: UNARY_OPS] - Removed DB with name: " + DbName));
+                std::cout << RemoveDbStatus << std::endl;
             }
         }
 
@@ -229,7 +229,7 @@ int main(int argc, char const *argv[])
             std::cout << "|               UNARY_QUERY                |" << std::endl;
             std::cout << "+------------------------------------------+\n" << std::endl;
 
-            std::cout << xstoreClient.GetCurrDT() << std::endl;
+            std::cout << XStoreClient.GetCurrDT() << std::endl;
 
 //            std::string queryResult = xstoreClient.UnaryQuery(1483228802, "TSLAa");
 //            std::cout << queryResult << std::endl;

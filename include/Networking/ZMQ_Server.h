@@ -11,10 +11,10 @@
 class ZMQ_Server {
     private:
         // Prepare ZMQ context & Sockets
-        zmq::context_t ctx;
+        zmq::context_t Ctx;
 
-        int numThreads;
-        std::string serverAddr;
+        int NumThreads;
+        std::string ServerAddr;
 
         // Work routines in each thread
         static void* WorkerRoutine(void *args);

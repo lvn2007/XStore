@@ -7,39 +7,39 @@
 #include <bitset>
 
 // Clock init
-std::chrono::time_point<std::chrono::high_resolution_clock> start, end;
-std::chrono::duration<double> diff;
+std::chrono::time_point<std::chrono::high_resolution_clock> Start, End;
+std::chrono::duration<double> Diff;
 
 struct BenchData {
-    double usec;
+    double Usec;
     size_t OGLength;
-    size_t compLength;
+    size_t CompLength;
 
     BenchData(double usecTimeTaken, size_t originalLength, size_t compressedLength) {
-        usec = usecTimeTaken;
+        Usec = usecTimeTaken;
         OGLength = originalLength;
-        compLength = compressedLength;
+        CompLength = compressedLength;
     }
 
-    std::string toString() {
-        return std::to_string(usec) + "," + std::to_string(OGLength) + "," + std::to_string(compLength) + "\n";
+    std::string ToString() {
+        return std::to_string(Usec) + "," + std::to_string(OGLength) + "," + std::to_string(CompLength) + "\n";
     }
 };
 
 // for string delimiter
-std::vector<std::string> split(std::string s, std::string delimiter) {
-    size_t pos_start = 0, pos_end, delim_len = delimiter.length();
-    std::string token;
-    std::vector<std::string> res;
+std::vector<std::string> Split(std::string s, std::string delimiter) {
+    size_t PosStart = 0, PosEnd, DelimLen = delimiter.length();
+    std::string Token;
+    std::vector<std::string> Res;
 
-    while ((pos_end = s.find(delimiter, pos_start)) != std::string::npos) {
-        token = s.substr (pos_start, pos_end - pos_start);
-        pos_start = pos_end + delim_len;
-        res.push_back (token);
+    while ((PosEnd = s.find(delimiter, PosStart)) != std::string::npos) {
+        Token = s.substr (PosStart, PosEnd - PosStart);
+        PosStart = PosEnd + DelimLen;
+        Res.push_back (Token);
     }
 
-    res.push_back (s.substr (pos_start));
-    return res;
+    Res.push_back (s.substr (PosStart));
+    return Res;
 }
 
 int main(int argc, char *argv[]) {
@@ -51,17 +51,17 @@ int main(int argc, char *argv[]) {
     }
 
     // Arguments parsing
-    std::string BIND_ADDR = argv[1];
-    std::string BIND_PORT = argv[2];
-    int THREAD_COUNT = atoi(argv[3]);
+    std::string BindAddr = argv[1];
+    std::string BindPort = argv[2];
+    int ThreadCount = atoi(argv[3]);
 
     // ----DEV AREA
-    spdlog::level::level_enum CONSOLE_LEVEL = spdlog::level::warn;
-    spdlog::level::level_enum FILE_LEVEL = spdlog::level::trace;
-    unsigned short int flushInterval = 10;
-    Logger logger = Logger(CONSOLE_LEVEL, FILE_LEVEL, flushInterval);
+    spdlog::level::level_enum ConsoleLevel = spdlog::level::warn;
+    spdlog::level::level_enum FileLevel = spdlog::level::trace;
+    unsigned short int FlushInterval = 10;
+    Logger LoggerInstance = Logger(ConsoleLevel, FileLevel, FlushInterval);
 
     // Spin ZMQ Server
-    ZMQ_Server XStoreZmqServer(THREAD_COUNT);
-    XStoreZmqServer.StartServer(BIND_ADDR, BIND_PORT);
+    ZMQ_Server XStoreZmqServer(ThreadCount);
+    XStoreZmqServer.StartServer(BindAddr, BindPort);
 }

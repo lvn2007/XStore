@@ -6,173 +6,173 @@
 #include "XStore.pb.h"
 
 struct DbInfo {
-  std::string dbName;
-  XStore_Proto::TimeUnit dbResolution;
-  float totalSizeInByte;
-  std::vector<std::string> fileName;
+  std::string DbName;
+  XStore_Proto::TimeUnit DbResolution;
+  float TotalSizeInByte;
+  std::vector<std::string> FileName;
 };
 
 struct SysInfo {
-  std::string serverAddr;
-  int numThreads;
-  std::vector<DbInfo> db_Info;
+  std::string SERVER_ADDR;
+  int NumThreads;
+  std::vector<DbInfo> DbInfoList;
 };
 
 class XStore_Client {
  private:
-  zmq::context_t ctx;
-  zmq::socket_t sock { ctx, zmq::socket_type::req };
+  zmq::context_t Ctx;
+  zmq::socket_t Sock { Ctx, zmq::socket_type::req };
  public:
   XStore_Client(std::string SERVER_ADDR, std::string SERVER_PORT) {
-      std::string fullAddr = "tcp://" + SERVER_ADDR + ":" + SERVER_PORT;
-      sock.connect(fullAddr);
+      std::string FullAddr = "tcp://" + SERVER_ADDR + ":" + SERVER_PORT;
+      Sock.connect(FullAddr);
   }
 
   std::string GetCurrDT() {
-      std::stringstream formattedTime;
-      std::time_t timeNow = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-      formattedTime << std::put_time(std::localtime(&timeNow), "%b %d, %Y %r");
-      std::string toReturn = formattedTime.str();
-      return toReturn;
+      std::stringstream FormattedTime;
+      std::time_t TimeNow = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+      FormattedTime << std::put_time(std::localtime(&TimeNow), "%b %d, %Y %r");
+      std::string ToReturn = FormattedTime.str();
+      return ToReturn;
   }
 
   SysInfo InfoRequest() {
-      XStore_Proto::ReqCMD toServer;
-      toServer.set_rtype(XStore_Proto::INFO);
+      XStore_Proto::ReqCMD ToServer;
+      ToServer.set_rtype(XStore_Proto::INFO);
 
       // Config msg and send
-      size_t byteSize = toServer.ByteSizeLong();
-      zmq::message_t z_out(byteSize);
-      toServer.SerializeToArray(z_out.data(), byteSize);
-      sock.send(z_out, zmq::send_flags::none);
+      size_t ByteSize = ToServer.ByteSizeLong();
+      zmq::message_t ZOut(ByteSize);
+      ToServer.SerializeToArray(ZOut.data(), ByteSize);
+      Sock.send(ZOut, zmq::send_flags::none);
 
       // RECEIVING
-      std::vector<zmq::message_t> recv_msgs;
-      zmq::message_t zFromServer;
-      zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
+      std::vector<zmq::message_t> RecvMsgs;
+      zmq::message_t ZFromServer;
+      zmq::recv_multipart(Sock, std::back_inserter(RecvMsgs));
 
       // Received structs
-      XStore_Proto::SysInfo_REP fromServer;
-      SysInfo toReturn;
+      XStore_Proto::SysInfo_REP FromServer;
+      SysInfo ToReturn;
 
-      fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
+      FromServer.ParseFromArray(RecvMsgs.back().data(), RecvMsgs.back().size());
 
       // Put return data from server to struct
-      toReturn.serverAddr = fromServer.serveraddr();
-      toReturn.numThreads = fromServer.threadcount();
+      ToReturn.SERVER_ADDR = FromServer.serveraddr();
+      ToReturn.NumThreads = FromServer.threadcount();
 
       // Loop through info of all DB exists in server
-      for (int i = 0; i < fromServer.dbinfo_size(); i++) {
-          DbInfo currDB;
-          currDB.dbName = fromServer.dbinfo(i).dbname();
-          currDB.dbResolution = fromServer.dbinfo(i).dbresolution();
-          currDB.totalSizeInByte = fromServer.dbinfo(i).totalsizeinbyte();
+      for (int i = 0; i < FromServer.dbinfo_size(); i++) {
+          DbInfo CurrDb;
+          CurrDb.DbName = FromServer.dbinfo(i).dbname();
+          CurrDb.DbResolution = FromServer.dbinfo(i).dbresolution();
+          CurrDb.TotalSizeInByte = FromServer.dbinfo(i).totalsizeinbyte();
 
           // Loop through all file name of a given DB
-          for (int j = 0; j < fromServer.dbinfo(i).filename_size(); j++) {
-              currDB.fileName.push_back(fromServer.dbinfo(i).filename(j));
+          for (int j = 0; j < FromServer.dbinfo(i).filename_size(); j++) {
+              CurrDb.FileName.push_back(FromServer.dbinfo(i).filename(j));
           }
-          toReturn.db_Info.push_back(currDB);
+          ToReturn.DbInfoList.push_back(CurrDb);
       }
 
-      return toReturn;
+      return ToReturn;
   }
 
   std::string UnaryQuery(std::time_t &targetUnixTime, std::string &targetDBName) {
-      XStore_Proto::UnaryQuery_REQ toServer;
-      toServer.set_rtype(XStore_Proto::UNARYQUERY);
-      toServer.set_timestamp(targetUnixTime);
-      toServer.set_dbname(targetDBName);
+      XStore_Proto::UnaryQuery_REQ ToServer;
+      ToServer.set_rtype(XStore_Proto::UNARYQUERY);
+      ToServer.set_timestamp(targetUnixTime);
+      ToServer.set_dbname(targetDBName);
 
       // Config msg and send
-      size_t byteSize = toServer.ByteSizeLong();
-      zmq::message_t z_out(byteSize);
-      toServer.SerializeToArray(z_out.data(), byteSize);
-      sock.send(z_out, zmq::send_flags::none);
+      size_t ByteSize = ToServer.ByteSizeLong();
+      zmq::message_t ZOut(ByteSize);
+      ToServer.SerializeToArray(ZOut.data(), ByteSize);
+      Sock.send(ZOut, zmq::send_flags::none);
 
       // RECEIVING
-      std::vector<zmq::message_t> recv_msgs;
-      zmq::message_t zFromServer;
-      zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
+      std::vector<zmq::message_t> RecvMsgs;
+      zmq::message_t ZFromServer;
+      zmq::recv_multipart(Sock, std::back_inserter(RecvMsgs));
 
       // Received structs
-      XStore_Proto::UnaryQuery_REP fromServer;
-      fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
+      XStore_Proto::UnaryQuery_REP FromServer;
+      FromServer.ParseFromArray(RecvMsgs.back().data(), RecvMsgs.back().size());
 
-      return std::to_string(fromServer.timestamp()) + "," + fromServer.data().fielddata(0).stringdata();
+      return std::to_string(FromServer.timestamp()) + "," + FromServer.data().fielddata(0).stringdata();
   }
 
   std::string CreateDB(std::string &dbName, XStore_Proto::TimeUnit &timeResolution, short int rowLength) {
-      XStore_Proto::CreateDB_REQ toServer;
-      toServer.set_rtype(XStore_Proto::CREATEDB);
-      toServer.set_dbname(dbName);
-      toServer.set_timeresolution(timeResolution);
-      toServer.set_rowlength(rowLength);
+      XStore_Proto::CreateDB_REQ ToServer;
+      ToServer.set_rtype(XStore_Proto::CREATEDB);
+      ToServer.set_dbname(dbName);
+      ToServer.set_timeresolution(timeResolution);
+      ToServer.set_rowlength(rowLength);
 
       // Config msg and send
-      size_t byteSize = toServer.ByteSizeLong();
-      zmq::message_t z_out(byteSize);
-      toServer.SerializeToArray(z_out.data(), byteSize);
-      sock.send(z_out, zmq::send_flags::none);
+      size_t ByteSize = ToServer.ByteSizeLong();
+      zmq::message_t ZOut(ByteSize);
+      ToServer.SerializeToArray(ZOut.data(), ByteSize);
+      Sock.send(ZOut, zmq::send_flags::none);
 
       // RECEIVING
-      std::vector<zmq::message_t> recv_msgs;
-      zmq::message_t zFromServer;
-      zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
+      std::vector<zmq::message_t> RecvMsgs;
+      zmq::message_t ZFromServer;
+      zmq::recv_multipart(Sock, std::back_inserter(RecvMsgs));
 
       // Received structs
-      XStore_Proto::CreateDB_REP fromServer;
+      XStore_Proto::CreateDB_REP FromServer;
 
-      fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
-      return fromServer.createdbstatus();
+      FromServer.ParseFromArray(RecvMsgs.back().data(), RecvMsgs.back().size());
+      return FromServer.createdbstatus();
   }
 
   std::string UnaryInsert(std::time_t &insertUnixTime, XStore_Proto::RowData &data, std::string &dbName) {
-      XStore_Proto::UnaryInsert_REQ toServer;
-      toServer.set_rtype(XStore_Proto::UNARYINSERT);
-      toServer.set_timestamp(insertUnixTime);
-      *toServer.mutable_data() = data;
-      toServer.set_dbname(dbName);
+      XStore_Proto::UnaryInsert_REQ ToServer;
+      ToServer.set_rtype(XStore_Proto::UNARYINSERT);
+      ToServer.set_timestamp(insertUnixTime);
+      *ToServer.mutable_data() = data;
+      ToServer.set_dbname(dbName);
 
       // Config msg and send
-      size_t byteSize = toServer.ByteSizeLong();
-      zmq::message_t z_out(byteSize);
-      toServer.SerializeToArray(z_out.data(), byteSize);
-      sock.send(z_out, zmq::send_flags::none);
+      size_t ByteSize = ToServer.ByteSizeLong();
+      zmq::message_t ZOut(ByteSize);
+      ToServer.SerializeToArray(ZOut.data(), ByteSize);
+      Sock.send(ZOut, zmq::send_flags::none);
 
       // RECEIVING
-      std::vector<zmq::message_t> recv_msgs;
-      zmq::message_t zFromServer;
-      zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
+      std::vector<zmq::message_t> RecvMsgs;
+      zmq::message_t ZFromServer;
+      zmq::recv_multipart(Sock, std::back_inserter(RecvMsgs));
 
       // Received structs
-      XStore_Proto::UnaryInsert_REP fromServer;
+      XStore_Proto::UnaryInsert_REP FromServer;
 
-      fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
-      return fromServer.insertstatus();
+      FromServer.ParseFromArray(RecvMsgs.back().data(), RecvMsgs.back().size());
+      return FromServer.insertstatus();
   }
 
   std::string RemoveDB(std::string &dbName) {
-      XStore_Proto::RemoveDB_REQ toServer;
-      toServer.set_rtype(XStore_Proto::REMOVEDB);
-      toServer.set_dbname(dbName);
+      XStore_Proto::RemoveDB_REQ ToServer;
+      ToServer.set_rtype(XStore_Proto::REMOVEDB);
+      ToServer.set_dbname(dbName);
 
       // Config msg and send
-      size_t byteSize = toServer.ByteSizeLong();
-      zmq::message_t z_out(byteSize);
-      toServer.SerializeToArray(z_out.data(), byteSize);
-      sock.send(z_out, zmq::send_flags::none);
+      size_t ByteSize = ToServer.ByteSizeLong();
+      zmq::message_t ZOut(ByteSize);
+      ToServer.SerializeToArray(ZOut.data(), ByteSize);
+      Sock.send(ZOut, zmq::send_flags::none);
 
       // RECEIVING
-      std::vector<zmq::message_t> recv_msgs;
-      zmq::message_t zFromServer;
-      zmq::recv_multipart(sock, std::back_inserter(recv_msgs));
+      std::vector<zmq::message_t> RecvMsgs;
+      zmq::message_t ZFromServer;
+      zmq::recv_multipart(Sock, std::back_inserter(RecvMsgs));
 
       // Received structs
-      XStore_Proto::RemoveDB_REP fromServer;
+      XStore_Proto::RemoveDB_REP FromServer;
 
-      fromServer.ParseFromArray(recv_msgs.back().data(), recv_msgs.back().size());
-      return fromServer.removestatus();
+      FromServer.ParseFromArray(RecvMsgs.back().data(), RecvMsgs.back().size());
+      return FromServer.removestatus();
   }
 };
 #endif //XSTORE_CLIENTSRC_XSTORE_CLIENT_H_

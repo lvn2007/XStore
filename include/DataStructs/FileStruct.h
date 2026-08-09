@@ -9,12 +9,12 @@
 
 // Data structure to hold data for I/O
 struct FileStruct {
-    std::string dbName;
-    std::string baseDir;
+    std::string DbName;
+    std::string BaseDir;
 
     // Map -- Stores file descriptor
-    std::map<int, FILE*> fFileMap;
-    std::map<int, int> bFileMap;
+    std::map<int, FILE*> FFileMap;
+    std::map<int, int> BFileMap;
 
     // Constructor
     FileStruct(std::string dbName, std::string baseDir);

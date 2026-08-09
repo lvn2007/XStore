@@ -8,8 +8,8 @@
 
 // Data structure to hold time-value together
 struct DataStruct {
-    std::time_t unixTime;
-    std::string data;
+    std::time_t UnixTime;
+    std::string Data;
 
     // Constructor
     DataStruct(std::time_t unixTime, std::string data);
@@ -23,9 +23,9 @@ struct DataStruct {
 };
 
 struct ValueStruct {
-    unsigned int index;
-    long double value;
-    bool isInitialized = false;
+    unsigned int Index;
+    long double Value;
+    bool IsInitialized = false;
 };
 
 #endif //XSTORE_DATASTRUCTS_H

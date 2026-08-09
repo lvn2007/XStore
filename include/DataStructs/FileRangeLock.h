@@ -26,20 +26,20 @@ class FileRangeLock {
 
     private:
         struct ActiveLock {
-            unsigned long long start;
-            unsigned long long end;    // exclusive
-            LockType type;
+            unsigned long long Start;
+            unsigned long long End;    // exclusive
+            LockType Type;
         };
 
         // Caller must hold mtx.
         bool Conflicts(unsigned long long start, unsigned long long end, LockType type) const;
 
-        std::mutex mtx;
-        std::condition_variable cv;
+        std::mutex Mtx;
+        std::condition_variable Cv;
         // Concurrently held ranges per file are bounded by the worker thread
         // count, so a flat vector + linear scan is cheaper than a node-based
         // container: no per-lock heap allocation and better cache locality.
-        std::vector<ActiveLock> activeLocks;
+        std::vector<ActiveLock> ActiveLocks;
 };
 
 // Process-wide registry: one FileRangeLock per file path, shared across
@@ -55,8 +55,8 @@ class FileLockRegistry {
         static FileRangeLock& Get(const std::string &filePath);
 
     private:
-        static std::shared_mutex registryMutex;
-        static std::unordered_map<std::string, std::unique_ptr<FileRangeLock>> locks;
+        static std::shared_mutex RegistryMutex;
+        static std::unordered_map<std::string, std::unique_ptr<FileRangeLock>> Locks;
 };
 
 // RAII guard -- guarantees UnlockRange() runs even on early return/exception.
@@ -73,10 +73,10 @@ class FileRangeLockGuard {
         FileRangeLockGuard& operator=(const FileRangeLockGuard&) = delete;
 
     private:
-        FileRangeLock &lock;
-        unsigned long long start;
-        unsigned long long length;
-        FileRangeLock::LockType type;
+        FileRangeLock &Lock;
+        unsigned long long Start;
+        unsigned long long Length;
+        FileRangeLock::LockType Type;
 };
 
 #endif //XSTORE_FILERANGELOCK_H

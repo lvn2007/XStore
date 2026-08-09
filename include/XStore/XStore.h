@@ -34,15 +34,15 @@
 
 class XStore {
     public:
-        std::string baseDir = GetBaseDir();
-        std::string dataStoreDir = baseDir + "DataStore/";
-        std::map<std::string, FileStruct> dbMap;
-        std::map<std::string, XStore_Proto::ConfigStruct> cfgMap;
-        std::string permittedTimeResolution[3] = {"SECOND", "MILLISECOND", "MICROSECOND"};
+        std::string BaseDir = GetBaseDir();
+        std::string DataStoreDir = BaseDir + "DataStore/";
+        std::map<std::string, FileStruct> DbMap;
+        std::map<std::string, XStore_Proto::ConfigStruct> CfgMap;
+        std::string PermittedTimeResolution[3] = {"SECOND", "MILLISECOND", "MICROSECOND"};
 
-        int dbCount = 0;
-        std::vector<std::string> dbNames = { };
-        std::map<std::string, unsigned long long int> resolutionMap { {"SECOND", 31'536'000}, {"MILLISECOND", 31'536'000'000}, {"MICROSECOND", 31'536'000'000'000}, {"NANOSECOND", 31'536'000'000'000'000} };
+        int DbCount = 0;
+        std::vector<std::string> DbNames = { };
+        std::map<std::string, unsigned long long int> ResolutionMap { {"SECOND", 31'536'000}, {"MILLISECOND", 31'536'000'000}, {"MICROSECOND", 31'536'000'000'000}, {"NANOSECOND", 31'536'000'000'000'000} };
 
         // Initialization
         XStore();
