@@ -41,7 +41,7 @@ target_include_directories(XStoreClientProto PUBLIC "${CMAKE_CURRENT_BINARY_DIR}
 # other CMake targets can just target_link_libraries(... XStoreClient).
 add_library(XStoreClient INTERFACE)
 target_include_directories(XStoreClient INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(XStoreClient INTERFACE XStoreClientProto "zmq" Threads::Threads)
+target_link_libraries(XStoreClient INTERFACE XStoreClientProto "zmq" Threads::Threads absl::log_internal_check_op)
 
 # Smoke-build target: proves the header compiles and links standalone.
 add_executable(XStore_Client_Example example/XStore_Client_Example.cpp)
