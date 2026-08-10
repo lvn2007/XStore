@@ -3,6 +3,10 @@
 std::map<std::string, XStore_Proto::ConfigStruct> XStore::CfgMap;
 std::shared_mutex XStore::CfgMutex;
 
+std::list<std::pair<std::string, XStore::MappedFile>> XStore::MmapLru;
+std::unordered_map<std::string, std::list<std::pair<std::string, XStore::MappedFile>>::iterator> XStore::MmapIndex;
+std::mutex XStore::MmapMutex;
+
 // Initialization
 XStore::XStore() {
     // Initialize DB
@@ -56,6 +60,83 @@ void XStore::PutCfg(const std::string &dbName, const XStore_Proto::ConfigStruct 
 void XStore::EraseCfg(const std::string &dbName) {
     std::unique_lock WriteLock(CfgMutex);
     CfgMap.erase(dbName);
+}
+
+void* XStore::GetOrMapFile(const std::string &targetFile, size_t rowLength, unsigned long long totalRows) {
+    std::lock_guard<std::mutex> Lock(MmapMutex);
+
+    auto it = MmapIndex.find(targetFile);
+    if (it != MmapIndex.end()) {
+        // Cache hit -> promote to MRU front
+        MmapLru.splice(MmapLru.begin(), MmapLru, it->second);
+        return it->second->second.Base;
+    }
+
+    // Cache miss -> open (create if needed), ensure size, map, cache
+    int Fd = open(targetFile.c_str(), O_RDWR | O_CREAT, 0644);
+    if (Fd < 0) {
+        return nullptr;
+    }
+
+    // +1 row: totalRows is (LastEpoch - FirstEpoch), but a write at
+    // unixTime == LastEpoch (the year's final second, inclusive) lands at
+    // offset totalRows*rowLength -- one row past that span. The original
+    // fwrite()-based writer silently grew the file to cover this via
+    // EOF-extension; a fixed-size mapping needs the extra row up front.
+    size_t FileLen = (static_cast<size_t>(totalRows) + 1) * rowLength;
+
+    struct stat St{};
+    if (fstat(Fd, &St) != 0 || static_cast<size_t>(St.st_size) < FileLen) {
+        if (ftruncate(Fd, FileLen) != 0) {
+            close(Fd);
+            return nullptr;
+        }
+    }
+
+    void *Base = mmap(NULL, FileLen, PROT_READ | PROT_WRITE, MAP_SHARED, Fd, 0);
+    // Mapping stays valid after the fd is closed -- no need to keep it open.
+    close(Fd);
+    if (Base == MAP_FAILED) {
+        return nullptr;
+    }
+
+    MmapLru.emplace_front(targetFile, MappedFile{Base, FileLen});
+    MmapIndex[targetFile] = MmapLru.begin();
+
+    if (MmapLru.size() > MmapCacheCap) {
+        munmap(MmapLru.back().second.Base, MmapLru.back().second.Len);
+        MmapIndex.erase(MmapLru.back().first);
+        MmapLru.pop_back();
+    }
+
+    return Base;
+}
+
+void XStore::EraseMappedFile(const std::string &targetFile) {
+    std::lock_guard<std::mutex> Lock(MmapMutex);
+
+    auto It = MmapIndex.find(targetFile);
+    if (It == MmapIndex.end()) {
+        return;
+    }
+
+    munmap(It->second->second.Base, It->second->second.Len);
+    MmapLru.erase(It->second);
+    MmapIndex.erase(It);
+}
+
+void XStore::EraseMappedFilesUnderPrefix(const std::string &dbDirPrefix) {
+    std::lock_guard<std::mutex> Lock(MmapMutex);
+
+    for (auto It = MmapLru.begin(); It != MmapLru.end();) {
+        if (It->first.compare(0, dbDirPrefix.size(), dbDirPrefix) == 0) {
+            munmap(It->second.Base, It->second.Len);
+            MmapIndex.erase(It->first);
+            It = MmapLru.erase(It);
+        } else {
+            ++It;
+        }
+    }
 }
 
 XStore_Proto::SysInfo_REP XStore::InfoQuery(std::string serverAddr, int threadCount) {
@@ -192,15 +273,10 @@ void XStore::UnaryInsert(const unsigned long long int &unixTime, const XStore_Pr
     // Base directory of a DB
     std::string DbBasePath = fmt::format("{}DataStore/{}/", BaseDir, dbName);
 
-    // IF db directory does not exist
-    if (std::filesystem::is_directory(DbBasePath) == 0) {
-        std::string ErrMsg = fmt::format("[ERROR] [UNARY INSERT] [DB: {}] - DB does not exist", dbName);
-        returnData->set_insertstatus(ErrMsg);
-        spdlog::error(ErrMsg.substr(ERROR_LEN));
-        return;
-    }
-
-    // Fetch cfgStruct from cache, loading from disk on first use
+    // Fetch cfgStruct from cache, loading from disk on first use. This also
+    // covers "DB does not exist": GetOrLoadCfg stats the .CFG file itself on
+    // a cache miss, so a separate upfront is_directory() check on every call
+    // (cache hit or not) would just be a redundant stat -- dropped.
     XStore_Proto::ConfigStruct CfgStruct;
     if (!GetOrLoadCfg(dbName, DbBasePath, CfgStruct)) {
         std::string ErrMsg = fmt::format("[ERROR] [UNARY INSERT] [DB: {}] - DB does not exist", dbName);
@@ -213,23 +289,26 @@ void XStore::UnaryInsert(const unsigned long long int &unixTime, const XStore_Pr
     //  Year, month, day, hour, minute, sec, ...
     TimeStruct CurrTs(unixTime, CfgStruct.timeresolution());
 
-    // Prepare to write
-    FILE *BFile;
+    // Cached PROT_WRITE mapping for this (dbName, year) file -- created,
+    // ftruncate'd to the full year's row count, and mapped once; every
+    // subsequent UnaryInsert to the same file reuses it (see GetOrMapFile).
     std::string TargetFile = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
-
-    // IF target file does NOT exist
-    if (std::filesystem::exists(TargetFile) == 0) {
-        // Truncate
-        BFile = std::fopen(TargetFile.c_str(), "wb+");
-
-        // Lock prior to file OP
-        FileRangeLockGuard TruncGuard(TargetFile, 0, 0, FileRangeLock::LockType::WRITE);
-        ftruncate(fileno(BFile), (CurrTs.LastEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength());
+    void *MappedBase = GetOrMapFile(TargetFile, CfgStruct.rowlength(), CurrTs.LastEpoch - CurrTs.FirstEpoch);
+    if (MappedBase == nullptr) {
+        std::string ErrMsg = fmt::format("[ERROR] [UNARY INSERT] [DB: {}] - Unable to open/map {}.XSTORE", dbName, CurrTs.Year);
+        returnData->set_insertstatus(ErrMsg);
+        spdlog::error(ErrMsg.substr(ERROR_LEN));
+        return;
     }
-    else {
-        // ELSE - Target file DOES exist
-        //  Open in append mode
-        BFile = std::fopen(TargetFile.c_str(), "rb+");
+
+    // A row that doesn't fit in the configured slot would otherwise silently
+    // truncate (SerializeToArray's return value was previously unchecked),
+    // corrupting whatever follows it in the file. Reject up front instead.
+    if (data.ByteSizeLong() > static_cast<size_t>(CfgStruct.rowlength())) {
+        std::string ErrMsg = fmt::format("[ERROR] [UNARY INSERT] [DB: {}] - Row size {} exceeds configured row length {}", dbName, data.ByteSizeLong(), CfgStruct.rowlength());
+        returnData->set_insertstatus(ErrMsg);
+        spdlog::error(ErrMsg.substr(ERROR_LEN));
+        return;
     }
 
     //  Computes diff & offset
@@ -240,14 +319,15 @@ void XStore::UnaryInsert(const unsigned long long int &unixTime, const XStore_Pr
         // Lock prior to file OP
         FileRangeLockGuard Guard(TargetFile, Offset, CfgStruct.rowlength(), FileRangeLock::LockType::WRITE);
 
-        //  Seek to target offset prior to write
-        fseeko64(BFile, Offset, SEEK_SET);
-
-        //  Writing actual data to disk
-        fwrite(data.SerializeAsString().data(), CfgStruct.rowlength(), 1, BFile);
+        // Zero the fixed-width row slot first, then serialize directly into
+        // it -- avoids the SerializeAsString() heap allocation + copy the
+        // original fwrite() path paid on every insert, and guarantees any
+        // bytes past a shorter re-serialization don't leak a previous
+        // occupant's stale trailing bytes.
+        char *Slot = static_cast<char*>(MappedBase) + Offset;
+        std::memset(Slot, 0, CfgStruct.rowlength());
+        data.SerializeToArray(Slot, CfgStruct.rowlength());
     }
-    //  Close file after write
-    std::fclose(BFile);
 
     std::string SuccessMsg = fmt::format("[INFO] [UNARY INSERT] [DB: {}] - Inserted {} to {}.XSTORE", dbName, unixTime, CurrTs.Year);
     returnData->set_insertstatus(SuccessMsg);
@@ -267,15 +347,10 @@ void XStore::UnaryQuery(const unsigned long long int &unixTime, std::string dbNa
     // Base directory of a DB
     std::string DbBasePath = fmt::format("{}DataStore/{}/", BaseDir, dbName);
 
-    // IF db directory does not exist
-    if (std::filesystem::is_directory(DbBasePath) == 0) {
-        std::string ErrMsg = fmt::format("[ERROR] [UNARY QUERY] [DB: {}] - DB does not exist", dbName);
-        returnData->set_querystatus(ErrMsg);
-        spdlog::error(ErrMsg.substr(ERROR_LEN));
-        return;
-    }
-
-    // Fetch cfgStruct from cache, loading from disk on first use
+    // Fetch cfgStruct from cache, loading from disk on first use. This also
+    // covers "DB does not exist": GetOrLoadCfg stats the .CFG file itself on
+    // a cache miss, so a separate upfront is_directory() check on every call
+    // (cache hit or not) would just be a redundant stat -- dropped.
     XStore_Proto::ConfigStruct CfgStruct;
     if (!GetOrLoadCfg(dbName, DbBasePath, CfgStruct)) {
         std::string ErrMsg = fmt::format("[ERROR] [UNARY QUERY] [DB: {}] - DB does not exist", dbName);
@@ -291,7 +366,9 @@ void XStore::UnaryQuery(const unsigned long long int &unixTime, std::string dbNa
     // Base directory of a DB & Target path of file to READ
     std::string TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
 
-    // IF target year file DOES NOT exist
+    // IF target year file DOES NOT exist -- checked explicitly because
+    // GetOrMapFile below opens with O_CREAT and would otherwise silently
+    // create+map an empty file for a query that should just report no data.
     if (std::filesystem::exists(TargetFilePath) == 0) {
         std::string ErrMsg = fmt::format("[ERROR] [UNARY QUERY] [DB: {}] - DB does not exist", dbName);
         returnData->set_querystatus(ErrMsg);
@@ -299,37 +376,29 @@ void XStore::UnaryQuery(const unsigned long long int &unixTime, std::string dbNa
         return;
     }
 
-    // Target file IS EXISTED
-    //  Staging area for file waiting to be read
-    FILE *BFile;
-    BFile = std::fopen(TargetFilePath.c_str(), "rb");
+    // Cached mapping for this (dbName, year) file, same mmap LRU cache
+    // UnaryInsert uses (see GetOrMapFile) -- avoids a fresh
+    // fopen/fseek/fread/fclose (2 syscalls + stdio buffering) on every query.
+    void *MappedBase = GetOrMapFile(TargetFilePath, CfgStruct.rowlength(), CurrTs.LastEpoch - CurrTs.FirstEpoch);
+    if (MappedBase == nullptr) {
+        std::string ErrMsg = fmt::format("[ERROR] [UNARY QUERY] [DB: {}] - Unable to open/map {}.XSTORE", dbName, CurrTs.Year);
+        returnData->set_querystatus(ErrMsg);
+        spdlog::error(ErrMsg.substr(ERROR_LEN));
+        return;
+    }
 
-    // Obtain file size
     //  Computes diff & offset
     unsigned long long int Diff = unixTime - CurrTs.FirstEpoch;
     unsigned long long int Offset = Diff * CfgStruct.rowlength();
 
-    //  A single line data will be read into here
-    char BufferIn[CfgStruct.rowlength()];
-    XStore_Proto::RowData TempData;
-
     {
-        //  Lock file prior to reading
+        //  Lock range prior to reading
         FileRangeLockGuard Guard(TargetFilePath, Offset, CfgStruct.rowlength(), FileRangeLock::LockType::READ);
 
-        //  Seek to computed offset
-        fseeko64(BFile, Offset, SEEK_SET);
-
-        // Extract N bytes of data according to N bytes from .CFG file
-        //  .CFG file is set by user when creating DB
-        fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
+        // Parse straight from the mapped row into the response -- skips the
+        // stack buffer + extra TempData copy the previous fread()-based path paid.
+        returnData->mutable_data()->ParseFromArray(static_cast<char*>(MappedBase) + Offset, CfgStruct.rowlength());
     }
-    // Close file after reading
-    fclose(BFile);
-
-    // Set data fetched from XStore to returning Protobuf obj
-    TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-    *returnData->mutable_data() = TempData;
 }
 
 // UNARY DELETE
@@ -490,6 +559,17 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
             Diff = UnixTime - ThisTs.FirstEpoch;
             Offset = Diff * CfgStruct.rowlength();
 
+            // Rows shorter than rowLength must not leave a previous
+            // occupant's stale trailing bytes in the slot (see the matching
+            // memset in UnaryInsert); rows that don't fit at all are rejected
+            // rather than silently truncated.
+            std::string Serialized = Data.SerializeAsString();
+            if (Serialized.size() > static_cast<size_t>(CfgStruct.rowlength())) {
+                continue;
+            }
+            std::string RowBuffer(CfgStruct.rowlength(), '\0');
+            std::memcpy(RowBuffer.data(), Serialized.data(), Serialized.size());
+
             // Lock prior to file OP
             FileRangeLockGuard Guard(TargetFile, Offset, CfgStruct.rowlength(), FileRangeLock::LockType::WRITE);
 
@@ -497,7 +577,7 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
             fseeko64(BFile, Offset, SEEK_SET);
 
             // Writing actual data to disk
-            fwrite(Data.SerializeAsString().data(), CfgStruct.rowlength(), 1, BFile);
+            fwrite(RowBuffer.data(), CfgStruct.rowlength(), 1, BFile);
         }
 
         // Close file after write
@@ -612,8 +692,12 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
             }
 
             // IF fetched data contains nothing
-            //  -> Skip to next iteration
-            if (strlen(BufferIn) == 0) {
+            //  -> Skip to next iteration. BufferIn is a fixed-width binary
+            //  buffer (not a C string), so strlen() would over-read past its
+            //  end whenever a real row's bytes fill the whole slot with no
+            //  zero byte in it; checking the first byte (a hole is always
+            //  fully zeroed) is what the aggregate scan kernels do too.
+            if (BufferIn[0] == 0) {
                 continue;
             }
 
@@ -801,7 +885,16 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, X
         FirstInsertData = protoFromClient->rangeinsert_data(DataMap[YearKey].at(0));
         const unsigned long long int &FirstUnixTime = FirstInsertData.timestamp();
         const unsigned long long int FirstOffset = (FirstUnixTime - ThisTs.FirstEpoch) * CfgStruct.rowlength();
-        const unsigned long long int RegionLength = CfgStruct.rowlength() * DataMap[YearKey].size();
+
+        // RegionLength must cover the actual byte span of the writes below,
+        // not just count*rowLength -- that undersizes the lock (and races
+        // unprotected writes past its end) whenever the timestamps in this
+        // year aren't contiguous. Relies on the same "incoming data is
+        // sorted" precondition the rest of this function already assumes, so
+        // the last entry in the group carries the highest offset.
+        const XStore_Proto::RangeInsert_DATA &LastInsertData = protoFromClient->rangeinsert_data(DataMap[YearKey].back());
+        const unsigned long long int LastOffset = (LastInsertData.timestamp() - ThisTs.FirstEpoch) * CfgStruct.rowlength();
+        const unsigned long long int RegionLength = (LastOffset + CfgStruct.rowlength()) - FirstOffset;
 
         {
             // Lock prior to file OP
@@ -819,11 +912,21 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, X
                 Diff = UnixTime - ThisTs.FirstEpoch;
                 Offset = Diff * CfgStruct.rowlength();
 
+                // Rows shorter than rowLength must not leave a previous
+                // occupant's stale trailing bytes in the slot; rows that
+                // don't fit at all are rejected rather than silently truncated.
+                std::string Serialized = Data.SerializeAsString();
+                if (Serialized.size() > static_cast<size_t>(CfgStruct.rowlength())) {
+                    continue;
+                }
+                std::string RowBuffer(CfgStruct.rowlength(), '\0');
+                std::memcpy(RowBuffer.data(), Serialized.data(), Serialized.size());
+
                 // Seek to target offset prior to write
                 fseeko64(BFile, Offset, SEEK_SET);
 
                 // Writing actual data to disk
-                fwrite(Data.SerializeAsString().data(), CfgStruct.rowlength(), 1, BFile);
+                fwrite(RowBuffer.data(), CfgStruct.rowlength(), 1, BFile);
             }
         }
         // Close file after write
@@ -966,8 +1069,17 @@ void XStore::RangeQuery(const unsigned long long int &startEpochT, const unsigne
                     returnData->set_querystatus(WarningMsg);
                     spdlog::warn(WarningMsg.substr(WARNING_LEN));
 
-                    // Update currTS with latest startEpoch after incrementing
-                    CurrTs = TimeStruct(StartEpoch + (CurrTs.LastEpoch - StartEpoch), CfgStruct.timeresolution());
+                    // Advance StartEpoch into the next year before recomputing
+                    // CurrTs -- the old "StartEpoch + (CurrTs.LastEpoch -
+                    // StartEpoch)" simplifies to just CurrTs.LastEpoch, which
+                    // stays in the SAME year (LastEpoch is Dec 31 23:59:59 of
+                    // that year), leaving StartEpoch untouched. TargetFilePath
+                    // above is built straight from CurrTs.Year without
+                    // recomputing it from StartEpoch, so the old code re-checked
+                    // the exact same missing file forever whenever a
+                    // multi-year span's non-final year had no data file.
+                    StartEpoch = CurrTs.LastEpoch + 1;
+                    CurrTs = TimeStruct(StartEpoch, CfgStruct.timeresolution());
                     continue;
                 }
 
@@ -1171,8 +1283,13 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(const unsigned long long int &
                     ToReturn.set_deletestatus(WarningMsg);
                     spdlog::warn(WarningMsg.substr(WARNING_LEN));
 
-                    // Update currTS with latest startEpoch after incrementing
-                    CurrTs = TimeStruct(StartEpoch + (CurrTs.LastEpoch - StartEpoch), CfgStruct.timeresolution());
+                    // Advance StartEpoch into the next year before recomputing
+                    // CurrTs -- see the matching fix/comment in RangeQuery
+                    // above; the old expression never actually advanced
+                    // StartEpoch, so a missing non-final year's file spun the
+                    // loop forever re-checking the same year.
+                    StartEpoch = CurrTs.LastEpoch + 1;
+                    CurrTs = TimeStruct(StartEpoch, CfgStruct.timeresolution());
                     continue;
                 }
 
@@ -1613,6 +1730,11 @@ XStore_Proto::RemoveDB_REP XStore::RemoveDB(std::string dbName) {
     // Remove DB from cfgMap
     EraseCfg(dbName);
 
+    // Drop & unmap any cached UnaryInsert mappings under this DB -- otherwise
+    // a future insert (via GetOrMapFile) could keep writing into an orphaned,
+    // unlinked mapping instead of a freshly-recreated DB with the same name.
+    EraseMappedFilesUnderPrefix(DbLoc + "/");
+
     RemoveStatus = fmt::format("[INFO] [REMOVE DB] [DB: {}] - Removed DB with name: {}", dbName, dbName);
     ToReturn.set_removestatus(RemoveStatus);
     spdlog::info(RemoveStatus.substr(INFO_LEN));
@@ -1650,6 +1772,10 @@ XStore_Proto::RemoveDBFiles_REP XStore::RemoveDBFiles(XStore_Proto::RemoveDBFile
         }
         bool CurrRemove = std::filesystem::remove(TargetPath);
         if (CurrRemove) {
+            // Drop this file's cached UnaryInsert mapping, if any -- same
+            // reasoning as RemoveDB, scoped to a single file.
+            EraseMappedFile(TargetPath.string());
+
             std::string InfoMsg = fmt::format("[INFO] [REMOVE DB FILES] [DB: {}] - Removed {}", dbName, protoFromClient->filename(i));
             ToReturn.add_removestatus(InfoMsg);
             spdlog::info(InfoMsg.substr(INFO_LEN));

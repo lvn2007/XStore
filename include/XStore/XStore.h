@@ -4,6 +4,9 @@
 #include <string>
 #include <cstring>
 #include <map>
+#include <list>
+#include <unordered_map>
+#include <mutex>
 #include <shared_mutex>
 #include <iostream>
 #include <filesystem>
@@ -43,6 +46,24 @@ class XStore {
         // CfgMutex since std::map isn't safe for concurrent read/insert.
         static std::map<std::string, XStore_Proto::ConfigStruct> CfgMap;
         static std::shared_mutex CfgMutex;
+
+        // Shared cache of PROT_WRITE mmap regions for .XSTORE data files, keyed
+        // by full path, so repeat UnaryInserts to the same (dbName, year) file
+        // skip open/ftruncate/mmap and become a single memcpy into an
+        // already-resident page. File size is fixed at creation (ftruncate'd
+        // up front to the year's full row count), so one mapping covers the
+        // whole file for its lifetime -- no remap needed. MRU-ordered list +
+        // index map = O(1) lookup/promote/evict; bounded (MmapCacheCap) to
+        // avoid unbounded address-space/FD growth. Guarded by MmapMutex since
+        // every access (including cache hits, which reorder the MRU list)
+        // mutates shared state; distinct row offsets never overlap in memory
+        // so concurrent memcpy's to disjoint slots need no extra locking
+        // (FileRangeLockGuard still serializes same-slot writes).
+        struct MappedFile { void *Base; size_t Len; };
+        static std::list<std::pair<std::string, MappedFile>> MmapLru;
+        static std::unordered_map<std::string, std::list<std::pair<std::string, MappedFile>>::iterator> MmapIndex;
+        static std::mutex MmapMutex;
+        static constexpr size_t MmapCacheCap = 256;
         std::string PermittedTimeResolution[3] = {"SECOND", "MILLISECOND", "MICROSECOND"};
 
         int DbCount = 0;
@@ -139,6 +160,20 @@ class XStore {
 
         // Remove dbName's ConfigStruct from CfgMap under exclusive lock.
         void EraseCfg(const std::string &dbName);
+
+        // Fetch targetFile's cached PROT_WRITE mapping, creating (and
+        // ftruncate'ing to totalRows*rowLength if new) the file and mapping it
+        // on first use. Returns nullptr on open/mmap failure.
+        void* GetOrMapFile(const std::string &targetFile, size_t rowLength, unsigned long long totalRows);
+
+        // munmap + drop targetFile's cached mapping, if present. Used before a
+        // file is deleted out from under the cache (RemoveDBFiles).
+        void EraseMappedFile(const std::string &targetFile);
+
+        // munmap + drop every cached mapping whose path falls under dbDirPrefix.
+        // Used before a DB directory is deleted out from under the cache
+        // (RemoveDB), since a single RemoveDB can span many cached year files.
+        void EraseMappedFilesUnderPrefix(const std::string &dbDirPrefix);
 
         void ToUpperCase(std::string::iterator begin, std::string::iterator end) {
             for (auto it = begin; it != end; ++it) {
