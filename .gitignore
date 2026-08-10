@@ -6,3 +6,4 @@ graphify-out/
 .github/
 __pycache__/
 *.pyc
+DataStore/*
