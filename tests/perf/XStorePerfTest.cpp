@@ -183,6 +183,59 @@ TEST_F(XStorePerfTest, BatchQueryThroughput) {
 }
 
 // ---------------------------------------------------------------------
+// Range Insert / Query -- many rows in a single call like Batch above, but
+// addressed by a contiguous [start, end] span instead of an explicit
+// timestamp list (and holes come back as empty entries instead of being
+// omitted) -- a distinct code path worth its own throughput number.
+// ---------------------------------------------------------------------
+
+TEST_F(XStorePerfTest, RangeInsertThroughput) {
+    XStore Store;
+    Store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    const unsigned long long N = PerfOpCount(200'000);
+
+    XStore_Proto::RangeInsert_REQ Req;
+    Req.set_dbname("PERFDB");
+    for (unsigned long long i = 0; i < N; i++) {
+        XStore_Proto::RangeInsert_DATA *Entry = Req.add_rangeinsert_data();
+        Entry->set_timestamp(BaseTs + i);
+        *Entry->mutable_data() = PerfRow(i);
+    }
+
+    XStore_Proto::RangeInsert_REP Rep;
+    auto Start = std::chrono::steady_clock::now();
+    Store.RangeInsert(&Req, &Rep);
+    double Elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - Start).count();
+
+    EXPECT_NE(Rep.insertstatus().find(fmt::format("Inserted {} elements", N)), std::string::npos) << Rep.insertstatus();
+    ReportPerf({"RangeInsert", N, Elapsed});
+}
+
+TEST_F(XStorePerfTest, RangeQueryThroughput) {
+    XStore Store;
+    Store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    const unsigned long long N = PerfOpCount(200'000);
+
+    XStore_Proto::RangeInsert_REQ InsertReq;
+    InsertReq.set_dbname("PERFDB");
+    for (unsigned long long i = 0; i < N; i++) {
+        XStore_Proto::RangeInsert_DATA *Entry = InsertReq.add_rangeinsert_data();
+        Entry->set_timestamp(BaseTs + i);
+        *Entry->mutable_data() = PerfRow(i);
+    }
+    XStore_Proto::RangeInsert_REP InsertRep;
+    Store.RangeInsert(&InsertReq, &InsertRep);
+
+    XStore_Proto::RangeQuery_REP QueryRep;
+    auto Start = std::chrono::steady_clock::now();
+    Store.RangeQuery(BaseTs, BaseTs + N - 1, "PERFDB", &QueryRep);
+    double Elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - Start).count();
+
+    ASSERT_EQ(QueryRep.queryresponse_size(), (int)N) << "range query lost/gained rows";
+    ReportPerf({"RangeQuery", N, Elapsed});
+}
+
+// ---------------------------------------------------------------------
 // Aggregates -- Min/Max/Sum/Avg each do a single mmap'd linear scan over
 // the requested range (ProcessFileRangeSelect for Min/Max,
 // ProcessFileRangeAccumulate for Sum/Avg -- Avg is Sum's kernel plus one
