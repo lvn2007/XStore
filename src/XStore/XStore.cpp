@@ -604,7 +604,7 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
 }
 
 // BATCH QUERY
-void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Proto::BatchQuery_REP *returnData) {
+void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Proto::BatchQuery_REP *returnData, bool SortTime) {
     // Ensure dbName string is all capitalized
     std::string DbName = protoFromClient->dbname();
     ToUpperCase(DbName.begin(), DbName.end());
@@ -635,6 +635,16 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
         returnData->set_querystatus(ErrMsg);
         spdlog::error(ErrMsg.substr(ERROR_LEN));
         return;
+    }
+
+    // Assuming incoming batch query is unsorted
+    //  -> Ascending sort
+    if (SortTime)
+    {
+        std::sort(std::execution::par_unseq, protoFromClient->mutable_timestamp()->begin(), protoFromClient->mutable_timestamp()->end(),
+                      [](const unsigned long long int& a, const unsigned long long int& b) {
+                        return a < b;
+        });
     }
 
     // Organize incoming batch query into map
@@ -668,12 +678,20 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
 
         TimeStruct ThisTs{static_cast<time_t>(protoFromClient->timestamp(Indices.front())), CfgStruct.timeresolution()};
 
-        // Cached mapping for this (dbName, year) file, same mmap LRU cache
-        // Unary/BatchInsert use -- avoids an fopen/fseek/fread (2+ syscalls)
-        // per row in favor of parsing straight out of an already-resident page.
-        void *MappedBase = GetOrMapFile(TargetFile, CfgStruct.rowlength(), ThisTs.LastEpoch - ThisTs.FirstEpoch);
-        if (MappedBase == nullptr) {
-            std::string ErrMsg = fmt::format("[ERROR] [BATCH QUERY] [DB: {}] - Unable to open/map {}.XSTORE", DbName, YearKey);
+        // BatchQuery deliberately does NOT go through GetOrMapFile/mmap here
+        // (unlike Unary/Batch/RangeInsert and RangeQuery, which all share
+        // that cache). Those all walk a file in offset order -- sequential
+        // or nearly so -- where mmap's page-fault-on-touch model plus the
+        // kernel's default readahead is a win. BatchQuery's row order is
+        // request order, i.e. scattered across the year's full offset span,
+        // and mmap random access degrades badly there: each page fault is
+        // costlier than a pread() of the same bytes, readahead prefetches
+        // pages this loop will never touch, and per-call madvise(MADV_RANDOM)
+        // to suppress that isn't free either once a lot of the mapping is
+        // resident. A plain pread() per row sidesteps all of it.
+        int Fd = open(TargetFile.c_str(), O_RDONLY);
+        if (Fd < 0) {
+            std::string ErrMsg = fmt::format("[ERROR] [BATCH QUERY] [DB: {}] - Unable to open {}.XSTORE", DbName, YearKey);
             returnData->set_querystatus(ErrMsg);
             spdlog::error(ErrMsg.substr(ERROR_LEN));
             continue;
@@ -681,9 +699,9 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
 
         // Single lock spanning this year-group's min-to-max offset span
         // instead of one lock per row. Found via a scan (not just
-        // front()/back()) since Indices is never guaranteed sorted --
-        // BatchQuery groups by year in request order, unlike BatchInsert
-        // which always sorts first.
+        // front()/back()) since Indices is only guaranteed sorted when
+        // SortTime is true -- BatchInsert always sorts, BatchQuery doesn't
+        // have to.
         auto [MinIt, MaxIt] = std::minmax_element(Indices.begin(), Indices.end(),
             [&](unsigned long long int a, unsigned long long int b) {
                 return protoFromClient->timestamp(a) < protoFromClient->timestamp(b);
@@ -694,27 +712,29 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
 
         FileRangeLockGuard Guard(TargetFile, MinOffset, RegionLength, FileRangeLock::LockType::READ);
 
+        std::vector<char> BufferIn(CfgStruct.rowlength());
         for (unsigned long long int Idx : Indices) {
             unsigned long long int Timestamp = protoFromClient->timestamp(Idx);
             unsigned long long int Offset = (Timestamp - ThisTs.FirstEpoch) * CfgStruct.rowlength();
-            const char *Slot = static_cast<char*>(MappedBase) + Offset;
+
+            pread(Fd, BufferIn.data(), CfgStruct.rowlength(), static_cast<off_t>(Offset));
 
             // IF fetched data contains nothing
-            //  -> Skip to next iteration. Slot is a fixed-width binary
+            //  -> Skip to next iteration. BufferIn is a fixed-width binary
             //  buffer (not a C string), so strlen() would over-read past its
             //  end whenever a real row's bytes fill the whole slot with no
             //  zero byte in it; checking the first byte (a hole is always
             //  fully zeroed) is what the aggregate scan kernels do too.
-            if (Slot[0] == 0) {
+            if (BufferIn[0] == 0) {
                 continue;
             }
 
-            // Parse straight from the mapped row into the response -- skips
-            // the TempData copy the previous fread()-based path paid.
             XStore_Proto::UnaryQuery_REP *CurrEntry = returnData->add_queryresponse();
             CurrEntry->set_timestamp(Timestamp);
-            CurrEntry->mutable_data()->ParseFromArray(Slot, CfgStruct.rowlength());
+            CurrEntry->mutable_data()->ParseFromArray(BufferIn.data(), CfgStruct.rowlength());
         }
+
+        close(Fd);
     }
 }
 
