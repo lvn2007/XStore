@@ -769,20 +769,20 @@ TEST_F(XStoreTest, AggregatesOverContiguousNumericColumn) {
     const unsigned long long End = TS_2024_MID + Values.size() - 1;
 
     XStore_Proto::Min_REP MinRep;
-    Store.MinAggregateV3(Start, End, "TESTDB", 0, &MinRep);
+    Store.MinAggregate(Start, End, "TESTDB", 0, &MinRep);
     EXPECT_EQ(MinRep.opstatus(), "SUCCESS");
     EXPECT_DOUBLE_EQ(MinRep.opresult().doubledata(), 1.0);
 
     XStore_Proto::Max_REP MaxRep;
-    Store.MaxAggregateV2(Start, End, "TESTDB", 0, &MaxRep);
+    Store.MaxAggregate(Start, End, "TESTDB", 0, &MaxRep);
     EXPECT_DOUBLE_EQ(MaxRep.opresult().doubledata(), 20.0);
 
     XStore_Proto::Sum_REP SumRep;
-    Store.SumAggregateV2(Start, End, "TESTDB", 0, &SumRep);
+    Store.SumAggregate(Start, End, "TESTDB", 0, &SumRep);
     EXPECT_DOUBLE_EQ(SumRep.opresult(), 41.0);
 
     XStore_Proto::Avg_REP AvgRep;
-    Store.AvgAggregateV2(Start, End, "TESTDB", 0, &AvgRep);
+    Store.AvgAggregate(Start, End, "TESTDB", 0, &AvgRep);
     EXPECT_DOUBLE_EQ(AvgRep.opresult(), 8.2);
 }
 
@@ -794,7 +794,7 @@ TEST_F(XStoreTest, MinAggregateColumnIndexOutOfRangeReturnsNoValidData) {
     Store.UnaryInsert(TS_2031_MID, MakeRow({FDouble(1.0)}), "TESTDB", &InsertRep);  // only column 0 exists
 
     XStore_Proto::Min_REP MinRep;
-    Store.MinAggregateV3(TS_2031_MID, TS_2031_MID, "TESTDB", 5, &MinRep);
+    Store.MinAggregate(TS_2031_MID, TS_2031_MID, "TESTDB", 5, &MinRep);
     EXPECT_EQ(MinRep.opstatus(), "ERROR: No valid data found");
 }
 
@@ -910,4 +910,73 @@ TEST_F(XStoreTest, ConcurrentWritesToDifferentYearFilesDoNotInterfere) {
 
     EXPECT_TRUE(fs::exists(Scratch->TestRoot / "DataStore" / "TESTDB" / "1998.XSTORE"));
     EXPECT_TRUE(fs::exists(Scratch->TestRoot / "DataStore" / "TESTDB" / "2031.XSTORE"));
+}
+
+// Regression tests for CfgMap: it used to be a plain (non-static) member, so
+// each worker thread's own `XStore` instance (see ZMQ_Server::WorkerRoutine,
+// which constructs one `XStore` per thread) held a private cache. A config
+// cached via one thread's instance was never visible to any other thread's
+// instance, and concurrent inserts into the map were also unsynchronized.
+// CfgMap and its guarding CfgMutex are now static, shared by every instance.
+
+TEST_F(XStoreTest, CfgCachedByOneXStoreInstanceIsVisibleToAnotherInstance) {
+    // Constructed before TESTDB exists, so Reader's own InitDB() (which runs
+    // in the constructor) cannot have cached TESTDB's config itself.
+    XStore Reader;
+
+    XStore Creator;
+    Creator.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+
+    // Make the on-disk .CFG diverge from what Creator just cached. If Reader
+    // had to fall back to reading disk itself instead of hitting the shared
+    // cache, it would pick up this wrong 4-byte row length instead of 128.
+    XStore_Proto::ConfigStruct Divergent;
+    Divergent.set_dbname("TESTDB");
+    Divergent.set_timeresolution(XStore_Proto::SECOND);
+    Divergent.set_rowlength(4);
+    fs::path CfgPath = Scratch->TestRoot / "DataStore" / "TESTDB" / "TESTDB.CFG";
+    FILE *CFile = std::fopen(CfgPath.string().c_str(), "wb+");
+    Divergent.SerializeToFileDescriptor(fileno(CFile));
+    std::fclose(CFile);
+
+    XStore_Proto::UnaryInsert_REP InsertRep;
+    Reader.UnaryInsert(TS_2016_MID, MakeRow({FDouble(3.14)}), "TESTDB", &InsertRep);
+
+    // Reader must have used the cached 128-byte row length -- not the 4-byte
+    // one now sitting on disk -- proving the shared cache, not disk, won.
+    ASSERT_TRUE(XStore::CfgMap.count("TESTDB"));
+    EXPECT_EQ(XStore::CfgMap.at("TESTDB").rowlength(), 128);
+
+    XStore_Proto::UnaryQuery_REP QueryRep;
+    Reader.UnaryQuery(TS_2016_MID, "TESTDB", &QueryRep);
+    ASSERT_EQ(QueryRep.data().fielddata_size(), 1);
+    EXPECT_DOUBLE_EQ(QueryRep.data().fielddata(0).doubledata(), 3.14);
+}
+
+TEST_F(XStoreTest, ConcurrentXStoreInstancesShareCfgMapWithoutCorruption) {
+    XStore Creator;
+    Creator.CreateDB("TESTDB", XStore_Proto::SECOND, 64);
+
+    // Force every worker below to race on a genuine cache miss instead of
+    // trivially hitting what CreateDB already cached.
+    XStore::CfgMap.clear();
+
+    constexpr int NumThreads = 16;
+    std::vector<std::thread> Threads;
+    std::vector<XStore_Proto::UnaryQuery_REP> Reps(NumThreads);
+
+    for (int i = 0; i < NumThreads; i++) {
+        Threads.emplace_back([i, &Reps]() {
+            XStore Worker;  // one instance per thread, matching ZMQ_Server's design
+            Worker.UnaryQuery(TS_2003_MID, "TESTDB", &Reps[i]);
+        });
+    }
+    for (auto &T : Threads) T.join();
+
+    // All 16 threads race to populate the same cache entry (both via each
+    // constructor's InitDB() and via GetOrLoadCfg's miss path). An unguarded
+    // std::map under that many concurrent inserts would risk a corrupted map
+    // or a crash; they must instead converge on one consistent entry.
+    ASSERT_EQ(XStore::CfgMap.size(), 1u);
+    EXPECT_EQ(XStore::CfgMap.at("TESTDB").rowlength(), 64);
 }

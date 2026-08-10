@@ -1,5 +1,8 @@
 #include "include/XStore/XStore.h"
 
+std::map<std::string, XStore_Proto::ConfigStruct> XStore::CfgMap;
+std::shared_mutex XStore::CfgMutex;
+
 // Initialization
 XStore::XStore() {
     // Initialize DB
@@ -7,6 +10,52 @@ XStore::XStore() {
 
     // First, check if there's any existing data exists
 //    HasDB();
+}
+
+bool XStore::GetOrLoadCfg(const std::string &dbName, const std::string &dbBasePath, XStore_Proto::ConfigStruct &cfgOut) {
+    // Fast path: another thread may have already cached this config
+    {
+        std::shared_lock ReadLock(CfgMutex);
+        auto It = CfgMap.find(dbName);
+        if (It != CfgMap.end()) {
+            cfgOut = It->second;
+            return true;
+        }
+    }
+
+    // Cache miss -> take exclusive lock & re-check (another thread may have
+    // loaded it while we were waiting for the lock)
+    std::unique_lock WriteLock(CfgMutex);
+    auto It = CfgMap.find(dbName);
+    if (It != CfgMap.end()) {
+        cfgOut = It->second;
+        return true;
+    }
+
+    std::string CfgPath = fmt::format("{}{}.CFG", dbBasePath, dbName);
+    if (!std::filesystem::exists(CfgPath)) {
+        return false;
+    }
+
+    FILE *CFile = std::fopen(CfgPath.c_str(), "rb");
+    if (CFile == nullptr) {
+        return false;
+    }
+    cfgOut.ParseFromFileDescriptor(fileno(CFile));
+    std::fclose(CFile);
+
+    CfgMap[dbName] = cfgOut;
+    return true;
+}
+
+void XStore::PutCfg(const std::string &dbName, const XStore_Proto::ConfigStruct &cfg) {
+    std::unique_lock WriteLock(CfgMutex);
+    CfgMap[dbName] = cfg;
+}
+
+void XStore::EraseCfg(const std::string &dbName) {
+    std::unique_lock WriteLock(CfgMutex);
+    CfgMap.erase(dbName);
 }
 
 XStore_Proto::SysInfo_REP XStore::InfoQuery(std::string serverAddr, int threadCount) {
@@ -119,7 +168,7 @@ XStore_Proto::CreateDB_REP XStore::CreateDB(std::string dbName, XStore_Proto::Ti
             std::fclose(BFile);
 
             //  Add this cfgStruct to cfgMap
-            CfgMap[dbName] = CfgStruct;
+            PutCfg(dbName, CfgStruct);
 
             spdlog::info(SuccessMsg.substr(INFO_LEN));
             return ToReturn;
@@ -151,20 +200,13 @@ void XStore::UnaryInsert(const unsigned long long int &unixTime, const XStore_Pr
         return;
     }
 
-    // Check if cfgMap NOT contains cfgStruct
+    // Fetch cfgStruct from cache, loading from disk on first use
     XStore_Proto::ConfigStruct CfgStruct;
-    if (CfgMap.find(dbName) == CfgMap.end()) {
-        // Read & add cfgStruct to cfgMap
-        FILE *CFile;
-        std::string CfgPath = fmt::format("{}{}.CFG", DbBasePath, dbName);
-        CFile = std::fopen(CfgPath.c_str(), "rb");
-        CfgStruct.ParseFromFileDescriptor(fileno(CFile));
-        std::fclose(CFile);
-        CfgMap[dbName] = CfgStruct;
-    }
-    else {
-        // Otherwise -> Fetch cfgStruct from cfgMap
-        CfgStruct = CfgMap[dbName];
+    if (!GetOrLoadCfg(dbName, DbBasePath, CfgStruct)) {
+        std::string ErrMsg = fmt::format("[ERROR] [UNARY INSERT] [DB: {}] - DB does not exist", dbName);
+        returnData->set_insertstatus(ErrMsg);
+        spdlog::error(ErrMsg.substr(ERROR_LEN));
+        return;
     }
 
     // Time structure contains all components per UNIXTIME:
@@ -233,20 +275,13 @@ void XStore::UnaryQuery(const unsigned long long int &unixTime, std::string dbNa
         return;
     }
 
-    // Check if cfgMap NOT contains cfgStruct
+    // Fetch cfgStruct from cache, loading from disk on first use
     XStore_Proto::ConfigStruct CfgStruct;
-    if (CfgMap.find(dbName) == CfgMap.end()) {
-        // Read & add cfgStruct to cfgMap
-        FILE *CFile;
-        std::string CfgPath = fmt::format("{}{}.CFG", DbBasePath, dbName);
-        CFile = std::fopen(CfgPath.c_str(), "rb");
-        CfgStruct.ParseFromFileDescriptor(fileno(CFile));
-        std::fclose(CFile);
-        CfgMap[dbName] = CfgStruct;
-    }
-    else {
-        // Otherwise -> Fetch cfgStruct from cfgMap
-        CfgStruct = CfgMap[dbName];
+    if (!GetOrLoadCfg(dbName, DbBasePath, CfgStruct)) {
+        std::string ErrMsg = fmt::format("[ERROR] [UNARY QUERY] [DB: {}] - DB does not exist", dbName);
+        returnData->set_querystatus(ErrMsg);
+        spdlog::error(ErrMsg.substr(ERROR_LEN));
+        return;
     }
 
     //  Time structure contains all components per UNIXTIME:
@@ -317,20 +352,13 @@ XStore_Proto::UnaryDelete_REP XStore::UnaryDelete(const unsigned long long int &
         return ToReturn;
     }
 
-    // Check if cfgMap NOT contains cfgStruct
+    // Fetch cfgStruct from cache, loading from disk on first use
     XStore_Proto::ConfigStruct CfgStruct;
-    if (CfgMap.find(dbName) == CfgMap.end()) {
-        // Read & add cfgStruct to cfgMap
-        FILE *CFile;
-        std::string CfgPath = fmt::format("{}{}.CFG", DbBasePath, dbName);
-        CFile = std::fopen(CfgPath.c_str(), "rb");
-        CfgStruct.ParseFromFileDescriptor(fileno(CFile));
-        std::fclose(CFile);
-        CfgMap[dbName] = CfgStruct;
-    }
-    else {
-        // Otherwise -> Fetch cfgStruct from cfgMap
-        CfgStruct = CfgMap[dbName];
+    if (!GetOrLoadCfg(dbName, DbBasePath, CfgStruct)) {
+        std::string ErrMsg = fmt::format("[ERROR] [UNARY DELETE] [DB: {}] - DB does not exist", dbName);
+        ToReturn.set_deletestatus(ErrMsg);
+        spdlog::error(ErrMsg.substr(ERROR_LEN));
+        return ToReturn;
     }
 
     // Time structure contains all components per UNIXTIME:
@@ -394,20 +422,13 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
         return;
     }
 
-    // Check if cfgMap NOT contains cfgStruct
+    // Fetch cfgStruct from cache, loading from disk on first use
     XStore_Proto::ConfigStruct CfgStruct;
-    if (CfgMap.find(DbName) == CfgMap.end()) {
-        // Read & Add cfgStruct to cfgMap
-        FILE *CFile;
-        std::string CfgPath = fmt::format("{}{}.CFG", DbBasePath, DbName);
-        CFile = std::fopen(CfgPath.c_str(), "rb");
-        CfgStruct.ParseFromFileDescriptor(fileno(CFile));
-        std::fclose(CFile);
-        CfgMap[DbName] = CfgStruct;
-    }
-    else {
-        // Otherwise -> Fetch cfgStruct from cfgMap
-        CfgStruct = CfgMap[DbName];
+    if (!GetOrLoadCfg(DbName, DbBasePath, CfgStruct)) {
+        std::string ErrMsg = fmt::format("[ERROR] [BATCH INSERT] [DB: {}] - DB does not exist", DbName);
+        returnData->set_insertstatus(ErrMsg);
+        spdlog::error(ErrMsg.substr(ERROR_LEN));
+        return;
     }
 
     // Assuming incoming data is unsorted
@@ -501,27 +522,13 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
     // Base directory of a DB
     std::string DbBasePath = fmt::format("{}DataStore/{}/", BaseDir, DbName);
 
-    // Check if cfgMap NOT contains cfgStruct
+    // Fetch cfgStruct from cache, loading from disk on first use
     XStore_Proto::ConfigStruct CfgStruct;
-    if (CfgMap.find(DbName) == CfgMap.end()) {
-        std::string CfgPath = fmt::format("{}{}.CFG", DbBasePath, DbName);
-
-        if (std::filesystem::exists(CfgPath) == 0) {
-            std::string ErrMsg = fmt::format("[ERROR] [BATCH QUERY] [DB: {}] - {}.CFG does not exist", DbName, DbName);
-            returnData->set_querystatus(ErrMsg);
-            spdlog::error(ErrMsg.substr(ERROR_LEN));
-            return;
-        }
-
-        // Read & Add cfgStruct to cfgMap
-        FILE *CFile = std::fopen(CfgPath.c_str(), "rb");
-        CfgStruct.ParseFromFileDescriptor(fileno(CFile));
-        std::fclose(CFile);
-        CfgMap[DbName] = CfgStruct;
-    }
-    else {
-        // Otherwise -> Fetch cfgStruct from cfgMap
-        CfgStruct = CfgMap[DbName];
+    if (!GetOrLoadCfg(DbName, DbBasePath, CfgStruct)) {
+        std::string ErrMsg = fmt::format("[ERROR] [BATCH QUERY] [DB: {}] - {}.CFG does not exist", DbName, DbName);
+        returnData->set_querystatus(ErrMsg);
+        spdlog::error(ErrMsg.substr(ERROR_LEN));
+        return;
     }
 
     // IF query range > 2GB limit of Protobuf or Empty
@@ -635,27 +642,13 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
     // Base directory of a DB
     std::string DbBasePath = fmt::format("{}DataStore/{}/", BaseDir, DbName);
 
-    // Check if cfgMap NOT contains cfgStruct
+    // Fetch cfgStruct from cache, loading from disk on first use
     XStore_Proto::ConfigStruct CfgStruct;
-    if (CfgMap.find(DbName) == CfgMap.end()) {
-        std::string CfgPath = fmt::format("{}{}.CFG", DbBasePath, DbName);
-
-        if (std::filesystem::exists(CfgPath) == 0) {
-            std::string ErrMsg = fmt::format("[ERROR] [BATCH DELETE] [DB: {}] - {}.CFG does not exist", DbName, DbName);
-            ToReturn.set_deletestatus(ErrMsg);
-            spdlog::error(ErrMsg.substr(ERROR_LEN));
-            return ToReturn;
-        }
-
-        // Read & Add cfgStruct to cfgMap
-        FILE *CFile = std::fopen(CfgPath.c_str(), "rb");
-        CfgStruct.ParseFromFileDescriptor(fileno(CFile));
-        std::fclose(CFile);
-        CfgMap[DbName] = CfgStruct;
-    }
-    else {
-        // Otherwise -> Fetch cfgStruct from cfgMap
-        CfgStruct = CfgMap[DbName];
+    if (!GetOrLoadCfg(DbName, DbBasePath, CfgStruct)) {
+        std::string ErrMsg = fmt::format("[ERROR] [BATCH DELETE] [DB: {}] - {}.CFG does not exist", DbName, DbName);
+        ToReturn.set_deletestatus(ErrMsg);
+        spdlog::error(ErrMsg.substr(ERROR_LEN));
+        return ToReturn;
     }
 
     // IF target delete timestamp(s) is empty OR db directory does not exist
@@ -755,20 +748,13 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, X
         return;
     }
 
-    // Check if cfgMap NOT contains cfgStruct
+    // Fetch cfgStruct from cache, loading from disk on first use
     XStore_Proto::ConfigStruct CfgStruct;
-    if (CfgMap.find(DbName) == CfgMap.end()) {
-        // Read & Add cfgStruct to cfgMap
-        FILE *CFile;
-        std::string CfgPath = fmt::format("{}{}.CFG", DbBasePath, DbName);
-        CFile = std::fopen(CfgPath.c_str(), "rb");
-        CfgStruct.ParseFromFileDescriptor(fileno(CFile));
-        std::fclose(CFile);
-        CfgMap[DbName] = CfgStruct;
-    }
-    else {
-        // Otherwise -> Fetch cfgStruct from cfgMap
-        CfgStruct = CfgMap[DbName];
+    if (!GetOrLoadCfg(DbName, DbBasePath, CfgStruct)) {
+        std::string ErrMsg = fmt::format("[ERROR] [RANGE INSERT] [DB: {}] - DB does not exist", DbName);
+        returnData->set_insertstatus(ErrMsg);
+        spdlog::error(ErrMsg.substr(ERROR_LEN));
+        return;
     }
 
     // Assuming incoming data is sorted --> Skip sorting
@@ -863,27 +849,13 @@ void XStore::RangeQuery(const unsigned long long int &startEpochT, const unsigne
     // Base directory of a DB
     std::string DbBasePath = fmt::format("{}DataStore/{}/", BaseDir, dbName);
 
-    // Check if cfgMap NOT contains cfgStruct
+    // Fetch cfgStruct from cache, loading from disk on first use
     XStore_Proto::ConfigStruct CfgStruct;
-    if (CfgMap.find(dbName) == CfgMap.end()) {
-        std::string CfgPath = DbBasePath + dbName + ".CFG";
-
-        if (std::filesystem::exists(CfgPath) == 0) {
-            std::string ErrMsg = fmt::format("[ERROR] [RANGE QUERY] [DB: {}] - {}.CFG does not exist", dbName, dbName);
-            returnData->set_querystatus(ErrMsg);
-            spdlog::error(ErrMsg.substr(ERROR_LEN));
-            return;
-        }
-
-        // Read & Add cfgStruct to cfgMap
-        FILE *CFile = std::fopen(CfgPath.c_str(), "rb");
-        CfgStruct.ParseFromFileDescriptor(fileno(CFile));
-        std::fclose(CFile);
-        CfgMap[dbName] = CfgStruct;
-    }
-    else {
-        // Otherwise -> Fetch cfgStruct from cfgMap
-        CfgStruct = CfgMap[dbName];
+    if (!GetOrLoadCfg(dbName, DbBasePath, CfgStruct)) {
+        std::string ErrMsg = fmt::format("[ERROR] [RANGE QUERY] [DB: {}] - {}.CFG does not exist", dbName, dbName);
+        returnData->set_querystatus(ErrMsg);
+        spdlog::error(ErrMsg.substr(ERROR_LEN));
+        return;
     }
 
     // IF query range > 2GB limit of Protobuf
@@ -1111,27 +1083,13 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(const unsigned long long int &
     // Base directory of a DB
     std::string DbBasePath = fmt::format("{}DataStore/{}/", BaseDir, dbName);
 
-    // Check if cfgMap NOT contains cfgStruct
+    // Fetch cfgStruct from cache, loading from disk on first use
     XStore_Proto::ConfigStruct CfgStruct;
-    if (CfgMap.find(dbName) == CfgMap.end()) {
-        std::string CfgPath = fmt::format("{}{}.CFG", DbBasePath, dbName);
-
-        if (std::filesystem::exists(CfgPath) == 0) {
-            std::string ErrMsg = fmt::format("[ERROR] [RANGE DELETE] [DB: {}] - {}.CFG does not exist", dbName, dbName);
-            ToReturn.set_deletestatus(ErrMsg);
-            spdlog::error(ErrMsg.substr(ERROR_LEN));
-            return ToReturn;
-        }
-
-        // Read & Add cfgStruct to cfgMap
-        FILE *CFile = std::fopen(CfgPath.c_str(), "rb");
-        CfgStruct.ParseFromFileDescriptor(fileno(CFile));
-        std::fclose(CFile);
-        CfgMap[dbName] = CfgStruct;
-    }
-    else {
-        // Otherwise -> Fetch cfgStruct from cfgMap
-        CfgStruct = CfgMap[dbName];
+    if (!GetOrLoadCfg(dbName, DbBasePath, CfgStruct)) {
+        std::string ErrMsg = fmt::format("[ERROR] [RANGE DELETE] [DB: {}] - {}.CFG does not exist", dbName, dbName);
+        ToReturn.set_deletestatus(ErrMsg);
+        spdlog::error(ErrMsg.substr(ERROR_LEN));
+        return ToReturn;
     }
 
     if ((endEpochT - startEpochT) < 0) {
@@ -1288,30 +1246,33 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(const unsigned long long int &
     return ToReturn;
 }
 
-void XStore::ProcessFileRange(FILE* bFile, unsigned long long startOffset, unsigned long long totalRows,
-                             size_t rowLen, unsigned short columnIdx,
-                             ValueStruct& minValue, XStore_Proto::FData& minData) {
+// Shared mmap-backed scan kernels used by MinAggregate/MaxAggregate/SumAggregate/AvgAggregate.
+//  One page-aligned mmap per file range, MADV_SEQUENTIAL readahead, zero per-row syscalls,
+//  CodedInputStream parses directly off mapped pages (no row buffer copy).
+
+template <typename Cmp>
+void XStore::ProcessFileRangeSelect(FILE* bFile, unsigned long long startOffset, unsigned long long totalRows,
+                                     size_t rowLen, unsigned short columnIdx,
+                                     ValueStruct& bestValue, XStore_Proto::FData& bestData) {
 
     if (totalRows == 0) return;
 
     int Fd = fileno(bFile);
     long PageSize = sysconf(_SC_PAGE_SIZE);
 
-    // 1. Calculate Page Alignment
     unsigned long long AlignedOffset = (startOffset / PageSize) * PageSize;
     unsigned long long AlignmentSlop = startOffset - AlignedOffset;
     size_t TotalBytesToMap = (totalRows * rowLen) + AlignmentSlop;
 
-    // 2. Map the file
     void* MmappedPtr = mmap(NULL, TotalBytesToMap, PROT_READ, MAP_SHARED, Fd, AlignedOffset);
     if (MmappedPtr == MAP_FAILED) return;
 
-    // Use MADV_SEQUENTIAL to tell the RAID-0 array to pre-fetch aggressively
     madvise(MmappedPtr, TotalBytesToMap, MADV_SEQUENTIAL | MADV_WILLNEED);
 
     const char* BasePtr = static_cast<const char*>(MmappedPtr) + AlignmentSlop;
     XStore_Proto::RowData TempData;
     ValueStruct TempValue;
+    const Cmp Better{}; // stateless functor, no per-call construction cost
 
     for (unsigned long long i = 0; i < totalRows; ++i) {
         const char* RowPtr = BasePtr + (i * rowLen);
@@ -1321,12 +1282,10 @@ void XStore::ProcessFileRange(FILE* bFile, unsigned long long startOffset, unsig
 
         TempData.Clear();
 
-        // 3. The Correct Parsing Strategy for Fixed-Width Rows
-        // We MUST use CodedInputStream to properly ignore trailing zeros in the 1536-byte slot
+        // We MUST use CodedInputStream to properly ignore trailing zeros in the fixed-width row slot
         google::protobuf::io::ArrayInputStream ArrayIn(RowPtr, (int)rowLen);
         google::protobuf::io::CodedInputStream CodedIn(&ArrayIn);
 
-        // MergePartialFromCodedStream stops at the end of the message, ignoring padding
         if (!TempData.MergePartialFromCodedStream(&CodedIn)) {
             continue;
         }
@@ -1337,10 +1296,10 @@ void XStore::ProcessFileRange(FILE* bFile, unsigned long long startOffset, unsig
             if (CurrData.oneOfData_case() > 0 && CurrData.oneOfData_case() <= 12) {
                 XStore::GetFDataValue(&CurrData, &TempValue);
 
-                if (!minValue.IsInitialized || TempValue.Value < minValue.Value) {
-                    minValue.Value = TempValue.Value;
-                    minValue.IsInitialized = true;
-                    minData = CurrData;
+                if (!bestValue.IsInitialized || Better(TempValue.Value, bestValue.Value)) {
+                    bestValue.Value = TempValue.Value;
+                    bestValue.IsInitialized = true;
+                    bestData = CurrData;
                 }
             }
         }
@@ -1349,7 +1308,64 @@ void XStore::ProcessFileRange(FILE* bFile, unsigned long long startOffset, unsig
     munmap(MmappedPtr, TotalBytesToMap);
 }
 
-void XStore::MinAggregateV3(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT,
+// Explicit instantiation: these are the only two comparators ever used, so the compiler
+// generates two fully-inlined, branch-free (on Cmp) versions -- no vtable/std::function overhead.
+template void XStore::ProcessFileRangeSelect<std::less<long double>>(
+    FILE*, unsigned long long, unsigned long long, size_t, unsigned short, ValueStruct&, XStore_Proto::FData&);
+template void XStore::ProcessFileRangeSelect<std::greater<long double>>(
+    FILE*, unsigned long long, unsigned long long, size_t, unsigned short, ValueStruct&, XStore_Proto::FData&);
+
+void XStore::ProcessFileRangeAccumulate(FILE* bFile, unsigned long long startOffset, unsigned long long totalRows,
+                                         size_t rowLen, unsigned short columnIdx,
+                                         double& sumOut, unsigned long long& validCountOut) {
+
+    if (totalRows == 0) return;
+
+    int Fd = fileno(bFile);
+    long PageSize = sysconf(_SC_PAGE_SIZE);
+
+    unsigned long long AlignedOffset = (startOffset / PageSize) * PageSize;
+    unsigned long long AlignmentSlop = startOffset - AlignedOffset;
+    size_t TotalBytesToMap = (totalRows * rowLen) + AlignmentSlop;
+
+    void* MmappedPtr = mmap(NULL, TotalBytesToMap, PROT_READ, MAP_SHARED, Fd, AlignedOffset);
+    if (MmappedPtr == MAP_FAILED) return;
+
+    madvise(MmappedPtr, TotalBytesToMap, MADV_SEQUENTIAL | MADV_WILLNEED);
+
+    const char* BasePtr = static_cast<const char*>(MmappedPtr) + AlignmentSlop;
+    XStore_Proto::RowData TempData;
+    ValueStruct TempValue;
+
+    for (unsigned long long i = 0; i < totalRows; ++i) {
+        const char* RowPtr = BasePtr + (i * rowLen);
+
+        if (RowPtr[0] == 0) continue;
+
+        TempData.Clear();
+
+        google::protobuf::io::ArrayInputStream ArrayIn(RowPtr, (int)rowLen);
+        google::protobuf::io::CodedInputStream CodedIn(&ArrayIn);
+
+        if (!TempData.MergePartialFromCodedStream(&CodedIn)) {
+            continue;
+        }
+
+        if (columnIdx < (unsigned int)TempData.fielddata_size()) {
+            const auto& CurrData = TempData.fielddata(columnIdx);
+
+            if (CurrData.oneOfData_case() > 0 && CurrData.oneOfData_case() <= 12) {
+                XStore::GetFDataValue(&CurrData, &TempValue);
+                sumOut += (double)TempValue.Value;
+                validCountOut++;
+            }
+        }
+    }
+
+    munmap(MmappedPtr, TotalBytesToMap);
+}
+
+void XStore::MinAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT,
                             std::string dbName, unsigned short int columnIdx, XStore_Proto::Min_REP *returnData) {
 
     ToUpperCase(dbName.begin(), dbName.end());
@@ -1357,19 +1373,16 @@ void XStore::MinAggregateV3(const unsigned long long int &startEpochT, const uns
 
     // Config Fetching
     XStore_Proto::ConfigStruct CfgStruct;
-    if (CfgMap.find(dbName) == CfgMap.end()) {
-        std::string CfgPath = DbBasePath + dbName + ".CFG";
-        if (!std::filesystem::exists(CfgPath)) { /* Handle Error... */ return; }
-        FILE *CFile = std::fopen(CfgPath.c_str(), "rb");
-        CfgStruct.ParseFromFileDescriptor(fileno(CFile));
-        std::fclose(CFile);
-        CfgMap[dbName] = CfgStruct;
-    } else {
-        CfgStruct = CfgMap[dbName];
+    if (!GetOrLoadCfg(dbName, DbBasePath, CfgStruct)) {
+        returnData->set_opstatus(fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - {}.CFG does not exist", dbName, dbName));
+        return;
     }
 
     // Safety Checks
-    if (startEpochT > endEpochT) { /* Handle Error... */ return; }
+    if (startEpochT > endEpochT) {
+        returnData->set_opstatus(fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - Target end time must be after start time", dbName));
+        return;
+    }
 
     ValueStruct MinValue;
     MinValue.IsInitialized = false;
@@ -1394,9 +1407,7 @@ void XStore::MinAggregateV3(const unsigned long long int &startEpochT, const uns
 
                 {
                     FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
-
-                    // CALL THE OPTIMIZED HELPER
-                    ProcessFileRange(BFile, FirstOffset, RowsToProcess, CfgStruct.rowlength(), columnIdx, MinValue, MinData);
+                    ProcessFileRangeSelect<std::less<long double>>(BFile, FirstOffset, RowsToProcess, CfgStruct.rowlength(), columnIdx, MinValue, MinData);
                 }
                 std::fclose(BFile);
             }
@@ -1415,2340 +1426,164 @@ void XStore::MinAggregateV3(const unsigned long long int &startEpochT, const uns
     }
 }
 
-void XStore::MinAggregateV2(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Min_REP *returnData) {
-    // Protobuf obj to be returned
-    std::string OpStatus;
+void XStore::MaxAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT,
+                            std::string dbName, unsigned short int columnIdx, XStore_Proto::Max_REP *returnData) {
 
-    // Ensure dbName string is all capitalized
     ToUpperCase(dbName.begin(), dbName.end());
-
-    // Base directory of a DB
     std::string DbBasePath = fmt::format("{}DataStore/{}/", BaseDir, dbName);
 
-    // Check if cfgMap NOT contains cfgStruct
     XStore_Proto::ConfigStruct CfgStruct;
-    if (CfgMap.find(dbName) == CfgMap.end()) {
-        std::string CfgPath = DbBasePath + dbName + ".CFG";
-
-        if (std::filesystem::exists(CfgPath) == 0) {
-            std::string ErrMsg = fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - {}.CFG does not exist", dbName, dbName);
-            returnData->set_opstatus(ErrMsg);
-            spdlog::error(ErrMsg.substr(ERROR_LEN));
-            return;
-        }
-
-        // Read & Add cfgStruct to cfgMap
-        FILE *CFile = std::fopen(CfgPath.c_str(), "rb");
-        CfgStruct.ParseFromFileDescriptor(fileno(CFile));
-        std::fclose(CFile);
-        CfgMap[dbName] = CfgStruct;
-    }
-    else {
-        // Otherwise -> Fetch cfgStruct from cfgMap
-        CfgStruct = CfgMap[dbName];
-    }
-
-    // IF query range > 2GB limit of Protobuf
-    if ((endEpochT - startEpochT) * CfgStruct.rowlength() > 2'000'000'000) {
-        std::string ErrMsg = fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - Query results is larger than 2GB", dbName);
-        returnData->set_opstatus(ErrMsg);
-        spdlog::error(ErrMsg.substr(ERROR_LEN));
+    if (!GetOrLoadCfg(dbName, DbBasePath, CfgStruct)) {
+        returnData->set_opstatus(fmt::format("[ERROR] [MAX AGGREGATE] [DB: {}] - {}.CFG does not exist", dbName, dbName));
         return;
     }
 
-    if ((endEpochT - startEpochT) < 0) {
-        std::string ErrMsg = fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - Target end time must be after start time", dbName);
-        returnData->set_opstatus(ErrMsg);
-        spdlog::error(ErrMsg.substr(ERROR_LEN));
+    if (startEpochT > endEpochT) {
+        returnData->set_opstatus(fmt::format("[ERROR] [MAX AGGREGATE] [DB: {}] - Target end time must be after start time", dbName));
         return;
     }
 
-    // IF db directory does not exist
-    if (std::filesystem::is_directory(DbBasePath) == 0) {
-        std::string ErrMsg = fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - DB does not exist", dbName);
-        returnData->set_opstatus(ErrMsg);
-        spdlog::error(ErrMsg.substr(ERROR_LEN));
-        return;
-    }
+    ValueStruct MaxValue;
+    MaxValue.IsInitialized = false;
+    XStore_Proto::FData MaxData;
 
-    // Organize into TimeStruct
-    //  TimeStruct provides many auxiliary vars/methods useful for read/write ops
-    TimeStruct CurrTs(startEpochT, CfgStruct.timeresolution());
+    unsigned long long IterEpoch = startEpochT;
 
-    // Placeholder for READ/MIN op
-    FILE *BFile;
-    std::string TargetFilePath;
-    unsigned long long int Diff, Offset, DataRead, IterIdx = startEpochT;
-    char BufferIn[CfgStruct.rowlength()];
-    XStore_Proto::RowData TempData;
-    std::string SuccessMsg;
+    while (IterEpoch <= endEpochT) {
+        TimeStruct CurrTs(IterEpoch, CfgStruct.timeresolution());
+        std::string TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
 
-    XStore_Proto::FData CurrData, MinData;
-    ValueStruct MinValue, TempValue;
+        unsigned long long EndOfCurrentFile = std::min(endEpochT, (unsigned long long)CurrTs.LastEpoch);
+        unsigned long long RowsToProcess = (EndOfCurrentFile - IterEpoch) + 1;
 
-    // IF query range is within 1-year
-    if (CurrTs.LastEpoch >= endEpochT) {
-        // Open file prior to reading
-        TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
+        if (std::filesystem::exists(TargetFilePath)) {
+            FILE* BFile = std::fopen(TargetFilePath.c_str(), "rb");
+            if (BFile) {
+                unsigned long long FirstOffset = (IterEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength();
+                unsigned long long RegionLength = RowsToProcess * CfgStruct.rowlength();
 
-        // IF target YEAR.XSTORE does NOT exist
-        if (std::filesystem::exists(TargetFilePath) == 0) {
-            // Return without error
-            std::string WarningMsg = fmt::format("[WARNING] [MIN AGGREGATE] [DB: {}] - {}.XSTORE does not exist", dbName, CurrTs.Year);
-            returnData->set_opstatus(WarningMsg);
-            spdlog::warn(WarningMsg.substr(WARNING_LEN));
-            return;
-        }
-
-        BFile = std::fopen(TargetFilePath.c_str(), "rb");
-
-        // Metadata of first datapoint
-        const unsigned long long int FirstOffset = (startEpochT - CurrTs.FirstEpoch) * CfgStruct.rowlength();
-        const unsigned long long int RegionLength = CfgStruct.rowlength() * (endEpochT - startEpochT);
-
-        // Lock file prior to reading
-        {
-        FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
-
-        // Initialize minValue by finding first valid value
-        while (IterIdx <= endEpochT) {
-            // Computes diff & offset
-            Diff = IterIdx - CurrTs.FirstEpoch;
-            Offset = Diff * CfgStruct.rowlength();
-
-            // Seek to computed offset
-            fseeko64(BFile, Offset, SEEK_SET);
-
-            // Extract N bytes of data according to N bytes from .CFG file
-            //  .CFG file is set by user when creating DB
-            DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-            // IF fetched data contains nothing
-            //  -> Skip to next iteration
-            if (DataRead == 0) {
-                continue;
-            }
-
-            // Add fetched data to returning Protobuf obj
-            TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-            CurrData = TempData.fielddata(columnIdx);
-
-            // Check if columnIdx is out of range
-            if (columnIdx >= TempData.fielddata_size()) {
-                OpStatus = fmt::format("[WARNING] [MIN AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                returnData->set_opstatus(OpStatus);
-                spdlog::warn(OpStatus.substr(WARNING_LEN));
-                continue;
-            }
-
-            // Check if target column is numeric
-            if (CurrData.oneOfData_case() > 12) {
-                OpStatus = fmt::format("[WARNING] [MIN AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                returnData->set_opstatus(OpStatus);
-                spdlog::warn(OpStatus.substr(WARNING_LEN));
-                continue;
-            }
-
-            // Initialize minValue to currentValue
-            if (!MinValue.IsInitialized) {
-                XStore::GetFDataValue(&CurrData, &MinValue);
-                MinValue.IsInitialized = TempValue.IsInitialized = true;
-                MinData = CurrData;
-                IterIdx++;
-                break;
-            }
-            IterIdx++;
-        }
-
-        // With minValue initialized -> Process the rest
-        for (unsigned long long EpochTime = IterIdx; EpochTime <= endEpochT; EpochTime++) {
-            // Computes diff & offset
-            Diff = EpochTime - CurrTs.FirstEpoch;
-            Offset = Diff * CfgStruct.rowlength();
-
-            // Seek to computed offset
-            fseeko64(BFile, Offset, SEEK_SET);
-
-            // Extract N bytes of data according to N bytes from .CFG file
-            //  .CFG file is set by user when creating DB
-            DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-            // IF fetched data contains nothing
-            //  -> Skip to next iteration
-            if (DataRead == 0) {
-                continue;
-            }
-
-            // Add fetched data to returning Protobuf obj
-            TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-            CurrData = TempData.fielddata(columnIdx);
-
-            // Check if columnIdx is out of range
-            if (columnIdx >= TempData.fielddata_size()) {
-                OpStatus = fmt::format("[WARNING] [MIN AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                returnData->set_opstatus(OpStatus);
-                spdlog::warn(OpStatus.substr(WARNING_LEN));
-                continue;
-            }
-
-            // Check if target column is numeric
-            if (CurrData.oneOfData_case() > 12) {
-                OpStatus = fmt::format("[WARNING] [MIN AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                returnData->set_opstatus(OpStatus);
-                spdlog::warn(OpStatus.substr(WARNING_LEN));
-                continue;
-            }
-
-            // Extract value from FData
-            XStore::GetFDataValue(&CurrData, &TempValue);
-
-            // Find min
-            if (MinValue.Value > TempValue.Value) {
-                MinValue = TempValue;
-                MinData = CurrData;
-            }
-        }
-
-        }
-        // Close file after reading
-        fclose(BFile);
-    }
-    // Otherwise -> Involves multi-year
-    else {
-        // Make a copy of start epoch time for incrementing
-        unsigned long long int StartEpoch = startEpochT;
-
-        // Loop through each year individually
-        while (StartEpoch < endEpochT) {
-            TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
-
-            // IF the requested start epoch spans ONLY 1 year
-            if (CurrTs.LastEpoch < endEpochT) {
-                // IF target YEAR.XSTORE does NOT exist
-                if (std::filesystem::exists(TargetFilePath) == 0) {
-                    std::string WarningMsg = fmt::format("[WARNING] [MIN AGGREGATE] [DB: {}] - {}.XSTORE does not exist", dbName, CurrTs.Year);
-                    returnData->set_opstatus(WarningMsg);
-                    spdlog::warn(WarningMsg.substr(WARNING_LEN));
-
-                    // Update currTS with latest startEpoch after incrementing
-                    CurrTs = TimeStruct(StartEpoch + (CurrTs.LastEpoch - StartEpoch), CfgStruct.timeresolution());
-                    continue;
-                }
-
-                BFile = std::fopen(TargetFilePath.c_str(), "rb");
-
-                // Metadata of first datapoint
-                const unsigned long long int FirstOffset = (StartEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength();
-                const unsigned long long int RegionLength = CfgStruct.rowlength() * (CurrTs.LastEpoch - StartEpoch);
-
-                // Lock file prior to reading
                 {
-                FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
-
-                // Iterate over range of query data & add queried data and status
-                while (IterIdx <= CurrTs.LastEpoch) {
-                    // Computes diff & offset
-                    Diff = IterIdx - CurrTs.FirstEpoch;
-                    Offset = Diff * CfgStruct.rowlength();
-
-                    // Seek to computed offset
-                    fseeko64(BFile, Offset, SEEK_SET);
-
-                    // Extract N bytes of data according to N bytes from .CFG file
-                    //  .CFG file is set by user when creating DB
-                    DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-                    // IF fetched data contains nothing
-                    //  -> Skip to next iteration
-                    if (DataRead == 0) {
-                        continue;
-                    }
-
-                    // Add fetched data to returning Protobuf obj
-                    TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-                    CurrData = TempData.fielddata(columnIdx);
-
-                    // Check if columnIdx is out of range
-                    if (columnIdx >= TempData.fielddata_size()) {
-                        OpStatus = fmt::format("[WARNING] [MIN AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Check if target column is numeric
-                    if (CurrData.oneOfData_case() > 12) {
-                        OpStatus = fmt::format("[WARNING] [MIN AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Initialize minValue to currentValue
-                    if (!MinValue.IsInitialized) {
-                        XStore::GetFDataValue(&CurrData, &MinValue);
-                        MinValue.IsInitialized = TempValue.IsInitialized = true;
-                        MinData = CurrData;
-                        IterIdx++;
-                        break;
-                    }
-                    IterIdx++;
-                    StartEpoch++;
+                    FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
+                    ProcessFileRangeSelect<std::greater<long double>>(BFile, FirstOffset, RowsToProcess, CfgStruct.rowlength(), columnIdx, MaxValue, MaxData);
                 }
-
-                for (unsigned long long int EpochTime = IterIdx; EpochTime <= CurrTs.LastEpoch; EpochTime++, StartEpoch++, IterIdx++) {
-                    // Computes diff & offset
-                    Diff = EpochTime - CurrTs.FirstEpoch;
-                    Offset = Diff * CfgStruct.rowlength();
-
-                    // Seek to computed offset
-                    fseeko64(BFile, Offset, SEEK_SET);
-
-                    // Extract N bytes of data according to N bytes from .CFG file
-                    //  .CFG file is set by user when creating DB
-                    DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-                    // IF fetched data contains nothing
-                    //  -> Skip to next iteration
-                    if (DataRead == 0) {
-                        continue;
-                    }
-
-                    // Add fetched data to returning Protobuf obj
-                    TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-                    CurrData = TempData.fielddata(columnIdx);
-
-                    // Check if columnIdx is out of range
-                    if (columnIdx >= TempData.fielddata_size()) {
-                        OpStatus = fmt::format("[WARNING] [MIN AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Check if target column is numeric
-                    if (CurrData.oneOfData_case() > 12) {
-                        OpStatus = fmt::format("[WARNING] [MIN AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Extract value from FData
-                    XStore::GetFDataValue(&CurrData, &TempValue);
-
-                    // Find min
-                    if (MinValue.Value > TempValue.Value) {
-                        MinValue = TempValue;
-                        MinData = CurrData;
-                    }
-                }
-
-                // Update currTS with latest startEpoch after incrementing
-                }
-
-                CurrTs = TimeStruct(StartEpoch, CfgStruct.timeresolution());
-
-                // Close file after write
                 std::fclose(BFile);
             }
-            else {
-                // IF target YEAR.XSTORE does NOT exist
-                if (std::filesystem::exists(TargetFilePath) == 0) {
-                    std::string WarningMsg = fmt::format("[WARNING] [MIN AGGREGATE] [DB: {}] - {}.XSTORE does not exist", dbName, CurrTs.Year);
-                    returnData->set_opstatus(WarningMsg);
-                    spdlog::warn(WarningMsg.substr(WARNING_LEN));
-
-                    // Update currTS with latest startEpoch after incrementing
-                    CurrTs = TimeStruct(StartEpoch + (endEpochT - StartEpoch), CfgStruct.timeresolution());
-                    continue;
-                }
-
-                BFile = std::fopen(TargetFilePath.c_str(), "rb");
-
-                // Metadata of first datapoint
-                const unsigned long long int FirstOffset = (StartEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength();
-                const unsigned long long int RegionLength = CfgStruct.rowlength() * (endEpochT - StartEpoch);
-
-                // Lock file prior to reading
-                {
-                FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
-
-                // Iterate over range of query data & add queried data and status
-                while (IterIdx <= endEpochT) {
-                    // Computes diff & offset
-                    Diff = IterIdx - CurrTs.FirstEpoch;
-                    Offset = Diff * CfgStruct.rowlength();
-
-                    // Seek to computed offset
-                    fseeko64(BFile, Offset, SEEK_SET);
-
-                    // Extract N bytes of data according to N bytes from .CFG file
-                    //  .CFG file is set by user when creating DB
-                    DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-                    // IF fetched data contains nothing
-                    //  -> Skip to next iteration
-                    if (DataRead == 0) {
-                        continue;
-                    }
-
-                    // Add fetched data to returning Protobuf obj
-                    TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-                    CurrData = TempData.fielddata(columnIdx);
-
-                    // Check if columnIdx is out of range
-                    if (columnIdx >= TempData.fielddata_size()) {
-                        OpStatus = fmt::format("[WARNING] [MIN AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Check if target column is numeric
-                    if (CurrData.oneOfData_case() > 12) {
-                        OpStatus = fmt::format("[WARNING] [MIN AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Initialize minValue to currentValue
-                    if (!MinValue.IsInitialized) {
-                        XStore::GetFDataValue(&CurrData, &MinValue);
-                        MinValue.IsInitialized = TempValue.IsInitialized = true;
-                        MinData = CurrData;
-                        IterIdx++;
-                        break;
-                    }
-                    IterIdx++;
-                    StartEpoch++;
-                }
-
-                for (unsigned long long int EpochTime = IterIdx; EpochTime <= endEpochT; EpochTime++, StartEpoch++, IterIdx++) {
-                    // Computes diff & offset
-                    Diff = EpochTime - CurrTs.FirstEpoch;
-                    Offset = Diff * CfgStruct.rowlength();
-
-                    // Seek to computed offset
-                    fseeko64(BFile, Offset, SEEK_SET);
-
-                    // Extract N bytes of data according to N bytes from .CFG file
-                    //  .CFG file is set by user when creating DB
-                    DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-                    // IF fetched data contains nothing
-                    //  -> Skip to next iteration
-                    if (DataRead == 0) {
-                        continue;
-                    }
-
-                    // Add fetched data to returning Protobuf obj
-                    TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-                    CurrData = TempData.fielddata(columnIdx);
-
-                    // Check if columnIdx is out of range
-                    if (columnIdx >= TempData.fielddata_size()) {
-                        OpStatus = fmt::format("[WARNING] [MIN AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Check if target column is numeric
-                    if (CurrData.oneOfData_case() > 12) {
-                        OpStatus = fmt::format("[WARNING] [MIN AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Extract value from FData
-                    XStore::GetFDataValue(&CurrData, &TempValue);
-
-                    // Find min
-                    if (MinValue.Value > TempValue.Value) {
-                        MinValue = TempValue;
-                        MinData = CurrData;
-                    }
-                }
-
-                }
-                // Close file after read
-                std::fclose(BFile);
-                break;
-            }
-        }
-    }
-
-    if (MinValue.IsInitialized) {
-        OpStatus = fmt::format("[INFO] [MIN AGGREGATE] [DB: {}] - Processed column {} from {} to {}", dbName, columnIdx, startEpochT, endEpochT);
-        returnData->set_opstatus(OpStatus);
-        *returnData->mutable_opresult() = MinData;
-        spdlog::info(OpStatus.substr(INFO_LEN));
-    }
-    else {
-        OpStatus = fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - Data is empty (0 row)", dbName, columnIdx);
-        returnData->set_opstatus(OpStatus);
-        *returnData->mutable_opresult() = MinData;
-        spdlog::error(OpStatus.substr(ERROR_LEN));
-    }
-}
-
-void XStore::MinAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Min_REP *returnData) {
-    // Placeholder
-    std::string OpStatus;
-
-    // Query target data
-    XStore_Proto::RangeQuery_REP RawRangeData;
-    XStore::RangeQuery(startEpochT, endEpochT, dbName, &RawRangeData);
-
-    // Check if there's no data (0 row)
-    if (RawRangeData.queryresponse_size() < 1) {
-        OpStatus = fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - Data is empty (0 row)", dbName, columnIdx);
-        returnData->set_opstatus(OpStatus);
-        spdlog::error(OpStatus.substr(ERROR_LEN));
-        return;
-    }
-
-    // Check if columnIdx is out of range
-    if (columnIdx >= RawRangeData.queryresponse(0).data().fielddata_size()) {
-        OpStatus = fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-        returnData->set_opstatus(OpStatus);
-        spdlog::error(OpStatus.substr(ERROR_LEN));
-        return;
-    }
-
-    // Initialize minValue by finding first valid value
-    unsigned int IterIdx = 0;
-    XStore_Proto::FData CurrData;
-    ValueStruct MinValue, TempValue;
-
-    while (IterIdx < RawRangeData.queryresponse_size()) {
-        if (RawRangeData.queryresponse(IterIdx).data().fielddata_size() == 0) {
-            OpStatus = fmt::format("[WARNING] [MIN AGGREGATE] [DB: {}] - Row index {} has 0 column", dbName, IterIdx);
-            returnData->set_opstatus(OpStatus);
-            spdlog::warn(OpStatus.substr(WARNING_LEN));
-            continue;
         }
 
-        // Check if target column is numeric
-        //  Not a numeric value
-        CurrData = RawRangeData.queryresponse(IterIdx).data().fielddata(columnIdx);
-        if (CurrData.oneOfData_case() > 12) {
-            OpStatus = fmt::format("[WARNING] [MIN AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-            returnData->set_opstatus(OpStatus);
-            spdlog::warn(OpStatus.substr(WARNING_LEN));
-            continue;
-        }
-
-        // Check if columnIdx is out of range
-        if (columnIdx >= RawRangeData.queryresponse(IterIdx).data().fielddata_size()) {
-            OpStatus = fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-            returnData->set_opstatus(OpStatus);
-            spdlog::error(OpStatus.substr(ERROR_LEN));
-            return;
-        }
-
-        // Initialize minValue to currentValue
-        if (!MinValue.IsInitialized) {
-            XStore::GetFDataValue(&CurrData, IterIdx, &MinValue);
-            MinValue.IsInitialized = TempValue.IsInitialized = true;
-            IterIdx++;
-            break;
-        }
-        IterIdx++;
-    }
-
-    // With minValue initialized -> Process the rest
-    //  The goal for 2 separate loops is to avoid excessive checking for initialization of minValue
-    for (int i = IterIdx; i < RawRangeData.queryresponse_size(); i++) {
-        // Skip if data has 0 column
-        //  This doesn't mean there's an error but there's one row of data that has 0 column in it
-        //  EX: 1000 rows of data with row 999th has 0 column
-        if (RawRangeData.queryresponse(i).data().fielddata_size() == 0) {
-            OpStatus = fmt::format("[WARNING] [MIN AGGREGATE] [DB: {}] - Row index {} has 0 column", dbName, i);
-            returnData->set_opstatus(OpStatus);
-            spdlog::warn(OpStatus.substr(WARNING_LEN));
-            continue;
-        }
-
-        // Check if target column is numeric
-        //  Not a numeric value
-        CurrData = RawRangeData.queryresponse(i).data().fielddata(columnIdx);
-        if (CurrData.oneOfData_case() > 12) {
-            OpStatus = fmt::format("[WARNING] [MIN AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-            returnData->set_opstatus(OpStatus);
-            spdlog::warn(OpStatus.substr(WARNING_LEN));
-            continue;
-        }
-
-        // Check if columnIdx is out of range
-        if (columnIdx >= RawRangeData.queryresponse(i).data().fielddata_size()) {
-            OpStatus = fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-            returnData->set_opstatus(OpStatus);
-            spdlog::error(OpStatus.substr(ERROR_LEN));
-            return;
-        }
-
-        // Extract value from FData
-        XStore::GetFDataValue(&CurrData, i, &TempValue);
-
-        // Find min
-        if (MinValue.Value > TempValue.Value) {
-            MinValue = TempValue;
-        }
-    }
-
-    // Assign minValue to returning msg
-    if (MinValue.IsInitialized) {
-        OpStatus = fmt::format("[INFO] [MIN AGGREGATE] [DB: {}] - Processed column {} from {} to {}", dbName, columnIdx, startEpochT, endEpochT);
-        returnData->set_opstatus(OpStatus);
-        *returnData->mutable_opresult() = RawRangeData.queryresponse(MinValue.Index).data().fielddata(columnIdx);
-        spdlog::info(OpStatus.substr(INFO_LEN));
-    }
-}
-
-void XStore::MaxAggregateV2(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Max_REP *returnData) {
-    // Protobuf obj to be returned
-    std::string OpStatus;
-
-    // Ensure dbName string is all capitalized
-    ToUpperCase(dbName.begin(), dbName.end());
-
-    // Base directory of a DB
-    std::string DbBasePath = fmt::format("{}DataStore/{}/", BaseDir, dbName);
-
-    // Check if cfgMap NOT contains cfgStruct
-    XStore_Proto::ConfigStruct CfgStruct;
-    if (CfgMap.find(dbName) == CfgMap.end()) {
-        std::string CfgPath = DbBasePath + dbName + ".CFG";
-
-        if (std::filesystem::exists(CfgPath) == 0) {
-            std::string ErrMsg = fmt::format("[ERROR] [MAX AGGREGATE] [DB: {}] - {}.CFG does not exist", dbName, dbName);
-            returnData->set_opstatus(ErrMsg);
-            spdlog::error(ErrMsg.substr(ERROR_LEN));
-            return;
-        }
-
-        // Read & Add cfgStruct to cfgMap
-        FILE *CFile = std::fopen(CfgPath.c_str(), "rb");
-        CfgStruct.ParseFromFileDescriptor(fileno(CFile));
-        std::fclose(CFile);
-        CfgMap[dbName] = CfgStruct;
-    }
-    else {
-        // Otherwise -> Fetch cfgStruct from cfgMap
-        CfgStruct = CfgMap[dbName];
-    }
-
-    // IF query range > 2GB limit of Protobuf
-    if ((endEpochT - startEpochT) * CfgStruct.rowlength() > 2'000'000'000) {
-        std::string ErrMsg = fmt::format("[ERROR] [MAX AGGREGATE] [DB: {}] - Query results is larger than 2GB", dbName);
-        returnData->set_opstatus(ErrMsg);
-        spdlog::error(ErrMsg.substr(ERROR_LEN));
-        return;
-    }
-
-    if ((endEpochT - startEpochT) < 0) {
-        std::string ErrMsg = fmt::format("[ERROR] [MAX AGGREGATE] [DB: {}] - Target end time must be after start time", dbName);
-        returnData->set_opstatus(ErrMsg);
-        spdlog::error(ErrMsg.substr(ERROR_LEN));
-        return;
-    }
-
-    // IF db directory does not exist
-    if (std::filesystem::is_directory(DbBasePath) == 0) {
-        std::string ErrMsg = fmt::format("[ERROR] [MAX AGGREGATE] [DB: {}] - DB does not exist", dbName);
-        returnData->set_opstatus(ErrMsg);
-        spdlog::error(ErrMsg.substr(ERROR_LEN));
-        return;
-    }
-
-    // Organize into TimeStruct
-    //  TimeStruct provides many auxiliary vars/methods useful for read/write ops
-    TimeStruct CurrTs(startEpochT, CfgStruct.timeresolution());
-
-    // Placeholder for READ/MIN op
-    FILE *BFile;
-    std::string TargetFilePath;
-    unsigned long long int Diff, Offset, DataRead, IterIdx = startEpochT;
-    char BufferIn[CfgStruct.rowlength()];
-    XStore_Proto::RowData TempData;
-    std::string SuccessMsg;
-
-    XStore_Proto::FData CurrData, MaxData;
-    ValueStruct MaxValue, TempValue;
-
-    // IF query range is within 1-year
-    if (CurrTs.LastEpoch >= endEpochT) {
-        // Open file prior to reading
-        TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
-
-        // IF target YEAR.XSTORE does NOT exist
-        if (std::filesystem::exists(TargetFilePath) == 0) {
-            // Return without error
-            std::string WarningMsg = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - {}.XSTORE does not exist", dbName, CurrTs.Year);
-            returnData->set_opstatus(WarningMsg);
-            spdlog::warn(WarningMsg.substr(WARNING_LEN));
-            return;
-        }
-
-        BFile = std::fopen(TargetFilePath.c_str(), "rb");
-
-        // Metadata of first datapoint
-        const unsigned long long int FirstOffset = (startEpochT - CurrTs.FirstEpoch) * CfgStruct.rowlength();
-        const unsigned long long int RegionLength = CfgStruct.rowlength() * (endEpochT - startEpochT);
-
-        // Lock file prior to reading
-        {
-        FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
-
-        // Initialize minValue by finding first valid value
-        while (IterIdx <= endEpochT) {
-            // Computes diff & offset
-            Diff = IterIdx - CurrTs.FirstEpoch;
-            Offset = Diff * CfgStruct.rowlength();
-
-            // Seek to computed offset
-            fseeko64(BFile, Offset, SEEK_SET);
-
-            // Extract N bytes of data according to N bytes from .CFG file
-            //  .CFG file is set by user when creating DB
-            DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-            // IF fetched data contains nothing
-            //  -> Skip to next iteration
-            if (DataRead == 0) {
-                continue;
-            }
-
-            // Add fetched data to returning Protobuf obj
-            TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-            CurrData = TempData.fielddata(columnIdx);
-
-            // Check if columnIdx is out of range
-            if (columnIdx >= TempData.fielddata_size()) {
-                OpStatus = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                returnData->set_opstatus(OpStatus);
-                spdlog::warn(OpStatus.substr(WARNING_LEN));
-                continue;
-            }
-
-            // Check if target column is numeric
-            if (CurrData.oneOfData_case() > 12) {
-                OpStatus = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                returnData->set_opstatus(OpStatus);
-                spdlog::warn(OpStatus.substr(WARNING_LEN));
-                continue;
-            }
-
-            // Initialize maxValue to currentValue
-            if (!MaxValue.IsInitialized) {
-                XStore::GetFDataValue(&CurrData, &MaxValue);
-                MaxValue.IsInitialized = TempValue.IsInitialized = true;
-                MaxData = CurrData;
-                IterIdx++;
-                break;
-            }
-            IterIdx++;
-        }
-
-        // With minValue initialized -> Process the rest
-        for (unsigned long long EpochTime = IterIdx; EpochTime <= endEpochT; EpochTime++) {
-            // Computes diff & offset
-            Diff = EpochTime - CurrTs.FirstEpoch;
-            Offset = Diff * CfgStruct.rowlength();
-
-            // Seek to computed offset
-            fseeko64(BFile, Offset, SEEK_SET);
-
-            // Extract N bytes of data according to N bytes from .CFG file
-            //  .CFG file is set by user when creating DB
-            DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-            // IF fetched data contains nothing
-            //  -> Skip to next iteration
-            if (DataRead == 0) {
-                continue;
-            }
-
-            // Add fetched data to returning Protobuf obj
-            TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-            CurrData = TempData.fielddata(columnIdx);
-
-            // Check if columnIdx is out of range
-            if (columnIdx >= TempData.fielddata_size()) {
-                OpStatus = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                returnData->set_opstatus(OpStatus);
-                spdlog::warn(OpStatus.substr(WARNING_LEN));
-                continue;
-            }
-
-            // Check if target column is numeric
-            if (CurrData.oneOfData_case() > 12) {
-                OpStatus = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                returnData->set_opstatus(OpStatus);
-                spdlog::warn(OpStatus.substr(WARNING_LEN));
-                continue;
-            }
-
-            // Extract value from FData
-            XStore::GetFDataValue(&CurrData, &TempValue);
-
-            // Find max
-            if (MaxValue.Value < TempValue.Value) {
-                MaxValue = TempValue;
-                MaxData = CurrData;
-            }
-        }
-
-        }
-        // Close file after reading
-        fclose(BFile);
-    }
-    // Otherwise -> Involves multi-year
-    else {
-        // Make a copy of start epoch time for incrementing
-        unsigned long long int StartEpoch = startEpochT;
-
-        // Loop through each year individually
-        while (StartEpoch < endEpochT) {
-            TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
-
-            // IF the requested start epoch spans ONLY 1 year
-            if (CurrTs.LastEpoch < endEpochT) {
-                // IF target YEAR.XSTORE does NOT exist
-                if (std::filesystem::exists(TargetFilePath) == 0) {
-                    std::string WarningMsg = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - {}.XSTORE does not exist", dbName, CurrTs.Year);
-                    returnData->set_opstatus(WarningMsg);
-                    spdlog::warn(WarningMsg.substr(WARNING_LEN));
-
-                    // Update currTS with latest startEpoch after incrementing
-                    CurrTs = TimeStruct(StartEpoch + (CurrTs.LastEpoch - StartEpoch), CfgStruct.timeresolution());
-                    continue;
-                }
-
-                BFile = std::fopen(TargetFilePath.c_str(), "rb");
-
-                // Metadata of first datapoint
-                const unsigned long long int FirstOffset = (StartEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength();
-                const unsigned long long int RegionLength = CfgStruct.rowlength() * (CurrTs.LastEpoch - StartEpoch);
-
-                // Lock file prior to reading
-                {
-                FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
-
-                // Iterate over range of query data & add queried data and status
-                while (IterIdx <= CurrTs.LastEpoch) {
-                    // Computes diff & offset
-                    Diff = IterIdx - CurrTs.FirstEpoch;
-                    Offset = Diff * CfgStruct.rowlength();
-
-                    // Seek to computed offset
-                    fseeko64(BFile, Offset, SEEK_SET);
-
-                    // Extract N bytes of data according to N bytes from .CFG file
-                    //  .CFG file is set by user when creating DB
-                    DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-                    // IF fetched data contains nothing
-                    //  -> Skip to next iteration
-                    if (DataRead == 0) {
-                        continue;
-                    }
-
-                    // Add fetched data to returning Protobuf obj
-                    TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-                    CurrData = TempData.fielddata(columnIdx);
-
-                    // Check if columnIdx is out of range
-                    if (columnIdx >= TempData.fielddata_size()) {
-                        OpStatus = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Check if target column is numeric
-                    if (CurrData.oneOfData_case() > 12) {
-                        OpStatus = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Initialize maxValue to currentValue
-                    if (!MaxValue.IsInitialized) {
-                        XStore::GetFDataValue(&CurrData, &MaxValue);
-                        MaxValue.IsInitialized = TempValue.IsInitialized = true;
-                        MaxData = CurrData;
-                        IterIdx++;
-                        break;
-                    }
-                    IterIdx++;
-                    StartEpoch++;
-                }
-
-                for (unsigned long long int EpochTime = IterIdx; EpochTime <= CurrTs.LastEpoch; EpochTime++, StartEpoch++, IterIdx++) {
-                    // Computes diff & offset
-                    Diff = EpochTime - CurrTs.FirstEpoch;
-                    Offset = Diff * CfgStruct.rowlength();
-
-                    // Seek to computed offset
-                    fseeko64(BFile, Offset, SEEK_SET);
-
-                    // Extract N bytes of data according to N bytes from .CFG file
-                    //  .CFG file is set by user when creating DB
-                    DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-                    // IF fetched data contains nothing
-                    //  -> Skip to next iteration
-                    if (DataRead == 0) {
-                        continue;
-                    }
-
-                    // Add fetched data to returning Protobuf obj
-                    TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-                    CurrData = TempData.fielddata(columnIdx);
-
-                    // Check if columnIdx is out of range
-                    if (columnIdx >= TempData.fielddata_size()) {
-                        OpStatus = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Check if target column is numeric
-                    if (CurrData.oneOfData_case() > 12) {
-                        OpStatus = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Extract value from FData
-                    XStore::GetFDataValue(&CurrData, &TempValue);
-
-                    // Find max
-                    if (MaxValue.Value < TempValue.Value) {
-                        MaxValue = TempValue;
-                        MaxData = CurrData;
-                    }
-                }
-
-                // Update currTS with latest startEpoch after incrementing
-                }
-
-                CurrTs = TimeStruct(StartEpoch, CfgStruct.timeresolution());
-
-                // Close file after write
-                std::fclose(BFile);
-            }
-            else {
-                // IF target YEAR.XSTORE does NOT exist
-                if (std::filesystem::exists(TargetFilePath) == 0) {
-                    std::string WarningMsg = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - {}.XSTORE does not exist", dbName, CurrTs.Year);
-                    returnData->set_opstatus(WarningMsg);
-                    spdlog::warn(WarningMsg.substr(WARNING_LEN));
-
-                    // Update currTS with latest startEpoch after incrementing
-                    CurrTs = TimeStruct(StartEpoch + (endEpochT - StartEpoch), CfgStruct.timeresolution());
-                    continue;
-                }
-
-                BFile = std::fopen(TargetFilePath.c_str(), "rb");
-
-                // Metadata of first datapoint
-                const unsigned long long int FirstOffset = (StartEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength();
-                const unsigned long long int RegionLength = CfgStruct.rowlength() * (endEpochT - StartEpoch);
-
-                // Lock file prior to reading
-                {
-                FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
-
-                // Iterate over range of query data & add queried data and status
-                while (IterIdx <= endEpochT) {
-                    // Computes diff & offset
-                    Diff = IterIdx - CurrTs.FirstEpoch;
-                    Offset = Diff * CfgStruct.rowlength();
-
-                    // Seek to computed offset
-                    fseeko64(BFile, Offset, SEEK_SET);
-
-                    // Extract N bytes of data according to N bytes from .CFG file
-                    //  .CFG file is set by user when creating DB
-                    DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-                    // IF fetched data contains nothing
-                    //  -> Skip to next iteration
-                    if (DataRead == 0) {
-                        continue;
-                    }
-
-                    // Add fetched data to returning Protobuf obj
-                    TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-                    CurrData = TempData.fielddata(columnIdx);
-
-                    // Check if columnIdx is out of range
-                    if (columnIdx >= TempData.fielddata_size()) {
-                        OpStatus = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Check if target column is numeric
-                    if (CurrData.oneOfData_case() > 12) {
-                        OpStatus = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Initialize maxValue to currentValue
-                    if (!MaxValue.IsInitialized) {
-                        XStore::GetFDataValue(&CurrData, &MaxValue);
-                        MaxValue.IsInitialized = TempValue.IsInitialized = true;
-                        MaxData = CurrData;
-                        IterIdx++;
-                        break;
-                    }
-                    IterIdx++;
-                    StartEpoch++;
-                }
-
-                for (unsigned long long int EpochTime = IterIdx; EpochTime <= endEpochT; EpochTime++, StartEpoch++, IterIdx++) {
-                    // Computes diff & offset
-                    Diff = EpochTime - CurrTs.FirstEpoch;
-                    Offset = Diff * CfgStruct.rowlength();
-
-                    // Seek to computed offset
-                    fseeko64(BFile, Offset, SEEK_SET);
-
-                    // Extract N bytes of data according to N bytes from .CFG file
-                    //  .CFG file is set by user when creating DB
-                    DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-                    // IF fetched data contains nothing
-                    //  -> Skip to next iteration
-                    if (DataRead == 0) {
-                        continue;
-                    }
-
-                    // Add fetched data to returning Protobuf obj
-                    TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-                    CurrData = TempData.fielddata(columnIdx);
-
-                    // Check if columnIdx is out of range
-                    if (columnIdx >= TempData.fielddata_size()) {
-                        OpStatus = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Check if target column is numeric
-                    if (CurrData.oneOfData_case() > 12) {
-                        OpStatus = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Extract value from FData
-                    XStore::GetFDataValue(&CurrData, &TempValue);
-
-                    // Find max
-                    if (MaxValue.Value < TempValue.Value) {
-                        MaxValue = TempValue;
-                        MaxData = CurrData;
-                    }
-                }
-
-                }
-                // Close file after read
-                std::fclose(BFile);
-                break;
-            }
-        }
+        IterEpoch = EndOfCurrentFile + 1;
     }
 
     if (MaxValue.IsInitialized) {
-        OpStatus = fmt::format("[INFO] [MAX AGGREGATE] [DB: {}] - Processed column {} from {} to {}", dbName, columnIdx, startEpochT, endEpochT);
-        returnData->set_opstatus(OpStatus);
+        returnData->set_opstatus("SUCCESS");
         *returnData->mutable_opresult() = MaxData;
-        spdlog::info(OpStatus.substr(INFO_LEN));
-    }
-    else {
-        OpStatus = fmt::format("[ERROR] [MAX AGGREGATE] [DB: {}] - Data is empty (0 row)", dbName, columnIdx);
-        returnData->set_opstatus(OpStatus);
-        *returnData->mutable_opresult() = MaxData;
-        spdlog::error(OpStatus.substr(ERROR_LEN));
+    } else {
+        returnData->set_opstatus("ERROR: No valid data found");
     }
 }
 
-void XStore::MaxAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Max_REP *returnData) {
-    // Placeholder
-    std::string OpStatus;
+void XStore::SumAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT,
+                            std::string dbName, unsigned short int columnIdx, XStore_Proto::Sum_REP *returnData) {
 
-    // Query target data
-    XStore_Proto::RangeQuery_REP RawRangeData;
-    XStore::RangeQuery(startEpochT, endEpochT, dbName, &RawRangeData);
-
-    // Check if there's no data (0 row)
-    if (RawRangeData.queryresponse_size() < 1) {
-        OpStatus = fmt::format("[ERROR] [MAX AGGREGATE] [DB: {}] - Data is empty (0 row)", dbName, columnIdx);
-        returnData->set_opstatus(OpStatus);
-        spdlog::error(OpStatus.substr(ERROR_LEN));
-        return;
-    }
-
-    // Check if columnIdx is out of range
-    if (columnIdx >= RawRangeData.queryresponse(0).data().fielddata_size()) {
-        OpStatus = fmt::format("[ERROR] [MAX AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-        returnData->set_opstatus(OpStatus);
-        spdlog::error(OpStatus.substr(ERROR_LEN));
-        return;
-    }
-
-    // Initialize maxValue by finding first valid value
-    unsigned int IterIdx = 0;
-    XStore_Proto::FData CurrData;
-    ValueStruct MaxValue, TempValue;
-
-    while (IterIdx < RawRangeData.queryresponse_size()) {
-        if (RawRangeData.queryresponse(IterIdx).data().fielddata_size() == 0) {
-            OpStatus = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - Row index {} has 0 column", dbName, IterIdx);
-            returnData->set_opstatus(OpStatus);
-            spdlog::warn(OpStatus.substr(WARNING_LEN));
-            continue;
-        }
-
-        // Check if target column is numeric
-        //  Not a numeric value
-        CurrData = RawRangeData.queryresponse(IterIdx).data().fielddata(columnIdx);
-        if (CurrData.oneOfData_case() > 12) {
-            OpStatus = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-            returnData->set_opstatus(OpStatus);
-            spdlog::warn(OpStatus.substr(WARNING_LEN));
-            continue;
-        }
-
-        // Check if columnIdx is out of range
-        if (columnIdx >= RawRangeData.queryresponse(IterIdx).data().fielddata_size()) {
-            OpStatus = fmt::format("[ERROR] [MAX AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-            returnData->set_opstatus(OpStatus);
-            spdlog::error(OpStatus.substr(ERROR_LEN));
-            return;
-        }
-
-        // Initialize maxValue to currentValue
-        if (!MaxValue.IsInitialized) {
-            XStore::GetFDataValue(&CurrData, IterIdx, &MaxValue);
-            MaxValue.IsInitialized = TempValue.IsInitialized = true;
-            IterIdx++;
-            break;
-        }
-        IterIdx++;
-    }
-
-    // With maxValue initialized -> Process the rest
-    //  The goal for 2 separate loops is to avoid excessive checking for initialization of maxValue
-    for (int i = IterIdx; i < RawRangeData.queryresponse_size(); i++) {
-        // Skip if data has 0 column
-        //  This doesn't mean there's an error but there's one row of data that has 0 column in it
-        //  EX: 1000 rows of data with row 999th has 0 column
-        if (RawRangeData.queryresponse(i).data().fielddata_size() == 0) {
-            OpStatus = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - Row index {} has 0 column", dbName, i);
-            returnData->set_opstatus(OpStatus);
-            spdlog::warn(OpStatus.substr(WARNING_LEN));
-            continue;
-        }
-
-        // Check if target column is numeric
-        //  Not a numeric value
-        CurrData = RawRangeData.queryresponse(i).data().fielddata(columnIdx);
-        if (CurrData.oneOfData_case() > 12) {
-            OpStatus = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-            returnData->set_opstatus(OpStatus);
-            spdlog::warn(OpStatus.substr(WARNING_LEN));
-            continue;
-        }
-
-        // Check if columnIdx is out of range
-        if (columnIdx >= RawRangeData.queryresponse(i).data().fielddata_size()) {
-            OpStatus = fmt::format("[ERROR] [MAX AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-            returnData->set_opstatus(OpStatus);
-            spdlog::error(OpStatus.substr(ERROR_LEN));
-            return;
-        }
-
-        // Extract value from FData
-        XStore::GetFDataValue(&CurrData, i, &TempValue);
-
-        // Find max
-        if (MaxValue.Value < TempValue.Value) {
-            MaxValue = TempValue;
-        }
-    }
-
-    // Assign maxValue to returning msg
-    if (MaxValue.IsInitialized) {
-        OpStatus = fmt::format("[INFO] [MAX AGGREGATE] [DB: {}] - Processed column {} from {} to {}", dbName, columnIdx, startEpochT, endEpochT);
-        returnData->set_opstatus(OpStatus);
-        *returnData->mutable_opresult() = RawRangeData.queryresponse(MaxValue.Index).data().fielddata(columnIdx);
-        spdlog::info(OpStatus.substr(INFO_LEN));
-    }
-}
-
-void XStore::SumAggregateV2(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Sum_REP *returnData) {
-    // Protobuf obj to be returned
-    std::string OpStatus;
-
-    // Ensure dbName string is all capitalized
     ToUpperCase(dbName.begin(), dbName.end());
-
-    // Base directory of a DB
     std::string DbBasePath = fmt::format("{}DataStore/{}/", BaseDir, dbName);
 
-    // Check if cfgMap NOT contains cfgStruct
     XStore_Proto::ConfigStruct CfgStruct;
-    if (CfgMap.find(dbName) == CfgMap.end()) {
-        std::string CfgPath = DbBasePath + dbName + ".CFG";
-
-        if (std::filesystem::exists(CfgPath) == 0) {
-            std::string ErrMsg = fmt::format("[ERROR] [SUM AGGREGATE] [DB: {}] - {}.CFG does not exist", dbName, dbName);
-            returnData->set_opstatus(ErrMsg);
-            spdlog::error(ErrMsg.substr(ERROR_LEN));
-            return;
-        }
-
-        // Read & Add cfgStruct to cfgMap
-        FILE *CFile = std::fopen(CfgPath.c_str(), "rb");
-        CfgStruct.ParseFromFileDescriptor(fileno(CFile));
-        std::fclose(CFile);
-        CfgMap[dbName] = CfgStruct;
-    }
-    else {
-        // Otherwise -> Fetch cfgStruct from cfgMap
-        CfgStruct = CfgMap[dbName];
-    }
-
-    // IF query range > 2GB limit of Protobuf
-    if ((endEpochT - startEpochT) * CfgStruct.rowlength() > 2'000'000'000) {
-        std::string ErrMsg = fmt::format("[ERROR] [SUM AGGREGATE] [DB: {}] - Query results is larger than 2GB", dbName);
-        returnData->set_opstatus(ErrMsg);
-        spdlog::error(ErrMsg.substr(ERROR_LEN));
+    if (!GetOrLoadCfg(dbName, DbBasePath, CfgStruct)) {
+        returnData->set_opstatus(fmt::format("[ERROR] [SUM AGGREGATE] [DB: {}] - {}.CFG does not exist", dbName, dbName));
         return;
     }
 
-    if ((endEpochT - startEpochT) < 0) {
-        std::string ErrMsg = fmt::format("[ERROR] [SUM AGGREGATE] [DB: {}] - Target end time must be after start time", dbName);
-        returnData->set_opstatus(ErrMsg);
-        spdlog::error(ErrMsg.substr(ERROR_LEN));
+    if (startEpochT > endEpochT) {
+        returnData->set_opstatus(fmt::format("[ERROR] [SUM AGGREGATE] [DB: {}] - Target end time must be after start time", dbName));
         return;
     }
 
-    // IF db directory does not exist
-    if (std::filesystem::is_directory(DbBasePath) == 0) {
-        std::string ErrMsg = fmt::format("[ERROR] [SUM AGGREGATE] [DB: {}] - DB does not exist", dbName);
-        returnData->set_opstatus(ErrMsg);
-        spdlog::error(ErrMsg.substr(ERROR_LEN));
-        return;
-    }
+    double SumResult = 0.0;
+    unsigned long long ValidCount = 0;
+    unsigned long long IterEpoch = startEpochT;
 
-    // Organize into TimeStruct
-    //  TimeStruct provides many auxiliary vars/methods useful for read/write ops
-    TimeStruct CurrTs(startEpochT, CfgStruct.timeresolution());
+    while (IterEpoch <= endEpochT) {
+        TimeStruct CurrTs(IterEpoch, CfgStruct.timeresolution());
+        std::string TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
 
-    // Placeholder for READ/MIN op
-    FILE *BFile;
-    std::string TargetFilePath;
-    unsigned long long int Diff, Offset, DataRead, IterIdx = startEpochT;
-    char BufferIn[CfgStruct.rowlength()];
-    XStore_Proto::RowData TempData;
-    std::string SuccessMsg;
+        unsigned long long EndOfCurrentFile = std::min(endEpochT, (unsigned long long)CurrTs.LastEpoch);
+        unsigned long long RowsToProcess = (EndOfCurrentFile - IterEpoch) + 1;
 
-    XStore_Proto::FData CurrData;
-    ValueStruct CurrValue;
-    double SumResult = 0;
+        if (std::filesystem::exists(TargetFilePath)) {
+            FILE* BFile = std::fopen(TargetFilePath.c_str(), "rb");
+            if (BFile) {
+                unsigned long long FirstOffset = (IterEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength();
+                unsigned long long RegionLength = RowsToProcess * CfgStruct.rowlength();
 
-    // IF query range is within 1-year
-    if (CurrTs.LastEpoch >= endEpochT) {
-        // Open file prior to reading
-        TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
-
-        // IF target YEAR.XSTORE does NOT exist
-        if (std::filesystem::exists(TargetFilePath) == 0) {
-            // Return without error
-            std::string WarningMsg = fmt::format("[WARNING] [SUM AGGREGATE] [DB: {}] - {}.XSTORE does not exist", dbName, CurrTs.Year);
-            returnData->set_opstatus(WarningMsg);
-            spdlog::warn(WarningMsg.substr(WARNING_LEN));
-            return;
-        }
-
-        BFile = std::fopen(TargetFilePath.c_str(), "rb");
-
-        // Metadata of first datapoint
-        const unsigned long long int FirstOffset = (startEpochT - CurrTs.FirstEpoch) * CfgStruct.rowlength();
-        const unsigned long long int RegionLength = CfgStruct.rowlength() * (endEpochT - startEpochT);
-
-        // Lock file prior to reading
-        {
-        FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
-
-        // Initialize minValue by finding first valid value
-        while (IterIdx <= endEpochT) {
-            // Computes diff & offset
-            Diff = IterIdx - CurrTs.FirstEpoch;
-            Offset = Diff * CfgStruct.rowlength();
-
-            // Seek to computed offset
-            fseeko64(BFile, Offset, SEEK_SET);
-
-            // Extract N bytes of data according to N bytes from .CFG file
-            //  .CFG file is set by user when creating DB
-            DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-            // IF fetched data contains nothing
-            //  -> Skip to next iteration
-            if (DataRead == 0) {
-                continue;
-            }
-
-            // Add fetched data to returning Protobuf obj
-            TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-            CurrData = TempData.fielddata(columnIdx);
-
-            // Check if columnIdx is out of range
-            if (columnIdx >= TempData.fielddata_size()) {
-                OpStatus = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                returnData->set_opstatus(OpStatus);
-                spdlog::warn(OpStatus.substr(WARNING_LEN));
-                continue;
-            }
-
-            // Check if target column is numeric
-            if (CurrData.oneOfData_case() > 12) {
-                OpStatus = fmt::format("[WARNING] [MAX AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                returnData->set_opstatus(OpStatus);
-                spdlog::warn(OpStatus.substr(WARNING_LEN));
-                continue;
-            }
-
-            // Initialize sumValue to currentValue
-            if (!CurrValue.IsInitialized) {
-                XStore::GetFDataValue(&CurrData, &CurrValue);
-                CurrValue.IsInitialized = true;
-                SumResult += CurrValue.Value;
-                IterIdx++;
-                break;
-            }
-            IterIdx++;
-        }
-
-        // With sumValue initialized -> Process the rest
-        //  The goal for 2 separate loops is to avoid excessive checking for initialization of sumValue
-        for (unsigned long long EpochTime = IterIdx; EpochTime <= endEpochT; EpochTime++) {
-            // Computes diff & offset
-            Diff = EpochTime - CurrTs.FirstEpoch;
-            Offset = Diff * CfgStruct.rowlength();
-
-            // Seek to computed offset
-            fseeko64(BFile, Offset, SEEK_SET);
-
-            // Extract N bytes of data according to N bytes from .CFG file
-            //  .CFG file is set by user when creating DB
-            DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-            // IF fetched data contains nothing
-            //  -> Skip to next iteration
-            if (DataRead == 0) {
-                continue;
-            }
-
-            // Add fetched data to returning Protobuf obj
-            TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-            CurrData = TempData.fielddata(columnIdx);
-
-            // Check if columnIdx is out of range
-            if (columnIdx >= TempData.fielddata_size()) {
-                OpStatus = fmt::format("[WARNING] [SUM AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                returnData->set_opstatus(OpStatus);
-                spdlog::warn(OpStatus.substr(WARNING_LEN));
-                continue;
-            }
-
-            // Check if target column is numeric
-            if (CurrData.oneOfData_case() > 12) {
-                OpStatus = fmt::format("[WARNING] [SUM AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                returnData->set_opstatus(OpStatus);
-                spdlog::warn(OpStatus.substr(WARNING_LEN));
-                continue;
-            }
-
-            // Extract value from FData
-            XStore::GetFDataValue(&CurrData, &CurrValue);
-            SumResult += CurrValue.Value;
-        }
-
-        }
-        // Close file after reading
-        fclose(BFile);
-    }
-    // Otherwise -> Involves multi-year
-    else {
-        // Make a copy of start epoch time for incrementing
-        unsigned long long int StartEpoch = startEpochT;
-
-        // Loop through each year individually
-        while (StartEpoch < endEpochT) {
-            TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
-
-            // IF the requested start epoch spans ONLY 1 year
-            if (CurrTs.LastEpoch < endEpochT) {
-                // IF target YEAR.XSTORE does NOT exist
-                if (std::filesystem::exists(TargetFilePath) == 0) {
-                    std::string WarningMsg = fmt::format("[WARNING] [SUM AGGREGATE] [DB: {}] - {}.XSTORE does not exist", dbName, CurrTs.Year);
-                    returnData->set_opstatus(WarningMsg);
-                    spdlog::warn(WarningMsg.substr(WARNING_LEN));
-
-                    // Update currTS with latest startEpoch after incrementing
-                    CurrTs = TimeStruct(StartEpoch + (CurrTs.LastEpoch - StartEpoch), CfgStruct.timeresolution());
-                    continue;
-                }
-
-                BFile = std::fopen(TargetFilePath.c_str(), "rb");
-
-                // Metadata of first datapoint
-                const unsigned long long int FirstOffset = (StartEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength();
-                const unsigned long long int RegionLength = CfgStruct.rowlength() * (CurrTs.LastEpoch - StartEpoch);
-
-                // Lock file prior to reading
                 {
-                FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
-
-                // Iterate over range of query data & add queried data and status
-                while (IterIdx <= CurrTs.LastEpoch) {
-                    // Computes diff & offset
-                    Diff = IterIdx - CurrTs.FirstEpoch;
-                    Offset = Diff * CfgStruct.rowlength();
-
-                    // Seek to computed offset
-                    fseeko64(BFile, Offset, SEEK_SET);
-
-                    // Extract N bytes of data according to N bytes from .CFG file
-                    //  .CFG file is set by user when creating DB
-                    DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-                    // IF fetched data contains nothing
-                    //  -> Skip to next iteration
-                    if (DataRead == 0) {
-                        continue;
-                    }
-
-                    // Add fetched data to returning Protobuf obj
-                    TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-                    CurrData = TempData.fielddata(columnIdx);
-
-                    // Check if columnIdx is out of range
-                    if (columnIdx >= TempData.fielddata_size()) {
-                        OpStatus = fmt::format("[WARNING] [SUM AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Check if target column is numeric
-                    if (CurrData.oneOfData_case() > 12) {
-                        OpStatus = fmt::format("[WARNING] [SUM AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Initialize sumValue to currentValue
-                    if (!CurrValue.IsInitialized) {
-                        XStore::GetFDataValue(&CurrData, &CurrValue);
-                        CurrValue.IsInitialized = true;
-                        SumResult += CurrValue.Value;
-                        IterIdx++;
-                        break;
-                    }
-                    IterIdx++;
-                    StartEpoch++;
+                    FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
+                    ProcessFileRangeAccumulate(BFile, FirstOffset, RowsToProcess, CfgStruct.rowlength(), columnIdx, SumResult, ValidCount);
                 }
-
-                for (unsigned long long int EpochTime = IterIdx; EpochTime <= CurrTs.LastEpoch; EpochTime++, StartEpoch++, IterIdx++) {
-                    // Computes diff & offset
-                    Diff = EpochTime - CurrTs.FirstEpoch;
-                    Offset = Diff * CfgStruct.rowlength();
-
-                    // Seek to computed offset
-                    fseeko64(BFile, Offset, SEEK_SET);
-
-                    // Extract N bytes of data according to N bytes from .CFG file
-                    //  .CFG file is set by user when creating DB
-                    DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-                    // IF fetched data contains nothing
-                    //  -> Skip to next iteration
-                    if (DataRead == 0) {
-                        continue;
-                    }
-
-                    // Add fetched data to returning Protobuf obj
-                    TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-                    CurrData = TempData.fielddata(columnIdx);
-
-                    // Check if columnIdx is out of range
-                    if (columnIdx >= TempData.fielddata_size()) {
-                        OpStatus = fmt::format("[WARNING] [SUM AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Check if target column is numeric
-                    if (CurrData.oneOfData_case() > 12) {
-                        OpStatus = fmt::format("[WARNING] [SUM AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Extract value from FData
-                    XStore::GetFDataValue(&CurrData, &CurrValue);
-                    SumResult += CurrValue.Value;
-                }
-
-                // Update currTS with latest startEpoch after incrementing
-                }
-
-                CurrTs = TimeStruct(StartEpoch, CfgStruct.timeresolution());
-
-                // Close file after write
                 std::fclose(BFile);
             }
-            else {
-                // IF target YEAR.XSTORE does NOT exist
-                if (std::filesystem::exists(TargetFilePath) == 0) {
-                    std::string WarningMsg = fmt::format("[WARNING] [SUM AGGREGATE] [DB: {}] - {}.XSTORE does not exist", dbName, CurrTs.Year);
-                    returnData->set_opstatus(WarningMsg);
-                    spdlog::warn(WarningMsg.substr(WARNING_LEN));
-
-                    // Update currTS with latest startEpoch after incrementing
-                    CurrTs = TimeStruct(StartEpoch + (endEpochT - StartEpoch), CfgStruct.timeresolution());
-                    continue;
-                }
-
-                BFile = std::fopen(TargetFilePath.c_str(), "rb");
-
-                // Metadata of first datapoint
-                const unsigned long long int FirstOffset = (StartEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength();
-                const unsigned long long int RegionLength = CfgStruct.rowlength() * (endEpochT - StartEpoch);
-
-                // Lock file prior to reading
-                {
-                FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
-
-                // Iterate over range of query data & add queried data and status
-                while (IterIdx <= endEpochT) {
-                    // Computes diff & offset
-                    Diff = IterIdx - CurrTs.FirstEpoch;
-                    Offset = Diff * CfgStruct.rowlength();
-
-                    // Seek to computed offset
-                    fseeko64(BFile, Offset, SEEK_SET);
-
-                    // Extract N bytes of data according to N bytes from .CFG file
-                    //  .CFG file is set by user when creating DB
-                    DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-                    // IF fetched data contains nothing
-                    //  -> Skip to next iteration
-                    if (DataRead == 0) {
-                        continue;
-                    }
-
-                    // Add fetched data to returning Protobuf obj
-                    TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-                    CurrData = TempData.fielddata(columnIdx);
-
-                    // Check if columnIdx is out of range
-                    if (columnIdx >= TempData.fielddata_size()) {
-                        OpStatus = fmt::format("[WARNING] [SUM AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Check if target column is numeric
-                    if (CurrData.oneOfData_case() > 12) {
-                        OpStatus = fmt::format("[WARNING] [SUM AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Initialize sumValue to currentValue
-                    if (!CurrValue.IsInitialized) {
-                        XStore::GetFDataValue(&CurrData, &CurrValue);
-                        CurrValue.IsInitialized = true;
-                        SumResult += CurrValue.Value;
-                        IterIdx++;
-                        break;
-                    }
-                    IterIdx++;
-                    StartEpoch++;
-                }
-
-                for (unsigned long long int EpochTime = IterIdx; EpochTime <= endEpochT; EpochTime++, StartEpoch++, IterIdx++) {
-                    // Computes diff & offset
-                    Diff = EpochTime - CurrTs.FirstEpoch;
-                    Offset = Diff * CfgStruct.rowlength();
-
-                    // Seek to computed offset
-                    fseeko64(BFile, Offset, SEEK_SET);
-
-                    // Extract N bytes of data according to N bytes from .CFG file
-                    //  .CFG file is set by user when creating DB
-                    DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-                    // IF fetched data contains nothing
-                    //  -> Skip to next iteration
-                    if (DataRead == 0) {
-                        continue;
-                    }
-
-                    // Add fetched data to returning Protobuf obj
-                    TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-                    CurrData = TempData.fielddata(columnIdx);
-
-                    // Check if columnIdx is out of range
-                    if (columnIdx >= TempData.fielddata_size()) {
-                        OpStatus = fmt::format("[WARNING] [SUM AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Check if target column is numeric
-                    if (CurrData.oneOfData_case() > 12) {
-                        OpStatus = fmt::format("[WARNING] [SUM AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Extract value from FData
-                    XStore::GetFDataValue(&CurrData, &CurrValue);
-                    SumResult += CurrValue.Value;
-                }
-
-                }
-                // Close file after read
-                std::fclose(BFile);
-                break;
-            }
         }
+
+        IterEpoch = EndOfCurrentFile + 1;
     }
 
-    if (CurrValue.IsInitialized) {
-        OpStatus = fmt::format("[INFO] [SUM AGGREGATE] [DB: {}] - Processed column {} from {} to {}", dbName, columnIdx, startEpochT, endEpochT);
-        returnData->set_opstatus(OpStatus);
+    if (ValidCount > 0) {
+        returnData->set_opstatus("SUCCESS");
         returnData->set_opresult(SumResult);
-        spdlog::info(OpStatus.substr(INFO_LEN));
-    }
-    else {
-        OpStatus = fmt::format("[ERROR] [SUM AGGREGATE] [DB: {}] - Data is empty (0 row)", dbName, columnIdx);
-        returnData->set_opstatus(OpStatus);
-        spdlog::error(OpStatus.substr(ERROR_LEN));
+    } else {
+        returnData->set_opstatus("ERROR: No valid data found");
     }
 }
 
-void XStore::SumAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Sum_REP *returnData) {
-    // Placeholder
-    std::string OpStatus;
+void XStore::AvgAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT,
+                            std::string dbName, unsigned short int columnIdx, XStore_Proto::Avg_REP *returnData) {
 
-    // Query target data
-    XStore_Proto::RangeQuery_REP RawRangeData;
-    XStore::RangeQuery(startEpochT, endEpochT, dbName, &RawRangeData);
-
-    // Check if there's no data (0 row)
-    if (RawRangeData.queryresponse_size() < 1) {
-        OpStatus = fmt::format("[ERROR] [SUM AGGREGATE] [DB: {}] - Data is empty (0 row)", dbName, columnIdx);
-        returnData->set_opstatus(OpStatus);
-        spdlog::error(OpStatus.substr(ERROR_LEN));
-        return;
-    }
-
-    // Initialize sumValue by finding first valid value
-    unsigned int IterIdx = 0;
-    XStore_Proto::FData CurrData;
-    ValueStruct CurrValue;
-    double SumResult = 0;
-
-    while (IterIdx < RawRangeData.queryresponse_size()) {
-        if (RawRangeData.queryresponse(IterIdx).data().fielddata_size() == 0) {
-            OpStatus = fmt::format("[WARNING] [SUM AGGREGATE] [DB: {}] - Row index {} has 0 column", dbName, IterIdx);
-            returnData->set_opstatus(OpStatus);
-            spdlog::warn(OpStatus.substr(WARNING_LEN));
-            continue;
-        }
-
-        // Check if target column is numeric
-        //  Not a numeric value
-        CurrData = RawRangeData.queryresponse(IterIdx).data().fielddata(columnIdx);
-        if (CurrData.oneOfData_case() > 12) {
-            OpStatus = fmt::format("[WARNING] [SUM AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-            returnData->set_opstatus(OpStatus);
-            spdlog::warn(OpStatus.substr(WARNING_LEN));
-            continue;
-        }
-
-        // Check if columnIdx is out of range
-        if (columnIdx >= RawRangeData.queryresponse(IterIdx).data().fielddata_size()) {
-            OpStatus = fmt::format("[ERROR] [SUM AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-            returnData->set_opstatus(OpStatus);
-            spdlog::error(OpStatus.substr(ERROR_LEN));
-            return;
-        }
-
-        // Initialize sumValue to currentValue
-        if (!CurrValue.IsInitialized) {
-            XStore::GetFDataValue(&CurrData, IterIdx, &CurrValue);
-            CurrValue.IsInitialized = true;
-            SumResult += CurrValue.Value;
-            IterIdx++;
-            break;
-        }
-        IterIdx++;
-    }
-
-    // With sumValue initialized -> Process the rest
-    //  The goal for 2 separate loops is to avoid excessive checking for initialization of sumValue
-    for (int i = IterIdx; i < RawRangeData.queryresponse_size(); i++) {
-        // Skip if data has 0 column
-        //  This doesn't mean there's an error but there's one row of data that has 0 column in it
-        //  EX: 1000 rows of data with row 999th has 0 column
-        if (RawRangeData.queryresponse(i).data().fielddata_size() == 0) {
-            OpStatus = fmt::format("[WARNING] [SUM AGGREGATE] [DB: {}] - Row index {} has 0 column", dbName, i);
-            returnData->set_opstatus(OpStatus);
-            spdlog::warn(OpStatus.substr(WARNING_LEN));
-            continue;
-        }
-
-        // Check if target column is numeric
-        //  Not a numeric value
-        CurrData = RawRangeData.queryresponse(i).data().fielddata(columnIdx);
-        if (CurrData.oneOfData_case() > 12) {
-            OpStatus = fmt::format("[ERROR] [SUM AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-            returnData->set_opstatus(OpStatus);
-            spdlog::error(OpStatus.substr(ERROR_LEN));
-            return;
-        }
-
-        // Check if columnIdx is out of range
-        if (columnIdx >= RawRangeData.queryresponse(i).data().fielddata_size()) {
-            OpStatus = fmt::format("[ERROR] [SUM AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-            returnData->set_opstatus(OpStatus);
-            spdlog::error(OpStatus.substr(ERROR_LEN));
-            return;
-        }
-
-        // Extract value and accumulate sum
-        XStore::GetFDataValue(&CurrData, i, &CurrValue);
-        SumResult += CurrValue.Value;
-    }
-
-    // Assign sumValue to returning msg
-    if (CurrValue.IsInitialized) {
-        OpStatus = fmt::format("[INFO] [SUM AGGREGATE] [DB: {}] - Processed column {} from {} to {}", dbName, columnIdx, startEpochT, endEpochT);
-        returnData->set_opstatus(OpStatus);
-        returnData->set_opresult(SumResult);
-        spdlog::info(OpStatus.substr(INFO_LEN));
-    }
-}
-
-void XStore::AvgAggregateV2(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Avg_REP *returnData) {
-    // Protobuf obj to be returned
-    std::string OpStatus;
-
-    // Ensure dbName string is all capitalized
     ToUpperCase(dbName.begin(), dbName.end());
-
-    // Base directory of a DB
     std::string DbBasePath = fmt::format("{}DataStore/{}/", BaseDir, dbName);
 
-    // Check if cfgMap NOT contains cfgStruct
     XStore_Proto::ConfigStruct CfgStruct;
-    if (CfgMap.find(dbName) == CfgMap.end()) {
-        std::string CfgPath = DbBasePath + dbName + ".CFG";
-
-        if (std::filesystem::exists(CfgPath) == 0) {
-            std::string ErrMsg = fmt::format("[ERROR] [AVG AGGREGATE] [DB: {}] - {}.CFG does not exist", dbName, dbName);
-            returnData->set_opstatus(ErrMsg);
-            spdlog::error(ErrMsg.substr(ERROR_LEN));
-            return;
-        }
-
-        // Read & Add cfgStruct to cfgMap
-        FILE *CFile = std::fopen(CfgPath.c_str(), "rb");
-        CfgStruct.ParseFromFileDescriptor(fileno(CFile));
-        std::fclose(CFile);
-        CfgMap[dbName] = CfgStruct;
-    }
-    else {
-        // Otherwise -> Fetch cfgStruct from cfgMap
-        CfgStruct = CfgMap[dbName];
-    }
-
-    // IF query range > 2GB limit of Protobuf
-    if ((endEpochT - startEpochT) * CfgStruct.rowlength() > 2'000'000'000) {
-        std::string ErrMsg = fmt::format("[ERROR] [AVG AGGREGATE] [DB: {}] - Query results is larger than 2GB", dbName);
-        returnData->set_opstatus(ErrMsg);
-        spdlog::error(ErrMsg.substr(ERROR_LEN));
+    if (!GetOrLoadCfg(dbName, DbBasePath, CfgStruct)) {
+        returnData->set_opstatus(fmt::format("[ERROR] [AVG AGGREGATE] [DB: {}] - {}.CFG does not exist", dbName, dbName));
         return;
     }
 
-    if ((endEpochT - startEpochT) < 0) {
-        std::string ErrMsg = fmt::format("[ERROR] [AVG AGGREGATE] [DB: {}] - Target end time must be after start time", dbName);
-        returnData->set_opstatus(ErrMsg);
-        spdlog::error(ErrMsg.substr(ERROR_LEN));
+    if (startEpochT > endEpochT) {
+        returnData->set_opstatus(fmt::format("[ERROR] [AVG AGGREGATE] [DB: {}] - Target end time must be after start time", dbName));
         return;
     }
 
-    // IF db directory does not exist
-    if (std::filesystem::is_directory(DbBasePath) == 0) {
-        std::string ErrMsg = fmt::format("[ERROR] [AVG AGGREGATE] [DB: {}] - DB does not exist", dbName);
-        returnData->set_opstatus(ErrMsg);
-        spdlog::error(ErrMsg.substr(ERROR_LEN));
-        return;
-    }
+    double SumResult = 0.0;
+    unsigned long long ValidCount = 0;
+    unsigned long long IterEpoch = startEpochT;
 
-    // Organize into TimeStruct
-    //  TimeStruct provides many auxiliary vars/methods useful for read/write ops
-    TimeStruct CurrTs(startEpochT, CfgStruct.timeresolution());
+    while (IterEpoch <= endEpochT) {
+        TimeStruct CurrTs(IterEpoch, CfgStruct.timeresolution());
+        std::string TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
 
-    // Placeholder for READ op
-    FILE *BFile;
-    std::string TargetFilePath;
-    unsigned long long int Diff, Offset, DataRead, IterIdx = startEpochT, Count = 0;
-    char BufferIn[CfgStruct.rowlength()];
-    XStore_Proto::RowData TempData;
-    std::string SuccessMsg;
+        unsigned long long EndOfCurrentFile = std::min(endEpochT, (unsigned long long)CurrTs.LastEpoch);
+        unsigned long long RowsToProcess = (EndOfCurrentFile - IterEpoch) + 1;
 
-    XStore_Proto::FData CurrData;
-    ValueStruct CurrValue;
-    double AvgResult = 0;
+        if (std::filesystem::exists(TargetFilePath)) {
+            FILE* BFile = std::fopen(TargetFilePath.c_str(), "rb");
+            if (BFile) {
+                unsigned long long FirstOffset = (IterEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength();
+                unsigned long long RegionLength = RowsToProcess * CfgStruct.rowlength();
 
-    // IF query range is within 1-year
-    if (CurrTs.LastEpoch >= endEpochT) {
-        // Open file prior to reading
-        TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
-
-        // IF target YEAR.XSTORE does NOT exist
-        if (std::filesystem::exists(TargetFilePath) == 0) {
-            // Return without error
-            std::string WarningMsg = fmt::format("[WARNING] [AVG AGGREGATE] [DB: {}] - {}.XSTORE does not exist", dbName, CurrTs.Year);
-            returnData->set_opstatus(WarningMsg);
-            spdlog::warn(WarningMsg.substr(WARNING_LEN));
-            return;
-        }
-
-        BFile = std::fopen(TargetFilePath.c_str(), "rb");
-
-        // Metadata of first datapoint
-        const unsigned long long int FirstOffset = (startEpochT - CurrTs.FirstEpoch) * CfgStruct.rowlength();
-        const unsigned long long int RegionLength = CfgStruct.rowlength() * (endEpochT - startEpochT);
-
-        // Lock file prior to reading
-        {
-        FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
-
-        // Initialize minValue by finding first valid value
-        while (IterIdx <= endEpochT) {
-            // Computes diff & offset
-            Diff = IterIdx - CurrTs.FirstEpoch;
-            Offset = Diff * CfgStruct.rowlength();
-
-            // Seek to computed offset
-            fseeko64(BFile, Offset, SEEK_SET);
-
-            // Extract N bytes of data according to N bytes from .CFG file
-            //  .CFG file is set by user when creating DB
-            DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-            // IF fetched data contains nothing
-            //  -> Skip to next iteration
-            if (DataRead == 0) {
-                continue;
-            }
-
-            // Add fetched data to returning Protobuf obj
-            TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-            CurrData = TempData.fielddata(columnIdx);
-
-            // Check if columnIdx is out of range
-            if (columnIdx >= TempData.fielddata_size()) {
-                OpStatus = fmt::format("[WARNING] [AVG AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                returnData->set_opstatus(OpStatus);
-                spdlog::warn(OpStatus.substr(WARNING_LEN));
-                continue;
-            }
-
-            // Check if target column is numeric
-            if (CurrData.oneOfData_case() > 12) {
-                OpStatus = fmt::format("[WARNING] [AVG AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                returnData->set_opstatus(OpStatus);
-                spdlog::warn(OpStatus.substr(WARNING_LEN));
-                continue;
-            }
-
-            // Initialize avgValue to currentValue
-            if (!CurrValue.IsInitialized) {
-                XStore::GetFDataValue(&CurrData, &CurrValue);
-                CurrValue.IsInitialized = true;
-                AvgResult += CurrValue.Value;
-                Count++;
-                IterIdx++;
-                break;
-            }
-            IterIdx++;
-        }
-
-        // With sumValue initialized -> Process the rest
-        //  The goal for 2 separate loops is to avoid excessive checking for initialization of sumValue
-        for (unsigned long long EpochTime = IterIdx; EpochTime <= endEpochT; EpochTime++) {
-            // Computes diff & offset
-            Diff = EpochTime - CurrTs.FirstEpoch;
-            Offset = Diff * CfgStruct.rowlength();
-
-            // Seek to computed offset
-            fseeko64(BFile, Offset, SEEK_SET);
-
-            // Extract N bytes of data according to N bytes from .CFG file
-            //  .CFG file is set by user when creating DB
-            DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-            // IF fetched data contains nothing
-            //  -> Skip to next iteration
-            if (DataRead == 0) {
-                continue;
-            }
-
-            // Add fetched data to returning Protobuf obj
-            TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-            CurrData = TempData.fielddata(columnIdx);
-
-            // Check if columnIdx is out of range
-            if (columnIdx >= TempData.fielddata_size()) {
-                OpStatus = fmt::format("[WARNING] [AVG AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                returnData->set_opstatus(OpStatus);
-                spdlog::warn(OpStatus.substr(WARNING_LEN));
-                continue;
-            }
-
-            // Check if target column is numeric
-            if (CurrData.oneOfData_case() > 12) {
-                OpStatus = fmt::format("[WARNING] [AVG AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                returnData->set_opstatus(OpStatus);
-                spdlog::warn(OpStatus.substr(WARNING_LEN));
-                continue;
-            }
-
-            // Extract value from FData
-            XStore::GetFDataValue(&CurrData, &CurrValue);
-            AvgResult += CurrValue.Value;
-            Count++;
-        }
-
-        }
-        // Close file after reading
-        fclose(BFile);
-    }
-    // Otherwise -> Involves multi-year
-    else {
-        // Make a copy of start epoch time for incrementing
-        unsigned long long int StartEpoch = startEpochT;
-
-        // Loop through each year individually
-        while (StartEpoch < endEpochT) {
-            TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
-
-            // IF the requested start epoch spans ONLY 1 year
-            if (CurrTs.LastEpoch < endEpochT) {
-                // IF target YEAR.XSTORE does NOT exist
-                if (std::filesystem::exists(TargetFilePath) == 0) {
-                    std::string WarningMsg = fmt::format("[WARNING] [AVG AGGREGATE] [DB: {}] - {}.XSTORE does not exist", dbName, CurrTs.Year);
-                    returnData->set_opstatus(WarningMsg);
-                    spdlog::warn(WarningMsg.substr(WARNING_LEN));
-
-                    // Update currTS with latest startEpoch after incrementing
-                    CurrTs = TimeStruct(StartEpoch + (CurrTs.LastEpoch - StartEpoch), CfgStruct.timeresolution());
-                    continue;
-                }
-
-                BFile = std::fopen(TargetFilePath.c_str(), "rb");
-
-                // Metadata of first datapoint
-                const unsigned long long int FirstOffset = (StartEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength();
-                const unsigned long long int RegionLength = CfgStruct.rowlength() * (CurrTs.LastEpoch - StartEpoch);
-
-                // Lock file prior to reading
                 {
-                FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
-
-                // Iterate over range of query data & add queried data and status
-                while (IterIdx <= CurrTs.LastEpoch) {
-                    // Computes diff & offset
-                    Diff = IterIdx - CurrTs.FirstEpoch;
-                    Offset = Diff * CfgStruct.rowlength();
-
-                    // Seek to computed offset
-                    fseeko64(BFile, Offset, SEEK_SET);
-
-                    // Extract N bytes of data according to N bytes from .CFG file
-                    //  .CFG file is set by user when creating DB
-                    DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-                    // IF fetched data contains nothing
-                    //  -> Skip to next iteration
-                    if (DataRead == 0) {
-                        continue;
-                    }
-
-                    // Add fetched data to returning Protobuf obj
-                    TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-                    CurrData = TempData.fielddata(columnIdx);
-
-                    // Check if columnIdx is out of range
-                    if (columnIdx >= TempData.fielddata_size()) {
-                        OpStatus = fmt::format("[WARNING] [AVG AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Check if target column is numeric
-                    if (CurrData.oneOfData_case() > 12) {
-                        OpStatus = fmt::format("[WARNING] [AVG AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Initialize avgValue to currentValue
-                    if (!CurrValue.IsInitialized) {
-                        XStore::GetFDataValue(&CurrData, &CurrValue);
-                        CurrValue.IsInitialized = true;
-                        AvgResult += CurrValue.Value;
-                        Count++;
-                        IterIdx++;
-                        break;
-                    }
-                    IterIdx++;
-                    StartEpoch++;
+                    FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
+                    ProcessFileRangeAccumulate(BFile, FirstOffset, RowsToProcess, CfgStruct.rowlength(), columnIdx, SumResult, ValidCount);
                 }
-
-                for (unsigned long long int EpochTime = IterIdx; EpochTime <= CurrTs.LastEpoch; EpochTime++, StartEpoch++, IterIdx++) {
-                    // Computes diff & offset
-                    Diff = EpochTime - CurrTs.FirstEpoch;
-                    Offset = Diff * CfgStruct.rowlength();
-
-                    // Seek to computed offset
-                    fseeko64(BFile, Offset, SEEK_SET);
-
-                    // Extract N bytes of data according to N bytes from .CFG file
-                    //  .CFG file is set by user when creating DB
-                    DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-                    // IF fetched data contains nothing
-                    //  -> Skip to next iteration
-                    if (DataRead == 0) {
-                        continue;
-                    }
-
-                    // Add fetched data to returning Protobuf obj
-                    TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-                    CurrData = TempData.fielddata(columnIdx);
-
-                    // Check if columnIdx is out of range
-                    if (columnIdx >= TempData.fielddata_size()) {
-                        OpStatus = fmt::format("[WARNING] [AVG AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Check if target column is numeric
-                    if (CurrData.oneOfData_case() > 12) {
-                        OpStatus = fmt::format("[WARNING] [AVG AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Extract value from FData
-                    XStore::GetFDataValue(&CurrData, &CurrValue);
-                    AvgResult += CurrValue.Value;
-                    Count++;
-                }
-
-                // Update currTS with latest startEpoch after incrementing
-                }
-
-                CurrTs = TimeStruct(StartEpoch, CfgStruct.timeresolution());
-
-                // Close file after write
                 std::fclose(BFile);
             }
-            else {
-                // IF target YEAR.XSTORE does NOT exist
-                if (std::filesystem::exists(TargetFilePath) == 0) {
-                    std::string WarningMsg = fmt::format("[WARNING] [AVG AGGREGATE] [DB: {}] - {}.XSTORE does not exist", dbName, CurrTs.Year);
-                    returnData->set_opstatus(WarningMsg);
-                    spdlog::warn(WarningMsg.substr(WARNING_LEN));
-
-                    // Update currTS with latest startEpoch after incrementing
-                    CurrTs = TimeStruct(StartEpoch + (endEpochT - StartEpoch), CfgStruct.timeresolution());
-                    continue;
-                }
-
-                BFile = std::fopen(TargetFilePath.c_str(), "rb");
-
-                // Metadata of first datapoint
-                const unsigned long long int FirstOffset = (StartEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength();
-                const unsigned long long int RegionLength = CfgStruct.rowlength() * (endEpochT - StartEpoch);
-
-                // Lock file prior to reading
-                {
-                FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
-
-                // Iterate over range of query data & add queried data and status
-                while (IterIdx <= endEpochT) {
-                    // Computes diff & offset
-                    Diff = IterIdx - CurrTs.FirstEpoch;
-                    Offset = Diff * CfgStruct.rowlength();
-
-                    // Seek to computed offset
-                    fseeko64(BFile, Offset, SEEK_SET);
-
-                    // Extract N bytes of data according to N bytes from .CFG file
-                    //  .CFG file is set by user when creating DB
-                    DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-                    // IF fetched data contains nothing
-                    //  -> Skip to next iteration
-                    if (DataRead == 0) {
-                        continue;
-                    }
-
-                    // Add fetched data to returning Protobuf obj
-                    TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-                    CurrData = TempData.fielddata(columnIdx);
-
-                    // Check if columnIdx is out of range
-                    if (columnIdx >= TempData.fielddata_size()) {
-                        OpStatus = fmt::format("[WARNING] [AVG AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Check if target column is numeric
-                    if (CurrData.oneOfData_case() > 12) {
-                        OpStatus = fmt::format("[WARNING] [AVG AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Initialize avgValue to currentValue
-                    if (!CurrValue.IsInitialized) {
-                        XStore::GetFDataValue(&CurrData, &CurrValue);
-                        CurrValue.IsInitialized = true;
-                        AvgResult += CurrValue.Value;
-                        Count++;
-                        IterIdx++;
-                        break;
-                    }
-                    IterIdx++;
-                    StartEpoch++;
-                }
-
-                for (unsigned long long int EpochTime = IterIdx; EpochTime <= endEpochT; EpochTime++, StartEpoch++, IterIdx++) {
-                    // Computes diff & offset
-                    Diff = EpochTime - CurrTs.FirstEpoch;
-                    Offset = Diff * CfgStruct.rowlength();
-
-                    // Seek to computed offset
-                    fseeko64(BFile, Offset, SEEK_SET);
-
-                    // Extract N bytes of data according to N bytes from .CFG file
-                    //  .CFG file is set by user when creating DB
-                    DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-                    // IF fetched data contains nothing
-                    //  -> Skip to next iteration
-                    if (DataRead == 0) {
-                        continue;
-                    }
-
-                    // Add fetched data to returning Protobuf obj
-                    TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-                    CurrData = TempData.fielddata(columnIdx);
-
-                    // Check if columnIdx is out of range
-                    if (columnIdx >= TempData.fielddata_size()) {
-                        OpStatus = fmt::format("[WARNING] [AVG AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Check if target column is numeric
-                    if (CurrData.oneOfData_case() > 12) {
-                        OpStatus = fmt::format("[WARNING] [AVG AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-                        returnData->set_opstatus(OpStatus);
-                        spdlog::warn(OpStatus.substr(WARNING_LEN));
-                        continue;
-                    }
-
-                    // Extract value from FData
-                    XStore::GetFDataValue(&CurrData, &CurrValue);
-                    AvgResult += CurrValue.Value;
-                    Count++;
-                }
-
-                }
-                // Close file after read
-                std::fclose(BFile);
-                break;
-            }
         }
+
+        IterEpoch = EndOfCurrentFile + 1;
     }
 
-    if (CurrValue.IsInitialized) {
-        OpStatus = fmt::format("[INFO] [AVG AGGREGATE] [DB: {}] - Processed column {} from {} to {}", dbName, columnIdx, startEpochT, endEpochT);
-        returnData->set_opstatus(OpStatus);
-        returnData->set_opresult(AvgResult / Count);
-        spdlog::info(OpStatus.substr(INFO_LEN));
-    }
-    else {
-        OpStatus = fmt::format("[ERROR] [AVG AGGREGATE] [DB: {}] - Data is empty (0 row)", dbName, columnIdx);
-        returnData->set_opstatus(OpStatus);
-        spdlog::error(OpStatus.substr(ERROR_LEN));
-    }
-}
-
-void XStore::AvgAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Avg_REP *returnData) {
-    // Placeholder
-    std::string OpStatus;
-
-    // Query target data
-    XStore_Proto::RangeQuery_REP RawRangeData;
-    XStore::RangeQuery(startEpochT, endEpochT, dbName, &RawRangeData);
-
-    // Check if there's no data (0 row)
-    if (RawRangeData.queryresponse_size() < 1) {
-        OpStatus = fmt::format("[ERROR] [AVG AGGREGATE] [DB: {}] - Data is empty (0 row)", dbName, columnIdx);
-        returnData->set_opstatus(OpStatus);
-        spdlog::error(OpStatus.substr(ERROR_LEN));
-        return;
-    }
-
-    // Initialize avgValue by finding first valid value
-    unsigned int IterIdx = 0, Count = 0;
-    XStore_Proto::FData CurrData;
-    ValueStruct CurrValue;
-    double AvgResult = 0;
-
-    while (IterIdx < RawRangeData.queryresponse_size()) {
-        if (RawRangeData.queryresponse(IterIdx).data().fielddata_size() == 0) {
-            OpStatus = fmt::format("[WARNING] [AVG AGGREGATE] [DB: {}] - Row index {} has 0 column", dbName, IterIdx);
-            returnData->set_opstatus(OpStatus);
-            spdlog::warn(OpStatus.substr(WARNING_LEN));
-            continue;
-        }
-
-        // Check if target column is numeric
-        //  Not a numeric value
-        CurrData = RawRangeData.queryresponse(IterIdx).data().fielddata(columnIdx);
-        if (CurrData.oneOfData_case() > 12) {
-            OpStatus = fmt::format("[WARNING] [AVG AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-            returnData->set_opstatus(OpStatus);
-            spdlog::warn(OpStatus.substr(WARNING_LEN));
-            continue;
-        }
-
-        // Check if columnIdx is out of range
-        if (columnIdx >= RawRangeData.queryresponse(IterIdx).data().fielddata_size()) {
-            OpStatus = fmt::format("[ERROR] [AVG AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-            returnData->set_opstatus(OpStatus);
-            spdlog::error(OpStatus.substr(ERROR_LEN));
-            return;
-        }
-
-        // Initialize avgValue to currentValue
-        if (!CurrValue.IsInitialized) {
-            XStore::GetFDataValue(&CurrData, IterIdx, &CurrValue);
-            CurrValue.IsInitialized = true;
-            AvgResult += CurrValue.Value;
-            Count++;
-            IterIdx++;
-            break;
-        }
-        IterIdx++;
-    }
-
-    // With avgValue initialized -> Process the rest
-    //  The goal for 2 separate loops is to avoid excessive checking for initialization of sumValue
-    for (int i = IterIdx; i < RawRangeData.queryresponse_size(); i++) {
-        // Skip if data has 0 column
-        //  This doesn't mean there's an error but there's one row of data that has 0 column in it
-        //  EX: 1000 rows of data with row 999th has 0 column
-        if (RawRangeData.queryresponse(i).data().fielddata_size() == 0) {
-            OpStatus = fmt::format("[WARNING] [AVG AGGREGATE] [DB: {}] - Row index {} has 0 column", dbName, i);
-            returnData->set_opstatus(OpStatus);
-            spdlog::warn(OpStatus.substr(WARNING_LEN));
-            continue;
-        }
-
-        // Check if target column is numeric
-        //  Not a numeric value
-        CurrData = RawRangeData.queryresponse(i).data().fielddata(columnIdx);
-        if (CurrData.oneOfData_case() > 12) {
-            OpStatus = fmt::format("[ERROR] [AVG AGGREGATE] [DB: {}] - One of value (Column {}) is not a numerical type", dbName, columnIdx);
-            returnData->set_opstatus(OpStatus);
-            spdlog::error(OpStatus.substr(ERROR_LEN));
-            return;
-        }
-
-        // Check if columnIdx is out of range
-        if (columnIdx >= RawRangeData.queryresponse(i).data().fielddata_size()) {
-            OpStatus = fmt::format("[ERROR] [AVG AGGREGATE] [DB: {}] - Column index {} is out of range", dbName, columnIdx);
-            returnData->set_opstatus(OpStatus);
-            spdlog::error(OpStatus.substr(ERROR_LEN));
-            return;
-        }
-
-        // Extract value and accumulate sum
-        XStore::GetFDataValue(&CurrData, i, &CurrValue);
-        AvgResult += CurrValue.Value;
-        Count++;
-    }
-
-    // Assign avgValue to returning msg
-    if (CurrValue.IsInitialized) {
-        // Compute avg
-        OpStatus = fmt::format("[INFO] [AVG AGGREGATE] [DB: {}] - Processed column {} from {} to {}", dbName, columnIdx, startEpochT, endEpochT);
-        returnData->set_opstatus(OpStatus);
-        returnData->set_opresult(AvgResult / Count);
-        spdlog::info(OpStatus.substr(INFO_LEN));
+    if (ValidCount > 0) {
+        returnData->set_opstatus("SUCCESS");
+        returnData->set_opresult(SumResult / (double)ValidCount);
+    } else {
+        returnData->set_opstatus("ERROR: No valid data found");
     }
 }
 
@@ -3776,7 +1611,7 @@ XStore_Proto::RemoveDB_REP XStore::RemoveDB(std::string dbName) {
     std::filesystem::remove_all(DbLoc);
 
     // Remove DB from cfgMap
-    CfgMap.erase(dbName);
+    EraseCfg(dbName);
 
     RemoveStatus = fmt::format("[INFO] [REMOVE DB] [DB: {}] - Removed DB with name: {}", dbName, dbName);
     ToReturn.set_removestatus(RemoveStatus);
@@ -3844,7 +1679,8 @@ void XStore::InitDB() {
         XStore_Proto::ConfigStruct CfgStruct;
         FILE *CFile = std::fopen(CfgFilePath.c_str(), "rb");
         CfgStruct.ParseFromFileDescriptor(fileno(CFile));
-        CfgMap[CurrDbName] = CfgStruct;
+        std::fclose(CFile);
+        PutCfg(CurrDbName, CfgStruct);
     }
 }
 

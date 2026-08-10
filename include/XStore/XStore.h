@@ -4,6 +4,7 @@
 #include <string>
 #include <cstring>
 #include <map>
+#include <shared_mutex>
 #include <iostream>
 #include <filesystem>
 #include <stdio.h>
@@ -13,12 +14,12 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <algorithm>
+#include <functional>
 #include <sys/types.h>
 #include <execution>
 #include "XStore.pb.h"
 #include "include/DataStructs/TimeStruct.h"
 #include "include/DataStructs/DataStruct.h"
-#include "include/DataStructs/FileStruct.h"
 #include "include/DataStructs/ConfigStruct.h"
 #include "include/DataStructs/FileRangeLock.h"
 #include "include/Logger/spdlog/fmt/fmt.h"
@@ -36,8 +37,12 @@ class XStore {
     public:
         std::string BaseDir = GetBaseDir();
         std::string DataStoreDir = BaseDir + "DataStore/";
-        std::map<std::string, FileStruct> DbMap;
-        std::map<std::string, XStore_Proto::ConfigStruct> CfgMap;
+
+        // Shared across every XStore instance (one per worker thread) so a config
+        // read from disk by one thread is visible to all others, and guarded by
+        // CfgMutex since std::map isn't safe for concurrent read/insert.
+        static std::map<std::string, XStore_Proto::ConfigStruct> CfgMap;
+        static std::shared_mutex CfgMutex;
         std::string PermittedTimeResolution[3] = {"SECOND", "MILLISECOND", "MICROSECOND"};
 
         int DbCount = 0;
@@ -86,25 +91,30 @@ class XStore {
         // RANGE DELETE
         XStore_Proto::RangeDelete_REP RangeDelete(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName);
 
+        // Shared mmap-backed scan kernels used by Min/Max/Sum/AvgAggregate ----------
+        // Select kernel: tracks the single winning row under comparator Cmp(candidate, currentBest).
+        //  Cmp = std::less<long double>  -> MIN ;  Cmp = std::greater<long double> -> MAX
+        template <typename Cmp>
+        void ProcessFileRangeSelect(FILE* bFile, unsigned long long startOffset, unsigned long long totalRows,
+                                     size_t rowLen, unsigned short columnIdx,
+                                     ValueStruct& bestValue, XStore_Proto::FData& bestData);
+
+        // Accumulate kernel: running sum + valid-row count. Backs SUM directly, AVG divides after.
+        void ProcessFileRangeAccumulate(FILE* bFile, unsigned long long startOffset, unsigned long long totalRows,
+                                         size_t rowLen, unsigned short columnIdx,
+                                         double& sumOut, unsigned long long& validCountOut);
+
         // MIN - AGGREGATE
         void MinAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Min_REP *returnData);
-        void MinAggregateV2(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Min_REP *returnData);
-        void ProcessFileRange(FILE* bFile, unsigned long long startOffset, unsigned long long totalRows,
-                             size_t rowLen, unsigned short columnIdx,
-                             ValueStruct& minValue, XStore_Proto::FData& minData);
-        void MinAggregateV3(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Min_REP *returnData);
 
         // MAX - AGGREGATE
         void MaxAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Max_REP *returnData);
-        void MaxAggregateV2(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Max_REP *returnData);
 
         // SUM - AGGREGATE
         void SumAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Sum_REP *returnData);
-        void SumAggregateV2(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Sum_REP *returnData);
 
         // AVG - AGGREGATE
         void AvgAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Avg_REP *returnData);
-        void AvgAggregateV2(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Avg_REP *returnData);
 
         // Initialize DB
         void InitDB();
@@ -117,6 +127,18 @@ class XStore {
         bool HasDB();
 
         bool HasDBFile(std::string filePath);
+
+        // Fetch dbName's ConfigStruct from CfgMap, loading it from dbBasePath's
+        // .CFG file into the cache on first use. Returns false if the .CFG file
+        // does not exist. Thread-safe: shared lock on cache hit, exclusive lock
+        // (with re-check) only on cache miss.
+        bool GetOrLoadCfg(const std::string &dbName, const std::string &dbBasePath, XStore_Proto::ConfigStruct &cfgOut);
+
+        // Insert/overwrite dbName's ConfigStruct in CfgMap under exclusive lock.
+        void PutCfg(const std::string &dbName, const XStore_Proto::ConfigStruct &cfg);
+
+        // Remove dbName's ConfigStruct from CfgMap under exclusive lock.
+        void EraseCfg(const std::string &dbName);
 
         void ToUpperCase(std::string::iterator begin, std::string::iterator end) {
             for (auto it = begin; it != end; ++it) {
