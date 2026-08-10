@@ -82,6 +82,12 @@ endif()
 # ------------------------------------------------------------------
 # Tests
 # ------------------------------------------------------------------
+option(XSTORE_BUILD_CLIENT "Build the ClientSrc C++ client library/example" ON)
+
+if(XSTORE_BUILD_CLIENT)
+    add_subdirectory(ClientSrc/Cpp)
+endif()
+
 option(XSTORE_BUILD_TESTS "Build XStore test suite" ON)
 
 if(XSTORE_BUILD_TESTS)

@@ -4,3 +4,5 @@ cmake-build-Debug/
 logs/
 graphify-out/
 .github/
+__pycache__/
+*.pyc

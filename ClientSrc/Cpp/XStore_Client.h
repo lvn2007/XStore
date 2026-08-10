@@ -1,7 +1,11 @@
 #ifndef XSTORE_CLIENTSRC_XSTORE_CLIENT_H_
 #define XSTORE_CLIENTSRC_XSTORE_CLIENT_H_
 
+#include <chrono>
 #include <cstdint>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>

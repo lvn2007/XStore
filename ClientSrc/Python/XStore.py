@@ -91,7 +91,7 @@ class XStoreClient:
             # Build 1 row worth of data
             rowData = XStore_Proto.RowData()
             for idx, item in enumerate(data):
-                fieldData = rowData.fData.add()
+                fieldData = rowData.fieldData.add()
                 if isinstance(item, str):
                     fieldData.stringData = item
                 elif isinstance(item, bool):
@@ -349,3 +349,104 @@ class XStoreClient:
         recvObj = XStore_Proto.RemoveDBFiles_REP()
         recvObj.ParseFromString(recvData)
         return recvObj.removeStatus
+
+    def batchDelete(self, dataList, targetDBName):
+        """
+        :param dataList:
+        :param targetDBName:
+        :return:
+        """
+        # Build msg prior to dispatch
+        batchDelete_REQ = XStore_Proto.BatchDelete_REQ()
+        batchDelete_REQ.rType = XStore_Proto.BATCHDELETE
+        batchDelete_REQ.dbName = targetDBName
+
+        # Loop through each data and add to batchDelete_REQ
+        for targetTime in dataList:
+            batchDelete_REQ.timestamp.append(targetTime)
+
+        # Dispatch request
+        self.socket.send(batchDelete_REQ.SerializeToString())
+
+        # Receive response
+        recvData = self.socket.recv()
+
+        # Prepare object to be parsed into
+        recvObj = XStore_Proto.BatchDelete_REP()
+        recvObj.ParseFromString(recvData)
+        return recvObj.deleteStatus
+
+    def rangeDelete(self, startUnixTime, endUnixTime, targetDBName):
+        """
+        :param startUnixTime:
+        :param endUnixTime:
+        :param targetDBName:
+        :return:
+        """
+        # Build msg prior to dispatch
+        rangeDelete_REQ = XStore_Proto.RangeDelete_REQ()
+        rangeDelete_REQ.rType = XStore_Proto.RANGEDELETE
+        rangeDelete_REQ.startTime = startUnixTime
+        rangeDelete_REQ.endTime = endUnixTime
+        rangeDelete_REQ.dbName = targetDBName
+
+        # Dispatch request
+        self.socket.send(rangeDelete_REQ.SerializeToString())
+
+        # Receive response
+        recvData = self.socket.recv()
+
+        # Prepare object to be parsed into
+        recvObj = XStore_Proto.RangeDelete_REP()
+        recvObj.ParseFromString(recvData)
+        return recvObj.deleteStatus
+
+    def _aggregate(self, reqType, reqClass, repClass, startUnixTime, endUnixTime, targetDBName, columnIdx):
+        # Shared by min/max/sum/avg -- same (startTime, endTime, dbName,
+        # columnIdx) request shape, differing only in RequestType and the
+        # generated message classes to use.
+        req = reqClass()
+        req.rType = reqType
+        req.startTime = startUnixTime
+        req.endTime = endUnixTime
+        req.dbName = targetDBName
+        req.columnIdx = columnIdx
+
+        # Dispatch request
+        self.socket.send(req.SerializeToString())
+
+        # Receive response
+        recvData = self.socket.recv()
+
+        # Prepare object to be parsed into
+        recvObj = repClass()
+        recvObj.ParseFromString(recvData)
+        return recvObj
+
+    def min(self, startUnixTime, endUnixTime, targetDBName, columnIdx):
+        """
+        :return: Min_REP (opResult FData oneof, opStatus)
+        """
+        return self._aggregate(XStore_Proto.MIN, XStore_Proto.Min_REQ, XStore_Proto.Min_REP,
+                                startUnixTime, endUnixTime, targetDBName, columnIdx)
+
+    def max(self, startUnixTime, endUnixTime, targetDBName, columnIdx):
+        """
+        :return: Max_REP (opResult FData oneof, opStatus)
+        """
+        return self._aggregate(XStore_Proto.MAX, XStore_Proto.Max_REQ, XStore_Proto.Max_REP,
+                                startUnixTime, endUnixTime, targetDBName, columnIdx)
+
+    def sum(self, startUnixTime, endUnixTime, targetDBName, columnIdx):
+        """
+        :return: Sum_REP (opResult double, opStatus)
+        """
+        return self._aggregate(XStore_Proto.SUM, XStore_Proto.Sum_REQ, XStore_Proto.Sum_REP,
+                                startUnixTime, endUnixTime, targetDBName, columnIdx)
+
+    def avg(self, startUnixTime, endUnixTime, targetDBName, columnIdx):
+        """
+        :return: Avg_REP (opResult double, opStatus)
+        """
+        return self._aggregate(XStore_Proto.AVG, XStore_Proto.Avg_REQ, XStore_Proto.Avg_REP,
+                                startUnixTime, endUnixTime, targetDBName, columnIdx)
