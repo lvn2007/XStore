@@ -177,21 +177,12 @@ class XStore_Client {
       return SendRecv<XStore_Proto::UnaryInsert_REQ, XStore_Proto::UnaryInsert_REP>(ToServer).insertstatus();
   }
 
-  std::string UnaryQuery(std::time_t &targetUnixTime, std::string &targetDBName) {
+  XStore_Proto::UnaryQuery_REP UnaryQuery(std::time_t &targetUnixTime, std::string &targetDBName) {
       XStore_Proto::UnaryQuery_REQ ToServer;
       ToServer.set_rtype(XStore_Proto::UNARYQUERY);
       ToServer.set_timestamp(targetUnixTime);
       ToServer.set_dbname(targetDBName);
-      XStore_Proto::UnaryQuery_REP FromServer = SendRecv<XStore_Proto::UnaryQuery_REQ, XStore_Proto::UnaryQuery_REP>(ToServer);
-
-      // A miss comes back with an empty RowData -- indexing fielddata(0)
-      // unconditionally (the previous behavior) is a fatal protobuf bounds
-      // check on that path instead of a clean "not found" result.
-      if (FromServer.data().fielddata_size() == 0) {
-          return std::to_string(FromServer.timestamp()) + "," +
-                 (FromServer.has_querystatus() ? FromServer.querystatus() : "NOT FOUND");
-      }
-      return std::to_string(FromServer.timestamp()) + "," + FromServer.data().fielddata(0).stringdata();
+      return SendRecv<XStore_Proto::UnaryQuery_REQ, XStore_Proto::UnaryQuery_REP>(ToServer);
   }
 
   std::string UnaryDelete(std::time_t &targetUnixTime, std::string &targetDBName) {
