@@ -1,5 +1,48 @@
 #include "include/XStore/XStore.h"
 
+namespace {
+
+// Shared by BatchInsert/RangeInsert: writes one year-group's rows into an
+// already-mapped file under a single lock spanning the group's min-to-max
+// offset (instead of one lock per row). GetEntry(idx) must return a message
+// with .timestamp()/.data() -- BatchInsert_DATA and RangeInsert_DATA both
+// qualify, so this is templated on the accessor rather than the message
+// type to avoid materializing an intermediate row vector per call.
+// Precondition (same as RangeInsert's existing one): indices is ordered so
+// that indices.front()/back() carry the group's earliest/latest timestamp.
+template <typename EntryAccessor>
+void WriteRowGroupToMappedFile(const std::string &targetFile, void *mappedBase, long firstEpoch,
+                                unsigned int rowLength, const std::vector<unsigned long long int> &indices,
+                                EntryAccessor &&getEntry) {
+    const unsigned long long int FirstOffset = (static_cast<unsigned long long>(getEntry(indices.front()).timestamp()) - firstEpoch) * rowLength;
+    const unsigned long long int LastOffset = (static_cast<unsigned long long>(getEntry(indices.back()).timestamp()) - firstEpoch) * rowLength;
+    const unsigned long long int RegionLength = (LastOffset + rowLength) - FirstOffset;
+
+    FileRangeLockGuard Guard(targetFile, FirstOffset, RegionLength, FileRangeLock::LockType::WRITE);
+
+    for (unsigned long long int Idx : indices) {
+        const auto &Entry = getEntry(Idx);
+        const XStore_Proto::RowData &Data = Entry.data();
+
+        // Rows that don't fit at all are rejected rather than silently
+        // truncated (matches UnaryInsert's check).
+        if (Data.ByteSizeLong() > static_cast<size_t>(rowLength)) {
+            continue;
+        }
+
+        unsigned long long int Offset = (static_cast<unsigned long long>(Entry.timestamp()) - firstEpoch) * rowLength;
+
+        // Zero the slot first, then serialize directly into it -- avoids a
+        // heap allocation + copy per row, and guarantees no stale trailing
+        // bytes from a previous occupant leak through (same as UnaryInsert).
+        char *Slot = static_cast<char*>(mappedBase) + Offset;
+        std::memset(Slot, 0, rowLength);
+        Data.SerializeToArray(Slot, rowLength);
+    }
+}
+
+}  // namespace
+
 std::map<std::string, XStore_Proto::ConfigStruct> XStore::CfgMap;
 std::shared_mutex XStore::CfgMutex;
 
@@ -521,67 +564,37 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
     }
 
     // Iterate through each key (year) of dataMap
-    XStore_Proto::BatchInsert_DATA CurrInsertData;
-    XStore_Proto::RowData Data;
     for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& Pair : DataMap) {
         unsigned short int YearKey = Pair.first;
-        FILE *BFile;
+        const std::vector<unsigned long long int> &Indices = Pair.second;
         std::string TargetFile = fmt::format("{}{}.XSTORE", DbBasePath, YearKey);
 
         // Grab first inserting element for TimeStruct purposes
         //  Get length of time to truncate
-        TimeStruct ThisTs{static_cast<time_t>(protoFromClient->batchinsert_data().at(DataMap[YearKey].at(0)).timestamp()), CfgStruct.timeresolution()};
+        TimeStruct ThisTs{static_cast<time_t>(protoFromClient->batchinsert_data(Indices.front()).timestamp()), CfgStruct.timeresolution()};
 
-        // IF target file does NOT exist
-        if (std::filesystem::exists(TargetFile) == 0) {
-            // Truncate
-            BFile = std::fopen(TargetFile.c_str(), "wb+");
-
-            // Lock prior to file OP
-            FileRangeLockGuard TruncGuard(TargetFile, 0, 0, FileRangeLock::LockType::WRITE);
-            ftruncate(fileno(BFile), (ThisTs.LastEpoch - ThisTs.FirstEpoch) * CfgStruct.rowlength());
-        }
-        else {
-            // ELSE - Target file DOES exist
-            //  Open in append mode
-            BFile = std::fopen(TargetFile.c_str(), "rb+");
-        }
-
-        long long int Diff, Offset;
-        // Iterate through each YEAR of inserting data
-        for (int i = 0; i < DataMap[YearKey].size(); i++) {
-            // Parse each data in a batch collection
-            CurrInsertData = protoFromClient->batchinsert_data(DataMap[YearKey].at(i));
-            std::time_t UnixTime = CurrInsertData.timestamp();
-            Data = CurrInsertData.data();
-
-            // Compute diff & offset
-            Diff = UnixTime - ThisTs.FirstEpoch;
-            Offset = Diff * CfgStruct.rowlength();
-
-            // Rows shorter than rowLength must not leave a previous
-            // occupant's stale trailing bytes in the slot (see the matching
-            // memset in UnaryInsert); rows that don't fit at all are rejected
-            // rather than silently truncated.
-            std::string Serialized = Data.SerializeAsString();
-            if (Serialized.size() > static_cast<size_t>(CfgStruct.rowlength())) {
-                continue;
-            }
-            std::string RowBuffer(CfgStruct.rowlength(), '\0');
-            std::memcpy(RowBuffer.data(), Serialized.data(), Serialized.size());
-
-            // Lock prior to file OP
-            FileRangeLockGuard Guard(TargetFile, Offset, CfgStruct.rowlength(), FileRangeLock::LockType::WRITE);
-
-            // Seek to target offset prior to write
-            fseeko64(BFile, Offset, SEEK_SET);
-
-            // Writing actual data to disk
-            fwrite(RowBuffer.data(), CfgStruct.rowlength(), 1, BFile);
+        // Cached PROT_WRITE mapping for this (dbName, year) file -- same mmap
+        // LRU cache UnaryInsert uses (see GetOrMapFile). Creates+ftruncates
+        // on first use, so the separate open/ftruncate branch this used to
+        // have is gone -- GetOrMapFile does it under its own lock. Every row
+        // below becomes a direct memcpy into an already-resident page
+        // instead of an fseek+fwrite syscall pair.
+        void *MappedBase = GetOrMapFile(TargetFile, CfgStruct.rowlength(), ThisTs.LastEpoch - ThisTs.FirstEpoch);
+        if (MappedBase == nullptr) {
+            std::string ErrMsg = fmt::format("[ERROR] [BATCH INSERT] [DB: {}] - Unable to open/map {}.XSTORE", DbName, YearKey);
+            returnData->set_insertstatus(ErrMsg);
+            spdlog::error(ErrMsg.substr(ERROR_LEN));
+            continue;
         }
 
-        // Close file after write
-        std::fclose(BFile);
+        // Single lock spanning this year-group's full min-to-max offset span
+        // instead of one lock per row -- Indices is sorted ascending (the
+        // whole batch was sorted by timestamp above), so front()/back() give
+        // the span directly; offset is monotonic in timestamp so this is the
+        // same "over-lock the gaps between scattered rows" trick RangeInsert
+        // uses too, hence the shared helper.
+        WriteRowGroupToMappedFile(TargetFile, MappedBase, ThisTs.FirstEpoch, CfgStruct.rowlength(), Indices,
+            [&](unsigned long long int idx) -> const XStore_Proto::BatchInsert_DATA& { return protoFromClient->batchinsert_data(idx); });
     }
 
     // Return insert status
@@ -592,9 +605,6 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
 
 // BATCH QUERY
 void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Proto::BatchQuery_REP *returnData, bool SortTime) {
-    // Protobuf obj to be returned
-    XStore_Proto::RowData TempData;
-
     // Ensure dbName string is all capitalized
     std::string DbName = protoFromClient->dbname();
     ToUpperCase(DbName.begin(), DbName.end());
@@ -651,11 +661,13 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
 
     // Iterate through each key (year) of dataMap
     for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& Pair : DataMap) {
-        FILE *BFile;
         unsigned short int YearKey = Pair.first;
+        const std::vector<unsigned long long int> &Indices = Pair.second;
         std::string TargetFile = fmt::format("{}{}.XSTORE", DbBasePath, YearKey);
 
-        // IF target file does NOT exist
+        // IF target file does NOT exist -- checked explicitly because
+        // GetOrMapFile below opens with O_CREAT and would otherwise silently
+        // create+map an empty file for a query that should just report no data.
         if (std::filesystem::exists(TargetFile) == 0) {
             // Skip to next iteration
             std::string WarnMsg = fmt::format("[WARNING] [BATCH QUERY] [DB: {}] - {}.XSTORE does not exist", DbName, YearKey);
@@ -663,53 +675,56 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
             spdlog::warn(WarnMsg.substr(WARNING_LEN));
             continue;
         }
-        else {
-            // ELSE - Target file DOES exist
-            //  Open in read mode
-            BFile = std::fopen(TargetFile.c_str(), "rb");
+
+        TimeStruct ThisTs{static_cast<time_t>(protoFromClient->timestamp(Indices.front())), CfgStruct.timeresolution()};
+
+        // Cached mapping for this (dbName, year) file, same mmap LRU cache
+        // Unary/BatchInsert use -- avoids an fopen/fseek/fread (2+ syscalls)
+        // per row in favor of parsing straight out of an already-resident page.
+        void *MappedBase = GetOrMapFile(TargetFile, CfgStruct.rowlength(), ThisTs.LastEpoch - ThisTs.FirstEpoch);
+        if (MappedBase == nullptr) {
+            std::string ErrMsg = fmt::format("[ERROR] [BATCH QUERY] [DB: {}] - Unable to open/map {}.XSTORE", DbName, YearKey);
+            returnData->set_querystatus(ErrMsg);
+            spdlog::error(ErrMsg.substr(ERROR_LEN));
+            continue;
         }
 
-        // Time-related & Auxiliary
-        unsigned long long int Diff, Offset;
-        char BufferIn[CfgStruct.rowlength()];
-        TimeStruct ThisTs{static_cast<time_t>(protoFromClient->timestamp(DataMap[YearKey].at(0))), CfgStruct.timeresolution()};
+        // Single lock spanning this year-group's min-to-max offset span
+        // instead of one lock per row. Found via a scan (not just
+        // front()/back()) since Indices is only guaranteed sorted when
+        // SortTime is true -- BatchInsert always sorts, BatchQuery doesn't
+        // have to.
+        auto [MinIt, MaxIt] = std::minmax_element(Indices.begin(), Indices.end(),
+            [&](unsigned long long int a, unsigned long long int b) {
+                return protoFromClient->timestamp(a) < protoFromClient->timestamp(b);
+        });
+        const unsigned long long int MinOffset = (protoFromClient->timestamp(*MinIt) - ThisTs.FirstEpoch) * CfgStruct.rowlength();
+        const unsigned long long int MaxOffset = (protoFromClient->timestamp(*MaxIt) - ThisTs.FirstEpoch) * CfgStruct.rowlength();
+        const unsigned long long int RegionLength = (MaxOffset + CfgStruct.rowlength()) - MinOffset;
 
-        for (int i = 0; i < DataMap[YearKey].size(); i++) {
-            // Computes diff & offset
-            Diff = protoFromClient->timestamp(DataMap[YearKey].at(i)) - ThisTs.FirstEpoch;
-            Offset = Diff * CfgStruct.rowlength();
+        FileRangeLockGuard Guard(TargetFile, MinOffset, RegionLength, FileRangeLock::LockType::READ);
 
-            {
-                // Lock prior to file OP
-                FileRangeLockGuard Guard(TargetFile, Offset, CfgStruct.rowlength(), FileRangeLock::LockType::READ);
-
-                // Seek to target offset prior to read
-                fseeko64(BFile, Offset, SEEK_SET);
-
-                // Extract N bytes of data according to N bytes from .CFG file
-                //  .CFG file is set by user when creating DB
-                fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-            }
+        for (unsigned long long int Idx : Indices) {
+            unsigned long long int Timestamp = protoFromClient->timestamp(Idx);
+            unsigned long long int Offset = (Timestamp - ThisTs.FirstEpoch) * CfgStruct.rowlength();
+            const char *Slot = static_cast<char*>(MappedBase) + Offset;
 
             // IF fetched data contains nothing
-            //  -> Skip to next iteration. BufferIn is a fixed-width binary
+            //  -> Skip to next iteration. Slot is a fixed-width binary
             //  buffer (not a C string), so strlen() would over-read past its
             //  end whenever a real row's bytes fill the whole slot with no
             //  zero byte in it; checking the first byte (a hole is always
             //  fully zeroed) is what the aggregate scan kernels do too.
-            if (BufferIn[0] == 0) {
+            if (Slot[0] == 0) {
                 continue;
             }
 
-            // Add fetched data to returning Protobuf obj
-            TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
+            // Parse straight from the mapped row into the response -- skips
+            // the TempData copy the previous fread()-based path paid.
             XStore_Proto::UnaryQuery_REP *CurrEntry = returnData->add_queryresponse();
-            CurrEntry->set_timestamp(protoFromClient->timestamp(DataMap[YearKey].at(i)));
-            *CurrEntry->mutable_data() = TempData;
+            CurrEntry->set_timestamp(Timestamp);
+            CurrEntry->mutable_data()->ParseFromArray(Slot, CfgStruct.rowlength());
         }
-
-        // Close file & Release lock after read
-        std::fclose(BFile);
     }
 }
 
@@ -735,14 +750,8 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
         return ToReturn;
     }
 
-    // IF target delete timestamp(s) is empty OR db directory does not exist
-    if (protoFromClient->timestamp_size() < 0) {
-        std::string ErrMsg = fmt::format("[ERROR] [BATCH DELETE] [DB: {}] - Empty target timestamp(s)", DbName);
-        ToReturn.set_deletestatus(ErrMsg);
-        spdlog::error(ErrMsg.substr(ERROR_LEN));
-        return ToReturn;
-    }
-    else if (std::filesystem::is_directory(DbBasePath) == 0) {
+    // IF db directory does not exist
+    if (std::filesystem::is_directory(DbBasePath) == 0) {
         std::string ErrMsg = fmt::format("[ERROR] [BATCH DELETE] [DB: {}] - DB does not exist", DbName);
         ToReturn.set_deletestatus(ErrMsg);
         spdlog::error(ErrMsg.substr(ERROR_LEN));
@@ -771,36 +780,45 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
 
     // Iterate through each key (year) of dataMap
     for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& Pair : DataMap) {
-        FILE *BFile;
         unsigned short int YearKey = Pair.first;
+        const std::vector<unsigned long long int> &Indices = Pair.second;
         std::string TargetFile = fmt::format("{}{}.XSTORE", DbBasePath, YearKey);
 
         // IF target file does NOT exist
         if (std::filesystem::exists(TargetFile) == 0) {
-            // Skip to next iteration
+            std::string WarningMsg = fmt::format("[WARNING] [BATCH DELETE] [DB: {}] - {}.XSTORE does not exist", DbName, YearKey);
+            ToReturn.set_deletestatus(WarningMsg);
+            spdlog::warn(WarningMsg.substr(WARNING_LEN));
             continue;
         }
-        else {
-            // ELSE - Target file DOES exist
-            //  Open in read mode
-            BFile = std::fopen(TargetFile.c_str(), "rb+");
-        }
 
-        // Time-related & Auxiliary
-        unsigned long long int Diff, Offset;
-        TimeStruct ThisTs{static_cast<time_t>(protoFromClient->timestamp(DataMap[YearKey].at(0))), CfgStruct.timeresolution()};
+        FILE *BFile = std::fopen(TargetFile.c_str(), "rb+");
+        TimeStruct ThisTs{static_cast<time_t>(protoFromClient->timestamp(Indices.front())), CfgStruct.timeresolution()};
 
-        for (int i = 0; i < DataMap[YearKey].size(); i++) {
-            // Computes diff & offset
-            Diff = protoFromClient->timestamp(DataMap[YearKey].at(i)) - ThisTs.FirstEpoch;
-            Offset = Diff * CfgStruct.rowlength();
+        // Single lock spanning this year-group's min-to-max offset span
+        // instead of one lock per row -- Indices is sorted ascending (the
+        // whole batch was sorted by timestamp above), so front()/back() give
+        // the span directly (same trick as BatchInsert). The fallocate64
+        // calls below still can't be coalesced into one, though: timestamps
+        // here are randomly distributed, not contiguous, so punching one big
+        // range would also deallocate OTHER rows' data sitting in the gaps
+        // between the requested points -- unlike a lock, which is harmless
+        // to over-cover.
+        const unsigned long long int FirstOffset = (protoFromClient->timestamp(Indices.front()) - ThisTs.FirstEpoch) * CfgStruct.rowlength();
+        const unsigned long long int LastOffset = (protoFromClient->timestamp(Indices.back()) - ThisTs.FirstEpoch) * CfgStruct.rowlength();
+        const unsigned long long int RegionLength = (LastOffset + CfgStruct.rowlength()) - FirstOffset;
 
+        {
             // Lock prior to file OP
-            FileRangeLockGuard Guard(TargetFile, Offset, CfgStruct.rowlength(), FileRangeLock::LockType::WRITE);
+            FileRangeLockGuard Guard(TargetFile, FirstOffset, RegionLength, FileRangeLock::LockType::WRITE);
 
-            // Deallocate data according to N bytes from rowLength
-            fallocate64(fileno(BFile), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, Offset, CfgStruct.rowlength());
-            DeleteCount++;
+            for (unsigned long long int Idx : Indices) {
+                unsigned long long int Offset = (protoFromClient->timestamp(Idx) - ThisTs.FirstEpoch) * CfgStruct.rowlength();
+
+                // Deallocate data according to N bytes from rowLength
+                fallocate64(fileno(BFile), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, Offset, CfgStruct.rowlength());
+                DeleteCount++;
+            }
         }
 
         // Close file & Release lock after read
@@ -856,81 +874,40 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, X
     }
 
     // Iterate through each key (year) of dataMap
-    XStore_Proto::RangeInsert_DATA FirstInsertData, CurrInsertData;
     for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& Pair : DataMap) {
         unsigned short int YearKey = Pair.first;
-        FILE *BFile;
+        const std::vector<unsigned long long int> &Indices = Pair.second;
         std::string TargetFile = fmt::format("{}{}.XSTORE", DbBasePath, YearKey);
 
         // Grab first inserting element for TimeStruct purposes
         //  Get length of time to truncate
-        TimeStruct ThisTs{static_cast<time_t>(protoFromClient->rangeinsert_data().at(DataMap[YearKey].at(0)).timestamp()), CfgStruct.timeresolution()};
+        TimeStruct ThisTs{static_cast<time_t>(protoFromClient->rangeinsert_data(Indices.front()).timestamp()), CfgStruct.timeresolution()};
 
-        // IF target file does NOT exist
-        if (std::filesystem::exists(TargetFile) == 0) {
-            // Truncate
-            BFile = std::fopen(TargetFile.c_str(), "wb+");
-
-            // Lock prior to file OP
-            FileRangeLockGuard TruncGuard(TargetFile, 0, 0, FileRangeLock::LockType::WRITE);
-            ftruncate(fileno(BFile), (ThisTs.LastEpoch - ThisTs.FirstEpoch) * CfgStruct.rowlength());
+        // Cached PROT_WRITE mapping for this (dbName, year) file -- same mmap
+        // LRU cache UnaryInsert uses (see GetOrMapFile). Creates+ftruncates
+        // on first use, so the separate open/ftruncate branch this used to
+        // have is gone. Timestamps in this year aren't guaranteed
+        // contiguous (see RegionLength below), so this still writes row by
+        // row rather than as one flat span -- but each row is now a direct
+        // memcpy into an already-resident page instead of an fseek+fwrite
+        // syscall pair.
+        void *MappedBase = GetOrMapFile(TargetFile, CfgStruct.rowlength(), ThisTs.LastEpoch - ThisTs.FirstEpoch);
+        if (MappedBase == nullptr) {
+            std::string ErrMsg = fmt::format("[ERROR] [RANGE INSERT] [DB: {}] - Unable to open/map {}.XSTORE", DbName, YearKey);
+            returnData->set_insertstatus(ErrMsg);
+            spdlog::error(ErrMsg.substr(ERROR_LEN));
+            continue;
         }
-        else {
-            // ELSE - Target file DOES exist
-            //  Open in append mode
-            BFile = std::fopen(TargetFile.c_str(), "rb+");
-        }
 
-        // Metadata of first datapoint
-        FirstInsertData = protoFromClient->rangeinsert_data(DataMap[YearKey].at(0));
-        const unsigned long long int &FirstUnixTime = FirstInsertData.timestamp();
-        const unsigned long long int FirstOffset = (FirstUnixTime - ThisTs.FirstEpoch) * CfgStruct.rowlength();
-
-        // RegionLength must cover the actual byte span of the writes below,
-        // not just count*rowLength -- that undersizes the lock (and races
-        // unprotected writes past its end) whenever the timestamps in this
-        // year aren't contiguous. Relies on the same "incoming data is
-        // sorted" precondition the rest of this function already assumes, so
-        // the last entry in the group carries the highest offset.
-        const XStore_Proto::RangeInsert_DATA &LastInsertData = protoFromClient->rangeinsert_data(DataMap[YearKey].back());
-        const unsigned long long int LastOffset = (LastInsertData.timestamp() - ThisTs.FirstEpoch) * CfgStruct.rowlength();
-        const unsigned long long int RegionLength = (LastOffset + CfgStruct.rowlength()) - FirstOffset;
-
-        {
-            // Lock prior to file OP
-            FileRangeLockGuard Guard(TargetFile, FirstOffset, RegionLength, FileRangeLock::LockType::WRITE);
-
-            unsigned long long int Diff, Offset;
-            // Iterate through each YEAR of inserting data
-            for (int i = 0; i < DataMap[YearKey].size(); i++) {
-                // Parse each data in a batch collection
-                CurrInsertData = protoFromClient->rangeinsert_data(DataMap[YearKey].at(i));
-                const unsigned long long int &UnixTime = CurrInsertData.timestamp();
-                const XStore_Proto::RowData &Data = CurrInsertData.data();
-
-                // Compute diff & offset
-                Diff = UnixTime - ThisTs.FirstEpoch;
-                Offset = Diff * CfgStruct.rowlength();
-
-                // Rows shorter than rowLength must not leave a previous
-                // occupant's stale trailing bytes in the slot; rows that
-                // don't fit at all are rejected rather than silently truncated.
-                std::string Serialized = Data.SerializeAsString();
-                if (Serialized.size() > static_cast<size_t>(CfgStruct.rowlength())) {
-                    continue;
-                }
-                std::string RowBuffer(CfgStruct.rowlength(), '\0');
-                std::memcpy(RowBuffer.data(), Serialized.data(), Serialized.size());
-
-                // Seek to target offset prior to write
-                fseeko64(BFile, Offset, SEEK_SET);
-
-                // Writing actual data to disk
-                fwrite(RowBuffer.data(), CfgStruct.rowlength(), 1, BFile);
-            }
-        }
-        // Close file after write
-        std::fclose(BFile);
+        // RegionLength (computed inside the shared helper below) must cover
+        // the actual byte span of the writes, not just count*rowLength --
+        // that undersizes the lock (and races unprotected writes past its
+        // end) whenever the timestamps in this year aren't contiguous.
+        // Relies on the same "incoming data is sorted" precondition the rest
+        // of this function already assumes, so the last entry in the group
+        // carries the highest offset.
+        WriteRowGroupToMappedFile(TargetFile, MappedBase, ThisTs.FirstEpoch, CfgStruct.rowlength(), Indices,
+            [&](unsigned long long int idx) -> const XStore_Proto::RangeInsert_DATA& { return protoFromClient->rangeinsert_data(idx); });
     }
 
     // Return insert status
@@ -941,11 +918,6 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, X
 
 // RANGE QUERY
 void XStore::RangeQuery(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, XStore_Proto::RangeQuery_REP *returnData) {
-    // Protobuf obj to be returned
-    XStore_Proto::RowData TempData;
-    XStore_Proto::UnaryQuery_REP *CurrEntry;
-    std::string QueryStatus;
-
     // Ensure dbName string is all capitalized
     ToUpperCase(dbName.begin(), dbName.end());
 
@@ -984,208 +956,88 @@ void XStore::RangeQuery(const unsigned long long int &startEpochT, const unsigne
         return;
     }
 
-    // Organize into TimeStruct
-    //  TimeStruct provides many auxiliary vars/methods useful for read/write ops
-    TimeStruct CurrTs(startEpochT, CfgStruct.timeresolution());
+    // Every timestamp in [startEpochT, endEpochT] whose year's file exists
+    // gets an entry (holes included, see below), so the total row count --
+    // and thus the final size of queryresponse -- is known upfront.
+    // Reserving it avoids the repeated field's O(log n) reallocations+copies
+    // for large spans; the 2GB check above already bounds this to a sane
+    // upfront allocation.
+    returnData->mutable_queryresponse()->Reserve(static_cast<int>(endEpochT - startEpochT + 1));
 
-    // Placeholder for READ op
-    FILE *BFile;
-    std::string TargetFilePath;
-    unsigned long long int Diff, Offset, DataRead;
-    char BufferIn[CfgStruct.rowlength()];
-    std::string SuccessMsg;
+    // Walk the span one year-file at a time. Each iteration clamps its
+    // segment to [IterEpoch, min(endEpochT, thisYear.LastEpoch)] and always
+    // advances IterEpoch past it before the next iteration -- a single-year
+    // span, and every year (including the last) of a multi-year span, are
+    // all just this same loop body running once or several times, so there's
+    // no separate "is this the final segment" branch to keep in sync (that
+    // duplication is what previously let a missing final year's file spin
+    // this forever -- see git history -- and let the read-lock region
+    // undersize by one row; both are structurally impossible here since
+    // IterEpoch always advances unconditionally and RegionLength is always
+    // derived from the same inclusive SegmentEnd).
+    unsigned long long int IterEpoch = startEpochT;
+    while (IterEpoch <= endEpochT) {
+        TimeStruct CurrTs(IterEpoch, CfgStruct.timeresolution());
+        std::string TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
+        const unsigned long long int SegmentEnd = std::min(endEpochT, static_cast<unsigned long long int>(CurrTs.LastEpoch));
 
-    // IF query range is within 1-year
-    if (CurrTs.LastEpoch >= endEpochT) {
-        // Open file prior to reading
-        TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
-
-        // IF target YEAR.XSTORE does NOT exist
+        // IF target YEAR.XSTORE does NOT exist -- checked explicitly because
+        // GetOrMapFile below opens with O_CREAT and would otherwise silently
+        // create+map an empty file for a query that should just report no
+        // data. A missing year contributes NO entries for its span (unlike a
+        // hole within an existing year, which still gets an empty-field
+        // entry -- see RangeQueryUninsertedTimestampsReturnEmptyEntriesNotOmitted
+        // vs RangeQuerySpanningThreeYearsWithMissingMiddleYearFile).
         if (std::filesystem::exists(TargetFilePath) == 0) {
-            // Return without error
             std::string WarningMsg = fmt::format("[WARNING] [RANGE QUERY] [DB: {}] - {}.XSTORE does not exist", dbName, CurrTs.Year);
             returnData->set_querystatus(WarningMsg);
             spdlog::warn(WarningMsg.substr(WARNING_LEN));
-            return;
+            IterEpoch = SegmentEnd + 1;
+            continue;
         }
 
-        BFile = std::fopen(TargetFilePath.c_str(), "rb");
+        // Cached mapping for this (dbName, year) file, same mmap LRU cache
+        // Unary/Batch/RangeInsert use -- avoids an fseek+fread (2 syscalls)
+        // per row; timestamps here are chronological/contiguous, so this
+        // just parses straight out of the mapped page per row with zero
+        // syscalls in the loop at all.
+        void *MappedBase = GetOrMapFile(TargetFilePath, CfgStruct.rowlength(), CurrTs.LastEpoch - CurrTs.FirstEpoch);
+        if (MappedBase == nullptr) {
+            std::string ErrMsg = fmt::format("[ERROR] [RANGE QUERY] [DB: {}] - Unable to open/map {}.XSTORE", dbName, CurrTs.Year);
+            returnData->set_querystatus(ErrMsg);
+            spdlog::error(ErrMsg.substr(ERROR_LEN));
+            IterEpoch = SegmentEnd + 1;
+            continue;
+        }
 
-        // Metadata of first datapoint
-        const unsigned long long int FirstOffset = (startEpochT - CurrTs.FirstEpoch) * CfgStruct.rowlength();
-        const unsigned long long int RegionLength = CfgStruct.rowlength() * (endEpochT - startEpochT);
+        const unsigned long long int FirstOffset = (IterEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength();
+        const unsigned long long int RegionLength = (SegmentEnd - IterEpoch + 1) * CfgStruct.rowlength();
 
         {
             // Lock file prior to reading
             FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
 
-            // Iterate over range of query data & add queried data and status
-            for (long EpochTime = startEpochT; EpochTime <= endEpochT; EpochTime++) {
-                // Computes diff & offset
-                Diff = EpochTime - CurrTs.FirstEpoch;
-                Offset = Diff * CfgStruct.rowlength();
+            // Iterate over this segment & add queried data and status. Every
+            // timestamp in range gets an entry -- unlike BatchQuery, holes
+            // are NOT omitted here, they come back as zero-field RowData.
+            for (unsigned long long int EpochTime = IterEpoch; EpochTime <= SegmentEnd; EpochTime++) {
+                unsigned long long int Offset = (EpochTime - CurrTs.FirstEpoch) * CfgStruct.rowlength();
 
-                // Seek to computed offset
-                fseeko64(BFile, Offset, SEEK_SET);
-
-                // Extract N bytes of data according to N bytes from .CFG file
-                //  .CFG file is set by user when creating DB
-                DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-                // IF fetched data contains nothing
-                //  -> Skip to next iteration
-                if (DataRead == 0) {
-                    continue;
-                }
-
-                // Add fetched data to returning Protobuf obj
-                TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-                CurrEntry = returnData->add_queryresponse();
+                // Parse straight from the mapped row into the response --
+                // skips the TempData copy the previous fread()-based path paid.
+                XStore_Proto::UnaryQuery_REP *CurrEntry = returnData->add_queryresponse();
                 CurrEntry->set_timestamp(EpochTime);
-                *CurrEntry->mutable_data() = TempData;
+                CurrEntry->mutable_data()->ParseFromArray(static_cast<char*>(MappedBase) + Offset, CfgStruct.rowlength());
             }
         }
-        // Close file after reading
-        fclose(BFile);
-    }
-    // Otherwise -> Involves multi-year
-    else {
-        // Make a copy of start epoch time for incrementing
-        unsigned long long int StartEpoch = startEpochT;
 
-        // Loop through each year individually
-        //  NOTE: "<=" (not "<") -- once startEpoch has caught up to equal
-        //  endEpochT, there is still exactly one remaining timestamp (endEpochT
-        //  itself) that the final-year branch below must process; using "<"
-        //  here would exit before that last point is ever read.
-        while (StartEpoch <= endEpochT) {
-            TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
-
-            // IF the requested start epoch spans ONLY 1 year
-            if (CurrTs.LastEpoch < endEpochT) {
-                // IF target YEAR.XSTORE does NOT exist
-                if (std::filesystem::exists(TargetFilePath) == 0) {
-                    std::string WarningMsg = fmt::format("[WARNING] [RANGE QUERY] [DB: {}] - {}.XSTORE does not exist", dbName, CurrTs.Year);
-                    returnData->set_querystatus(WarningMsg);
-                    spdlog::warn(WarningMsg.substr(WARNING_LEN));
-
-                    // Advance StartEpoch into the next year before recomputing
-                    // CurrTs -- the old "StartEpoch + (CurrTs.LastEpoch -
-                    // StartEpoch)" simplifies to just CurrTs.LastEpoch, which
-                    // stays in the SAME year (LastEpoch is Dec 31 23:59:59 of
-                    // that year), leaving StartEpoch untouched. TargetFilePath
-                    // above is built straight from CurrTs.Year without
-                    // recomputing it from StartEpoch, so the old code re-checked
-                    // the exact same missing file forever whenever a
-                    // multi-year span's non-final year had no data file.
-                    StartEpoch = CurrTs.LastEpoch + 1;
-                    CurrTs = TimeStruct(StartEpoch, CfgStruct.timeresolution());
-                    continue;
-                }
-
-                BFile = std::fopen(TargetFilePath.c_str(), "rb");
-
-                // Metadata of first datapoint
-                const unsigned long long int FirstOffset = (StartEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength();
-                const unsigned long long int RegionLength = CfgStruct.rowlength() * (CurrTs.LastEpoch - StartEpoch);
-
-                {
-                    // Lock file prior to reading
-                    FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
-
-                    // Iterate over range of query data & add queried data and status
-                    for (unsigned long long int EpochTime = StartEpoch; EpochTime <= CurrTs.LastEpoch; EpochTime++, StartEpoch++) {
-                        // Computes diff & offset
-                        Diff = EpochTime - CurrTs.FirstEpoch;
-                        Offset = Diff * CfgStruct.rowlength();
-
-                        // Seek to computed offset
-                        fseeko64(BFile, Offset, SEEK_SET);
-
-                        // Extract N bytes of data according to N bytes from .CFG file
-                        //  .CFG file is set by user when creating DB
-                        DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-                        // IF fetched data contains nothing
-                        //  -> Skip to next iteration
-                        if (DataRead == 0) {
-                            continue;
-                        }
-
-                        // Add fetched data to returning Protobuf obj
-                        TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-                        CurrEntry = returnData->add_queryresponse();
-                        CurrEntry->set_timestamp(EpochTime);
-                        *CurrEntry->mutable_data() = TempData;
-                    }
-                }
-
-                // Update currTS with latest startEpoch after incrementing
-                CurrTs = TimeStruct(StartEpoch, CfgStruct.timeresolution());
-
-                // Close file after read
-                std::fclose(BFile);
-            }
-            else {
-                // IF target YEAR.XSTORE does NOT exist
-                if (std::filesystem::exists(TargetFilePath) == 0) {
-                    std::string WarningMsg = fmt::format("[WARNING] [RANGE QUERY] [DB: {}] - {}.XSTORE does not exist", dbName, CurrTs.Year);
-                    returnData->set_querystatus(WarningMsg);
-                    spdlog::warn(WarningMsg.substr(WARNING_LEN));
-
-                    // Update currTS with latest startEpoch after incrementing
-                    CurrTs = TimeStruct(StartEpoch + (endEpochT - StartEpoch), CfgStruct.timeresolution());
-                    continue;
-                }
-
-                BFile = std::fopen(TargetFilePath.c_str(), "rb");
-
-                // Metadata of first datapoint
-                const unsigned long long int FirstOffset = (StartEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength();
-                const unsigned long long int RegionLength = CfgStruct.rowlength() * (endEpochT - StartEpoch);
-
-                {
-                    // Lock file prior to reading
-                    FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
-
-                    // Iterate over range of query data & add queried data and status
-                    for (unsigned long long int EpochTime = StartEpoch; EpochTime <= endEpochT; EpochTime++, StartEpoch++) {
-                        // Computes diff & offset
-                        Diff = EpochTime - CurrTs.FirstEpoch;
-                        Offset = Diff * CfgStruct.rowlength();
-
-                        // Seek to computed offset
-                        fseeko64(BFile, Offset, SEEK_SET);
-
-                        // Extract N bytes of data according to N bytes from .CFG file
-                        //  .CFG file is set by user when creating DB
-                        DataRead = fread(&BufferIn[0], 1, CfgStruct.rowlength(), BFile);
-
-                        // IF fetched data contains nothing
-                        //  -> Skip to next iteration
-                        if (DataRead == 0) {
-                            continue;
-                        }
-
-                        // Add fetched data to returning Protobuf obj
-                        TempData.ParseFromArray(&BufferIn, CfgStruct.rowlength());
-                        CurrEntry = returnData->add_queryresponse();
-                        CurrEntry->set_timestamp(EpochTime);
-                        *CurrEntry->mutable_data() = TempData;
-                    }
-                }
-                // Close file after read
-                std::fclose(BFile);
-                break;
-            }
-        }
+        IterEpoch = SegmentEnd + 1;
     }
 }
 
 // RANGE DELETE
 XStore_Proto::RangeDelete_REP XStore::RangeDelete(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName) {
     // Protobuf obj to be returned
-    std::string QueryStatus;
     XStore_Proto::RangeDelete_REP ToReturn;
     int DeleteCount = 0;
 
@@ -1219,36 +1071,36 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(const unsigned long long int &
         return ToReturn;
     }
 
-    // Organize into TimeStruct
-    //  TimeStruct provides many auxiliary vars/methods useful for read/write ops
-    TimeStruct CurrTs(startEpochT, CfgStruct.timeresolution());
+    // Walk the span one year-file at a time. Each iteration clamps its
+    // segment to [IterEpoch, min(endEpochT, thisYear.LastEpoch)] and always
+    // advances IterEpoch past it before the next iteration -- same shape as
+    // RangeQuery (see there for why this replaced the old three-branch
+    // single-year/multi-year-first/multi-year-last duplication and the bugs
+    // that duplication let slip through: a missing final year's file used to
+    // spin this forever). fallocate64 still needs a real fd (punching holes
+    // isn't an mmap operation), so this segment still opens/closes the file
+    // via stdio rather than going through GetOrMapFile.
+    unsigned long long int IterEpoch = startEpochT;
+    while (IterEpoch <= endEpochT) {
+        TimeStruct CurrTs(IterEpoch, CfgStruct.timeresolution());
+        std::string TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
+        const unsigned long long int SegmentEnd = std::min(endEpochT, static_cast<unsigned long long int>(CurrTs.LastEpoch));
 
-    // Placeholder for READ op
-    FILE *BFile;
-    std::string TargetFilePath;
-    unsigned long long int Diff, Offset, RangeCount;
-
-    // IF query range is within 1-year
-    if (CurrTs.LastEpoch >= endEpochT) {
-        // Open file prior to reading
-        TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
-
-        // IF target YEAR.XSTORE does NOT exist
+        // IF target YEAR.XSTORE does NOT exist -- a missing year contributes
+        // nothing to DeleteCount, same as RangeQuery contributes no entries
+        // for a missing year.
         if (std::filesystem::exists(TargetFilePath) == 0) {
-            // Return without error
-            std::string ErrorMsg = fmt::format("[ERROR] [RANGE DELETE] [DB: {}] - DB does not exist", dbName);
-            ToReturn.set_deletestatus(ErrorMsg);
-            spdlog::error(ErrorMsg.substr(ERROR_LEN));
-            return ToReturn;
+            std::string WarningMsg = fmt::format("[WARNING] [RANGE DELETE] [DB: {}] - {}.XSTORE does not exist", dbName, CurrTs.Year);
+            ToReturn.set_deletestatus(WarningMsg);
+            spdlog::warn(WarningMsg.substr(WARNING_LEN));
+            IterEpoch = SegmentEnd + 1;
+            continue;
         }
 
-        BFile = std::fopen(TargetFilePath.c_str(), "rb+");
+        FILE *BFile = std::fopen(TargetFilePath.c_str(), "rb+");
 
-        // Compute diff & offset
-        Diff = startEpochT - CurrTs.FirstEpoch;
-        Offset = Diff * CfgStruct.rowlength();
-        // +1: rangeCount covers [startEpochT, endEpochT] inclusive.
-        RangeCount = endEpochT - startEpochT + 1;
+        const unsigned long long int Offset = (IterEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength();
+        const unsigned long long int RangeCount = SegmentEnd - IterEpoch + 1;
 
         {
             // Lock file prior to deleting
@@ -1259,104 +1111,11 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(const unsigned long long int &
             DeleteCount += RangeCount;
         }
         // Close file after delete
-        fclose(BFile);
+        std::fclose(BFile);
+
+        IterEpoch = SegmentEnd + 1;
     }
-    // Otherwise -> Involves multi-year
-    else {
-        // Make a copy of start epoch time for incrementing
-        unsigned long long int StartEpoch = startEpochT;
 
-        // Loop through each year individually
-        //  NOTE: "<=" (not "<") -- once startEpoch has caught up to equal
-        //  endEpochT, there is still exactly one remaining timestamp (endEpochT
-        //  itself) that the final-year branch below must process; using "<"
-        //  here would exit before that last point is ever deleted (see the
-        //  matching fix/comment in RangeQuery above).
-        while (StartEpoch <= endEpochT) {
-            TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
-
-            // IF the requested start epoch spans ONLY 1 year
-            if (CurrTs.LastEpoch < endEpochT) {
-                // IF target YEAR.XSTORE does NOT exist
-                if (std::filesystem::exists(TargetFilePath) == 0) {
-                    std::string WarningMsg = fmt::format("[WARNING] [RANGE DELETE] [DB: {}] - {}.XSTORE does not exist", dbName, CurrTs.Year);
-                    ToReturn.set_deletestatus(WarningMsg);
-                    spdlog::warn(WarningMsg.substr(WARNING_LEN));
-
-                    // Advance StartEpoch into the next year before recomputing
-                    // CurrTs -- see the matching fix/comment in RangeQuery
-                    // above; the old expression never actually advanced
-                    // StartEpoch, so a missing non-final year's file spun the
-                    // loop forever re-checking the same year.
-                    StartEpoch = CurrTs.LastEpoch + 1;
-                    CurrTs = TimeStruct(StartEpoch, CfgStruct.timeresolution());
-                    continue;
-                }
-
-                BFile = std::fopen(TargetFilePath.c_str(), "rb+");
-
-                // Computes diff & offset
-                Diff = StartEpoch - CurrTs.FirstEpoch;
-                Offset = Diff * CfgStruct.rowlength();
-                // +1: rangeCount covers [startEpoch, currTS.lastEpoch] inclusive.
-                // Without it, the last row of this year's segment (currTS.lastEpoch
-                // itself) never gets deallocated.
-                RangeCount = CurrTs.LastEpoch - StartEpoch + 1;
-
-                {
-                    // Lock file prior to deleting
-                    FileRangeLockGuard Guard(TargetFilePath, Offset, CfgStruct.rowlength() * RangeCount, FileRangeLock::LockType::WRITE);
-
-                    // Deallocate data according to N bytes from rowLength
-                    fallocate64(fileno(BFile), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, Offset, CfgStruct.rowlength() * RangeCount);
-                    DeleteCount += RangeCount;
-                }
-
-                // Advance startEpoch past the year just processed -- without this,
-                // startEpoch never changes and the outer while loop spins forever
-                // on the same year for any genuinely multi-year delete.
-                StartEpoch = CurrTs.LastEpoch + 1;
-
-                // Update currTS with latest startEpoch after incrementing
-                CurrTs = TimeStruct(StartEpoch, CfgStruct.timeresolution());
-
-                // Close file after delete
-                std::fclose(BFile);
-            }
-            else {
-                // IF target YEAR.XSTORE does NOT exist
-                if (std::filesystem::exists(TargetFilePath) == 0) {
-                    std::string WarningMsg = fmt::format("[WARNING] [RANGE DELETE] [DB: {}] - {}.XSTORE does not exist", dbName, CurrTs.Year);
-                    ToReturn.set_deletestatus(WarningMsg);
-                    spdlog::warn(WarningMsg.substr(WARNING_LEN));
-
-                    // Update currTS with latest startEpoch after incrementing
-                    CurrTs = TimeStruct(StartEpoch + (endEpochT - StartEpoch), CfgStruct.timeresolution());
-                    continue;
-                }
-
-                BFile = std::fopen(TargetFilePath.c_str(), "rb+");
-
-                // Computes diff & offset
-                Diff = StartEpoch - CurrTs.FirstEpoch;
-                Offset = Diff * CfgStruct.rowlength();
-                // +1: rangeCount covers [startEpoch, endEpochT] inclusive.
-                RangeCount = endEpochT - StartEpoch + 1;
-
-                {
-                    // Lock file prior to deleting
-                    FileRangeLockGuard Guard(TargetFilePath, Offset, CfgStruct.rowlength() * RangeCount, FileRangeLock::LockType::WRITE);
-
-                    // Deallocate data according to N bytes from rowLength
-                    fallocate64(fileno(BFile), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, Offset, CfgStruct.rowlength() * RangeCount);
-                    DeleteCount += RangeCount;
-                }
-                // Close file after delete
-                std::fclose(BFile);
-                break;
-            }
-        }
-    }
     std::string InfoMsg = fmt::format("[INFO] [RANGE DELETE] [DB: {}] - Deleted {} items", dbName, DeleteCount);
     ToReturn.set_deletestatus(InfoMsg);
     spdlog::info(InfoMsg.substr(INFO_LEN));

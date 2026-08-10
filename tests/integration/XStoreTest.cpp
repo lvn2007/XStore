@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <map>
 #include <random>
@@ -858,6 +859,79 @@ TEST_F(XStoreTest, BatchDeleteThenBatchQueryDeletedEntriesOmitted) {
     EXPECT_EQ(Returned, std::set<unsigned long long>({TS_2009_MID, TS_2031_MID}));
 }
 
+TEST_F(XStoreTest, BatchDeleteTargetingMissingYearFileStillReportsCount) {
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    // TESTDB exists but nothing was ever inserted for 2016 -> no 2016.XSTORE.
+    // BatchDelete used to silently `continue` here with no status set at all
+    // mid-loop (unlike BatchQuery/RangeDelete, which both warn) -- the
+    // trailing "Deleted N items" summary always overwrites deletestatus
+    // regardless (same as RangeDelete), so the RESPONSE looks the same
+    // either way; the fix is log-visibility parity (spdlog::warn) with the
+    // sibling functions, not a response change. This just confirms the
+    // missing-year branch doesn't crash and still falls through to a correct count.
+    XStore_Proto::BatchDelete_REQ DeleteReq;
+    DeleteReq.set_dbname("TESTDB");
+    DeleteReq.add_timestamp(TS_2016_MID);
+    XStore_Proto::BatchDelete_REP DeleteRep = Store.BatchDelete(&DeleteReq);
+    EXPECT_NE(DeleteRep.deletestatus().find("Deleted 0 items"), std::string::npos) << DeleteRep.deletestatus();
+}
+
+TEST_F(XStoreTest, BatchDeleteWithWidelySeparatedTimestampsLocksFullSpanAgainstConcurrentWriter) {
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+
+    // Two widely-spaced (same-year) timestamps in one BatchDelete call.
+    // BatchDelete now takes a single lock spanning [min offset, max offset]
+    // per year-group instead of one lock per row (mirrors BatchInsert's
+    // analogous test) -- confirms that coalesced lock actually covers the
+    // far point, not just count*rowLength starting at the near one. The
+    // fallocate64 calls themselves stay per-row (can't be coalesced without
+    // deleting unrelated rows in the gap), so this only exercises the lock.
+    const unsigned long long Near = TS_2009_MID;
+    const unsigned long long Far = TS_2009_MID + 200000;  // well outside a 2*rowLength lock window
+
+    XStore_Proto::UnaryInsert_REP SeedRep;
+    Store.UnaryInsert(Near, MakeRow({FInt64(-1)}), "TESTDB", &SeedRep);
+    Store.UnaryInsert(Far, MakeRow({FInt64(-1)}), "TESTDB", &SeedRep);
+
+    constexpr int KIterations = 300;
+    auto BatchDeleter = [&]() {
+        XStore BdStore;
+        for (int i = 0; i < KIterations; i++) {
+            XStore_Proto::BatchDelete_REQ Req;
+            Req.set_dbname("TESTDB");
+            Req.add_timestamp(Near);
+            Req.add_timestamp(Far);
+            BdStore.BatchDelete(&Req);
+        }
+    };
+    auto FarWriter = [&]() {
+        XStore FwStore;
+        for (int i = 0; i < KIterations; i++) {
+            XStore_Proto::UnaryInsert_REP Rep;
+            FwStore.UnaryInsert(Far, MakeRow({FInt64(3'000'000LL + i)}), "TESTDB", &Rep);
+        }
+    };
+
+    std::thread T0(BatchDeleter);
+    std::thread T1(FarWriter);
+    T0.join();
+    T1.join();
+
+    XStore_Proto::UnaryQuery_REP FarQuery;
+    Store.UnaryQuery(Far, "TESTDB", &FarQuery);
+    // Whatever the final state (deleted, or a clean write from FarWriter),
+    // it must be exactly one clean field or nothing -- never torn bytes from
+    // an unprotected interleave between the punch and a concurrent write.
+    EXPECT_LE(FarQuery.data().fielddata_size(), 1) << "row at the far offset must parse as at most one clean field, not torn/corrupted bytes";
+    if (FarQuery.data().fielddata_size() == 1) {
+        int64_t FinalValue = FarQuery.data().fielddata(0).int64data();
+        EXPECT_TRUE(FinalValue == -1 || (FinalValue >= 3'000'000LL && FinalValue < 3'000'000LL + KIterations))
+            << "finalValue=" << FinalValue;
+    }
+}
+
 TEST_F(XStoreTest, BatchInsertOverwriteWithSmallerRowLeavesNoStaleTrailingBytes) {
     XStore Store;
     Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
@@ -886,6 +960,90 @@ TEST_F(XStoreTest, BatchInsertOverwriteWithSmallerRowLeavesNoStaleTrailingBytes)
     ASSERT_EQ(QueryRep.data().fielddata_size(), 1);
     EXPECT_EQ(QueryRep.data().fielddata(0).oneOfData_case(), XStore_Proto::FData::kInt32Data);
     EXPECT_EQ(QueryRep.data().fielddata(0).int32data(), 7);
+}
+
+TEST_F(XStoreTest, BatchInsertRepeatedCallsToSameYearFileAccumulateViaCachedMapping) {
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+
+    // First call creates+maps 2016.XSTORE via GetOrMapFile; every later call
+    // to the same year must hit that cached mapping instead of re-creating/
+    // re-truncating it, which would wipe out rows written by earlier calls.
+    for (int i = 0; i < 20; i++) {
+        XStore_Proto::BatchInsert_REQ Req;
+        Req.set_dbname("TESTDB");
+        XStore_Proto::BatchInsert_DATA *Entry = Req.add_batchinsert_data();
+        Entry->set_timestamp(TS_2016_MID + i);
+        *Entry->mutable_data() = MakeRow({FInt64(i)});
+        XStore_Proto::BatchInsert_REP Rep;
+        Store.BatchInsert(&Req, &Rep);
+    }
+
+    XStore_Proto::BatchQuery_REQ QueryReq;
+    QueryReq.set_dbname("TESTDB");
+    for (int i = 0; i < 20; i++) QueryReq.add_timestamp(TS_2016_MID + i);
+
+    XStore_Proto::BatchQuery_REP QueryRep;
+    Store.BatchQuery(&QueryReq, &QueryRep);
+
+    ASSERT_EQ(QueryRep.queryresponse_size(), 20) << "an earlier call's rows were lost -- cached mapping must have been re-truncated instead of reused";
+    std::map<unsigned long long, int64_t> ByTs;
+    for (int i = 0; i < QueryRep.queryresponse_size(); i++) {
+        ByTs[QueryRep.queryresponse(i).timestamp()] = QueryRep.queryresponse(i).data().fielddata(0).int64data();
+    }
+    for (int i = 0; i < 20; i++) {
+        EXPECT_EQ(ByTs[TS_2016_MID + i], i);
+    }
+}
+
+TEST_F(XStoreTest, BatchInsertWithWidelySeparatedTimestampsLocksFullSpanAgainstConcurrentWriter) {
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+
+    // Two widely-spaced (same-year) timestamps in one BatchInsert call.
+    // BatchInsert now takes a single lock spanning [min offset, max offset]
+    // per year-group instead of one lock per row (mirrors RangeInsert's
+    // analogous fix/test below) -- confirms that coalesced lock actually
+    // covers the far point, not just count*rowLength starting at the near one.
+    const unsigned long long Near = TS_2009_MID;
+    const unsigned long long Far = TS_2009_MID + 200000;  // well outside a 2*rowLength lock window
+
+    constexpr int KIterations = 300;
+    auto BatchWriter = [&]() {
+        XStore BwStore;
+        for (int i = 0; i < KIterations; i++) {
+            XStore_Proto::BatchInsert_REQ Req;
+            Req.set_dbname("TESTDB");
+            XStore_Proto::BatchInsert_DATA *E0 = Req.add_batchinsert_data();
+            E0->set_timestamp(Near);
+            *E0->mutable_data() = MakeRow({FInt64(1'000'000LL + i)});
+            XStore_Proto::BatchInsert_DATA *E1 = Req.add_batchinsert_data();
+            E1->set_timestamp(Far);
+            *E1->mutable_data() = MakeRow({FInt64(2'000'000LL + i)});
+            XStore_Proto::BatchInsert_REP Rep;
+            BwStore.BatchInsert(&Req, &Rep);
+        }
+    };
+    auto FarWriter = [&]() {
+        XStore FwStore;
+        for (int i = 0; i < KIterations; i++) {
+            XStore_Proto::UnaryInsert_REP Rep;
+            FwStore.UnaryInsert(Far, MakeRow({FInt64(3'000'000LL + i)}), "TESTDB", &Rep);
+        }
+    };
+
+    std::thread T0(BatchWriter);
+    std::thread T1(FarWriter);
+    T0.join();
+    T1.join();
+
+    XStore_Proto::UnaryQuery_REP FarQuery;
+    Store.UnaryQuery(Far, "TESTDB", &FarQuery);
+    ASSERT_EQ(FarQuery.data().fielddata_size(), 1) << "row at the far offset must parse as exactly one clean field, not torn/corrupted bytes";
+    int64_t FinalValue = FarQuery.data().fielddata(0).int64data();
+    EXPECT_TRUE((FinalValue >= 2'000'000LL && FinalValue < 2'000'000LL + KIterations) ||
+                (FinalValue >= 3'000'000LL && FinalValue < 3'000'000LL + KIterations))
+        << "finalValue=" << FinalValue;
 }
 
 TEST_F(XStoreTest, BatchQueryRowFillingEntireBufferWithNoZeroByteIsNotTreatedAsHole) {
@@ -960,6 +1118,50 @@ TEST_F(XStoreTest, BatchQueryRejectsRequestOver2GBLimit) {
     Store.BatchQuery(&QueryReq, &QueryRep);
     EXPECT_NE(QueryRep.querystatus().find("larger than 2GB"), std::string::npos) << QueryRep.querystatus();
     EXPECT_EQ(QueryRep.queryresponse_size(), 0);
+}
+
+TEST_F(XStoreTest, BatchQuerySortTimeFalseWithUnsortedTimestampsRoundTrips) {
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+
+    // All in the same year, deliberately far apart and inserted/queried in a
+    // non-ascending order. With SortTime=false, BatchQuery's per-year index
+    // vector is NOT guaranteed sorted, so it can't size its single coalesced
+    // lock off front()/back() the way BatchInsert (which always sorts) does
+    // -- exercises the min/max scan it uses instead.
+    std::map<unsigned long long, std::string> Expected = {
+        {TS_2016_MID + 50000, "mid"},
+        {TS_2016_MID, "low"},
+        {TS_2016_MID + 100000, "high"},
+        {TS_2016_MID + 25000, "low-mid"},
+    };
+
+    XStore_Proto::BatchInsert_REQ InsertReq;
+    InsertReq.set_dbname("TESTDB");
+    for (auto &[ts, val] : Expected) {
+        XStore_Proto::BatchInsert_DATA *Entry = InsertReq.add_batchinsert_data();
+        Entry->set_timestamp(ts);
+        *Entry->mutable_data() = MakeRow({FString(val)});
+    }
+    XStore_Proto::BatchInsert_REP InsertRep;
+    Store.BatchInsert(&InsertReq, &InsertRep);
+
+    XStore_Proto::BatchQuery_REQ QueryReq;
+    QueryReq.set_dbname("TESTDB");
+    for (unsigned long long ts : {TS_2016_MID + 100000, TS_2016_MID, TS_2016_MID + 50000, TS_2016_MID + 25000}) {
+        QueryReq.add_timestamp(ts);
+    }
+
+    XStore_Proto::BatchQuery_REP QueryRep;
+    Store.BatchQuery(&QueryReq, &QueryRep, /*SortTime=*/false);
+
+    ASSERT_EQ(QueryRep.queryresponse_size(), 4);
+    for (int i = 0; i < QueryRep.queryresponse_size(); i++) {
+        const auto &Entry = QueryRep.queryresponse(i);
+        ASSERT_TRUE(Expected.count(Entry.timestamp())) << "unexpected timestamp " << Entry.timestamp();
+        ASSERT_EQ(Entry.data().fielddata_size(), 1);
+        EXPECT_EQ(Entry.data().fielddata(0).stringdata(), Expected[Entry.timestamp()]);
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -1057,6 +1259,77 @@ TEST_F(XStoreTest, RangeInsertToNonexistentDBReturnsError) {
     EXPECT_EQ(InsertRep.insertstatus(), "[ERROR] [RANGE INSERT] [DB: NOPE] - DB does not exist");
 }
 
+TEST_F(XStoreTest, RangeDeleteSingleYearMissingFileReturnsCountSummaryNotDbNotExistError) {
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    // TESTDB directory exists (CreateDB above), but no year file was ever
+    // written -- 2009.XSTORE specifically doesn't exist. RangeDelete's old
+    // single-year branch special-cased this with an early-return "[ERROR]
+    // ... DB does not exist" (a stale/misleading copy-paste of the
+    // is_directory check's message -- the DB does exist, only the year file
+    // doesn't), skipping the trailing "Deleted N items" summary every other
+    // missing-year case falls through to. Unifying with the multi-year
+    // handling makes a missing year behave the same everywhere: warn and
+    // still report the (zero) count.
+    XStore_Proto::RangeDelete_REP DeleteRep = Store.RangeDelete(TS_2009_MID, TS_2009_MID + 10, "TESTDB");
+    EXPECT_NE(DeleteRep.deletestatus().find("Deleted 0 items"), std::string::npos) << DeleteRep.deletestatus();
+}
+
+TEST_F(XStoreTest, RangeDeleteReclaimsDiskSpaceAndMmapCacheReflectsTheHole) {
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+
+    // Wide-enough span (5000 rows) that real block allocation is easily
+    // measurable and not noise from filesystem allocation granularity.
+    constexpr int KRowCount = 5000;
+    XStore_Proto::RangeInsert_REQ InsertReq;
+    InsertReq.set_dbname("TESTDB");
+    for (int i = 0; i < KRowCount; i++) {
+        XStore_Proto::RangeInsert_DATA *Entry = InsertReq.add_rangeinsert_data();
+        Entry->set_timestamp(TS_2024_MID + i);
+        *Entry->mutable_data() = MakeRow({FInt64(i)});
+    }
+    XStore_Proto::RangeInsert_REP InsertRep;
+    Store.RangeInsert(&InsertReq, &InsertRep);
+
+    // RangeInsert (and the RangeQuery below) go through the shared mmap
+    // cache (GetOrMapFile); RangeDelete's fallocate64 punches the hole via a
+    // separate, freshly-opened fd -- confirms that hole is visible through
+    // an *already-mapped* MAP_SHARED region too, not just to fresh reads.
+    XStore_Proto::RangeQuery_REP PreDeleteQuery;
+    Store.RangeQuery(TS_2024_MID, TS_2024_MID + KRowCount - 1, "TESTDB", &PreDeleteQuery);
+    ASSERT_EQ(PreDeleteQuery.queryresponse_size(), KRowCount);
+    for (int i = 0; i < KRowCount; i++) {
+        ASSERT_EQ(PreDeleteQuery.queryresponse(i).data().fielddata_size(), 1) << "i=" << i;
+    }
+
+    fs::path DataFile = Scratch->TestRoot / "DataStore" / "TESTDB" / "2024.XSTORE";
+    struct stat StBeforeDelete{};
+    ASSERT_EQ(stat(DataFile.string().c_str(), &StBeforeDelete), 0);
+    unsigned long long AllocatedBeforeDelete = static_cast<unsigned long long>(StBeforeDelete.st_blocks) * 512ULL;
+    EXPECT_GT(AllocatedBeforeDelete, 0ULL) << "expected real blocks behind the inserted rows before deleting";
+
+    XStore_Proto::RangeDelete_REP DeleteRep = Store.RangeDelete(TS_2024_MID, TS_2024_MID + KRowCount - 1, "TESTDB");
+    EXPECT_NE(DeleteRep.deletestatus().find(fmt::format("Deleted {} items", KRowCount)), std::string::npos) << DeleteRep.deletestatus();
+
+    // Disk space actually reclaimed -- not just "reads now return empty",
+    // which fallocate's FALLOC_FL_KEEP_SIZE (logical size unchanged) doesn't
+    // by itself guarantee unless FALLOC_FL_PUNCH_HOLE is also set.
+    struct stat StAfterDelete{};
+    ASSERT_EQ(stat(DataFile.string().c_str(), &StAfterDelete), 0);
+    unsigned long long AllocatedAfterDelete = static_cast<unsigned long long>(StAfterDelete.st_blocks) * 512ULL;
+    EXPECT_EQ(StAfterDelete.st_size, StBeforeDelete.st_size) << "logical file size (FALLOC_FL_KEEP_SIZE) must be unchanged by the delete";
+    EXPECT_LT(AllocatedAfterDelete, AllocatedBeforeDelete / 2) << "expected the punched range's blocks to be actually freed, not just zero-filled";
+
+    // Data actually gone, read back through the same cached mapping RangeInsert/RangeQuery used above.
+    XStore_Proto::RangeQuery_REP PostDeleteQuery;
+    Store.RangeQuery(TS_2024_MID, TS_2024_MID + KRowCount - 1, "TESTDB", &PostDeleteQuery);
+    ASSERT_EQ(PostDeleteQuery.queryresponse_size(), KRowCount);
+    for (int i = 0; i < KRowCount; i++) {
+        EXPECT_EQ(PostDeleteQuery.queryresponse(i).data().fielddata_size(), 0) << "i=" << i << " -- stale data read through an already-mapped region after fallocate hole-punch on a different fd";
+    }
+}
+
 TEST_F(XStoreTest, RangeDeleteSpanningTwoYearBoundaryDeletesBothEndpoints) {
     XStore Store;
     Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
@@ -1152,6 +1425,57 @@ TEST_F(XStoreTest, RangeInsertWithNonContiguousTimestampsLocksFullSpanAgainstCon
         << "finalValue=" << FinalValue;
 }
 
+TEST_F(XStoreTest, RangeQueryLastRowInSpanIsLockedAgainstConcurrentWriter) {
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+
+    // RegionLength used to be sized as count-1 rows (missing a "+1" to cover
+    // the inclusive [start, end] the read loop actually walks), so the very
+    // last row of the queried span sat outside the locked byte range. End is
+    // that last row.
+    //
+    // A data-race-based test (racing a writer against many RangeQuery calls
+    // and checking for torn reads) turned out unreliable here -- the actual
+    // unprotected-memory race window is nanoseconds wide, so it doesn't
+    // reproduce on demand under a plain thread scheduler. This instead tests
+    // the lock's actual coverage directly: hold a manual WRITE lock on End's
+    // exact byte offset (computed the same way XStore does internally) and
+    // confirm RangeQuery blocks on it -- a lock region that excludes End
+    // would let RangeQuery return immediately without contending at all.
+    const unsigned long long Start = TS_2009_MID;
+    const unsigned long long End = TS_2009_MID + 5;
+    constexpr short RowLength = 128;
+
+    XStore_Proto::UnaryInsert_REP SeedRep;
+    Store.UnaryInsert(End, MakeRow({FInt64(-1)}), "TESTDB", &SeedRep);  // pre-allocate the year file
+
+    TimeStruct Ts(static_cast<time_t>(End), XStore_Proto::SECOND);
+    const unsigned long long Offset = (End - Ts.FirstEpoch) * RowLength;
+    const std::string TargetFile = fmt::format("{}DataStore/TESTDB/{}.XSTORE", Store.BaseDir, Ts.Year);
+
+    constexpr auto HoldDuration = std::chrono::milliseconds(150);
+    std::atomic<bool> LockAcquired{false};
+    std::thread Holder([&]() {
+        FileRangeLockGuard Guard(TargetFile, Offset, RowLength, FileRangeLock::LockType::WRITE);
+        LockAcquired = true;
+        std::this_thread::sleep_for(HoldDuration);
+    });
+
+    while (!LockAcquired) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));  // let Holder settle in
+
+    auto QueryStart = std::chrono::steady_clock::now();
+    XStore_Proto::RangeQuery_REP Rep;
+    Store.RangeQuery(Start, End, "TESTDB", &Rep);
+    auto Elapsed = std::chrono::steady_clock::now() - QueryStart;
+
+    Holder.join();
+
+    ASSERT_EQ(Rep.queryresponse_size(), 6);
+    EXPECT_GE(Elapsed, HoldDuration - std::chrono::milliseconds(20))
+        << "RangeQuery returned without waiting on a WRITE lock held on the span's last row -- its lock region doesn't cover [start, end] inclusive";
+}
+
 TEST_F(XStoreTest, RangeQuerySpanningThreeYearsWithMissingMiddleYearFile) {
     XStore Store;
     // A ~31.5M-second span (nearly 2 full years) at the usual 128-byte
@@ -1184,6 +1508,54 @@ TEST_F(XStoreTest, RangeQuerySpanningThreeYearsWithMissingMiddleYearFile) {
     EXPECT_EQ(Found[TS_2000_FIRST_PLUS], "start-of-2000");
 }
 
+TEST_F(XStoreTest, RangeQueryMissingFinalYearFileReturnsInsteadOfHanging) {
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 32);
+
+    constexpr unsigned long long TS_1998_LAST = 915148799ULL;   // 1998-12-31 23:59:59 UTC
+    constexpr unsigned long long TS_1999_EARLY = 915148810ULL;  // 1999-01-01 00:00:10 UTC -- 1999.XSTORE never created
+
+    XStore_Proto::UnaryInsert_REP InsertRep;
+    Store.UnaryInsert(TS_1998_LAST, MakeRow({FString("end-of-1998")}), "TESTDB", &InsertRep);  // creates 1998.XSTORE only
+
+    // Regression test for an infinite loop: the final-year "file missing"
+    // branch used to `continue` after a no-op CurrTs recompute
+    // (StartEpoch+(endEpochT-StartEpoch) always equals endEpochT, so nothing
+    // actually advances) instead of `break`, so a missing FINAL year spun the
+    // outer while loop forever. Starts right at the year boundary (not
+    // TS_1998_MID) so the legitimate 1998 segment is a handful of rows, not
+    // millions -- otherwise that alone could out-run the timeout below and
+    // be mistaken for the hang this test is trying to catch. Runs off-thread
+    // with a timeout so a regression fails this test instead of hanging the
+    // whole binary.
+    std::atomic<bool> Completed{false};
+    XStore_Proto::RangeQuery_REP QueryRep;
+    std::thread Worker([&]() {
+        Store.RangeQuery(TS_1998_LAST, TS_1999_EARLY, "TESTDB", &QueryRep);
+        Completed = true;
+    });
+
+    for (int i = 0; i < 100 && !Completed; i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    if (!Completed) {
+        Worker.detach();  // don't join a thread that may be stuck forever
+        FAIL() << "RangeQuery hung instead of returning when the final year's file was missing";
+        return;
+    }
+    Worker.join();
+
+    bool Found1998 = false;
+    for (int i = 0; i < QueryRep.queryresponse_size(); i++) {
+        if (QueryRep.queryresponse(i).timestamp() == TS_1998_LAST) {
+            Found1998 = QueryRep.queryresponse(i).data().fielddata_size() == 1;
+        }
+    }
+    EXPECT_TRUE(Found1998);
+    EXPECT_NE(QueryRep.querystatus().find("1999.XSTORE does not exist"), std::string::npos) << QueryRep.querystatus();
+}
+
 TEST_F(XStoreTest, RangeDeleteSpanningThreeYearsWithMissingMiddleYearFileDeletesExistingEndpoints) {
     XStore Store;
     Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
@@ -1208,6 +1580,47 @@ TEST_F(XStoreTest, RangeDeleteSpanningThreeYearsWithMissingMiddleYearFileDeletes
     EXPECT_EQ(Rep2000.data().fielddata_size(), 0);
 }
 
+TEST_F(XStoreTest, RangeDeleteMissingFinalYearFileReturnsInsteadOfHanging) {
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+
+    constexpr unsigned long long TS_1998_LAST = 915148799ULL;   // 1998-12-31 23:59:59 UTC
+    constexpr unsigned long long TS_1999_EARLY = 915148810ULL;  // 1999-01-01 00:00:10 UTC -- 1999.XSTORE never created
+
+    XStore_Proto::UnaryInsert_REP InsertRep;
+    Store.UnaryInsert(TS_1998_LAST, MakeRow({FString("end-of-1998")}), "TESTDB", &InsertRep);  // creates 1998.XSTORE only
+
+    // Same infinite-loop shape as RangeQuery's analogous regression test
+    // above -- same reason for starting right at the year boundary too.
+    std::atomic<bool> Completed{false};
+    XStore_Proto::RangeDelete_REP DeleteRep;
+    std::thread Worker([&]() {
+        DeleteRep = Store.RangeDelete(TS_1998_LAST, TS_1999_EARLY, "TESTDB");
+        Completed = true;
+    });
+
+    for (int i = 0; i < 100 && !Completed; i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    if (!Completed) {
+        Worker.detach();
+        FAIL() << "RangeDelete hung instead of returning when the final year's file was missing";
+        return;
+    }
+    Worker.join();
+
+    // RangeDelete's final status is always the trailing count summary (any
+    // mid-loop WARNING gets overwritten by it), so correctness is checked via
+    // the count instead: only TS_1998_LAST (the single point in the existing
+    // year) was deleted.
+    EXPECT_NE(DeleteRep.deletestatus().find("Deleted 1 items"), std::string::npos) << DeleteRep.deletestatus();
+
+    XStore_Proto::UnaryQuery_REP Rep1998;
+    Store.UnaryQuery(TS_1998_LAST, "TESTDB", &Rep1998);
+    EXPECT_EQ(Rep1998.data().fielddata_size(), 0);
+}
+
 TEST_F(XStoreTest, RangeQueryRejectsRequestOver2GBLimit) {
     XStore Store;
     Store.CreateDB("TESTDB", XStore_Proto::SECOND, 32000);
@@ -1217,6 +1630,66 @@ TEST_F(XStoreTest, RangeQueryRejectsRequestOver2GBLimit) {
     Store.RangeQuery(TS_2016_MID, TS_2016_MID + 63000, "TESTDB", &QueryRep);
     EXPECT_NE(QueryRep.querystatus().find("larger than 2GB"), std::string::npos) << QueryRep.querystatus();
     EXPECT_EQ(QueryRep.queryresponse_size(), 0);
+}
+
+TEST_F(XStoreTest, UnaryBatchAndRangeInsertQueryShareSameCachedMappingWithinAYear) {
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+
+    // Write the same year's file through all three insert paths, then read
+    // every point back through all three query paths -- Unary, Batch and
+    // Range all go through the same GetOrMapFile cache now, so a write via
+    // one path must be immediately visible via the others without a stale
+    // read (previously Batch/Range wrote via stdio underneath whatever
+    // mapping Unary might already have open for that same file).
+    XStore_Proto::UnaryInsert_REP UnaryRep;
+    Store.UnaryInsert(TS_2009_MID, MakeRow({FString("via-unary")}), "TESTDB", &UnaryRep);
+
+    XStore_Proto::BatchInsert_REQ BatchReq;
+    BatchReq.set_dbname("TESTDB");
+    XStore_Proto::BatchInsert_DATA *BatchEntry = BatchReq.add_batchinsert_data();
+    BatchEntry->set_timestamp(TS_2009_MID + 1);
+    *BatchEntry->mutable_data() = MakeRow({FString("via-batch")});
+    XStore_Proto::BatchInsert_REP BatchRep;
+    Store.BatchInsert(&BatchReq, &BatchRep);
+
+    XStore_Proto::RangeInsert_REQ RangeReq;
+    RangeReq.set_dbname("TESTDB");
+    XStore_Proto::RangeInsert_DATA *RangeEntry = RangeReq.add_rangeinsert_data();
+    RangeEntry->set_timestamp(TS_2009_MID + 2);
+    *RangeEntry->mutable_data() = MakeRow({FString("via-range")});
+    XStore_Proto::RangeInsert_REP RangeRep;
+    Store.RangeInsert(&RangeReq, &RangeRep);
+
+    // Read every point back through UnaryQuery.
+    for (int i = 0; i < 3; i++) {
+        XStore_Proto::UnaryQuery_REP Rep;
+        Store.UnaryQuery(TS_2009_MID + i, "TESTDB", &Rep);
+        ASSERT_EQ(Rep.data().fielddata_size(), 1) << "i=" << i;
+    }
+
+    // Read every point back through BatchQuery.
+    XStore_Proto::BatchQuery_REQ QueryReq;
+    QueryReq.set_dbname("TESTDB");
+    for (int i = 0; i < 3; i++) QueryReq.add_timestamp(TS_2009_MID + i);
+    XStore_Proto::BatchQuery_REP QueryRep;
+    Store.BatchQuery(&QueryReq, &QueryRep);
+    ASSERT_EQ(QueryRep.queryresponse_size(), 3);
+    std::map<unsigned long long, std::string> ByTs;
+    for (int i = 0; i < QueryRep.queryresponse_size(); i++) {
+        ByTs[QueryRep.queryresponse(i).timestamp()] = QueryRep.queryresponse(i).data().fielddata(0).stringdata();
+    }
+    EXPECT_EQ(ByTs[TS_2009_MID], "via-unary");
+    EXPECT_EQ(ByTs[TS_2009_MID + 1], "via-batch");
+    EXPECT_EQ(ByTs[TS_2009_MID + 2], "via-range");
+
+    // Read every point back through RangeQuery.
+    XStore_Proto::RangeQuery_REP RangeQueryRep;
+    Store.RangeQuery(TS_2009_MID, TS_2009_MID + 2, "TESTDB", &RangeQueryRep);
+    ASSERT_EQ(RangeQueryRep.queryresponse_size(), 3);
+    EXPECT_EQ(RangeQueryRep.queryresponse(0).data().fielddata(0).stringdata(), "via-unary");
+    EXPECT_EQ(RangeQueryRep.queryresponse(1).data().fielddata(0).stringdata(), "via-batch");
+    EXPECT_EQ(RangeQueryRep.queryresponse(2).data().fielddata(0).stringdata(), "via-range");
 }
 
 // ---------------------------------------------------------------------
