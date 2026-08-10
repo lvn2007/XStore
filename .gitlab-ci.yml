@@ -133,7 +133,7 @@ cleanup-lxc:
   stage: Cleanup
   script:
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- Stopping ${containerName}"
-    - lxc stop ciRunner                                       # Stopping LXC container
+    - lxc stop ${containerName}                               # Stopping LXC container
     - echo "[INFO - `date +'%m-%d-%Y'` `date +'%r'`] -- ${containerName} has been turned off successfully"
   tags:
     - LXC_Controller
