@@ -1,1 +1,0 @@
-/usr/bin/c++ CMakeFiles/sClient_Protobuf.dir/sClient_Protobuf.cpp.o CMakeFiles/sClient_Protobuf.dir/message.pb.cc.o -o sClient_Protobuf  -Wl,-rpath,/usr/local/lib /usr/local/lib/libprotobuf.so -pthread 

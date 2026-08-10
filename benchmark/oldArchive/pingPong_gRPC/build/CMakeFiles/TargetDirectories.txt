@@ -1,4 +1,0 @@
-/home/ubuntu/pingPong_gRPC/build/CMakeFiles/sServer_gRPC.dir
-/home/ubuntu/pingPong_gRPC/build/CMakeFiles/sClient_gRPC.dir
-/home/ubuntu/pingPong_gRPC/build/CMakeFiles/edit_cache.dir
-/home/ubuntu/pingPong_gRPC/build/CMakeFiles/rebuild_cache.dir

@@ -1,8 +1,0 @@
-/home/ubuntu/pingPong/build/CMakeFiles/sServer_Raw.dir
-/home/ubuntu/pingPong/build/CMakeFiles/sClient_Raw.dir
-/home/ubuntu/pingPong/build/CMakeFiles/sServer_Protobuf.dir
-/home/ubuntu/pingPong/build/CMakeFiles/sClient_Protobuf.dir
-/home/ubuntu/pingPong/build/CMakeFiles/pServer.dir
-/home/ubuntu/pingPong/build/CMakeFiles/pClient.dir
-/home/ubuntu/pingPong/build/CMakeFiles/edit_cache.dir
-/home/ubuntu/pingPong/build/CMakeFiles/rebuild_cache.dir
