@@ -14,7 +14,7 @@ endif()
 set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# 3. ADD: Sanitizers for debugging (Uncomment when you need to find the bug)
+# Sanitizers for debugging (uncomment when you need to find the bug)
 # set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -fsanitize=address -fsanitize=undefined")
 # set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address -fsanitize=undefined")
 
@@ -29,25 +29,8 @@ add_definitions(-D_LARGEFILE_SOURCE -D_LARGE_FILES -D_FILE_OFFSET_BITS=64)
 
 include(FetchContent)
 
-# ZStandard - sudo apt install libzstd-dev
-set(Zstd_INCLUDE_DIR /usr/include)
-mark_as_advanced(Zstd_INCLUDE_DIR)
-#   Look for the necessary library
-set(Zstd_LIBRARY /usr/lib/x86_64-linux-gnu/libzstd.so)
-mark_as_advanced(Zstd_LIBRARY)
-set(Zstd_FOUND 1)
-
-set(Zstd_INCLUDE_DIRS ${Zstd_INCLUDE_DIR})
-set(Zstd_LIBRARIES ${Zstd_LIBRARY})
-if(NOT TARGET Zstd::Zstd)
-    add_library(Zstd::Zstd UNKNOWN IMPORTED)
-    set_target_properties(Zstd::Zstd PROPERTIES
-            IMPORTED_LOCATION             "${Zstd_LIBRARY}"
-            INTERFACE_INCLUDE_DIRECTORIES "${Zstd_INCLUDE_DIR}")
-endif()
-
 # Protobuf
-# find_package(absl REQUIRED)
+find_package(absl REQUIRED)
 find_package(Protobuf REQUIRED)
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
@@ -74,11 +57,9 @@ add_custom_command(
         -I "${XStore_proto_path}" "${XStore_proto}"
         DEPENDS "${XStore_proto}")
 
+# Include generated *.pb.h files
 include_directories(${Protobuf_INCLUDE_DIRS})
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
-
-# Include generated *.pb.h files
-include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 
 include_directories(.)
 include_directories(include)
@@ -94,6 +75,9 @@ add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h
         include/Logger/Logger.h)
 
 target_link_libraries(XStore PUBLIC "stdc++fs" protobuf::libprotobuf "zmq" Threads::Threads)
+if(TARGET absl::log_internal_check_op)
+    target_link_libraries(XStore PUBLIC absl::log_internal_check_op)
+endif()
 
 # ------------------------------------------------------------------
 # Tests

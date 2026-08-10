@@ -16,6 +16,9 @@ add_executable(xstore_tests
 )
 
 target_link_libraries(xstore_tests PRIVATE GTest::gtest_main protobuf::libprotobuf Threads::Threads "stdc++fs")
+if(TARGET absl::log_internal_check_op)
+    target_link_libraries(xstore_tests PRIVATE absl::log_internal_check_op)
+endif()
 
 include(GoogleTest)
 gtest_discover_tests(xstore_tests)
@@ -46,6 +49,9 @@ add_executable(xstore_network_tests
 )
 
 target_link_libraries(xstore_network_tests PRIVATE GTest::gtest_main protobuf::libprotobuf Threads::Threads "stdc++fs" "zmq")
+if(TARGET absl::log_internal_check_op)
+    target_link_libraries(xstore_network_tests PRIVATE absl::log_internal_check_op)
+endif()
 
 gtest_discover_tests(xstore_network_tests)
 
