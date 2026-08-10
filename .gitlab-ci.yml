@@ -1,6 +1,6 @@
 variables:
-  containerName: "ciRunner"
-  snapshotName: "freshSnapshot"
+  containerName: "CI-Runner"
+  snapshotName: "FreshSnapshot"
 
 stages:          # List of stages for jobs, and their order of execution
   - Initialize
