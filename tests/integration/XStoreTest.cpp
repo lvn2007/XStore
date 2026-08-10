@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <ctime>
 #include <filesystem>
 #include <map>
 #include <random>
@@ -95,6 +96,29 @@ TEST_F(XStoreTest, InfoQueryReflectsCreatedDatabase) {
     EXPECT_EQ(Info.dbinfo(0).dbresolution(), XStore_Proto::SECOND);
 }
 
+TEST_F(XStoreTest, InfoQueryReflectsMultipleCreatedDatabases) {
+    XStore Store;
+    // Distinct resolutions per DB so each dbinfo entry can be matched back to
+    // its creator unambiguously, not just counted.
+    Store.CreateDB("ALPHADB", XStore_Proto::SECOND, 64);
+    Store.CreateDB("BETADB", XStore_Proto::MILLISECOND, 128);
+    Store.CreateDB("GAMMADB", XStore_Proto::MICROSECOND, 256);
+
+    XStore_Proto::SysInfo_REP Info = Store.InfoQuery("127.0.0.1", 3);
+
+    ASSERT_EQ(Info.dbinfo_size(), 3);
+    std::map<std::string, XStore_Proto::TimeUnit> ByName;
+    for (int i = 0; i < Info.dbinfo_size(); i++) {
+        ByName[Info.dbinfo(i).dbname()] = Info.dbinfo(i).dbresolution();
+    }
+    ASSERT_EQ(ByName.count("ALPHADB"), 1u);
+    ASSERT_EQ(ByName.count("BETADB"), 1u);
+    ASSERT_EQ(ByName.count("GAMMADB"), 1u);
+    EXPECT_EQ(ByName["ALPHADB"], XStore_Proto::SECOND);
+    EXPECT_EQ(ByName["BETADB"], XStore_Proto::MILLISECOND);
+    EXPECT_EQ(ByName["GAMMADB"], XStore_Proto::MICROSECOND);
+}
+
 // ---------------------------------------------------------------------
 // CreateDB
 // ---------------------------------------------------------------------
@@ -122,6 +146,18 @@ TEST_F(XStoreTest, CreateDBRejectsDuplicateName) {
     EXPECT_EQ(Rep.createdbstatus(), "[ERROR] [CREATE DB] [DB: TESTDB] - Already existed");
 }
 
+TEST_F(XStoreTest, CreateDBRejectsNanosecondResolution) {
+    // ResolutionMap (include/XStore/XStore.h) lists NANOSECOND, but the
+    // actual gate CreateDB enforces is PermittedTimeResolution, which only
+    // allows SECOND/MILLISECOND/MICROSECOND -- confirms NANOSECOND is
+    // actually rejected, not just absent from a stale comment.
+    XStore Store;
+    XStore_Proto::CreateDB_REP Rep = Store.CreateDB("TESTDB", XStore_Proto::NANOSECOND, 128);
+
+    EXPECT_EQ(Rep.createdbstatus(), "[ERROR] [CREATE DB] [DB: TESTDB] - Invalid time resolution");
+    EXPECT_FALSE(fs::exists(Scratch->TestRoot / "DataStore" / "TESTDB"));
+}
+
 // ---------------------------------------------------------------------
 // RemoveDB
 // ---------------------------------------------------------------------
@@ -143,6 +179,37 @@ TEST_F(XStoreTest, RemoveDBDeletesDirectoryAndDropsFromInfoQuery) {
 
     XStore_Proto::SysInfo_REP Info = Store.InfoQuery("127.0.0.1", 1);
     EXPECT_EQ(Info.dbinfo_size(), 0);
+}
+
+TEST_F(XStoreTest, RemoveDBThenRecreateSameNameDoesNotReadStaleMmapData) {
+    // RemoveDB calls EraseMappedFilesUnderPrefix so a future insert can't
+    // keep writing into an orphaned, unlinked mapping (see the comment at
+    // XStore::RemoveDB's call site) -- this confirms that actually holds: a
+    // fresh DB reusing the old name must not see the previous DB's data
+    // through a stale cached mapping the erase should have dropped.
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore_Proto::UnaryInsert_REP FirstInsertRep;
+    Store.UnaryInsert(TS_2016_MID, MakeRow({FString("old-generation")}), "TESTDB", &FirstInsertRep);
+    ASSERT_NE(FirstInsertRep.insertstatus().find("[INFO]"), std::string::npos);
+
+    Store.RemoveDB("TESTDB");
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+
+    // Same year, same offset as the old generation's write -- if the old
+    // mapping survived, this read would incorrectly find "old-generation".
+    XStore_Proto::UnaryQuery_REP StaleCheck;
+    Store.UnaryQuery(TS_2016_MID, "TESTDB", &StaleCheck);
+    EXPECT_EQ(StaleCheck.data().fielddata_size(), 0) << "found data through a stale mapping from the removed DB";
+
+    XStore_Proto::UnaryInsert_REP SecondInsertRep;
+    Store.UnaryInsert(TS_2016_MID, MakeRow({FString("new-generation")}), "TESTDB", &SecondInsertRep);
+    ASSERT_NE(SecondInsertRep.insertstatus().find("[INFO]"), std::string::npos);
+
+    XStore_Proto::UnaryQuery_REP QueryRep;
+    Store.UnaryQuery(TS_2016_MID, "TESTDB", &QueryRep);
+    ASSERT_EQ(QueryRep.data().fielddata_size(), 1);
+    EXPECT_EQ(QueryRep.data().fielddata(0).stringdata(), "new-generation");
 }
 
 // ---------------------------------------------------------------------
@@ -167,6 +234,35 @@ TEST_F(XStoreTest, RemoveDBFilesRemovesDataFileButProtectsConfig) {
 
     EXPECT_FALSE(fs::exists(Scratch->TestRoot / "DataStore" / "TESTDB" / "2016.XSTORE"));
     EXPECT_TRUE(fs::exists(Scratch->TestRoot / "DataStore" / "TESTDB" / "TESTDB.CFG"));
+}
+
+TEST_F(XStoreTest, RemoveDBFilesThenReinsertSameYearDoesNotReadStaleMmapData) {
+    // Same stale-mapping concern as RemoveDB above, but scoped to a single
+    // file via EraseMappedFile (RemoveDBFiles's call site comment references
+    // the same reasoning).
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore_Proto::UnaryInsert_REP FirstInsertRep;
+    Store.UnaryInsert(TS_2016_MID, MakeRow({FString("old-generation")}), "TESTDB", &FirstInsertRep);
+    ASSERT_NE(FirstInsertRep.insertstatus().find("[INFO]"), std::string::npos);
+
+    XStore_Proto::RemoveDBFiles_REQ RemoveReq;
+    RemoveReq.add_filename("2016.XSTORE");
+    XStore_Proto::RemoveDBFiles_REP RemoveRep = Store.RemoveDBFiles(&RemoveReq, "TESTDB");
+    ASSERT_NE(RemoveRep.removestatus(0).find("[INFO]"), std::string::npos);
+
+    XStore_Proto::UnaryQuery_REP StaleCheck;
+    Store.UnaryQuery(TS_2016_MID, "TESTDB", &StaleCheck);
+    EXPECT_EQ(StaleCheck.data().fielddata_size(), 0) << "found data through a stale mapping of the removed file";
+
+    XStore_Proto::UnaryInsert_REP SecondInsertRep;
+    Store.UnaryInsert(TS_2016_MID, MakeRow({FString("new-generation")}), "TESTDB", &SecondInsertRep);
+    ASSERT_NE(SecondInsertRep.insertstatus().find("[INFO]"), std::string::npos);
+
+    XStore_Proto::UnaryQuery_REP QueryRep;
+    Store.UnaryQuery(TS_2016_MID, "TESTDB", &QueryRep);
+    ASSERT_EQ(QueryRep.data().fielddata_size(), 1);
+    EXPECT_EQ(QueryRep.data().fielddata(0).stringdata(), "new-generation");
 }
 
 // ---------------------------------------------------------------------
@@ -1693,6 +1789,52 @@ TEST_F(XStoreTest, UnaryBatchAndRangeInsertQueryShareSameCachedMappingWithinAYea
 }
 
 // ---------------------------------------------------------------------
+// Mmap LRU cache -- GetOrMapFile caches PROT_WRITE mappings capped at
+// XStore::MmapCacheCap (256, see include/XStore/XStore.h); Unary/Batch/Range
+// insert+query all share it (confirmed above).
+// ---------------------------------------------------------------------
+
+TEST_F(XStoreTest, GetOrMapFileEvictsBeyondCapAndEvictedFilesStillReadCorrectly) {
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 8);
+
+    constexpr int KYearCount = 300;  // > MmapCacheCap (256) -- forces eviction
+    std::vector<unsigned long long> Timestamps;
+    Timestamps.reserve(KYearCount);
+
+    for (int i = 0; i < KYearCount; i++) {
+        int Year = 1700 + i;  // distinct year per iteration -> distinct .XSTORE file per insert
+        struct tm YearMid{};
+        YearMid.tm_year = Year - 1900;
+        YearMid.tm_mon = 6;  // July -- far from any year boundary
+        YearMid.tm_mday = 1;
+        YearMid.tm_hour = 12;
+        unsigned long long Ts = static_cast<unsigned long long>(timegm(&YearMid));
+        Timestamps.push_back(Ts);
+
+        XStore_Proto::UnaryInsert_REP InsertRep;
+        Store.UnaryInsert(Ts, MakeRow({FInt32(i)}), "TESTDB", &InsertRep);
+        ASSERT_NE(InsertRep.insertstatus().find("[INFO]"), std::string::npos) << "i=" << i;
+    }
+
+    // Cache must never grow past its cap despite KYearCount distinct files
+    // having been mapped over the course of the loop above.
+    EXPECT_LE(XStore::MmapLru.size(), XStore::MmapCacheCap);
+    EXPECT_EQ(XStore::MmapLru.size(), XStore::MmapIndex.size());
+
+    // Read every point back, including the ones whose mapping must have been
+    // evicted (and therefore has to be transparently re-created by
+    // GetOrMapFile on this read) -- correctness must survive eviction+remap,
+    // not just hold for whatever's still in the originally-cached tail.
+    for (int i = 0; i < KYearCount; i++) {
+        XStore_Proto::UnaryQuery_REP QueryRep;
+        Store.UnaryQuery(Timestamps[i], "TESTDB", &QueryRep);
+        ASSERT_EQ(QueryRep.data().fielddata_size(), 1) << "i=" << i;
+        EXPECT_EQ(QueryRep.data().fielddata(0).int32data(), i) << "i=" << i;
+    }
+}
+
+// ---------------------------------------------------------------------
 // Aggregates -- Min/Max/Sum/Avg, happy path over a contiguous, fully
 // populated numeric column
 // ---------------------------------------------------------------------
@@ -1745,6 +1887,71 @@ TEST_F(XStoreTest, MinAggregateColumnIndexOutOfRangeReturnsNoValidData) {
     EXPECT_EQ(MinRep.opstatus(), "ERROR: No valid data found");
 }
 
+// Min/Max/Sum/Avg all gate on GetOrLoadCfg the same way every insert/query
+// path does, but unlike those paths (each covered by its own *OnMissingDB*
+// test above) none of the four aggregates had a missing-DB regression test.
+TEST_F(XStoreTest, MinAggregateOnMissingDBReturnsError) {
+    XStore Store;
+    XStore_Proto::Min_REP MinRep;
+    Store.MinAggregate(TS_2016_MID, TS_2016_MID, "NOPE", 0, &MinRep);
+    EXPECT_EQ(MinRep.opstatus(), "[ERROR] [MIN AGGREGATE] [DB: NOPE] - NOPE.CFG does not exist");
+}
+
+TEST_F(XStoreTest, MaxAggregateOnMissingDBReturnsError) {
+    XStore Store;
+    XStore_Proto::Max_REP MaxRep;
+    Store.MaxAggregate(TS_2016_MID, TS_2016_MID, "NOPE", 0, &MaxRep);
+    EXPECT_EQ(MaxRep.opstatus(), "[ERROR] [MAX AGGREGATE] [DB: NOPE] - NOPE.CFG does not exist");
+}
+
+TEST_F(XStoreTest, SumAggregateOnMissingDBReturnsError) {
+    XStore Store;
+    XStore_Proto::Sum_REP SumRep;
+    Store.SumAggregate(TS_2016_MID, TS_2016_MID, "NOPE", 0, &SumRep);
+    EXPECT_EQ(SumRep.opstatus(), "[ERROR] [SUM AGGREGATE] [DB: NOPE] - NOPE.CFG does not exist");
+}
+
+TEST_F(XStoreTest, AvgAggregateOnMissingDBReturnsError) {
+    XStore Store;
+    XStore_Proto::Avg_REP AvgRep;
+    Store.AvgAggregate(TS_2016_MID, TS_2016_MID, "NOPE", 0, &AvgRep);
+    EXPECT_EQ(AvgRep.opstatus(), "[ERROR] [AVG AGGREGATE] [DB: NOPE] - NOPE.CFG does not exist");
+}
+
+// All four aggregates gate on startEpochT > endEpochT the same way, right
+// after the GetOrLoadCfg check above -- covered for none of them until now.
+TEST_F(XStoreTest, MinAggregateRejectsStartAfterEnd) {
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore_Proto::Min_REP MinRep;
+    Store.MinAggregate(TS_2016_MID + 1, TS_2016_MID, "TESTDB", 0, &MinRep);
+    EXPECT_EQ(MinRep.opstatus(), "[ERROR] [MIN AGGREGATE] [DB: TESTDB] - Target end time must be after start time");
+}
+
+TEST_F(XStoreTest, MaxAggregateRejectsStartAfterEnd) {
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore_Proto::Max_REP MaxRep;
+    Store.MaxAggregate(TS_2016_MID + 1, TS_2016_MID, "TESTDB", 0, &MaxRep);
+    EXPECT_EQ(MaxRep.opstatus(), "[ERROR] [MAX AGGREGATE] [DB: TESTDB] - Target end time must be after start time");
+}
+
+TEST_F(XStoreTest, SumAggregateRejectsStartAfterEnd) {
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore_Proto::Sum_REP SumRep;
+    Store.SumAggregate(TS_2016_MID + 1, TS_2016_MID, "TESTDB", 0, &SumRep);
+    EXPECT_EQ(SumRep.opstatus(), "[ERROR] [SUM AGGREGATE] [DB: TESTDB] - Target end time must be after start time");
+}
+
+TEST_F(XStoreTest, AvgAggregateRejectsStartAfterEnd) {
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore_Proto::Avg_REP AvgRep;
+    Store.AvgAggregate(TS_2016_MID + 1, TS_2016_MID, "TESTDB", 0, &AvgRep);
+    EXPECT_EQ(AvgRep.opstatus(), "[ERROR] [AVG AGGREGATE] [DB: TESTDB] - Target end time must be after start time");
+}
+
 TEST_F(XStoreTest, SumAndAvgAggregateWithRemainderDivisor) {
     XStore Store;
     Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
@@ -1795,6 +2002,125 @@ TEST_F(XStoreTest, AggregateOverMultiYearRangeSpansAllYears) {
     XStore_Proto::Sum_REP SumRep;
     Store.SumAggregate(TS_2016_LAST, TS_2017_FIRST, "TESTDB", 0, &SumRep);
     EXPECT_DOUBLE_EQ(SumRep.opresult(), -5.0);
+
+    XStore_Proto::Avg_REP AvgRep;
+    Store.AvgAggregate(TS_2016_LAST, TS_2017_FIRST, "TESTDB", 0, &AvgRep);
+    EXPECT_DOUBLE_EQ(AvgRep.opresult(), -2.5);
+}
+
+TEST_F(XStoreTest, AggregateOverRangeWithMissingMiddleYearFileSkipsItAndReflectsRemainingYears) {
+    // Same "warn and continue past a missing year file" shape as
+    // RangeQuery/RangeDelete's analogous multi-year tests, but for the
+    // aggregate kernels -- 1998, 1999 (missing), 2000, exercising the
+    // multi-year while loop's missing-file branch for both
+    // ProcessFileRangeSelect (Min, via MinAggregate) and
+    // ProcessFileRangeAccumulate (Sum, via SumAggregate).
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+
+    constexpr unsigned long long TS_1998_LAST = 915148799ULL;       // 1998-12-31 23:59:59 UTC
+    constexpr unsigned long long TS_2000_FIRST_PLUS = 946684810ULL; // 2000-01-01 00:00:10 UTC
+
+    XStore_Proto::UnaryInsert_REP InsertRep;
+    Store.UnaryInsert(TS_1998_LAST, MakeRow({FDouble(5.0)}), "TESTDB", &InsertRep);
+    Store.UnaryInsert(TS_2000_FIRST_PLUS, MakeRow({FDouble(-10.0)}), "TESTDB", &InsertRep);
+    // Deliberately nothing inserted for 1999 -> 1999.XSTORE never gets created.
+
+    XStore_Proto::Min_REP MinRep;
+    Store.MinAggregate(TS_1998_LAST, TS_2000_FIRST_PLUS, "TESTDB", 0, &MinRep);
+    EXPECT_EQ(MinRep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(MinRep.opresult().doubledata(), -10.0);
+
+    XStore_Proto::Sum_REP SumRep;
+    Store.SumAggregate(TS_1998_LAST, TS_2000_FIRST_PLUS, "TESTDB", 0, &SumRep);
+    EXPECT_DOUBLE_EQ(SumRep.opresult(), -5.0);
+}
+
+TEST_F(XStoreTest, MinMaxAggregateTieBreakReturnsFirstEncounteredRow) {
+    // ProcessFileRangeSelect only replaces the running best on a *strict*
+    // Better(candidate, best) -- ties never replace -- so among several rows
+    // sharing the winning value, the first one scanned (earliest timestamp)
+    // must be the one returned. Column 1 carries a per-row marker so the
+    // winning row's identity (not just its column-0 value) can be checked.
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+
+    XStore_Proto::RangeInsert_REQ InsertReq;
+    InsertReq.set_dbname("TESTDB");
+    auto AddRow = [&](int i, double val, const std::string &marker) {
+        XStore_Proto::RangeInsert_DATA *Entry = InsertReq.add_rangeinsert_data();
+        Entry->set_timestamp(TS_2009_MID + i);
+        *Entry->mutable_data() = MakeRow({FDouble(val), FString(marker)});
+    };
+    AddRow(0, 5.0, "first-min");
+    AddRow(1, 1.0, "first-tie");   // ties for MIN
+    AddRow(2, 1.0, "second-tie");  // same MIN value, must lose to the earlier row
+    AddRow(3, 5.0, "second-max");  // ties for MAX with row 0
+
+    XStore_Proto::RangeInsert_REP InsertRep;
+    Store.RangeInsert(&InsertReq, &InsertRep);
+
+    XStore_Proto::Min_REP MinRep;
+    Store.MinAggregate(TS_2009_MID, TS_2009_MID + 3, "TESTDB", 0, &MinRep);
+    ASSERT_EQ(MinRep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(MinRep.opresult().doubledata(), 1.0);
+
+    XStore_Proto::Max_REP MaxRep;
+    Store.MaxAggregate(TS_2009_MID, TS_2009_MID + 3, "TESTDB", 0, &MaxRep);
+    ASSERT_EQ(MaxRep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(MaxRep.opresult().doubledata(), 5.0);
+}
+
+TEST_F(XStoreTest, AggregateSkipsUnsetFieldData) {
+    // Distinct branch from AggregateSkipsNonNumericColumnValues below: an
+    // actually-unset FData (oneOfData_case() == 0) fails the kernels'
+    // "case() > 0" check, not the "case() <= 12" one.
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+
+    XStore_Proto::RangeInsert_REQ InsertReq;
+    InsertReq.set_dbname("TESTDB");
+    auto AddRow = [&](int i, const XStore_Proto::FData &f) {
+        XStore_Proto::RangeInsert_DATA *Entry = InsertReq.add_rangeinsert_data();
+        Entry->set_timestamp(TS_2031_MID + i);
+        *Entry->mutable_data() = MakeRow({f});
+    };
+    AddRow(0, FDouble(3.0));
+    AddRow(1, XStore_Proto::FData());  // unset -- must not be treated as 0.0
+    AddRow(2, FDouble(7.0));
+
+    XStore_Proto::RangeInsert_REP InsertRep;
+    Store.RangeInsert(&InsertReq, &InsertRep);
+
+    XStore_Proto::Sum_REP SumRep;
+    Store.SumAggregate(TS_2031_MID, TS_2031_MID + 2, "TESTDB", 0, &SumRep);
+    EXPECT_DOUBLE_EQ(SumRep.opresult(), 10.0) << "unset field must not contribute (not even as 0.0)";
+
+    XStore_Proto::Avg_REP AvgRep;
+    Store.AvgAggregate(TS_2031_MID, TS_2031_MID + 2, "TESTDB", 0, &AvgRep);
+    EXPECT_DOUBLE_EQ(AvgRep.opresult(), 5.0) << "divisor must be 2 (valid rows only), not 3";
+}
+
+TEST_F(XStoreTest, AggregateTreatsExplicitlyEmptyRowSameAsHole) {
+    // The aggregate kernels' hole check is just RowPtr[0] == 0 (the first
+    // serialized byte) -- normally safe, since FData's first field always
+    // serializes with a non-zero protobuf tag byte. But a row inserted with
+    // *zero* fielddata entries serializes to zero bytes, so its slot stays
+    // all-zero (indistinguishable from a never-written hole). Confirms that
+    // degenerate case doesn't crash and is simply excluded, same as a real
+    // hole would be.
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+
+    XStore_Proto::UnaryInsert_REP InsertRep;
+    Store.UnaryInsert(TS_2016_MID, MakeRow({FDouble(4.0)}), "TESTDB", &InsertRep);
+    Store.UnaryInsert(TS_2016_MID + 1, MakeRow({}), "TESTDB", &InsertRep);  // explicitly zero columns
+    Store.UnaryInsert(TS_2016_MID + 2, MakeRow({FDouble(6.0)}), "TESTDB", &InsertRep);
+
+    XStore_Proto::Sum_REP SumRep;
+    Store.SumAggregate(TS_2016_MID, TS_2016_MID + 2, "TESTDB", 0, &SumRep);
+    EXPECT_EQ(SumRep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(SumRep.opresult(), 10.0) << "the zero-column row must not contribute (and must not crash the scan)";
 }
 
 TEST_F(XStoreTest, AggregateSkipsNonNumericColumnValues) {
@@ -1886,6 +2212,45 @@ TEST_F(XStoreTest, ConcurrentSumAggregateDuringConcurrentInsertsDoesNotCrashOrTe
             Store.SumAggregate(TS_2024_MID, TS_2024_MID + KWidth - 1, "TESTDB", 0, &Rep);
             // No crash/hang is the primary assertion; if data is present at
             // all it must have parsed as a real numeric sum, never garbage.
+            EXPECT_TRUE(Rep.opstatus() == "SUCCESS" || Rep.opstatus() == "ERROR: No valid data found");
+        }
+    };
+
+    std::thread W(Writer);
+    std::thread A(Aggregator);
+    W.join();
+    A.join();
+}
+
+// Sum/Avg go through ProcessFileRangeAccumulate (covered under concurrent
+// writes above); Min/Max go through the separate ProcessFileRangeSelect
+// template instead -- that path's concurrent-read safety was never
+// exercised on its own.
+TEST_F(XStoreTest, ConcurrentMinAggregateDuringConcurrentInsertsDoesNotCrashOrTear) {
+    XStore SeedStore;
+    SeedStore.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    XStore_Proto::UnaryInsert_REP SeedRep;
+    SeedStore.UnaryInsert(TS_2024_MID, MakeRow({FDouble(1.0)}), "TESTDB", &SeedRep);  // pre-allocate the year file
+
+    constexpr int KIterations = 200;
+    constexpr int KWidth = 50;
+
+    auto Writer = [&]() {
+        XStore Store;
+        for (int i = 0; i < KIterations; i++) {
+            for (int j = 0; j < KWidth; j++) {
+                XStore_Proto::UnaryInsert_REP Rep;
+                Store.UnaryInsert(TS_2024_MID + j, MakeRow({FDouble((double)(i + j))}), "TESTDB", &Rep);
+            }
+        }
+    };
+    auto Aggregator = [&]() {
+        XStore Store;
+        for (int i = 0; i < KIterations; i++) {
+            XStore_Proto::Min_REP Rep;
+            Store.MinAggregate(TS_2024_MID, TS_2024_MID + KWidth - 1, "TESTDB", 0, &Rep);
+            // No crash/hang is the primary assertion; if data is present at
+            // all it must have parsed as a real numeric value, never garbage.
             EXPECT_TRUE(Rep.opstatus() == "SUCCESS" || Rep.opstatus() == "ERROR: No valid data found");
         }
     };

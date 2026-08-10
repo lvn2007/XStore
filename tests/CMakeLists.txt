@@ -56,7 +56,32 @@ endif()
 gtest_discover_tests(xstore_network_tests)
 
 add_custom_command(TARGET xstore_network_tests POST_BUILD
-        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "^XStoreZmqNetworkTest\\."
+        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "^XStoreZmqNetworkTest\\.\\|^XStoreZmqConcurrentTest\\."
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         COMMENT "Running xstore_network_tests via ctest"
 )
+
+# xstore_perf_tests: throughput/latency micro-benchmarks for Unary/Batch
+# Insert+Query (see tests/perf/XStorePerfTest.cpp for why these report
+# numbers instead of asserting hard thresholds). Deliberately NOT wired into
+# a POST_BUILD ctest run like xstore_tests/xstore_network_tests above --
+# unlike those, this suite isn't meant to gate every build, only to be run
+# on demand (`ctest -R XStorePerfTest` or the binary directly) when doing
+# perf work.
+add_executable(xstore_perf_tests
+        perf/XStorePerfTest.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore.cpp
+        ${CMAKE_SOURCE_DIR}/src/DataStructs/DataStruct.cpp
+        ${CMAKE_SOURCE_DIR}/src/DataStructs/FileStruct.cpp
+        ${CMAKE_SOURCE_DIR}/src/DataStructs/ConfigStruct.cpp
+        ${CMAKE_SOURCE_DIR}/src/DataStructs/TimeStruct.cpp
+        ${CMAKE_SOURCE_DIR}/src/DataStructs/FileRangeLock.cpp
+        ${PROTO_SRCS} ${PROTO_HDRS}
+)
+
+target_link_libraries(xstore_perf_tests PRIVATE GTest::gtest_main protobuf::libprotobuf Threads::Threads "stdc++fs")
+if(TARGET absl::log_internal_check_op)
+    target_link_libraries(xstore_perf_tests PRIVATE absl::log_internal_check_op)
+endif()
+
+gtest_discover_tests(xstore_perf_tests)

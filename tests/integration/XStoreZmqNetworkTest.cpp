@@ -11,10 +11,12 @@
 // socket/thread on process exit. Only the on-disk scratch directory is
 // cleaned up in TearDownTestSuite().
 #include <gtest/gtest.h>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <thread>
 #include <unistd.h>
+#include <vector>
 
 #include "include/Networking/ZMQ_Server.h"
 #include "XStoreTestSupport.h"
@@ -339,4 +341,133 @@ TEST_F(XStoreZmqNetworkTest, RemoveDBFilesThenRemoveDBOverWire) {
     RemoveDbReq.set_dbname("ZMQ_REMOVE_DB");
     auto RemoveDbRep = SendRequest<XStore_Proto::RemoveDB_REQ, XStore_Proto::RemoveDB_REP>(RemoveDbReq);
     EXPECT_EQ(RemoveDbRep.removestatus(), "[INFO] [REMOVE DB] [DB: ZMQ_REMOVE_DB] - Removed DB with name: ZMQ_REMOVE_DB");
+}
+
+// ---------------------------------------------------------------------
+// Multi-worker concurrency -- XStoreZmqNetworkTest above always runs a
+// single-worker server against one sequential REQ client, so it never
+// exercises ZMQ_Server's actual thread pool (each worker owns its own
+// XStore instance sharing XStore's static CfgMap/MmapLru, per
+// XStoreTest's Concurrent* tests) or multiple simultaneous clients
+// contending on the ROUTER/DEALER proxy. This fixture spins up its own
+// multi-worker server on a separate port specifically to cover that gap.
+// ---------------------------------------------------------------------
+
+class XStoreZmqConcurrentTest : public ::testing::Test {
+ protected:
+  static ScratchDir *Scratch;
+  static std::string ServerAddr;
+
+  static void SetUpTestSuite() {
+      // Leaked deliberately, same rationale as XStoreZmqNetworkTest.
+      Scratch = new ScratchDir("xstore_zmq_concurrent_test");
+
+      int Port = 26500 + static_cast<int>(getpid() % 4000);
+      ServerAddr = "tcp://127.0.0.1:" + std::to_string(Port);
+
+      auto *Server = new ZMQ_Server(4);  // multi-worker pool, unlike XStoreZmqNetworkTest's single worker
+      std::thread ServerThread([Server, Port]() {
+          Server->StartServer("127.0.0.1", std::to_string(Port));
+      });
+      ServerThread.detach();
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  }
+
+  static void TearDownTestSuite() {
+      delete Scratch;  // server thread pool left dangling, harmless at process exit
+  }
+
+  // Each client thread below owns its own context/socket -- ZMQ sockets
+  // aren't safe to share across threads.
+  template <typename ReqT, typename RepT>
+  static RepT SendRequest(zmq::socket_t &socket, const ReqT &req) {
+      std::string Payload = req.SerializeAsString();
+      auto SendResult = socket.send(zmq::buffer(Payload), zmq::send_flags::none);
+      RepT Rep;
+      if (!SendResult) {
+          ADD_FAILURE() << "failed to send request over ZMQ";
+          return Rep;
+      }
+      zmq::message_t Reply;
+      auto RecvResult = socket.recv(Reply, zmq::recv_flags::none);
+      if (!RecvResult) {
+          ADD_FAILURE() << "no reply received from ZMQ server within timeout";
+          return Rep;
+      }
+      Rep.ParseFromArray(Reply.data(), Reply.size());
+      return Rep;
+  }
+
+  static zmq::socket_t MakeClientSocket(zmq::context_t &ctx) {
+      zmq::socket_t Socket(ctx, zmq::socket_type::req);
+      Socket.set(zmq::sockopt::rcvtimeo, 5000);
+      Socket.set(zmq::sockopt::linger, 0);
+      Socket.connect(ServerAddr);
+      return Socket;
+  }
+};
+
+ScratchDir *XStoreZmqConcurrentTest::Scratch = nullptr;
+std::string XStoreZmqConcurrentTest::ServerAddr;
+
+TEST_F(XStoreZmqConcurrentTest, ConcurrentClientsUnaryInsertAndQueryOverWireDoNotCorruptData) {
+    zmq::context_t SetupCtx(1);
+    zmq::socket_t SetupSocket = MakeClientSocket(SetupCtx);
+
+    XStore_Proto::CreateDB_REQ CreateReq;
+    CreateReq.set_rtype(XStore_Proto::CREATEDB);
+    CreateReq.set_dbname("ZMQ_CONCURRENT_DB");
+    CreateReq.set_timeresolution(XStore_Proto::SECOND);
+    CreateReq.set_rowlength(128);
+    auto CreateRep = SendRequest<XStore_Proto::CreateDB_REQ, XStore_Proto::CreateDB_REP>(SetupSocket, CreateReq);
+    ASSERT_NE(CreateRep.createdbstatus().find("[INFO]"), std::string::npos) << CreateRep.createdbstatus();
+
+    constexpr int KClients = 8;
+    constexpr int KPerClient = 50;
+    std::vector<std::thread> Clients;
+    std::atomic<int> FailureCount{0};
+
+    for (int c = 0; c < KClients; c++) {
+        Clients.emplace_back([c, &FailureCount]() {
+            zmq::context_t Ctx(1);
+            zmq::socket_t Socket = MakeClientSocket(Ctx);
+
+            // Each client writes to its own disjoint offset range, same year
+            // -- so a failure can only come from cross-client interference on
+            // the server side (shared XStore statics / mmap cache), not from
+            // two clients legitimately racing the same row.
+            const unsigned long long Base = TS_2005_MID + (unsigned long long)c * 10000;
+            for (int i = 0; i < KPerClient; i++) {
+                unsigned long long Ts = Base + i;
+                int64_t Expected = (int64_t)c * 1'000'000LL + i;
+
+                XStore_Proto::UnaryInsert_REQ InsertReq;
+                InsertReq.set_rtype(XStore_Proto::UNARYINSERT);
+                InsertReq.set_dbname("ZMQ_CONCURRENT_DB");
+                InsertReq.set_timestamp(Ts);
+                *InsertReq.mutable_data() = MakeRow({FInt64(Expected)});
+                auto InsertRep = SendRequest<XStore_Proto::UnaryInsert_REQ, XStore_Proto::UnaryInsert_REP>(Socket, InsertReq);
+                if (InsertRep.insertstatus().find("[INFO]") == std::string::npos) {
+                    ADD_FAILURE() << "client " << c << " i=" << i << " insert failed: " << InsertRep.insertstatus();
+                    FailureCount++;
+                    continue;
+                }
+
+                XStore_Proto::UnaryQuery_REQ QueryReq;
+                QueryReq.set_rtype(XStore_Proto::UNARYQUERY);
+                QueryReq.set_dbname("ZMQ_CONCURRENT_DB");
+                QueryReq.set_timestamp(Ts);
+                auto QueryRep = SendRequest<XStore_Proto::UnaryQuery_REQ, XStore_Proto::UnaryQuery_REP>(Socket, QueryReq);
+                if (QueryRep.data().fielddata_size() != 1 || QueryRep.data().fielddata(0).int64data() != Expected) {
+                    ADD_FAILURE() << "client " << c << " i=" << i << " read back wrong/missing data";
+                    FailureCount++;
+                }
+            }
+        });
+    }
+    for (auto &T : Clients) T.join();
+
+    EXPECT_EQ(FailureCount.load(), 0)
+        << "one or more concurrent clients saw a failed/incorrect request through the multi-worker server";
 }
