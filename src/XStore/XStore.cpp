@@ -604,7 +604,7 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
 }
 
 // BATCH QUERY
-void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Proto::BatchQuery_REP *returnData, bool SortTime) {
+void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Proto::BatchQuery_REP *returnData) {
     // Ensure dbName string is all capitalized
     std::string DbName = protoFromClient->dbname();
     ToUpperCase(DbName.begin(), DbName.end());
@@ -635,16 +635,6 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
         returnData->set_querystatus(ErrMsg);
         spdlog::error(ErrMsg.substr(ERROR_LEN));
         return;
-    }
-
-    // Assuming incoming batch query is unsorted
-    //  -> Ascending sort
-    if (SortTime)
-    {
-        std::sort(std::execution::par_unseq, protoFromClient->mutable_timestamp()->begin(), protoFromClient->mutable_timestamp()->end(),
-                      [](const unsigned long long int& a, const unsigned long long int& b) {
-                        return a < b;
-        });
     }
 
     // Organize incoming batch query into map
@@ -691,9 +681,9 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
 
         // Single lock spanning this year-group's min-to-max offset span
         // instead of one lock per row. Found via a scan (not just
-        // front()/back()) since Indices is only guaranteed sorted when
-        // SortTime is true -- BatchInsert always sorts, BatchQuery doesn't
-        // have to.
+        // front()/back()) since Indices is never guaranteed sorted --
+        // BatchQuery groups by year in request order, unlike BatchInsert
+        // which always sorts first.
         auto [MinIt, MaxIt] = std::minmax_element(Indices.begin(), Indices.end(),
             [&](unsigned long long int a, unsigned long long int b) {
                 return protoFromClient->timestamp(a) < protoFromClient->timestamp(b);

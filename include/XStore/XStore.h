@@ -98,7 +98,7 @@ class XStore {
         void BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_Proto::BatchInsert_REP *returnData);
 
         // BATCH QUERY
-        void BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Proto::BatchQuery_REP *returnData, bool SortTime=true);
+        void BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Proto::BatchQuery_REP *returnData);
 
         // BATCH DELETE
         XStore_Proto::BatchDelete_REP BatchDelete(XStore_Proto::BatchDelete_REQ *protoFromClient);

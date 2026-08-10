@@ -620,7 +620,8 @@ TEST_F(XStoreTest, BatchInsertThenBatchQueryExactTimestampsRoundTrip) {
 
     XStore_Proto::BatchQuery_REQ QueryReq;
     QueryReq.set_dbname("TESTDB");
-    // Deliberately shuffled/unsorted input -- BatchQuery must sort internally.
+    // Deliberately shuffled/unsorted input -- BatchQuery groups by year
+    // regardless of input order, so this must round-trip either way.
     for (unsigned long long ts : {TS_2016_MID, TS_1998_MID, TS_2031_MID, TS_2003_MID, TS_2009_MID}) {
         QueryReq.add_timestamp(ts);
     }
@@ -1120,15 +1121,15 @@ TEST_F(XStoreTest, BatchQueryRejectsRequestOver2GBLimit) {
     EXPECT_EQ(QueryRep.queryresponse_size(), 0);
 }
 
-TEST_F(XStoreTest, BatchQuerySortTimeFalseWithUnsortedTimestampsRoundTrips) {
+TEST_F(XStoreTest, BatchQueryUnsortedTimestampsRoundTrips) {
     XStore Store;
     Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
     // All in the same year, deliberately far apart and inserted/queried in a
-    // non-ascending order. With SortTime=false, BatchQuery's per-year index
-    // vector is NOT guaranteed sorted, so it can't size its single coalesced
-    // lock off front()/back() the way BatchInsert (which always sorts) does
-    // -- exercises the min/max scan it uses instead.
+    // non-ascending order. BatchQuery's per-year index vector is NOT
+    // guaranteed sorted, so it can't size its single coalesced lock off
+    // front()/back() the way BatchInsert (which always sorts) does --
+    // exercises the min/max scan it uses instead.
     std::map<unsigned long long, std::string> Expected = {
         {TS_2016_MID + 50000, "mid"},
         {TS_2016_MID, "low"},
@@ -1153,7 +1154,7 @@ TEST_F(XStoreTest, BatchQuerySortTimeFalseWithUnsortedTimestampsRoundTrips) {
     }
 
     XStore_Proto::BatchQuery_REP QueryRep;
-    Store.BatchQuery(&QueryReq, &QueryRep, /*SortTime=*/false);
+    Store.BatchQuery(&QueryReq, &QueryRep);
 
     ASSERT_EQ(QueryRep.queryresponse_size(), 4);
     for (int i = 0; i < QueryRep.queryresponse_size(); i++) {
