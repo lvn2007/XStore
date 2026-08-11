@@ -32,6 +32,65 @@ constexpr unsigned long long TS_2012_MID = 1343995200ULL;  // 2012-08-03 12:00:0
 constexpr unsigned long long TS_2020_MID = 1592222400ULL;  // 2020-06-15 12:00:00 UTC
 constexpr unsigned long long TS_2028_MID = 1856260800ULL;  // 2028-10-27 12:00:00 UTC
 
+// Wraps a payload into the Request envelope ZMQ_Server now expects on the
+// wire (one oneof case per request type, see XStore.proto) -- overload
+// resolution picks the right oneof setter from the argument type.
+XStore_Proto::Request Wrap(const XStore_Proto::ReqCMD &Req) {
+    XStore_Proto::Request W;
+    *W.mutable_info() = Req;
+    return W;
+}
+XStore_Proto::Request Wrap(const XStore_Proto::CreateDB_REQ &Req) {
+    XStore_Proto::Request W;
+    *W.mutable_createdb() = Req;
+    return W;
+}
+XStore_Proto::Request Wrap(const XStore_Proto::RemoveDB_REQ &Req) {
+    XStore_Proto::Request W;
+    *W.mutable_removedb() = Req;
+    return W;
+}
+XStore_Proto::Request Wrap(const XStore_Proto::RemoveDBFiles_REQ &Req) {
+    XStore_Proto::Request W;
+    *W.mutable_removedbfiles() = Req;
+    return W;
+}
+XStore_Proto::Request Wrap(const XStore_Proto::UnaryInsert_REQ &Req) {
+    XStore_Proto::Request W;
+    *W.mutable_unaryinsert() = Req;
+    return W;
+}
+XStore_Proto::Request Wrap(const XStore_Proto::UnaryQuery_REQ &Req) {
+    XStore_Proto::Request W;
+    *W.mutable_unaryquery() = Req;
+    return W;
+}
+XStore_Proto::Request Wrap(const XStore_Proto::UnaryDelete_REQ &Req) {
+    XStore_Proto::Request W;
+    *W.mutable_unarydelete() = Req;
+    return W;
+}
+XStore_Proto::Request Wrap(const XStore_Proto::BatchInsert_REQ &Req) {
+    XStore_Proto::Request W;
+    *W.mutable_batchinsert() = Req;
+    return W;
+}
+XStore_Proto::Request Wrap(const XStore_Proto::BatchQuery_REQ &Req) {
+    XStore_Proto::Request W;
+    *W.mutable_batchquery() = Req;
+    return W;
+}
+XStore_Proto::Request Wrap(const XStore_Proto::RangeInsert_REQ &Req) {
+    XStore_Proto::Request W;
+    *W.mutable_rangeinsert() = Req;
+    return W;
+}
+XStore_Proto::Request Wrap(const XStore_Proto::RangeQuery_REQ &Req) {
+    XStore_Proto::Request W;
+    *W.mutable_rangequery() = Req;
+    return W;
+}
+
 }  // namespace
 
 class XStoreZmqNetworkTest : public ::testing::Test {
@@ -74,8 +133,8 @@ class XStoreZmqNetworkTest : public ::testing::Test {
       delete Scratch;  // removes the scratch DataStore dir; server thread is left dangling, harmless at process exit
   }
 
-  template <typename ReqT, typename RepT>
-  RepT SendRequest(const ReqT &req) {
+  template <typename RepT>
+  RepT SendRequest(const XStore_Proto::Request &req) {
       std::string Payload = req.SerializeAsString();
       auto SendResult = ClientSocket->send(zmq::buffer(Payload), zmq::send_flags::none);
       RepT Rep;
@@ -108,12 +167,12 @@ TEST_F(XStoreZmqNetworkTest, InfoQueryOverWireReflectsCreatedDatabase) {
     CreateReq.set_dbname("ZMQ_INFO_DB");
     CreateReq.set_timeresolution(XStore_Proto::SECOND);
     CreateReq.set_rowlength(128);
-    auto CreateRep = SendRequest<XStore_Proto::CreateDB_REQ, XStore_Proto::CreateDB_REP>(CreateReq);
+    auto CreateRep = SendRequest<XStore_Proto::CreateDB_REP>(Wrap(CreateReq));
     EXPECT_EQ(CreateRep.createdbstatus(), "[INFO] [CREATE DB] [DB: ZMQ_INFO_DB] - Created DB");
 
     XStore_Proto::ReqCMD InfoReq;
     InfoReq.set_rtype(XStore_Proto::INFO);
-    auto InfoRep = SendRequest<XStore_Proto::ReqCMD, XStore_Proto::SysInfo_REP>(InfoReq);
+    auto InfoRep = SendRequest<XStore_Proto::SysInfo_REP>(Wrap(InfoReq));
 
     bool Found = false;
     for (int i = 0; i < InfoRep.dbinfo_size(); i++) {
@@ -128,9 +187,9 @@ TEST_F(XStoreZmqNetworkTest, CreateDBOverWireRejectsDuplicateName) {
     CreateReq.set_dbname("ZMQ_DUP_DB");
     CreateReq.set_timeresolution(XStore_Proto::SECOND);
     CreateReq.set_rowlength(128);
-    SendRequest<XStore_Proto::CreateDB_REQ, XStore_Proto::CreateDB_REP>(CreateReq);
+    SendRequest<XStore_Proto::CreateDB_REP>(Wrap(CreateReq));
 
-    auto SecondRep = SendRequest<XStore_Proto::CreateDB_REQ, XStore_Proto::CreateDB_REP>(CreateReq);
+    auto SecondRep = SendRequest<XStore_Proto::CreateDB_REP>(Wrap(CreateReq));
     EXPECT_EQ(SecondRep.createdbstatus(), "[ERROR] [CREATE DB] [DB: ZMQ_DUP_DB] - Already existed");
 }
 
@@ -144,21 +203,21 @@ TEST_F(XStoreZmqNetworkTest, UnaryInsertThenUnaryQueryRoundTripsDataOverWire) {
     CreateReq.set_dbname("ZMQ_UNARY_DB");
     CreateReq.set_timeresolution(XStore_Proto::SECOND);
     CreateReq.set_rowlength(128);
-    SendRequest<XStore_Proto::CreateDB_REQ, XStore_Proto::CreateDB_REP>(CreateReq);
+    SendRequest<XStore_Proto::CreateDB_REP>(Wrap(CreateReq));
 
     XStore_Proto::UnaryInsert_REQ InsertReq;
     InsertReq.set_rtype(XStore_Proto::UNARYINSERT);
     InsertReq.set_dbname("ZMQ_UNARY_DB");
     InsertReq.set_timestamp(TS_2005_MID);
     *InsertReq.mutable_data() = MakeRow({FDouble(2.71828), FString("wire-data"), FBool(true)});
-    auto InsertRep = SendRequest<XStore_Proto::UnaryInsert_REQ, XStore_Proto::UnaryInsert_REP>(InsertReq);
+    auto InsertRep = SendRequest<XStore_Proto::UnaryInsert_REP>(Wrap(InsertReq));
     EXPECT_NE(InsertRep.insertstatus().find("[INFO]"), std::string::npos);
 
     XStore_Proto::UnaryQuery_REQ QueryReq;
     QueryReq.set_rtype(XStore_Proto::UNARYQUERY);
     QueryReq.set_dbname("ZMQ_UNARY_DB");
     QueryReq.set_timestamp(TS_2005_MID);
-    auto QueryRep = SendRequest<XStore_Proto::UnaryQuery_REQ, XStore_Proto::UnaryQuery_REP>(QueryReq);
+    auto QueryRep = SendRequest<XStore_Proto::UnaryQuery_REP>(Wrap(QueryReq));
 
     EXPECT_EQ(QueryRep.timestamp(), TS_2005_MID);
     ASSERT_EQ(QueryRep.data().fielddata_size(), 3);
@@ -172,7 +231,7 @@ TEST_F(XStoreZmqNetworkTest, UnaryQueryOverWireOnMissingDBReturnsError) {
     QueryReq.set_rtype(XStore_Proto::UNARYQUERY);
     QueryReq.set_dbname("ZMQ_NOPE_DB");
     QueryReq.set_timestamp(TS_2005_MID);
-    auto QueryRep = SendRequest<XStore_Proto::UnaryQuery_REQ, XStore_Proto::UnaryQuery_REP>(QueryReq);
+    auto QueryRep = SendRequest<XStore_Proto::UnaryQuery_REP>(Wrap(QueryReq));
     EXPECT_EQ(QueryRep.querystatus(), "[ERROR] [UNARY QUERY] [DB: ZMQ_NOPE_DB] - DB does not exist");
 }
 
@@ -182,27 +241,27 @@ TEST_F(XStoreZmqNetworkTest, UnaryDeleteOverWirePunchesHoleThenQueryReturnsEmpty
     CreateReq.set_dbname("ZMQ_DELETE_DB");
     CreateReq.set_timeresolution(XStore_Proto::SECOND);
     CreateReq.set_rowlength(128);
-    SendRequest<XStore_Proto::CreateDB_REQ, XStore_Proto::CreateDB_REP>(CreateReq);
+    SendRequest<XStore_Proto::CreateDB_REP>(Wrap(CreateReq));
 
     XStore_Proto::UnaryInsert_REQ InsertReq;
     InsertReq.set_rtype(XStore_Proto::UNARYINSERT);
     InsertReq.set_dbname("ZMQ_DELETE_DB");
     InsertReq.set_timestamp(TS_2012_MID);
     *InsertReq.mutable_data() = MakeRow({FString("to-be-deleted")});
-    SendRequest<XStore_Proto::UnaryInsert_REQ, XStore_Proto::UnaryInsert_REP>(InsertReq);
+    SendRequest<XStore_Proto::UnaryInsert_REP>(Wrap(InsertReq));
 
     XStore_Proto::UnaryDelete_REQ DeleteReq;
     DeleteReq.set_rtype(XStore_Proto::UNARYDELETE);
     DeleteReq.set_dbname("ZMQ_DELETE_DB");
     DeleteReq.set_timestamp(TS_2012_MID);
-    auto DeleteRep = SendRequest<XStore_Proto::UnaryDelete_REQ, XStore_Proto::UnaryDelete_REP>(DeleteReq);
+    auto DeleteRep = SendRequest<XStore_Proto::UnaryDelete_REP>(Wrap(DeleteReq));
     EXPECT_NE(DeleteRep.deletestatus().find("[INFO]"), std::string::npos);
 
     XStore_Proto::UnaryQuery_REQ QueryReq;
     QueryReq.set_rtype(XStore_Proto::UNARYQUERY);
     QueryReq.set_dbname("ZMQ_DELETE_DB");
     QueryReq.set_timestamp(TS_2012_MID);
-    auto QueryRep = SendRequest<XStore_Proto::UnaryQuery_REQ, XStore_Proto::UnaryQuery_REP>(QueryReq);
+    auto QueryRep = SendRequest<XStore_Proto::UnaryQuery_REP>(Wrap(QueryReq));
     EXPECT_EQ(QueryRep.data().fielddata_size(), 0);
 }
 
@@ -216,7 +275,7 @@ TEST_F(XStoreZmqNetworkTest, BatchInsertThenBatchQueryOverWireOmitsHoles) {
     CreateReq.set_dbname("ZMQ_BATCH_DB");
     CreateReq.set_timeresolution(XStore_Proto::SECOND);
     CreateReq.set_rowlength(128);
-    SendRequest<XStore_Proto::CreateDB_REQ, XStore_Proto::CreateDB_REP>(CreateReq);
+    SendRequest<XStore_Proto::CreateDB_REP>(Wrap(CreateReq));
 
     const unsigned long long Ts1 = TS_2012_MID;      // 1 column
     const unsigned long long Ts2 = TS_2020_MID;      // 2 columns, different year
@@ -234,7 +293,7 @@ TEST_F(XStoreZmqNetworkTest, BatchInsertThenBatchQueryOverWireOmitsHoles) {
     Entry2->set_timestamp(Ts2);
     *Entry2->mutable_data() = MakeRow({FUInt64(123456789ULL), FBytes("two-cols")});
 
-    auto InsertRep = SendRequest<XStore_Proto::BatchInsert_REQ, XStore_Proto::BatchInsert_REP>(InsertReq);
+    auto InsertRep = SendRequest<XStore_Proto::BatchInsert_REP>(Wrap(InsertReq));
     EXPECT_NE(InsertRep.insertstatus().find("Inserted 2 elements"), std::string::npos);
 
     XStore_Proto::BatchQuery_REQ QueryReq;
@@ -244,7 +303,7 @@ TEST_F(XStoreZmqNetworkTest, BatchInsertThenBatchQueryOverWireOmitsHoles) {
     QueryReq.add_timestamp(TsHole);
     QueryReq.add_timestamp(Ts2);
 
-    auto QueryRep = SendRequest<XStore_Proto::BatchQuery_REQ, XStore_Proto::BatchQuery_REP>(QueryReq);
+    auto QueryRep = SendRequest<XStore_Proto::BatchQuery_REP>(Wrap(QueryReq));
 
     ASSERT_EQ(QueryRep.queryresponse_size(), 2);
     std::map<unsigned long long, XStore_Proto::UnaryQuery_REP> ByTs;
@@ -267,7 +326,7 @@ TEST_F(XStoreZmqNetworkTest, BatchInsertOverWireToNonexistentDBReturnsError) {
     Entry->set_timestamp(TS_2012_MID);
     *Entry->mutable_data() = MakeRow({FDouble(1.0)});
 
-    auto InsertRep = SendRequest<XStore_Proto::BatchInsert_REQ, XStore_Proto::BatchInsert_REP>(InsertReq);
+    auto InsertRep = SendRequest<XStore_Proto::BatchInsert_REP>(Wrap(InsertReq));
     EXPECT_EQ(InsertRep.insertstatus(), "[ERROR] [BATCH INSERT] [DB: ZMQ_NOPE_BATCH_DB] - DB does not exist");
 }
 
@@ -281,7 +340,7 @@ TEST_F(XStoreZmqNetworkTest, RangeInsertThenRangeQueryOverWireIncludesHoleAsEmpt
     CreateReq.set_dbname("ZMQ_RANGE_DB");
     CreateReq.set_timeresolution(XStore_Proto::SECOND);
     CreateReq.set_rowlength(128);
-    SendRequest<XStore_Proto::CreateDB_REQ, XStore_Proto::CreateDB_REP>(CreateReq);
+    SendRequest<XStore_Proto::CreateDB_REP>(Wrap(CreateReq));
 
     // Sparse range insert: endpoints only, leaving a hole at TS_2028_MID + 1.
     XStore_Proto::RangeInsert_REQ InsertReq;
@@ -293,7 +352,7 @@ TEST_F(XStoreZmqNetworkTest, RangeInsertThenRangeQueryOverWireIncludesHoleAsEmpt
     XStore_Proto::RangeInsert_DATA *Last = InsertReq.add_rangeinsert_data();
     Last->set_timestamp(TS_2028_MID + 2);
     *Last->mutable_data() = MakeRow({FSFixed64(42)});
-    SendRequest<XStore_Proto::RangeInsert_REQ, XStore_Proto::RangeInsert_REP>(InsertReq);
+    SendRequest<XStore_Proto::RangeInsert_REP>(Wrap(InsertReq));
 
     XStore_Proto::RangeQuery_REQ QueryReq;
     QueryReq.set_rtype(XStore_Proto::RANGEQUERY);
@@ -301,7 +360,7 @@ TEST_F(XStoreZmqNetworkTest, RangeInsertThenRangeQueryOverWireIncludesHoleAsEmpt
     QueryReq.set_starttime(TS_2028_MID);
     QueryReq.set_endtime(TS_2028_MID + 2);
 
-    auto QueryRep = SendRequest<XStore_Proto::RangeQuery_REQ, XStore_Proto::RangeQuery_REP>(QueryReq);
+    auto QueryRep = SendRequest<XStore_Proto::RangeQuery_REP>(Wrap(QueryReq));
 
     ASSERT_EQ(QueryRep.queryresponse_size(), 3);
     EXPECT_EQ(QueryRep.queryresponse(0).data().fielddata(0).sfixed64data(), -42);
@@ -319,27 +378,27 @@ TEST_F(XStoreZmqNetworkTest, RemoveDBFilesThenRemoveDBOverWire) {
     CreateReq.set_dbname("ZMQ_REMOVE_DB");
     CreateReq.set_timeresolution(XStore_Proto::SECOND);
     CreateReq.set_rowlength(128);
-    SendRequest<XStore_Proto::CreateDB_REQ, XStore_Proto::CreateDB_REP>(CreateReq);
+    SendRequest<XStore_Proto::CreateDB_REP>(Wrap(CreateReq));
 
     XStore_Proto::UnaryInsert_REQ InsertReq;
     InsertReq.set_rtype(XStore_Proto::UNARYINSERT);
     InsertReq.set_dbname("ZMQ_REMOVE_DB");
     InsertReq.set_timestamp(TS_2005_MID);
     *InsertReq.mutable_data() = MakeRow({FBool(false)});
-    SendRequest<XStore_Proto::UnaryInsert_REQ, XStore_Proto::UnaryInsert_REP>(InsertReq);
+    SendRequest<XStore_Proto::UnaryInsert_REP>(Wrap(InsertReq));
 
     XStore_Proto::RemoveDBFiles_REQ RemoveFilesReq;
     RemoveFilesReq.set_rtype(XStore_Proto::REMOVEDBFILES);
     RemoveFilesReq.set_dbname("ZMQ_REMOVE_DB");
     RemoveFilesReq.add_filename("2005.XSTORE");
-    auto RemoveFilesRep = SendRequest<XStore_Proto::RemoveDBFiles_REQ, XStore_Proto::RemoveDBFiles_REP>(RemoveFilesReq);
+    auto RemoveFilesRep = SendRequest<XStore_Proto::RemoveDBFiles_REP>(Wrap(RemoveFilesReq));
     ASSERT_EQ(RemoveFilesRep.removestatus_size(), 1);
     EXPECT_NE(RemoveFilesRep.removestatus(0).find("[INFO]"), std::string::npos);
 
     XStore_Proto::RemoveDB_REQ RemoveDbReq;
     RemoveDbReq.set_rtype(XStore_Proto::REMOVEDB);
     RemoveDbReq.set_dbname("ZMQ_REMOVE_DB");
-    auto RemoveDbRep = SendRequest<XStore_Proto::RemoveDB_REQ, XStore_Proto::RemoveDB_REP>(RemoveDbReq);
+    auto RemoveDbRep = SendRequest<XStore_Proto::RemoveDB_REP>(Wrap(RemoveDbReq));
     EXPECT_EQ(RemoveDbRep.removestatus(), "[INFO] [REMOVE DB] [DB: ZMQ_REMOVE_DB] - Removed DB with name: ZMQ_REMOVE_DB");
 }
 
@@ -380,8 +439,8 @@ class XStoreZmqConcurrentTest : public ::testing::Test {
 
   // Each client thread below owns its own context/socket -- ZMQ sockets
   // aren't safe to share across threads.
-  template <typename ReqT, typename RepT>
-  static RepT SendRequest(zmq::socket_t &socket, const ReqT &req) {
+  template <typename RepT>
+  static RepT SendRequest(zmq::socket_t &socket, const XStore_Proto::Request &req) {
       std::string Payload = req.SerializeAsString();
       auto SendResult = socket.send(zmq::buffer(Payload), zmq::send_flags::none);
       RepT Rep;
@@ -420,7 +479,7 @@ TEST_F(XStoreZmqConcurrentTest, ConcurrentClientsUnaryInsertAndQueryOverWireDoNo
     CreateReq.set_dbname("ZMQ_CONCURRENT_DB");
     CreateReq.set_timeresolution(XStore_Proto::SECOND);
     CreateReq.set_rowlength(128);
-    auto CreateRep = SendRequest<XStore_Proto::CreateDB_REQ, XStore_Proto::CreateDB_REP>(SetupSocket, CreateReq);
+    auto CreateRep = SendRequest<XStore_Proto::CreateDB_REP>(SetupSocket, Wrap(CreateReq));
     ASSERT_NE(CreateRep.createdbstatus().find("[INFO]"), std::string::npos) << CreateRep.createdbstatus();
 
     constexpr int KClients = 8;
@@ -447,7 +506,7 @@ TEST_F(XStoreZmqConcurrentTest, ConcurrentClientsUnaryInsertAndQueryOverWireDoNo
                 InsertReq.set_dbname("ZMQ_CONCURRENT_DB");
                 InsertReq.set_timestamp(Ts);
                 *InsertReq.mutable_data() = MakeRow({FInt64(Expected)});
-                auto InsertRep = SendRequest<XStore_Proto::UnaryInsert_REQ, XStore_Proto::UnaryInsert_REP>(Socket, InsertReq);
+                auto InsertRep = SendRequest<XStore_Proto::UnaryInsert_REP>(Socket, Wrap(InsertReq));
                 if (InsertRep.insertstatus().find("[INFO]") == std::string::npos) {
                     ADD_FAILURE() << "client " << c << " i=" << i << " insert failed: " << InsertRep.insertstatus();
                     FailureCount++;
@@ -458,7 +517,7 @@ TEST_F(XStoreZmqConcurrentTest, ConcurrentClientsUnaryInsertAndQueryOverWireDoNo
                 QueryReq.set_rtype(XStore_Proto::UNARYQUERY);
                 QueryReq.set_dbname("ZMQ_CONCURRENT_DB");
                 QueryReq.set_timestamp(Ts);
-                auto QueryRep = SendRequest<XStore_Proto::UnaryQuery_REQ, XStore_Proto::UnaryQuery_REP>(Socket, QueryReq);
+                auto QueryRep = SendRequest<XStore_Proto::UnaryQuery_REP>(Socket, Wrap(QueryReq));
                 if (QueryRep.data().fielddata_size() != 1 || QueryRep.data().fielddata(0).int64data() != Expected) {
                     ADD_FAILURE() << "client " << c << " i=" << i << " read back wrong/missing data";
                     FailureCount++;

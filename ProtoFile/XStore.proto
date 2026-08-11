@@ -65,13 +65,13 @@ message MultipleRowData {
 }
 
 message ReqCMD {
-  RequestType rType = 1;
+  RequestType RType = 1;
 }
 
 // ======== REQUESTS section ========
 // --- CREATE DB request
 message CreateDB_REQ {
-  RequestType rType = 1;
+  RequestType RType = 1;
   string dbName = 2;
   TimeUnit timeResolution = 3;
   uint32 rowLength = 4;
@@ -79,20 +79,20 @@ message CreateDB_REQ {
 
 // --- REMOVE DB request
 message RemoveDB_REQ {
-  RequestType rType = 1;
+  RequestType RType = 1;
   string dbName = 2;
 }
 
 // --- REMOVE DB FILES request
 message RemoveDBFiles_REQ {
-  RequestType rType = 1;
+  RequestType RType = 1;
   string dbName = 2;
   repeated string fileName = 3;
 }
 
 // --- UNARY INSERT
 message UnaryInsert_REQ {
-  RequestType rType = 1;
+  RequestType RType = 1;
   uint64 timestamp = 2;
   RowData data = 3;
   string dbName = 4;
@@ -100,14 +100,14 @@ message UnaryInsert_REQ {
 
 // --- UNARY QUERY
 message UnaryQuery_REQ {
-  RequestType rType = 1;
+  RequestType RType = 1;
   uint64 timestamp = 2;
   string dbName = 3;
 }
 
 // --- UNARY DELETE
 message UnaryDelete_REQ {
-  RequestType rType = 1;
+  RequestType RType = 1;
   uint64 timestamp = 2;
   string dbName = 3;
 }
@@ -120,14 +120,14 @@ message BatchInsert_DATA {
 
 // --- BATCH INSERT
 message BatchInsert_REQ {
-  RequestType rType = 1;
+  RequestType RType = 1;
   string dbName = 2;
   repeated BatchInsert_DATA batchInsert_DATA = 3;
 }
 
 // --- BATCH QUERY
 message BatchQuery_REQ {
-  RequestType rType = 1;
+  RequestType RType = 1;
   repeated uint64 timestamp = 2;
   string dbName = 3;
   bool SortTime = 4;
@@ -135,7 +135,7 @@ message BatchQuery_REQ {
 
 // --- BATCH DELETE
 message BatchDelete_REQ {
-  RequestType rType = 1;
+  RequestType RType = 1;
   repeated uint64 timestamp = 2;
   string dbName = 3;
 }
@@ -148,14 +148,14 @@ message RangeInsert_DATA {
 
 // --- RANGE INSERT
 message RangeInsert_REQ {
-  RequestType rType = 1;
+  RequestType RType = 1;
   string dbName = 2;
   repeated RangeInsert_DATA rangeInsert_DATA = 3;
 }
 
 // --- RANGE QUERY
 message RangeQuery_REQ {
-  RequestType rType = 1;
+  RequestType RType = 1;
   uint64 startTime = 2;
   uint64 endTime = 3;
   string dbName = 4;
@@ -163,7 +163,7 @@ message RangeQuery_REQ {
 
 // --- RANGE DELETE
 message RangeDelete_REQ {
-  RequestType rType = 1;
+  RequestType RType = 1;
   uint64 startTime = 2;
   uint64 endTime = 3;
   string dbName = 4;
@@ -171,7 +171,7 @@ message RangeDelete_REQ {
 
 // --- MIN
 message Min_REQ {
-  RequestType rType = 1;
+  RequestType RType = 1;
   uint64 startTime = 2;
   uint64 endTime = 3;
   string dbName = 4;
@@ -180,7 +180,7 @@ message Min_REQ {
 
 // --- MAX
 message Max_REQ {
-  RequestType rType = 1;
+  RequestType RType = 1;
   uint64 startTime = 2;
   uint64 endTime = 3;
   string dbName = 4;
@@ -189,7 +189,7 @@ message Max_REQ {
 
 // --- SUM
 message Sum_REQ {
-  RequestType rType = 1;
+  RequestType RType = 1;
   uint64 startTime = 2;
   uint64 endTime = 3;
   string dbName = 4;
@@ -198,11 +198,36 @@ message Sum_REQ {
 
 // --- AVG
 message Avg_REQ {
-  RequestType rType = 1;
+  RequestType RType = 1;
   uint64 startTime = 2;
   uint64 endTime = 3;
   string dbName = 4;
   sint32 columnIdx = 5;
+}
+
+// --- Envelope: one wire message carries exactly one of these. The oneof
+// case (payload_case()) replaces RType as the dispatch tag, so a request
+// only needs to be parsed once server-side.
+message Request {
+  oneof payload {
+    ReqCMD info = 1;
+    CreateDB_REQ createdb = 2;
+    RemoveDB_REQ removedb = 3;
+    RemoveDBFiles_REQ removedbfiles = 4;
+    UnaryInsert_REQ unaryinsert = 5;
+    UnaryQuery_REQ unaryquery = 6;
+    UnaryDelete_REQ unarydelete = 7;
+    BatchInsert_REQ batchinsert = 8;
+    BatchQuery_REQ batchquery = 9;
+    BatchDelete_REQ batchdelete = 10;
+    RangeInsert_REQ rangeinsert = 11;
+    RangeQuery_REQ rangequery = 12;
+    RangeDelete_REQ rangedelete = 13;
+    Min_REQ min = 14;
+    Max_REQ max = 15;
+    Sum_REQ sum = 16;
+    Avg_REQ avg = 17;
+  }
 }
 
 // ======== RESPONSE section ========

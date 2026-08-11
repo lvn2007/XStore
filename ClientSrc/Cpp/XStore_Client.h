@@ -61,9 +61,11 @@ class XStore_Client {
 
   // Every RPC is: serialize request, blocking send, blocking recv, parse
   // reply. Sharing that here means the 17 request types can't drift out of
-  // sync with each other the way copy-pasted send/recv blocks do.
-  template <typename ReqT, typename RepT>
-  RepT SendRecv(const ReqT &ToServer) {
+  // sync with each other the way copy-pasted send/recv blocks do. ToServer
+  // is always the Request envelope -- the oneof case tells the server which
+  // payload it's holding, so it only has to parse the wire bytes once.
+  template <typename RepT>
+  RepT SendRecv(const XStore_Proto::Request &ToServer) {
       size_t ByteSize = ToServer.ByteSizeLong();
       zmq::message_t ZOut(ByteSize);
       ToServer.SerializeToArray(ZOut.data(), ByteSize);
@@ -115,9 +117,9 @@ class XStore_Client {
 
   // ==== INFO ====
   SysInfo InfoRequest() {
-      XStore_Proto::ReqCMD ToServer;
-      ToServer.set_rtype(XStore_Proto::INFO);
-      XStore_Proto::SysInfo_REP FromServer = SendRecv<XStore_Proto::ReqCMD, XStore_Proto::SysInfo_REP>(ToServer);
+      XStore_Proto::Request ToServer;
+      ToServer.mutable_info()->set_rtype(XStore_Proto::INFO);
+      XStore_Proto::SysInfo_REP FromServer = SendRecv<XStore_Proto::SysInfo_REP>(ToServer);
 
       SysInfo ToReturn;
       ToReturn.SERVER_ADDR = FromServer.serveraddr();
@@ -140,176 +142,196 @@ class XStore_Client {
 
   // ==== DB management ====
   std::string CreateDB(std::string &dbName, XStore_Proto::TimeUnit &timeResolution, short int rowLength) {
-      XStore_Proto::CreateDB_REQ ToServer;
-      ToServer.set_rtype(XStore_Proto::CREATEDB);
-      ToServer.set_dbname(dbName);
-      ToServer.set_timeresolution(timeResolution);
-      ToServer.set_rowlength(rowLength);
-      return SendRecv<XStore_Proto::CreateDB_REQ, XStore_Proto::CreateDB_REP>(ToServer).createdbstatus();
+      XStore_Proto::Request ToServer;
+      auto *Payload = ToServer.mutable_createdb();
+      Payload->set_rtype(XStore_Proto::CREATEDB);
+      Payload->set_dbname(dbName);
+      Payload->set_timeresolution(timeResolution);
+      Payload->set_rowlength(rowLength);
+      return SendRecv<XStore_Proto::CreateDB_REP>(ToServer).createdbstatus();
   }
 
   std::string RemoveDB(std::string &dbName) {
-      XStore_Proto::RemoveDB_REQ ToServer;
-      ToServer.set_rtype(XStore_Proto::REMOVEDB);
-      ToServer.set_dbname(dbName);
-      return SendRecv<XStore_Proto::RemoveDB_REQ, XStore_Proto::RemoveDB_REP>(ToServer).removestatus();
+      XStore_Proto::Request ToServer;
+      auto *Payload = ToServer.mutable_removedb();
+      Payload->set_rtype(XStore_Proto::REMOVEDB);
+      Payload->set_dbname(dbName);
+      return SendRecv<XStore_Proto::RemoveDB_REP>(ToServer).removestatus();
   }
 
   // Per-file status, one entry per requested fileName -- can't be flattened
   // to a single string without losing which file(s) failed.
   XStore_Proto::RemoveDBFiles_REP RemoveDBFiles(std::string &dbName, std::vector<std::string> &fileNames) {
-      XStore_Proto::RemoveDBFiles_REQ ToServer;
-      ToServer.set_rtype(XStore_Proto::REMOVEDBFILES);
-      ToServer.set_dbname(dbName);
+      XStore_Proto::Request ToServer;
+      auto *Payload = ToServer.mutable_removedbfiles();
+      Payload->set_rtype(XStore_Proto::REMOVEDBFILES);
+      Payload->set_dbname(dbName);
       for (const std::string &Name : fileNames) {
-          ToServer.add_filename(Name);
+          Payload->add_filename(Name);
       }
-      return SendRecv<XStore_Proto::RemoveDBFiles_REQ, XStore_Proto::RemoveDBFiles_REP>(ToServer);
+      return SendRecv<XStore_Proto::RemoveDBFiles_REP>(ToServer);
   }
 
   // ==== Unary ====
   std::string UnaryInsert(std::time_t &insertUnixTime, XStore_Proto::RowData &data, std::string &dbName) {
-      XStore_Proto::UnaryInsert_REQ ToServer;
-      ToServer.set_rtype(XStore_Proto::UNARYINSERT);
-      ToServer.set_timestamp(insertUnixTime);
-      *ToServer.mutable_data() = data;
-      ToServer.set_dbname(dbName);
-      return SendRecv<XStore_Proto::UnaryInsert_REQ, XStore_Proto::UnaryInsert_REP>(ToServer).insertstatus();
+      XStore_Proto::Request ToServer;
+      auto *Payload = ToServer.mutable_unaryinsert();
+      Payload->set_rtype(XStore_Proto::UNARYINSERT);
+      Payload->set_timestamp(insertUnixTime);
+      *Payload->mutable_data() = data;
+      Payload->set_dbname(dbName);
+      return SendRecv<XStore_Proto::UnaryInsert_REP>(ToServer).insertstatus();
   }
 
   XStore_Proto::UnaryQuery_REP UnaryQuery(std::time_t &targetUnixTime, std::string &targetDBName) {
-      XStore_Proto::UnaryQuery_REQ ToServer;
-      ToServer.set_rtype(XStore_Proto::UNARYQUERY);
-      ToServer.set_timestamp(targetUnixTime);
-      ToServer.set_dbname(targetDBName);
-      return SendRecv<XStore_Proto::UnaryQuery_REQ, XStore_Proto::UnaryQuery_REP>(ToServer);
+      XStore_Proto::Request ToServer;
+      auto *Payload = ToServer.mutable_unaryquery();
+      Payload->set_rtype(XStore_Proto::UNARYQUERY);
+      Payload->set_timestamp(targetUnixTime);
+      Payload->set_dbname(targetDBName);
+      return SendRecv<XStore_Proto::UnaryQuery_REP>(ToServer);
   }
 
   std::string UnaryDelete(std::time_t &targetUnixTime, std::string &targetDBName) {
-      XStore_Proto::UnaryDelete_REQ ToServer;
-      ToServer.set_rtype(XStore_Proto::UNARYDELETE);
-      ToServer.set_timestamp(targetUnixTime);
-      ToServer.set_dbname(targetDBName);
-      return SendRecv<XStore_Proto::UnaryDelete_REQ, XStore_Proto::UnaryDelete_REP>(ToServer).deletestatus();
+      XStore_Proto::Request ToServer;
+      auto *Payload = ToServer.mutable_unarydelete();
+      Payload->set_rtype(XStore_Proto::UNARYDELETE);
+      Payload->set_timestamp(targetUnixTime);
+      Payload->set_dbname(targetDBName);
+      return SendRecv<XStore_Proto::UnaryDelete_REP>(ToServer).deletestatus();
   }
 
   // ==== Batch (arbitrary timestamp set) ====
   std::string BatchInsert(std::string &dbName, std::vector<std::pair<uint64_t, XStore_Proto::RowData>> &rows) {
-      XStore_Proto::BatchInsert_REQ ToServer;
-      ToServer.set_rtype(XStore_Proto::BATCHINSERT);
-      ToServer.set_dbname(dbName);
-      ToServer.mutable_batchinsert_data()->Reserve(static_cast<int>(rows.size()));
+      XStore_Proto::Request ToServer;
+      auto *Payload = ToServer.mutable_batchinsert();
+      Payload->set_rtype(XStore_Proto::BATCHINSERT);
+      Payload->set_dbname(dbName);
+      Payload->mutable_batchinsert_data()->Reserve(static_cast<int>(rows.size()));
       for (auto &Row : rows) {
-          XStore_Proto::BatchInsert_DATA *Entry = ToServer.add_batchinsert_data();
+          XStore_Proto::BatchInsert_DATA *Entry = Payload->add_batchinsert_data();
           Entry->set_timestamp(Row.first);
           *Entry->mutable_data() = Row.second;
       }
-      return SendRecv<XStore_Proto::BatchInsert_REQ, XStore_Proto::BatchInsert_REP>(ToServer).insertstatus();
+      return SendRecv<XStore_Proto::BatchInsert_REP>(ToServer).insertstatus();
   }
 
   // Advanced/perf overload: build the request directly (e.g. reuse a
   // populated message across calls) instead of via the (timestamp, RowData)
-  // vector above.
-  std::string BatchInsert(XStore_Proto::BatchInsert_REQ &insertData) {
-      return SendRecv<XStore_Proto::BatchInsert_REQ, XStore_Proto::BatchInsert_REP>(insertData).insertstatus();
+  // vector above. Takes by value so an rvalue caller moves in for free.
+  std::string BatchInsert(XStore_Proto::BatchInsert_REQ insertData) {
+      XStore_Proto::Request ToServer;
+      *ToServer.mutable_batchinsert() = std::move(insertData);
+      return SendRecv<XStore_Proto::BatchInsert_REP>(ToServer).insertstatus();
   }
 
   XStore_Proto::BatchQuery_REP BatchQuery(std::string &dbName, std::vector<uint64_t> &timestamps, bool sortTime = true) {
-      XStore_Proto::BatchQuery_REQ ToServer;
-      ToServer.set_rtype(XStore_Proto::BATCHQUERY);
-      ToServer.set_dbname(dbName);
-      ToServer.set_sorttime(sortTime);
+      XStore_Proto::Request ToServer;
+      auto *Payload = ToServer.mutable_batchquery();
+      Payload->set_rtype(XStore_Proto::BATCHQUERY);
+      Payload->set_dbname(dbName);
+      Payload->set_sorttime(sortTime);
       for (uint64_t Ts : timestamps) {
-          ToServer.add_timestamp(Ts);
+          Payload->add_timestamp(Ts);
       }
-      return SendRecv<XStore_Proto::BatchQuery_REQ, XStore_Proto::BatchQuery_REP>(ToServer);
+      return SendRecv<XStore_Proto::BatchQuery_REP>(ToServer);
   }
 
   std::string BatchDelete(std::string &dbName, std::vector<uint64_t> &timestamps) {
-      XStore_Proto::BatchDelete_REQ ToServer;
-      ToServer.set_rtype(XStore_Proto::BATCHDELETE);
-      ToServer.set_dbname(dbName);
+      XStore_Proto::Request ToServer;
+      auto *Payload = ToServer.mutable_batchdelete();
+      Payload->set_rtype(XStore_Proto::BATCHDELETE);
+      Payload->set_dbname(dbName);
       for (uint64_t Ts : timestamps) {
-          ToServer.add_timestamp(Ts);
+          Payload->add_timestamp(Ts);
       }
-      return SendRecv<XStore_Proto::BatchDelete_REQ, XStore_Proto::BatchDelete_REP>(ToServer).deletestatus();
+      return SendRecv<XStore_Proto::BatchDelete_REP>(ToServer).deletestatus();
   }
 
   // ==== Range (contiguous timestamp span) ====
   std::string RangeInsert(std::string &dbName, std::vector<std::pair<uint64_t, XStore_Proto::RowData>> &rows) {
-      XStore_Proto::RangeInsert_REQ ToServer;
-      ToServer.set_rtype(XStore_Proto::RANGEINSERT);
-      ToServer.set_dbname(dbName);
-      ToServer.mutable_rangeinsert_data()->Reserve(static_cast<int>(rows.size()));
+      XStore_Proto::Request ToServer;
+      auto *Payload = ToServer.mutable_rangeinsert();
+      Payload->set_rtype(XStore_Proto::RANGEINSERT);
+      Payload->set_dbname(dbName);
+      Payload->mutable_rangeinsert_data()->Reserve(static_cast<int>(rows.size()));
       for (auto &Row : rows) {
-          XStore_Proto::RangeInsert_DATA *Entry = ToServer.add_rangeinsert_data();
+          XStore_Proto::RangeInsert_DATA *Entry = Payload->add_rangeinsert_data();
           Entry->set_timestamp(Row.first);
           *Entry->mutable_data() = Row.second;
       }
-      return SendRecv<XStore_Proto::RangeInsert_REQ, XStore_Proto::RangeInsert_REP>(ToServer).insertstatus();
+      return SendRecv<XStore_Proto::RangeInsert_REP>(ToServer).insertstatus();
   }
 
-  std::string RangeInsert(XStore_Proto::RangeInsert_REQ &insertData) {
-      return SendRecv<XStore_Proto::RangeInsert_REQ, XStore_Proto::RangeInsert_REP>(insertData).insertstatus();
+  std::string RangeInsert(XStore_Proto::RangeInsert_REQ insertData) {
+      XStore_Proto::Request ToServer;
+      *ToServer.mutable_rangeinsert() = std::move(insertData);
+      return SendRecv<XStore_Proto::RangeInsert_REP>(ToServer).insertstatus();
   }
 
   XStore_Proto::RangeQuery_REP RangeQuery(uint64_t startTime, uint64_t endTime, std::string &dbName) {
-      XStore_Proto::RangeQuery_REQ ToServer;
-      ToServer.set_rtype(XStore_Proto::RANGEQUERY);
-      ToServer.set_starttime(startTime);
-      ToServer.set_endtime(endTime);
-      ToServer.set_dbname(dbName);
-      return SendRecv<XStore_Proto::RangeQuery_REQ, XStore_Proto::RangeQuery_REP>(ToServer);
+      XStore_Proto::Request ToServer;
+      auto *Payload = ToServer.mutable_rangequery();
+      Payload->set_rtype(XStore_Proto::RANGEQUERY);
+      Payload->set_starttime(startTime);
+      Payload->set_endtime(endTime);
+      Payload->set_dbname(dbName);
+      return SendRecv<XStore_Proto::RangeQuery_REP>(ToServer);
   }
 
   std::string RangeDelete(uint64_t startTime, uint64_t endTime, std::string &dbName) {
-      XStore_Proto::RangeDelete_REQ ToServer;
-      ToServer.set_rtype(XStore_Proto::RANGEDELETE);
-      ToServer.set_starttime(startTime);
-      ToServer.set_endtime(endTime);
-      ToServer.set_dbname(dbName);
-      return SendRecv<XStore_Proto::RangeDelete_REQ, XStore_Proto::RangeDelete_REP>(ToServer).deletestatus();
+      XStore_Proto::Request ToServer;
+      auto *Payload = ToServer.mutable_rangedelete();
+      Payload->set_rtype(XStore_Proto::RANGEDELETE);
+      Payload->set_starttime(startTime);
+      Payload->set_endtime(endTime);
+      Payload->set_dbname(dbName);
+      return SendRecv<XStore_Proto::RangeDelete_REP>(ToServer).deletestatus();
   }
 
   // ==== Aggregates ====
   XStore_Proto::Min_REP Min(uint64_t startTime, uint64_t endTime, std::string &dbName, int32_t columnIdx) {
-      XStore_Proto::Min_REQ ToServer;
-      ToServer.set_rtype(XStore_Proto::MIN);
-      ToServer.set_starttime(startTime);
-      ToServer.set_endtime(endTime);
-      ToServer.set_dbname(dbName);
-      ToServer.set_columnidx(columnIdx);
-      return SendRecv<XStore_Proto::Min_REQ, XStore_Proto::Min_REP>(ToServer);
+      XStore_Proto::Request ToServer;
+      auto *Payload = ToServer.mutable_min();
+      Payload->set_rtype(XStore_Proto::MIN);
+      Payload->set_starttime(startTime);
+      Payload->set_endtime(endTime);
+      Payload->set_dbname(dbName);
+      Payload->set_columnidx(columnIdx);
+      return SendRecv<XStore_Proto::Min_REP>(ToServer);
   }
 
   XStore_Proto::Max_REP Max(uint64_t startTime, uint64_t endTime, std::string &dbName, int32_t columnIdx) {
-      XStore_Proto::Max_REQ ToServer;
-      ToServer.set_rtype(XStore_Proto::MAX);
-      ToServer.set_starttime(startTime);
-      ToServer.set_endtime(endTime);
-      ToServer.set_dbname(dbName);
-      ToServer.set_columnidx(columnIdx);
-      return SendRecv<XStore_Proto::Max_REQ, XStore_Proto::Max_REP>(ToServer);
+      XStore_Proto::Request ToServer;
+      auto *Payload = ToServer.mutable_max();
+      Payload->set_rtype(XStore_Proto::MAX);
+      Payload->set_starttime(startTime);
+      Payload->set_endtime(endTime);
+      Payload->set_dbname(dbName);
+      Payload->set_columnidx(columnIdx);
+      return SendRecv<XStore_Proto::Max_REP>(ToServer);
   }
 
   XStore_Proto::Sum_REP Sum(uint64_t startTime, uint64_t endTime, std::string &dbName, int32_t columnIdx) {
-      XStore_Proto::Sum_REQ ToServer;
-      ToServer.set_rtype(XStore_Proto::SUM);
-      ToServer.set_starttime(startTime);
-      ToServer.set_endtime(endTime);
-      ToServer.set_dbname(dbName);
-      ToServer.set_columnidx(columnIdx);
-      return SendRecv<XStore_Proto::Sum_REQ, XStore_Proto::Sum_REP>(ToServer);
+      XStore_Proto::Request ToServer;
+      auto *Payload = ToServer.mutable_sum();
+      Payload->set_rtype(XStore_Proto::SUM);
+      Payload->set_starttime(startTime);
+      Payload->set_endtime(endTime);
+      Payload->set_dbname(dbName);
+      Payload->set_columnidx(columnIdx);
+      return SendRecv<XStore_Proto::Sum_REP>(ToServer);
   }
 
   XStore_Proto::Avg_REP Avg(uint64_t startTime, uint64_t endTime, std::string &dbName, int32_t columnIdx) {
-      XStore_Proto::Avg_REQ ToServer;
-      ToServer.set_rtype(XStore_Proto::AVG);
-      ToServer.set_starttime(startTime);
-      ToServer.set_endtime(endTime);
-      ToServer.set_dbname(dbName);
-      ToServer.set_columnidx(columnIdx);
-      return SendRecv<XStore_Proto::Avg_REQ, XStore_Proto::Avg_REP>(ToServer);
+      XStore_Proto::Request ToServer;
+      auto *Payload = ToServer.mutable_avg();
+      Payload->set_rtype(XStore_Proto::AVG);
+      Payload->set_starttime(startTime);
+      Payload->set_endtime(endTime);
+      Payload->set_dbname(dbName);
+      Payload->set_columnidx(columnIdx);
+      return SendRecv<XStore_Proto::Avg_REP>(ToServer);
   }
 };
 #endif //XSTORE_CLIENTSRC_XSTORE_CLIENT_H_

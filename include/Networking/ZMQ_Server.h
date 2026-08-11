@@ -2,7 +2,7 @@
 #define XSTORE_ZMQ_SERVER_H
 
 #include <include/XStore/XStore.h>
-#include <pthread.h>
+#include <thread>
 #include "include/Networking/zmq.hpp"
 #include "XStore.pb.h"
 #include "include/Networking/zmq_addon.hpp"
@@ -16,8 +16,8 @@ class ZMQ_Server {
         int NumThreads;
         std::string ServerAddr;
 
-        // Work routines in each thread
-        static void* WorkerRoutine(void *args);
+        // Work routine run by each worker thread
+        void WorkerRoutine(std::string serverAddr);
 
     public:
         ZMQ_Server(int numThreads);
