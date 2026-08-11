@@ -190,7 +190,7 @@ TEST_F(XStoreZmqNetworkTest, CreateDBOverWireRejectsDuplicateName) {
     SendRequest<XStore_Proto::CreateDB_REP>(Wrap(CreateReq));
 
     auto SecondRep = SendRequest<XStore_Proto::CreateDB_REP>(Wrap(CreateReq));
-    EXPECT_EQ(SecondRep.createdbstatus(), "[ERROR] [CREATE DB] [DB: ZMQ_DUP_DB] - Already existed");
+    EXPECT_EQ(SecondRep.createdbstatus(), "[WARNING] [CREATE DB] [DB: ZMQ_DUP_DB] - Already existed");
 }
 
 // ---------------------------------------------------------------------
@@ -232,7 +232,7 @@ TEST_F(XStoreZmqNetworkTest, UnaryQueryOverWireOnMissingDBReturnsError) {
     QueryReq.set_dbname("ZMQ_NOPE_DB");
     QueryReq.set_timestamp(TS_2005_MID);
     auto QueryRep = SendRequest<XStore_Proto::UnaryQuery_REP>(Wrap(QueryReq));
-    EXPECT_EQ(QueryRep.querystatus(), "[ERROR] [UNARY QUERY] [DB: ZMQ_NOPE_DB] - DB does not exist");
+    EXPECT_EQ(QueryRep.querystatus(), "[WARNING] [UNARY QUERY] [DB: ZMQ_NOPE_DB] - DB does not exist");
 }
 
 TEST_F(XStoreZmqNetworkTest, UnaryDeleteOverWirePunchesHoleThenQueryReturnsEmpty) {
@@ -327,7 +327,7 @@ TEST_F(XStoreZmqNetworkTest, BatchInsertOverWireToNonexistentDBReturnsError) {
     *Entry->mutable_data() = MakeRow({FDouble(1.0)});
 
     auto InsertRep = SendRequest<XStore_Proto::BatchInsert_REP>(Wrap(InsertReq));
-    EXPECT_EQ(InsertRep.insertstatus(), "[ERROR] [BATCH INSERT] [DB: ZMQ_NOPE_BATCH_DB] - DB does not exist");
+    EXPECT_EQ(InsertRep.insertstatus(), "[WARNING] [BATCH INSERT] [DB: ZMQ_NOPE_BATCH_DB] - DB does not exist");
 }
 
 // ---------------------------------------------------------------------

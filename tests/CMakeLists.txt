@@ -6,8 +6,13 @@
 # xstore_network_tests below via the real wire protocol.
 add_executable(xstore_tests
         integration/XStoreTest.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore.cpp
-        ${CMAKE_SOURCE_DIR}/src/DataStructs/ConfigStruct.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Internal.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Management.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_IO.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_UnaryOps.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_BatchOps.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_RangeOps.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Aggregates.cpp
         ${CMAKE_SOURCE_DIR}/src/DataStructs/TimeStruct.cpp
         ${CMAKE_SOURCE_DIR}/src/DataStructs/FileRangeLock.cpp
         ${PROTO_SRCS} ${PROTO_HDRS}
@@ -36,9 +41,14 @@ add_custom_command(TARGET xstore_tests POST_BUILD
 # into the XStore class directly.
 add_executable(xstore_network_tests
         integration/XStoreZmqNetworkTest.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Internal.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Management.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_IO.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_UnaryOps.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_BatchOps.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_RangeOps.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Aggregates.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore_Networking/ZMQ_Server.cpp
-        ${CMAKE_SOURCE_DIR}/src/DataStructs/ConfigStruct.cpp
         ${CMAKE_SOURCE_DIR}/src/DataStructs/TimeStruct.cpp
         ${CMAKE_SOURCE_DIR}/src/DataStructs/FileRangeLock.cpp
         ${PROTO_SRCS} ${PROTO_HDRS}
@@ -66,8 +76,13 @@ add_custom_command(TARGET xstore_network_tests POST_BUILD
 # perf work.
 add_executable(xstore_perf_tests
         perf/XStorePerfTest.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore.cpp
-        ${CMAKE_SOURCE_DIR}/src/DataStructs/ConfigStruct.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Internal.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Management.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_IO.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_UnaryOps.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_BatchOps.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_RangeOps.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Aggregates.cpp
         ${CMAKE_SOURCE_DIR}/src/DataStructs/TimeStruct.cpp
         ${CMAKE_SOURCE_DIR}/src/DataStructs/FileRangeLock.cpp
         ${PROTO_SRCS} ${PROTO_HDRS}

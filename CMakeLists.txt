@@ -65,11 +65,19 @@ include_directories(.)
 include_directories(include)
 include_directories(src)
 
-add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h
+add_executable(XStore src/main.cpp
+        include/XStore/XStore_Internal.h src/XStore/XStore_Internal.cpp
+        src/XStore/XStore_Management.cpp
+        src/XStore/XStore_IO.cpp
+        src/XStore/XStore_UnaryOps.cpp
+        src/XStore/XStore_BatchOps.cpp
+        src/XStore/XStore_RangeOps.cpp
+        src/XStore/XStore_Aggregates.cpp
+        include/XStore/XStore.h
         include/DataStructs/ValueStruct.h ${PROTO_SRCS} ${PROTO_HDRS}
         include/Networking/zmq.hpp include/Networking/zmq_addon.hpp
         include/Networking/ZMQ_Server.h src/XStore_Networking/ZMQ_Server.cpp
-        include/Networking/zhelpers.hpp src/DataStructs/ConfigStruct.cpp include/DataStructs/ConfigStruct.h
+        include/Networking/zhelpers.hpp
         include/DataStructs/TimeStruct.h src/DataStructs/TimeStruct.cpp
         include/DataStructs/FileRangeLock.h src/DataStructs/FileRangeLock.cpp
         include/Logger/Logger.h)

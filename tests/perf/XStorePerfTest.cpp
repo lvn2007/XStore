@@ -24,6 +24,8 @@
 #include <string>
 #include <unistd.h>
 
+#include "include/Logger/spdlog/fmt/fmt.h"
+#include "include/Logger/Logger.h"
 #include "tests/integration/XStoreTestSupport.h"
 
 using namespace xstore_test;

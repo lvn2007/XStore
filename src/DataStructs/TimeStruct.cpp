@@ -1,4 +1,5 @@
 #include "include/DataStructs/TimeStruct.h"
+#include "include/Logger/Logger.h"
 #include <stdexcept>
 
 namespace {
@@ -16,6 +17,12 @@ constexpr int64_t ToSeconds(int64_t value, XStore_Proto::TimeUnit resolution) {
         case XStore_Proto::HOUR:        return value * 3'600;
         case XStore_Proto::DAY:         return value * 86'400;
         default:
+            // Never legitimately reachable -- CreateDB already validates
+            // resolution against PermittedTimeResolution before a CfgStruct
+            // is ever written, so this only fires on a corrupted/hand-edited
+            // .CFG file. Logged (not just thrown) since the exception may
+            // propagate past a caller that doesn't log its .what().
+            spdlog::critical("[TIME STRUCT] - Unrecognized TimeResolution value: {}", static_cast<int>(resolution));
             throw std::invalid_argument("TimeStruct: unrecognized TimeResolution");
     }
 }
@@ -34,6 +41,12 @@ constexpr int64_t FromSeconds(int64_t seconds, XStore_Proto::TimeUnit resolution
         case XStore_Proto::HOUR:        return seconds / 3'600;
         case XStore_Proto::DAY:         return seconds / 86'400;
         default:
+            // Never legitimately reachable -- CreateDB already validates
+            // resolution against PermittedTimeResolution before a CfgStruct
+            // is ever written, so this only fires on a corrupted/hand-edited
+            // .CFG file. Logged (not just thrown) since the exception may
+            // propagate past a caller that doesn't log its .what().
+            spdlog::critical("[TIME STRUCT] - Unrecognized TimeResolution value: {}", static_cast<int>(resolution));
             throw std::invalid_argument("TimeStruct: unrecognized TimeResolution");
     }
 }

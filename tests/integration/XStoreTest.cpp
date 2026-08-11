@@ -20,6 +20,9 @@
 #include <thread>
 #include <vector>
 
+#include "include/DataStructs/TimeStruct.h"
+#include "include/DataStructs/FileRangeLock.h"
+#include "include/Logger/spdlog/fmt/fmt.h"
 #include "XStoreTestSupport.h"
 
 namespace fs = std::filesystem;
@@ -160,7 +163,7 @@ TEST_F(XStoreTest, CreateDBRejectsRowLengthBelowFour) {
     XStore Store;
     XStore_Proto::CreateDB_REP Rep = Store.CreateDB("TESTDB", XStore_Proto::SECOND, 3);
 
-    EXPECT_EQ(Rep.createdbstatus(), "[ERROR] [CREATE DB] [DB: TESTDB] - Row length must be >= 4");
+    EXPECT_EQ(Rep.createdbstatus(), "[WARNING] [CREATE DB] [DB: TESTDB] - Row length must be >= 4");
 }
 
 TEST_F(XStoreTest, CreateDBSucceedsAndWritesConfigFile) {
@@ -176,7 +179,7 @@ TEST_F(XStoreTest, CreateDBRejectsDuplicateName) {
     Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
     XStore_Proto::CreateDB_REP Rep = Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
-    EXPECT_EQ(Rep.createdbstatus(), "[ERROR] [CREATE DB] [DB: TESTDB] - Already existed");
+    EXPECT_EQ(Rep.createdbstatus(), "[WARNING] [CREATE DB] [DB: TESTDB] - Already existed");
 }
 
 TEST_F(XStoreTest, CreateDBRejectsNanosecondResolution) {
@@ -187,7 +190,7 @@ TEST_F(XStoreTest, CreateDBRejectsNanosecondResolution) {
     XStore Store;
     XStore_Proto::CreateDB_REP Rep = Store.CreateDB("TESTDB", XStore_Proto::NANOSECOND, 128);
 
-    EXPECT_EQ(Rep.createdbstatus(), "[ERROR] [CREATE DB] [DB: TESTDB] - Invalid time resolution");
+    EXPECT_EQ(Rep.createdbstatus(), "[WARNING] [CREATE DB] [DB: TESTDB] - Invalid time resolution");
     EXPECT_FALSE(fs::exists(Scratch->TestRoot / "DataStore" / "TESTDB"));
 }
 
@@ -199,7 +202,7 @@ TEST_F(XStoreTest, RemoveDBOnMissingDBReturnsError) {
     XStore Store;
     XStore_Proto::RemoveDB_REP Rep = Store.RemoveDB("TESTDB");
 
-    EXPECT_EQ(Rep.removestatus(), "[ERROR] [REMOVE DB] [DB: TESTDB] - DB does not exists");
+    EXPECT_EQ(Rep.removestatus(), "[WARNING] [REMOVE DB] [DB: TESTDB] - DB does not exists");
 }
 
 TEST_F(XStoreTest, RemoveDBDeletesDirectoryAndDropsFromInfoQuery) {
@@ -307,7 +310,7 @@ TEST_F(XStoreTest, UnaryInsertOnMissingDBReturnsError) {
     XStore_Proto::UnaryInsert_REP Rep;
     Store.UnaryInsert(TS_2016_MID, MakeRow({FString("hello")}), "TESTDB", &Rep);
 
-    EXPECT_EQ(Rep.insertstatus(), "[ERROR] [UNARY INSERT] [DB: TESTDB] - DB does not exist");
+    EXPECT_EQ(Rep.insertstatus(), "[WARNING] [UNARY INSERT] [DB: TESTDB] - DB does not exist");
 }
 
 TEST_F(XStoreTest, UnaryInsertExactTimestampHasInsertedData) {
@@ -422,7 +425,7 @@ TEST_F(XStoreTest, UnaryQueryWithDbButNoYearFileReturnsError) {
     XStore_Proto::UnaryQuery_REP QueryRep;
     Store.UnaryQuery(TS_2016_MID, "TESTDB", &QueryRep);
 
-    EXPECT_EQ(QueryRep.querystatus(), "[ERROR] [UNARY QUERY] [DB: TESTDB] - DB does not exist");
+    EXPECT_EQ(QueryRep.querystatus(), "[WARNING] [UNARY QUERY] [DB: TESTDB] - DB does not exist");
 }
 
 // Unlike UnaryInsert/BatchQuery/RangeQuery (which all check the DB directory
@@ -434,7 +437,7 @@ TEST_F(XStoreTest, UnaryQueryOnNeverCreatedDBReturnsErrorInsteadOfCrashing) {
     XStore Store;  // fresh instance: cfgMap starts empty, so this can't be masked by a warm cache
     XStore_Proto::UnaryQuery_REP QueryRep;
     Store.UnaryQuery(TS_2003_MID, "NEVER_CREATED_DB", &QueryRep);
-    EXPECT_NE(QueryRep.querystatus().find("[ERROR]"), std::string::npos);
+    EXPECT_NE(QueryRep.querystatus().find("[WARNING]"), std::string::npos);
 }
 
 TEST_F(XStoreTest, UnaryInsertDbNameIsCaseInsensitive) {
@@ -490,7 +493,7 @@ TEST_F(XStoreTest, UnaryDeletePunchesHoleThenUnaryQueryReturnsEmptyData) {
 TEST_F(XStoreTest, UnaryDeleteOnMissingDBReturnsError) {
     XStore Store;
     XStore_Proto::UnaryDelete_REP DeleteRep = Store.UnaryDelete(TS_2016_MID, "NOPE");
-    EXPECT_EQ(DeleteRep.deletestatus(), "[ERROR] [UNARY DELETE] [DB: NOPE] - DB does not exist");
+    EXPECT_EQ(DeleteRep.deletestatus(), "[WARNING] [UNARY DELETE] [DB: NOPE] - DB does not exist");
 }
 
 TEST_F(XStoreTest, UnaryDeleteOnMissingYearFileReturnsError) {
@@ -498,7 +501,7 @@ TEST_F(XStoreTest, UnaryDeleteOnMissingYearFileReturnsError) {
     Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
     // DB exists but nothing was ever inserted for this year -> no 2016.XSTORE file.
     XStore_Proto::UnaryDelete_REP DeleteRep = Store.UnaryDelete(TS_2016_MID, "TESTDB");
-    EXPECT_EQ(DeleteRep.deletestatus(), "[ERROR] [UNARY DELETE] [DB: TESTDB] - 2016.XSTORE does not exist");
+    EXPECT_EQ(DeleteRep.deletestatus(), "[WARNING] [UNARY DELETE] [DB: TESTDB] - 2016.XSTORE does not exist");
 }
 
 TEST_F(XStoreTest, UnaryInsertAtFirstAndLastEpochOfYearRoundTrip) {
@@ -581,7 +584,7 @@ TEST_F(XStoreTest, UnaryInsertRowLargerThanRowLengthIsRejectedAndDoesNotCorruptN
     // return value, so this silently truncated instead of erroring.
     XStore_Proto::UnaryInsert_REP OversizedRep;
     Store.UnaryInsert(TS_2009_MID + 1, MakeRow({FString("this string is far too long for an 8 byte row")}), "TESTDB", &OversizedRep);
-    EXPECT_NE(OversizedRep.insertstatus().find("[ERROR]"), std::string::npos) << OversizedRep.insertstatus();
+    EXPECT_NE(OversizedRep.insertstatus().find("[WARNING]"), std::string::npos) << OversizedRep.insertstatus();
     EXPECT_NE(OversizedRep.insertstatus().find("exceeds"), std::string::npos) << OversizedRep.insertstatus();
 
     // The oversized attempt must not have written anything, and the
@@ -939,7 +942,7 @@ TEST_F(XStoreTest, BatchInsertToNonexistentDBReturnsError) {
 
     XStore_Proto::BatchInsert_REP InsertRep;
     Store.BatchInsert(&InsertReq, &InsertRep);
-    EXPECT_EQ(InsertRep.insertstatus(), "[ERROR] [BATCH INSERT] [DB: NOPE] - DB does not exist");
+    EXPECT_EQ(InsertRep.insertstatus(), "[WARNING] [BATCH INSERT] [DB: NOPE] - DB does not exist");
 }
 
 TEST_F(XStoreTest, BatchInsertEmptyPayloadOnExistingDBSucceedsWithZeroInserted) {
@@ -1419,7 +1422,7 @@ TEST_F(XStoreTest, RangeInsertToNonexistentDBReturnsError) {
 
     XStore_Proto::RangeInsert_REP InsertRep;
     Store.RangeInsert(&InsertReq, &InsertRep);
-    EXPECT_EQ(InsertRep.insertstatus(), "[ERROR] [RANGE INSERT] [DB: NOPE] - DB does not exist");
+    EXPECT_EQ(InsertRep.insertstatus(), "[WARNING] [RANGE INSERT] [DB: NOPE] - DB does not exist");
 }
 
 TEST_F(XStoreTest, RangeDeleteSingleYearMissingFileReturnsCountSummaryNotDbNotExistError) {
@@ -1961,28 +1964,28 @@ TEST_F(XStoreTest, MinAggregateOnMissingDBReturnsError) {
     XStore Store;
     XStore_Proto::Min_REP MinRep;
     Store.MinAggregate(TS_2016_MID, TS_2016_MID, "NOPE", 0, &MinRep);
-    EXPECT_EQ(MinRep.opstatus(), "[ERROR] [MIN AGGREGATE] [DB: NOPE] - NOPE.CFG does not exist");
+    EXPECT_EQ(MinRep.opstatus(), "[WARNING] [MIN AGGREGATE] [DB: NOPE] - NOPE.CFG does not exist");
 }
 
 TEST_F(XStoreTest, MaxAggregateOnMissingDBReturnsError) {
     XStore Store;
     XStore_Proto::Max_REP MaxRep;
     Store.MaxAggregate(TS_2016_MID, TS_2016_MID, "NOPE", 0, &MaxRep);
-    EXPECT_EQ(MaxRep.opstatus(), "[ERROR] [MAX AGGREGATE] [DB: NOPE] - NOPE.CFG does not exist");
+    EXPECT_EQ(MaxRep.opstatus(), "[WARNING] [MAX AGGREGATE] [DB: NOPE] - NOPE.CFG does not exist");
 }
 
 TEST_F(XStoreTest, SumAggregateOnMissingDBReturnsError) {
     XStore Store;
     XStore_Proto::Sum_REP SumRep;
     Store.SumAggregate(TS_2016_MID, TS_2016_MID, "NOPE", 0, &SumRep);
-    EXPECT_EQ(SumRep.opstatus(), "[ERROR] [SUM AGGREGATE] [DB: NOPE] - NOPE.CFG does not exist");
+    EXPECT_EQ(SumRep.opstatus(), "[WARNING] [SUM AGGREGATE] [DB: NOPE] - NOPE.CFG does not exist");
 }
 
 TEST_F(XStoreTest, AvgAggregateOnMissingDBReturnsError) {
     XStore Store;
     XStore_Proto::Avg_REP AvgRep;
     Store.AvgAggregate(TS_2016_MID, TS_2016_MID, "NOPE", 0, &AvgRep);
-    EXPECT_EQ(AvgRep.opstatus(), "[ERROR] [AVG AGGREGATE] [DB: NOPE] - NOPE.CFG does not exist");
+    EXPECT_EQ(AvgRep.opstatus(), "[WARNING] [AVG AGGREGATE] [DB: NOPE] - NOPE.CFG does not exist");
 }
 
 // All four aggregates gate on startEpochT > endEpochT the same way, right
@@ -1992,7 +1995,7 @@ TEST_F(XStoreTest, MinAggregateRejectsStartAfterEnd) {
     Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
     XStore_Proto::Min_REP MinRep;
     Store.MinAggregate(TS_2016_MID + 1, TS_2016_MID, "TESTDB", 0, &MinRep);
-    EXPECT_EQ(MinRep.opstatus(), "[ERROR] [MIN AGGREGATE] [DB: TESTDB] - Target end time must be after start time");
+    EXPECT_EQ(MinRep.opstatus(), "[WARNING] [MIN AGGREGATE] [DB: TESTDB] - Target end time must be after start time");
 }
 
 TEST_F(XStoreTest, MaxAggregateRejectsStartAfterEnd) {
@@ -2000,7 +2003,7 @@ TEST_F(XStoreTest, MaxAggregateRejectsStartAfterEnd) {
     Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
     XStore_Proto::Max_REP MaxRep;
     Store.MaxAggregate(TS_2016_MID + 1, TS_2016_MID, "TESTDB", 0, &MaxRep);
-    EXPECT_EQ(MaxRep.opstatus(), "[ERROR] [MAX AGGREGATE] [DB: TESTDB] - Target end time must be after start time");
+    EXPECT_EQ(MaxRep.opstatus(), "[WARNING] [MAX AGGREGATE] [DB: TESTDB] - Target end time must be after start time");
 }
 
 TEST_F(XStoreTest, SumAggregateRejectsStartAfterEnd) {
@@ -2008,7 +2011,7 @@ TEST_F(XStoreTest, SumAggregateRejectsStartAfterEnd) {
     Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
     XStore_Proto::Sum_REP SumRep;
     Store.SumAggregate(TS_2016_MID + 1, TS_2016_MID, "TESTDB", 0, &SumRep);
-    EXPECT_EQ(SumRep.opstatus(), "[ERROR] [SUM AGGREGATE] [DB: TESTDB] - Target end time must be after start time");
+    EXPECT_EQ(SumRep.opstatus(), "[WARNING] [SUM AGGREGATE] [DB: TESTDB] - Target end time must be after start time");
 }
 
 TEST_F(XStoreTest, AvgAggregateRejectsStartAfterEnd) {
@@ -2016,7 +2019,7 @@ TEST_F(XStoreTest, AvgAggregateRejectsStartAfterEnd) {
     Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
     XStore_Proto::Avg_REP AvgRep;
     Store.AvgAggregate(TS_2016_MID + 1, TS_2016_MID, "TESTDB", 0, &AvgRep);
-    EXPECT_EQ(AvgRep.opstatus(), "[ERROR] [AVG AGGREGATE] [DB: TESTDB] - Target end time must be after start time");
+    EXPECT_EQ(AvgRep.opstatus(), "[WARNING] [AVG AGGREGATE] [DB: TESTDB] - Target end time must be after start time");
 }
 
 TEST_F(XStoreTest, SumAndAvgAggregateWithRemainderDivisor) {

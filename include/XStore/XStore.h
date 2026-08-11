@@ -1,33 +1,23 @@
 #ifndef XSTORE_XSTORE_H
 #define XSTORE_XSTORE_H
 
-#include <string>
-#include <cstring>
-#include <map>
+// Everything below is needed by this header's own declarations (member
+// types or method signatures). Anything only used inside an XStore_*.cpp
+// method body -- filesystem, sys/mman.h, fcntl.h, algorithm, execution,
+// TimeStruct, fmt, spdlog, etc. -- is included by that .cpp directly rather
+// than leaking into every translation unit that includes this class.
+#include <cstddef>
+#include <cstdio>
 #include <list>
-#include <unordered_map>
-#include <unordered_set>
+#include <map>
 #include <mutex>
 #include <shared_mutex>
-#include <iostream>
-#include <filesystem>
-#include <stdio.h>
-#include <sys/mman.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <algorithm>
-#include <functional>
-#include <sys/types.h>
-#include <execution>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 #include "XStore.pb.h"
-#include "include/DataStructs/TimeStruct.h"
 #include "include/DataStructs/ValueStruct.h"
-#include "include/DataStructs/ConfigStruct.h"
-#include "include/DataStructs/FileRangeLock.h"
-#include "include/Logger/spdlog/fmt/fmt.h"
-#include "include/Logger/Logger.h"
 
 // Length of msg header
 #define TRACE_LEN 8
