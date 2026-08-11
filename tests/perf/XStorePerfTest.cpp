@@ -501,3 +501,4 @@ TEST_F(XStorePerfTest, AvgAggregateThroughput) {
     ASSERT_EQ(AvgRep.opstatus(), "SUCCESS");
     ReportPerf({"AvgAggregate", N, Elapsed});
 }
+

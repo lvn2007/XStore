@@ -175,16 +175,24 @@ std::string XStore::DbBasePath(const std::string &dbName) const {
 }
 
 void* XStore::GetOrMapFile(const std::string &targetFile, size_t rowLength, unsigned long long totalRows) {
-    std::lock_guard<std::mutex> Lock(MmapMutex);
-
-    auto it = MmapIndex.find(targetFile);
-    if (it != MmapIndex.end()) {
-        // Cache hit -> promote to MRU front
-        MmapLru.splice(MmapLru.begin(), MmapLru, it->second);
-        return it->second->second.Base;
+    // Fast path: already mapped -- only the lookup+MRU-promote touches
+    // shared state, so the lock is held just long enough for that.
+    {
+        std::lock_guard<std::mutex> Lock(MmapMutex);
+        auto it = MmapIndex.find(targetFile);
+        if (it != MmapIndex.end()) {
+            MmapLru.splice(MmapLru.begin(), MmapLru, it->second);
+            return it->second->second.Base;
+        }
     }
 
-    // Cache miss -> open (create if needed), ensure size, map, cache
+    // Cache miss -> open (create if needed), ensure size, map. Done WITHOUT
+    // the lock: open/fstat/ftruncate/mmap are syscalls whose cost scales
+    // with file size and disk state, and holding a process-wide mutex
+    // across them would serialize every other thread's inserts -- to any
+    // DB, not just this one -- for that syscall's whole duration. Two
+    // threads racing to first-touch the same file both pay this cost
+    // unlocked; the loser's redundant mapping is dropped below.
     int Fd = open(targetFile.c_str(), O_RDWR | O_CREAT, 0644);
     if (Fd < 0) {
         return nullptr;
@@ -210,6 +218,17 @@ void* XStore::GetOrMapFile(const std::string &targetFile, size_t rowLength, unsi
     close(Fd);
     if (Base == MAP_FAILED) {
         return nullptr;
+    }
+
+    // Re-acquire to install into the cache, double-checked: another thread
+    // may have raced us to map this same file while we were unlocked.
+    std::lock_guard<std::mutex> Lock(MmapMutex);
+    auto it = MmapIndex.find(targetFile);
+    if (it != MmapIndex.end()) {
+        // Lost the race -- drop our redundant mapping, use theirs.
+        munmap(Base, FileLen);
+        MmapLru.splice(MmapLru.begin(), MmapLru, it->second);
+        return it->second->second.Base;
     }
 
     MmapLru.emplace_front(targetFile, MappedFile{Base, FileLen});
