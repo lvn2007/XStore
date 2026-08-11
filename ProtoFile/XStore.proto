@@ -28,6 +28,9 @@ enum TimeUnit {
   MILLISECOND = 1;
   MICROSECOND = 2;
   NANOSECOND = 3;
+  MINUTE = 4;
+  HOUR = 5;
+  DAY = 6;
 }
 
 message ConfigStruct {

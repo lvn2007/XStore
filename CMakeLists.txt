@@ -65,9 +65,9 @@ include_directories(.)
 include_directories(include)
 include_directories(src)
 
-add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h src/DataStructs/DataStruct.cpp
-        include/DataStructs/DataStruct.h ${PROTO_SRCS} ${PROTO_HDRS} src/DataStructs/FileStruct.cpp
-        include/DataStructs/FileStruct.h include/Networking/zmq.hpp include/Networking/zmq_addon.hpp
+add_executable(XStore src/main.cpp src/XStore/XStore.cpp include/XStore/XStore.h
+        include/DataStructs/ValueStruct.h ${PROTO_SRCS} ${PROTO_HDRS}
+        include/Networking/zmq.hpp include/Networking/zmq_addon.hpp
         include/Networking/ZMQ_Server.h src/XStore_Networking/ZMQ_Server.cpp
         include/Networking/zhelpers.hpp src/DataStructs/ConfigStruct.cpp include/DataStructs/ConfigStruct.h
         include/DataStructs/TimeStruct.h src/DataStructs/TimeStruct.cpp

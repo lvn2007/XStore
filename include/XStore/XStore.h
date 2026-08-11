@@ -6,6 +6,7 @@
 #include <map>
 #include <list>
 #include <unordered_map>
+#include <unordered_set>
 #include <mutex>
 #include <shared_mutex>
 #include <iostream>
@@ -22,7 +23,7 @@
 #include <execution>
 #include "XStore.pb.h"
 #include "include/DataStructs/TimeStruct.h"
-#include "include/DataStructs/DataStruct.h"
+#include "include/DataStructs/ValueStruct.h"
 #include "include/DataStructs/ConfigStruct.h"
 #include "include/DataStructs/FileRangeLock.h"
 #include "include/Logger/spdlog/fmt/fmt.h"
@@ -38,8 +39,14 @@
 
 class XStore {
     public:
+        // Convention: every directory-path member/return value in this class
+        // (BaseDir, DataStoreDir, DbBasePath()'s result) is stored WITHOUT a
+        // trailing '/'. Joining is always done explicitly via JoinPath (or an
+        // explicit '/' in a format string), never by relying on a variable
+        // having one baked in -- that made call sites impossible to read
+        // without checking how the value upstream was built.
         std::string BaseDir = GetBaseDir();
-        std::string DataStoreDir = BaseDir + "DataStore/";
+        std::string DataStoreDir = JoinPath(BaseDir, "DataStore");
 
         // Shared across every XStore instance (one per worker thread) so a config
         // read from disk by one thread is visible to all others, and guarded by
@@ -128,6 +135,17 @@ class XStore {
         // MIN - AGGREGATE
         void MinAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Min_REP *returnData);
 
+        // Profiling-only prototype (see tests/perf/XStorePerfTest.cpp): same scan
+        // as ProcessFileRangeSelect/MinAggregate but compares natively-typed
+        // doubles directly, skipping GetFDataValue's switch + long double
+        // conversion. Hardcoded to doubleData -- exists to measure the delta a
+        // type-specialized kernel would buy, not as a drop-in replacement.
+        template <typename Cmp>
+        void ProcessFileRangeSelectTypedDouble(FILE* bFile, unsigned long long startOffset, unsigned long long totalRows,
+                                     size_t rowLen, unsigned short columnIdx,
+                                     bool& bestInitialized, double& bestValue, XStore_Proto::FData& bestData);
+        void MinAggregateTypedDouble(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Min_REP *returnData);
+
         // MAX - AGGREGATE
         void MaxAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Max_REP *returnData);
 
@@ -144,10 +162,11 @@ class XStore {
         // Get current base directory
         std::string GetBaseDir();
 
-        // Check if there's any existing database
-        bool HasDB();
-
-        bool HasDBFile(std::string filePath);
+        // Base directory for dbName's data/config files under DataStoreDir,
+        // e.g. "<DataStoreDir>/<dbName>" -- no trailing '/' (see convention
+        // note above BaseDir). Assumes dbName is already upper-cased (call
+        // ToUpperCase first, as every public method does).
+        std::string DbBasePath(const std::string &dbName) const;
 
         // Fetch dbName's ConfigStruct from CfgMap, loading it from dbBasePath's
         // .CFG file into the cache on first use. Returns false if the .CFG file
@@ -175,9 +194,26 @@ class XStore {
         // (RemoveDB), since a single RemoveDB can span many cached year files.
         void EraseMappedFilesUnderPrefix(const std::string &dbDirPrefix);
 
+        // Joins base and child with exactly one '/' between them, regardless
+        // of whether base already happens to end with one -- the single
+        // place path-join logic lives, so no directory-path member needs to
+        // carry a trailing '/' of its own (see the convention note above
+        // BaseDir).
+        static std::string JoinPath(const std::string &base, const std::string &child) {
+            if (!base.empty() && base.back() == '/') {
+                return base + child;
+            }
+            return base + "/" + child;
+        }
+
         void ToUpperCase(std::string::iterator begin, std::string::iterator end) {
+            // Only mask the case bit off actual lowercase letters -- doing it
+            // unconditionally corrupts every other byte in the 'a'-'z' bit
+            // pattern's range (e.g. '0'-'9', '-') into unrelated control chars.
             for (auto it = begin; it != end; ++it) {
-                *it &= ~0x20;
+                if (*it >= 'a' && *it <= 'z') {
+                    *it &= ~0x20;
+                }
             }
         };
 

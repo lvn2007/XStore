@@ -7,8 +7,6 @@
 add_executable(xstore_tests
         integration/XStoreTest.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore.cpp
-        ${CMAKE_SOURCE_DIR}/src/DataStructs/DataStruct.cpp
-        ${CMAKE_SOURCE_DIR}/src/DataStructs/FileStruct.cpp
         ${CMAKE_SOURCE_DIR}/src/DataStructs/ConfigStruct.cpp
         ${CMAKE_SOURCE_DIR}/src/DataStructs/TimeStruct.cpp
         ${CMAKE_SOURCE_DIR}/src/DataStructs/FileRangeLock.cpp
@@ -40,8 +38,6 @@ add_executable(xstore_network_tests
         integration/XStoreZmqNetworkTest.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore_Networking/ZMQ_Server.cpp
-        ${CMAKE_SOURCE_DIR}/src/DataStructs/DataStruct.cpp
-        ${CMAKE_SOURCE_DIR}/src/DataStructs/FileStruct.cpp
         ${CMAKE_SOURCE_DIR}/src/DataStructs/ConfigStruct.cpp
         ${CMAKE_SOURCE_DIR}/src/DataStructs/TimeStruct.cpp
         ${CMAKE_SOURCE_DIR}/src/DataStructs/FileRangeLock.cpp
@@ -71,8 +67,6 @@ add_custom_command(TARGET xstore_network_tests POST_BUILD
 add_executable(xstore_perf_tests
         perf/XStorePerfTest.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore.cpp
-        ${CMAKE_SOURCE_DIR}/src/DataStructs/DataStruct.cpp
-        ${CMAKE_SOURCE_DIR}/src/DataStructs/FileStruct.cpp
         ${CMAKE_SOURCE_DIR}/src/DataStructs/ConfigStruct.cpp
         ${CMAKE_SOURCE_DIR}/src/DataStructs/TimeStruct.cpp
         ${CMAKE_SOURCE_DIR}/src/DataStructs/FileRangeLock.cpp

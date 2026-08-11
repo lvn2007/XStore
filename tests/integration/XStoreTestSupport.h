@@ -48,10 +48,11 @@ inline std::atomic<int> &DirCounter() {
     return Counter;
 }
 
-// XStore::GetBaseDir() resolves baseDir as the PARENT of the process's current
-// working directory (mirroring the production layout: <baseDir>/build/<binary>,
-// <baseDir>/DataStore/<dbName>/...). Constructing this moves the process cwd
-// into "<tmp>/<prefix>_<pid>_<n>/build" and restores it on destruction.
+// XStore::GetBaseDir() resolves baseDir as the process's current working
+// directory (mirroring the production layout: the XStore binary runs with
+// its cwd set to <baseDir>, and <baseDir>/DataStore/<dbName>/... lives
+// alongside it). Constructing this moves the process cwd into
+// "<tmp>/<prefix>_<pid>_<n>" and restores it on destruction.
 class ScratchDir {
 public:
     fs::path OriginalCwd;
@@ -61,9 +62,8 @@ public:
         OriginalCwd = fs::current_path();
         TestRoot = fs::temp_directory_path() /
             fs::path(prefix + "_" + std::to_string(getpid()) + "_" + std::to_string(DirCounter()++));
-        fs::create_directories(TestRoot / "build");
         fs::create_directories(TestRoot / "DataStore");
-        fs::current_path(TestRoot / "build");
+        fs::current_path(TestRoot);
     }
 
     ~ScratchDir() {

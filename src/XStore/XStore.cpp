@@ -2,6 +2,23 @@
 
 namespace {
 
+// std::execution::par_unseq dispatches work across a thread pool -- worth it
+// once a batch is big enough that sorting it in parallel outweighs that
+// dispatch/join overhead, but for a small batch (the common case for most
+// callers) the overhead alone can cost more than a plain sequential sort
+// would take to run the whole thing. Used by Batch Insert/Query/Delete's
+// "sort incoming timestamps first" step.
+constexpr std::ptrdiff_t ParallelSortThreshold = 10'000;
+
+template <typename Iterator, typename Compare>
+void SortBatch(Iterator begin, Iterator end, Compare comp) {
+    if (std::distance(begin, end) >= ParallelSortThreshold) {
+        std::sort(std::execution::par_unseq, begin, end, comp);
+    } else {
+        std::sort(begin, end, comp);
+    }
+}
+
 // Shared by BatchInsert/RangeInsert: writes one year-group's rows into an
 // already-mapped file under a single lock spanning the group's min-to-max
 // offset (instead of one lock per row). GetEntry(idx) must return a message
@@ -41,6 +58,42 @@ void WriteRowGroupToMappedFile(const std::string &targetFile, void *mappedBase, 
     }
 }
 
+// Shared by Min/Max/Sum/AvgAggregate: walks [startEpochT, endEpochT] one
+// year-file at a time, read-locking each existing segment and handing it to
+// kernel(file, firstOffset, rowsToProcess) -- the four aggregates differ only
+// in which ProcessFileRange* kernel runs and what it accumulates into. A
+// missing year contributes nothing (kernel just isn't called for it), same
+// as Range Query/Delete's handling of missing years.
+template <typename Kernel>
+void WalkYearSpan(const std::string &dbBasePath, const XStore_Proto::ConfigStruct &cfgStruct,
+                   unsigned long long startEpochT, unsigned long long endEpochT, Kernel &&kernel) {
+    unsigned long long IterEpoch = startEpochT;
+
+    while (IterEpoch <= endEpochT) {
+        TimeStruct CurrTs(IterEpoch, cfgStruct.timeresolution());
+        std::string TargetFilePath = fmt::format("{}/{}.XSTORE", dbBasePath, CurrTs.Year);
+
+        unsigned long long EndOfCurrentFile = std::min(endEpochT, static_cast<unsigned long long>(CurrTs.LastEpoch));
+        unsigned long long RowsToProcess = (EndOfCurrentFile - IterEpoch) + 1;
+
+        if (std::filesystem::exists(TargetFilePath)) {
+            FILE *BFile = std::fopen(TargetFilePath.c_str(), "rb");
+            if (BFile) {
+                unsigned long long FirstOffset = (IterEpoch - CurrTs.FirstEpoch) * cfgStruct.rowlength();
+                unsigned long long RegionLength = RowsToProcess * cfgStruct.rowlength();
+
+                {
+                    FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
+                    kernel(BFile, FirstOffset, RowsToProcess);
+                }
+                std::fclose(BFile);
+            }
+        }
+
+        IterEpoch = EndOfCurrentFile + 1;
+    }
+}
+
 }  // namespace
 
 std::map<std::string, XStore_Proto::ConfigStruct> XStore::CfgMap;
@@ -52,11 +105,23 @@ std::mutex XStore::MmapMutex;
 
 // Initialization
 XStore::XStore() {
-    // Initialize DB
-    InitDB();
+    // One XStore instance is constructed per worker thread (see ZMQ_Server),
+    // and in production every one of them shares the same DataStoreDir for
+    // the life of the process -- so creating it and scanning it into the
+    // shared CfgMap only needs to happen once per distinct DataStoreDir, not
+    // once per thread. Keyed by the path itself (rather than a single
+    // once_flag) so this still does real work again for a genuinely
+    // different DataStoreDir, which is what lets tests construct many
+    // XStore instances against many distinct scratch directories within one
+    // process.
+    static std::mutex InitMutex;
+    static std::unordered_set<std::string> InitializedDirs;
 
-    // First, check if there's any existing data exists
-//    HasDB();
+    std::lock_guard<std::mutex> Lock(InitMutex);
+    if (InitializedDirs.insert(DataStoreDir).second) {
+        std::filesystem::create_directories(DataStoreDir);
+        InitDB();
+    }
 }
 
 bool XStore::GetOrLoadCfg(const std::string &dbName, const std::string &dbBasePath, XStore_Proto::ConfigStruct &cfgOut) {
@@ -79,7 +144,7 @@ bool XStore::GetOrLoadCfg(const std::string &dbName, const std::string &dbBasePa
         return true;
     }
 
-    std::string CfgPath = fmt::format("{}{}.CFG", dbBasePath, dbName);
+    std::string CfgPath = JoinPath(dbBasePath, dbName + ".CFG");
     if (!std::filesystem::exists(CfgPath)) {
         return false;
     }
@@ -103,6 +168,10 @@ void XStore::PutCfg(const std::string &dbName, const XStore_Proto::ConfigStruct 
 void XStore::EraseCfg(const std::string &dbName) {
     std::unique_lock WriteLock(CfgMutex);
     CfgMap.erase(dbName);
+}
+
+std::string XStore::DbBasePath(const std::string &dbName) const {
+    return JoinPath(DataStoreDir, dbName);
 }
 
 void* XStore::GetOrMapFile(const std::string &targetFile, size_t rowLength, unsigned long long totalRows) {
@@ -193,7 +262,7 @@ XStore_Proto::SysInfo_REP XStore::InfoQuery(std::string serverAddr, int threadCo
     // Loop through all db available in DataStore
     for (auto& dir : std::filesystem::directory_iterator(DataStoreDir)) {
         std::string CurrDbName = dir.path().filename().string();
-        std::string CurrDbDir = DataStoreDir + CurrDbName;
+        std::string CurrDbDir = JoinPath(DataStoreDir, CurrDbName);
 
         // Set DB Name
         XStore_Proto::DbStats *CurrDb = ToReturn.add_dbinfo();
@@ -201,15 +270,18 @@ XStore_Proto::SysInfo_REP XStore::InfoQuery(std::string serverAddr, int threadCo
 
         // Fetch config of a target DB
         XStore_Proto::ConfigStruct CfgStruct;
-        std::string CurrCfgFilePath = CurrDbDir + "/" + CurrDbName + ".CFG";
+        std::string CurrCfgFilePath = JoinPath(CurrDbDir, CurrDbName + ".CFG");
 
         // Check if .CFG file is exist
         if (std::filesystem::exists(CurrCfgFilePath)) {
             int CfgFile = open(CurrCfgFilePath.c_str(), O_RDONLY);
-            CfgStruct.ParseFromFileDescriptor(CfgFile);
+            if (CfgFile >= 0) {
+                CfgStruct.ParseFromFileDescriptor(CfgFile);
+                close(CfgFile);
 
-            // Set DB Resolution
-            CurrDb->set_dbresolution(CfgStruct.timeresolution());
+                // Set DB Resolution
+                CurrDb->set_dbresolution(CfgStruct.timeresolution());
+            }
         }
 
         // Size of all data files in current DB
@@ -220,10 +292,7 @@ XStore_Proto::SysInfo_REP XStore::InfoQuery(std::string serverAddr, int threadCo
         for (auto& dbDir : std::filesystem::directory_iterator(CurrDbDir)) {
             // Current file name & path in dbDir
             std::string CurrFileName = dbDir.path().filename().string();
-            stat((CurrDbDir + "/" + CurrFileName).c_str(), &StatStruct);
-
-            // Fetch current file size & convert to GB
-            unsigned int CurrFileSizeInGb = file_size(dbDir.path());
+            stat(JoinPath(CurrDbDir, CurrFileName).c_str(), &StatStruct);
 
             // Number of 512B blocks allocated
             AllSize += StatStruct.st_blocks * 512;
@@ -251,7 +320,7 @@ XStore_Proto::CreateDB_REP XStore::CreateDB(std::string dbName, XStore_Proto::Ti
     }
 
     // Target directory of a given DB name
-    std::string TargetPath = fmt::format("{}DataStore/{}/", BaseDir, dbName);
+    std::string TargetPath = DbBasePath(dbName);
 
     // IF folder for dbName is already created
     //  -> Inform user about the error
@@ -278,7 +347,7 @@ XStore_Proto::CreateDB_REP XStore::CreateDB(std::string dbName, XStore_Proto::Ti
 
             // Writing cfgStruct to file
             FILE *BFile;
-            std::string CfgPath  = fmt::format("{}{}.CFG", TargetPath, dbName);
+            std::string CfgPath  = JoinPath(TargetPath, dbName + ".CFG");
             BFile = std::fopen(CfgPath.c_str(), "wb+");
 
             {
@@ -314,14 +383,14 @@ void XStore::UnaryInsert(const unsigned long long int &unixTime, const XStore_Pr
     ToUpperCase(dbName.begin(), dbName.end());
 
     // Base directory of a DB
-    std::string DbBasePath = fmt::format("{}DataStore/{}/", BaseDir, dbName);
+    std::string DbBasePathStr = DbBasePath(dbName);
 
     // Fetch cfgStruct from cache, loading from disk on first use. This also
     // covers "DB does not exist": GetOrLoadCfg stats the .CFG file itself on
     // a cache miss, so a separate upfront is_directory() check on every call
     // (cache hit or not) would just be a redundant stat -- dropped.
     XStore_Proto::ConfigStruct CfgStruct;
-    if (!GetOrLoadCfg(dbName, DbBasePath, CfgStruct)) {
+    if (!GetOrLoadCfg(dbName, DbBasePathStr, CfgStruct)) {
         std::string ErrMsg = fmt::format("[ERROR] [UNARY INSERT] [DB: {}] - DB does not exist", dbName);
         returnData->set_insertstatus(ErrMsg);
         spdlog::error(ErrMsg.substr(ERROR_LEN));
@@ -335,7 +404,7 @@ void XStore::UnaryInsert(const unsigned long long int &unixTime, const XStore_Pr
     // Cached PROT_WRITE mapping for this (dbName, year) file -- created,
     // ftruncate'd to the full year's row count, and mapped once; every
     // subsequent UnaryInsert to the same file reuses it (see GetOrMapFile).
-    std::string TargetFile = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
+    std::string TargetFile = fmt::format("{}/{}.XSTORE", DbBasePathStr, CurrTs.Year);
     void *MappedBase = GetOrMapFile(TargetFile, CfgStruct.rowlength(), CurrTs.LastEpoch - CurrTs.FirstEpoch);
     if (MappedBase == nullptr) {
         std::string ErrMsg = fmt::format("[ERROR] [UNARY INSERT] [DB: {}] - Unable to open/map {}.XSTORE", dbName, CurrTs.Year);
@@ -388,14 +457,14 @@ void XStore::UnaryQuery(const unsigned long long int &unixTime, std::string dbNa
     ToUpperCase(dbName.begin(), dbName.end());
 
     // Base directory of a DB
-    std::string DbBasePath = fmt::format("{}DataStore/{}/", BaseDir, dbName);
+    std::string DbBasePathStr = DbBasePath(dbName);
 
     // Fetch cfgStruct from cache, loading from disk on first use. This also
     // covers "DB does not exist": GetOrLoadCfg stats the .CFG file itself on
     // a cache miss, so a separate upfront is_directory() check on every call
     // (cache hit or not) would just be a redundant stat -- dropped.
     XStore_Proto::ConfigStruct CfgStruct;
-    if (!GetOrLoadCfg(dbName, DbBasePath, CfgStruct)) {
+    if (!GetOrLoadCfg(dbName, DbBasePathStr, CfgStruct)) {
         std::string ErrMsg = fmt::format("[ERROR] [UNARY QUERY] [DB: {}] - DB does not exist", dbName);
         returnData->set_querystatus(ErrMsg);
         spdlog::error(ErrMsg.substr(ERROR_LEN));
@@ -407,7 +476,7 @@ void XStore::UnaryQuery(const unsigned long long int &unixTime, std::string dbNa
     TimeStruct CurrTs(unixTime, CfgStruct.timeresolution());
 
     // Base directory of a DB & Target path of file to READ
-    std::string TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
+    std::string TargetFilePath = fmt::format("{}/{}.XSTORE", DbBasePathStr, CurrTs.Year);
 
     // IF target year file DOES NOT exist -- checked explicitly because
     // GetOrMapFile below opens with O_CREAT and would otherwise silently
@@ -454,10 +523,10 @@ XStore_Proto::UnaryDelete_REP XStore::UnaryDelete(const unsigned long long int &
     ToUpperCase(dbName.begin(), dbName.end());
 
     // Base directory of a DB
-    std::string DbBasePath = fmt::format("{}DataStore/{}/", BaseDir, dbName);
+    std::string DbBasePathStr = DbBasePath(dbName);
 
     // IF db directory does not exist
-    if (std::filesystem::is_directory(DbBasePath) == 0) {
+    if (std::filesystem::is_directory(DbBasePathStr) == 0) {
         std::string ErrMsg = fmt::format("[ERROR] [UNARY DELETE] [DB: {}] - DB does not exist", dbName);
         ToReturn.set_deletestatus(ErrMsg);
         spdlog::error(ErrMsg.substr(ERROR_LEN));
@@ -466,7 +535,7 @@ XStore_Proto::UnaryDelete_REP XStore::UnaryDelete(const unsigned long long int &
 
     // Fetch cfgStruct from cache, loading from disk on first use
     XStore_Proto::ConfigStruct CfgStruct;
-    if (!GetOrLoadCfg(dbName, DbBasePath, CfgStruct)) {
+    if (!GetOrLoadCfg(dbName, DbBasePathStr, CfgStruct)) {
         std::string ErrMsg = fmt::format("[ERROR] [UNARY DELETE] [DB: {}] - DB does not exist", dbName);
         ToReturn.set_deletestatus(ErrMsg);
         spdlog::error(ErrMsg.substr(ERROR_LEN));
@@ -480,7 +549,7 @@ XStore_Proto::UnaryDelete_REP XStore::UnaryDelete(const unsigned long long int &
     // Prepare to delete (Writing NULL byte)
     FILE *BFile;
     std::string TargetFileName = fmt::format("{}.XSTORE", CurrTs.Year);
-    std::string TargetFilePath = fmt::format("{}{}", DbBasePath, TargetFileName);
+    std::string TargetFilePath = JoinPath(DbBasePathStr, TargetFileName);
 
     // IF target file does NOT exist
     if (std::filesystem::exists(TargetFilePath) == 0) {
@@ -524,10 +593,10 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
     ToUpperCase(DbName.begin(), DbName.end());
 
     // Base directory of a DB
-    std::string DbBasePath = fmt::format("{}DataStore/{}/", BaseDir, DbName);
+    std::string DbBasePathStr = DbBasePath(DbName);
 
     // IF db directory does not exist
-    if (std::filesystem::is_directory(DbBasePath) == 0) {
+    if (std::filesystem::is_directory(DbBasePathStr) == 0) {
         std::string ErrMsg = fmt::format("[ERROR] [BATCH INSERT] [DB: {}] - DB does not exist", DbName);
         returnData->set_insertstatus(ErrMsg);
         spdlog::error(ErrMsg.substr(ERROR_LEN));
@@ -536,7 +605,7 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
 
     // Fetch cfgStruct from cache, loading from disk on first use
     XStore_Proto::ConfigStruct CfgStruct;
-    if (!GetOrLoadCfg(DbName, DbBasePath, CfgStruct)) {
+    if (!GetOrLoadCfg(DbName, DbBasePathStr, CfgStruct)) {
         std::string ErrMsg = fmt::format("[ERROR] [BATCH INSERT] [DB: {}] - DB does not exist", DbName);
         returnData->set_insertstatus(ErrMsg);
         spdlog::error(ErrMsg.substr(ERROR_LEN));
@@ -545,7 +614,7 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
 
     // Assuming incoming data is unsorted
     //  -> Ascending sort
-    std::sort(std::execution::par_unseq, protoFromClient->mutable_batchinsert_data()->begin(), protoFromClient->mutable_batchinsert_data()->end(),
+    SortBatch(protoFromClient->mutable_batchinsert_data()->begin(), protoFromClient->mutable_batchinsert_data()->end(),
               [](const XStore_Proto::BatchInsert_DATA& a, const XStore_Proto::BatchInsert_DATA &b) {
                     return a.timestamp() < b.timestamp();
     });
@@ -567,7 +636,7 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
     for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& Pair : DataMap) {
         unsigned short int YearKey = Pair.first;
         const std::vector<unsigned long long int> &Indices = Pair.second;
-        std::string TargetFile = fmt::format("{}{}.XSTORE", DbBasePath, YearKey);
+        std::string TargetFile = fmt::format("{}/{}.XSTORE", DbBasePathStr, YearKey);
 
         // Grab first inserting element for TimeStruct purposes
         //  Get length of time to truncate
@@ -610,11 +679,11 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
     ToUpperCase(DbName.begin(), DbName.end());
 
     // Base directory of a DB
-    std::string DbBasePath = fmt::format("{}DataStore/{}/", BaseDir, DbName);
+    std::string DbBasePathStr = DbBasePath(DbName);
 
     // Fetch cfgStruct from cache, loading from disk on first use
     XStore_Proto::ConfigStruct CfgStruct;
-    if (!GetOrLoadCfg(DbName, DbBasePath, CfgStruct)) {
+    if (!GetOrLoadCfg(DbName, DbBasePathStr, CfgStruct)) {
         std::string ErrMsg = fmt::format("[ERROR] [BATCH QUERY] [DB: {}] - {}.CFG does not exist", DbName, DbName);
         returnData->set_querystatus(ErrMsg);
         spdlog::error(ErrMsg.substr(ERROR_LEN));
@@ -630,7 +699,7 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
     }
 
     // IF db directory does not exist
-    if (std::filesystem::is_directory(DbBasePath) == 0) {
+    if (std::filesystem::is_directory(DbBasePathStr) == 0) {
         std::string ErrMsg = fmt::format("[ERROR] [BATCH QUERY] [DB: {}] - DB does not exist", DbName);
         returnData->set_querystatus(ErrMsg);
         spdlog::error(ErrMsg.substr(ERROR_LEN));
@@ -641,7 +710,7 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
     //  -> Ascending sort
     if (SortTime)
     {
-        std::sort(std::execution::par_unseq, protoFromClient->mutable_timestamp()->begin(), protoFromClient->mutable_timestamp()->end(),
+        SortBatch(protoFromClient->mutable_timestamp()->begin(), protoFromClient->mutable_timestamp()->end(),
                       [](const unsigned long long int& a, const unsigned long long int& b) {
                         return a < b;
         });
@@ -663,7 +732,7 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
     for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& Pair : DataMap) {
         unsigned short int YearKey = Pair.first;
         const std::vector<unsigned long long int> &Indices = Pair.second;
-        std::string TargetFile = fmt::format("{}{}.XSTORE", DbBasePath, YearKey);
+        std::string TargetFile = fmt::format("{}/{}.XSTORE", DbBasePathStr, YearKey);
 
         // IF target file does NOT exist -- checked explicitly because
         // GetOrMapFile below opens with O_CREAT and would otherwise silently
@@ -749,11 +818,11 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
     ToUpperCase(DbName.begin(), DbName.end());
 
     // Base directory of a DB
-    std::string DbBasePath = fmt::format("{}DataStore/{}/", BaseDir, DbName);
+    std::string DbBasePathStr = DbBasePath(DbName);
 
     // Fetch cfgStruct from cache, loading from disk on first use
     XStore_Proto::ConfigStruct CfgStruct;
-    if (!GetOrLoadCfg(DbName, DbBasePath, CfgStruct)) {
+    if (!GetOrLoadCfg(DbName, DbBasePathStr, CfgStruct)) {
         std::string ErrMsg = fmt::format("[ERROR] [BATCH DELETE] [DB: {}] - {}.CFG does not exist", DbName, DbName);
         ToReturn.set_deletestatus(ErrMsg);
         spdlog::error(ErrMsg.substr(ERROR_LEN));
@@ -761,7 +830,7 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
     }
 
     // IF db directory does not exist
-    if (std::filesystem::is_directory(DbBasePath) == 0) {
+    if (std::filesystem::is_directory(DbBasePathStr) == 0) {
         std::string ErrMsg = fmt::format("[ERROR] [BATCH DELETE] [DB: {}] - DB does not exist", DbName);
         ToReturn.set_deletestatus(ErrMsg);
         spdlog::error(ErrMsg.substr(ERROR_LEN));
@@ -770,7 +839,7 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
 
     // Assuming incoming batch query is unsorted
     //  -> Ascending sort
-    std::sort(std::execution::par_unseq, protoFromClient->mutable_timestamp()->begin(), protoFromClient->mutable_timestamp()->end(),
+    SortBatch(protoFromClient->mutable_timestamp()->begin(), protoFromClient->mutable_timestamp()->end(),
               [](const unsigned long long int& a, const unsigned long long int& b) {
                 return a < b;
     });
@@ -792,7 +861,7 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
     for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& Pair : DataMap) {
         unsigned short int YearKey = Pair.first;
         const std::vector<unsigned long long int> &Indices = Pair.second;
-        std::string TargetFile = fmt::format("{}{}.XSTORE", DbBasePath, YearKey);
+        std::string TargetFile = fmt::format("{}/{}.XSTORE", DbBasePathStr, YearKey);
 
         // IF target file does NOT exist
         if (std::filesystem::exists(TargetFile) == 0) {
@@ -850,10 +919,10 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, X
     ToUpperCase(DbName.begin(), DbName.end());
 
     // Base directory of a DB
-    std::string DbBasePath = fmt::format("{}DataStore/{}/", BaseDir, DbName);
+    std::string DbBasePathStr = DbBasePath(DbName);
 
     // IF db directory does not exist
-    if (std::filesystem::is_directory(DbBasePath) == 0) {
+    if (std::filesystem::is_directory(DbBasePathStr) == 0) {
         std::string ErrMsg = fmt::format("[ERROR] [RANGE INSERT] [DB: {}] - DB does not exist", DbName);
         returnData->set_insertstatus(ErrMsg);
         spdlog::error(ErrMsg.substr(ERROR_LEN));
@@ -862,7 +931,7 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, X
 
     // Fetch cfgStruct from cache, loading from disk on first use
     XStore_Proto::ConfigStruct CfgStruct;
-    if (!GetOrLoadCfg(DbName, DbBasePath, CfgStruct)) {
+    if (!GetOrLoadCfg(DbName, DbBasePathStr, CfgStruct)) {
         std::string ErrMsg = fmt::format("[ERROR] [RANGE INSERT] [DB: {}] - DB does not exist", DbName);
         returnData->set_insertstatus(ErrMsg);
         spdlog::error(ErrMsg.substr(ERROR_LEN));
@@ -887,7 +956,7 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, X
     for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& Pair : DataMap) {
         unsigned short int YearKey = Pair.first;
         const std::vector<unsigned long long int> &Indices = Pair.second;
-        std::string TargetFile = fmt::format("{}{}.XSTORE", DbBasePath, YearKey);
+        std::string TargetFile = fmt::format("{}/{}.XSTORE", DbBasePathStr, YearKey);
 
         // Grab first inserting element for TimeStruct purposes
         //  Get length of time to truncate
@@ -932,12 +1001,23 @@ void XStore::RangeQuery(const unsigned long long int &startEpochT, const unsigne
     ToUpperCase(dbName.begin(), dbName.end());
 
     // Base directory of a DB
-    std::string DbBasePath = fmt::format("{}DataStore/{}/", BaseDir, dbName);
+    std::string DbBasePathStr = DbBasePath(dbName);
 
     // Fetch cfgStruct from cache, loading from disk on first use
     XStore_Proto::ConfigStruct CfgStruct;
-    if (!GetOrLoadCfg(dbName, DbBasePath, CfgStruct)) {
+    if (!GetOrLoadCfg(dbName, DbBasePathStr, CfgStruct)) {
         std::string ErrMsg = fmt::format("[ERROR] [RANGE QUERY] [DB: {}] - {}.CFG does not exist", dbName, dbName);
+        returnData->set_querystatus(ErrMsg);
+        spdlog::error(ErrMsg.substr(ERROR_LEN));
+        return;
+    }
+
+    // Must run before the size check below: startEpochT/endEpochT are
+    // unsigned, so an inverted range would otherwise underflow (endEpochT -
+    // startEpochT) into a huge value and get misreported as ">2GB" instead
+    // of the actual "end before start" error.
+    if (startEpochT > endEpochT) {
+        std::string ErrMsg = fmt::format("[ERROR] [RANGE QUERY] [DB: {}] - Target end time must be after start time", dbName);
         returnData->set_querystatus(ErrMsg);
         spdlog::error(ErrMsg.substr(ERROR_LEN));
         return;
@@ -951,15 +1031,8 @@ void XStore::RangeQuery(const unsigned long long int &startEpochT, const unsigne
         return;
     }
 
-    if ((endEpochT - startEpochT) < 0) {
-        std::string ErrMsg = fmt::format("[ERROR] [RANGE QUERY] [DB: {}] - Target end time must be after start time", dbName);
-        returnData->set_querystatus(ErrMsg);
-        spdlog::error(ErrMsg.substr(ERROR_LEN));
-        return;
-    }
-
     // IF db directory does not exist
-    if (std::filesystem::is_directory(DbBasePath) == 0) {
+    if (std::filesystem::is_directory(DbBasePathStr) == 0) {
         std::string ErrMsg = fmt::format("[ERROR] [RANGE QUERY] [DB: {}] - DB does not exist", dbName);
         returnData->set_querystatus(ErrMsg);
         spdlog::error(ErrMsg.substr(ERROR_LEN));
@@ -988,7 +1061,7 @@ void XStore::RangeQuery(const unsigned long long int &startEpochT, const unsigne
     unsigned long long int IterEpoch = startEpochT;
     while (IterEpoch <= endEpochT) {
         TimeStruct CurrTs(IterEpoch, CfgStruct.timeresolution());
-        std::string TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
+        std::string TargetFilePath = fmt::format("{}/{}.XSTORE", DbBasePathStr, CurrTs.Year);
         const unsigned long long int SegmentEnd = std::min(endEpochT, static_cast<unsigned long long int>(CurrTs.LastEpoch));
 
         // IF target YEAR.XSTORE does NOT exist -- checked explicitly because
@@ -1055,18 +1128,18 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(const unsigned long long int &
     ToUpperCase(dbName.begin(), dbName.end());
 
     // Base directory of a DB
-    std::string DbBasePath = fmt::format("{}DataStore/{}/", BaseDir, dbName);
+    std::string DbBasePathStr = DbBasePath(dbName);
 
     // Fetch cfgStruct from cache, loading from disk on first use
     XStore_Proto::ConfigStruct CfgStruct;
-    if (!GetOrLoadCfg(dbName, DbBasePath, CfgStruct)) {
+    if (!GetOrLoadCfg(dbName, DbBasePathStr, CfgStruct)) {
         std::string ErrMsg = fmt::format("[ERROR] [RANGE DELETE] [DB: {}] - {}.CFG does not exist", dbName, dbName);
         ToReturn.set_deletestatus(ErrMsg);
         spdlog::error(ErrMsg.substr(ERROR_LEN));
         return ToReturn;
     }
 
-    if ((endEpochT - startEpochT) < 0) {
+    if (startEpochT > endEpochT) {
         std::string ErrMsg = fmt::format("[ERROR] [RANGE DELETE] [DB: {}] - Target end time must be after start time", dbName);
         ToReturn.set_deletestatus(ErrMsg);
         spdlog::error(ErrMsg.substr(ERROR_LEN));
@@ -1074,7 +1147,7 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(const unsigned long long int &
     }
 
     // IF db directory does not exist
-    if (std::filesystem::is_directory(DbBasePath) == 0) {
+    if (std::filesystem::is_directory(DbBasePathStr) == 0) {
         std::string ErrMsg = fmt::format("[ERROR] [RANGE DELETE] [DB: {}] - DB does not exist", dbName);
         ToReturn.set_deletestatus(ErrMsg);
         spdlog::error(ErrMsg.substr(ERROR_LEN));
@@ -1093,7 +1166,7 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(const unsigned long long int &
     unsigned long long int IterEpoch = startEpochT;
     while (IterEpoch <= endEpochT) {
         TimeStruct CurrTs(IterEpoch, CfgStruct.timeresolution());
-        std::string TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
+        std::string TargetFilePath = fmt::format("{}/{}.XSTORE", DbBasePathStr, CurrTs.Year);
         const unsigned long long int SegmentEnd = std::min(endEpochT, static_cast<unsigned long long int>(CurrTs.LastEpoch));
 
         // IF target YEAR.XSTORE does NOT exist -- a missing year contributes
@@ -1255,16 +1328,14 @@ void XStore::MinAggregate(const unsigned long long int &startEpochT, const unsig
                             std::string dbName, unsigned short int columnIdx, XStore_Proto::Min_REP *returnData) {
 
     ToUpperCase(dbName.begin(), dbName.end());
-    std::string DbBasePath = fmt::format("{}DataStore/{}/", BaseDir, dbName);
+    std::string DbBasePathStr = DbBasePath(dbName);
 
-    // Config Fetching
     XStore_Proto::ConfigStruct CfgStruct;
-    if (!GetOrLoadCfg(dbName, DbBasePath, CfgStruct)) {
+    if (!GetOrLoadCfg(dbName, DbBasePathStr, CfgStruct)) {
         returnData->set_opstatus(fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - {}.CFG does not exist", dbName, dbName));
         return;
     }
 
-    // Safety Checks
     if (startEpochT > endEpochT) {
         returnData->set_opstatus(fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - Target end time must be after start time", dbName));
         return;
@@ -1274,37 +1345,109 @@ void XStore::MinAggregate(const unsigned long long int &startEpochT, const unsig
     MinValue.IsInitialized = false;
     XStore_Proto::FData MinData;
 
-    unsigned long long IterEpoch = startEpochT;
+    WalkYearSpan(DbBasePathStr, CfgStruct, startEpochT, endEpochT,
+        [&](FILE *bFile, unsigned long long firstOffset, unsigned long long rowsToProcess) {
+            ProcessFileRangeSelect<std::less<long double>>(bFile, firstOffset, rowsToProcess, CfgStruct.rowlength(), columnIdx, MinValue, MinData);
+        });
 
-    // The logic below handles both single-year and multi-year spans efficiently
-    while (IterEpoch <= endEpochT) {
-        TimeStruct CurrTs(IterEpoch, CfgStruct.timeresolution());
-        std::string TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
+    if (MinValue.IsInitialized) {
+        returnData->set_opstatus("SUCCESS");
+        *returnData->mutable_opresult() = MinData;
+    } else {
+        returnData->set_opstatus("ERROR: No valid data found");
+    }
+}
 
-        // Determine the end of the current file range
-        unsigned long long EndOfCurrentFile = std::min(endEpochT, (unsigned long long)CurrTs.LastEpoch);
-        unsigned long long RowsToProcess = (EndOfCurrentFile - IterEpoch) + 1;
+// Profiling-only prototype -- see header comment on the declaration and
+// tests/perf/XStorePerfTest.cpp for how it's benchmarked against MinAggregate.
+template <typename Cmp>
+void XStore::ProcessFileRangeSelectTypedDouble(FILE* bFile, unsigned long long startOffset, unsigned long long totalRows,
+                                     size_t rowLen, unsigned short columnIdx,
+                                     bool& bestInitialized, double& bestValue, XStore_Proto::FData& bestData) {
 
-        if (std::filesystem::exists(TargetFilePath)) {
-            FILE* BFile = std::fopen(TargetFilePath.c_str(), "rb");
-            if (BFile) {
-                unsigned long long FirstOffset = (IterEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength();
-                unsigned long long RegionLength = RowsToProcess * CfgStruct.rowlength();
+    if (totalRows == 0) return;
 
-                {
-                    FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
-                    ProcessFileRangeSelect<std::less<long double>>(BFile, FirstOffset, RowsToProcess, CfgStruct.rowlength(), columnIdx, MinValue, MinData);
-                }
-                std::fclose(BFile);
-            }
+    int Fd = fileno(bFile);
+    long PageSize = sysconf(_SC_PAGE_SIZE);
+
+    unsigned long long AlignedOffset = (startOffset / PageSize) * PageSize;
+    unsigned long long AlignmentSlop = startOffset - AlignedOffset;
+    size_t TotalBytesToMap = (totalRows * rowLen) + AlignmentSlop;
+
+    void* MmappedPtr = mmap(NULL, TotalBytesToMap, PROT_READ, MAP_SHARED, Fd, AlignedOffset);
+    if (MmappedPtr == MAP_FAILED) return;
+
+    madvise(MmappedPtr, TotalBytesToMap, MADV_SEQUENTIAL | MADV_WILLNEED);
+
+    const char* BasePtr = static_cast<const char*>(MmappedPtr) + AlignmentSlop;
+    XStore_Proto::RowData TempData;
+    const Cmp Better{};
+
+    for (unsigned long long i = 0; i < totalRows; ++i) {
+        const char* RowPtr = BasePtr + (i * rowLen);
+
+        if (RowPtr[0] == 0) continue;
+
+        TempData.Clear();
+
+        google::protobuf::io::ArrayInputStream ArrayIn(RowPtr, (int)rowLen);
+        google::protobuf::io::CodedInputStream CodedIn(&ArrayIn);
+
+        if (!TempData.MergePartialFromCodedStream(&CodedIn)) {
+            continue;
         }
 
-        // Move to the start of the next year
-        IterEpoch = EndOfCurrentFile + 1;
+        if (columnIdx < (unsigned int)TempData.fielddata_size()) {
+            const auto& CurrData = TempData.fielddata(columnIdx);
+
+            // Native-type compare: no GetFDataValue switch, no long double
+            // conversion. Real version would determine this case once (not
+            // per row) from the first valid row seen.
+            if (CurrData.oneOfData_case() == XStore_Proto::FData::OneOfDataCase::kDoubleData) {
+                double CandidateValue = CurrData.doubledata();
+
+                if (!bestInitialized || Better(CandidateValue, bestValue)) {
+                    bestValue = CandidateValue;
+                    bestInitialized = true;
+                    bestData = CurrData;
+                }
+            }
+        }
     }
 
-    // Return Results
-    if (MinValue.IsInitialized) {
+    munmap(MmappedPtr, TotalBytesToMap);
+}
+
+template void XStore::ProcessFileRangeSelectTypedDouble<std::less<double>>(
+    FILE*, unsigned long long, unsigned long long, size_t, unsigned short, bool&, double&, XStore_Proto::FData&);
+
+void XStore::MinAggregateTypedDouble(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT,
+                            std::string dbName, unsigned short int columnIdx, XStore_Proto::Min_REP *returnData) {
+
+    ToUpperCase(dbName.begin(), dbName.end());
+    std::string DbBasePathStr = DbBasePath(dbName);
+
+    XStore_Proto::ConfigStruct CfgStruct;
+    if (!GetOrLoadCfg(dbName, DbBasePathStr, CfgStruct)) {
+        returnData->set_opstatus(fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - {}.CFG does not exist", dbName, dbName));
+        return;
+    }
+
+    if (startEpochT > endEpochT) {
+        returnData->set_opstatus(fmt::format("[ERROR] [MIN AGGREGATE] [DB: {}] - Target end time must be after start time", dbName));
+        return;
+    }
+
+    bool MinInitialized = false;
+    double MinValue = 0.0;
+    XStore_Proto::FData MinData;
+
+    WalkYearSpan(DbBasePathStr, CfgStruct, startEpochT, endEpochT,
+        [&](FILE *bFile, unsigned long long firstOffset, unsigned long long rowsToProcess) {
+            ProcessFileRangeSelectTypedDouble<std::less<double>>(bFile, firstOffset, rowsToProcess, CfgStruct.rowlength(), columnIdx, MinInitialized, MinValue, MinData);
+        });
+
+    if (MinInitialized) {
         returnData->set_opstatus("SUCCESS");
         *returnData->mutable_opresult() = MinData;
     } else {
@@ -1316,10 +1459,10 @@ void XStore::MaxAggregate(const unsigned long long int &startEpochT, const unsig
                             std::string dbName, unsigned short int columnIdx, XStore_Proto::Max_REP *returnData) {
 
     ToUpperCase(dbName.begin(), dbName.end());
-    std::string DbBasePath = fmt::format("{}DataStore/{}/", BaseDir, dbName);
+    std::string DbBasePathStr = DbBasePath(dbName);
 
     XStore_Proto::ConfigStruct CfgStruct;
-    if (!GetOrLoadCfg(dbName, DbBasePath, CfgStruct)) {
+    if (!GetOrLoadCfg(dbName, DbBasePathStr, CfgStruct)) {
         returnData->set_opstatus(fmt::format("[ERROR] [MAX AGGREGATE] [DB: {}] - {}.CFG does not exist", dbName, dbName));
         return;
     }
@@ -1333,31 +1476,10 @@ void XStore::MaxAggregate(const unsigned long long int &startEpochT, const unsig
     MaxValue.IsInitialized = false;
     XStore_Proto::FData MaxData;
 
-    unsigned long long IterEpoch = startEpochT;
-
-    while (IterEpoch <= endEpochT) {
-        TimeStruct CurrTs(IterEpoch, CfgStruct.timeresolution());
-        std::string TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
-
-        unsigned long long EndOfCurrentFile = std::min(endEpochT, (unsigned long long)CurrTs.LastEpoch);
-        unsigned long long RowsToProcess = (EndOfCurrentFile - IterEpoch) + 1;
-
-        if (std::filesystem::exists(TargetFilePath)) {
-            FILE* BFile = std::fopen(TargetFilePath.c_str(), "rb");
-            if (BFile) {
-                unsigned long long FirstOffset = (IterEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength();
-                unsigned long long RegionLength = RowsToProcess * CfgStruct.rowlength();
-
-                {
-                    FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
-                    ProcessFileRangeSelect<std::greater<long double>>(BFile, FirstOffset, RowsToProcess, CfgStruct.rowlength(), columnIdx, MaxValue, MaxData);
-                }
-                std::fclose(BFile);
-            }
-        }
-
-        IterEpoch = EndOfCurrentFile + 1;
-    }
+    WalkYearSpan(DbBasePathStr, CfgStruct, startEpochT, endEpochT,
+        [&](FILE *bFile, unsigned long long firstOffset, unsigned long long rowsToProcess) {
+            ProcessFileRangeSelect<std::greater<long double>>(bFile, firstOffset, rowsToProcess, CfgStruct.rowlength(), columnIdx, MaxValue, MaxData);
+        });
 
     if (MaxValue.IsInitialized) {
         returnData->set_opstatus("SUCCESS");
@@ -1371,10 +1493,10 @@ void XStore::SumAggregate(const unsigned long long int &startEpochT, const unsig
                             std::string dbName, unsigned short int columnIdx, XStore_Proto::Sum_REP *returnData) {
 
     ToUpperCase(dbName.begin(), dbName.end());
-    std::string DbBasePath = fmt::format("{}DataStore/{}/", BaseDir, dbName);
+    std::string DbBasePathStr = DbBasePath(dbName);
 
     XStore_Proto::ConfigStruct CfgStruct;
-    if (!GetOrLoadCfg(dbName, DbBasePath, CfgStruct)) {
+    if (!GetOrLoadCfg(dbName, DbBasePathStr, CfgStruct)) {
         returnData->set_opstatus(fmt::format("[ERROR] [SUM AGGREGATE] [DB: {}] - {}.CFG does not exist", dbName, dbName));
         return;
     }
@@ -1386,31 +1508,11 @@ void XStore::SumAggregate(const unsigned long long int &startEpochT, const unsig
 
     double SumResult = 0.0;
     unsigned long long ValidCount = 0;
-    unsigned long long IterEpoch = startEpochT;
 
-    while (IterEpoch <= endEpochT) {
-        TimeStruct CurrTs(IterEpoch, CfgStruct.timeresolution());
-        std::string TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
-
-        unsigned long long EndOfCurrentFile = std::min(endEpochT, (unsigned long long)CurrTs.LastEpoch);
-        unsigned long long RowsToProcess = (EndOfCurrentFile - IterEpoch) + 1;
-
-        if (std::filesystem::exists(TargetFilePath)) {
-            FILE* BFile = std::fopen(TargetFilePath.c_str(), "rb");
-            if (BFile) {
-                unsigned long long FirstOffset = (IterEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength();
-                unsigned long long RegionLength = RowsToProcess * CfgStruct.rowlength();
-
-                {
-                    FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
-                    ProcessFileRangeAccumulate(BFile, FirstOffset, RowsToProcess, CfgStruct.rowlength(), columnIdx, SumResult, ValidCount);
-                }
-                std::fclose(BFile);
-            }
-        }
-
-        IterEpoch = EndOfCurrentFile + 1;
-    }
+    WalkYearSpan(DbBasePathStr, CfgStruct, startEpochT, endEpochT,
+        [&](FILE *bFile, unsigned long long firstOffset, unsigned long long rowsToProcess) {
+            ProcessFileRangeAccumulate(bFile, firstOffset, rowsToProcess, CfgStruct.rowlength(), columnIdx, SumResult, ValidCount);
+        });
 
     if (ValidCount > 0) {
         returnData->set_opstatus("SUCCESS");
@@ -1424,10 +1526,10 @@ void XStore::AvgAggregate(const unsigned long long int &startEpochT, const unsig
                             std::string dbName, unsigned short int columnIdx, XStore_Proto::Avg_REP *returnData) {
 
     ToUpperCase(dbName.begin(), dbName.end());
-    std::string DbBasePath = fmt::format("{}DataStore/{}/", BaseDir, dbName);
+    std::string DbBasePathStr = DbBasePath(dbName);
 
     XStore_Proto::ConfigStruct CfgStruct;
-    if (!GetOrLoadCfg(dbName, DbBasePath, CfgStruct)) {
+    if (!GetOrLoadCfg(dbName, DbBasePathStr, CfgStruct)) {
         returnData->set_opstatus(fmt::format("[ERROR] [AVG AGGREGATE] [DB: {}] - {}.CFG does not exist", dbName, dbName));
         return;
     }
@@ -1439,31 +1541,11 @@ void XStore::AvgAggregate(const unsigned long long int &startEpochT, const unsig
 
     double SumResult = 0.0;
     unsigned long long ValidCount = 0;
-    unsigned long long IterEpoch = startEpochT;
 
-    while (IterEpoch <= endEpochT) {
-        TimeStruct CurrTs(IterEpoch, CfgStruct.timeresolution());
-        std::string TargetFilePath = fmt::format("{}{}.XSTORE", DbBasePath, CurrTs.Year);
-
-        unsigned long long EndOfCurrentFile = std::min(endEpochT, (unsigned long long)CurrTs.LastEpoch);
-        unsigned long long RowsToProcess = (EndOfCurrentFile - IterEpoch) + 1;
-
-        if (std::filesystem::exists(TargetFilePath)) {
-            FILE* BFile = std::fopen(TargetFilePath.c_str(), "rb");
-            if (BFile) {
-                unsigned long long FirstOffset = (IterEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength();
-                unsigned long long RegionLength = RowsToProcess * CfgStruct.rowlength();
-
-                {
-                    FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
-                    ProcessFileRangeAccumulate(BFile, FirstOffset, RowsToProcess, CfgStruct.rowlength(), columnIdx, SumResult, ValidCount);
-                }
-                std::fclose(BFile);
-            }
-        }
-
-        IterEpoch = EndOfCurrentFile + 1;
-    }
+    WalkYearSpan(DbBasePathStr, CfgStruct, startEpochT, endEpochT,
+        [&](FILE *bFile, unsigned long long firstOffset, unsigned long long rowsToProcess) {
+            ProcessFileRangeAccumulate(bFile, firstOffset, rowsToProcess, CfgStruct.rowlength(), columnIdx, SumResult, ValidCount);
+        });
 
     if (ValidCount > 0) {
         returnData->set_opstatus("SUCCESS");
@@ -1482,7 +1564,7 @@ XStore_Proto::RemoveDB_REP XStore::RemoveDB(std::string dbName) {
     ToUpperCase(dbName.begin(), dbName.end());
 
     // Location of DB
-    std::string DbLoc = fmt::format("{}{}", DataStoreDir, dbName);
+    std::string DbLoc = JoinPath(DataStoreDir, dbName);
 
     // IF DB does NOT exist
     //  -> Return remove error
@@ -1519,7 +1601,7 @@ XStore_Proto::RemoveDBFiles_REP XStore::RemoveDBFiles(XStore_Proto::RemoveDBFile
     ToUpperCase(dbName.begin(), dbName.end());
 
     // Location of DB
-    std::string DbLoc = fmt::format("{}{}", DataStoreDir, dbName);
+    std::string DbLoc = JoinPath(DataStoreDir, dbName);
 
     if (!std::filesystem::exists(DbLoc)) {
         for (int i = 0; i < protoFromClient->filename_size(); i++) {
@@ -1532,7 +1614,18 @@ XStore_Proto::RemoveDBFiles_REP XStore::RemoveDBFiles(XStore_Proto::RemoveDBFile
 
     // Loop through each requested file name
     for (int i = 0; i < protoFromClient->filename_size(); i++) {
-        std::filesystem::path TargetPath = fmt::format("{}{}/{}", DataStoreDir, dbName, protoFromClient->filename(i));
+        // filename is client-controlled and must name a single entry directly
+        // inside this DB's directory -- reject anything with a path separator
+        // (e.g. "../other.CFG") so a crafted request can't escape DbLoc and
+        // delete arbitrary files elsewhere on disk.
+        if (protoFromClient->filename(i).find('/') != std::string::npos) {
+            std::string ErrMsg = fmt::format("[ERROR] [REMOVE DB FILES] [DB: {}] - Invalid file name {}", dbName, protoFromClient->filename(i));
+            ToReturn.add_removestatus(ErrMsg);
+            spdlog::error(ErrMsg.substr(ERROR_LEN));
+            continue;
+        }
+
+        std::filesystem::path TargetPath = JoinPath(DbLoc, protoFromClient->filename(i));
         if (protoFromClient->filename(i) == fmt::format("{}.CFG", dbName)) {
             std::string WarnMsg = fmt::format("[WARNING] [REMOVE DB FILES] [DB: {}] - {} is prohibited from remove", dbName, protoFromClient->filename(i));
             ToReturn.add_removestatus(WarnMsg);
@@ -1562,17 +1655,21 @@ void XStore::InitDB() {
     // Loop through each dbName
     for (auto& p : std::filesystem::directory_iterator(DataStoreDir))
     {
-        // Full path of each DB
-        std::string CurrDbPath = p.path().string();
-
-        // Extract -- Getting only dbName
-        std::string CurrDbName = CurrDbPath.erase(0, DataStoreDir.size());
+        // dbName is just the last path component -- reading it off the
+        // filesystem::path itself instead of stripping a known-length
+        // DataStoreDir prefix means this doesn't care whether DataStoreDir
+        // carries a trailing '/' or not.
+        std::string CurrDbName = p.path().filename().string();
 
         // Open & Read cfgStruct of all DB currently exists
-        std::string CfgFilePath = fmt::format("{}/{}.CFG", p.path().string(), CurrDbName);
+        std::string CfgFilePath = JoinPath(p.path().string(), CurrDbName + ".CFG");
 
         XStore_Proto::ConfigStruct CfgStruct;
         FILE *CFile = std::fopen(CfgFilePath.c_str(), "rb");
+        if (CFile == nullptr) {
+            spdlog::error("[ERROR] [INIT DB] [DB: {}] - Unable to open {}", CurrDbName, CfgFilePath);
+            continue;
+        }
         CfgStruct.ParseFromFileDescriptor(fileno(CFile));
         std::fclose(CFile);
         PutCfg(CurrDbName, CfgStruct);
@@ -1580,26 +1677,11 @@ void XStore::InitDB() {
 }
 
 std::string XStore::GetBaseDir() {
-    std::string ToReturn;
-
-    // Getting current path of XStore executable
-    ToReturn = std::filesystem::current_path().parent_path();
-
-    // Extract baseDir for XStore i.e., /home/ubuntu/XStore/
-//    toReturn.erase(toReturn.find("XStore") + 7, toReturn.size());
-    return ToReturn + "/";
-}
-
-// Check if there's any existing database
-bool XStore::HasDB() {
-    // Path to DataStore -- Currently hard-coded | WILL NEED TO FIX SO IT IS DYNAMIC
-    const std::filesystem::path TmpDir{ std::filesystem::path(BaseDir + "DataStore")};
-    return !std::filesystem::is_empty(TmpDir);
-}
-
-bool XStore::HasDBFile(std::string filePath) {
-    struct stat Buffer;
-    return (stat(filePath.c_str(), &Buffer) == 0);
+    // The XStore binary is expected to run with its working directory set to
+    // the directory it lives in (e.g. /home/ubuntu/XStore/), with DataStore/
+    // living alongside it as a direct child -- so BaseDir is just cwd, not
+    // cwd's parent. No trailing '/' -- see the convention note in XStore.h.
+    return std::filesystem::current_path().string();
 }
 
 

@@ -47,6 +47,39 @@ constexpr unsigned long long TS_2031_MID = 1946721600ULL;   // 2031-09-09 12:00:
 constexpr unsigned long long RANDOM_RANGE_LOW = 157'766'400ULL;
 constexpr unsigned long long RANDOM_RANGE_HIGH = 2'366'841'600ULL;
 
+// Shared by the wide-row multi-column tests (Range round-trip + both
+// column-targeted aggregate tests): a deterministic, pure function of
+// rowIndex so the exact same row can be regenerated at verification time
+// instead of carrying the inserted data around separately. 32 columns --
+// column 0 is a numeric decoy held constant across every row (so a
+// wrong-column read shows up as an obviously wrong aggregate), column 1 is
+// always non-numeric (the "can't aggregate this" target), column 2 is
+// numeric and varies with rowIndex (the real aggregate target), and the
+// remaining columns cycle through several other oneof branches with
+// per-row-varying values so the row is a realistic wide row, not padding.
+constexpr int kWideRowColumnCount = 32;
+constexpr int kWideRowCount = 10'000;
+
+XStore_Proto::RowData BuildWideRow(int rowIndex) {
+    std::vector<XStore_Proto::FData> Fields;
+    Fields.push_back(FDouble(100.0));                                 // col 0: numeric decoy, constant
+    Fields.push_back(FString("label-" + std::to_string(rowIndex)));   // col 1: non-numeric target
+    Fields.push_back(FInt64(rowIndex));                                // col 2: numeric target, varies
+
+    while (static_cast<int>(Fields.size()) < kWideRowColumnCount) {
+        int i = static_cast<int>(Fields.size());
+        switch (i % 6) {
+            case 0: Fields.push_back(FFloat(static_cast<float>(i) + rowIndex)); break;
+            case 1: Fields.push_back(FInt32(i - rowIndex)); break;
+            case 2: Fields.push_back(FUInt64(static_cast<uint64_t>(i) + rowIndex)); break;
+            case 3: Fields.push_back(FBool((i + rowIndex) % 2 == 0)); break;
+            case 4: Fields.push_back(FBytes("b-" + std::to_string(i))); break;
+            default: Fields.push_back(FSInt32(-i)); break;
+        }
+    }
+    return MakeRow(Fields);
+}
+
 }  // namespace
 
 class XStoreTest : public ::testing::Test {
@@ -1290,6 +1323,40 @@ TEST_F(XStoreTest, RangeInsertThenRangeQueryContiguousRangeAllPresent) {
     }
 }
 
+// Unlike the test above, every Unary/Batch/Range* test row up to this point
+// used a single column, so a multi-column row never actually round-tripped
+// through RangeInsert/RangeQuery -- only through Unary/Batch (see
+// UnaryInsertRowWith32PlusMixedTypeColumnsRoundTrips and
+// BatchInsertMixedColumnCountsPerTimestamp).
+TEST_F(XStoreTest, RangeInsertThenRangeQueryMultiColumnRowsRoundTrip) {
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 1024);
+
+    XStore_Proto::RangeInsert_REQ InsertReq;
+    InsertReq.set_dbname("TESTDB");
+    for (int i = 0; i < kWideRowCount; i++) {
+        XStore_Proto::RangeInsert_DATA *Entry = InsertReq.add_rangeinsert_data();
+        Entry->set_timestamp(TS_2024_MID + i);
+        *Entry->mutable_data() = BuildWideRow(i);
+    }
+    XStore_Proto::RangeInsert_REP InsertRep;
+    Store.RangeInsert(&InsertReq, &InsertRep);
+
+    XStore_Proto::RangeQuery_REP QueryRep;
+    Store.RangeQuery(TS_2024_MID, TS_2024_MID + kWideRowCount - 1, "TESTDB", &QueryRep);
+
+    ASSERT_EQ(QueryRep.queryresponse_size(), kWideRowCount);
+    for (int i = 0; i < kWideRowCount; i++) {
+        const auto &Data = QueryRep.queryresponse(i).data();
+        ASSERT_EQ(Data.fielddata_size(), kWideRowColumnCount);
+        // BuildWideRow is a pure function of rowIndex, so regenerating the
+        // expected row and comparing serialized bytes checks every one of
+        // the 32 columns' type and value in one assertion, rather than
+        // duplicating BuildWideRow's per-column logic here to drift from it.
+        EXPECT_EQ(Data.SerializeAsString(), BuildWideRow(i).SerializeAsString());
+    }
+}
+
 TEST_F(XStoreTest, RangeQueryUninsertedTimestampsReturnEmptyEntriesNotOmitted) {
     XStore Store;
     Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
@@ -1547,7 +1614,7 @@ TEST_F(XStoreTest, RangeQueryLastRowInSpanIsLockedAgainstConcurrentWriter) {
 
     TimeStruct Ts(static_cast<time_t>(End), XStore_Proto::SECOND);
     const unsigned long long Offset = (End - Ts.FirstEpoch) * RowLength;
-    const std::string TargetFile = fmt::format("{}DataStore/TESTDB/{}.XSTORE", Store.BaseDir, Ts.Year);
+    const std::string TargetFile = fmt::format("{}/DataStore/TESTDB/{}.XSTORE", Store.BaseDir, Ts.Year);
 
     constexpr auto HoldDuration = std::chrono::milliseconds(150);
     std::atomic<bool> LockAcquired{false};
@@ -2167,6 +2234,96 @@ TEST_F(XStoreTest, AggregateOverAllNonNumericColumnReturnsNoValidData) {
     EXPECT_EQ(SumRep.opstatus(), "ERROR: No valid data found");
 }
 
+// Every aggregate test above uses a single-column row, so columnIdx is
+// trivially always 0 -- none of them actually prove the aggregate reads the
+// COLUMN it was asked for rather than e.g. always column 0, and none run at
+// any real scale. This uses the full 32-column/10k-row BuildWideRow fixture:
+// column 0 is a numeric decoy held constant across all 10k rows (sum would
+// be 1,000,000.0 if the kernels ignored columnIdx), column 2 is the real
+// target with a distinct value (rowIndex) per row.
+TEST_F(XStoreTest, AggregateOnSpecificColumnAmongMixedTypeColumnsIgnoresOtherColumns) {
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 1024);
+    constexpr unsigned short TargetColumn = 2;
+
+    XStore_Proto::RangeInsert_REQ InsertReq;
+    InsertReq.set_dbname("TESTDB");
+    for (int i = 0; i < kWideRowCount; i++) {
+        XStore_Proto::RangeInsert_DATA *Entry = InsertReq.add_rangeinsert_data();
+        Entry->set_timestamp(TS_2024_MID + i);
+        *Entry->mutable_data() = BuildWideRow(i);
+    }
+    XStore_Proto::RangeInsert_REP InsertRep;
+    Store.RangeInsert(&InsertReq, &InsertRep);
+
+    const unsigned long long Start = TS_2024_MID;
+    const unsigned long long End = TS_2024_MID + kWideRowCount - 1;
+
+    // Column 2 holds rowIndex for rowIndex in [0, kWideRowCount).
+    const int64_t ExpectedMin = 0;
+    const int64_t ExpectedMax = kWideRowCount - 1;
+    const double ExpectedSum = (kWideRowCount - 1) * static_cast<double>(kWideRowCount) / 2.0;
+    const double ExpectedAvg = ExpectedSum / kWideRowCount;
+
+    XStore_Proto::Min_REP MinRep;
+    Store.MinAggregate(Start, End, "TESTDB", TargetColumn, &MinRep);
+    EXPECT_EQ(MinRep.opresult().int64data(), ExpectedMin);
+
+    XStore_Proto::Max_REP MaxRep;
+    Store.MaxAggregate(Start, End, "TESTDB", TargetColumn, &MaxRep);
+    EXPECT_EQ(MaxRep.opresult().int64data(), ExpectedMax);
+
+    XStore_Proto::Sum_REP SumRep;
+    Store.SumAggregate(Start, End, "TESTDB", TargetColumn, &SumRep);
+    EXPECT_DOUBLE_EQ(SumRep.opresult(), ExpectedSum)
+        << "must be column 2's sum, not column 0's decoy sum (1000000)";
+
+    XStore_Proto::Avg_REP AvgRep;
+    Store.AvgAggregate(Start, End, "TESTDB", TargetColumn, &AvgRep);
+    EXPECT_DOUBLE_EQ(AvgRep.opresult(), ExpectedAvg);
+}
+
+// Distinct from AggregateOverAllNonNumericColumnReturnsNoValidData above:
+// that row has no numeric data anywhere, so "no valid data" is ambiguous
+// between "wrong column type" and "no numeric data in the row at all". Here
+// -- same 32-column/10k-row BuildWideRow fixture -- columns 0 and 2 ARE
+// valid numeric data, confirming the aggregate rejects based on the
+// SPECIFICALLY requested column's type (column 1, always a string), not on
+// whether the row has numeric data somewhere.
+TEST_F(XStoreTest, AggregateTargetingNonNumericColumnAmongMixedTypeRowReturnsNoValidData) {
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 1024);
+
+    XStore_Proto::RangeInsert_REQ InsertReq;
+    InsertReq.set_dbname("TESTDB");
+    for (int i = 0; i < kWideRowCount; i++) {
+        XStore_Proto::RangeInsert_DATA *Entry = InsertReq.add_rangeinsert_data();
+        Entry->set_timestamp(TS_2024_MID + i);
+        *Entry->mutable_data() = BuildWideRow(i);
+    }
+    XStore_Proto::RangeInsert_REP InsertRep;
+    Store.RangeInsert(&InsertReq, &InsertRep);
+
+    const unsigned long long Start = TS_2024_MID;
+    const unsigned long long End = TS_2024_MID + kWideRowCount - 1;
+
+    XStore_Proto::Sum_REP SumOnString;
+    Store.SumAggregate(Start, End, "TESTDB", 1, &SumOnString);
+    EXPECT_EQ(SumOnString.opstatus(), "ERROR: No valid data found");
+
+    XStore_Proto::Min_REP MinOnString;
+    Store.MinAggregate(Start, End, "TESTDB", 1, &MinOnString);
+    EXPECT_EQ(MinOnString.opstatus(), "ERROR: No valid data found");
+
+    // Sanity: column 0 (the constant 100.0 decoy) in these SAME rows
+    // aggregates fine -- proves the ERROR above is really about column 1's
+    // type, not the DB/range setup.
+    XStore_Proto::Sum_REP SumOnCol0;
+    Store.SumAggregate(Start, End, "TESTDB", 0, &SumOnCol0);
+    EXPECT_EQ(SumOnCol0.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(SumOnCol0.opresult(), 100.0 * kWideRowCount);
+}
+
 TEST_F(XStoreTest, AggregateOverRangeContainingHolesOnlyReflectsPresentRows) {
     XStore Store;
     Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
@@ -2474,10 +2631,12 @@ TEST_F(XStoreTest, ConcurrentXStoreInstancesShareCfgMapWithoutCorruption) {
     }
     for (auto &T : Threads) T.join();
 
-    // All 16 threads race to populate the same cache entry (both via each
-    // constructor's InitDB() and via GetOrLoadCfg's miss path). An unguarded
-    // std::map under that many concurrent inserts would risk a corrupted map
-    // or a crash; they must instead converge on one consistent entry.
+    // All 16 threads race to populate the same cache entry: whichever one's
+    // constructor wins the per-DataStoreDir InitDB() race populates it first,
+    // and every other thread's GetOrLoadCfg() miss path races behind it. An
+    // unguarded std::map under that many concurrent inserts would risk a
+    // corrupted map or a crash; they must instead converge on one consistent
+    // entry.
     ASSERT_EQ(XStore::CfgMap.size(), 1u);
     EXPECT_EQ(XStore::CfgMap.at("TESTDB").rowlength(), 64);
 }
