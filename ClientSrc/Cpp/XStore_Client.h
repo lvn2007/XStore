@@ -95,6 +95,15 @@ class XStore_Client {
       Sock.connect(FullAddr);
   }
 
+  // ZMQ connect() is lazy -- TCP + ZMTP handshake actually fires on first
+  // send(). Call this right after construction to eat that cost now instead
+  // of on the first real RPC. INFO is the lightest request type (rtype 0),
+  // so it's used as the ping. Throws same as any RPC on timeout/unreachable
+  // server -- caller must Reconnect() before retrying, same as elsewhere.
+  void Warmup() {
+      InfoRequest();
+  }
+
   // A REQ socket that hits a send/recv timeout has its strict
   // send-then-recv state machine left in an undefined spot per ZMQ's own
   // docs -- the fix is a fresh socket, not another send. Call this after
