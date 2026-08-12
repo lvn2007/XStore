@@ -4,6 +4,8 @@
 #include "include/XStore/XStore.h"
 #include "include/DataStructs/FileRangeLock.h"
 #include <cstring>
+#include <unistd.h>
+#include <vector>
 
 // Helpers shared by the XStore_*.cpp translation units. Not part of the
 // public XStore.h surface -- callers outside src/XStore/ have no reason to
@@ -18,9 +20,13 @@
 std::string* SetTaggedStatus(std::string *status, const char *tag, const std::string &body);
 
 // Shared by XStore_BatchOps.cpp's BatchInsert and XStore_RangeOps.cpp's
-// RangeInsert: writes one year-group's rows into an already-mapped file
-// under a single lock spanning the group's min-to-max offset (instead of one
-// lock per row). GetEntry(idx) must return a message with
+// RangeInsert: writes one year-group's rows into fd via pwrite() under a
+// single lock spanning the group's min-to-max offset (instead of one lock
+// per row). Same reasoning as UnaryInsert's pwrite()/GetOrOpenFile switch
+// (see XStore_UnaryOps.cpp) -- a scattered (RAND) group used to pay a
+// synchronous mmap write-fault per row; pwrite() into a still-sparse region
+// is a buffered write that costs the same whether the group's offsets are
+// contiguous or scattered. GetEntry(idx) must return a message with
 // .timestamp()/.data() -- BatchInsert_DATA and RangeInsert_DATA both
 // qualify, so this is templated on the accessor rather than the message
 // type to avoid materializing an intermediate row vector per call.
@@ -31,14 +37,21 @@ std::string* SetTaggedStatus(std::string *status, const char *tag, const std::st
 // living in a single .cpp -- both callers instantiate it with their own
 // accessor lambda.
 template <typename EntryAccessor>
-void WriteRowGroupToMappedFile(const std::string &targetFile, void *mappedBase, long firstEpoch,
-                                unsigned int rowLength, const std::vector<unsigned long long int> &indices,
-                                EntryAccessor &&getEntry) {
+void WriteRowGroupToFile(const std::string &targetFile, int fd, long firstEpoch,
+                          unsigned int rowLength, const std::vector<unsigned long long int> &indices,
+                          EntryAccessor &&getEntry) {
     const unsigned long long int FirstOffset = (static_cast<unsigned long long>(getEntry(indices.front()).timestamp()) - firstEpoch) * rowLength;
     const unsigned long long int LastOffset = (static_cast<unsigned long long>(getEntry(indices.back()).timestamp()) - firstEpoch) * rowLength;
     const unsigned long long int RegionLength = (LastOffset + rowLength) - FirstOffset;
 
     FileRangeLockGuard Guard(targetFile, FirstOffset, RegionLength, FileRangeLock::LockType::WRITE);
+
+    // Thread-local scratch buffer, grown once and reused across rows/calls --
+    // avoids a heap allocation per row (same as UnaryInsert's RowBuf).
+    thread_local std::vector<char> RowBuf;
+    if (RowBuf.size() < rowLength) {
+        RowBuf.resize(rowLength);
+    }
 
     for (unsigned long long int Idx : indices) {
         const auto &Entry = getEntry(Idx);
@@ -52,12 +65,12 @@ void WriteRowGroupToMappedFile(const std::string &targetFile, void *mappedBase, 
 
         unsigned long long int Offset = (static_cast<unsigned long long>(Entry.timestamp()) - firstEpoch) * rowLength;
 
-        // Zero the slot first, then serialize directly into it -- avoids a
-        // heap allocation + copy per row, and guarantees no stale trailing
-        // bytes from a previous occupant leak through (same as UnaryInsert).
-        char *Slot = static_cast<char*>(mappedBase) + Offset;
-        std::memset(Slot, 0, rowLength);
-        Data.SerializeToArray(Slot, rowLength);
+        // Zero the buffer first, then serialize directly into it -- no
+        // stale trailing bytes from a previous row leak through (same as
+        // UnaryInsert).
+        std::memset(RowBuf.data(), 0, rowLength);
+        Data.SerializeToArray(RowBuf.data(), rowLength);
+        pwrite(fd, RowBuf.data(), rowLength, static_cast<off_t>(Offset));
     }
 }
 

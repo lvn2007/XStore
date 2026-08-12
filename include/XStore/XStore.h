@@ -61,6 +61,31 @@ class XStore {
         static std::unordered_map<std::string, std::list<std::pair<std::string, MappedFile>>::iterator> MmapIndex;
         static std::mutex MmapMutex;
         static constexpr size_t MmapCacheCap = 256;
+
+        // Shared cache of open fds for .XSTORE data files, keyed by full path --
+        // used by UnaryInsert's pwrite() path. Unlike GetOrMapFile, writing
+        // through a plain fd never faults a page into the process's address
+        // space: a pwrite() into a still-sparse region goes through the same
+        // buffered write()/delayed-allocation path the file gets on every
+        // access pattern (SEQ or RND), instead of a synchronous mmap
+        // write-fault that must allocate a real block before returning. Same
+        // MRU-bounded design as MmapLru, just storing an fd instead of a base
+        // pointer.
+        //
+        // Sized differently than MmapCacheCap on purpose: a miss here is just
+        // an open() (microseconds, no page-fault-time block allocation), so
+        // the cap doesn't need to be large to amortize an expensive miss --
+        // it only needs to cover the handful of year files actively being
+        // written at once. Kept small so total resident cost (~256B kernel
+        // struct file + ~250B userspace list/map node per entry, no
+        // per-fd userspace buffer -- pwrite() writes straight to the kernel
+        // page cache) stays in the same ballpark as the single ~4KB buffer
+        // glibc's fwrite would have allocated for one open stream, rather
+        // than inheriting the address-space-driven 256 sizing MmapLru uses.
+        static std::list<std::pair<std::string, int>> FdLru;
+        static std::unordered_map<std::string, std::list<std::pair<std::string, int>>::iterator> FdIndex;
+        static std::mutex FdMutex;
+        static constexpr size_t FdCacheCap = 8;
         std::string PermittedTimeResolution[3] = {"SECOND", "MILLISECOND", "MICROSECOND"};
 
         int DbCount = 0;
@@ -183,6 +208,17 @@ class XStore {
         // Used before a DB directory is deleted out from under the cache
         // (RemoveDB), since a single RemoveDB can span many cached year files.
         void EraseMappedFilesUnderPrefix(const std::string &dbDirPrefix);
+
+        // Fetch targetFile's cached fd, creating (and ftruncate'ing to
+        // totalRows*rowLength if new) the file on first use. Returns -1 on
+        // open/ftruncate failure.
+        int GetOrOpenFile(const std::string &targetFile, size_t rowLength, unsigned long long totalRows);
+
+        // close + drop targetFile's cached fd, if present.
+        void EraseOpenFile(const std::string &targetFile);
+
+        // close + drop every cached fd whose path falls under dbDirPrefix.
+        void EraseOpenFilesUnderPrefix(const std::string &dbDirPrefix);
 
         // Joins base and child with exactly one '/' between them, regardless
         // of whether base already happens to end with one -- the single
