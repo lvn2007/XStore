@@ -6,6 +6,8 @@
 #include <cstring>
 #include <filesystem>
 #include <fcntl.h>
+#include <unistd.h>
+#include <vector>
 
 // UNARY INSERT
 void XStore::UnaryInsert(const unsigned long long int &unixTime, const XStore_Proto::RowData &data, std::string dbName, XStore_Proto::UnaryInsert_REP *returnData) {
@@ -31,13 +33,20 @@ void XStore::UnaryInsert(const unsigned long long int &unixTime, const XStore_Pr
     //  Year, month, day, hour, minute, sec, ...
     TimeStruct CurrTs(unixTime, CfgStruct.timeresolution());
 
-    // Cached PROT_WRITE mapping for this (dbName, year) file -- created,
-    // ftruncate'd to the full year's row count, and mapped once; every
-    // subsequent UnaryInsert to the same file reuses it (see GetOrMapFile).
+    // Cached fd for this (dbName, year) file -- created and ftruncate'd to
+    // the full year's row count once; every subsequent UnaryInsert to the
+    // same file reuses it (see GetOrOpenFile). Writes go through pwrite()
+    // rather than a PROT_WRITE mmap: a pwrite() into a still-sparse region
+    // is a buffered write that defers real block allocation to async
+    // writeback, same cost whether the target offset is sequential or
+    // random. An mmap write-fault into an untouched page can't defer that
+    // -- it has to synchronously allocate the block before the fault
+    // returns -- which made random-offset inserts far more expensive than
+    // sequential ones.
     std::string TargetFile = fmt::format("{}/{}.XSTORE", DbBasePathStr, CurrTs.Year);
-    void *MappedBase = GetOrMapFile(TargetFile, CfgStruct.rowlength(), CurrTs.LastEpoch - CurrTs.FirstEpoch);
-    if (MappedBase == nullptr) {
-        std::string ErrMsg = fmt::format("[UNARY INSERT] [DB: {}] - Unable to open/map {}.XSTORE", dbName, CurrTs.Year);
+    int Fd = GetOrOpenFile(TargetFile, CfgStruct.rowlength(), CurrTs.LastEpoch - CurrTs.FirstEpoch);
+    if (Fd < 0) {
+        std::string ErrMsg = fmt::format("[UNARY INSERT] [DB: {}] - Unable to open {}.XSTORE", dbName, CurrTs.Year);
         SetTaggedStatus(returnData->mutable_insertstatus(), "[ERROR] ", ErrMsg);
         spdlog::error(ErrMsg);
         return;
@@ -57,18 +66,28 @@ void XStore::UnaryInsert(const unsigned long long int &unixTime, const XStore_Pr
     unsigned long long int Diff = unixTime - CurrTs.FirstEpoch;
     unsigned long long int Offset = Diff * CfgStruct.rowlength();
 
+    // Thread-local scratch buffer, grown once and reused across calls --
+    // avoids the SerializeAsString() heap allocation the original fwrite()
+    // path paid on every insert. Zeroed first so bytes past a shorter
+    // re-serialization don't leak a previous row's stale trailing bytes.
+    thread_local std::vector<char> RowBuf;
+    if (RowBuf.size() < CfgStruct.rowlength()) {
+        RowBuf.resize(CfgStruct.rowlength());
+    }
+    std::memset(RowBuf.data(), 0, CfgStruct.rowlength());
+    data.SerializeToArray(RowBuf.data(), CfgStruct.rowlength());
+
+    ssize_t Written;
     {
         // Lock prior to file OP
         FileRangeLockGuard Guard(TargetFile, Offset, CfgStruct.rowlength(), FileRangeLock::LockType::WRITE);
-
-        // Zero the fixed-width row slot first, then serialize directly into
-        // it -- avoids the SerializeAsString() heap allocation + copy the
-        // original fwrite() path paid on every insert, and guarantees any
-        // bytes past a shorter re-serialization don't leak a previous
-        // occupant's stale trailing bytes.
-        char *Slot = static_cast<char*>(MappedBase) + Offset;
-        std::memset(Slot, 0, CfgStruct.rowlength());
-        data.SerializeToArray(Slot, CfgStruct.rowlength());
+        Written = pwrite(Fd, RowBuf.data(), CfgStruct.rowlength(), static_cast<off_t>(Offset));
+    }
+    if (Written != static_cast<ssize_t>(CfgStruct.rowlength())) {
+        std::string ErrMsg = fmt::format("[UNARY INSERT] [DB: {}] - Short/failed write to {}.XSTORE", dbName, CurrTs.Year);
+        SetTaggedStatus(returnData->mutable_insertstatus(), "[ERROR] ", ErrMsg);
+        spdlog::error(ErrMsg);
+        return;
     }
 
     std::string SuccessMsg = fmt::format("[UNARY INSERT] [DB: {}] - Inserted {} to {}.XSTORE", dbName, unixTime, CurrTs.Year);

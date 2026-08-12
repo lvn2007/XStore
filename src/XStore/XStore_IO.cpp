@@ -10,6 +10,10 @@ std::list<std::pair<std::string, XStore::MappedFile>> XStore::MmapLru;
 std::unordered_map<std::string, std::list<std::pair<std::string, XStore::MappedFile>>::iterator> XStore::MmapIndex;
 std::mutex XStore::MmapMutex;
 
+std::list<std::pair<std::string, int>> XStore::FdLru;
+std::unordered_map<std::string, std::list<std::pair<std::string, int>>::iterator> XStore::FdIndex;
+std::mutex XStore::FdMutex;
+
 void* XStore::GetOrMapFile(const std::string &targetFile, size_t rowLength, unsigned long long totalRows) {
     // Fast path: already mapped -- only the lookup+MRU-promote touches
     // shared state, so the lock is held just long enough for that.
@@ -77,6 +81,87 @@ void* XStore::GetOrMapFile(const std::string &targetFile, size_t rowLength, unsi
     }
 
     return Base;
+}
+
+int XStore::GetOrOpenFile(const std::string &targetFile, size_t rowLength, unsigned long long totalRows) {
+    // Fast path: already open -- only the lookup+MRU-promote touches shared
+    // state, mirrors GetOrMapFile's fast path.
+    {
+        std::lock_guard<std::mutex> Lock(FdMutex);
+        auto it = FdIndex.find(targetFile);
+        if (it != FdIndex.end()) {
+            FdLru.splice(FdLru.begin(), FdLru, it->second);
+            return it->second->second;
+        }
+    }
+
+    // Cache miss -> open (create if needed), ensure size. Done WITHOUT the
+    // lock for the same reason as GetOrMapFile: these are syscalls whose
+    // cost shouldn't serialize every other thread's inserts.
+    int Fd = open(targetFile.c_str(), O_RDWR | O_CREAT, 0644);
+    if (Fd < 0) {
+        return -1;
+    }
+
+    // +1 row: see GetOrMapFile for why.
+    size_t FileLen = (static_cast<size_t>(totalRows) + 1) * rowLength;
+
+    struct stat St{};
+    if (fstat(Fd, &St) != 0 || static_cast<size_t>(St.st_size) < FileLen) {
+        if (ftruncate(Fd, FileLen) != 0) {
+            close(Fd);
+            return -1;
+        }
+    }
+
+    // Re-acquire to install into the cache, double-checked: another thread
+    // may have raced us to open this same file while we were unlocked.
+    std::lock_guard<std::mutex> Lock(FdMutex);
+    auto it = FdIndex.find(targetFile);
+    if (it != FdIndex.end()) {
+        // Lost the race -- drop our redundant fd, use theirs.
+        close(Fd);
+        FdLru.splice(FdLru.begin(), FdLru, it->second);
+        return it->second->second;
+    }
+
+    FdLru.emplace_front(targetFile, Fd);
+    FdIndex[targetFile] = FdLru.begin();
+
+    if (FdLru.size() > FdCacheCap) {
+        close(FdLru.back().second);
+        FdIndex.erase(FdLru.back().first);
+        FdLru.pop_back();
+    }
+
+    return Fd;
+}
+
+void XStore::EraseOpenFile(const std::string &targetFile) {
+    std::lock_guard<std::mutex> Lock(FdMutex);
+
+    auto It = FdIndex.find(targetFile);
+    if (It == FdIndex.end()) {
+        return;
+    }
+
+    close(It->second->second);
+    FdLru.erase(It->second);
+    FdIndex.erase(It);
+}
+
+void XStore::EraseOpenFilesUnderPrefix(const std::string &dbDirPrefix) {
+    std::lock_guard<std::mutex> Lock(FdMutex);
+
+    for (auto It = FdLru.begin(); It != FdLru.end();) {
+        if (It->first.compare(0, dbDirPrefix.size(), dbDirPrefix) == 0) {
+            close(It->second);
+            FdIndex.erase(It->first);
+            It = FdLru.erase(It);
+        } else {
+            ++It;
+        }
+    }
 }
 
 void XStore::EraseMappedFile(const std::string &targetFile) {
