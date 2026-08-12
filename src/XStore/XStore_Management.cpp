@@ -236,8 +236,6 @@ XStore_Proto::RemoveDB_REP XStore::RemoveDB(std::string dbName) {
     // a future insert (via GetOrMapFile) could keep writing into an orphaned,
     // unlinked mapping instead of a freshly-recreated DB with the same name.
     EraseMappedFilesUnderPrefix(DbLoc + "/");
-    // Same reasoning for UnaryInsert's cached fds (see GetOrOpenFile).
-    EraseOpenFilesUnderPrefix(DbLoc + "/");
 
     RemoveStatus = fmt::format("[REMOVE DB] [DB: {}] - Removed DB with name: {}", dbName, dbName);
     SetTaggedStatus(ToReturn.mutable_removestatus(), "[INFO] ", RemoveStatus);
@@ -290,7 +288,6 @@ XStore_Proto::RemoveDBFiles_REP XStore::RemoveDBFiles(XStore_Proto::RemoveDBFile
             // Drop this file's cached UnaryInsert mapping, if any -- same
             // reasoning as RemoveDB, scoped to a single file.
             EraseMappedFile(TargetPath.string());
-            EraseOpenFile(TargetPath.string());
 
             std::string InfoMsg = fmt::format("[REMOVE DB FILES] [DB: {}] - Removed {}", dbName, protoFromClient->filename(i));
             SetTaggedStatus(ToReturn.add_removestatus(), "[INFO] ", InfoMsg);

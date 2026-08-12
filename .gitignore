@@ -6,5 +6,4 @@ graphify-out/
 .github/
 __pycache__/
 *.pyc
-DataStore/
-10Y_128-Cols_Experiments/
+DataStore/*

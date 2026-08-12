@@ -87,14 +87,15 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
         //  Get length of time to truncate
         TimeStruct ThisTs{static_cast<time_t>(protoFromClient->batchinsert_data(Indices.front()).timestamp()), CfgStruct.timeresolution()};
 
-        // Cached fd for this (dbName, year) file -- same fd cache UnaryInsert
-        // uses (see GetOrOpenFile). Creates+ftruncates on first use, so the
-        // separate open/ftruncate branch this used to have is gone. Every
-        // row below becomes a pwrite() rather than a memcpy into a
-        // PROT_WRITE mapping -- see WriteRowGroupToFile for why.
-        int Fd = GetOrOpenFile(TargetFile, CfgStruct.rowlength(), ThisTs.LastEpoch - ThisTs.FirstEpoch);
-        if (Fd < 0) {
-            std::string ErrMsg = fmt::format("[BATCH INSERT] [DB: {}] - Unable to open {}.XSTORE", DbName, YearKey);
+        // Cached PROT_WRITE mapping for this (dbName, year) file -- same mmap
+        // LRU cache UnaryInsert uses (see GetOrMapFile). Creates+ftruncates
+        // on first use, so the separate open/ftruncate branch this used to
+        // have is gone -- GetOrMapFile does it under its own lock. Every row
+        // below becomes a direct memcpy into an already-resident page
+        // instead of an fseek+fwrite syscall pair.
+        void *MappedBase = GetOrMapFile(TargetFile, CfgStruct.rowlength(), ThisTs.LastEpoch - ThisTs.FirstEpoch);
+        if (MappedBase == nullptr) {
+            std::string ErrMsg = fmt::format("[BATCH INSERT] [DB: {}] - Unable to open/map {}.XSTORE", DbName, YearKey);
             SetTaggedStatus(returnData->mutable_insertstatus(), "[ERROR] ", ErrMsg);
             spdlog::error(ErrMsg);
             continue;
@@ -106,7 +107,7 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
         // the span directly; offset is monotonic in timestamp so this is the
         // same "over-lock the gaps between scattered rows" trick RangeInsert
         // uses too, hence the shared helper.
-        WriteRowGroupToFile(TargetFile, Fd, ThisTs.FirstEpoch, CfgStruct.rowlength(), Indices,
+        WriteRowGroupToMappedFile(TargetFile, MappedBase, ThisTs.FirstEpoch, CfgStruct.rowlength(), Indices,
             [&](unsigned long long int idx) -> const XStore_Proto::BatchInsert_DATA& { return protoFromClient->batchinsert_data(idx); });
     }
 

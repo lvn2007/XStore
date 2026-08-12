@@ -58,16 +58,17 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, X
         //  Get length of time to truncate
         TimeStruct ThisTs{static_cast<time_t>(protoFromClient->rangeinsert_data(Indices.front()).timestamp()), CfgStruct.timeresolution()};
 
-        // Cached fd for this (dbName, year) file -- same fd cache UnaryInsert
-        // uses (see GetOrOpenFile). Creates+ftruncates on first use, so the
-        // separate open/ftruncate branch this used to have is gone.
-        // Timestamps in this year aren't guaranteed contiguous (see
-        // RegionLength below), so this still writes row by row rather than
-        // as one flat span -- but each row is now a pwrite() rather than a
-        // memcpy into a PROT_WRITE mapping -- see WriteRowGroupToFile for why.
-        int Fd = GetOrOpenFile(TargetFile, CfgStruct.rowlength(), ThisTs.LastEpoch - ThisTs.FirstEpoch);
-        if (Fd < 0) {
-            std::string ErrMsg = fmt::format("[RANGE INSERT] [DB: {}] - Unable to open {}.XSTORE", DbName, YearKey);
+        // Cached PROT_WRITE mapping for this (dbName, year) file -- same mmap
+        // LRU cache UnaryInsert uses (see GetOrMapFile). Creates+ftruncates
+        // on first use, so the separate open/ftruncate branch this used to
+        // have is gone. Timestamps in this year aren't guaranteed
+        // contiguous (see RegionLength below), so this still writes row by
+        // row rather than as one flat span -- but each row is now a direct
+        // memcpy into an already-resident page instead of an fseek+fwrite
+        // syscall pair.
+        void *MappedBase = GetOrMapFile(TargetFile, CfgStruct.rowlength(), ThisTs.LastEpoch - ThisTs.FirstEpoch);
+        if (MappedBase == nullptr) {
+            std::string ErrMsg = fmt::format("[RANGE INSERT] [DB: {}] - Unable to open/map {}.XSTORE", DbName, YearKey);
             SetTaggedStatus(returnData->mutable_insertstatus(), "[ERROR] ", ErrMsg);
             spdlog::error(ErrMsg);
             continue;
@@ -80,7 +81,7 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, X
         // Relies on the same "incoming data is sorted" precondition the rest
         // of this function already assumes, so the last entry in the group
         // carries the highest offset.
-        WriteRowGroupToFile(TargetFile, Fd, ThisTs.FirstEpoch, CfgStruct.rowlength(), Indices,
+        WriteRowGroupToMappedFile(TargetFile, MappedBase, ThisTs.FirstEpoch, CfgStruct.rowlength(), Indices,
             [&](unsigned long long int idx) -> const XStore_Proto::RangeInsert_DATA& { return protoFromClient->rangeinsert_data(idx); });
     }
 
