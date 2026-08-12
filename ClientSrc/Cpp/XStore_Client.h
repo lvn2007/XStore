@@ -93,6 +93,7 @@ class XStore_Client {
       Sock.set(zmq::sockopt::linger, 0);
       std::string FullAddr = "tcp://" + SERVER_ADDR + ":" + SERVER_PORT;
       Sock.connect(FullAddr);
+      Warmup();
   }
 
   // ZMQ connect() is lazy -- TCP + ZMTP handshake actually fires on first
@@ -114,6 +115,7 @@ class XStore_Client {
       Sock.set(zmq::sockopt::sndtimeo, timeoutMs);
       Sock.set(zmq::sockopt::linger, 0);
       Sock.connect("tcp://" + SERVER_ADDR + ":" + SERVER_PORT);
+      Warmup();
   }
 
   std::string GetCurrDT() {
