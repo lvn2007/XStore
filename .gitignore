@@ -6,5 +6,6 @@ graphify-out/
 .github/
 __pycache__/
 *.pyc
-DataStore/
+DataStore/*
 10Y_128-Cols_Experiments/
+AGENTS.md

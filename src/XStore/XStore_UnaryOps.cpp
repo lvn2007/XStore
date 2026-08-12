@@ -68,14 +68,18 @@ void XStore::UnaryInsert(const unsigned long long int &unixTime, const XStore_Pr
 
     // Thread-local scratch buffer, grown once and reused across calls --
     // avoids the SerializeAsString() heap allocation the original fwrite()
-    // path paid on every insert. Zeroed first so bytes past a shorter
-    // re-serialization don't leak a previous row's stale trailing bytes.
+    // path paid on every insert. Serialize first, then zero only the tail
+    // past the actual serialized size -- covers the same "no stale bytes
+    // from a previous larger row leak through" guarantee as zeroing the
+    // whole buffer up front, without redundantly touching the bytes
+    // SerializeToArray is about to overwrite anyway.
     thread_local std::vector<char> RowBuf;
     if (RowBuf.size() < CfgStruct.rowlength()) {
         RowBuf.resize(CfgStruct.rowlength());
     }
-    std::memset(RowBuf.data(), 0, CfgStruct.rowlength());
     data.SerializeToArray(RowBuf.data(), CfgStruct.rowlength());
+    size_t SerializedSize = data.ByteSizeLong();
+    std::memset(RowBuf.data() + SerializedSize, 0, CfgStruct.rowlength() - SerializedSize);
 
     ssize_t Written;
     {

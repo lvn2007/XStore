@@ -65,11 +65,13 @@ void WriteRowGroupToFile(const std::string &targetFile, int fd, long firstEpoch,
 
         unsigned long long int Offset = (static_cast<unsigned long long>(Entry.timestamp()) - firstEpoch) * rowLength;
 
-        // Zero the buffer first, then serialize directly into it -- no
-        // stale trailing bytes from a previous row leak through (same as
-        // UnaryInsert).
-        std::memset(RowBuf.data(), 0, rowLength);
+        // Serialize first, then zero only the tail past the actual
+        // serialized size -- no stale trailing bytes from a previous row
+        // leak through (same guarantee as UnaryInsert), without redundantly
+        // zeroing bytes SerializeToArray is about to overwrite anyway.
         Data.SerializeToArray(RowBuf.data(), rowLength);
+        size_t SerializedSize = Data.ByteSizeLong();
+        std::memset(RowBuf.data() + SerializedSize, 0, rowLength - SerializedSize);
         pwrite(fd, RowBuf.data(), rowLength, static_cast<off_t>(Offset));
     }
 }
