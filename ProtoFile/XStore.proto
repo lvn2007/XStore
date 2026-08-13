@@ -21,6 +21,7 @@ enum RequestType {
   MAX = 14;
   SUM = 15;
   AVG = 16;
+  PING = 17;
 }
 
 enum TimeUnit {
@@ -230,6 +231,7 @@ message Request {
     Max_REQ max = 15;
     Sum_REQ sum = 16;
     Avg_REQ avg = 17;
+    ReqCMD ping = 18;
   }
 }
 
@@ -247,6 +249,11 @@ message SysInfo_REP {
   string serverAddr = 1;
   int32 threadCount = 2;
   repeated DbStats dbInfo = 3;
+}
+
+// --- PING: empty ack, no server-side work beyond the round trip. Used to
+// force the ZMTP handshake (warmup) without InfoQuery's directory scan.
+message Ping_REP {
 }
 
 // --- CREATE DB response

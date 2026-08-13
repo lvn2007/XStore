@@ -76,6 +76,13 @@ void ZMQ_Server::WorkerRoutine(std::string serverAddr) {
                 break;
             }
 
+            // PING -- warmup/liveness probe, no XStore work, just the round trip
+            case XStore_Proto::Request::kPing: {
+                XStore_Proto::Ping_REP Rep;
+                SendProto(Socket, Rep);
+                break;
+            }
+
             // CREATE DB
             case XStore_Proto::Request::kCreatedb: {
                 const auto &Req = ClientRequest.createdb();

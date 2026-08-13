@@ -86,36 +86,44 @@ class XStore_Client {
  public:
   // timeoutMs < 0 (default) blocks forever, matching the previous behavior.
   // Pass a positive value so an unreachable/dead server raises instead of
-  // hanging this REQ socket indefinitely.
-  XStore_Client(std::string SERVER_ADDR, std::string SERVER_PORT, int timeoutMs = -1) {
+  // hanging this REQ socket indefinitely. warmupOnInit lets callers who
+  // don't care about paying the handshake cost upfront (e.g. short-lived
+  // clients that may never send a request) skip it.
+  XStore_Client(std::string SERVER_ADDR, std::string SERVER_PORT, int timeoutMs = -1, bool warmupOnInit = true) {
       Sock.set(zmq::sockopt::rcvtimeo, timeoutMs);
       Sock.set(zmq::sockopt::sndtimeo, timeoutMs);
       Sock.set(zmq::sockopt::linger, 0);
       std::string FullAddr = "tcp://" + SERVER_ADDR + ":" + SERVER_PORT;
       Sock.connect(FullAddr);
-      Warmup();
+      if (warmupOnInit) {
+          Warmup();
+      }
   }
 
   // ZMQ connect() is lazy -- TCP + ZMTP handshake actually fires on first
   // send(). Call this right after construction to eat that cost now instead
-  // of on the first real RPC. INFO is the lightest request type (rtype 0),
-  // so it's used as the ping. Throws same as any RPC on timeout/unreachable
-  // server -- caller must Reconnect() before retrying, same as elsewhere.
+  // of on the first real RPC. PING is a bare round trip with no server-side
+  // XStore work (unlike INFO, which scans the data store directory), so it
+  // forces the handshake without the extra I/O. Throws same as any RPC on
+  // timeout/unreachable server -- caller must Reconnect() before retrying,
+  // same as elsewhere.
   void Warmup() {
-      InfoRequest();
+      Ping();
   }
 
   // A REQ socket that hits a send/recv timeout has its strict
   // send-then-recv state machine left in an undefined spot per ZMQ's own
   // docs -- the fix is a fresh socket, not another send. Call this after
   // catching a timeout exception from any RPC below before retrying.
-  void Reconnect(std::string SERVER_ADDR, std::string SERVER_PORT, int timeoutMs = -1) {
+  void Reconnect(std::string SERVER_ADDR, std::string SERVER_PORT, int timeoutMs = -1, bool warmupOnInit = true) {
       Sock = zmq::socket_t(Ctx, zmq::socket_type::req);
       Sock.set(zmq::sockopt::rcvtimeo, timeoutMs);
       Sock.set(zmq::sockopt::sndtimeo, timeoutMs);
       Sock.set(zmq::sockopt::linger, 0);
       Sock.connect("tcp://" + SERVER_ADDR + ":" + SERVER_PORT);
-      Warmup();
+      if (warmupOnInit) {
+          Warmup();
+      }
   }
 
   std::string GetCurrDT() {
@@ -124,6 +132,15 @@ class XStore_Client {
       FormattedTime << std::put_time(std::localtime(&TimeNow), "%b %d, %Y %r");
       std::string ToReturn = FormattedTime.str();
       return ToReturn;
+  }
+
+  // ==== PING ====
+  // Bare round trip, no server-side XStore work -- cheaper than InfoRequest()
+  // for warmup/liveness checks that don't need SysInfo's contents.
+  void Ping() {
+      XStore_Proto::Request ToServer;
+      ToServer.mutable_ping()->set_rtype(XStore_Proto::PING);
+      SendRecv<XStore_Proto::Ping_REP>(ToServer);
   }
 
   // ==== INFO ====

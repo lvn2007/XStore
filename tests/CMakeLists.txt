@@ -67,6 +67,25 @@ add_custom_command(TARGET xstore_network_tests POST_BUILD
         COMMENT "Running xstore_network_tests via ctest"
 )
 
+# xstore_client_tests exercises XStore_Client.h itself (the warmupOnInit
+# flag) via the XStoreClient INTERFACE target from ClientSrc/Cpp, which
+# generates its own copy of the protobuf bindings -- kept in a separate
+# binary from xstore_tests/xstore_network_tests above so their
+# independently-generated XStore.pb.cc symbols never collide in one link.
+if(TARGET XStoreClient)
+    add_executable(xstore_client_tests integration/XStoreClientTest.cpp)
+    target_link_libraries(xstore_client_tests PRIVATE GTest::gtest_main XStoreClient)
+
+    include(GoogleTest)
+    gtest_discover_tests(xstore_client_tests)
+
+    add_custom_command(TARGET xstore_client_tests POST_BUILD
+            COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "^XStoreClientWarmupTest\\."
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+            COMMENT "Running xstore_client_tests via ctest"
+    )
+endif()
+
 # xstore_perf_tests: throughput/latency micro-benchmarks for Unary/Batch
 # Insert+Query (see tests/perf/XStorePerfTest.cpp for why these report
 # numbers instead of asserting hard thresholds). Deliberately NOT wired into

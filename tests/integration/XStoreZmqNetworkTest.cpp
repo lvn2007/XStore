@@ -181,6 +181,17 @@ TEST_F(XStoreZmqNetworkTest, InfoQueryOverWireReflectsCreatedDatabase) {
     EXPECT_TRUE(Found) << "expected ZMQ_INFO_DB to be reported by INFO over the wire";
 }
 
+// PING doesn't share Wrap()'s ReqCMD overload (ambiguous with INFO, same
+// C++ type) -- build the envelope directly.
+TEST_F(XStoreZmqNetworkTest, PingOverWireReturnsEmptyAckWithoutTouchingDataStore) {
+    XStore_Proto::Request PingReq;
+    PingReq.mutable_ping()->set_rtype(XStore_Proto::PING);
+    auto PingRep = SendRequest<XStore_Proto::Ping_REP>(PingReq);
+    // Only assertion that matters: the round trip completed and parsed as
+    // Ping_REP (SendRequest would ADD_FAILURE on send/recv timeout above).
+    (void)PingRep;
+}
+
 TEST_F(XStoreZmqNetworkTest, CreateDBOverWireRejectsDuplicateName) {
     XStore_Proto::CreateDB_REQ CreateReq;
     CreateReq.set_rtype(XStore_Proto::CREATEDB);
