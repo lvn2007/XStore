@@ -55,8 +55,11 @@ void XStore::UnaryInsert(const unsigned long long int &unixTime, const XStore_Pr
     // A row that doesn't fit in the configured slot would otherwise silently
     // truncate (SerializeToArray's return value was previously unchecked),
     // corrupting whatever follows it in the file. Reject up front instead.
-    if (data.ByteSizeLong() > static_cast<size_t>(CfgStruct.rowlength())) {
-        std::string ErrMsg = fmt::format("[UNARY INSERT] [DB: {}] - Row size {} exceeds configured row length {}", dbName, data.ByteSizeLong(), CfgStruct.rowlength());
+    // ByteSizeLong() walks every field, so it's computed once here and
+    // reused below rather than called again to learn the same size.
+    size_t SerializedSize = data.ByteSizeLong();
+    if (SerializedSize > static_cast<size_t>(CfgStruct.rowlength())) {
+        std::string ErrMsg = fmt::format("[UNARY INSERT] [DB: {}] - Row size {} exceeds configured row length {}", dbName, SerializedSize, CfgStruct.rowlength());
         SetTaggedStatus(returnData->mutable_insertstatus(), "[WARNING] ", ErrMsg);
         spdlog::warn(ErrMsg);
         return;
@@ -78,7 +81,6 @@ void XStore::UnaryInsert(const unsigned long long int &unixTime, const XStore_Pr
         RowBuf.resize(CfgStruct.rowlength());
     }
     data.SerializeToArray(RowBuf.data(), CfgStruct.rowlength());
-    size_t SerializedSize = data.ByteSizeLong();
     std::memset(RowBuf.data() + SerializedSize, 0, CfgStruct.rowlength() - SerializedSize);
 
     ssize_t Written;
@@ -129,8 +131,8 @@ void XStore::UnaryQuery(const unsigned long long int &unixTime, std::string dbNa
     std::string TargetFilePath = fmt::format("{}/{}.XSTORE", DbBasePathStr, CurrTs.Year);
 
     // IF target year file DOES NOT exist -- checked explicitly because
-    // GetOrMapFile below opens with O_CREAT and would otherwise silently
-    // create+map an empty file for a query that should just report no data.
+    // GetOrOpenFile below opens with O_CREAT and would otherwise silently
+    // create an empty file for a query that should just report no data.
     if (std::filesystem::exists(TargetFilePath) == 0) {
         std::string ErrMsg = fmt::format("[UNARY QUERY] [DB: {}] - DB does not exist", dbName);
         SetTaggedStatus(returnData->mutable_querystatus(), "[WARNING] ", ErrMsg);
@@ -138,12 +140,16 @@ void XStore::UnaryQuery(const unsigned long long int &unixTime, std::string dbNa
         return;
     }
 
-    // Cached mapping for this (dbName, year) file, same mmap LRU cache
-    // UnaryInsert uses (see GetOrMapFile) -- avoids a fresh
-    // fopen/fseek/fread/fclose (2 syscalls + stdio buffering) on every query.
-    void *MappedBase = GetOrMapFile(TargetFilePath, CfgStruct.rowlength(), CurrTs.LastEpoch - CurrTs.FirstEpoch);
-    if (MappedBase == nullptr) {
-        std::string ErrMsg = fmt::format("[UNARY QUERY] [DB: {}] - Unable to open/map {}.XSTORE", dbName, CurrTs.Year);
+    // Cached fd for this (dbName, year) file -- same fd cache UnaryInsert
+    // uses (see GetOrOpenFile). Reads go through pread() rather than a
+    // PROT_READ mmap: a RAND query's offset almost never lands on an
+    // already-faulted page in a multi-GB sparse file, so mmap access paid a
+    // synchronous major page fault on nearly every call -- the same
+    // "major page faulting is too expensive" cost UnaryInsert's pwrite()
+    // switch already fixed on the write side, just never carried over here.
+    int Fd = GetOrOpenFile(TargetFilePath, CfgStruct.rowlength(), CurrTs.LastEpoch - CurrTs.FirstEpoch);
+    if (Fd < 0) {
+        std::string ErrMsg = fmt::format("[UNARY QUERY] [DB: {}] - Unable to open {}.XSTORE", dbName, CurrTs.Year);
         SetTaggedStatus(returnData->mutable_querystatus(), "[ERROR] ", ErrMsg);
         spdlog::error(ErrMsg);
         return;
@@ -153,14 +159,20 @@ void XStore::UnaryQuery(const unsigned long long int &unixTime, std::string dbNa
     unsigned long long int Diff = unixTime - CurrTs.FirstEpoch;
     unsigned long long int Offset = Diff * CfgStruct.rowlength();
 
+    // Thread-local scratch buffer, grown once and reused across calls --
+    // same reasoning as UnaryInsert's RowBuf.
+    thread_local std::vector<char> RowBuf;
+    if (RowBuf.size() < CfgStruct.rowlength()) {
+        RowBuf.resize(CfgStruct.rowlength());
+    }
+
     {
         //  Lock range prior to reading
         FileRangeLockGuard Guard(TargetFilePath, Offset, CfgStruct.rowlength(), FileRangeLock::LockType::READ);
-
-        // Parse straight from the mapped row into the response -- skips the
-        // stack buffer + extra TempData copy the previous fread()-based path paid.
-        returnData->mutable_data()->ParseFromArray(static_cast<char*>(MappedBase) + Offset, CfgStruct.rowlength());
+        pread(Fd, RowBuf.data(), CfgStruct.rowlength(), static_cast<off_t>(Offset));
     }
+
+    returnData->mutable_data()->ParseFromArray(RowBuf.data(), CfgStruct.rowlength());
 }
 
 // UNARY DELETE

@@ -58,8 +58,11 @@ void WriteRowGroupToFile(const std::string &targetFile, int fd, long firstEpoch,
         const XStore_Proto::RowData &Data = Entry.data();
 
         // Rows that don't fit at all are rejected rather than silently
-        // truncated (matches UnaryInsert's check).
-        if (Data.ByteSizeLong() > static_cast<size_t>(rowLength)) {
+        // truncated (matches UnaryInsert's check). ByteSizeLong() walks
+        // every field, so it's computed once and reused below rather than
+        // called a second time to learn the same size after serializing.
+        size_t SerializedSize = Data.ByteSizeLong();
+        if (SerializedSize > static_cast<size_t>(rowLength)) {
             continue;
         }
 
@@ -70,7 +73,6 @@ void WriteRowGroupToFile(const std::string &targetFile, int fd, long firstEpoch,
         // leak through (same guarantee as UnaryInsert), without redundantly
         // zeroing bytes SerializeToArray is about to overwrite anyway.
         Data.SerializeToArray(RowBuf.data(), rowLength);
-        size_t SerializedSize = Data.ByteSizeLong();
         std::memset(RowBuf.data() + SerializedSize, 0, rowLength - SerializedSize);
         pwrite(fd, RowBuf.data(), rowLength, static_cast<off_t>(Offset));
     }

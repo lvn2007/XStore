@@ -13,12 +13,16 @@
 #include <chrono>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <random>
 #include <set>
 #include <sys/stat.h>
 #include <thread>
 #include <vector>
+
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 
 #include "include/DataStructs/TimeStruct.h"
 #include "include/DataStructs/FileRangeLock.h"
@@ -81,6 +85,32 @@ XStore_Proto::RowData BuildWideRow(int rowIndex) {
         }
     }
     return MakeRow(Fields);
+}
+
+// Reads exactly rowLength bytes at timestamp's computed file offset and
+// decodes them into a fresh RowData -- entirely independent of
+// XStore::UnaryQuery/BatchQuery/the aggregate kernels, so it can't be
+// fooled by a bug that happens to affect a write path and its usual read
+// path identically (data would still round-trip through the library, but
+// what's actually on disk -- and what any other tool reading these files
+// later would see -- would be wrong). CodedInputStream + MergePartial
+// mirrors the trailing-zero-tolerant parse XStore_IO.cpp's own aggregate
+// kernels use, rather than a plain ParseFromArray, which errors on the
+// zero-padded tail past the real message.
+XStore_Proto::RowData ReadRowDirectlyFromDisk(const fs::path &dataFile, unsigned long long timestamp,
+                                               long long firstEpoch, int rowLength) {
+    unsigned long long Offset = (timestamp - static_cast<unsigned long long>(firstEpoch)) * static_cast<unsigned long long>(rowLength);
+
+    std::ifstream In(dataFile, std::ios::binary);
+    In.seekg(static_cast<std::streamoff>(Offset));
+    std::vector<char> Buf(rowLength);
+    In.read(Buf.data(), rowLength);
+
+    XStore_Proto::RowData Row;
+    google::protobuf::io::ArrayInputStream ArrayIn(Buf.data(), rowLength);
+    google::protobuf::io::CodedInputStream CodedIn(&ArrayIn);
+    Row.MergePartialFromCodedStream(&CodedIn);
+    return Row;
 }
 
 }  // namespace
@@ -2642,4 +2672,91 @@ TEST_F(XStoreTest, ConcurrentXStoreInstancesShareCfgMapWithoutCorruption) {
     // entry.
     ASSERT_EQ(XStore::CfgMap.size(), 1u);
     EXPECT_EQ(XStore::CfgMap.at("TESTDB").rowlength(), 64);
+}
+
+// ---------------------------------------------------------------------
+// Independent raw-file cross-check -- every round-trip test above writes
+// through one XStore method and reads back through another, but both sides
+// share the same protobuf (de)serialization code, so a bug that happens to
+// affect a write path and its usual read path identically would still pass.
+// These three instead decode the raw .XSTORE bytes directly (see
+// ReadRowDirectlyFromDisk above), one per distinct write/read code path:
+// UnaryInsert's pwrite, Batch/RangeInsert's shared WriteRowGroupToFile, and
+// SumAggregate's separate mmap-based accumulate kernel.
+// ---------------------------------------------------------------------
+
+TEST_F(XStoreTest, UnaryInsertWritesExactBytesIndependentlyReadableFromDisk) {
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+
+    XStore_Proto::UnaryInsert_REP InsertRep;
+    Store.UnaryInsert(TS_2016_MID, MakeRow({FDouble(2.71828), FString("raw-check"), FInt32(-42)}), "TESTDB", &InsertRep);
+    ASSERT_NE(InsertRep.insertstatus().find("[INFO]"), std::string::npos);
+
+    TimeStruct Ts(TS_2016_MID, XStore_Proto::SECOND);
+    fs::path DataFile = Scratch->TestRoot / "DataStore" / "TESTDB" / "2016.XSTORE";
+    XStore_Proto::RowData Row = ReadRowDirectlyFromDisk(DataFile, TS_2016_MID, Ts.FirstEpoch, 128);
+
+    ASSERT_EQ(Row.fielddata_size(), 3);
+    EXPECT_DOUBLE_EQ(Row.fielddata(0).doubledata(), 2.71828);
+    EXPECT_EQ(Row.fielddata(1).stringdata(), "raw-check");
+    EXPECT_EQ(Row.fielddata(2).int32data(), -42);
+}
+
+TEST_F(XStoreTest, BatchInsertWritesExactBytesIndependentlyReadableFromDisk) {
+    // RangeInsert shares this exact write helper (WriteRowGroupToFile, see
+    // include/XStore/XStore_Internal.h), so this test's coverage extends to
+    // it too -- a near-duplicate RangeInsert version would just repeat it.
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 64);
+
+    std::vector<unsigned long long> Timestamps = {TS_2016_MID, TS_2016_MID + 500000, TS_2016_MID - 500000};
+    XStore_Proto::BatchInsert_REQ Req;
+    Req.set_dbname("TESTDB");
+    for (size_t i = 0; i < Timestamps.size(); i++) {
+        auto *Entry = Req.add_batchinsert_data();
+        Entry->set_timestamp(Timestamps[i]);
+        *Entry->mutable_data() = MakeRow({FInt64(static_cast<int64_t>(i) * 1000 - 7)});
+    }
+    XStore_Proto::BatchInsert_REP Rep;
+    Store.BatchInsert(&Req, &Rep);
+    ASSERT_NE(Rep.insertstatus().find("successfully"), std::string::npos);
+
+    fs::path DataFile = Scratch->TestRoot / "DataStore" / "TESTDB" / "2016.XSTORE";
+    TimeStruct Ts(TS_2016_MID, XStore_Proto::SECOND);
+    for (size_t i = 0; i < Timestamps.size(); i++) {
+        XStore_Proto::RowData Row = ReadRowDirectlyFromDisk(DataFile, Timestamps[i], Ts.FirstEpoch, 64);
+        ASSERT_EQ(Row.fielddata_size(), 1) << "i=" << i;
+        EXPECT_EQ(Row.fielddata(0).int64data(), static_cast<int64_t>(i) * 1000 - 7) << "i=" << i;
+    }
+}
+
+TEST_F(XStoreTest, SumAggregateMatchesIndependentlyComputedSumFromRawDiskBytes) {
+    // SumAggregate reads via ProcessFileRangeAccumulate's mmap-based kernel
+    // (XStore_IO.cpp) -- a third, distinct read path from UnaryQuery's
+    // pread and BatchQuery's pread-per-row, so a bug specific to that
+    // kernel wouldn't show up in either test above.
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 64);
+
+    std::vector<unsigned long long> Timestamps = {TS_2016_MID, TS_2016_MID + 10, TS_2016_MID + 25, TS_2016_MID + 40};
+    std::vector<double> Values = {12.5, -30.25, 100.0, -0.75};
+    for (size_t i = 0; i < Timestamps.size(); i++) {
+        XStore_Proto::UnaryInsert_REP Rep;
+        Store.UnaryInsert(Timestamps[i], MakeRow({FDouble(Values[i]), FString("decoy")}), "TESTDB", &Rep);
+        ASSERT_NE(Rep.insertstatus().find("[INFO]"), std::string::npos) << "i=" << i;
+    }
+
+    fs::path DataFile = Scratch->TestRoot / "DataStore" / "TESTDB" / "2016.XSTORE";
+    TimeStruct Ts(TS_2016_MID, XStore_Proto::SECOND);
+    double ExpectedSum = 0.0;
+    for (size_t i = 0; i < Timestamps.size(); i++) {
+        XStore_Proto::RowData Row = ReadRowDirectlyFromDisk(DataFile, Timestamps[i], Ts.FirstEpoch, 64);
+        ExpectedSum += Row.fielddata(0).doubledata();
+    }
+
+    XStore_Proto::Sum_REP SumRep;
+    Store.SumAggregate(TS_2016_MID, TS_2016_MID + 40, "TESTDB", 0, &SumRep);
+    EXPECT_EQ(SumRep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(SumRep.opresult(), ExpectedSum);
 }
