@@ -20,13 +20,20 @@
 std::string* SetTaggedStatus(std::string *status, const char *tag, const std::string &body);
 
 // Shared by XStore_BatchOps.cpp's BatchInsert and XStore_RangeOps.cpp's
-// RangeInsert: writes one year-group's rows into fd via pwrite() under a
-// single lock spanning the group's min-to-max offset (instead of one lock
-// per row). Same reasoning as UnaryInsert's pwrite()/GetOrOpenFile switch
-// (see XStore_UnaryOps.cpp) -- a scattered (RAND) group used to pay a
-// synchronous mmap write-fault per row; pwrite() into a still-sparse region
-// is a buffered write that costs the same whether the group's offsets are
-// contiguous or scattered. GetEntry(idx) must return a message with
+// RangeInsert: writes one year-group's rows into fd under a single lock
+// spanning the group's min-to-max offset (instead of one lock per row --
+// see the comment on that lock at each call site; that granularity was
+// tried at both extremes -- per-row and this whole-span -- and whole-span
+// won, so it's left alone here).
+//
+// The *write* side is coalesced independently of the lock: rows are sorted
+// into maximal contiguous runs (adjacent offsets, no gap) and each run is
+// serialized into one buffer and issued as a single pwrite() spanning the
+// whole run, instead of one pwrite() per row. A fully sequential group
+// collapses to one run -- one pwrite() for the entire group, mirroring the
+// syscall-coalescing an fwrite()-style buffer would give for free. A fully
+// scattered (RAND) group degrades to one run per row -- same syscall count
+// as before, never worse. GetEntry(idx) must return a message with
 // .timestamp()/.data() -- BatchInsert_DATA and RangeInsert_DATA both
 // qualify, so this is templated on the accessor rather than the message
 // type to avoid materializing an intermediate row vector per call.
@@ -46,35 +53,60 @@ void WriteRowGroupToFile(const std::string &targetFile, int fd, long firstEpoch,
 
     FileRangeLockGuard Guard(targetFile, FirstOffset, RegionLength, FileRangeLock::LockType::WRITE);
 
-    // Thread-local scratch buffer, grown once and reused across rows/calls --
-    // avoids a heap allocation per row (same as UnaryInsert's RowBuf).
-    thread_local std::vector<char> RowBuf;
-    if (RowBuf.size() < rowLength) {
-        RowBuf.resize(rowLength);
-    }
+    struct ValidRow {
+        unsigned long long int Idx;
+        unsigned long long int Offset;
+        size_t SerializedSize;
+    };
 
+    // Rows that don't fit at all are rejected rather than silently truncated
+    // (matches UnaryInsert's check) -- left out of Valid entirely (not
+    // zeroed, not written) so a rejected row breaks run-detection below the
+    // same way any other offset gap does, rather than getting a written
+    // slot of zeros it was never supposed to have. ByteSizeLong() walks
+    // every field, so it's computed once here and carried through instead
+    // of being recomputed in the write pass.
+    std::vector<ValidRow> Valid;
+    Valid.reserve(indices.size());
     for (unsigned long long int Idx : indices) {
         const auto &Entry = getEntry(Idx);
-        const XStore_Proto::RowData &Data = Entry.data();
+        size_t SerializedSize = Entry.data().ByteSizeLong();
+        if (SerializedSize <= static_cast<size_t>(rowLength)) {
+            unsigned long long int Offset = (static_cast<unsigned long long>(Entry.timestamp()) - firstEpoch) * rowLength;
+            Valid.push_back({Idx, Offset, SerializedSize});
+        }
+    }
 
-        // Rows that don't fit at all are rejected rather than silently
-        // truncated (matches UnaryInsert's check). ByteSizeLong() walks
-        // every field, so it's computed once and reused below rather than
-        // called a second time to learn the same size after serializing.
-        size_t SerializedSize = Data.ByteSizeLong();
-        if (SerializedSize > static_cast<size_t>(rowLength)) {
-            continue;
+    // Thread-local scratch buffer, grown to fit the largest run written so
+    // far and reused across calls -- avoids a heap allocation per run.
+    thread_local std::vector<char> RunBuf;
+
+    for (size_t RunStart = 0; RunStart < Valid.size(); ) {
+        size_t RunEnd = RunStart + 1;
+        while (RunEnd < Valid.size() && Valid[RunEnd].Offset == Valid[RunEnd - 1].Offset + rowLength) {
+            ++RunEnd;
         }
 
-        unsigned long long int Offset = (static_cast<unsigned long long>(Entry.timestamp()) - firstEpoch) * rowLength;
+        size_t RunBytes = (RunEnd - RunStart) * static_cast<size_t>(rowLength);
+        if (RunBuf.size() < RunBytes) {
+            RunBuf.resize(RunBytes);
+        }
 
-        // Serialize first, then zero only the tail past the actual
-        // serialized size -- no stale trailing bytes from a previous row
-        // leak through (same guarantee as UnaryInsert), without redundantly
-        // zeroing bytes SerializeToArray is about to overwrite anyway.
-        Data.SerializeToArray(RowBuf.data(), rowLength);
-        std::memset(RowBuf.data() + SerializedSize, 0, rowLength - SerializedSize);
-        pwrite(fd, RowBuf.data(), rowLength, static_cast<off_t>(Offset));
+        for (size_t i = RunStart; i < RunEnd; ++i) {
+            char *Dest = RunBuf.data() + (i - RunStart) * rowLength;
+            const XStore_Proto::RowData &Data = getEntry(Valid[i].Idx).data();
+
+            // Serialize first, then zero only the tail past the actual
+            // serialized size -- no stale trailing bytes from a previous
+            // row leak through (same guarantee as UnaryInsert), without
+            // redundantly zeroing bytes SerializeToArray is about to
+            // overwrite anyway.
+            Data.SerializeToArray(Dest, rowLength);
+            std::memset(Dest + Valid[i].SerializedSize, 0, rowLength - Valid[i].SerializedSize);
+        }
+
+        pwrite(fd, RunBuf.data(), RunBytes, static_cast<off_t>(Valid[RunStart].Offset));
+        RunStart = RunEnd;
     }
 }
 
