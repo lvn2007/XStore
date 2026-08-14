@@ -7,6 +7,7 @@
 #include <ctime>
 #include <fcntl.h>
 #include <filesystem>
+#include <sys/mman.h>
 
 // RANGE INSERT
 void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, XStore_Proto::RangeInsert_REP *returnData) {
@@ -192,8 +193,25 @@ void XStore::RangeQuery(const unsigned long long int &startEpochT, const unsigne
         const unsigned long long int RegionLength = (SegmentEnd - IterEpoch + 1) * CfgStruct.rowlength();
 
         {
-            // Lock file prior to reading
+            // Lock file prior to reading -- READ lock scoped to exactly this
+            // segment's byte range, not the whole file, so concurrent reads
+            // of disjoint regions (or other years' files entirely) never
+            // wait on this one.
             FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
+
+            // Prefetch the queried span in one shot instead of relying on
+            // lazy page-faulting (one fault per first-touched page as the
+            // loop below walks the range) plus whatever the kernel's default
+            // readahead window happens to cover. madvise() requires a
+            // page-aligned addr/length, so align down to the containing page
+            // and extend the length by that slop.
+            {
+                static const long PageSize = sysconf(_SC_PAGE_SIZE);
+                char *SpanStart = static_cast<char*>(MappedBase) + FirstOffset;
+                uintptr_t AlignedAddr = reinterpret_cast<uintptr_t>(SpanStart) & ~(static_cast<uintptr_t>(PageSize) - 1);
+                size_t AlignSlop = reinterpret_cast<uintptr_t>(SpanStart) - AlignedAddr;
+                madvise(reinterpret_cast<void*>(AlignedAddr), RegionLength + AlignSlop, MADV_WILLNEED);
+            }
 
             // Iterate over this segment & add queried data and status. Every
             // timestamp in range gets an entry -- unlike BatchQuery, holes

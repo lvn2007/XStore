@@ -6,31 +6,29 @@
 #include <google/protobuf/io/coded_stream.h>
 #include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 
-std::list<std::pair<std::string, XStore::MappedFile>> XStore::MmapLru;
-std::unordered_map<std::string, std::list<std::pair<std::string, XStore::MappedFile>>::iterator> XStore::MmapIndex;
-std::mutex XStore::MmapMutex;
-
-std::list<std::pair<std::string, int>> XStore::FdLru;
-std::unordered_map<std::string, std::list<std::pair<std::string, int>>::iterator> XStore::FdIndex;
-std::mutex XStore::FdMutex;
+std::array<XStore::MmapShard, XStore::MmapShardCount> XStore::MmapShards;
+std::array<XStore::FdShard, XStore::FdShardCount> XStore::FdShards;
 
 void* XStore::GetOrMapFile(const std::string &targetFile, size_t rowLength, unsigned long long totalRows) {
-    // Fast path: already mapped -- only the lookup+MRU-promote touches
-    // shared state, so the lock is held just long enough for that.
+    MmapShard &Shard = MmapShards[std::hash<std::string>{}(targetFile) % MmapShardCount];
+
+    // Fast path: already mapped -- only the lookup+MRU-promote touches this
+    // shard's state, so the lock is held just long enough for that, and
+    // only contends with other threads hashing to the same shard.
     {
-        std::lock_guard<std::mutex> Lock(MmapMutex);
-        auto it = MmapIndex.find(targetFile);
-        if (it != MmapIndex.end()) {
-            MmapLru.splice(MmapLru.begin(), MmapLru, it->second);
+        std::lock_guard<std::mutex> Lock(Shard.Mutex);
+        auto it = Shard.Index.find(targetFile);
+        if (it != Shard.Index.end()) {
+            Shard.Lru.splice(Shard.Lru.begin(), Shard.Lru, it->second);
             return it->second->second.Base;
         }
     }
 
     // Cache miss -> open (create if needed), ensure size, map. Done WITHOUT
     // the lock: open/fstat/ftruncate/mmap are syscalls whose cost scales
-    // with file size and disk state, and holding a process-wide mutex
-    // across them would serialize every other thread's inserts -- to any
-    // DB, not just this one -- for that syscall's whole duration. Two
+    // with file size and disk state, and holding this shard's mutex across
+    // them would serialize every other thread hashing to the same shard --
+    // to any DB, not just this one -- for that syscall's whole duration. Two
     // threads racing to first-touch the same file both pay this cost
     // unlocked; the loser's redundant mapping is dropped below.
     int Fd = open(targetFile.c_str(), O_RDWR | O_CREAT, 0644);
@@ -62,35 +60,37 @@ void* XStore::GetOrMapFile(const std::string &targetFile, size_t rowLength, unsi
 
     // Re-acquire to install into the cache, double-checked: another thread
     // may have raced us to map this same file while we were unlocked.
-    std::lock_guard<std::mutex> Lock(MmapMutex);
-    auto it = MmapIndex.find(targetFile);
-    if (it != MmapIndex.end()) {
+    std::lock_guard<std::mutex> Lock(Shard.Mutex);
+    auto it = Shard.Index.find(targetFile);
+    if (it != Shard.Index.end()) {
         // Lost the race -- drop our redundant mapping, use theirs.
         munmap(Base, FileLen);
-        MmapLru.splice(MmapLru.begin(), MmapLru, it->second);
+        Shard.Lru.splice(Shard.Lru.begin(), Shard.Lru, it->second);
         return it->second->second.Base;
     }
 
-    MmapLru.emplace_front(targetFile, MappedFile{Base, FileLen});
-    MmapIndex[targetFile] = MmapLru.begin();
+    Shard.Lru.emplace_front(targetFile, MappedFile{Base, FileLen});
+    Shard.Index[targetFile] = Shard.Lru.begin();
 
-    if (MmapLru.size() > MmapCacheCap) {
-        munmap(MmapLru.back().second.Base, MmapLru.back().second.Len);
-        MmapIndex.erase(MmapLru.back().first);
-        MmapLru.pop_back();
+    if (Shard.Lru.size() > MmapShardCap) {
+        munmap(Shard.Lru.back().second.Base, Shard.Lru.back().second.Len);
+        Shard.Index.erase(Shard.Lru.back().first);
+        Shard.Lru.pop_back();
     }
 
     return Base;
 }
 
 int XStore::GetOrOpenFile(const std::string &targetFile, size_t rowLength, unsigned long long totalRows) {
-    // Fast path: already open -- only the lookup+MRU-promote touches shared
-    // state, mirrors GetOrMapFile's fast path.
+    FdShard &Shard = FdShards[std::hash<std::string>{}(targetFile) % FdShardCount];
+
+    // Fast path: already open -- only the lookup+MRU-promote touches this
+    // shard's state, mirrors GetOrMapFile's fast path.
     {
-        std::lock_guard<std::mutex> Lock(FdMutex);
-        auto it = FdIndex.find(targetFile);
-        if (it != FdIndex.end()) {
-            FdLru.splice(FdLru.begin(), FdLru, it->second);
+        std::lock_guard<std::mutex> Lock(Shard.Mutex);
+        auto it = Shard.Index.find(targetFile);
+        if (it != Shard.Index.end()) {
+            Shard.Lru.splice(Shard.Lru.begin(), Shard.Lru, it->second);
             return it->second->second;
         }
     }
@@ -116,77 +116,90 @@ int XStore::GetOrOpenFile(const std::string &targetFile, size_t rowLength, unsig
 
     // Re-acquire to install into the cache, double-checked: another thread
     // may have raced us to open this same file while we were unlocked.
-    std::lock_guard<std::mutex> Lock(FdMutex);
-    auto it = FdIndex.find(targetFile);
-    if (it != FdIndex.end()) {
+    std::lock_guard<std::mutex> Lock(Shard.Mutex);
+    auto it = Shard.Index.find(targetFile);
+    if (it != Shard.Index.end()) {
         // Lost the race -- drop our redundant fd, use theirs.
         close(Fd);
-        FdLru.splice(FdLru.begin(), FdLru, it->second);
+        Shard.Lru.splice(Shard.Lru.begin(), Shard.Lru, it->second);
         return it->second->second;
     }
 
-    FdLru.emplace_front(targetFile, Fd);
-    FdIndex[targetFile] = FdLru.begin();
+    Shard.Lru.emplace_front(targetFile, Fd);
+    Shard.Index[targetFile] = Shard.Lru.begin();
 
-    if (FdLru.size() > FdCacheCap) {
-        close(FdLru.back().second);
-        FdIndex.erase(FdLru.back().first);
-        FdLru.pop_back();
+    if (Shard.Lru.size() > FdShardCap) {
+        close(Shard.Lru.back().second);
+        Shard.Index.erase(Shard.Lru.back().first);
+        Shard.Lru.pop_back();
     }
 
     return Fd;
 }
 
 void XStore::EraseOpenFile(const std::string &targetFile) {
-    std::lock_guard<std::mutex> Lock(FdMutex);
+    FdShard &Shard = FdShards[std::hash<std::string>{}(targetFile) % FdShardCount];
+    std::lock_guard<std::mutex> Lock(Shard.Mutex);
 
-    auto It = FdIndex.find(targetFile);
-    if (It == FdIndex.end()) {
+    auto It = Shard.Index.find(targetFile);
+    if (It == Shard.Index.end()) {
         return;
     }
 
     close(It->second->second);
-    FdLru.erase(It->second);
-    FdIndex.erase(It);
+    Shard.Lru.erase(It->second);
+    Shard.Index.erase(It);
 }
 
 void XStore::EraseOpenFilesUnderPrefix(const std::string &dbDirPrefix) {
-    std::lock_guard<std::mutex> Lock(FdMutex);
+    // Same rationale as EraseMappedFilesUnderPrefix -- sweep each shard
+    // under its own lock rather than one lock for the whole sweep.
+    for (FdShard &Shard : FdShards) {
+        std::lock_guard<std::mutex> Lock(Shard.Mutex);
 
-    for (auto It = FdLru.begin(); It != FdLru.end();) {
-        if (It->first.compare(0, dbDirPrefix.size(), dbDirPrefix) == 0) {
-            close(It->second);
-            FdIndex.erase(It->first);
-            It = FdLru.erase(It);
-        } else {
-            ++It;
+        for (auto It = Shard.Lru.begin(); It != Shard.Lru.end();) {
+            if (It->first.compare(0, dbDirPrefix.size(), dbDirPrefix) == 0) {
+                close(It->second);
+                Shard.Index.erase(It->first);
+                It = Shard.Lru.erase(It);
+            } else {
+                ++It;
+            }
         }
     }
 }
 
 void XStore::EraseMappedFile(const std::string &targetFile) {
-    std::lock_guard<std::mutex> Lock(MmapMutex);
+    MmapShard &Shard = MmapShards[std::hash<std::string>{}(targetFile) % MmapShardCount];
+    std::lock_guard<std::mutex> Lock(Shard.Mutex);
 
-    auto It = MmapIndex.find(targetFile);
-    if (It == MmapIndex.end()) {
+    auto It = Shard.Index.find(targetFile);
+    if (It == Shard.Index.end()) {
         return;
     }
 
     munmap(It->second->second.Base, It->second->second.Len);
-    MmapLru.erase(It->second);
-    MmapIndex.erase(It);
+    Shard.Lru.erase(It->second);
+    Shard.Index.erase(It);
 }
 
 void XStore::EraseMappedFilesUnderPrefix(const std::string &dbDirPrefix) {
-    std::lock_guard<std::mutex> Lock(MmapMutex);
+    // Prefix sweep doesn't know which shard(s) hold matching files, so it
+    // walks all of them -- locked one shard at a time (not all at once),
+    // so concurrent GetOrMapFile() calls hashing to other shards aren't
+    // blocked for the sweep's duration. Rare/administrative path (DB
+    // removal), not a hot path, so this is fine.
+    for (MmapShard &Shard : MmapShards) {
+        std::lock_guard<std::mutex> Lock(Shard.Mutex);
 
-    for (auto It = MmapLru.begin(); It != MmapLru.end();) {
-        if (It->first.compare(0, dbDirPrefix.size(), dbDirPrefix) == 0) {
-            munmap(It->second.Base, It->second.Len);
-            MmapIndex.erase(It->first);
-            It = MmapLru.erase(It);
-        } else {
-            ++It;
+        for (auto It = Shard.Lru.begin(); It != Shard.Lru.end();) {
+            if (It->first.compare(0, dbDirPrefix.size(), dbDirPrefix) == 0) {
+                munmap(It->second.Base, It->second.Len);
+                Shard.Index.erase(It->first);
+                It = Shard.Lru.erase(It);
+            } else {
+                ++It;
+            }
         }
     }
 }

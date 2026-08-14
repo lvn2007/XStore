@@ -6,6 +6,7 @@
 // method body -- filesystem, sys/mman.h, fcntl.h, algorithm, execution,
 // TimeStruct, fmt, spdlog, etc. -- is included by that .cpp directly rather
 // than leaking into every translation unit that includes this class.
+#include <array>
 #include <cstddef>
 #include <cstdio>
 #include <list>
@@ -51,16 +52,32 @@ class XStore {
         // up front to the year's full row count), so one mapping covers the
         // whole file for its lifetime -- no remap needed. MRU-ordered list +
         // index map = O(1) lookup/promote/evict; bounded (MmapCacheCap) to
-        // avoid unbounded address-space/FD growth. Guarded by MmapMutex since
-        // every access (including cache hits, which reorder the MRU list)
-        // mutates shared state; distinct row offsets never overlap in memory
-        // so concurrent memcpy's to disjoint slots need no extra locking
+        // avoid unbounded address-space/FD growth.
+        //
+        // Sharded across MmapShardCount independent {list, map, mutex}
+        // instances, keyed by hashing the file path, instead of one
+        // process-wide mutex: a cold-started server hit by many concurrent
+        // first-touches (e.g. N threads each first-mapping a different year
+        // file at once) used to serialize entirely on that single mutex for
+        // the lookup+MRU-promote step, even though the actual open/mmap work
+        // was already unlocked. Two threads touching different files usually
+        // land in different shards now and don't share a lock at all; only
+        // threads racing on the same file (or a hash collision) still
+        // serialize, same as before. Per-shard cap is MmapCacheCap divided
+        // across shards so total resident mapping count is unchanged.
+        // Distinct row offsets never overlap in memory so concurrent
+        // memcpy's to disjoint slots need no extra locking beyond this
         // (FileRangeLockGuard still serializes same-slot writes).
         struct MappedFile { void *Base; size_t Len; };
-        static std::list<std::pair<std::string, MappedFile>> MmapLru;
-        static std::unordered_map<std::string, std::list<std::pair<std::string, MappedFile>>::iterator> MmapIndex;
-        static std::mutex MmapMutex;
+        struct MmapShard {
+            std::list<std::pair<std::string, MappedFile>> Lru;
+            std::unordered_map<std::string, std::list<std::pair<std::string, MappedFile>>::iterator> Index;
+            std::mutex Mutex;
+        };
+        static constexpr size_t MmapShardCount = 64;
         static constexpr size_t MmapCacheCap = 256;
+        static constexpr size_t MmapShardCap = MmapCacheCap / MmapShardCount;
+        static std::array<MmapShard, MmapShardCount> MmapShards;
 
         // Shared cache of open fds for .XSTORE data files, keyed by full path --
         // used by UnaryInsert's pwrite() path. Unlike GetOrMapFile, writing
@@ -82,10 +99,25 @@ class XStore {
         // page cache) stays in the same ballpark as the single ~4KB buffer
         // glibc's fwrite would have allocated for one open stream, rather
         // than inheriting the address-space-driven 256 sizing MmapLru uses.
-        static std::list<std::pair<std::string, int>> FdLru;
-        static std::unordered_map<std::string, std::list<std::pair<std::string, int>>::iterator> FdIndex;
-        static std::mutex FdMutex;
+        //
+        // Sharded the same way as the mmap cache (see MmapShard above), just
+        // fewer shards -- FdCacheCap is already tiny (8 total) so 64 shards
+        // would leave under one slot each. 4 shards keeps a usable 2-slot
+        // cap per shard while still splitting the lock so concurrent
+        // first-opens of different files don't all serialize on one mutex.
+        // Expect a smaller win than the mmap case: an fd-open miss is
+        // already cheap (no page-fault-time block allocation to hide behind
+        // an unlocked window), so the contention this closes is narrower to
+        // start with.
+        struct FdShard {
+            std::list<std::pair<std::string, int>> Lru;
+            std::unordered_map<std::string, std::list<std::pair<std::string, int>>::iterator> Index;
+            std::mutex Mutex;
+        };
+        static constexpr size_t FdShardCount = 4;
         static constexpr size_t FdCacheCap = 8;
+        static constexpr size_t FdShardCap = FdCacheCap / FdShardCount;
+        static std::array<FdShard, FdShardCount> FdShards;
         std::string PermittedTimeResolution[3] = {"SECOND", "MILLISECOND", "MICROSECOND"};
 
         int DbCount = 0;

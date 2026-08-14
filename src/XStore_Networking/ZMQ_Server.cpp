@@ -1,4 +1,5 @@
 #include "include/Networking/ZMQ_Server.h"
+#include <google/protobuf/arena.h>
 
 namespace {
 // Shared by every case below: serialize a response proto and dispatch it to
@@ -52,23 +53,40 @@ void ZMQ_Server::WorkerRoutine(std::string serverAddr) {
     zmq::socket_t Socket(Ctx, zmq::socket_type::rep);
     Socket.connect("inproc://workers");
 
+    // One arena per worker thread, reused for every request via Reset()
+    // rather than constructed fresh each time. Reset() keeps the arena's
+    // already-allocated blocks around for the next request instead of
+    // returning them to the system allocator, so steady-state traffic
+    // doesn't pay for the underlying block list's malloc/free churn either
+    // -- only the (much cheaper) bump-pointer allocations within it.
+    // Covers BOTH the incoming Request (RangeInsert_REQ/BatchInsert_REQ
+    // carry the same repeated-RowData-with-FData-columns nesting on the
+    // parse side that RangeQuery/BatchQuery/UnaryQuery pay on the response
+    // side) and the three response types with nested repeated fields.
+    google::protobuf::Arena Arena;
+
     while (true) {
         // RECEIVING
         //  Wait for next request from CLIENT
         std::vector<zmq::message_t> ClientMsgs;
         zmq::recv_multipart(Socket, std::back_inserter(ClientMsgs));
 
+        // Free everything the previous iteration allocated in one shot --
+        // safe here because that request's response was already serialized
+        // and sent by SendProto before the loop came back around.
+        Arena.Reset();
+
         //  Parse the envelope once -- the oneof case (payload_case()) below
         //  is the dispatch tag, so there's no separate lightweight parse
         //  followed by a second full parse of the same bytes.
-        XStore_Proto::Request ClientRequest;
-        if (!ClientRequest.ParseFromArray(ClientMsgs.back().data(), ClientMsgs.back().size())) {
+        auto *ClientRequest = google::protobuf::Arena::Create<XStore_Proto::Request>(&Arena);
+        if (!ClientRequest->ParseFromArray(ClientMsgs.back().data(), ClientMsgs.back().size())) {
             spdlog::warn("[NETWORKING] - Failed to parse request, dropping");
             Socket.send(zmq::message_t(0), zmq::send_flags::dontwait);
             continue;
         }
 
-        switch (ClientRequest.payload_case()) {
+        switch (ClientRequest->payload_case()) {
             // INFO
             case XStore_Proto::Request::kInfo: {
                 XStore_Proto::SysInfo_REP Rep = MyStore.InfoQuery(serverAddr, NumThreads);
@@ -85,7 +103,7 @@ void ZMQ_Server::WorkerRoutine(std::string serverAddr) {
 
             // CREATE DB
             case XStore_Proto::Request::kCreatedb: {
-                const auto &Req = ClientRequest.createdb();
+                const auto &Req = ClientRequest->createdb();
                 XStore_Proto::CreateDB_REP Rep = MyStore.CreateDB(Req.dbname(), Req.timeresolution(), Req.rowlength());
                 SendProto(Socket, Rep);
                 break;
@@ -93,7 +111,7 @@ void ZMQ_Server::WorkerRoutine(std::string serverAddr) {
 
             // REMOVE DB
             case XStore_Proto::Request::kRemovedb: {
-                const auto &Req = ClientRequest.removedb();
+                const auto &Req = ClientRequest->removedb();
                 XStore_Proto::RemoveDB_REP Rep = MyStore.RemoveDB(Req.dbname());
                 SendProto(Socket, Rep);
                 break;
@@ -101,7 +119,7 @@ void ZMQ_Server::WorkerRoutine(std::string serverAddr) {
 
             // REMOVE DB FILES
             case XStore_Proto::Request::kRemovedbfiles: {
-                auto *Req = ClientRequest.mutable_removedbfiles();
+                auto *Req = ClientRequest->mutable_removedbfiles();
                 XStore_Proto::RemoveDBFiles_REP Rep = MyStore.RemoveDBFiles(Req, Req->dbname());
                 SendProto(Socket, Rep);
                 break;
@@ -109,7 +127,7 @@ void ZMQ_Server::WorkerRoutine(std::string serverAddr) {
 
             // UNARY INSERT
             case XStore_Proto::Request::kUnaryinsert: {
-                const auto &Req = ClientRequest.unaryinsert();
+                const auto &Req = ClientRequest->unaryinsert();
                 XStore_Proto::UnaryInsert_REP Rep;
                 MyStore.UnaryInsert(Req.timestamp(), Req.data(), Req.dbname(), &Rep);
                 SendProto(Socket, Rep);
@@ -118,16 +136,21 @@ void ZMQ_Server::WorkerRoutine(std::string serverAddr) {
 
             // UNARY QUERY
             case XStore_Proto::Request::kUnaryquery: {
-                const auto &Req = ClientRequest.unaryquery();
-                XStore_Proto::UnaryQuery_REP Rep;
-                MyStore.UnaryQuery(Req.timestamp(), Req.dbname(), &Rep);
-                SendProto(Socket, Rep);
+                const auto &Req = ClientRequest->unaryquery();
+                // Arena-allocated: same RowData -> repeated FData nesting as
+                // Range/BatchQuery (up to one alloc per column), and this is
+                // likely the highest-QPS RPC of all of them -- single-row
+                // point queries. Not scaled by span like RangeQuery, but
+                // paid on every call with no reuse across calls.
+                auto *Rep = google::protobuf::Arena::Create<XStore_Proto::UnaryQuery_REP>(&Arena);
+                MyStore.UnaryQuery(Req.timestamp(), Req.dbname(), Rep);
+                SendProto(Socket, *Rep);
                 break;
             }
 
             // UNARY DELETE
             case XStore_Proto::Request::kUnarydelete: {
-                const auto &Req = ClientRequest.unarydelete();
+                const auto &Req = ClientRequest->unarydelete();
                 XStore_Proto::UnaryDelete_REP Rep = MyStore.UnaryDelete(Req.timestamp(), Req.dbname());
                 SendProto(Socket, Rep);
                 break;
@@ -135,7 +158,12 @@ void ZMQ_Server::WorkerRoutine(std::string serverAddr) {
 
             // BATCH INSERT
             case XStore_Proto::Request::kBatchinsert: {
-                auto *Req = ClientRequest.mutable_batchinsert();
+                // Req itself is already arena-allocated (it's a field inside
+                // ClientRequest, which lives on Arena) -- BatchInsert_REQ's
+                // repeated BatchInsert_DATA, each with its own RowData ->
+                // repeated FData, was parsed straight into arena memory
+                // above with no extra work needed here.
+                auto *Req = ClientRequest->mutable_batchinsert();
                 XStore_Proto::BatchInsert_REP Rep;
                 MyStore.BatchInsert(Req, &Rep);
                 SendProto(Socket, Rep);
@@ -144,16 +172,23 @@ void ZMQ_Server::WorkerRoutine(std::string serverAddr) {
 
             // BATCH QUERY
             case XStore_Proto::Request::kBatchquery: {
-                auto *Req = ClientRequest.mutable_batchquery();
-                XStore_Proto::BatchQuery_REP Rep;
-                MyStore.BatchQuery(Req, &Rep);
-                SendProto(Socket, Rep);
+                auto *Req = ClientRequest->mutable_batchquery();
+                // Arena-allocated: queryResponse is repeated UnaryQuery_REP,
+                // each entry owning its own RowData -> repeated FData, so a
+                // wide/long response means one heap alloc per row plus one
+                // per column inside it via the ordinary allocator. Arena
+                // turns that whole tree into bump-pointer allocations off
+                // one block, freed in one shot when Arena is Reset() at the
+                // top of the loop -- no per-message new/delete.
+                auto *Rep = google::protobuf::Arena::Create<XStore_Proto::BatchQuery_REP>(&Arena);
+                MyStore.BatchQuery(Req, Rep);
+                SendProto(Socket, *Rep);
                 break;
             }
 
             // BATCH DELETE
             case XStore_Proto::Request::kBatchdelete: {
-                auto *Req = ClientRequest.mutable_batchdelete();
+                auto *Req = ClientRequest->mutable_batchdelete();
                 XStore_Proto::BatchDelete_REP Rep = MyStore.BatchDelete(Req);
                 SendProto(Socket, Rep);
                 break;
@@ -161,7 +196,13 @@ void ZMQ_Server::WorkerRoutine(std::string serverAddr) {
 
             // RANGE INSERT
             case XStore_Proto::Request::kRangeinsert: {
-                const auto &Req = ClientRequest.rangeinsert();
+                // Same as BatchInsert above: RangeInsert_REQ's repeated
+                // RangeInsert_DATA -> RowData -> repeated FData tree is
+                // already arena-allocated from the ParseFromArray above --
+                // this is the actual benefit for RangeInsert, since its own
+                // response (RangeInsert_REP) is just a status string with
+                // nothing to arena.
+                const auto &Req = ClientRequest->rangeinsert();
                 XStore_Proto::RangeInsert_REP Rep;
                 MyStore.RangeInsert(&Req, &Rep);
                 SendProto(Socket, Rep);
@@ -170,16 +211,20 @@ void ZMQ_Server::WorkerRoutine(std::string serverAddr) {
 
             // RANGE QUERY
             case XStore_Proto::Request::kRangequery: {
-                const auto &Req = ClientRequest.rangequery();
-                XStore_Proto::RangeQuery_REP Rep;
-                MyStore.RangeQuery(Req.starttime(), Req.endtime(), Req.dbname(), &Rep);
-                SendProto(Socket, Rep);
+                const auto &Req = ClientRequest->rangequery();
+                // Arena-allocated -- see BatchQuery's case above for why.
+                // RangeQuery's row count scales with span (not a fixed
+                // batch size), so this is where the per-row allocation
+                // count matters most.
+                auto *Rep = google::protobuf::Arena::Create<XStore_Proto::RangeQuery_REP>(&Arena);
+                MyStore.RangeQuery(Req.starttime(), Req.endtime(), Req.dbname(), Rep);
+                SendProto(Socket, *Rep);
                 break;
             }
 
             // RANGE DELETE
             case XStore_Proto::Request::kRangedelete: {
-                const auto &Req = ClientRequest.rangedelete();
+                const auto &Req = ClientRequest->rangedelete();
                 XStore_Proto::RangeDelete_REP Rep = MyStore.RangeDelete(Req.starttime(), Req.endtime(), Req.dbname());
                 SendProto(Socket, Rep);
                 break;
@@ -187,7 +232,7 @@ void ZMQ_Server::WorkerRoutine(std::string serverAddr) {
 
             // MIN AGGREGATE
             case XStore_Proto::Request::kMin: {
-                const auto &Req = ClientRequest.min();
+                const auto &Req = ClientRequest->min();
                 XStore_Proto::Min_REP Rep;
                 MyStore.MinAggregate(Req.starttime(), Req.endtime(), Req.dbname(), Req.columnidx(), &Rep);
                 SendProto(Socket, Rep);
@@ -196,7 +241,7 @@ void ZMQ_Server::WorkerRoutine(std::string serverAddr) {
 
             // MAX AGGREGATE
             case XStore_Proto::Request::kMax: {
-                const auto &Req = ClientRequest.max();
+                const auto &Req = ClientRequest->max();
                 XStore_Proto::Max_REP Rep;
                 MyStore.MaxAggregate(Req.starttime(), Req.endtime(), Req.dbname(), Req.columnidx(), &Rep);
                 SendProto(Socket, Rep);
@@ -205,7 +250,7 @@ void ZMQ_Server::WorkerRoutine(std::string serverAddr) {
 
             // SUM AGGREGATE
             case XStore_Proto::Request::kSum: {
-                const auto &Req = ClientRequest.sum();
+                const auto &Req = ClientRequest->sum();
                 XStore_Proto::Sum_REP Rep;
                 MyStore.SumAggregate(Req.starttime(), Req.endtime(), Req.dbname(), Req.columnidx(), &Rep);
                 SendProto(Socket, Rep);
@@ -214,7 +259,7 @@ void ZMQ_Server::WorkerRoutine(std::string serverAddr) {
 
             // AVG AGGREGATE
             case XStore_Proto::Request::kAvg: {
-                const auto &Req = ClientRequest.avg();
+                const auto &Req = ClientRequest->avg();
                 XStore_Proto::Avg_REP Rep;
                 MyStore.AvgAggregate(Req.starttime(), Req.endtime(), Req.dbname(), Req.columnidx(), &Rep);
                 SendProto(Socket, Rep);
