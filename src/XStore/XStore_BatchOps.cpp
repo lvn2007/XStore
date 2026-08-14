@@ -225,7 +225,13 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
 
         FileRangeLockGuard Guard(TargetFile, MinOffset, RegionLength, FileRangeLock::LockType::READ);
 
-        std::vector<char> BufferIn(CfgStruct.rowlength());
+        // thread_local + grow-only: avoids a fresh heap allocation per
+        // year-group per call, same pattern UnaryInsert/UnaryQuery's RowBuf
+        // and WriteRowGroupToFile's RunBuf already use.
+        thread_local std::vector<char> BufferIn;
+        if (BufferIn.size() < CfgStruct.rowlength()) {
+            BufferIn.resize(CfgStruct.rowlength());
+        }
         for (unsigned long long int Idx : Indices) {
             unsigned long long int Timestamp = protoFromClient->timestamp(Idx);
             unsigned long long int Offset = (Timestamp - ThisTs.FirstEpoch) * CfgStruct.rowlength();

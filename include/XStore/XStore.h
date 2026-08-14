@@ -40,10 +40,22 @@ class XStore {
         std::string DataStoreDir = JoinPath(BaseDir, "DataStore");
 
         // Shared across every XStore instance (one per worker thread) so a config
-        // read from disk by one thread is visible to all others, and guarded by
-        // CfgMutex since std::map isn't safe for concurrent read/insert.
-        static std::map<std::string, XStore_Proto::ConfigStruct> CfgMap;
-        static std::shared_mutex CfgMutex;
+        // read from disk by one thread is visible to all others. Sharded the
+        // same way as the mmap/fd caches: GetOrLoadCfg is the first thing
+        // every single RPC calls (every insert, query, delete, all four
+        // aggregates), so even though the fast path only takes a *shared*
+        // lock, that shared_lock's acquire/release is still an atomic RMW on
+        // one process-wide cache line hit by every worker thread on every
+        // call -- the hottest piece of shared state in the system. No cap or
+        // eviction here (unlike Mmap/FdShard) since the config set is small
+        // and static per DB, so each shard is just an unordered_map + its
+        // own shared_mutex.
+        struct CfgShard {
+            std::unordered_map<std::string, XStore_Proto::ConfigStruct> Map;
+            std::shared_mutex Mutex;
+        };
+        static constexpr size_t CfgShardCount = 16;
+        static std::array<CfgShard, CfgShardCount> CfgShards;
 
         // Shared cache of PROT_WRITE mmap regions for .XSTORE data files, keyed
         // by full path, so repeat UnaryInserts to the same (dbName, year) file
@@ -166,16 +178,33 @@ class XStore {
         // RANGE DELETE
         XStore_Proto::RangeDelete_REP RangeDelete(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName);
 
+        // Walks [startEpochT, endEpochT] one year-file at a time for
+        // Min/Max/Sum/AvgAggregate, read-locking each existing segment and
+        // handing kernel(rowsBase, rowsToProcess) a pointer straight into
+        // GetOrMapFile's cached mapping -- a member function (not a free
+        // one) purely so it can call GetOrMapFile, which is private.
+        template <typename Kernel>
+        void WalkYearSpan(const std::string &dbBasePath, const XStore_Proto::ConfigStruct &cfgStruct,
+                          unsigned long long startEpochT, unsigned long long endEpochT, Kernel &&kernel);
+
         // Shared mmap-backed scan kernels used by Min/Max/Sum/AvgAggregate ----------
+        // rowsBase points directly into GetOrMapFile's cached, already-resident
+        // mapping (offset to the first row this kernel should scan) -- no
+        // mmap()/madvise()/munmap() here anymore. That per-call setup/teardown
+        // used to happen fresh on every single aggregate call (WalkYearSpan
+        // mapped just the queried sub-range itself, never through the shared
+        // cache), unlike every other read path, which all reuse GetOrMapFile's
+        // MRU-cached mapping. Now this shares it too.
+        //
         // Select kernel: tracks the single winning row under comparator Cmp(candidate, currentBest).
         //  Cmp = std::less<long double>  -> MIN ;  Cmp = std::greater<long double> -> MAX
         template <typename Cmp>
-        void ProcessFileRangeSelect(FILE* bFile, unsigned long long startOffset, unsigned long long totalRows,
+        void ProcessFileRangeSelect(const char* rowsBase, unsigned long long totalRows,
                                      size_t rowLen, unsigned short columnIdx,
                                      ValueStruct& bestValue, XStore_Proto::FData& bestData);
 
         // Accumulate kernel: running sum + valid-row count. Backs SUM directly, AVG divides after.
-        void ProcessFileRangeAccumulate(FILE* bFile, unsigned long long startOffset, unsigned long long totalRows,
+        void ProcessFileRangeAccumulate(const char* rowsBase, unsigned long long totalRows,
                                          size_t rowLen, unsigned short columnIdx,
                                          double& sumOut, unsigned long long& validCountOut);
 
@@ -188,7 +217,7 @@ class XStore {
         // conversion. Hardcoded to doubleData -- exists to measure the delta a
         // type-specialized kernel would buy, not as a drop-in replacement.
         template <typename Cmp>
-        void ProcessFileRangeSelectTypedDouble(FILE* bFile, unsigned long long startOffset, unsigned long long totalRows,
+        void ProcessFileRangeSelectTypedDouble(const char* rowsBase, unsigned long long totalRows,
                                      size_t rowLen, unsigned short columnIdx,
                                      bool& bestInitialized, double& bestValue, XStore_Proto::FData& bestData);
         void MinAggregateTypedDouble(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Min_REP *returnData);

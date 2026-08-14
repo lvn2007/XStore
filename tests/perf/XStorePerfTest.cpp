@@ -82,7 +82,7 @@ class XStorePerfTest : public ::testing::Test {
       // timed loops below and measure logging cost instead of XStore's.
       spdlog::set_level(spdlog::level::warn);
       Scratch = std::make_unique<ScratchDir>("xstore_perf_test");
-      XStore::CfgMap.clear();
+      for (auto &Shard : XStore::CfgShards) Shard.Map.clear();
   }
 
   void TearDown() override {

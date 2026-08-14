@@ -204,36 +204,25 @@ void XStore::EraseMappedFilesUnderPrefix(const std::string &dbDirPrefix) {
     }
 }
 
-// Shared mmap-backed scan kernels used by MinAggregate/MaxAggregate/SumAggregate/AvgAggregate.
-//  One page-aligned mmap per file range, MADV_SEQUENTIAL readahead, zero per-row syscalls,
-//  CodedInputStream parses directly off mapped pages (no row buffer copy).
+// Shared scan kernels used by MinAggregate/MaxAggregate/SumAggregate/AvgAggregate.
+// rowsBase points directly into GetOrMapFile's cached, already-resident
+// mapping -- no per-call mmap()/madvise()/munmap() here anymore (see the
+// header comment on the declarations for why). CodedInputStream parses
+// directly off the mapped pages, no row buffer copy.
 
 template <typename Cmp>
-void XStore::ProcessFileRangeSelect(FILE* bFile, unsigned long long startOffset, unsigned long long totalRows,
+void XStore::ProcessFileRangeSelect(const char* rowsBase, unsigned long long totalRows,
                                      size_t rowLen, unsigned short columnIdx,
                                      ValueStruct& bestValue, XStore_Proto::FData& bestData) {
 
     if (totalRows == 0) return;
 
-    int Fd = fileno(bFile);
-    long PageSize = sysconf(_SC_PAGE_SIZE);
-
-    unsigned long long AlignedOffset = (startOffset / PageSize) * PageSize;
-    unsigned long long AlignmentSlop = startOffset - AlignedOffset;
-    size_t TotalBytesToMap = (totalRows * rowLen) + AlignmentSlop;
-
-    void* MmappedPtr = mmap(NULL, TotalBytesToMap, PROT_READ, MAP_SHARED, Fd, AlignedOffset);
-    if (MmappedPtr == MAP_FAILED) return;
-
-    madvise(MmappedPtr, TotalBytesToMap, MADV_SEQUENTIAL | MADV_WILLNEED);
-
-    const char* BasePtr = static_cast<const char*>(MmappedPtr) + AlignmentSlop;
     XStore_Proto::RowData TempData;
     ValueStruct TempValue;
     const Cmp Better{}; // stateless functor, no per-call construction cost
 
     for (unsigned long long i = 0; i < totalRows; ++i) {
-        const char* RowPtr = BasePtr + (i * rowLen);
+        const char* RowPtr = rowsBase + (i * rowLen);
 
         // Instant skip for empty slots
         if (RowPtr[0] == 0) continue;
@@ -262,41 +251,26 @@ void XStore::ProcessFileRangeSelect(FILE* bFile, unsigned long long startOffset,
             }
         }
     }
-
-    munmap(MmappedPtr, TotalBytesToMap);
 }
 
 // Explicit instantiation: these are the only two comparators ever used, so the compiler
 // generates two fully-inlined, branch-free (on Cmp) versions -- no vtable/std::function overhead.
 template void XStore::ProcessFileRangeSelect<std::less<long double>>(
-    FILE*, unsigned long long, unsigned long long, size_t, unsigned short, ValueStruct&, XStore_Proto::FData&);
+    const char*, unsigned long long, size_t, unsigned short, ValueStruct&, XStore_Proto::FData&);
 template void XStore::ProcessFileRangeSelect<std::greater<long double>>(
-    FILE*, unsigned long long, unsigned long long, size_t, unsigned short, ValueStruct&, XStore_Proto::FData&);
+    const char*, unsigned long long, size_t, unsigned short, ValueStruct&, XStore_Proto::FData&);
 
-void XStore::ProcessFileRangeAccumulate(FILE* bFile, unsigned long long startOffset, unsigned long long totalRows,
+void XStore::ProcessFileRangeAccumulate(const char* rowsBase, unsigned long long totalRows,
                                          size_t rowLen, unsigned short columnIdx,
                                          double& sumOut, unsigned long long& validCountOut) {
 
     if (totalRows == 0) return;
 
-    int Fd = fileno(bFile);
-    long PageSize = sysconf(_SC_PAGE_SIZE);
-
-    unsigned long long AlignedOffset = (startOffset / PageSize) * PageSize;
-    unsigned long long AlignmentSlop = startOffset - AlignedOffset;
-    size_t TotalBytesToMap = (totalRows * rowLen) + AlignmentSlop;
-
-    void* MmappedPtr = mmap(NULL, TotalBytesToMap, PROT_READ, MAP_SHARED, Fd, AlignedOffset);
-    if (MmappedPtr == MAP_FAILED) return;
-
-    madvise(MmappedPtr, TotalBytesToMap, MADV_SEQUENTIAL | MADV_WILLNEED);
-
-    const char* BasePtr = static_cast<const char*>(MmappedPtr) + AlignmentSlop;
     XStore_Proto::RowData TempData;
     ValueStruct TempValue;
 
     for (unsigned long long i = 0; i < totalRows; ++i) {
-        const char* RowPtr = BasePtr + (i * rowLen);
+        const char* RowPtr = rowsBase + (i * rowLen);
 
         if (RowPtr[0] == 0) continue;
 
@@ -319,37 +293,22 @@ void XStore::ProcessFileRangeAccumulate(FILE* bFile, unsigned long long startOff
             }
         }
     }
-
-    munmap(MmappedPtr, TotalBytesToMap);
 }
 
 // Profiling-only prototype -- see header comment on the declaration and
 // tests/perf/XStorePerfTest.cpp for how it's benchmarked against MinAggregate.
 template <typename Cmp>
-void XStore::ProcessFileRangeSelectTypedDouble(FILE* bFile, unsigned long long startOffset, unsigned long long totalRows,
+void XStore::ProcessFileRangeSelectTypedDouble(const char* rowsBase, unsigned long long totalRows,
                                      size_t rowLen, unsigned short columnIdx,
                                      bool& bestInitialized, double& bestValue, XStore_Proto::FData& bestData) {
 
     if (totalRows == 0) return;
 
-    int Fd = fileno(bFile);
-    long PageSize = sysconf(_SC_PAGE_SIZE);
-
-    unsigned long long AlignedOffset = (startOffset / PageSize) * PageSize;
-    unsigned long long AlignmentSlop = startOffset - AlignedOffset;
-    size_t TotalBytesToMap = (totalRows * rowLen) + AlignmentSlop;
-
-    void* MmappedPtr = mmap(NULL, TotalBytesToMap, PROT_READ, MAP_SHARED, Fd, AlignedOffset);
-    if (MmappedPtr == MAP_FAILED) return;
-
-    madvise(MmappedPtr, TotalBytesToMap, MADV_SEQUENTIAL | MADV_WILLNEED);
-
-    const char* BasePtr = static_cast<const char*>(MmappedPtr) + AlignmentSlop;
     XStore_Proto::RowData TempData;
     const Cmp Better{};
 
     for (unsigned long long i = 0; i < totalRows; ++i) {
-        const char* RowPtr = BasePtr + (i * rowLen);
+        const char* RowPtr = rowsBase + (i * rowLen);
 
         if (RowPtr[0] == 0) continue;
 
@@ -379,12 +338,10 @@ void XStore::ProcessFileRangeSelectTypedDouble(FILE* bFile, unsigned long long s
             }
         }
     }
-
-    munmap(MmappedPtr, TotalBytesToMap);
 }
 
 template void XStore::ProcessFileRangeSelectTypedDouble<std::less<double>>(
-    FILE*, unsigned long long, unsigned long long, size_t, unsigned short, bool&, double&, XStore_Proto::FData&);
+    const char*, unsigned long long, size_t, unsigned short, bool&, double&, XStore_Proto::FData&);
 
 void XStore::GetFDataValue(const XStore_Proto::FData *fDataInput, unsigned int columnIdx, ValueStruct *returnData) {
     switch (fDataInput->oneOfData_case()) {

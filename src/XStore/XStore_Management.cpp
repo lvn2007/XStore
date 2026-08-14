@@ -9,8 +9,7 @@
 #include <sys/stat.h>
 #include <unordered_set>
 
-std::map<std::string, XStore_Proto::ConfigStruct> XStore::CfgMap;
-std::shared_mutex XStore::CfgMutex;
+std::array<XStore::CfgShard, XStore::CfgShardCount> XStore::CfgShards;
 
 // Initialization
 XStore::XStore() {
@@ -34,11 +33,13 @@ XStore::XStore() {
 }
 
 bool XStore::GetOrLoadCfg(const std::string &dbName, const std::string &dbBasePath, XStore_Proto::ConfigStruct &cfgOut) {
+    CfgShard &Shard = CfgShards[std::hash<std::string>{}(dbName) % CfgShardCount];
+
     // Fast path: another thread may have already cached this config
     {
-        std::shared_lock ReadLock(CfgMutex);
-        auto It = CfgMap.find(dbName);
-        if (It != CfgMap.end()) {
+        std::shared_lock ReadLock(Shard.Mutex);
+        auto It = Shard.Map.find(dbName);
+        if (It != Shard.Map.end()) {
             cfgOut = It->second;
             return true;
         }
@@ -46,9 +47,9 @@ bool XStore::GetOrLoadCfg(const std::string &dbName, const std::string &dbBasePa
 
     // Cache miss -> take exclusive lock & re-check (another thread may have
     // loaded it while we were waiting for the lock)
-    std::unique_lock WriteLock(CfgMutex);
-    auto It = CfgMap.find(dbName);
-    if (It != CfgMap.end()) {
+    std::unique_lock WriteLock(Shard.Mutex);
+    auto It = Shard.Map.find(dbName);
+    if (It != Shard.Map.end()) {
         cfgOut = It->second;
         return true;
     }
@@ -65,18 +66,20 @@ bool XStore::GetOrLoadCfg(const std::string &dbName, const std::string &dbBasePa
     cfgOut.ParseFromFileDescriptor(fileno(CFile));
     std::fclose(CFile);
 
-    CfgMap[dbName] = cfgOut;
+    Shard.Map[dbName] = cfgOut;
     return true;
 }
 
 void XStore::PutCfg(const std::string &dbName, const XStore_Proto::ConfigStruct &cfg) {
-    std::unique_lock WriteLock(CfgMutex);
-    CfgMap[dbName] = cfg;
+    CfgShard &Shard = CfgShards[std::hash<std::string>{}(dbName) % CfgShardCount];
+    std::unique_lock WriteLock(Shard.Mutex);
+    Shard.Map[dbName] = cfg;
 }
 
 void XStore::EraseCfg(const std::string &dbName) {
-    std::unique_lock WriteLock(CfgMutex);
-    CfgMap.erase(dbName);
+    CfgShard &Shard = CfgShards[std::hash<std::string>{}(dbName) % CfgShardCount];
+    std::unique_lock WriteLock(Shard.Mutex);
+    Shard.Map.erase(dbName);
 }
 
 std::string XStore::DbBasePath(const std::string &dbName) const {
@@ -100,20 +103,14 @@ XStore_Proto::SysInfo_REP XStore::InfoQuery(std::string serverAddr, int threadCo
         XStore_Proto::DbStats *CurrDb = ToReturn.add_dbinfo();
         CurrDb->set_dbname(CurrDbName);
 
-        // Fetch config of a target DB
+        // Fetch config of a target DB -- via the shared cache every other
+        // operation already uses, instead of a fresh open+parse per DB on
+        // every InfoQuery call (a status/monitoring endpoint, likely polled
+        // repeatedly).
         XStore_Proto::ConfigStruct CfgStruct;
-        std::string CurrCfgFilePath = JoinPath(CurrDbDir, CurrDbName + ".CFG");
-
-        // Check if .CFG file is exist
-        if (std::filesystem::exists(CurrCfgFilePath)) {
-            int CfgFile = open(CurrCfgFilePath.c_str(), O_RDONLY);
-            if (CfgFile >= 0) {
-                CfgStruct.ParseFromFileDescriptor(CfgFile);
-                close(CfgFile);
-
-                // Set DB Resolution
-                CurrDb->set_dbresolution(CfgStruct.timeresolution());
-            }
+        if (GetOrLoadCfg(CurrDbName, CurrDbDir, CfgStruct)) {
+            // Set DB Resolution
+            CurrDb->set_dbresolution(CfgStruct.timeresolution());
         }
 
         // Size of all data files in current DB

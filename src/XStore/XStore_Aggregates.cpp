@@ -7,17 +7,19 @@
 #include <filesystem>
 #include <functional>
 
-namespace {
-
 // Shared by Min/Max/Sum/AvgAggregate: walks [startEpochT, endEpochT] one
 // year-file at a time, read-locking each existing segment and handing it to
-// kernel(file, firstOffset, rowsToProcess) -- the four aggregates differ only
-// in which ProcessFileRange* kernel runs and what it accumulates into. A
-// missing year contributes nothing (kernel just isn't called for it), same
-// as Range Query/Delete's handling of missing years.
+// kernel(rowsBase, rowsToProcess) -- the four aggregates differ only in which
+// ProcessFileRange* kernel runs and what it accumulates into. A missing year
+// contributes nothing (kernel just isn't called for it), same as Range
+// Query/Delete's handling of missing years.
+//
+// Goes through GetOrMapFile -- the same MRU-cached, sharded mapping every
+// other read path (Range Query, Unary/Batch/RangeInsert) already reuses --
+// instead of a fresh fopen()+mmap()+munmap() per call like this used to do.
 template <typename Kernel>
-void WalkYearSpan(const std::string &dbBasePath, const XStore_Proto::ConfigStruct &cfgStruct,
-                   unsigned long long startEpochT, unsigned long long endEpochT, Kernel &&kernel) {
+void XStore::WalkYearSpan(const std::string &dbBasePath, const XStore_Proto::ConfigStruct &cfgStruct,
+                           unsigned long long startEpochT, unsigned long long endEpochT, Kernel &&kernel) {
     unsigned long long IterEpoch = startEpochT;
 
     while (IterEpoch <= endEpochT) {
@@ -28,24 +30,21 @@ void WalkYearSpan(const std::string &dbBasePath, const XStore_Proto::ConfigStruc
         unsigned long long RowsToProcess = (EndOfCurrentFile - IterEpoch) + 1;
 
         if (std::filesystem::exists(TargetFilePath)) {
-            FILE *BFile = std::fopen(TargetFilePath.c_str(), "rb");
-            if (BFile) {
+            void *MappedBase = GetOrMapFile(TargetFilePath, cfgStruct.rowlength(), CurrTs.LastEpoch - CurrTs.FirstEpoch);
+            if (MappedBase != nullptr) {
                 unsigned long long FirstOffset = (IterEpoch - CurrTs.FirstEpoch) * cfgStruct.rowlength();
                 unsigned long long RegionLength = RowsToProcess * cfgStruct.rowlength();
 
                 {
                     FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
-                    kernel(BFile, FirstOffset, RowsToProcess);
+                    kernel(static_cast<const char*>(MappedBase) + FirstOffset, RowsToProcess);
                 }
-                std::fclose(BFile);
             }
         }
 
         IterEpoch = EndOfCurrentFile + 1;
     }
 }
-
-}  // namespace
 
 void XStore::MinAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT,
                             std::string dbName, unsigned short int columnIdx, XStore_Proto::Min_REP *returnData) {
@@ -73,8 +72,8 @@ void XStore::MinAggregate(const unsigned long long int &startEpochT, const unsig
     XStore_Proto::FData MinData;
 
     WalkYearSpan(DbBasePathStr, CfgStruct, startEpochT, endEpochT,
-        [&](FILE *bFile, unsigned long long firstOffset, unsigned long long rowsToProcess) {
-            ProcessFileRangeSelect<std::less<long double>>(bFile, firstOffset, rowsToProcess, CfgStruct.rowlength(), columnIdx, MinValue, MinData);
+        [&](const char *rowsBase, unsigned long long rowsToProcess) {
+            ProcessFileRangeSelect<std::less<long double>>(rowsBase, rowsToProcess, CfgStruct.rowlength(), columnIdx, MinValue, MinData);
         });
 
     if (MinValue.IsInitialized) {
@@ -108,8 +107,8 @@ void XStore::MinAggregateTypedDouble(const unsigned long long int &startEpochT, 
     XStore_Proto::FData MinData;
 
     WalkYearSpan(DbBasePathStr, CfgStruct, startEpochT, endEpochT,
-        [&](FILE *bFile, unsigned long long firstOffset, unsigned long long rowsToProcess) {
-            ProcessFileRangeSelectTypedDouble<std::less<double>>(bFile, firstOffset, rowsToProcess, CfgStruct.rowlength(), columnIdx, MinInitialized, MinValue, MinData);
+        [&](const char *rowsBase, unsigned long long rowsToProcess) {
+            ProcessFileRangeSelectTypedDouble<std::less<double>>(rowsBase, rowsToProcess, CfgStruct.rowlength(), columnIdx, MinInitialized, MinValue, MinData);
         });
 
     if (MinInitialized) {
@@ -146,8 +145,8 @@ void XStore::MaxAggregate(const unsigned long long int &startEpochT, const unsig
     XStore_Proto::FData MaxData;
 
     WalkYearSpan(DbBasePathStr, CfgStruct, startEpochT, endEpochT,
-        [&](FILE *bFile, unsigned long long firstOffset, unsigned long long rowsToProcess) {
-            ProcessFileRangeSelect<std::greater<long double>>(bFile, firstOffset, rowsToProcess, CfgStruct.rowlength(), columnIdx, MaxValue, MaxData);
+        [&](const char *rowsBase, unsigned long long rowsToProcess) {
+            ProcessFileRangeSelect<std::greater<long double>>(rowsBase, rowsToProcess, CfgStruct.rowlength(), columnIdx, MaxValue, MaxData);
         });
 
     if (MaxValue.IsInitialized) {
@@ -184,8 +183,8 @@ void XStore::SumAggregate(const unsigned long long int &startEpochT, const unsig
     unsigned long long ValidCount = 0;
 
     WalkYearSpan(DbBasePathStr, CfgStruct, startEpochT, endEpochT,
-        [&](FILE *bFile, unsigned long long firstOffset, unsigned long long rowsToProcess) {
-            ProcessFileRangeAccumulate(bFile, firstOffset, rowsToProcess, CfgStruct.rowlength(), columnIdx, SumResult, ValidCount);
+        [&](const char *rowsBase, unsigned long long rowsToProcess) {
+            ProcessFileRangeAccumulate(rowsBase, rowsToProcess, CfgStruct.rowlength(), columnIdx, SumResult, ValidCount);
         });
 
     if (ValidCount > 0) {
@@ -222,8 +221,8 @@ void XStore::AvgAggregate(const unsigned long long int &startEpochT, const unsig
     unsigned long long ValidCount = 0;
 
     WalkYearSpan(DbBasePathStr, CfgStruct, startEpochT, endEpochT,
-        [&](FILE *bFile, unsigned long long firstOffset, unsigned long long rowsToProcess) {
-            ProcessFileRangeAccumulate(bFile, firstOffset, rowsToProcess, CfgStruct.rowlength(), columnIdx, SumResult, ValidCount);
+        [&](const char *rowsBase, unsigned long long rowsToProcess) {
+            ProcessFileRangeAccumulate(rowsBase, rowsToProcess, CfgStruct.rowlength(), columnIdx, SumResult, ValidCount);
         });
 
     if (ValidCount > 0) {

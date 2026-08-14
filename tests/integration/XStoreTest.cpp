@@ -122,15 +122,15 @@ class XStoreTest : public ::testing::Test {
   void SetUp() override {
       Scratch = std::make_unique<ScratchDir>("xstore_test");
 
-      // CfgMap is a process-wide static cache keyed only by dbName (by
-      // design -- production's DataStoreDir never changes for a process's
-      // lifetime, so it doesn't need to be). Every test here reuses "TESTDB"
-      // in its own fresh scratch directory though, so without this a DB
-      // cached (and never explicitly RemoveDB'd -- e.g. RemoveDBFiles
-      // legitimately leaves it cached, since it protects the .CFG) by an
-      // earlier test would still look cached to a later, unrelated test's
-      // brand-new (and otherwise empty) scratch directory.
-      XStore::CfgMap.clear();
+      // CfgMap (now CfgShards) is a process-wide static cache keyed only by
+      // dbName (by design -- production's DataStoreDir never changes for a
+      // process's lifetime, so it doesn't need to be). Every test here
+      // reuses "TESTDB" in its own fresh scratch directory though, so
+      // without this a DB cached (and never explicitly RemoveDB'd -- e.g.
+      // RemoveDBFiles legitimately leaves it cached, since it protects the
+      // .CFG) by an earlier test would still look cached to a later,
+      // unrelated test's brand-new (and otherwise empty) scratch directory.
+      for (auto &Shard : XStore::CfgShards) Shard.Map.clear();
   }
 
   void TearDown() override {
@@ -2645,8 +2645,9 @@ TEST_F(XStoreTest, CfgCachedByOneXStoreInstanceIsVisibleToAnotherInstance) {
 
     // Reader must have used the cached 128-byte row length -- not the 4-byte
     // one now sitting on disk -- proving the shared cache, not disk, won.
-    ASSERT_TRUE(XStore::CfgMap.count("TESTDB"));
-    EXPECT_EQ(XStore::CfgMap.at("TESTDB").rowlength(), 128);
+    auto &Shard = XStore::CfgShards[std::hash<std::string>{}("TESTDB") % XStore::CfgShardCount];
+    ASSERT_TRUE(Shard.Map.count("TESTDB"));
+    EXPECT_EQ(Shard.Map.at("TESTDB").rowlength(), 128);
 
     XStore_Proto::UnaryQuery_REP QueryRep;
     Reader.UnaryQuery(TS_2016_MID, "TESTDB", &QueryRep);
@@ -2660,7 +2661,7 @@ TEST_F(XStoreTest, ConcurrentXStoreInstancesShareCfgMapWithoutCorruption) {
 
     // Force every worker below to race on a genuine cache miss instead of
     // trivially hitting what CreateDB already cached.
-    XStore::CfgMap.clear();
+    for (auto &S : XStore::CfgShards) S.Map.clear();
 
     constexpr int NumThreads = 16;
     std::vector<std::thread> Threads;
@@ -2677,11 +2678,14 @@ TEST_F(XStoreTest, ConcurrentXStoreInstancesShareCfgMapWithoutCorruption) {
     // All 16 threads race to populate the same cache entry: whichever one's
     // constructor wins the per-DataStoreDir InitDB() race populates it first,
     // and every other thread's GetOrLoadCfg() miss path races behind it. An
-    // unguarded std::map under that many concurrent inserts would risk a
+    // unguarded map under that many concurrent inserts would risk a
     // corrupted map or a crash; they must instead converge on one consistent
-    // entry.
-    ASSERT_EQ(XStore::CfgMap.size(), 1u);
-    EXPECT_EQ(XStore::CfgMap.at("TESTDB").rowlength(), 64);
+    // entry -- summed across shards since "TESTDB" only ever lands in one.
+    size_t TotalCfgEntries = 0;
+    for (auto &S : XStore::CfgShards) TotalCfgEntries += S.Map.size();
+    ASSERT_EQ(TotalCfgEntries, 1u);
+    auto &Shard = XStore::CfgShards[std::hash<std::string>{}("TESTDB") % XStore::CfgShardCount];
+    EXPECT_EQ(Shard.Map.at("TESTDB").rowlength(), 64);
 }
 
 // ---------------------------------------------------------------------
