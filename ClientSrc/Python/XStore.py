@@ -25,23 +25,33 @@ class XStoreClient:
         self.socket = self.zmqContext.socket(zmq.REQ)
         self.socket.connect(f'tcp://{SERVER_ADDR}:{SERVER_PORT}')
 
+    def _sendRecv(self, envelope, repClass):
+        # Every RPC is: serialize the Request envelope, send, recv, parse
+        # reply. The server dispatches on the envelope's oneof case
+        # (payload_case()), so a bare/unwrapped request message never gets
+        # routed anywhere -- it must always be the Request wrapper on the wire.
+        self.socket.send(envelope.SerializeToString())
+        recvData = self.socket.recv()
+        recvObj = repClass()
+        recvObj.ParseFromString(recvData)
+        return recvObj
+
+    def ping(self):
+        """
+        Bare round trip, no server-side XStore work -- cheaper than
+        infoQuery() for warmup/liveness checks.
+        """
+        envelope = XStore_Proto.Request()
+        envelope.ping.RType = XStore_Proto.PING
+        self._sendRecv(envelope, XStore_Proto.Ping_REP)
+
     def infoQuery(self):
         """
         :return: Nothing
         """
-        # Build msg prior to dispatch
-        reqCMD = XStore_Proto.ReqCMD()
-        reqCMD.rType = XStore_Proto.INFO
-
-        # Dispatch request
-        self.socket.send(reqCMD.SerializeToString())
-
-        # Receive response
-        recvData = self.socket.recv()
-
-        # Prepare object to be parsed into
-        recvObj = XStore_Proto.SysInfo_REP()
-        recvObj.ParseFromString(recvData)
+        envelope = XStore_Proto.Request()
+        envelope.info.RType = XStore_Proto.INFO
+        recvObj = self._sendRecv(envelope, XStore_Proto.SysInfo_REP)
 
         # List of dbInfo
         dbInfo = []
@@ -61,30 +71,22 @@ class XStoreClient:
         :param rowLength:
         :return:
         """
-        # Build msg prior to dispatch
-        createDB_REQ = XStore_Proto.CreateDB_REQ()
-        createDB_REQ.rType = XStore_Proto.CREATEDB
-        createDB_REQ.dbName = dbName
-        createDB_REQ.timeResolution = timeResolution
-        createDB_REQ.rowLength = rowLength
+        envelope = XStore_Proto.Request()
+        payload = envelope.createdb
+        payload.RType = XStore_Proto.CREATEDB
+        payload.dbName = dbName
+        payload.timeResolution = timeResolution
+        payload.rowLength = rowLength
 
-        # Dispatch request
-        self.socket.send(createDB_REQ.SerializeToString())
-
-        # Receive response
-        recvData = self.socket.recv()
-
-        # Prepare object to be parsed into
-        recvObj = XStore_Proto.CreateDB_REP()
-        recvObj.ParseFromString(recvData)
+        recvObj = self._sendRecv(envelope, XStore_Proto.CreateDB_REP)
         return recvObj.createDBStatus
 
     def unaryInsert(self, insertUnixTime: int, data: [object, list], targetDBName: str) -> str:
-        # Build msg prior to dispatch
-        unaryInsert_REQ = XStore_Proto.UnaryInsert_REQ()
-        unaryInsert_REQ.rType = XStore_Proto.UNARYINSERT
-        unaryInsert_REQ.timestamp = insertUnixTime
-        unaryInsert_REQ.dbName = targetDBName
+        envelope = XStore_Proto.Request()
+        payload = envelope.unaryinsert
+        payload.RType = XStore_Proto.UNARYINSERT
+        payload.timestamp = insertUnixTime
+        payload.dbName = targetDBName
 
         # IF data is list -> Assume worse case scenario for space-efficiency
         if isinstance(data, list):
@@ -98,19 +100,11 @@ class XStoreClient:
                     fieldData.boolData = item
                 elif isinstance(item, (int, float)):
                     fieldData.doubleData = item
-            unaryInsert_REQ.data.MergeFrom(rowData)
+            payload.data.MergeFrom(rowData)
         else:
-            unaryInsert_REQ.data.MergeFrom(data)
+            payload.data.MergeFrom(data)
 
-        # Dispatch request
-        self.socket.send(unaryInsert_REQ.SerializeToString())
-
-        # Receive response
-        recvData = self.socket.recv()
-
-        # Prepare object to be parsed into
-        recvObj = XStore_Proto.UnaryInsert_REP()
-        recvObj.ParseFromString(recvData)
+        recvObj = self._sendRecv(envelope, XStore_Proto.UnaryInsert_REP)
         return recvObj.insertStatus
 
     def unaryQuery(self, targetUnixTime, targetDBName):
@@ -119,39 +113,22 @@ class XStoreClient:
         :param targetDBName:
         :return:
         """
-        # Build msg prior to dispatch
-        unaryQuery_REQ = XStore_Proto.UnaryQuery_REQ()
-        unaryQuery_REQ.rType = XStore_Proto.UNARYQUERY
-        unaryQuery_REQ.timestamp = targetUnixTime
-        unaryQuery_REQ.dbName = targetDBName
+        envelope = XStore_Proto.Request()
+        payload = envelope.unaryquery
+        payload.RType = XStore_Proto.UNARYQUERY
+        payload.timestamp = targetUnixTime
+        payload.dbName = targetDBName
 
-        # Dispatch request
-        self.socket.send(unaryQuery_REQ.SerializeToString())
-
-        # Receive response
-        recvData = self.socket.recv()
-
-        # Prepare object to be parsed into
-        recvObj = XStore_Proto.UnaryQuery_REP()
-        recvObj.ParseFromString(recvData)
-        return recvObj
+        return self._sendRecv(envelope, XStore_Proto.UnaryQuery_REP)
 
     def unaryDelete(self, targetUnixTime, targetDBName):
-        # Build msg prior to dispatch
-        unaryDelete_REQ = XStore_Proto.UnaryDelete_REQ()
-        unaryDelete_REQ.rType = XStore_Proto.UNARYDELETE
-        unaryDelete_REQ.timestamp = targetUnixTime
-        unaryDelete_REQ.dbName = targetDBName
+        envelope = XStore_Proto.Request()
+        payload = envelope.unarydelete
+        payload.RType = XStore_Proto.UNARYDELETE
+        payload.timestamp = targetUnixTime
+        payload.dbName = targetDBName
 
-        # Dispatch request
-        self.socket.send(unaryDelete_REQ.SerializeToString())
-
-        # Receive response
-        recvData = self.socket.recv()
-
-        # Prepare object to be parsed into
-        recvObj = XStore_Proto.UnaryDelete_REP()
-        recvObj.ParseFromString(recvData)
+        recvObj = self._sendRecv(envelope, XStore_Proto.UnaryDelete_REP)
         return recvObj.deleteStatus
 
     def rangeInsert(self, dataList, targetDBName):
@@ -160,10 +137,10 @@ class XStoreClient:
         :param targetDBName:
         :return:
         """
-        # Build msg prior to dispatch
-        rangeInsert_REQ = XStore_Proto.RangeInsert_REQ()
-        rangeInsert_REQ.rType = XStore_Proto.RANGEINSERT
-        rangeInsert_REQ.dbName = targetDBName
+        envelope = XStore_Proto.Request()
+        payload = envelope.rangeinsert
+        payload.RType = XStore_Proto.RANGEINSERT
+        payload.dbName = targetDBName
 
         # IF first element in dataList is not type rangeInsert_DATA
         #   -> Inferred data type -- Assume worse case scenario for space-efficiency
@@ -181,19 +158,11 @@ class XStoreClient:
                 insertData = XStore_Proto.RangeInsert_DATA()
                 insertData.timestamp = data["timestamp"]
                 insertData.data.MergeFrom(rowData)
-                rangeInsert_REQ.rangeInsert_DATA.append(insertData)
+                payload.rangeInsert_DATA.append(insertData)
         else:
-            rangeInsert_REQ.rangeInsert_DATA.MergeFrom(dataList)
+            payload.rangeInsert_DATA.MergeFrom(dataList)
 
-        # Dispatch request
-        self.socket.send(rangeInsert_REQ.SerializeToString())
-
-        # Receive response
-        recvData = self.socket.recv()
-
-        # Prepare object to be parsed into
-        recvObj = XStore_Proto.RangeInsert_REP()
-        recvObj.ParseFromString(recvData)
+        recvObj = self._sendRecv(envelope, XStore_Proto.RangeInsert_REP)
         return recvObj.insertStatus
 
     def batchInsert(self, dataList, targetDBName):
@@ -202,10 +171,10 @@ class XStoreClient:
         :param targetDBName:
         :return:
         """
-        # Build msg prior to dispatch
-        batchInsert_REQ = XStore_Proto.BatchInsert_REQ()
-        batchInsert_REQ.rType = XStore_Proto.BATCHINSERT
-        batchInsert_REQ.dbName = targetDBName
+        envelope = XStore_Proto.Request()
+        payload = envelope.batchinsert
+        payload.RType = XStore_Proto.BATCHINSERT
+        payload.dbName = targetDBName
 
         # IF first element in dataList is not type batchInsert_DATA
         #   -> Inferred data type -- Assume worse case scenario for space-efficiency
@@ -223,19 +192,11 @@ class XStoreClient:
                 insertData = XStore_Proto.BatchInsert_DATA()
                 insertData.timestamp = data["timestamp"]
                 insertData.data.MergeFrom(rowData)
-                batchInsert_REQ.batchInsert_DATA.append(insertData)
+                payload.batchInsert_DATA.append(insertData)
         else:
-            batchInsert_REQ.batchInsert_DATA.MergeFrom(dataList)
+            payload.batchInsert_DATA.MergeFrom(dataList)
 
-        # Dispatch request
-        self.socket.send(batchInsert_REQ.SerializeToString())
-
-        # Receive response
-        recvData = self.socket.recv()
-
-        # Prepare object to be parsed into
-        recvObj = XStore_Proto.BatchInsert_REP()
-        recvObj.ParseFromString(recvData)
+        recvObj = self._sendRecv(envelope, XStore_Proto.BatchInsert_REP)
         return recvObj.insertStatus
 
     def rangeQuery(self, startUnixTime, endUnixTime, targetDBName):
@@ -245,34 +206,14 @@ class XStoreClient:
         :param targetDBName:
         :return:
         """
-        # Build msg prior to dispatch
-        rangeQuery_REQ = XStore_Proto.RangeQuery_REQ()
-        rangeQuery_REQ.rType = XStore_Proto.RANGEQUERY
-        rangeQuery_REQ.startTime = startUnixTime
-        rangeQuery_REQ.endTime = endUnixTime
-        rangeQuery_REQ.dbName = targetDBName
+        envelope = XStore_Proto.Request()
+        payload = envelope.rangequery
+        payload.RType = XStore_Proto.RANGEQUERY
+        payload.startTime = startUnixTime
+        payload.endTime = endUnixTime
+        payload.dbName = targetDBName
 
-        # Dispatch request
-        self.socket.send(rangeQuery_REQ.SerializeToString())
-
-        # Receive response
-        recvData = self.socket.recv()
-
-        # Prepare object to be parsed into
-        recvObj = XStore_Proto.RangeQuery_REP()
-        recvObj.ParseFromString(recvData)
-
-        # List of dbInfo
-        # queryResults = []
-
-        # Extract & Append each DB Info into list
-        # for i in recvObj.unaryResponse:
-        #     currResult = QueryResult(i.timestamp, i.dataset, i.queryStatus)
-        #     queryResults.append(currResult)
-
-        # QueryResults as returning object
-        # return QueryResults(queryResults, recvObj.queryStatus)
-        return recvObj
+        return self._sendRecv(envelope, XStore_Proto.RangeQuery_REP)
 
     def batchQuery(self, dataList, targetDBName, SortTime=False):
         """
@@ -280,26 +221,17 @@ class XStoreClient:
         :param targetDBName:
         :return:
         """
-        # Build msg prior to dispatch
-        batchQuery_REQ = XStore_Proto.BatchQuery_REQ()
-        batchQuery_REQ.rType = XStore_Proto.BATCHQUERY
-        batchQuery_REQ.dbName = targetDBName
-        batchQuery_REQ.SortTime = SortTime
+        envelope = XStore_Proto.Request()
+        payload = envelope.batchquery
+        payload.RType = XStore_Proto.BATCHQUERY
+        payload.dbName = targetDBName
+        payload.SortTime = SortTime
 
-        # Loop through each data and add to batchQuery_REQ
+        # Loop through each data and add to batchquery payload
         for targetTime in dataList:
-            # Organize batchInsert_DATA
-            batchQuery_REQ.timestamp.append(targetTime)
+            payload.timestamp.append(targetTime)
 
-        # Dispatch request
-        self.socket.send(batchQuery_REQ.SerializeToString())
-
-        # Receive response
-        recvData = self.socket.recv()
-
-        # Prepare object to be parsed into
-        recvObj = XStore_Proto.BatchQuery_REP()
-        recvObj.ParseFromString(recvData)
+        recvObj = self._sendRecv(envelope, XStore_Proto.BatchQuery_REP)
         return recvObj.queryResponse
 
     def removeDB(self, dbName):
@@ -307,20 +239,12 @@ class XStoreClient:
         :param dbName:
         :return:
         """
-        # Build msg prior to dispatch
-        removeDB_REQ = XStore_Proto.RemoveDB_REQ()
-        removeDB_REQ.rType = XStore_Proto.REMOVEDB
-        removeDB_REQ.dbName = dbName
+        envelope = XStore_Proto.Request()
+        payload = envelope.removedb
+        payload.RType = XStore_Proto.REMOVEDB
+        payload.dbName = dbName
 
-        # Dispatch request
-        self.socket.send(removeDB_REQ.SerializeToString())
-
-        # Receive response
-        recvData = self.socket.recv()
-
-        # Prepare object to be parsed into
-        recvObj = XStore_Proto.RemoveDB_REP()
-        recvObj.ParseFromString(recvData)
+        recvObj = self._sendRecv(envelope, XStore_Proto.RemoveDB_REP)
         return recvObj.removeStatus
 
     def removeDB_files(self, filenameList, dbName):
@@ -329,25 +253,16 @@ class XStoreClient:
         :param dbName:
         :return:
         """
-        # Build msg prior to dispatch
-        removeDBFiles_REQ = XStore_Proto.RemoveDBFiles_REQ()
-        removeDBFiles_REQ.rType = XStore_Proto.REMOVEDBFILES
-        removeDBFiles_REQ.dbName = dbName
+        envelope = XStore_Proto.Request()
+        payload = envelope.removedbfiles
+        payload.RType = XStore_Proto.REMOVEDBFILES
+        payload.dbName = dbName
 
-        # Loop through each data and add to removeDBFiles_REQ
+        # Loop through each data and add to removedbfiles payload
         for i in filenameList:
-            # Add filename to removeDBFiles_REQ
-            removeDBFiles_REQ.fileName.append(i)
+            payload.fileName.append(i)
 
-        # Dispatch request
-        self.socket.send(removeDBFiles_REQ.SerializeToString())
-
-        # Receive response
-        recvData = self.socket.recv()
-
-        # Prepare object to be parsed into
-        recvObj = XStore_Proto.RemoveDBFiles_REP()
-        recvObj.ParseFromString(recvData)
+        recvObj = self._sendRecv(envelope, XStore_Proto.RemoveDBFiles_REP)
         return recvObj.removeStatus
 
     def batchDelete(self, dataList, targetDBName):
@@ -356,24 +271,16 @@ class XStoreClient:
         :param targetDBName:
         :return:
         """
-        # Build msg prior to dispatch
-        batchDelete_REQ = XStore_Proto.BatchDelete_REQ()
-        batchDelete_REQ.rType = XStore_Proto.BATCHDELETE
-        batchDelete_REQ.dbName = targetDBName
+        envelope = XStore_Proto.Request()
+        payload = envelope.batchdelete
+        payload.RType = XStore_Proto.BATCHDELETE
+        payload.dbName = targetDBName
 
-        # Loop through each data and add to batchDelete_REQ
+        # Loop through each data and add to batchdelete payload
         for targetTime in dataList:
-            batchDelete_REQ.timestamp.append(targetTime)
+            payload.timestamp.append(targetTime)
 
-        # Dispatch request
-        self.socket.send(batchDelete_REQ.SerializeToString())
-
-        # Receive response
-        recvData = self.socket.recv()
-
-        # Prepare object to be parsed into
-        recvObj = XStore_Proto.BatchDelete_REP()
-        recvObj.ParseFromString(recvData)
+        recvObj = self._sendRecv(envelope, XStore_Proto.BatchDelete_REP)
         return recvObj.deleteStatus
 
     def rangeDelete(self, startUnixTime, endUnixTime, targetDBName):
@@ -383,70 +290,54 @@ class XStoreClient:
         :param targetDBName:
         :return:
         """
-        # Build msg prior to dispatch
-        rangeDelete_REQ = XStore_Proto.RangeDelete_REQ()
-        rangeDelete_REQ.rType = XStore_Proto.RANGEDELETE
-        rangeDelete_REQ.startTime = startUnixTime
-        rangeDelete_REQ.endTime = endUnixTime
-        rangeDelete_REQ.dbName = targetDBName
+        envelope = XStore_Proto.Request()
+        payload = envelope.rangedelete
+        payload.RType = XStore_Proto.RANGEDELETE
+        payload.startTime = startUnixTime
+        payload.endTime = endUnixTime
+        payload.dbName = targetDBName
 
-        # Dispatch request
-        self.socket.send(rangeDelete_REQ.SerializeToString())
-
-        # Receive response
-        recvData = self.socket.recv()
-
-        # Prepare object to be parsed into
-        recvObj = XStore_Proto.RangeDelete_REP()
-        recvObj.ParseFromString(recvData)
+        recvObj = self._sendRecv(envelope, XStore_Proto.RangeDelete_REP)
         return recvObj.deleteStatus
 
-    def _aggregate(self, reqType, reqClass, repClass, startUnixTime, endUnixTime, targetDBName, columnIdx):
+    def _aggregate(self, reqType, oneofName, repClass, startUnixTime, endUnixTime, targetDBName, columnIdx):
         # Shared by min/max/sum/avg -- same (startTime, endTime, dbName,
         # columnIdx) request shape, differing only in RequestType and the
-        # generated message classes to use.
-        req = reqClass()
-        req.rType = reqType
-        req.startTime = startUnixTime
-        req.endTime = endUnixTime
-        req.dbName = targetDBName
-        req.columnIdx = columnIdx
+        # oneof field / generated REP class to use.
+        envelope = XStore_Proto.Request()
+        payload = getattr(envelope, oneofName)
+        payload.RType = reqType
+        payload.startTime = startUnixTime
+        payload.endTime = endUnixTime
+        payload.dbName = targetDBName
+        payload.columnIdx = columnIdx
 
-        # Dispatch request
-        self.socket.send(req.SerializeToString())
-
-        # Receive response
-        recvData = self.socket.recv()
-
-        # Prepare object to be parsed into
-        recvObj = repClass()
-        recvObj.ParseFromString(recvData)
-        return recvObj
+        return self._sendRecv(envelope, repClass)
 
     def min(self, startUnixTime, endUnixTime, targetDBName, columnIdx):
         """
         :return: Min_REP (opResult FData oneof, opStatus)
         """
-        return self._aggregate(XStore_Proto.MIN, XStore_Proto.Min_REQ, XStore_Proto.Min_REP,
+        return self._aggregate(XStore_Proto.MIN, "min", XStore_Proto.Min_REP,
                                 startUnixTime, endUnixTime, targetDBName, columnIdx)
 
     def max(self, startUnixTime, endUnixTime, targetDBName, columnIdx):
         """
         :return: Max_REP (opResult FData oneof, opStatus)
         """
-        return self._aggregate(XStore_Proto.MAX, XStore_Proto.Max_REQ, XStore_Proto.Max_REP,
+        return self._aggregate(XStore_Proto.MAX, "max", XStore_Proto.Max_REP,
                                 startUnixTime, endUnixTime, targetDBName, columnIdx)
 
     def sum(self, startUnixTime, endUnixTime, targetDBName, columnIdx):
         """
         :return: Sum_REP (opResult double, opStatus)
         """
-        return self._aggregate(XStore_Proto.SUM, XStore_Proto.Sum_REQ, XStore_Proto.Sum_REP,
+        return self._aggregate(XStore_Proto.SUM, "sum", XStore_Proto.Sum_REP,
                                 startUnixTime, endUnixTime, targetDBName, columnIdx)
 
     def avg(self, startUnixTime, endUnixTime, targetDBName, columnIdx):
         """
         :return: Avg_REP (opResult double, opStatus)
         """
-        return self._aggregate(XStore_Proto.AVG, XStore_Proto.Avg_REQ, XStore_Proto.Avg_REP,
+        return self._aggregate(XStore_Proto.AVG, "avg", XStore_Proto.Avg_REP,
                                 startUnixTime, endUnixTime, targetDBName, columnIdx)
