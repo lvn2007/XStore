@@ -38,15 +38,28 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, X
     // Assuming incoming data is sorted --> Skip sorting
     // Organize incoming data into map
     //  dataMap[2016] = Vector {Index 0, Index 1, ...}
-    std::time_t CurrTime;
-    tm EpochStruct;
     std::map<unsigned short int, std::vector<unsigned long long int>> DataMap;
 
-    // Granularity check
+    // Granularity check -- year-bucket via TimeStruct's closed-form calendar
+    // calc instead of gmtime_r (see BatchInsert for the same change and why:
+    // gmtime_r always treated the raw timestamp as whole seconds regardless
+    // of CfgStruct.timeresolution(), silently mis-bucketing MILLISECOND/
+    // MICROSECOND DBs). Data here is assumed pre-sorted ascending (see
+    // above), so consecutive rows usually share the same year: reuse the
+    // last TimeStruct's [FirstEpoch, LastEpoch] window via one comparison
+    // instead of rerunning the full calendar decomposition on every row.
+    bool HaveWindow = false;
+    unsigned short int CurrYear = 0;
+    int64_t WindowLastEpoch = 0;
     for (int i = 0; i < protoFromClient->rangeinsert_data_size(); i++) {
-        CurrTime = protoFromClient->rangeinsert_data(i).timestamp();
-        gmtime_r(&CurrTime, &EpochStruct);
-        DataMap[(EpochStruct.tm_year + 1900)].push_back(i);
+        unsigned long long int Ts = protoFromClient->rangeinsert_data(i).timestamp();
+        if (!HaveWindow || static_cast<int64_t>(Ts) > WindowLastEpoch) {
+            TimeStruct RowTs(static_cast<time_t>(Ts), CfgStruct.timeresolution());
+            CurrYear = RowTs.Year;
+            WindowLastEpoch = RowTs.LastEpoch;
+            HaveWindow = true;
+        }
+        DataMap[CurrYear].push_back(i);
     }
 
     // Iterate through each key (year) of dataMap

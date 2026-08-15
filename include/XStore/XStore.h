@@ -284,6 +284,15 @@ class XStore {
         // open/ftruncate failure.
         int GetOrOpenFile(const std::string &targetFile, size_t rowLength, unsigned long long totalRows);
 
+        // Peek-only: true if targetFile already has a cached fd (no open,
+        // no creation). A cache hit here is proof the file exists -- only
+        // files opened via GetOrOpenFile are ever cached, and both removal
+        // paths (EraseOpenFile/EraseOpenFilesUnderPrefix) drop the cache
+        // entry in the same call that deletes the file -- so callers that
+        // otherwise need a filesystem::exists() check purely to avoid
+        // GetOrOpenFile's O_CREAT can skip that stat() on a cache hit.
+        bool IsFdCached(const std::string &targetFile);
+
         // close + drop targetFile's cached fd, if present.
         void EraseOpenFile(const std::string &targetFile);
 

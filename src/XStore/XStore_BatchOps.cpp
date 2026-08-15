@@ -66,15 +66,30 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
 
     // Organize incoming data into map
     //  dataMap[2016] = Vector {Index 0, Index 1, ...}
-    std::time_t CurrTime;
-    tm EpochStruct;
     std::map<unsigned short int, std::vector<unsigned long long int>> DataMap;
 
-    // Granularity check
+    // Granularity check -- year-bucket via TimeStruct's closed-form calendar
+    // calc instead of gmtime_r. Two reasons: (1) gmtime_r always treated the
+    // raw timestamp as whole seconds regardless of CfgStruct.timeresolution(),
+    // silently mis-bucketing MILLISECOND/MICROSECOND DBs into the wrong
+    // year's file -- TimeStruct is resolution-aware, same as every other use
+    // of it in this class. (2) Batch is sorted ascending above, so
+    // consecutive rows usually share the same year: reuse the last
+    // TimeStruct's [FirstEpoch, LastEpoch] window via one comparison instead
+    // of rerunning the full calendar decomposition on every row -- only
+    // rebuilt on an actual year crossing.
+    bool HaveWindow = false;
+    unsigned short int CurrYear = 0;
+    int64_t WindowLastEpoch = 0;
     for (int i = 0; i < protoFromClient->batchinsert_data_size(); i++) {
-        CurrTime = protoFromClient->batchinsert_data(i).timestamp();
-        gmtime_r(&CurrTime, &EpochStruct);
-        DataMap[(EpochStruct.tm_year + 1900)].push_back(i);
+        unsigned long long int Ts = protoFromClient->batchinsert_data(i).timestamp();
+        if (!HaveWindow || static_cast<int64_t>(Ts) > WindowLastEpoch) {
+            TimeStruct RowTs(static_cast<time_t>(Ts), CfgStruct.timeresolution());
+            CurrYear = RowTs.Year;
+            WindowLastEpoch = RowTs.LastEpoch;
+            HaveWindow = true;
+        }
+        DataMap[CurrYear].push_back(i);
     }
 
     // Iterate through each key (year) of dataMap
@@ -202,7 +217,16 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
         // pages this loop will never touch, and per-call madvise(MADV_RANDOM)
         // to suppress that isn't free either once a lot of the mapping is
         // resident. A plain pread() per row sidesteps all of it.
-        int Fd = open(TargetFile.c_str(), O_RDONLY);
+        //
+        // The fd itself, though, goes through the same shared fd cache
+        // Unary/BatchInsert use (see GetOrOpenFile) instead of a fresh
+        // open()/close() every call -- existence was already confirmed
+        // above, so O_CREAT there is a no-op, and any ftruncate is a no-op
+        // too since the file is never smaller than the size this computes.
+        // A warm cache turns "open syscall + N preads + close syscall" into
+        // "one shard-mutex lookup + N preads", and the fd is left open for
+        // the next call (or Insert traffic on the same file) to reuse.
+        int Fd = GetOrOpenFile(TargetFile, CfgStruct.rowlength(), ThisTs.LastEpoch - ThisTs.FirstEpoch);
         if (Fd < 0) {
             std::string ErrMsg = fmt::format("[BATCH QUERY] [DB: {}] - Unable to open {}.XSTORE", DbName, YearKey);
             SetTaggedStatus(returnData->mutable_querystatus(), "[ERROR] ", ErrMsg);
@@ -252,8 +276,6 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
             CurrEntry->set_timestamp(Timestamp);
             CurrEntry->mutable_data()->ParseFromArray(BufferIn.data(), CfgStruct.rowlength());
         }
-
-        close(Fd);
     }
 }
 

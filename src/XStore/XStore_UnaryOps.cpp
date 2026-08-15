@@ -9,6 +9,30 @@
 #include <unistd.h>
 #include <vector>
 
+namespace {
+// TargetFile is rebuilt from DbBasePathStr + Year on every call otherwise --
+// a heap allocation paid even on a warm fd-cache hit, since fmt::format
+// always produces a fresh std::string. Real time-series workloads mostly
+// insert/query the current (dbName, year) repeatedly in a row, so a
+// single-entry thread_local memo skips the rebuild entirely on the common
+// case and only reformats on an actual db/year change. Shared by
+// UnaryInsert and UnaryQuery -- safe, since a single worker thread only
+// ever handles one request at a time (see ZMQ_Server::WorkerRoutine), so
+// there's no cross-call aliasing while the returned reference is live.
+const std::string& CachedYearFilePath(const std::string &dbName, const std::string &dbBasePathStr, unsigned short year) {
+    thread_local std::string TlsDbName;
+    thread_local unsigned short TlsYear = 0;
+    thread_local std::string TlsPath;
+
+    if (TlsDbName != dbName || TlsYear != year) {
+        TlsPath = fmt::format("{}/{}.XSTORE", dbBasePathStr, year);
+        TlsDbName = dbName;
+        TlsYear = year;
+    }
+    return TlsPath;
+}
+}  // namespace
+
 // UNARY INSERT
 void XStore::UnaryInsert(const unsigned long long int &unixTime, const XStore_Proto::RowData &data, std::string dbName, XStore_Proto::UnaryInsert_REP *returnData) {
     // Ensure dbName string is all capitalized
@@ -43,7 +67,7 @@ void XStore::UnaryInsert(const unsigned long long int &unixTime, const XStore_Pr
     // -- it has to synchronously allocate the block before the fault
     // returns -- which made random-offset inserts far more expensive than
     // sequential ones.
-    std::string TargetFile = fmt::format("{}/{}.XSTORE", DbBasePathStr, CurrTs.Year);
+    const std::string &TargetFile = CachedYearFilePath(dbName, DbBasePathStr, CurrTs.Year);
     int Fd = GetOrOpenFile(TargetFile, CfgStruct.rowlength(), CurrTs.LastEpoch - CurrTs.FirstEpoch);
     if (Fd < 0) {
         std::string ErrMsg = fmt::format("[UNARY INSERT] [DB: {}] - Unable to open {}.XSTORE", dbName, CurrTs.Year);
@@ -128,12 +152,16 @@ void XStore::UnaryQuery(const unsigned long long int &unixTime, std::string dbNa
     TimeStruct CurrTs(unixTime, CfgStruct.timeresolution());
 
     // Base directory of a DB & Target path of file to READ
-    std::string TargetFilePath = fmt::format("{}/{}.XSTORE", DbBasePathStr, CurrTs.Year);
+    const std::string &TargetFilePath = CachedYearFilePath(dbName, DbBasePathStr, CurrTs.Year);
 
     // IF target year file DOES NOT exist -- checked explicitly because
     // GetOrOpenFile below opens with O_CREAT and would otherwise silently
     // create an empty file for a query that should just report no data.
-    if (std::filesystem::exists(TargetFilePath) == 0) {
+    // IsFdCached short-circuits the stat() syscall on a warm cache: only
+    // files actually opened via GetOrOpenFile are ever cached, and both
+    // removal paths drop the cache entry in the same call that deletes the
+    // file, so a cache hit is already proof the file exists.
+    if (!IsFdCached(TargetFilePath) && std::filesystem::exists(TargetFilePath) == 0) {
         std::string ErrMsg = fmt::format("[UNARY QUERY] [DB: {}] - DB does not exist", dbName);
         SetTaggedStatus(returnData->mutable_querystatus(), "[WARNING] ", ErrMsg);
         spdlog::warn(ErrMsg);

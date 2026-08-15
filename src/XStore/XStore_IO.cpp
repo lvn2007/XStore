@@ -138,6 +138,12 @@ int XStore::GetOrOpenFile(const std::string &targetFile, size_t rowLength, unsig
     return Fd;
 }
 
+bool XStore::IsFdCached(const std::string &targetFile) {
+    FdShard &Shard = FdShards[std::hash<std::string>{}(targetFile) % FdShardCount];
+    std::lock_guard<std::mutex> Lock(Shard.Mutex);
+    return Shard.Index.find(targetFile) != Shard.Index.end();
+}
+
 void XStore::EraseOpenFile(const std::string &targetFile) {
     FdShard &Shard = FdShards[std::hash<std::string>{}(targetFile) % FdShardCount];
     std::lock_guard<std::mutex> Lock(Shard.Mutex);

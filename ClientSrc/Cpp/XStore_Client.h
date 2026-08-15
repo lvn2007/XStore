@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 
+#include <google/protobuf/arena.h>
+
 #include "zmq.hpp"
 #include "zmq_addon.hpp"
 #include "XStore.pb.h"
@@ -59,6 +61,14 @@ class XStore_Client {
   zmq::context_t Ctx;
   zmq::socket_t Sock { Ctx, zmq::socket_type::req };
 
+  // Reused across calls instead of a fresh std::vector<zmq::message_t>
+  // constructed on every SendRecv -- .clear() keeps the already-grown
+  // backing storage. Safe as a plain member (not thread_local): a single
+  // XStore_Client instance's REQ socket is strict send-then-recv lockstep
+  // already, so it was never safe to call concurrently from multiple
+  // threads to begin with.
+  std::vector<zmq::message_t> RecvBuf;
+
   // Every RPC is: serialize request, blocking send, blocking recv, parse
   // reply. Sharing that here means the 17 request types can't drift out of
   // sync with each other the way copy-pasted send/recv blocks do. ToServer
@@ -73,13 +83,13 @@ class XStore_Client {
           throw std::runtime_error("XStore_Client: send failed/timed out");
       }
 
-      std::vector<zmq::message_t> RecvMsgs;
-      if (!zmq::recv_multipart(Sock, std::back_inserter(RecvMsgs)) || RecvMsgs.empty()) {
+      RecvBuf.clear();
+      if (!zmq::recv_multipart(Sock, std::back_inserter(RecvBuf)) || RecvBuf.empty()) {
           throw std::runtime_error("XStore_Client: recv failed/timed out");
       }
 
       RepT FromServer;
-      FromServer.ParseFromArray(RecvMsgs.back().data(), RecvMsgs.back().size());
+      FromServer.ParseFromArray(RecvBuf.back().data(), RecvBuf.back().size());
       return FromServer;
   }
 
@@ -230,9 +240,17 @@ class XStore_Client {
   }
 
   // ==== Batch (arbitrary timestamp set) ====
+  // Built on a local Arena instead of the default heap allocator: each
+  // add_batchinsert_data()/mutable_data() below allocates a submessage, and
+  // for a large batch (thousands of rows) that's thousands of individual
+  // new/delete calls under the ordinary allocator vs. bump-pointer
+  // allocations off one arena block here, freed in one shot when Arena goes
+  // out of scope. SendRecv takes a const Request&, so an arena-allocated
+  // Request works with it unchanged -- only construction here differs.
   std::string BatchInsert(std::string &dbName, std::vector<std::pair<uint64_t, XStore_Proto::RowData>> &rows) {
-      XStore_Proto::Request ToServer;
-      auto *Payload = ToServer.mutable_batchinsert();
+      google::protobuf::Arena Arena;
+      auto *ToServer = google::protobuf::Arena::Create<XStore_Proto::Request>(&Arena);
+      auto *Payload = ToServer->mutable_batchinsert();
       Payload->set_rtype(XStore_Proto::BATCHINSERT);
       Payload->set_dbname(dbName);
       Payload->mutable_batchinsert_data()->Reserve(static_cast<int>(rows.size()));
@@ -241,7 +259,7 @@ class XStore_Client {
           Entry->set_timestamp(Row.first);
           *Entry->mutable_data() = Row.second;
       }
-      return SendRecv<XStore_Proto::BatchInsert_REP>(ToServer).insertstatus();
+      return SendRecv<XStore_Proto::BatchInsert_REP>(*ToServer).insertstatus();
   }
 
   // Advanced/perf overload: build the request directly (e.g. reuse a
@@ -277,9 +295,11 @@ class XStore_Client {
   }
 
   // ==== Range (contiguous timestamp span) ====
+  // Arena-built for the same reason as the BatchInsert overload above.
   std::string RangeInsert(std::string &dbName, std::vector<std::pair<uint64_t, XStore_Proto::RowData>> &rows) {
-      XStore_Proto::Request ToServer;
-      auto *Payload = ToServer.mutable_rangeinsert();
+      google::protobuf::Arena Arena;
+      auto *ToServer = google::protobuf::Arena::Create<XStore_Proto::Request>(&Arena);
+      auto *Payload = ToServer->mutable_rangeinsert();
       Payload->set_rtype(XStore_Proto::RANGEINSERT);
       Payload->set_dbname(dbName);
       Payload->mutable_rangeinsert_data()->Reserve(static_cast<int>(rows.size()));
@@ -288,7 +308,7 @@ class XStore_Client {
           Entry->set_timestamp(Row.first);
           *Entry->mutable_data() = Row.second;
       }
-      return SendRecv<XStore_Proto::RangeInsert_REP>(ToServer).insertstatus();
+      return SendRecv<XStore_Proto::RangeInsert_REP>(*ToServer).insertstatus();
   }
 
   std::string RangeInsert(XStore_Proto::RangeInsert_REQ insertData) {

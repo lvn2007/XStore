@@ -65,10 +65,17 @@ void ZMQ_Server::WorkerRoutine(std::string serverAddr) {
     // side) and the three response types with nested repeated fields.
     google::protobuf::Arena Arena;
 
+    // Reused across iterations (this function IS the per-thread loop, so a
+    // plain local -- no thread_local needed) instead of a fresh
+    // std::vector<zmq::message_t> constructed every request: .clear() keeps
+    // the vector's already-grown backing storage instead of paying a heap
+    // allocation for a new one each time.
+    std::vector<zmq::message_t> ClientMsgs;
+
     while (true) {
         // RECEIVING
         //  Wait for next request from CLIENT
-        std::vector<zmq::message_t> ClientMsgs;
+        ClientMsgs.clear();
         zmq::recv_multipart(Socket, std::back_inserter(ClientMsgs));
 
         // Free everything the previous iteration allocated in one shot --
