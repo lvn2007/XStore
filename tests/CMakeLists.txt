@@ -67,13 +67,20 @@ add_custom_command(TARGET xstore_network_tests POST_BUILD
         COMMENT "Running xstore_network_tests via ctest"
 )
 
-# xstore_client_tests exercises XStore_Client.h itself (the warmupOnInit
-# flag) via the XStoreClient INTERFACE target from ClientSrc/Cpp, which
+# xstore_client_tests exercises XStore_Client.h itself: XStoreClientTest.cpp
+# covers the warmupOnInit flag in isolation, XStoreClientLiveTest.cpp drives
+# real Unary/Batch/Range Insert+Query+Delete/aggregate round trips against a
+# live XStore server over the actual network (opt-in via XSTORE_LIVE_ADDR /
+# XSTORE_LIVE_PORT env vars -- GTEST_SKIPs otherwise, see that file's header).
+# Both link the XStoreClient INTERFACE target from ClientSrc/Cpp, which
 # generates its own copy of the protobuf bindings -- kept in a separate
 # binary from xstore_tests/xstore_network_tests above so their
 # independently-generated XStore.pb.cc symbols never collide in one link.
 if(TARGET XStoreClient)
-    add_executable(xstore_client_tests integration/XStoreClientTest.cpp)
+    add_executable(xstore_client_tests
+            integration/XStoreClientTest.cpp
+            integration/XStoreClientLiveTest.cpp
+    )
     target_link_libraries(xstore_client_tests PRIVATE GTest::gtest_main XStoreClient)
 
     include(GoogleTest)
