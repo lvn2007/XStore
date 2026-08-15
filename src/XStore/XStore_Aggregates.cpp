@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <filesystem>
 #include <functional>
+#include <sys/mman.h>
+#include <unistd.h>
 
 // Shared by Min/Max/Sum/AvgAggregate: walks [startEpochT, endEpochT] one
 // year-file at a time, read-locking each existing segment and handing it to
@@ -37,6 +39,22 @@ void XStore::WalkYearSpan(const std::string &dbBasePath, const XStore_Proto::Con
 
                 {
                     FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
+
+                    // Bulk prefetch hint before the kernel's row-by-row walk --
+                    // same rationale as RangeQuery (XStore_RangeOps.cpp): one
+                    // madvise() covering the whole segment instead of one page
+                    // fault per first-touched page as the kernel scans forward.
+                    // Matters more here than for RangeQuery -- aggregates walk
+                    // the full span with no early exit, so the whole region is
+                    // always going to be touched.
+                    {
+                        static const long PageSize = sysconf(_SC_PAGE_SIZE);
+                        char *SpanStart = static_cast<char*>(MappedBase) + FirstOffset;
+                        uintptr_t AlignedAddr = reinterpret_cast<uintptr_t>(SpanStart) & ~(static_cast<uintptr_t>(PageSize) - 1);
+                        size_t AlignSlop = reinterpret_cast<uintptr_t>(SpanStart) - AlignedAddr;
+                        madvise(reinterpret_cast<void*>(AlignedAddr), RegionLength + AlignSlop, MADV_WILLNEED);
+                    }
+
                     kernel(static_cast<const char*>(MappedBase) + FirstOffset, RowsToProcess);
                 }
             }

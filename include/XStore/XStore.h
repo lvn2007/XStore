@@ -190,12 +190,21 @@ class XStore {
         // Shared mmap-backed scan kernels used by Min/Max/Sum/AvgAggregate ----------
         // rowsBase points directly into GetOrMapFile's cached, already-resident
         // mapping (offset to the first row this kernel should scan) -- no
-        // mmap()/madvise()/munmap() here anymore. That per-call setup/teardown
-        // used to happen fresh on every single aggregate call (WalkYearSpan
-        // mapped just the queried sub-range itself, never through the shared
-        // cache), unlike every other read path, which all reuse GetOrMapFile's
-        // MRU-cached mapping. Now this shares it too.
+        // mmap()/munmap() here anymore. That per-call setup/teardown used to
+        // happen fresh on every single aggregate call (WalkYearSpan mapped just
+        // the queried sub-range itself, never through the shared cache), unlike
+        // every other read path, which all reuse GetOrMapFile's MRU-cached
+        // mapping. Now this shares it too (WalkYearSpan also issues one
+        // madvise(WILLNEED) per segment before calling the kernel, to prefetch
+        // the queried span instead of relying on lazy per-page faulting).
         //
+        // Each row is extracted via ExtractColumnByIndexSkipParse (see the .cpp
+        // for the tag-walk mechanics) rather than a full RowData parse -- these
+        // kernels only ever want ONE column, so decoding every column in the
+        // row was pure waste. See the .cpp for how holes/wrong-type/corrupt
+        // columns are handled.
+        bool ExtractColumnByIndexSkipParse(const char* rowPtr, size_t rowLen, unsigned short columnIdx, XStore_Proto::FData& outData);
+
         // Select kernel: tracks the single winning row under comparator Cmp(candidate, currentBest).
         //  Cmp = std::less<long double>  -> MIN ;  Cmp = std::greater<long double> -> MAX
         template <typename Cmp>
