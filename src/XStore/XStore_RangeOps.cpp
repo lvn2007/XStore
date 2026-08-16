@@ -16,7 +16,7 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, X
     ToUpperCase(DbName.begin(), DbName.end());
 
     // Base directory of a DB
-    std::string DbBasePathStr = DbBasePath(DbName);
+    const std::string &DbBasePathStr = CachedDbBasePath(DbName);
 
     // IF db directory does not exist
     if (std::filesystem::is_directory(DbBasePathStr) == 0) {
@@ -66,7 +66,7 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, X
     for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& Pair : DataMap) {
         unsigned short int YearKey = Pair.first;
         const std::vector<unsigned long long int> &Indices = Pair.second;
-        std::string TargetFile = fmt::format("{}/{}.XSTORE", DbBasePathStr, YearKey);
+        const std::string &TargetFile = CachedYearFilePath(DbBasePathStr, YearKey);
 
         // Grab first inserting element for TimeStruct purposes
         //  Get length of time to truncate
@@ -114,7 +114,7 @@ void XStore::RangeQuery(const unsigned long long int &startEpochT, const unsigne
     ToUpperCase(dbName.begin(), dbName.end());
 
     // Base directory of a DB
-    std::string DbBasePathStr = DbBasePath(dbName);
+    const std::string &DbBasePathStr = CachedDbBasePath(dbName);
 
     // Fetch cfgStruct from cache, loading from disk on first use
     XStore_Proto::ConfigStruct CfgStruct;
@@ -174,7 +174,7 @@ void XStore::RangeQuery(const unsigned long long int &startEpochT, const unsigne
     unsigned long long int IterEpoch = startEpochT;
     while (IterEpoch <= endEpochT) {
         TimeStruct CurrTs(IterEpoch, CfgStruct.timeresolution());
-        std::string TargetFilePath = fmt::format("{}/{}.XSTORE", DbBasePathStr, CurrTs.Year);
+        const std::string &TargetFilePath = CachedYearFilePath(DbBasePathStr, CurrTs.Year);
         const unsigned long long int SegmentEnd = std::min(endEpochT, static_cast<unsigned long long int>(CurrTs.LastEpoch));
 
         // IF target YEAR.XSTORE does NOT exist -- checked explicitly because
@@ -262,7 +262,7 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(const unsigned long long int &
     ToUpperCase(dbName.begin(), dbName.end());
 
     // Base directory of a DB
-    std::string DbBasePathStr = DbBasePath(dbName);
+    const std::string &DbBasePathStr = CachedDbBasePath(dbName);
 
     // Fetch cfgStruct from cache, loading from disk on first use
     XStore_Proto::ConfigStruct CfgStruct;
@@ -300,7 +300,7 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(const unsigned long long int &
     unsigned long long int IterEpoch = startEpochT;
     while (IterEpoch <= endEpochT) {
         TimeStruct CurrTs(IterEpoch, CfgStruct.timeresolution());
-        std::string TargetFilePath = fmt::format("{}/{}.XSTORE", DbBasePathStr, CurrTs.Year);
+        const std::string &TargetFilePath = CachedYearFilePath(DbBasePathStr, CurrTs.Year);
         const unsigned long long int SegmentEnd = std::min(endEpochT, static_cast<unsigned long long int>(CurrTs.LastEpoch));
 
         // IF target YEAR.XSTORE does NOT exist -- a missing year contributes

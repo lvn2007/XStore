@@ -294,6 +294,82 @@ TEST_F(XStorePerfTest, UnaryInsertRandomConcurrentThroughput) {
 }
 
 // ---------------------------------------------------------------------
+// CPU-only microbenchmark for CachedDbBasePath/CachedYearFilePath (see
+// XStore.h/XStore_Management.cpp) -- isolates their allocation/lookup cost
+// from the disk pwrite()/pread() that dominates (and adds heavy run-to-run
+// variance to, per this box's ~30-50% swings observed in the end-to-end RND
+// tests above) every real Unary/Batch/Range op. No XStore instance, no
+// disk I/O, nothing but the exact caching pattern those private methods use
+// (reproduced here rather than exposing them via a friend declaration just
+// for a benchmark) versus the raw JoinPath/fmt::format they replace.
+// ---------------------------------------------------------------------
+
+namespace {
+
+const std::string& BenchCachedDbBasePath(const std::string &dbName) {
+    thread_local std::unordered_map<std::string, std::string> TlsBasePaths;
+    auto It = TlsBasePaths.find(dbName);
+    if (It != TlsBasePaths.end()) return It->second;
+    return TlsBasePaths.emplace(dbName, "/fake/DataStore/" + dbName).first->second;
+}
+
+const std::string& BenchCachedYearFilePath(const std::string &dbBasePath, unsigned short year) {
+    thread_local std::unordered_map<std::string, std::unordered_map<unsigned short, std::string>> TlsYearPaths;
+    std::unordered_map<unsigned short, std::string> &YearMap = TlsYearPaths[dbBasePath];
+    auto It = YearMap.find(year);
+    if (It != YearMap.end()) return It->second;
+    return YearMap.emplace(year, fmt::format("{}/{}.XSTORE", dbBasePath, year)).first->second;
+}
+
+}  // namespace
+
+TEST(YearPathCacheMicrobench, HashmapCacheBeatsRawRebuildUnderBoundedRandomYearAccess) {
+    const unsigned long long N = PerfOpCount(2'000'000);
+    constexpr int KYears = 30;  // matches the RND tests' 30-year span above
+    const std::string DbName = "PERFDB";
+
+    std::mt19937 Rng(7);
+    std::uniform_int_distribution<int> YearDist(0, KYears - 1);
+    std::vector<unsigned short> Years(N);
+    for (auto &Y : Years) Y = static_cast<unsigned short>(2000 + YearDist(Rng));
+
+    volatile size_t Sink = 0;  // keeps the optimizer from eliding the calls
+
+    // Warm the cache once (untimed) so the timed pass measures steady-state
+    // hit cost, not KYears' one-time misses -- this IS the behavior a real
+    // worker thread gets after its first pass over a bounded year range.
+    for (int y = 0; y < KYears; y++) {
+        Sink += BenchCachedYearFilePath(BenchCachedDbBasePath(DbName), static_cast<unsigned short>(2000 + y)).size();
+    }
+
+    auto CachedStart = std::chrono::steady_clock::now();
+    for (unsigned long long i = 0; i < N; i++) {
+        Sink += BenchCachedYearFilePath(BenchCachedDbBasePath(DbName), Years[i]).size();
+    }
+    double CachedElapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - CachedStart).count();
+
+    // Raw equivalent: what every call paid before these caches existed --
+    // JoinPath(DataStoreDir, dbName) reproduced inline (JoinPath itself is
+    // private) followed by fmt::format for the year file, same as
+    // DbBasePath()+CachedYearFilePath's miss path.
+    auto RawStart = std::chrono::steady_clock::now();
+    for (unsigned long long i = 0; i < N; i++) {
+        std::string RawBasePath = "/fake/DataStore/" + DbName;
+        Sink += fmt::format("{}/{}.XSTORE", RawBasePath, Years[i]).size();
+    }
+    double RawElapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - RawStart).count();
+
+    ASSERT_GT(Sink, 0u);
+
+    double SpeedupPct = RawElapsed > 0 ? 100.0 * (RawElapsed - CachedElapsed) / RawElapsed : 0.0;
+    ReportPerf({"YearPathCache[hashmap-cached]", N, CachedElapsed});
+    ReportPerf({"YearPathCache[raw-rebuild]", N, RawElapsed});
+    std::cout << "[PERF] YearPathCache: hashmap-cached vs raw rebuild, " << KYears << "-year bounded RND access ("
+              << N << " calls): " << std::fixed << std::setprecision(1) << SpeedupPct << "% "
+              << (SpeedupPct >= 0 ? "faster" : "slower") << std::endl;
+}
+
+// ---------------------------------------------------------------------
 // Batch Insert / Query -- many rows in a single call, the shape of a bulk
 // load/export in production.
 // ---------------------------------------------------------------------

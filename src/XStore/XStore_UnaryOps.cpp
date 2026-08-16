@@ -9,37 +9,13 @@
 #include <unistd.h>
 #include <vector>
 
-namespace {
-// TargetFile is rebuilt from DbBasePathStr + Year on every call otherwise --
-// a heap allocation paid even on a warm fd-cache hit, since fmt::format
-// always produces a fresh std::string. Real time-series workloads mostly
-// insert/query the current (dbName, year) repeatedly in a row, so a
-// single-entry thread_local memo skips the rebuild entirely on the common
-// case and only reformats on an actual db/year change. Shared by
-// UnaryInsert and UnaryQuery -- safe, since a single worker thread only
-// ever handles one request at a time (see ZMQ_Server::WorkerRoutine), so
-// there's no cross-call aliasing while the returned reference is live.
-const std::string& CachedYearFilePath(const std::string &dbName, const std::string &dbBasePathStr, unsigned short year) {
-    thread_local std::string TlsDbName;
-    thread_local unsigned short TlsYear = 0;
-    thread_local std::string TlsPath;
-
-    if (TlsDbName != dbName || TlsYear != year) {
-        TlsPath = fmt::format("{}/{}.XSTORE", dbBasePathStr, year);
-        TlsDbName = dbName;
-        TlsYear = year;
-    }
-    return TlsPath;
-}
-}  // namespace
-
 // UNARY INSERT
 void XStore::UnaryInsert(const unsigned long long int &unixTime, const XStore_Proto::RowData &data, std::string dbName, XStore_Proto::UnaryInsert_REP *returnData) {
     // Ensure dbName string is all capitalized
     ToUpperCase(dbName.begin(), dbName.end());
 
     // Base directory of a DB
-    std::string DbBasePathStr = DbBasePath(dbName);
+    const std::string &DbBasePathStr = CachedDbBasePath(dbName);
 
     // Fetch cfgStruct from cache, loading from disk on first use. This also
     // covers "DB does not exist": GetOrLoadCfg stats the .CFG file itself on
@@ -67,7 +43,7 @@ void XStore::UnaryInsert(const unsigned long long int &unixTime, const XStore_Pr
     // -- it has to synchronously allocate the block before the fault
     // returns -- which made random-offset inserts far more expensive than
     // sequential ones.
-    const std::string &TargetFile = CachedYearFilePath(dbName, DbBasePathStr, CurrTs.Year);
+    const std::string &TargetFile = CachedYearFilePath(DbBasePathStr, CurrTs.Year);
     // Held for the rest of this function's scope (through the pwrite()
     // below) so a concurrent eviction on another thread can't close this
     // fd out from under us -- see FdShard's comment in XStore.h.
@@ -137,7 +113,7 @@ void XStore::UnaryQuery(const unsigned long long int &unixTime, std::string dbNa
     ToUpperCase(dbName.begin(), dbName.end());
 
     // Base directory of a DB
-    std::string DbBasePathStr = DbBasePath(dbName);
+    const std::string &DbBasePathStr = CachedDbBasePath(dbName);
 
     // Fetch cfgStruct from cache, loading from disk on first use. This also
     // covers "DB does not exist": GetOrLoadCfg stats the .CFG file itself on
@@ -156,7 +132,7 @@ void XStore::UnaryQuery(const unsigned long long int &unixTime, std::string dbNa
     TimeStruct CurrTs(unixTime, CfgStruct.timeresolution());
 
     // Base directory of a DB & Target path of file to READ
-    const std::string &TargetFilePath = CachedYearFilePath(dbName, DbBasePathStr, CurrTs.Year);
+    const std::string &TargetFilePath = CachedYearFilePath(DbBasePathStr, CurrTs.Year);
 
     // IF target year file DOES NOT exist -- checked explicitly because
     // GetOrOpenFile below opens with O_CREAT and would otherwise silently
@@ -220,7 +196,7 @@ XStore_Proto::UnaryDelete_REP XStore::UnaryDelete(const unsigned long long int &
     ToUpperCase(dbName.begin(), dbName.end());
 
     // Base directory of a DB
-    std::string DbBasePathStr = DbBasePath(dbName);
+    const std::string &DbBasePathStr = CachedDbBasePath(dbName);
 
     // IF db directory does not exist
     if (std::filesystem::is_directory(DbBasePathStr) == 0) {
@@ -245,12 +221,11 @@ XStore_Proto::UnaryDelete_REP XStore::UnaryDelete(const unsigned long long int &
 
     // Prepare to delete (Writing NULL byte)
     FILE *BFile;
-    std::string TargetFileName = fmt::format("{}.XSTORE", CurrTs.Year);
-    std::string TargetFilePath = JoinPath(DbBasePathStr, TargetFileName);
+    const std::string &TargetFilePath = CachedYearFilePath(DbBasePathStr, CurrTs.Year);
 
     // IF target file does NOT exist
     if (std::filesystem::exists(TargetFilePath) == 0) {
-        std::string ErrMsg = fmt::format("[UNARY DELETE] [DB: {}] - {} does not exist", dbName, TargetFileName);
+        std::string ErrMsg = fmt::format("[UNARY DELETE] [DB: {}] - {}.XSTORE does not exist", dbName, CurrTs.Year);
         SetTaggedStatus(ToReturn.mutable_deletestatus(), "[WARNING] ", ErrMsg);
         spdlog::warn(ErrMsg);
         return ToReturn;
@@ -274,7 +249,7 @@ XStore_Proto::UnaryDelete_REP XStore::UnaryDelete(const unsigned long long int &
     // Close file after write
     std::fclose(BFile);
 
-    std::string SuccessMsg = fmt::format("[UNARY DELETE] [DB: {}] - Deleted {} in {}", dbName, epochTime, TargetFileName);
+    std::string SuccessMsg = fmt::format("[UNARY DELETE] [DB: {}] - Deleted {} in {}.XSTORE", dbName, epochTime, CurrTs.Year);
     SetTaggedStatus(ToReturn.mutable_deletestatus(), "[INFO] ", SuccessMsg);
     return ToReturn;
 }

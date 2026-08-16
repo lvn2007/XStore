@@ -26,7 +26,7 @@ void XStore::WalkYearSpan(const std::string &dbBasePath, const XStore_Proto::Con
 
     while (IterEpoch <= endEpochT) {
         TimeStruct CurrTs(IterEpoch, cfgStruct.timeresolution());
-        std::string TargetFilePath = fmt::format("{}/{}.XSTORE", dbBasePath, CurrTs.Year);
+        const std::string &TargetFilePath = CachedYearFilePath(dbBasePath, CurrTs.Year);
 
         unsigned long long EndOfCurrentFile = std::min(endEpochT, static_cast<unsigned long long>(CurrTs.LastEpoch));
         unsigned long long RowsToProcess = (EndOfCurrentFile - IterEpoch) + 1;
@@ -72,7 +72,7 @@ void XStore::MinAggregate(const unsigned long long int &startEpochT, const unsig
                             std::string dbName, unsigned short int columnIdx, XStore_Proto::Min_REP *returnData) {
 
     ToUpperCase(dbName.begin(), dbName.end());
-    std::string DbBasePathStr = DbBasePath(dbName);
+    const std::string &DbBasePathStr = CachedDbBasePath(dbName);
 
     XStore_Proto::ConfigStruct CfgStruct;
     if (!GetOrLoadCfg(dbName, DbBasePathStr, CfgStruct)) {
@@ -111,7 +111,7 @@ void XStore::MinAggregateTypedDouble(const unsigned long long int &startEpochT, 
                             std::string dbName, unsigned short int columnIdx, XStore_Proto::Min_REP *returnData) {
 
     ToUpperCase(dbName.begin(), dbName.end());
-    std::string DbBasePathStr = DbBasePath(dbName);
+    const std::string &DbBasePathStr = CachedDbBasePath(dbName);
 
     XStore_Proto::ConfigStruct CfgStruct;
     if (!GetOrLoadCfg(dbName, DbBasePathStr, CfgStruct)) {
@@ -145,7 +145,7 @@ void XStore::MaxAggregate(const unsigned long long int &startEpochT, const unsig
                             std::string dbName, unsigned short int columnIdx, XStore_Proto::Max_REP *returnData) {
 
     ToUpperCase(dbName.begin(), dbName.end());
-    std::string DbBasePathStr = DbBasePath(dbName);
+    const std::string &DbBasePathStr = CachedDbBasePath(dbName);
 
     XStore_Proto::ConfigStruct CfgStruct;
     if (!GetOrLoadCfg(dbName, DbBasePathStr, CfgStruct)) {
@@ -184,7 +184,7 @@ void XStore::SumAggregate(const unsigned long long int &startEpochT, const unsig
                             std::string dbName, unsigned short int columnIdx, XStore_Proto::Sum_REP *returnData) {
 
     ToUpperCase(dbName.begin(), dbName.end());
-    std::string DbBasePathStr = DbBasePath(dbName);
+    const std::string &DbBasePathStr = CachedDbBasePath(dbName);
 
     XStore_Proto::ConfigStruct CfgStruct;
     if (!GetOrLoadCfg(dbName, DbBasePathStr, CfgStruct)) {
@@ -222,7 +222,7 @@ void XStore::AvgAggregate(const unsigned long long int &startEpochT, const unsig
                             std::string dbName, unsigned short int columnIdx, XStore_Proto::Avg_REP *returnData) {
 
     ToUpperCase(dbName.begin(), dbName.end());
-    std::string DbBasePathStr = DbBasePath(dbName);
+    const std::string &DbBasePathStr = CachedDbBasePath(dbName);
 
     XStore_Proto::ConfigStruct CfgStruct;
     if (!GetOrLoadCfg(dbName, DbBasePathStr, CfgStruct)) {

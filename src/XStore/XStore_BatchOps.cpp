@@ -38,7 +38,7 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
     ToUpperCase(DbName.begin(), DbName.end());
 
     // Base directory of a DB
-    std::string DbBasePathStr = DbBasePath(DbName);
+    const std::string &DbBasePathStr = CachedDbBasePath(DbName);
 
     // IF db directory does not exist
     if (std::filesystem::is_directory(DbBasePathStr) == 0) {
@@ -96,7 +96,7 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
     for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& Pair : DataMap) {
         unsigned short int YearKey = Pair.first;
         const std::vector<unsigned long long int> &Indices = Pair.second;
-        std::string TargetFile = fmt::format("{}/{}.XSTORE", DbBasePathStr, YearKey);
+        const std::string &TargetFile = CachedYearFilePath(DbBasePathStr, YearKey);
 
         // Grab first inserting element for TimeStruct purposes
         //  Get length of time to truncate
@@ -142,7 +142,7 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
     ToUpperCase(DbName.begin(), DbName.end());
 
     // Base directory of a DB
-    std::string DbBasePathStr = DbBasePath(DbName);
+    const std::string &DbBasePathStr = CachedDbBasePath(DbName);
 
     // Fetch cfgStruct from cache, loading from disk on first use
     XStore_Proto::ConfigStruct CfgStruct;
@@ -195,7 +195,7 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
     for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& Pair : DataMap) {
         unsigned short int YearKey = Pair.first;
         const std::vector<unsigned long long int> &Indices = Pair.second;
-        std::string TargetFile = fmt::format("{}/{}.XSTORE", DbBasePathStr, YearKey);
+        const std::string &TargetFile = CachedYearFilePath(DbBasePathStr, YearKey);
 
         // IF target file does NOT exist -- checked explicitly because
         // GetOrMapFile below opens with O_CREAT and would otherwise silently
@@ -298,7 +298,7 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
     ToUpperCase(DbName.begin(), DbName.end());
 
     // Base directory of a DB
-    std::string DbBasePathStr = DbBasePath(DbName);
+    const std::string &DbBasePathStr = CachedDbBasePath(DbName);
 
     // Fetch cfgStruct from cache, loading from disk on first use
     XStore_Proto::ConfigStruct CfgStruct;
@@ -341,7 +341,7 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
     for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& Pair : DataMap) {
         unsigned short int YearKey = Pair.first;
         const std::vector<unsigned long long int> &Indices = Pair.second;
-        std::string TargetFile = fmt::format("{}/{}.XSTORE", DbBasePathStr, YearKey);
+        const std::string &TargetFile = CachedYearFilePath(DbBasePathStr, YearKey);
 
         // IF target file does NOT exist
         if (std::filesystem::exists(TargetFile) == 0) {

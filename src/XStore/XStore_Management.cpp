@@ -86,6 +86,25 @@ std::string XStore::DbBasePath(const std::string &dbName) const {
     return JoinPath(DataStoreDir, dbName);
 }
 
+const std::string& XStore::CachedDbBasePath(const std::string &dbName) const {
+    thread_local std::unordered_map<std::string, std::string> TlsBasePaths;
+    auto It = TlsBasePaths.find(dbName);
+    if (It != TlsBasePaths.end()) {
+        return It->second;
+    }
+    return TlsBasePaths.emplace(dbName, DbBasePath(dbName)).first->second;
+}
+
+const std::string& XStore::CachedYearFilePath(const std::string &dbBasePath, unsigned short year) const {
+    thread_local std::unordered_map<std::string, std::unordered_map<unsigned short, std::string>> TlsYearPaths;
+    std::unordered_map<unsigned short, std::string> &YearMap = TlsYearPaths[dbBasePath];
+    auto It = YearMap.find(year);
+    if (It != YearMap.end()) {
+        return It->second;
+    }
+    return YearMap.emplace(year, fmt::format("{}/{}.XSTORE", dbBasePath, year)).first->second;
+}
+
 XStore_Proto::SysInfo_REP XStore::InfoQuery(std::string serverAddr, int threadCount) {
     // Protobuf obj to be returned
     XStore_Proto::SysInfo_REP ToReturn;

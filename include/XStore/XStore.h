@@ -270,6 +270,33 @@ class XStore {
         // Get current base directory
         std::string GetBaseDir();
 
+        // Thread-local memo of dbName -> DbBasePath(dbName). DbBasePath is
+        // pure (DataStoreDir + dbName, no I/O) but JoinPath rebuilds it via a
+        // fresh heap allocation on every call -- and every single op
+        // function (Unary/Batch/Range Insert/Query/Delete, all four
+        // aggregates) calls it unconditionally, before even checking
+        // whether the cfg cache hit. A hashmap (not a single-entry memo)
+        // because a worker thread can flip between a small set of DBs
+        // across consecutive requests, not just stay on one.
+        const std::string& CachedDbBasePath(const std::string &dbName) const;
+
+        // Thread-local memo of (dbBasePath, year) -> "<dbBasePath>/<year>.XSTORE".
+        // Same reasoning as CachedDbBasePath, for the per-(db,year) file
+        // path every Unary/Batch/Range op (and WalkYearSpan, for the
+        // aggregates) builds via fmt::format on every call (or every
+        // year-group/segment, for Batch/Range). A hashmap rather than a
+        // single-entry memo specifically because RND-pattern workloads (see
+        // UnaryInsertRandomThroughput in XStorePerfTest.cpp) touch a handful
+        // of distinct years in no particular order -- a single-entry memo
+        // would miss on nearly every call there, while a real dataset's year
+        // range is small enough that a full hashmap stays warm regardless of
+        // access order. Keyed by dbBasePath (not dbName) since that's
+        // already 1:1 with the db and every caller already has it in hand --
+        // callers that only know dbBasePath (e.g. WalkYearSpan, shared by
+        // all four aggregates) don't need to separately thread dbName
+        // through just for this.
+        const std::string& CachedYearFilePath(const std::string &dbBasePath, unsigned short year) const;
+
         // Base directory for dbName's data/config files under DataStoreDir,
         // e.g. "<DataStoreDir>/<dbName>" -- no trailing '/' (see convention
         // note above BaseDir). Assumes dbName is already upper-cased (call
