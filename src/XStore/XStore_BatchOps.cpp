@@ -107,13 +107,17 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
         // separate open/ftruncate branch this used to have is gone. Every
         // row below becomes a pwrite() rather than a memcpy into a
         // PROT_WRITE mapping -- see WriteRowGroupToFile for why.
-        int Fd = GetOrOpenFile(TargetFile, CfgStruct.rowlength(), ThisTs.LastEpoch - ThisTs.FirstEpoch);
-        if (Fd < 0) {
+        // Held through WriteRowGroupToFile below so a concurrent eviction on
+        // another thread can't close this fd mid-write -- see FdShard's
+        // comment in XStore.h.
+        std::shared_ptr<int> FdHandle = GetOrOpenFile(TargetFile, CfgStruct.rowlength(), ThisTs.LastEpoch - ThisTs.FirstEpoch);
+        if (!FdHandle) {
             std::string ErrMsg = fmt::format("[BATCH INSERT] [DB: {}] - Unable to open {}.XSTORE", DbName, YearKey);
             SetTaggedStatus(returnData->mutable_insertstatus(), "[ERROR] ", ErrMsg);
             spdlog::error(ErrMsg);
             continue;
         }
+        int Fd = *FdHandle;
 
         // Single lock spanning this year-group's full min-to-max offset span
         // instead of one lock per row -- Indices is sorted ascending (the
@@ -226,13 +230,17 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
         // A warm cache turns "open syscall + N preads + close syscall" into
         // "one shard-mutex lookup + N preads", and the fd is left open for
         // the next call (or Insert traffic on the same file) to reuse.
-        int Fd = GetOrOpenFile(TargetFile, CfgStruct.rowlength(), ThisTs.LastEpoch - ThisTs.FirstEpoch);
-        if (Fd < 0) {
+        // Held through the pread() loop below so a concurrent eviction on
+        // another thread can't close this fd mid-read -- see FdShard's
+        // comment in XStore.h.
+        std::shared_ptr<int> FdHandle = GetOrOpenFile(TargetFile, CfgStruct.rowlength(), ThisTs.LastEpoch - ThisTs.FirstEpoch);
+        if (!FdHandle) {
             std::string ErrMsg = fmt::format("[BATCH QUERY] [DB: {}] - Unable to open {}.XSTORE", DbName, YearKey);
             SetTaggedStatus(returnData->mutable_querystatus(), "[ERROR] ", ErrMsg);
             spdlog::error(ErrMsg);
             continue;
         }
+        int Fd = *FdHandle;
 
         // Single lock spanning this year-group's min-to-max offset span
         // instead of one lock per row. Found via a scan (not just

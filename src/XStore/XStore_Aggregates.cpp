@@ -32,7 +32,11 @@ void XStore::WalkYearSpan(const std::string &dbBasePath, const XStore_Proto::Con
         unsigned long long RowsToProcess = (EndOfCurrentFile - IterEpoch) + 1;
 
         if (std::filesystem::exists(TargetFilePath)) {
-            void *MappedBase = GetOrMapFile(TargetFilePath, cfgStruct.rowlength(), CurrTs.LastEpoch - CurrTs.FirstEpoch);
+            // Held through the kernel() call below so a concurrent eviction
+            // on another thread can't munmap() this mapping mid-scan -- see
+            // MmapShard's comment in XStore.h.
+            std::shared_ptr<void> MappedHandle = GetOrMapFile(TargetFilePath, cfgStruct.rowlength(), CurrTs.LastEpoch - CurrTs.FirstEpoch);
+            void *MappedBase = MappedHandle.get();
             if (MappedBase != nullptr) {
                 unsigned long long FirstOffset = (IterEpoch - CurrTs.FirstEpoch) * cfgStruct.rowlength();
                 unsigned long long RegionLength = RowsToProcess * cfgStruct.rowlength();

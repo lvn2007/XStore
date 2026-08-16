@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <list>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
@@ -80,10 +81,23 @@ class XStore {
         // Distinct row offsets never overlap in memory so concurrent
         // memcpy's to disjoint slots need no extra locking beyond this
         // (FileRangeLockGuard still serializes same-slot writes).
+        // Entries are shared_ptr<MappedFile>, not a bare MappedFile: eviction
+        // (below, and EraseMappedFile/EraseMappedFilesUnderPrefix) used to
+        // munmap() unconditionally as soon as a slot aged out or was
+        // explicitly dropped, with zero coordination against a thread that
+        // had already read this same MappedFile* out of the cache earlier
+        // and was still mid-access via the raw pointer GetOrMapFile handed
+        // back -- a straight use-after-unmap race (corruption or SIGSEGV,
+        // reproduced under concurrent RND inserts once the working set
+        // exceeded MmapShardCap). The shared_ptr's refcount now tracks every
+        // outstanding GetOrMapFile() caller in addition to the cache's own
+        // entry: eviction/erase here only drops the CACHE's reference, and
+        // the custom deleter's munmap() doesn't actually run until the last
+        // holder -- cache or in-flight caller -- releases theirs.
         struct MappedFile { void *Base; size_t Len; };
         struct MmapShard {
-            std::list<std::pair<std::string, MappedFile>> Lru;
-            std::unordered_map<std::string, std::list<std::pair<std::string, MappedFile>>::iterator> Index;
+            std::list<std::pair<std::string, std::shared_ptr<MappedFile>>> Lru;
+            std::unordered_map<std::string, std::list<std::pair<std::string, std::shared_ptr<MappedFile>>>::iterator> Index;
             std::mutex Mutex;
         };
         static constexpr size_t MmapShardCount = 64;
@@ -121,9 +135,18 @@ class XStore {
         // already cheap (no page-fault-time block allocation to hide behind
         // an unlocked window), so the contention this closes is narrower to
         // start with.
+        // shared_ptr<int> entries for the same reason as MmapShard's
+        // shared_ptr<MappedFile> above -- eviction/erase used to close()
+        // unconditionally with no regard for a thread still mid-pwrite()/
+        // pread() on that exact fd via an earlier GetOrOpenFile() return
+        // value, risking either a clean EBADF or (worse, if the closed fd
+        // number got reused by an unrelated concurrent open() before the
+        // racing pwrite/pread ran) a silent write into the wrong file.
+        // FdCacheCap's small size (8, process-wide) made this easy to hit
+        // once more than a handful of year files were concurrently hot.
         struct FdShard {
-            std::list<std::pair<std::string, int>> Lru;
-            std::unordered_map<std::string, std::list<std::pair<std::string, int>>::iterator> Index;
+            std::list<std::pair<std::string, std::shared_ptr<int>>> Lru;
+            std::unordered_map<std::string, std::list<std::pair<std::string, std::shared_ptr<int>>>::iterator> Index;
             std::mutex Mutex;
         };
         static constexpr size_t FdShardCount = 4;
@@ -267,8 +290,13 @@ class XStore {
 
         // Fetch targetFile's cached PROT_WRITE mapping, creating (and
         // ftruncate'ing to totalRows*rowLength if new) the file and mapping it
-        // on first use. Returns nullptr on open/mmap failure.
-        void* GetOrMapFile(const std::string &targetFile, size_t rowLength, unsigned long long totalRows);
+        // on first use. Returns nullptr on open/mmap failure. The returned
+        // shared_ptr<void>'s .get() is the mapping's base address (an alias
+        // into the cache's MappedFile control block, see MmapShard above) --
+        // callers must keep it alive for as long as they touch the mapping,
+        // since that's what defers the eventual munmap() past a concurrent
+        // eviction.
+        std::shared_ptr<void> GetOrMapFile(const std::string &targetFile, size_t rowLength, unsigned long long totalRows);
 
         // munmap + drop targetFile's cached mapping, if present. Used before a
         // file is deleted out from under the cache (RemoveDBFiles).
@@ -281,8 +309,10 @@ class XStore {
 
         // Fetch targetFile's cached fd, creating (and ftruncate'ing to
         // totalRows*rowLength if new) the file on first use. Returns -1 on
-        // open/ftruncate failure.
-        int GetOrOpenFile(const std::string &targetFile, size_t rowLength, unsigned long long totalRows);
+        // open/ftruncate failure. Callers must keep the returned shared_ptr
+        // alive for as long as they use the fd (see FdShard above) -- that's
+        // what defers the eventual close() past a concurrent eviction.
+        std::shared_ptr<int> GetOrOpenFile(const std::string &targetFile, size_t rowLength, unsigned long long totalRows);
 
         // Peek-only: true if targetFile already has a cached fd (no open,
         // no creation). A cache hit here is proof the file exists -- only

@@ -68,13 +68,17 @@ void XStore::UnaryInsert(const unsigned long long int &unixTime, const XStore_Pr
     // returns -- which made random-offset inserts far more expensive than
     // sequential ones.
     const std::string &TargetFile = CachedYearFilePath(dbName, DbBasePathStr, CurrTs.Year);
-    int Fd = GetOrOpenFile(TargetFile, CfgStruct.rowlength(), CurrTs.LastEpoch - CurrTs.FirstEpoch);
-    if (Fd < 0) {
+    // Held for the rest of this function's scope (through the pwrite()
+    // below) so a concurrent eviction on another thread can't close this
+    // fd out from under us -- see FdShard's comment in XStore.h.
+    std::shared_ptr<int> FdHandle = GetOrOpenFile(TargetFile, CfgStruct.rowlength(), CurrTs.LastEpoch - CurrTs.FirstEpoch);
+    if (!FdHandle) {
         std::string ErrMsg = fmt::format("[UNARY INSERT] [DB: {}] - Unable to open {}.XSTORE", dbName, CurrTs.Year);
         SetTaggedStatus(returnData->mutable_insertstatus(), "[ERROR] ", ErrMsg);
         spdlog::error(ErrMsg);
         return;
     }
+    int Fd = *FdHandle;
 
     // A row that doesn't fit in the configured slot would otherwise silently
     // truncate (SerializeToArray's return value was previously unchecked),
@@ -175,13 +179,17 @@ void XStore::UnaryQuery(const unsigned long long int &unixTime, std::string dbNa
     // synchronous major page fault on nearly every call -- the same
     // "major page faulting is too expensive" cost UnaryInsert's pwrite()
     // switch already fixed on the write side, just never carried over here.
-    int Fd = GetOrOpenFile(TargetFilePath, CfgStruct.rowlength(), CurrTs.LastEpoch - CurrTs.FirstEpoch);
-    if (Fd < 0) {
+    // Held for the rest of this function's scope (through the pread()
+    // below) so a concurrent eviction on another thread can't close this
+    // fd out from under us -- see FdShard's comment in XStore.h.
+    std::shared_ptr<int> FdHandle = GetOrOpenFile(TargetFilePath, CfgStruct.rowlength(), CurrTs.LastEpoch - CurrTs.FirstEpoch);
+    if (!FdHandle) {
         std::string ErrMsg = fmt::format("[UNARY QUERY] [DB: {}] - Unable to open {}.XSTORE", dbName, CurrTs.Year);
         SetTaggedStatus(returnData->mutable_querystatus(), "[ERROR] ", ErrMsg);
         spdlog::error(ErrMsg);
         return;
     }
+    int Fd = *FdHandle;
 
     //  Computes diff & offset
     unsigned long long int Diff = unixTime - CurrTs.FirstEpoch;

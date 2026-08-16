@@ -1,6 +1,7 @@
 #ifndef XSTORE_FILERANGELOCK_H
 #define XSTORE_FILERANGELOCK_H
 
+#include <array>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -46,17 +47,32 @@ class FileRangeLock {
 // every worker thread (each thread owns its own XStore instance, so the
 // lock table cannot live on XStore itself).
 //
-// Reads use a shared_mutex: after a file's first access, every subsequent
-// lookup takes a shared (read) lock and can proceed fully in parallel with
-// other threads' lookups. The registry only serializes (briefly, via an
-// exclusive lock) the first time a given file path is touched.
+// Sharded across ShardCount independent {mutex, map} pairs (hash(filePath) %
+// ShardCount), same pattern as XStore's CfgShards/FdShards/MmapShards --
+// every op (Unary/Batch/Range Insert/Query/Delete) goes through Get() on
+// every call, so a single global shared_mutex here was a serialization point
+// shared by ALL files, not just contending writers of the same file:
+// threads touching completely unrelated files/DBs still bounced the same
+// mutex's cache line. Sharding lets unrelated files' lookups proceed fully
+// independently.
+//
+// Within a shard, reads use a shared_mutex: after a file's first access,
+// every subsequent lookup takes a shared (read) lock and can proceed fully
+// in parallel with other threads' lookups on that shard. Only the first
+// time a given file path is touched does its shard serialize (briefly, via
+// an exclusive lock).
 class FileLockRegistry {
     public:
         static FileRangeLock& Get(const std::string &filePath);
 
     private:
-        static std::shared_mutex RegistryMutex;
-        static std::unordered_map<std::string, std::unique_ptr<FileRangeLock>> Locks;
+        struct Shard {
+            std::shared_mutex Mutex;
+            std::unordered_map<std::string, std::unique_ptr<FileRangeLock>> Locks;
+        };
+
+        static constexpr size_t ShardCount = 16;
+        static std::array<Shard, ShardCount> Shards;
 };
 
 // RAII guard -- guarantees UnlockRange() runs even on early return/exception.

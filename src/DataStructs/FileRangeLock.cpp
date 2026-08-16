@@ -46,16 +46,18 @@ void FileRangeLock::UnlockRange(unsigned long long start, unsigned long long len
     Cv.notify_all();
 }
 
-std::shared_mutex FileLockRegistry::RegistryMutex;
-std::unordered_map<std::string, std::unique_ptr<FileRangeLock>> FileLockRegistry::Locks;
+std::array<FileLockRegistry::Shard, FileLockRegistry::ShardCount> FileLockRegistry::Shards;
 
 FileRangeLock& FileLockRegistry::Get(const std::string &filePath) {
+    Shard &S = Shards[std::hash<std::string>{}(filePath) % ShardCount];
+
     // Fast path: file already registered -- shared lock lets every worker
-    // thread look this up concurrently with no serialization.
+    // thread look this up concurrently with no serialization, and only
+    // contends with other threads hashing to the same shard.
     {
-        std::shared_lock<std::shared_mutex> Lk(RegistryMutex);
-        auto It = Locks.find(filePath);
-        if (It != Locks.end()) {
+        std::shared_lock<std::shared_mutex> Lk(S.Mutex);
+        auto It = S.Locks.find(filePath);
+        if (It != S.Locks.end()) {
             return *It->second;
         }
     }
@@ -63,10 +65,10 @@ FileRangeLock& FileLockRegistry::Get(const std::string &filePath) {
     // Slow path: first time this file is touched -- take the exclusive lock
     // and double-check, since another thread may have inserted it in the
     // gap between the two locks.
-    std::unique_lock<std::shared_mutex> Lk(RegistryMutex);
-    auto It = Locks.find(filePath);
-    if (It == Locks.end()) {
-        It = Locks.emplace(filePath, std::make_unique<FileRangeLock>()).first;
+    std::unique_lock<std::shared_mutex> Lk(S.Mutex);
+    auto It = S.Locks.find(filePath);
+    if (It == S.Locks.end()) {
+        It = S.Locks.emplace(filePath, std::make_unique<FileRangeLock>()).first;
     }
     return *It->second;
 }

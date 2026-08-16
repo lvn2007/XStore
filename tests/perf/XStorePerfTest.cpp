@@ -14,6 +14,7 @@
 // XSTORE_PERF_N environment variable for quicker local iteration or a
 // heavier run.
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <fcntl.h>
@@ -21,8 +22,11 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <random>
 #include <string>
+#include <thread>
 #include <unistd.h>
+#include <unordered_set>
 
 #include "include/Logger/spdlog/fmt/fmt.h"
 #include "include/Logger/Logger.h"
@@ -64,6 +68,24 @@ void ReportPerf(const PerfStats &Stats) {
 // reflects realistic per-row serialize/copy cost, not a best case.
 XStore_Proto::RowData PerfRow(unsigned long long i) {
     return MakeRow({FDouble((double)i), FInt64((int64_t)i), FString("payload")});
+}
+
+// No root on this box (drop_caches is root-only), but /tmp -- where
+// ScratchDir puts its files -- is real ext4, not tmpfs, so per-file
+// fsync+POSIX_FADV_DONTNEED evicts exactly this DB's year files from page
+// cache without touching the rest of the machine's cache. fsync first:
+// DONTNEED on a still-dirty page is not guaranteed to evict it.
+void DropPageCacheForDb(const std::string &dbName) {
+    fs::path DbDir = fs::current_path() / "DataStore" / dbName;
+    if (!fs::exists(DbDir)) return;
+    for (const auto &Entry : fs::directory_iterator(DbDir)) {
+        if (Entry.path().extension() != ".XSTORE") continue;
+        int Fd = open(Entry.path().c_str(), O_RDONLY);
+        if (Fd < 0) continue;
+        fsync(Fd);
+        posix_fadvise(Fd, 0, 0, POSIX_FADV_DONTNEED);
+        close(Fd);
+    }
 }
 
 }  // namespace
@@ -130,6 +152,145 @@ TEST_F(XStorePerfTest, UnaryQueryThroughput) {
 
     ASSERT_EQ(QueryRep.data().fielddata_size(), 3) << "last query returned unexpected column count";
     ReportPerf({"UnaryQuery", N, Elapsed});
+}
+
+// ---------------------------------------------------------------------
+// Unary Insert RND -- same one-row-per-call shape as UnaryInsertThroughput
+// above, but timestamps are drawn uniformly at random (no replacement) from
+// a multi-year span instead of a sequential run -- mirrors XBench's
+// UNARY_RAND workload (Parquet_OPS.py: random.sample(range(0, numRows), N)
+// over a ~10 year span), which is what the reported real-world regression
+// was measured against. Every insert here (after the first ~SpanYears of
+// them) has a real chance of landing in a different year file than the
+// previous call, unlike the sequential test where every call after the
+// first shares the same file -- so this is the shape that actually
+// exercises the per-call TargetFile path build/cache and FileLockRegistry
+// lookup, not just the pwrite() cost.
+// ---------------------------------------------------------------------
+
+namespace {
+
+// Unique random timestamps across [BaseTs, BaseTs + SpanSeconds), fixed seed
+// for reproducibility across variant runs (comparing optimization variants
+// requires the exact same insert order/spread each time). Collision retry
+// via unordered_set is fine here: N is always a small fraction of
+// SpanSeconds, so collision odds are negligible.
+std::vector<unsigned long long> UniqueRandomTimestamps(unsigned long long baseTs, unsigned long long spanSeconds, unsigned long long n) {
+    std::mt19937_64 Rng(42);
+    std::uniform_int_distribution<unsigned long long> Dist(0, spanSeconds - 1);
+    std::unordered_set<unsigned long long> Seen;
+    std::vector<unsigned long long> Out;
+    Out.reserve(n);
+    while (Out.size() < n) {
+        unsigned long long Candidate = baseTs + Dist(Rng);
+        if (Seen.insert(Candidate).second) {
+            Out.push_back(Candidate);
+        }
+    }
+    return Out;
+}
+
+}  // namespace
+
+TEST_F(XStorePerfTest, UnaryInsertRandomThroughput) {
+    XStore Store;
+    Store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    const unsigned long long N = PerfOpCount(200'000);
+
+    // 2020-01-01T00:00:00Z, spanning 5 years -- several distinct year files
+    // get touched, same as the real UNARY_RAND workload's multi-year spread.
+    constexpr unsigned long long RandBaseTs = 1577836800ULL;
+    constexpr unsigned long long SpanSeconds = 5ULL * 365 * 86'400;
+    std::vector<unsigned long long> Timestamps = UniqueRandomTimestamps(RandBaseTs, SpanSeconds, N);
+
+    // Best-of-3, OS page cache for PERFDB's files dropped before every timed
+    // pass -- isolates steady-state per-row cost (path build, lock registry
+    // lookup, pwrite) from one-shot OS readahead/writeback state, same
+    // methodology as RunMinAggregateCompare's cold runs below.
+    constexpr int kRndRepeats = 3;
+    double Best = std::numeric_limits<double>::max();
+    XStore_Proto::UnaryInsert_REP Rep;
+    for (int Iter = 0; Iter < kRndRepeats; Iter++) {
+        DropPageCacheForDb("PERFDB");
+        auto Start = std::chrono::steady_clock::now();
+        for (unsigned long long i = 0; i < N; i++) {
+            Store.UnaryInsert(Timestamps[i], PerfRow(i), "PERFDB", &Rep);
+        }
+        double Elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - Start).count();
+        Best = std::min(Best, Elapsed);
+    }
+
+    ASSERT_NE(Rep.insertstatus().find("[INFO]"), std::string::npos) << "last insert failed: " << Rep.insertstatus();
+
+    // Correctness: spot-check every Nth row round-trips through UnaryQuery
+    // exactly as inserted -- catches a broken path-cache/lock-registry
+    // variant silently writing to (or reading back from) the wrong file.
+    const unsigned long long CheckStride = std::max<unsigned long long>(1, N / 500);
+    for (unsigned long long i = 0; i < N; i += CheckStride) {
+        XStore_Proto::UnaryQuery_REP QueryRep;
+        Store.UnaryQuery(Timestamps[i], "PERFDB", &QueryRep);
+        ASSERT_EQ(QueryRep.data().fielddata_size(), 3) << "row " << i << " (ts=" << Timestamps[i] << ") missing/corrupt after RND insert";
+        ASSERT_DOUBLE_EQ(QueryRep.data().fielddata(0).doubledata(), (double)i) << "row " << i << " (ts=" << Timestamps[i] << ") wrong data -- wrote to/read from wrong file";
+    }
+
+    ReportPerf({"UnaryInsertRND", N, Best});
+}
+
+// Concurrency variant: T worker threads, each its own XStore instance (own
+// thread_local caches, matching ZMQ_Server::WorkerRoutine's one-instance-
+// per-thread model), all inserting into the SAME db concurrently with
+// non-overlapping random timestamps. Isolates FileLockRegistry/fd-shard
+// contention specifically -- the single-threaded test above can't surface
+// that, since a lone thread never contends with itself.
+TEST_F(XStorePerfTest, UnaryInsertRandomConcurrentThroughput) {
+    XStore Setup;
+    Setup.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+
+    const unsigned long long N = PerfOpCount(200'000);
+    constexpr unsigned int T = 8;
+    constexpr unsigned long long RandBaseTs = 1577836800ULL;
+    // 30 distinct year files, well past FdCacheCap (8, process-wide) --
+    // guarantees the fd cache actually evicts under this test's concurrency
+    // instead of every touched file coincidentally fitting in the cache, so
+    // this reliably exercises (and regresses against) the eviction-vs.
+    // in-flight-use race GetOrOpenFile/GetOrMapFile guard against.
+    constexpr unsigned long long SpanSeconds = 30ULL * 365 * 86'400;
+    std::vector<unsigned long long> Timestamps = UniqueRandomTimestamps(RandBaseTs, SpanSeconds, N);
+
+    DropPageCacheForDb("PERFDB");
+
+    std::vector<std::thread> Workers;
+    std::vector<XStore_Proto::UnaryInsert_REP> Reps(T);
+    auto Start = std::chrono::steady_clock::now();
+    for (unsigned int t = 0; t < T; t++) {
+        Workers.emplace_back([&, t]() {
+            XStore ThreadStore;
+            for (unsigned long long i = t; i < N; i += T) {
+                ThreadStore.UnaryInsert(Timestamps[i], PerfRow(i), "PERFDB", &Reps[t]);
+            }
+        });
+    }
+    for (auto &W : Workers) W.join();
+    double Elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - Start).count();
+
+    for (unsigned int t = 0; t < T; t++) {
+        ASSERT_NE(Reps[t].insertstatus().find("[INFO]"), std::string::npos) << "thread " << t << " last insert failed: " << Reps[t].insertstatus();
+    }
+
+    // Correctness: every row round-trips, and (critically for a concurrency
+    // bug) no thread's writes clobbered another's -- each timestamp is
+    // unique across threads by construction (interleaved partition of
+    // Timestamps), so any cross-talk would show up as a wrong value here.
+    XStore Verify;
+    const unsigned long long CheckStride = std::max<unsigned long long>(1, N / 500);
+    for (unsigned long long i = 0; i < N; i += CheckStride) {
+        XStore_Proto::UnaryQuery_REP QueryRep;
+        Verify.UnaryQuery(Timestamps[i], "PERFDB", &QueryRep);
+        ASSERT_EQ(QueryRep.data().fielddata_size(), 3) << "row " << i << " (ts=" << Timestamps[i] << ") missing/corrupt after concurrent RND insert";
+        ASSERT_DOUBLE_EQ(QueryRep.data().fielddata(0).doubledata(), (double)i) << "row " << i << " (ts=" << Timestamps[i] << ") wrong data -- cross-thread clobber";
+    }
+
+    ReportPerf({"UnaryInsertRND[concurrent T=" + std::to_string(T) + "]", N, Elapsed});
 }
 
 // ---------------------------------------------------------------------
@@ -342,24 +503,6 @@ namespace {
 // kRepeats times, alternating order each repeat, and reports the min of each
 // (standard microbench practice: min filters OS jitter better than mean).
 constexpr int kRepeats = 5;
-
-// No root on this box (drop_caches is root-only), but /tmp -- where
-// ScratchDir puts its files -- is real ext4, not tmpfs, so per-file
-// fsync+POSIX_FADV_DONTNEED evicts exactly this DB's year files from page
-// cache without touching the rest of the machine's cache. fsync first:
-// DONTNEED on a still-dirty page is not guaranteed to evict it.
-void DropPageCacheForDb(const std::string &dbName) {
-    fs::path DbDir = fs::current_path() / "DataStore" / dbName;
-    if (!fs::exists(DbDir)) return;
-    for (const auto &Entry : fs::directory_iterator(DbDir)) {
-        if (Entry.path().extension() != ".XSTORE") continue;
-        int Fd = open(Entry.path().c_str(), O_RDONLY);
-        if (Fd < 0) continue;
-        fsync(Fd);
-        posix_fadvise(Fd, 0, 0, POSIX_FADV_DONTNEED);
-        close(Fd);
-    }
-}
 
 double TimedRunGeneric(XStore &Store, unsigned long long BaseTs, unsigned long long N,
                         XStore_Proto::Min_REP &Rep) {

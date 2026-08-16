@@ -79,13 +79,17 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, X
         // RegionLength below), so this still writes row by row rather than
         // as one flat span -- but each row is now a pwrite() rather than a
         // memcpy into a PROT_WRITE mapping -- see WriteRowGroupToFile for why.
-        int Fd = GetOrOpenFile(TargetFile, CfgStruct.rowlength(), ThisTs.LastEpoch - ThisTs.FirstEpoch);
-        if (Fd < 0) {
+        // Held through WriteRowGroupToFile below so a concurrent eviction on
+        // another thread can't close this fd mid-write -- see FdShard's
+        // comment in XStore.h.
+        std::shared_ptr<int> FdHandle = GetOrOpenFile(TargetFile, CfgStruct.rowlength(), ThisTs.LastEpoch - ThisTs.FirstEpoch);
+        if (!FdHandle) {
             std::string ErrMsg = fmt::format("[RANGE INSERT] [DB: {}] - Unable to open {}.XSTORE", DbName, YearKey);
             SetTaggedStatus(returnData->mutable_insertstatus(), "[ERROR] ", ErrMsg);
             spdlog::error(ErrMsg);
             continue;
         }
+        int Fd = *FdHandle;
 
         // RegionLength (computed inside the shared helper below) must cover
         // the actual byte span of the writes, not just count*rowLength --
@@ -193,14 +197,18 @@ void XStore::RangeQuery(const unsigned long long int &startEpochT, const unsigne
         // per row; timestamps here are chronological/contiguous, so this
         // just parses straight out of the mapped page per row with zero
         // syscalls in the loop at all.
-        void *MappedBase = GetOrMapFile(TargetFilePath, CfgStruct.rowlength(), CurrTs.LastEpoch - CurrTs.FirstEpoch);
-        if (MappedBase == nullptr) {
+        // Held through the read loop below so a concurrent eviction on
+        // another thread can't munmap() this mapping mid-read -- see
+        // MmapShard's comment in XStore.h.
+        std::shared_ptr<void> MappedHandle = GetOrMapFile(TargetFilePath, CfgStruct.rowlength(), CurrTs.LastEpoch - CurrTs.FirstEpoch);
+        if (MappedHandle == nullptr) {
             std::string ErrMsg = fmt::format("[RANGE QUERY] [DB: {}] - Unable to open/map {}.XSTORE", dbName, CurrTs.Year);
             SetTaggedStatus(returnData->mutable_querystatus(), "[ERROR] ", ErrMsg);
             spdlog::error(ErrMsg);
             IterEpoch = SegmentEnd + 1;
             continue;
         }
+        void *MappedBase = MappedHandle.get();
 
         const unsigned long long int FirstOffset = (IterEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength();
         const unsigned long long int RegionLength = (SegmentEnd - IterEpoch + 1) * CfgStruct.rowlength();

@@ -2575,6 +2575,64 @@ TEST_F(XStoreTest, ConcurrentWritesToDifferentYearFilesDoNotInterfere) {
     EXPECT_TRUE(fs::exists(Scratch->TestRoot / "DataStore" / "TESTDB" / "2031.XSTORE"));
 }
 
+// Regression test for a use-after-close race in GetOrOpenFile's fd-cache
+// eviction: FdCacheCap is small (8, process-wide -- see XStore.h), and
+// eviction used to close() the LRU-oldest fd unconditionally, with no
+// coordination against a thread still mid-pwrite() on that exact fd via an
+// earlier GetOrOpenFile() return value. Once the closed fd number got
+// reused by an unrelated concurrent open(), the racing pwrite() either
+// failed outright (observed as this test's rows going missing) or -- worse,
+// not exercised deterministically here -- silently wrote into whatever file
+// now owned that fd number. Fixed by having GetOrOpenFile/GetOrMapFile
+// return a shared_ptr whose refcount includes every in-flight caller, not
+// just the cache's own entry, so eviction only drops the cache's reference
+// and the actual close()/munmap() is deferred until the last holder (cache
+// or caller) releases it.
+//
+// KYears (20) deliberately exceeds FdCacheCap (8) so this test's own writes
+// force real evictions among files it's still actively using, regardless of
+// what any earlier test left resident in the (process-wide, static) fd
+// cache -- reproduced this reliably pre-fix while benchmarking XBench's
+// UNARY_RAND workload under concurrency.
+TEST_F(XStoreTest, ConcurrentUnaryInsertAcrossManyYearFilesDoesNotLoseDataToFdCacheEviction) {
+    XStore SeedStore;
+    SeedStore.CreateDB("TESTDB", XStore_Proto::SECOND, 64);
+
+    constexpr int KYears = 48;
+    constexpr int KRowsPerYear = 50;
+    constexpr int KThreads = 8;
+
+    // +400 days per step (not +365) so each index lands in a distinct
+    // calendar year regardless of leap years -- doesn't need to be exact,
+    // just needs KYears genuinely distinct year files.
+    auto YearBaseTs = [](int yearIdx) -> unsigned long long {
+        return TS_2024_MID + static_cast<unsigned long long>(yearIdx) * 400ULL * 86'400ULL;
+    };
+
+    std::vector<std::thread> Writers;
+    for (int t = 0; t < KThreads; t++) {
+        Writers.emplace_back([&, t]() {
+            XStore Store;
+            for (int y = t; y < KYears; y += KThreads) {
+                for (int r = 0; r < KRowsPerYear; r++) {
+                    XStore_Proto::UnaryInsert_REP Rep;
+                    Store.UnaryInsert(YearBaseTs(y) + r, MakeRow({FInt64((int64_t)(y * 1000 + r))}), "TESTDB", &Rep);
+                }
+            }
+        });
+    }
+    for (auto &W : Writers) W.join();
+
+    for (int y = 0; y < KYears; y++) {
+        for (int r = 0; r < KRowsPerYear; r++) {
+            XStore_Proto::UnaryQuery_REP Rep;
+            SeedStore.UnaryQuery(YearBaseTs(y) + r, "TESTDB", &Rep);
+            ASSERT_EQ(Rep.data().fielddata_size(), 1) << "year=" << y << " row=" << r << " -- missing (fd-cache eviction race dropped this write)";
+            EXPECT_EQ(Rep.data().fielddata(0).int64data(), (int64_t)(y * 1000 + r)) << "year=" << y << " row=" << r << " -- wrong value (fd-cache eviction race clobbered this write)";
+        }
+    }
+}
+
 TEST_F(XStoreTest, ConcurrentUnaryInsertAndUnaryQuerySameOffsetDoNotRace) {
     XStore SeedStore;
     SeedStore.CreateDB("TESTDB", XStore_Proto::SECOND, 128);

@@ -10,7 +10,7 @@
 std::array<XStore::MmapShard, XStore::MmapShardCount> XStore::MmapShards;
 std::array<XStore::FdShard, XStore::FdShardCount> XStore::FdShards;
 
-void* XStore::GetOrMapFile(const std::string &targetFile, size_t rowLength, unsigned long long totalRows) {
+std::shared_ptr<void> XStore::GetOrMapFile(const std::string &targetFile, size_t rowLength, unsigned long long totalRows) {
     MmapShard &Shard = MmapShards[std::hash<std::string>{}(targetFile) % MmapShardCount];
 
     // Fast path: already mapped -- only the lookup+MRU-promote touches this
@@ -21,7 +21,8 @@ void* XStore::GetOrMapFile(const std::string &targetFile, size_t rowLength, unsi
         auto it = Shard.Index.find(targetFile);
         if (it != Shard.Index.end()) {
             Shard.Lru.splice(Shard.Lru.begin(), Shard.Lru, it->second);
-            return it->second->second.Base;
+            std::shared_ptr<MappedFile> Owner = it->second->second;
+            return std::shared_ptr<void>(Owner, Owner->Base);
         }
     }
 
@@ -59,30 +60,42 @@ void* XStore::GetOrMapFile(const std::string &targetFile, size_t rowLength, unsi
         return nullptr;
     }
 
+    // Deleter fires munmap() only once every shared_ptr copy -- the cache's
+    // own entry AND any in-flight caller still holding one from an earlier
+    // GetOrMapFile() -- has been released (see MmapShard's comment).
+    std::shared_ptr<MappedFile> Owner(new MappedFile{Base, FileLen}, [](MappedFile *Mf) {
+        munmap(Mf->Base, Mf->Len);
+        delete Mf;
+    });
+
     // Re-acquire to install into the cache, double-checked: another thread
     // may have raced us to map this same file while we were unlocked.
     std::lock_guard<std::mutex> Lock(Shard.Mutex);
     auto it = Shard.Index.find(targetFile);
     if (it != Shard.Index.end()) {
-        // Lost the race -- drop our redundant mapping, use theirs.
-        munmap(Base, FileLen);
+        // Lost the race -- our redundant Owner isn't stored anywhere else,
+        // so it unmaps itself when it goes out of scope below; use theirs.
+        std::shared_ptr<MappedFile> Winner = it->second->second;
         Shard.Lru.splice(Shard.Lru.begin(), Shard.Lru, it->second);
-        return it->second->second.Base;
+        return std::shared_ptr<void>(Winner, Winner->Base);
     }
 
-    Shard.Lru.emplace_front(targetFile, MappedFile{Base, FileLen});
+    Shard.Lru.emplace_front(targetFile, Owner);
     Shard.Index[targetFile] = Shard.Lru.begin();
 
     if (Shard.Lru.size() > MmapShardCap) {
-        munmap(Shard.Lru.back().second.Base, Shard.Lru.back().second.Len);
+        // Only the cache's reference is dropped here -- if some other
+        // thread is still holding a copy of this entry's shared_ptr from an
+        // earlier GetOrMapFile() call, the deleter (and its munmap())
+        // doesn't run until that copy is released too.
         Shard.Index.erase(Shard.Lru.back().first);
         Shard.Lru.pop_back();
     }
 
-    return Base;
+    return std::shared_ptr<void>(Owner, Owner->Base);
 }
 
-int XStore::GetOrOpenFile(const std::string &targetFile, size_t rowLength, unsigned long long totalRows) {
+std::shared_ptr<int> XStore::GetOrOpenFile(const std::string &targetFile, size_t rowLength, unsigned long long totalRows) {
     FdShard &Shard = FdShards[std::hash<std::string>{}(targetFile) % FdShardCount];
 
     // Fast path: already open -- only the lookup+MRU-promote touches this
@@ -101,7 +114,7 @@ int XStore::GetOrOpenFile(const std::string &targetFile, size_t rowLength, unsig
     // cost shouldn't serialize every other thread's inserts.
     int Fd = open(targetFile.c_str(), O_RDWR | O_CREAT, 0644);
     if (Fd < 0) {
-        return -1;
+        return nullptr;
     }
 
     // +1 row: see GetOrMapFile for why.
@@ -111,31 +124,42 @@ int XStore::GetOrOpenFile(const std::string &targetFile, size_t rowLength, unsig
     if (fstat(Fd, &St) != 0 || static_cast<size_t>(St.st_size) < FileLen) {
         if (ftruncate(Fd, FileLen) != 0) {
             close(Fd);
-            return -1;
+            return nullptr;
         }
     }
+
+    // Deleter fires close() only once every shared_ptr copy -- the cache's
+    // own entry AND any in-flight caller still holding one from an earlier
+    // GetOrOpenFile() -- has been released (see FdShard's comment).
+    std::shared_ptr<int> Owner(new int(Fd), [](int *FdPtr) {
+        close(*FdPtr);
+        delete FdPtr;
+    });
 
     // Re-acquire to install into the cache, double-checked: another thread
     // may have raced us to open this same file while we were unlocked.
     std::lock_guard<std::mutex> Lock(Shard.Mutex);
     auto it = Shard.Index.find(targetFile);
     if (it != Shard.Index.end()) {
-        // Lost the race -- drop our redundant fd, use theirs.
-        close(Fd);
+        // Lost the race -- our redundant Owner isn't stored anywhere else,
+        // so it closes itself when it goes out of scope below; use theirs.
         Shard.Lru.splice(Shard.Lru.begin(), Shard.Lru, it->second);
         return it->second->second;
     }
 
-    Shard.Lru.emplace_front(targetFile, Fd);
+    Shard.Lru.emplace_front(targetFile, Owner);
     Shard.Index[targetFile] = Shard.Lru.begin();
 
     if (Shard.Lru.size() > FdShardCap) {
-        close(Shard.Lru.back().second);
+        // Only the cache's reference is dropped here -- if some other
+        // thread is still holding a copy of this entry's shared_ptr from an
+        // earlier GetOrOpenFile() call, the deleter (and its close()) doesn't
+        // run until that copy is released too.
         Shard.Index.erase(Shard.Lru.back().first);
         Shard.Lru.pop_back();
     }
 
-    return Fd;
+    return Owner;
 }
 
 bool XStore::IsFdCached(const std::string &targetFile) {
@@ -153,7 +177,9 @@ void XStore::EraseOpenFile(const std::string &targetFile) {
         return;
     }
 
-    close(It->second->second);
+    // Only drops the cache's reference -- see FdShard's comment. If a
+    // caller is still mid-pwrite()/pread() on a copy of this fd's
+    // shared_ptr, close() is deferred until that copy is released too.
     Shard.Lru.erase(It->second);
     Shard.Index.erase(It);
 }
@@ -166,7 +192,6 @@ void XStore::EraseOpenFilesUnderPrefix(const std::string &dbDirPrefix) {
 
         for (auto It = Shard.Lru.begin(); It != Shard.Lru.end();) {
             if (It->first.compare(0, dbDirPrefix.size(), dbDirPrefix) == 0) {
-                close(It->second);
                 Shard.Index.erase(It->first);
                 It = Shard.Lru.erase(It);
             } else {
@@ -185,7 +210,9 @@ void XStore::EraseMappedFile(const std::string &targetFile) {
         return;
     }
 
-    munmap(It->second->second.Base, It->second->second.Len);
+    // Only drops the cache's reference -- see MmapShard's comment. If a
+    // caller is still mid-read/write on a copy of this mapping's
+    // shared_ptr, munmap() is deferred until that copy is released too.
     Shard.Lru.erase(It->second);
     Shard.Index.erase(It);
 }
@@ -201,7 +228,6 @@ void XStore::EraseMappedFilesUnderPrefix(const std::string &dbDirPrefix) {
 
         for (auto It = Shard.Lru.begin(); It != Shard.Lru.end();) {
             if (It->first.compare(0, dbDirPrefix.size(), dbDirPrefix) == 0) {
-                munmap(It->second.Base, It->second.Len);
                 Shard.Index.erase(It->first);
                 It = Shard.Lru.erase(It);
             } else {
