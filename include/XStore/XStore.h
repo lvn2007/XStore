@@ -15,6 +15,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -166,22 +167,22 @@ class XStore {
         XStore_Proto::SysInfo_REP InfoQuery(std::string serverAddr, int threadCount);
 
         // CREATING new DB instance with row length
-        XStore_Proto::CreateDB_REP CreateDB(std::string dbName, XStore_Proto::TimeUnit timeResolution, short int rowLength);
+        XStore_Proto::CreateDB_REP CreateDB(std::string_view dbName, XStore_Proto::TimeUnit timeResolution, short int rowLength);
 
         // REMOVE DB -- Removing an entire DB and its data files
-        XStore_Proto::RemoveDB_REP RemoveDB(std::string dbName);
+        XStore_Proto::RemoveDB_REP RemoveDB(std::string_view dbName);
 
         // REMOVE DB FILES -- Removing file(s) based on name in a certain DB
-        XStore_Proto::RemoveDBFiles_REP RemoveDBFiles(XStore_Proto::RemoveDBFiles_REQ *protoFromClient, std::string dbName);
+        XStore_Proto::RemoveDBFiles_REP RemoveDBFiles(XStore_Proto::RemoveDBFiles_REQ *protoFromClient, std::string_view dbName);
 
         // UNARY INSERT
-        void UnaryInsert(const unsigned long long int &epochTime, const XStore_Proto::RowData &data, std::string dbName, XStore_Proto::UnaryInsert_REP *returnData);
+        void UnaryInsert(const unsigned long long int &epochTime, const XStore_Proto::RowData &data, std::string_view dbName, XStore_Proto::UnaryInsert_REP *returnData);
 
         // UNARY QUERY
-        void UnaryQuery(const unsigned long long int &epochTime, std::string dbName, XStore_Proto::UnaryQuery_REP *returnData);
+        void UnaryQuery(const unsigned long long int &epochTime, std::string_view dbName, XStore_Proto::UnaryQuery_REP *returnData);
 
         // UNARY DELETE
-        XStore_Proto::UnaryDelete_REP UnaryDelete(const unsigned long long int &epochTime, std::string dbName);
+        XStore_Proto::UnaryDelete_REP UnaryDelete(const unsigned long long int &epochTime, std::string_view dbName);
 
         // BATCH INSERT
         void BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_Proto::BatchInsert_REP *returnData);
@@ -196,10 +197,10 @@ class XStore {
         void RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, XStore_Proto::RangeInsert_REP *returnData);
 
         // RANGE QUERY
-        void RangeQuery(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, XStore_Proto::RangeQuery_REP *returnData);
+        void RangeQuery(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string_view dbName, XStore_Proto::RangeQuery_REP *returnData);
 
         // RANGE DELETE
-        XStore_Proto::RangeDelete_REP RangeDelete(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName);
+        XStore_Proto::RangeDelete_REP RangeDelete(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string_view dbName);
 
         // Walks [startEpochT, endEpochT] one year-file at a time for
         // Min/Max/Sum/AvgAggregate, read-locking each existing segment and
@@ -209,6 +210,23 @@ class XStore {
         template <typename Kernel>
         void WalkYearSpan(const std::string &dbBasePath, const XStore_Proto::ConfigStruct &cfgStruct,
                           unsigned long long startEpochT, unsigned long long endEpochT, Kernel &&kernel);
+
+        // Same year-by-year walk as WalkYearSpan, but distributes segments
+        // across a bounded thread pool when the span covers enough distinct
+        // years to be worth it -- narrow spans (the common case) fall back
+        // to calling WalkYearSpan directly, no thread spawned at all.
+        // segmentKernel(PartialState&, rowsBase, rowsToProcess) accumulates
+        // into a PER-THREAD-LOCAL PartialState, never a value shared across
+        // threads -- protobuf/ValueStruct objects aren't safe for
+        // concurrent mutation from multiple threads even on logically-
+        // disjoint fields (see protobuf's own thread-safety docs). mergeFn
+        // (finalState&, partialState) combines each thread's partial result
+        // into the running total sequentially after all threads join --
+        // cheap, O(#threads) not O(#rows). Returns the fully-merged state.
+        template <typename PartialState, typename SegmentKernel, typename MergeFn>
+        PartialState WalkYearSpanParallel(const std::string &dbBasePath, const XStore_Proto::ConfigStruct &cfgStruct,
+                                            unsigned long long startEpochT, unsigned long long endEpochT,
+                                            PartialState initialState, SegmentKernel &&segmentKernel, MergeFn &&mergeFn);
 
         // Shared mmap-backed scan kernels used by Min/Max/Sum/AvgAggregate ----------
         // rowsBase points directly into GetOrMapFile's cached, already-resident
@@ -241,27 +259,16 @@ class XStore {
                                          double& sumOut, unsigned long long& validCountOut);
 
         // MIN - AGGREGATE
-        void MinAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Min_REP *returnData);
-
-        // Profiling-only prototype (see tests/perf/XStorePerfTest.cpp): same scan
-        // as ProcessFileRangeSelect/MinAggregate but compares natively-typed
-        // doubles directly, skipping GetFDataValue's switch + long double
-        // conversion. Hardcoded to doubleData -- exists to measure the delta a
-        // type-specialized kernel would buy, not as a drop-in replacement.
-        template <typename Cmp>
-        void ProcessFileRangeSelectTypedDouble(const char* rowsBase, unsigned long long totalRows,
-                                     size_t rowLen, unsigned short columnIdx,
-                                     bool& bestInitialized, double& bestValue, XStore_Proto::FData& bestData);
-        void MinAggregateTypedDouble(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Min_REP *returnData);
+        void MinAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string_view dbName, unsigned short int columnIdx, XStore_Proto::Min_REP *returnData);
 
         // MAX - AGGREGATE
-        void MaxAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Max_REP *returnData);
+        void MaxAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string_view dbName, unsigned short int columnIdx, XStore_Proto::Max_REP *returnData);
 
         // SUM - AGGREGATE
-        void SumAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Sum_REP *returnData);
+        void SumAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string_view dbName, unsigned short int columnIdx, XStore_Proto::Sum_REP *returnData);
 
         // AVG - AGGREGATE
-        void AvgAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, unsigned short int columnIdx, XStore_Proto::Avg_REP *returnData);
+        void AvgAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string_view dbName, unsigned short int columnIdx, XStore_Proto::Avg_REP *returnData);
 
         // Initialize DB
         void InitDB();

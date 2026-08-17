@@ -254,6 +254,20 @@ void XStore::EraseMappedFilesUnderPrefix(const std::string &dbDirPrefix) {
 // harness that proved this before promotion; removed now that there's only
 // one kernel to measure).
 
+// Tried a two-phase version here: Phase 1 extracts each valid row's value
+// into a flat, reused double buffer (narrowed from long double, since the
+// column's byte offset varies row-to-row under protobuf's variable-length
+// encoding, so extraction itself can't be vectorized -- only a reduction
+// over an already-flat buffer could be), Phase 2 scans that buffer for
+// min/max. Benchmarked SLOWER (~15-20% on MinAggregate, a wash on Max):
+// materializing the whole array costs real write bandwidth in Phase 1 and
+// read bandwidth in Phase 2 -- for a 1M-row scan that's ~8MB of double[]
+// traffic that doesn't fit L2/L3, round-tripping to DRAM. The original
+// single-pass design never pays that: it keeps one scalar "current best" in
+// a register while streaming through rows once. Since the reduction step
+// was never the bottleneck (extraction/parse dominates per-row cost), there
+// was nothing worth vectorizing there to begin with -- reverted after
+// measuring.
 template <typename Cmp>
 void XStore::ProcessFileRangeSelect(const char* rowsBase, unsigned long long totalRows,
                                      size_t rowLen, unsigned short columnIdx,
@@ -317,54 +331,6 @@ void XStore::ProcessFileRangeAccumulate(const char* rowsBase, unsigned long long
         }
     }
 }
-
-// Profiling-only prototype -- see header comment on the declaration and
-// tests/perf/XStorePerfTest.cpp for how it's benchmarked against MinAggregate.
-template <typename Cmp>
-void XStore::ProcessFileRangeSelectTypedDouble(const char* rowsBase, unsigned long long totalRows,
-                                     size_t rowLen, unsigned short columnIdx,
-                                     bool& bestInitialized, double& bestValue, XStore_Proto::FData& bestData) {
-
-    if (totalRows == 0) return;
-
-    XStore_Proto::RowData TempData;
-    const Cmp Better{};
-
-    for (unsigned long long i = 0; i < totalRows; ++i) {
-        const char* RowPtr = rowsBase + (i * rowLen);
-
-        if (RowPtr[0] == 0) continue;
-
-        TempData.Clear();
-
-        google::protobuf::io::ArrayInputStream ArrayIn(RowPtr, (int)rowLen);
-        google::protobuf::io::CodedInputStream CodedIn(&ArrayIn);
-
-        if (!TempData.MergePartialFromCodedStream(&CodedIn)) {
-            continue;
-        }
-
-        if (columnIdx < (unsigned int)TempData.fielddata_size()) {
-            const auto& CurrData = TempData.fielddata(columnIdx);
-
-            // Native-type compare: no GetFDataValue switch, no long double
-            // conversion. Real version would determine this case once (not
-            // per row) from the first valid row seen.
-            if (CurrData.oneOfData_case() == XStore_Proto::FData::OneOfDataCase::kDoubleData) {
-                double CandidateValue = CurrData.doubledata();
-
-                if (!bestInitialized || Better(CandidateValue, bestValue)) {
-                    bestValue = CandidateValue;
-                    bestInitialized = true;
-                    bestData = CurrData;
-                }
-            }
-        }
-    }
-}
-
-template void XStore::ProcessFileRangeSelectTypedDouble<std::less<double>>(
-    const char*, unsigned long long, size_t, unsigned short, bool&, double&, XStore_Proto::FData&);
 
 // Extracts just columnIdx's FData from a row's wire bytes instead of parsing
 // the whole RowData -- ProcessFileRangeSelect/Accumulate above only ever

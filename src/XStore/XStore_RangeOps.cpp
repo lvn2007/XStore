@@ -36,9 +36,12 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, X
     }
 
     // Assuming incoming data is sorted --> Skip sorting
-    // Organize incoming data into map
-    //  dataMap[2016] = Vector {Index 0, Index 1, ...}
-    std::map<unsigned short int, std::vector<unsigned long long int>> DataMap;
+    // Organize incoming data into year buckets -- flat vector + linear scan
+    // (see AppendToYearBucket), not std::map: a single request realistically
+    // touches only a handful of distinct years, and RangeInsert's response
+    // is just a status string, so bucket iteration order doesn't need to be
+    // chronological the way BatchQuery's response does.
+    YearBucketMap DataMap;
 
     // Granularity check -- year-bucket via TimeStruct's closed-form calendar
     // calc instead of gmtime_r (see BatchInsert for the same change and why:
@@ -59,11 +62,11 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, X
             WindowLastEpoch = RowTs.LastEpoch;
             HaveWindow = true;
         }
-        DataMap[CurrYear].push_back(i);
+        AppendToYearBucket(DataMap, CurrYear, static_cast<unsigned long long int>(i));
     }
 
     // Iterate through each key (year) of dataMap
-    for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& Pair : DataMap) {
+    for (const std::pair<unsigned short int, std::vector<unsigned long long int>> &Pair : DataMap) {
         unsigned short int YearKey = Pair.first;
         const std::vector<unsigned long long int> &Indices = Pair.second;
         const std::string &TargetFile = CachedYearFilePath(DbBasePathStr, YearKey);
@@ -109,9 +112,9 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, X
 }
 
 // RANGE QUERY
-void XStore::RangeQuery(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName, XStore_Proto::RangeQuery_REP *returnData) {
+void XStore::RangeQuery(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string_view dbNameView, XStore_Proto::RangeQuery_REP *returnData) {
     // Ensure dbName string is all capitalized
-    ToUpperCase(dbName.begin(), dbName.end());
+    const std::string &dbName = UpperCaseInto(dbNameView);
 
     // Base directory of a DB
     const std::string &DbBasePathStr = CachedDbBasePath(dbName);
@@ -253,13 +256,13 @@ void XStore::RangeQuery(const unsigned long long int &startEpochT, const unsigne
 }
 
 // RANGE DELETE
-XStore_Proto::RangeDelete_REP XStore::RangeDelete(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string dbName) {
+XStore_Proto::RangeDelete_REP XStore::RangeDelete(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string_view dbNameView) {
     // Protobuf obj to be returned
     XStore_Proto::RangeDelete_REP ToReturn;
     int DeleteCount = 0;
 
     // Ensure dbName string is all capitalized
-    ToUpperCase(dbName.begin(), dbName.end());
+    const std::string &dbName = UpperCaseInto(dbNameView);
 
     // Base directory of a DB
     const std::string &DbBasePathStr = CachedDbBasePath(dbName);
@@ -294,9 +297,7 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(const unsigned long long int &
     // RangeQuery (see there for why this replaced the old three-branch
     // single-year/multi-year-first/multi-year-last duplication and the bugs
     // that duplication let slip through: a missing final year's file used to
-    // spin this forever). fallocate64 still needs a real fd (punching holes
-    // isn't an mmap operation), so this segment still opens/closes the file
-    // via stdio rather than going through GetOrMapFile.
+    // spin this forever).
     unsigned long long int IterEpoch = startEpochT;
     while (IterEpoch <= endEpochT) {
         TimeStruct CurrTs(IterEpoch, CfgStruct.timeresolution());
@@ -314,7 +315,24 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(const unsigned long long int &
             continue;
         }
 
-        FILE *BFile = std::fopen(TargetFilePath.c_str(), "rb+");
+        // Cached fd instead of a fresh fopen()/fclose() per year-segment --
+        // fallocate64() just needs a plain fd (punching holes isn't an mmap
+        // operation, so GetOrMapFile's mmap cache genuinely doesn't apply
+        // here, but the separate fd cache does and hands one back with no
+        // FILE*/fileno() layer needed). Existence was already confirmed
+        // above, so O_CREAT/ftruncate here are no-ops. Held through the
+        // fallocate64() call below so a concurrent eviction on another
+        // thread can't close this fd mid-delete -- see FdShard's comment in
+        // XStore.h.
+        std::shared_ptr<int> FdHandle = GetOrOpenFile(TargetFilePath, CfgStruct.rowlength(), CurrTs.LastEpoch - CurrTs.FirstEpoch);
+        if (!FdHandle) {
+            std::string ErrMsg = fmt::format("[RANGE DELETE] [DB: {}] - Unable to open {}.XSTORE", dbName, CurrTs.Year);
+            SetTaggedStatus(ToReturn.mutable_deletestatus(), "[ERROR] ", ErrMsg);
+            spdlog::error(ErrMsg);
+            IterEpoch = SegmentEnd + 1;
+            continue;
+        }
+        int Fd = *FdHandle;
 
         const unsigned long long int Offset = (IterEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength();
         const unsigned long long int RangeCount = SegmentEnd - IterEpoch + 1;
@@ -324,11 +342,9 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(const unsigned long long int &
             FileRangeLockGuard Guard(TargetFilePath, Offset, CfgStruct.rowlength() * RangeCount, FileRangeLock::LockType::WRITE);
 
             // Deallocate data according to N bytes from rowLength
-            fallocate64(fileno(BFile), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, Offset, CfgStruct.rowlength() * RangeCount);
+            fallocate64(Fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, Offset, CfgStruct.rowlength() * RangeCount);
             DeleteCount += RangeCount;
         }
-        // Close file after delete
-        std::fclose(BFile);
 
         IterEpoch = SegmentEnd + 1;
     }

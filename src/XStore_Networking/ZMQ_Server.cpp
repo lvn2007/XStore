@@ -6,11 +6,21 @@ namespace {
 // the CLIENT. REP sockets enforce recv-then-send ordering already, so
 // dontwait never actually blocks here -- kept only to match a fire-and-forget
 // send with no result check, same as before.
+//
+// SerializeWithCachedSizesToArray(), not SerializeToArray(): per
+// message_lite.h, SerializeToArray() is "just a simple wrapper around
+// ByteSize() and SerializeWithCachedSizes()" -- it recomputes the size
+// itself before writing, redundant with the ByteSizeLong() call directly
+// above it (which already walked the tree once and cached every
+// submessage's size). SerializeWithCachedSizesToArray() reuses those cached
+// sizes instead of recomputing them, cutting SendProto from 2 size-compute
+// passes + 1 write pass down to 1 size-compute pass + 1 write pass -- safe
+// as long as msg isn't mutated between the two calls, which it isn't here.
 template <typename T>
 void SendProto(zmq::socket_t &socket, const T &msg) {
     size_t Size = msg.ByteSizeLong();
     zmq::message_t Reply(Size);
-    msg.SerializeToArray(Reply.data(), Size);
+    msg.SerializeWithCachedSizesToArray(static_cast<uint8_t*>(Reply.data()));
     socket.send(Reply, zmq::send_flags::dontwait);
 }
 }  // namespace
@@ -24,6 +34,14 @@ void ZMQ_Server::StartServer(std::string listenAddr, std::string listenPort) {
     zmq::socket_t ClientSocket(Ctx, zmq::socket_type::router);
     std::string ServerAddr = "tcp://" + listenAddr + ":" + listenPort;
 
+    // No queue depth cap -- 0 means "no limit" (bounded only by available
+    // memory) rather than the library default of 1000 messages/socket.
+    // Chosen deliberately: the goal here is maximum accepted throughput, not
+    // bounded-memory backpressure: under a burst that outpaces the worker
+    // pool, this queues in RAM instead of blocking/dropping at the socket.
+    ClientSocket.set(zmq::sockopt::sndhwm, 0);
+    ClientSocket.set(zmq::sockopt::rcvhwm, 0);
+
     // Set listenAddr & port internally
     this->ServerAddr = ServerAddr;
 
@@ -32,6 +50,8 @@ void ZMQ_Server::StartServer(std::string listenAddr, std::string listenPort) {
 
     //  Socket to talk to WORKERS
     zmq::socket_t WorkerSocket(Ctx, zmq::socket_type::dealer);
+    WorkerSocket.set(zmq::sockopt::sndhwm, 0);
+    WorkerSocket.set(zmq::sockopt::rcvhwm, 0);
     WorkerSocket.bind("inproc://workers");
 
     //  Launch pool of WORKER threads
@@ -49,8 +69,11 @@ void ZMQ_Server::WorkerRoutine(std::string serverAddr) {
     // Instantiate XStore for each thread
     XStore MyStore;
 
-    // Each thread shares the server's ZMQ context
+    // Each thread shares the server's ZMQ context. No queue-depth cap, same
+    // reasoning as ClientSocket/WorkerSocket in StartServer.
     zmq::socket_t Socket(Ctx, zmq::socket_type::rep);
+    Socket.set(zmq::sockopt::sndhwm, 0);
+    Socket.set(zmq::sockopt::rcvhwm, 0);
     Socket.connect("inproc://workers");
 
     // One arena per worker thread, reused for every request via Reset()
@@ -67,16 +90,18 @@ void ZMQ_Server::WorkerRoutine(std::string serverAddr) {
 
     // Reused across iterations (this function IS the per-thread loop, so a
     // plain local -- no thread_local needed) instead of a fresh
-    // std::vector<zmq::message_t> constructed every request: .clear() keeps
-    // the vector's already-grown backing storage instead of paying a heap
-    // allocation for a new one each time.
-    std::vector<zmq::message_t> ClientMsgs;
+    // zmq::message_t constructed every request. A single message_t, not a
+    // vector: this REP socket only ever sees one body frame per request --
+    // the client (XStore_Client.h) always does a single-frame Sock.send(),
+    // never send_multipart -- so the more()-check loop and back_inserter
+    // machinery recv_multipart pays for a possible second/third frame was
+    // pure overhead here, never exercised in practice.
+    zmq::message_t ClientMsg;
 
     while (true) {
         // RECEIVING
         //  Wait for next request from CLIENT
-        ClientMsgs.clear();
-        zmq::recv_multipart(Socket, std::back_inserter(ClientMsgs));
+        Socket.recv(ClientMsg);
 
         // Free everything the previous iteration allocated in one shot --
         // safe here because that request's response was already serialized
@@ -87,7 +112,7 @@ void ZMQ_Server::WorkerRoutine(std::string serverAddr) {
         //  is the dispatch tag, so there's no separate lightweight parse
         //  followed by a second full parse of the same bytes.
         auto *ClientRequest = google::protobuf::Arena::Create<XStore_Proto::Request>(&Arena);
-        if (!ClientRequest->ParseFromArray(ClientMsgs.back().data(), ClientMsgs.back().size())) {
+        if (!ClientRequest->ParseFromArray(ClientMsg.data(), ClientMsg.size())) {
             spdlog::warn("[NETWORKING] - Failed to parse request, dropping");
             Socket.send(zmq::message_t(0), zmq::send_flags::dontwait);
             continue;

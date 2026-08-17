@@ -5,6 +5,7 @@
 #include <variant>
 #include <fstream>
 #include <bitset>
+#include <thread>
 
 // Clock init
 std::chrono::time_point<std::chrono::high_resolution_clock> Start, End;
@@ -54,6 +55,16 @@ int main(int argc, char *argv[]) {
     std::string BindAddr = argv[1];
     std::string BindPort = argv[2];
     int ThreadCount = atoi(argv[3]);
+    if (ThreadCount <= 0) {
+        // atoi() returns 0 on a non-numeric/missing argument as well as on a
+        // literal "0" -- either way a non-positive thread count would launch
+        // a server with no workers to ever answer a request, so fall back to
+        // the host's hardware concurrency instead of silently doing that.
+        unsigned int Fallback = std::thread::hardware_concurrency();
+        ThreadCount = Fallback > 0 ? static_cast<int>(Fallback) : 1;
+        std::cout << "[WARNING] [BOOT] - Invalid thread count '" << argv[3]
+                  << "', falling back to " << ThreadCount << std::endl;
+    }
 
     // ----DEV AREA
     spdlog::level::level_enum ConsoleLevel = spdlog::level::warn;

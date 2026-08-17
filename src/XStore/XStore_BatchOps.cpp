@@ -40,15 +40,11 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
     // Base directory of a DB
     const std::string &DbBasePathStr = CachedDbBasePath(DbName);
 
-    // IF db directory does not exist
-    if (std::filesystem::is_directory(DbBasePathStr) == 0) {
-        std::string ErrMsg = fmt::format("[BATCH INSERT] [DB: {}] - DB does not exist", DbName);
-        SetTaggedStatus(returnData->mutable_insertstatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
-        return;
-    }
-
-    // Fetch cfgStruct from cache, loading from disk on first use
+    // Fetch cfgStruct from cache, loading from disk on first use. This also
+    // covers "DB does not exist": GetOrLoadCfg stats the .CFG file itself on
+    // a cache miss, so a separate upfront is_directory() check on every call
+    // (cache hit or not) would just be a redundant stat -- dropped, same fix
+    // already applied to Unary ops.
     XStore_Proto::ConfigStruct CfgStruct;
     if (!GetOrLoadCfg(DbName, DbBasePathStr, CfgStruct)) {
         std::string ErrMsg = fmt::format("[BATCH INSERT] [DB: {}] - DB does not exist", DbName);
@@ -57,16 +53,25 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
         return;
     }
 
-    // Assuming incoming data is unsorted
-    //  -> Ascending sort
+    // Assuming incoming data is unsorted -> ascending sort. Physically
+    // reorders batchinsert_data() in place (tried sorting a separate index
+    // array instead, to avoid mutating the caller's row order -- benchmarked
+    // SLOWER: RepeatedPtrField::sort() only swaps pointers, not the
+    // underlying BatchInsert_DATA objects, so the physical sort was never
+    // the expensive part; the index-array version instead made every
+    // downstream getEntry(idx) lookup in WriteRowGroupToFile -- called
+    // multiple times per row -- a random-order access into the
+    // ~1.6MB/200k-row pointer array instead of a sequential scan, losing
+    // hardware prefetch. Reverted after measuring).
     SortBatch(protoFromClient->mutable_batchinsert_data()->begin(), protoFromClient->mutable_batchinsert_data()->end(),
               [](const XStore_Proto::BatchInsert_DATA& a, const XStore_Proto::BatchInsert_DATA &b) {
                     return a.timestamp() < b.timestamp();
     });
 
-    // Organize incoming data into map
-    //  dataMap[2016] = Vector {Index 0, Index 1, ...}
-    std::map<unsigned short int, std::vector<unsigned long long int>> DataMap;
+    // Organize incoming data into year buckets -- flat vector + linear scan
+    // (see AppendToYearBucket), not std::map: a single call realistically
+    // touches only a handful of distinct years.
+    YearBucketMap DataMap;
 
     // Granularity check -- year-bucket via TimeStruct's closed-form calendar
     // calc instead of gmtime_r. Two reasons: (1) gmtime_r always treated the
@@ -89,11 +94,11 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
             WindowLastEpoch = RowTs.LastEpoch;
             HaveWindow = true;
         }
-        DataMap[CurrYear].push_back(i);
+        AppendToYearBucket(DataMap, CurrYear, static_cast<unsigned long long int>(i));
     }
 
     // Iterate through each key (year) of dataMap
-    for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& Pair : DataMap) {
+    for (const std::pair<unsigned short int, std::vector<unsigned long long int>> &Pair : DataMap) {
         unsigned short int YearKey = Pair.first;
         const std::vector<unsigned long long int> &Indices = Pair.second;
         const std::string &TargetFile = CachedYearFilePath(DbBasePathStr, YearKey);
@@ -161,14 +166,6 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
         return;
     }
 
-    // IF db directory does not exist
-    if (std::filesystem::is_directory(DbBasePathStr) == 0) {
-        std::string ErrMsg = fmt::format("[BATCH QUERY] [DB: {}] - DB does not exist", DbName);
-        SetTaggedStatus(returnData->mutable_querystatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
-        return;
-    }
-
     // Assuming incoming batch query is unsorted
     //  -> Ascending sort
     if (SortTime)
@@ -179,28 +176,54 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
         });
     }
 
-    // Organize incoming batch query into map
-    //  dataMap[2016] = Vector {Index 0, Index 1, ...}
-    unsigned long long int CurrTime;
-    std::map<unsigned short int, std::vector<unsigned long long int>> DataMap;
+    // Organize incoming batch query into year buckets -- flat vector + linear
+    // scan (see AppendToYearBucket), not std::map.
+    YearBucketMap DataMap;
 
-    // Granularity check
+    // Granularity check -- same TimeStruct window-reuse BatchInsert uses
+    // (see there for the full rationale), gated on SortTime: the reuse trick
+    // only checks an upper bound (has this row crossed into a later year
+    // than the current window's LastEpoch), never a lower bound, so it's
+    // only valid when consecutive rows are non-decreasing -- guaranteed when
+    // SortTime just sorted them, NOT guaranteed otherwise (see
+    // BatchQuerySortTimeFalseWithUnsortedTimestampsRoundTrips, which sends
+    // out-of-order timestamps with SortTime=false and still expects correct
+    // per-row bucketing). "!SortTime ||" makes the rebuild condition always
+    // true in that case, so behavior there is unchanged from before.
+    bool HaveWindow = false;
+    unsigned short int CurrYear = 0;
+    int64_t WindowLastEpoch = 0;
     for (int i = 0; i < protoFromClient->timestamp_size(); i++) {
-        CurrTime = protoFromClient->timestamp(i);
-        struct TimeStruct CurrTs(CurrTime, CfgStruct.timeresolution());
-        DataMap[CurrTs.Year].push_back(i);
+        unsigned long long int CurrTime = protoFromClient->timestamp(i);
+        if (!SortTime || !HaveWindow || static_cast<int64_t>(CurrTime) > WindowLastEpoch) {
+            TimeStruct CurrTs(CurrTime, CfgStruct.timeresolution());
+            CurrYear = CurrTs.Year;
+            WindowLastEpoch = CurrTs.LastEpoch;
+            HaveWindow = true;
+        }
+        AppendToYearBucket(DataMap, CurrYear, static_cast<unsigned long long int>(i));
     }
 
+    // Keep the response chronological across years -- matches the old
+    // std::map-based version's iteration order, which was always
+    // year-ascending regardless of request/bucket-creation order (relevant
+    // when SortTime is false, where buckets can otherwise be created in
+    // request order instead of year order).
+    std::sort(DataMap.begin(), DataMap.end(),
+              [](const auto &a, const auto &b) { return a.first < b.first; });
+
     // Iterate through each key (year) of dataMap
-    for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& Pair : DataMap) {
+    for (const std::pair<unsigned short int, std::vector<unsigned long long int>> &Pair : DataMap) {
         unsigned short int YearKey = Pair.first;
         const std::vector<unsigned long long int> &Indices = Pair.second;
         const std::string &TargetFile = CachedYearFilePath(DbBasePathStr, YearKey);
 
         // IF target file does NOT exist -- checked explicitly because
         // GetOrMapFile below opens with O_CREAT and would otherwise silently
-        // create+map an empty file for a query that should just report no data.
-        if (std::filesystem::exists(TargetFile) == 0) {
+        // create+map an empty file for a query that should just report no
+        // data. IsFdCached short-circuits the stat() syscall on a warm
+        // cache, same as UnaryQuery.
+        if (!IsFdCached(TargetFile) && std::filesystem::exists(TargetFile) == 0) {
             // Skip to next iteration
             std::string WarnMsg = fmt::format("[BATCH QUERY] [DB: {}] - {}.XSTORE does not exist", DbName, YearKey);
             SetTaggedStatus(returnData->mutable_querystatus(), "[WARNING] ", WarnMsg);
@@ -324,21 +347,34 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
                 return a < b;
     });
 
-    // Organize incoming batch delete timestamp into map
-    //  dataMap[2016] = Vector {Index 0, Index 1, ...}
-    std::time_t CurrTime;
-    tm EpochStruct;
-    std::map<unsigned short int, std::vector<unsigned long long int>> DataMap;
+    // Organize incoming batch delete timestamps into year buckets -- flat
+    // vector + linear scan (see AppendToYearBucket), not std::map.
+    YearBucketMap DataMap;
 
-    // Granularity check
+    // Granularity check -- TimeStruct instead of gmtime_r (gmtime_r always
+    // treated the raw timestamp as whole seconds regardless of
+    // CfgStruct.timeresolution(), silently mis-bucketing MILLISECOND/
+    // MICROSECOND DBs into the wrong year -- same bug class TimeStruct
+    // already fixed for Insert/Query, just never carried over here), plus
+    // the same window-reuse BatchInsert uses. Unconditionally safe here
+    // (unlike BatchQuery's SortTime-gated version) since this batch is
+    // always sorted ascending just above, with no unsorted-input toggle.
+    bool HaveWindow = false;
+    unsigned short int CurrYear = 0;
+    int64_t WindowLastEpoch = 0;
     for (int i = 0; i < protoFromClient->timestamp_size(); i++) {
-        CurrTime = protoFromClient->timestamp(i);
-        gmtime_r(&CurrTime, &EpochStruct);
-        DataMap[EpochStruct.tm_year + 1900].push_back(i);
+        unsigned long long int CurrTime = protoFromClient->timestamp(i);
+        if (!HaveWindow || static_cast<int64_t>(CurrTime) > WindowLastEpoch) {
+            TimeStruct RowTs(static_cast<time_t>(CurrTime), CfgStruct.timeresolution());
+            CurrYear = RowTs.Year;
+            WindowLastEpoch = RowTs.LastEpoch;
+            HaveWindow = true;
+        }
+        AppendToYearBucket(DataMap, CurrYear, static_cast<unsigned long long int>(i));
     }
 
     // Iterate through each key (year) of dataMap
-    for (std::pair<const unsigned short int, std::vector<unsigned long long int>> const& Pair : DataMap) {
+    for (const std::pair<unsigned short int, std::vector<unsigned long long int>> &Pair : DataMap) {
         unsigned short int YearKey = Pair.first;
         const std::vector<unsigned long long int> &Indices = Pair.second;
         const std::string &TargetFile = CachedYearFilePath(DbBasePathStr, YearKey);
@@ -351,8 +387,24 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
             continue;
         }
 
-        FILE *BFile = std::fopen(TargetFile.c_str(), "rb+");
         TimeStruct ThisTs{static_cast<time_t>(protoFromClient->timestamp(Indices.front())), CfgStruct.timeresolution()};
+
+        // Cached fd instead of a fresh fopen()/fclose() per year-group --
+        // fallocate64() just needs a plain fd (punching holes isn't an mmap
+        // operation), and GetOrOpenFile already hands one back with no
+        // FILE*/fileno() layer needed. Existence was already confirmed
+        // above, so O_CREAT/ftruncate here are no-ops, same reasoning as
+        // BatchQuery's fd-cache use. Held through the fallocate64() loop
+        // below so a concurrent eviction on another thread can't close this
+        // fd mid-delete -- see FdShard's comment in XStore.h.
+        std::shared_ptr<int> FdHandle = GetOrOpenFile(TargetFile, CfgStruct.rowlength(), ThisTs.LastEpoch - ThisTs.FirstEpoch);
+        if (!FdHandle) {
+            std::string ErrMsg = fmt::format("[BATCH DELETE] [DB: {}] - Unable to open {}.XSTORE", DbName, YearKey);
+            SetTaggedStatus(ToReturn.mutable_deletestatus(), "[ERROR] ", ErrMsg);
+            spdlog::error(ErrMsg);
+            continue;
+        }
+        int Fd = *FdHandle;
 
         // Single lock spanning this year-group's min-to-max offset span
         // instead of one lock per row -- Indices is sorted ascending (the
@@ -375,13 +427,10 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
                 unsigned long long int Offset = (protoFromClient->timestamp(Idx) - ThisTs.FirstEpoch) * CfgStruct.rowlength();
 
                 // Deallocate data according to N bytes from rowLength
-                fallocate64(fileno(BFile), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, Offset, CfgStruct.rowlength());
+                fallocate64(Fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, Offset, CfgStruct.rowlength());
                 DeleteCount++;
             }
         }
-
-        // Close file & Release lock after read
-        std::fclose(BFile);
     }
     std::string InfoMsg = fmt::format("[BATCH DELETE] [DB: {}] - Deleted {} items", DbName, DeleteCount);
     SetTaggedStatus(ToReturn.mutable_deletestatus(), "[INFO] ", InfoMsg);

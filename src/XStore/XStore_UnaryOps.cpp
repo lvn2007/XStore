@@ -10,9 +10,9 @@
 #include <vector>
 
 // UNARY INSERT
-void XStore::UnaryInsert(const unsigned long long int &unixTime, const XStore_Proto::RowData &data, std::string dbName, XStore_Proto::UnaryInsert_REP *returnData) {
+void XStore::UnaryInsert(const unsigned long long int &unixTime, const XStore_Proto::RowData &data, std::string_view dbNameView, XStore_Proto::UnaryInsert_REP *returnData) {
     // Ensure dbName string is all capitalized
-    ToUpperCase(dbName.begin(), dbName.end());
+    const std::string &dbName = UpperCaseInto(dbNameView);
 
     // Base directory of a DB
     const std::string &DbBasePathStr = CachedDbBasePath(dbName);
@@ -100,17 +100,25 @@ void XStore::UnaryInsert(const unsigned long long int &unixTime, const XStore_Pr
         return;
     }
 
+    // Tried fmt::format_to() straight into the destination field here to
+    // save the SuccessMsg temporary's copy -- benchmarked SLOWER (~13%) than
+    // this, even with an upfront reserve(): format_to() through a generic
+    // back_insert_iterator loses fmt::format()'s internal contiguous-buffer
+    // fast path, so it does more per-byte work than fmt::format() + a plain
+    // reserve()'d assign/append despite looking like fewer copies on paper.
+    // SetTaggedStatus already reserves the exact final size once and does
+    // two flat memcpy-style writes -- reverted to it after measuring.
     std::string SuccessMsg = fmt::format("[UNARY INSERT] [DB: {}] - Inserted {} to {}.XSTORE", dbName, unixTime, CurrTs.Year);
     SetTaggedStatus(returnData->mutable_insertstatus(), "[INFO] ", SuccessMsg);
     return;
 }
 
 // UNARY QUERY
-void XStore::UnaryQuery(const unsigned long long int &unixTime, std::string dbName, XStore_Proto::UnaryQuery_REP *returnData) {
+void XStore::UnaryQuery(const unsigned long long int &unixTime, std::string_view dbNameView, XStore_Proto::UnaryQuery_REP *returnData) {
     returnData->set_timestamp(unixTime);
 
     // Ensure dbName string is all capitalized
-    ToUpperCase(dbName.begin(), dbName.end());
+    const std::string &dbName = UpperCaseInto(dbNameView);
 
     // Base directory of a DB
     const std::string &DbBasePathStr = CachedDbBasePath(dbName);
@@ -188,25 +196,21 @@ void XStore::UnaryQuery(const unsigned long long int &unixTime, std::string dbNa
 }
 
 // UNARY DELETE
-XStore_Proto::UnaryDelete_REP XStore::UnaryDelete(const unsigned long long int &epochTime, std::string dbName) {
+XStore_Proto::UnaryDelete_REP XStore::UnaryDelete(const unsigned long long int &epochTime, std::string_view dbNameView) {
     // Protobuf obj to be returned
     XStore_Proto::UnaryDelete_REP ToReturn;
 
     // Ensure dbName string is all capitalized
-    ToUpperCase(dbName.begin(), dbName.end());
+    const std::string &dbName = UpperCaseInto(dbNameView);
 
     // Base directory of a DB
     const std::string &DbBasePathStr = CachedDbBasePath(dbName);
 
-    // IF db directory does not exist
-    if (std::filesystem::is_directory(DbBasePathStr) == 0) {
-        std::string ErrMsg = fmt::format("[UNARY DELETE] [DB: {}] - DB does not exist", dbName);
-        SetTaggedStatus(ToReturn.mutable_deletestatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
-        return ToReturn;
-    }
-
-    // Fetch cfgStruct from cache, loading from disk on first use
+    // Fetch cfgStruct from cache, loading from disk on first use. This also
+    // covers "DB does not exist": GetOrLoadCfg stats the .CFG file itself on
+    // a cache miss, so a separate upfront is_directory() check on every call
+    // (cache hit or not) would just be a redundant stat -- dropped, same fix
+    // already applied to UnaryInsert/UnaryQuery.
     XStore_Proto::ConfigStruct CfgStruct;
     if (!GetOrLoadCfg(dbName, DbBasePathStr, CfgStruct)) {
         std::string ErrMsg = fmt::format("[UNARY DELETE] [DB: {}] - DB does not exist", dbName);
@@ -219,8 +223,6 @@ XStore_Proto::UnaryDelete_REP XStore::UnaryDelete(const unsigned long long int &
     //  Year, month, day, hour, minute, sec, ...
     TimeStruct CurrTs(epochTime, CfgStruct.timeresolution());
 
-    // Prepare to delete (Writing NULL byte)
-    FILE *BFile;
     const std::string &TargetFilePath = CachedYearFilePath(DbBasePathStr, CurrTs.Year);
 
     // IF target file does NOT exist
@@ -231,9 +233,22 @@ XStore_Proto::UnaryDelete_REP XStore::UnaryDelete(const unsigned long long int &
         return ToReturn;
     }
 
-    // OTHERWISE - Target file DOES exist
-    //  Open in append mode
-    BFile = std::fopen(TargetFilePath.c_str(), "rb+");
+    // Cached fd instead of a fresh fopen()/fclose() per call -- fallocate64()
+    // just needs a plain fd (punching holes isn't an mmap operation), and
+    // GetOrOpenFile already hands one back with no FILE*/fileno() layer
+    // needed, same fd cache UnaryInsert/UnaryQuery use. Existence was
+    // already confirmed above, so O_CREAT/ftruncate here are no-ops. Held
+    // through the fallocate64() call below so a concurrent eviction on
+    // another thread can't close this fd mid-delete -- see FdShard's
+    // comment in XStore.h.
+    std::shared_ptr<int> FdHandle = GetOrOpenFile(TargetFilePath, CfgStruct.rowlength(), CurrTs.LastEpoch - CurrTs.FirstEpoch);
+    if (!FdHandle) {
+        std::string ErrMsg = fmt::format("[UNARY DELETE] [DB: {}] - Unable to open {}.XSTORE", dbName, CurrTs.Year);
+        SetTaggedStatus(ToReturn.mutable_deletestatus(), "[ERROR] ", ErrMsg);
+        spdlog::error(ErrMsg);
+        return ToReturn;
+    }
+    int Fd = *FdHandle;
 
     //  Computes diff & offset
     unsigned long long int Diff = epochTime - CurrTs.FirstEpoch;
@@ -244,10 +259,8 @@ XStore_Proto::UnaryDelete_REP XStore::UnaryDelete(const unsigned long long int &
         FileRangeLockGuard Guard(TargetFilePath, Offset, CfgStruct.rowlength(), FileRangeLock::LockType::WRITE);
 
         // Deallocate data according to N bytes from rowLength
-        fallocate64(fileno(BFile), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, Offset, CfgStruct.rowlength());
+        fallocate64(Fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, Offset, CfgStruct.rowlength());
     }
-    // Close file after write
-    std::fclose(BFile);
 
     std::string SuccessMsg = fmt::format("[UNARY DELETE] [DB: {}] - Deleted {} in {}.XSTORE", dbName, epochTime, CurrTs.Year);
     SetTaggedStatus(ToReturn.mutable_deletestatus(), "[INFO] ", SuccessMsg);

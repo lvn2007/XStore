@@ -87,12 +87,24 @@ std::string XStore::DbBasePath(const std::string &dbName) const {
 }
 
 const std::string& XStore::CachedDbBasePath(const std::string &dbName) const {
-    thread_local std::unordered_map<std::string, std::string> TlsBasePaths;
-    auto It = TlsBasePaths.find(dbName);
-    if (It != TlsBasePaths.end()) {
+    // Keyed by (DataStoreDir, dbName), not dbName alone: DataStoreDir is
+    // constant for the life of a real server process (one fixed cwd at
+    // startup), so in production this collapses to a single outer-map
+    // entry and behaves exactly like the old dbName-only cache. It only
+    // matters when the same thread constructs XStore instances against
+    // different DataStoreDirs -- e.g. this codebase's own test suite,
+    // which chdir()s into a fresh scratch directory per test case but
+    // reuses "TESTDB" as the dbName across nearly all of them. A dbName-
+    // only, thread_local memo doesn't expire when a test's directory is
+    // torn down, so a later test's lookup for "TESTDB" would silently
+    // return an earlier, already-deleted test's path instead of its own.
+    thread_local std::unordered_map<std::string, std::unordered_map<std::string, std::string>> TlsBasePaths;
+    std::unordered_map<std::string, std::string> &DirMap = TlsBasePaths[DataStoreDir];
+    auto It = DirMap.find(dbName);
+    if (It != DirMap.end()) {
         return It->second;
     }
-    return TlsBasePaths.emplace(dbName, DbBasePath(dbName)).first->second;
+    return DirMap.emplace(dbName, DbBasePath(dbName)).first->second;
 }
 
 const std::string& XStore::CachedYearFilePath(const std::string &dbBasePath, unsigned short year) const {
@@ -152,13 +164,17 @@ XStore_Proto::SysInfo_REP XStore::InfoQuery(std::string serverAddr, int threadCo
     return ToReturn;
 }
 
-XStore_Proto::CreateDB_REP XStore::CreateDB(std::string dbName, XStore_Proto::TimeUnit timeResolution, short int rowLength) {
+XStore_Proto::CreateDB_REP XStore::CreateDB(std::string_view dbNameView, XStore_Proto::TimeUnit timeResolution, short int rowLength) {
     // Protobuf obj to be returned
     XStore_Proto::CreateDB_REP ToReturn;
     std::string CreateDbStatus;
 
-    // Ensure dbName & timeResolution string is all capitalized
-    ToUpperCase(dbName.begin(), dbName.end());
+    // Ensure dbName & timeResolution string is all capitalized. dbNameView
+    // is a trivial pointer+length pass at the call boundary (no
+    // std::string construction/copy there); UpperCaseInto does the one
+    // read-uppercase-write pass into a reused thread_local buffer instead
+    // of the old by-value-copy-then-transform-in-place's two passes.
+    const std::string &dbName = UpperCaseInto(dbNameView);
 
     if (rowLength < 4) {
         CreateDbStatus = fmt::format("[CREATE DB] [DB: {}] - Row length must be >= 4", dbName);
@@ -222,13 +238,13 @@ XStore_Proto::CreateDB_REP XStore::CreateDB(std::string dbName, XStore_Proto::Ti
     return ToReturn;
 }
 
-XStore_Proto::RemoveDB_REP XStore::RemoveDB(std::string dbName) {
+XStore_Proto::RemoveDB_REP XStore::RemoveDB(std::string_view dbNameView) {
     // Protobuf obj to be returned
     std::string RemoveStatus;
     XStore_Proto::RemoveDB_REP ToReturn;
 
     // Ensure dbName string is all capitalized
-    ToUpperCase(dbName.begin(), dbName.end());
+    const std::string &dbName = UpperCaseInto(dbNameView);
 
     // Location of DB
     std::string DbLoc = JoinPath(DataStoreDir, dbName);
@@ -261,13 +277,13 @@ XStore_Proto::RemoveDB_REP XStore::RemoveDB(std::string dbName) {
     return ToReturn;
 }
 
-XStore_Proto::RemoveDBFiles_REP XStore::RemoveDBFiles(XStore_Proto::RemoveDBFiles_REQ *protoFromClient, std::string dbName) {
+XStore_Proto::RemoveDBFiles_REP XStore::RemoveDBFiles(XStore_Proto::RemoveDBFiles_REQ *protoFromClient, std::string_view dbNameView) {
     // Protobuf obj to be returned
     std::string RemoveStatus;
     XStore_Proto::RemoveDBFiles_REP ToReturn;
 
     // Ensure dbName string is all capitalized
-    ToUpperCase(dbName.begin(), dbName.end());
+    const std::string &dbName = UpperCaseInto(dbNameView);
 
     // Location of DB
     std::string DbLoc = JoinPath(DataStoreDir, dbName);

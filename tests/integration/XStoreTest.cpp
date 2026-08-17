@@ -2118,6 +2118,93 @@ TEST_F(XStoreTest, AggregateOverMultiYearRangeSpansAllYears) {
     EXPECT_DOUBLE_EQ(AvgRep.opresult(), -2.5);
 }
 
+TEST_F(XStoreTest, AggregateOverWideMultiYearSpanUsesParallelWalkCorrectly) {
+    // AggregateOverMultiYearRangeSpansAllYears above only spans 2 years --
+    // below WalkYearSpanParallel's kMinSegmentsForParallelWalk (4), so it
+    // always takes the sequential fallback path and never actually
+    // exercises the parallel-dispatch/merge code. This test spans many
+    // years to drive requests through the parallel path (thread-per-segment
+    // dispatch + cross-thread merge), verifying Min/Max/Sum/Avg all still
+    // compute the correct answer once real threads and a merge step are
+    // involved.
+    //
+    // Data sits at the exact first/last second of the two data-bearing
+    // years, same reasoning as AggregateOverMultiYearRangeSpansAllYears:
+    // any year strictly BETWEEN the query's start and end is "fully
+    // contained," so WalkYearSpan always hands its kernel the *entire*
+    // year's row count regardless of where within that year data was
+    // inserted -- the insert position only matters for the two edge years.
+    // The only way to keep middle years cheap is to never insert into them
+    // at all, so their .XSTORE file never exists and WalkYearSpan's
+    // exists() check skips them for free -- they still count toward the
+    // segment total that triggers parallel dispatch.
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+
+    // TimeStruct (not hand-computed epoch arithmetic) finds the exact start
+    // of "about 6 years after 2016" -- avoids an off-by-a-leap-day error
+    // accidentally landing this row mid-year instead of on a boundary.
+    unsigned long long ApproxFutureTs = TS_2016_LAST + (6ULL * 365 * 86400);
+    TimeStruct FutureYear(static_cast<time_t>(ApproxFutureTs), XStore_Proto::SECOND);
+    unsigned long long FutureYearFirst = static_cast<unsigned long long>(FutureYear.FirstEpoch);
+
+    XStore_Proto::UnaryInsert_REP InsertRep;
+    Store.UnaryInsert(TS_2016_LAST, MakeRow({FDouble(-30.0)}), "TESTDB", &InsertRep);
+    ASSERT_NE(InsertRep.insertstatus().find("[INFO]"), std::string::npos);
+    Store.UnaryInsert(FutureYearFirst, MakeRow({FDouble(20.0)}), "TESTDB", &InsertRep);
+    ASSERT_NE(InsertRep.insertstatus().find("[INFO]"), std::string::npos);
+
+    XStore_Proto::Min_REP MinRep;
+    Store.MinAggregate(TS_2016_LAST, FutureYearFirst, "TESTDB", 0, &MinRep);
+    ASSERT_EQ(MinRep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(MinRep.opresult().doubledata(), -30.0);
+
+    XStore_Proto::Max_REP MaxRep;
+    Store.MaxAggregate(TS_2016_LAST, FutureYearFirst, "TESTDB", 0, &MaxRep);
+    ASSERT_EQ(MaxRep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(MaxRep.opresult().doubledata(), 20.0);
+
+    XStore_Proto::Sum_REP SumRep;
+    Store.SumAggregate(TS_2016_LAST, FutureYearFirst, "TESTDB", 0, &SumRep);
+    ASSERT_EQ(SumRep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(SumRep.opresult(), -10.0);
+
+    XStore_Proto::Avg_REP AvgRep;
+    Store.AvgAggregate(TS_2016_LAST, FutureYearFirst, "TESTDB", 0, &AvgRep);
+    ASSERT_EQ(AvgRep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(AvgRep.opresult(), -5.0);
+}
+
+TEST_F(XStoreTest, MinAggregateTieAcrossYearsUnderParallelWalkPicksCorrectValue) {
+    // Companion to MinMaxAggregateTieBreakReturnsFirstEncounteredRow (which
+    // only covers a within-one-year, sequential-path tie): with >=4 years
+    // in play, ties are resolved by thread/segment processing order rather
+    // than strict chronological order (documented tradeoff in
+    // MinAggregate) -- this only asserts the numeric result is correct (the
+    // actual tied value), not which specific row's FData comes back, since
+    // that identity guarantee is the one thing NOT promised for a
+    // cross-thread tie. Same first/last-second-only data placement as
+    // AggregateOverWideMultiYearSpanUsesParallelWalkCorrectly, for the same
+    // "don't force a full-year scan on a middle year" reason.
+    XStore Store;
+    Store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+
+    unsigned long long ApproxFutureTs = TS_2016_LAST + (6ULL * 365 * 86400);
+    TimeStruct FutureYear(static_cast<time_t>(ApproxFutureTs), XStore_Proto::SECOND);
+    unsigned long long FutureYearFirst = static_cast<unsigned long long>(FutureYear.FirstEpoch);
+
+    XStore_Proto::UnaryInsert_REP InsertRep;
+    Store.UnaryInsert(TS_2016_LAST, MakeRow({FDouble(1.0)}), "TESTDB", &InsertRep);
+    ASSERT_NE(InsertRep.insertstatus().find("[INFO]"), std::string::npos);
+    Store.UnaryInsert(FutureYearFirst, MakeRow({FDouble(1.0)}), "TESTDB", &InsertRep);  // ties for MIN
+    ASSERT_NE(InsertRep.insertstatus().find("[INFO]"), std::string::npos);
+
+    XStore_Proto::Min_REP MinRep;
+    Store.MinAggregate(TS_2016_LAST, FutureYearFirst, "TESTDB", 0, &MinRep);
+    ASSERT_EQ(MinRep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(MinRep.opresult().doubledata(), 1.0);
+}
+
 TEST_F(XStoreTest, AggregateOverRangeWithMissingMiddleYearFileSkipsItAndReflectsRemainingYears) {
     // Same "warn and continue past a missing year file" shape as
     // RangeQuery/RangeDelete's analogous multi-year tests, but for the
