@@ -1,0 +1,13 @@
+Total parameter combination: 2
+ No. of Core: 32
+ Filename: data.csv
+ IP Address: 172.16.6.3
+ Port Number: 9491
+ Chunk Size: 1,000,000
+ Skip Size: 900
+ Database: MONGODB
+ Total time: 1,013.05s
+ Throughput: 7.11 Backtests per Hour
+ Avg. I/O Time: 1,010.78s
+ Avg. Compute Time: 0.89s
+

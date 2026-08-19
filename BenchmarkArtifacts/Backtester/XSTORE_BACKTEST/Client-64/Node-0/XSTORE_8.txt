@@ -1,0 +1,13 @@
+Total parameter combination: 8
+ No. of Core: 32
+ Filename: data.csv
+ IP Address: 172.16.6.3
+ Port Number: 9497
+ Chunk Size: 1,000,000
+ Skip Size: 900
+ Database: XSTORE
+ Total time: 41.84s
+ Throughput: 688.29 Backtests per Hour
+ Avg. I/O Time: 38.74s
+ Avg. Compute Time: 0.63s
+

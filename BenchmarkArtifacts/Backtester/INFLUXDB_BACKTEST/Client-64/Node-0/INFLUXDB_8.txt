@@ -1,0 +1,13 @@
+Total parameter combination: 8
+ No. of Core: 32
+ Filename: data.csv
+ IP Address: 172.16.6.3
+ Port Number: 9492
+ Chunk Size: 1,000,000
+ Skip Size: 900
+ Database: INFLUXDB
+ Total time: 2,708.91s
+ Throughput: 10.63 Backtests per Hour
+ Avg. I/O Time: 2,684.03s
+ Avg. Compute Time: 0.95s
+

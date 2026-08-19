@@ -1,0 +1,13 @@
+Total parameter combination: 1
+ No. of Core: 32
+ Filename: data.csv
+ IP Address: 172.16.6.3
+ Port Number: 8081
+ Chunk Size: 1,000,000
+ Skip Size: 900
+ Database: GRAPHITE
+ Total time: 2,784.79s
+ Throughput: 1.29 Backtests per Hour
+ Avg. I/O Time: 2,781.83s
+ Avg. Compute Time: 0.92s
+

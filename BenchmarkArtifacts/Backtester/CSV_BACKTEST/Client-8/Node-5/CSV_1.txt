@@ -1,0 +1,13 @@
+Total parameter combination: 1
+ No. of Core: 32
+ Filename: /NFS_STORAGE/BacktestData.csv
+ IP Address: 172.16.6.3
+ Port Number: 0
+ Chunk Size: 1,000,000
+ Skip Size: 900
+ Database: CSV
+ Total time: 833.53s
+ Throughput: 4.32 Backtests per Hour
+ Avg. I/O Time: 832.92s
+ Avg. Compute Time: 0.57s
+

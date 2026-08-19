@@ -1,0 +1,13 @@
+Total parameter combination: 64
+ No. of Core: 32
+ Filename: /NVME_RAID-0/BacktestData.parquet
+ IP Address: 127.0.0.1
+ Port Number: 0
+ Chunk Size: 1,000,000
+ Skip Size: 900
+ Database: PARQUET
+ Total time: 418.70s
+ Throughput: 550.28 Backtests per Hour
+ Avg. I/O Time: 203.35s
+ Avg. Compute Time: 2.20s
+
