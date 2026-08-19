@@ -26,14 +26,58 @@ IEEE/ACM Supercomputing/SC 2023
 </details>
 
 # System Requirements
-* Operating systems: Linux Ubuntu 22.04 LTS
-* Compiler: g++ 11.4.0 (C++ 17 standard)
-* Google Protocol Buffer v3.18.1 or higher
-* ZeroMQ CPP v4.8.1 or higher
+* Operating systems: Linux Ubuntu 24.04 LTS
+* Build tools: build-essential, cmake, g++ 11.4.0 (C++ 17 standard), git
+* Google Protocol Buffer — built from source, pinned to [commit `35cd01f`](https://github.com/protocolbuffers/protobuf/commit/35cd01f9fe9afbeea38cc7b979a3b6bfcde82c03) (v35.1)
+* ZeroMQ — `libzmq3-dev` (C library) plus bundled cppzmq header ([ClientSrc/Cpp/zmq.hpp](ClientSrc/Cpp/zmq.hpp))
+* sysstat, tmux — used by the server deployment scripts (see below)
 
 # How to Install
 * [Installation Wiki](https://gitlab.com/lvn2007/XStore/-/wikis/installation)
 
+### Quick Build
+```bash
+./build.sh
+```
+Builds XStore via CMake and stages a runnable server directory at `../XStore_Server`.
+
+### Server Deployment Scripts
+[BenchmarkArtifacts/scripts/XStore/](BenchmarkArtifacts/scripts/XStore/) has scripts to provision and run an XStore server end-to-end:
+* `initXStoreServer.sh <working_dir>` — installs dependencies, clones XStore, builds/installs pinned protobuf, compiles XStore, opens firewall port 9497.
+* `runXStoreServer.sh <isPurge=true|false> <working_dir>` — starts the server in tmux session `XStore`; `isPurge=true` wipes the existing DataStore first, `false` keeps it.
+
 # How to Use
 * [XStore API](https://gitlab.com/lvn2007/XStore/-/wikis/api)
 * [Data Structure](https://gitlab.com/lvn2007/XStore/-/wikis/Data%20Structure)
+* [Technical Reference](docs/XStore_Technical_Reference.md)
+
+### Client Libraries
+* [C++ client](ClientSrc/Cpp/) — see [example](ClientSrc/Cpp/example/XStore_Client_Example.cpp)
+* [Python client](ClientSrc/Python/XStore.py)
+
+# Benchmarks
+Performance evaluated across latency, throughput, aggregate/analytical queries, and backtesting workloads.
+
+<details open><summary>Latency</summary>
+
+![XStore Latency](BenchmarkArtifacts/XStore_latencyNumerical.svg)
+
+</details>
+
+<details open><summary>Throughput</summary>
+
+![XStore Throughput](BenchmarkArtifacts/XStore_throughputNumerical.svg)
+
+</details>
+
+<details open><summary>Aggregates / Analytical Queries</summary>
+
+![XStore Aggregates](BenchmarkArtifacts/XStore_analyticalQueries.svg)
+
+</details>
+
+<details open><summary>Backtesting</summary>
+
+![XStore Backtesting](BenchmarkArtifacts/XStore_Backtester.svg)
+
+</details>
