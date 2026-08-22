@@ -14,7 +14,7 @@ namespace xstore_test {
 
 namespace fs = std::filesystem;
 
-// One factory per `oneof oneOfData` branch in FData (see ProtoFile/XStore.proto)
+// One factory per `oneof oneOfData` branch in FData (see proto/XStore.proto)
 // so tests can build rows out of every type the wire format actually allows,
 // not just double/string/bool.
 inline XStore_Proto::FData FDouble(double v)                { XStore_Proto::FData f; f.set_doubledata(v); return f; }

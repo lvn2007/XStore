@@ -28,7 +28,7 @@
 #include <unistd.h>
 #include <unordered_set>
 
-#include "include/Logger/spdlog/fmt/fmt.h"
+#include <spdlog/fmt/fmt.h>
 #include "include/Logger/Logger.h"
 #include "tests/integration/XStoreTestSupport.h"
 

@@ -49,11 +49,11 @@ compile-client:
   needs:
     - job: "compile-server"
   script:
-    - cd ClientSrc && mkdir build && cd build
+    - cd client_src && mkdir build && cd build
     - cmake .. && make && cd ../../..
     - mkdir ~/XStore_Client ~/XStore_Client/build
     - ls
-    - cp -r XStore/ClientSrc/build/* ~/XStore_Client/build    # Copy to designated home folder so won't get cleaned-up by runner
+    - cp -r XStore/client_src/build/* ~/XStore_Client/build    # Copy to designated home folder so won't get cleaned-up by runner
 
 build-test-server:
   variables:

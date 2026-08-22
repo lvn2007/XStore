@@ -1,7 +1,7 @@
 #include "include/XStore/XStore_Internal.h"
 #include "include/DataStructs/TimeStruct.h"
 #include "include/DataStructs/FileRangeLock.h"
-#include "include/Logger/spdlog/fmt/fmt.h"
+#include <spdlog/fmt/fmt.h>
 #include "include/Logger/Logger.h"
 #include <algorithm>
 #include <filesystem>

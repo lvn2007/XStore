@@ -3,9 +3,9 @@
 
 #include <include/XStore/XStore.h>
 #include <thread>
-#include "include/Networking/zmq.hpp"
+#include <zmq.hpp>
 #include "XStore.pb.h"
-#include "include/Networking/zmq_addon.hpp"
+#include <zmq_addon.hpp>
 #include "include/Logger/Logger.h"
 
 class ZMQ_Server {

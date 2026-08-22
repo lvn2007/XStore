@@ -36,15 +36,15 @@ find_package(Protobuf REQUIRED)
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
-# Logging library - spdlog
-include_directories(include/Logger)
+# Vendored third-party headers (spdlog, cppzmq)
+include_directories(third_party)
 
 # Protobuf-compiler
 set(_PROTOBUF_PROTOC $<TARGET_FILE:protobuf::protoc>)
 message(STATUS "Using Protobuf ${Protobuf_VERSION}")
 
 # Proto file
-get_filename_component(XStore_proto "ProtoFile/XStore.proto" ABSOLUTE)
+get_filename_component(XStore_proto "proto/XStore.proto" ABSOLUTE)
 get_filename_component(XStore_proto_path "${XStore_proto}" PATH)
 
 set(PROTO_SRCS "${CMAKE_CURRENT_BINARY_DIR}/XStore.pb.cc")
@@ -75,9 +75,9 @@ add_executable(XStore src/main.cpp
         src/XStore/XStore_Aggregates.cpp
         include/XStore/XStore.h
         include/DataStructs/ValueStruct.h ${PROTO_SRCS} ${PROTO_HDRS}
-        include/Networking/zmq.hpp include/Networking/zmq_addon.hpp
+        third_party/zmq.hpp third_party/zmq_addon.hpp
         include/Networking/ZMQ_Server.h src/XStore_Networking/ZMQ_Server.cpp
-        include/Networking/zhelpers.hpp
+        third_party/zhelpers.hpp
         include/DataStructs/TimeStruct.h src/DataStructs/TimeStruct.cpp
         include/DataStructs/FileRangeLock.h src/DataStructs/FileRangeLock.cpp
         include/Logger/Logger.h)
@@ -90,10 +90,10 @@ endif()
 # ------------------------------------------------------------------
 # Tests
 # ------------------------------------------------------------------
-option(XSTORE_BUILD_CLIENT "Build the ClientSrc C++ client library/example" ON)
+option(XSTORE_BUILD_CLIENT "Build the client_src C++ client library/example" ON)
 
 if(XSTORE_BUILD_CLIENT)
-    add_subdirectory(ClientSrc/Cpp)
+    add_subdirectory(client_src/Cpp)
 endif()
 
 option(XSTORE_BUILD_TESTS "Build XStore test suite" ON)

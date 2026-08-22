@@ -389,7 +389,7 @@ template <typename T> void SendProto(zmq::socket_t &socket, const T &msg) {
 
 ## 8. Client Libraries
 
-### 8.1 C++ (`ClientSrc/Cpp/XStore_Client.h`) — header-only
+### 8.1 C++ (`client_src/Cpp/XStore_Client.h`) — header-only
 
 - All 17 RPCs funnel through one templated `SendRecv<RepT>(const Request&)`: serialize → blocking `send` → blocking `recv` (`zmq::recv_multipart` into a reused member buffer) → parse. Centralizing this means the 17 call sites can't drift out of sync the way hand-copied send/recv blocks would.
 - **Timeout semantics:** constructor takes `timeoutMs` (default −1 = block forever, matching legacy behavior). A `REQ` socket that hits a send/recv timeout is left in an **undefined state machine position** per ZeroMQ's own documentation — the documented fix is a fresh socket, not a retried send, hence `Reconnect()` exists as an explicit required step after catching a timeout, rather than being automatic/hidden.
@@ -397,7 +397,7 @@ template <typename T> void SendProto(zmq::socket_t &socket, const T &msg) {
 - Batch/Range insert helpers offer both a convenience overload (`vector<pair<timestamp, RowData>>`, internally Arena-built to amortize per-row submessage allocation for large batches) and an advanced overload that accepts a pre-built request message directly (move-friendly, for callers who want to reuse/construct the message themselves).
 - `XStore_FData::Double()/Int32()/String()/...` factory helpers exist because proto3 gives `sint32`/`fixed32`/`sfixed32` (etc.) the *same* C++ parameter type (`int32_t`) despite different wire encodings — overloading on parameter type alone can't disambiguate them, so intent is named explicitly instead.
 
-### 8.2 Python (`ClientSrc/Python/XStore.py` + generated `XStore_pb2.py`)
+### 8.2 Python (`client_src/Python/XStore.py` + generated `XStore_pb2.py`)
 
 Generated from the same `XStore.proto` (kept in sync with the C++ server's `Request`-envelope/oneof protocol — commit `115db5e` specifically fixed the Python client to wrap requests in the `Request` envelope and resync its generated `_pb2.py` after the server-side protocol changed, which is a concrete example of the wire-schema/client drift risk inherent to hand-maintained multi-language clients against one `.proto`).
 
@@ -497,7 +497,7 @@ UNARY_INSERT_RAND   UNARY_INSERT_SEQ   UNARY_QUERY_RAND   UNARY_QUERY_SEQ
 
 Naming convention observed in the artifacts (e.g. `BASIC-INSERT-BATCH-SEQ_Client-26_10-1000_900000-910000.parquet`): `<WORKLOAD-TAG>_Client-<clientID>_<param>-<param>_<rangeStart>-<rangeEnd>.parquet` — each file is one client's timed results for one contiguous timestamp sub-range of the 10-year (2000–2009), 128-column synthetic dataset described in §10.3, stored in **Parquet** for downstream analysis. This corpus is the empirical basis for whatever throughput/latency figures the associated paper reports at scale (as opposed to the single-machine, single-process numbers the in-repo `tests/perf` suite produces) — it exercises **SEQ vs. RAND** access patterns and **UNARY vs. BATCH** call granularity orthogonally across all four CRUD-adjacent operation families plus all four aggregate types, driven by XBench across a distributed multi-node client fleet against one XStore server.
 
-`BenchmarkArtifacts/` exists in the XStore repo but is currently empty (a designated output location, not yet populated in this checkout).
+`benchmark_artifact/` exists in the XStore repo but is currently empty (a designated output location, not yet populated in this checkout).
 
 ---
 
@@ -525,9 +525,9 @@ These are worth stating explicitly for a paper's "limitations/threats to validit
 
 - **Language/standard:** C++17 (`CMAKE_CXX_STANDARD 17`), compiled `-O3` in Release (the default build type if unspecified).
 - **Required external packages:** Abseil (`absl`, transitively via Protobuf), Google Protocol Buffers (≥3.18.1, `optimize_for = SPEED`, `--experimental_allow_proto3_optional`), ZeroMQ C++ bindings (cppzmq, ≥4.8.1 per README; headers vendored under `include/Networking/`), POSIX Threads.
-- **Vendored (bundled in-tree, not fetched):** spdlog (+ bundled fmt) under `include/Logger/` — the large majority of the graphify-derived node/edge count for this repository is this vendored logging/formatting library, not XStore's own logic; ZeroMQ C++ header bindings (`zmq.hpp`, `zmq_addon.hpp`, `zhelpers.hpp`) under both `include/Networking/` (server) and `ClientSrc/Cpp/` (client, duplicated so the client target has no dependency on the server's include tree).
+- **Vendored (bundled in-tree, not fetched):** spdlog (+ bundled fmt) under `third_party/spdlog/` — the large majority of the graphify-derived node/edge count for this repository is this vendored logging/formatting library, not XStore's own logic; ZeroMQ C++ header bindings (`zmq.hpp`, `zmq_addon.hpp`, `zhelpers.hpp`) live under `third_party/` (server copy) and are duplicated under `client_src/Cpp/third_party/` (client copy, kept self-contained within `client_src/Cpp/` so the client library has no dependency outside its own directory and can be copied out standalone).
 - **Fetched at configure time:** GoogleTest v1.17.0 via CMake `FetchContent` (only if `XSTORE_BUILD_TESTS`, default `ON`).
-- **Build targets:** `XStore` (server executable), optional `ClientSrc/Cpp` subdirectory (`XSTORE_BUILD_CLIENT`, default `ON`), optional `tests` subdirectory (`XSTORE_BUILD_TESTS`, default `ON`).
+- **Build targets:** `XStore` (server executable), optional `client_src/Cpp` subdirectory (`XSTORE_BUILD_CLIENT`, default `ON`), optional `tests` subdirectory (`XSTORE_BUILD_TESTS`, default `ON`).
 - **Large-file support** explicitly enabled (`_LARGEFILE_SOURCE`, `_LARGE_FILES`, `_FILE_OFFSET_BITS=64`) — expected given year-files can be large, fixed-width, and pre-`ftruncate`d to full-year capacity up front.
 - **CI** (`.gitlab-ci.ymll`, GitLab CI over LXC-restored runners): stages are Initialize (LXC snapshot restore) → OS Configuration (apt update/upgrade, install `build-essential cmake g++ protobuf-compiler libzmq3-dev libzstd-dev`) → Build (server, then client) → Test → Cleanup.
 - **XBench's own dependency surface** (separate build, §10.3): additionally requires Apache Arrow + `libparquet-dev` (via Apache's APT source) for its `DataManager`'s Parquet I/O, `argparse.hpp` (vendored header-only CLI parser), and driver-side database clients for whichever comparison systems are under test (MongoDB, InfluxDB, Graphite, and — unwired — TimescaleDB).
@@ -550,4 +550,4 @@ These are worth stating explicitly for a paper's "limitations/threats to validit
 
 ---
 
-*End of technical reference. Compiled from direct inspection of the XStore source tree (`src/`, `include/`, `ProtoFile/`, `ClientSrc/`, `tests/`), the sibling XBench benchmark-harness source tree (`/home/ubuntu/XBench`), the XStore project's git history, and its benchmark artifact layout, as of the repository state at commit `8c6c4fc`.*
+*End of technical reference. Compiled from direct inspection of the XStore source tree (`src/`, `include/`, `proto/`, `client_src/`, `tests/`), the sibling XBench benchmark-harness source tree (`/home/ubuntu/XBench`), the XStore project's git history, and its benchmark artifact layout, as of the repository state at commit `8c6c4fc`.*

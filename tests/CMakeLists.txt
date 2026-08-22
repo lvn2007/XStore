@@ -72,7 +72,7 @@ add_custom_command(TARGET xstore_network_tests POST_BUILD
 # real Unary/Batch/Range Insert+Query+Delete/aggregate round trips against a
 # live XStore server over the actual network (opt-in via XSTORE_LIVE_ADDR /
 # XSTORE_LIVE_PORT env vars -- GTEST_SKIPs otherwise, see that file's header).
-# Both link the XStoreClient INTERFACE target from ClientSrc/Cpp, which
+# Both link the XStoreClient INTERFACE target from client_src/Cpp, which
 # generates its own copy of the protobuf bindings -- kept in a separate
 # binary from xstore_tests/xstore_network_tests above so their
 # independently-generated XStore.pb.cc symbols never collide in one link.

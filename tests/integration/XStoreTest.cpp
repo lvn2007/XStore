@@ -26,7 +26,7 @@
 
 #include "include/DataStructs/TimeStruct.h"
 #include "include/DataStructs/FileRangeLock.h"
-#include "include/Logger/spdlog/fmt/fmt.h"
+#include <spdlog/fmt/fmt.h>
 #include "XStoreTestSupport.h"
 
 namespace fs = std::filesystem;
@@ -365,7 +365,7 @@ TEST_F(XStoreTest, UnaryInsertAllProtoDataTypesRoundTrip) {
     XStore Store;
     Store.CreateDB("TESTDB", XStore_Proto::SECOND, 256);
 
-    // Exercises every branch of FData's oneof (see ProtoFile/XStore.proto),
+    // Exercises every branch of FData's oneof (see proto/XStore.proto),
     // not just the double/string/bool trio used elsewhere in this file.
     XStore_Proto::UnaryInsert_REP InsertRep;
     Store.UnaryInsert(TS_2016_MID, MakeRow({
