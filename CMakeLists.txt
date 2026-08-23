@@ -78,6 +78,7 @@ add_executable(XStore src/main.cpp
         third_party/zmq.hpp third_party/zmq_addon.hpp
         include/Networking/ZMQ_Server.h src/XStore_Networking/ZMQ_Server.cpp
         third_party/zhelpers.hpp
+        third_party/argparse/argparse.hpp
         include/DataStructs/TimeStruct.h src/DataStructs/TimeStruct.cpp
         include/DataStructs/FileRangeLock.h src/DataStructs/FileRangeLock.cpp
         include/Logger/Logger.h)
