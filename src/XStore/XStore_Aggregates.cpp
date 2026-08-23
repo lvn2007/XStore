@@ -170,7 +170,7 @@ struct SumPartial {
 };
 }  // namespace
 
-void XStore::MinAggregate(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t,
+void XStore::MinAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
                             std::string_view db_name_view, unsigned short int column_idx, XStore_Proto::Min_REP *return_data) {
 
     const std::string &db_name = UpperCaseInto(db_name_view);
@@ -223,7 +223,7 @@ void XStore::MinAggregate(const unsigned long long int &start_epoch_t, const uns
     }
 }
 
-void XStore::MaxAggregate(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t,
+void XStore::MaxAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
                             std::string_view db_name_view, unsigned short int column_idx, XStore_Proto::Max_REP *return_data) {
 
     const std::string &db_name = UpperCaseInto(db_name_view);
@@ -265,7 +265,7 @@ void XStore::MaxAggregate(const unsigned long long int &start_epoch_t, const uns
     }
 }
 
-void XStore::SumAggregate(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t,
+void XStore::SumAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
                             std::string_view db_name_view, unsigned short int column_idx, XStore_Proto::Sum_REP *return_data) {
 
     const std::string &db_name = UpperCaseInto(db_name_view);
@@ -316,7 +316,7 @@ void XStore::SumAggregate(const unsigned long long int &start_epoch_t, const uns
     }
 }
 
-void XStore::AvgAggregate(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t,
+void XStore::AvgAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
                             std::string_view db_name_view, unsigned short int column_idx, XStore_Proto::Avg_REP *return_data) {
 
     const std::string &db_name = UpperCaseInto(db_name_view);

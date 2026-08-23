@@ -117,12 +117,12 @@ const std::string& XStore::CachedYearFilePath(const std::string &db_base_path, u
     return year_map.emplace(year, fmt::format("{}/{}.XSTORE", db_base_path, year)).first->second;
 }
 
-XStore_Proto::SysInfo_REP XStore::InfoQuery(std::string server_addr, int thread_count) {
+XStore_Proto::SysInfo_REP XStore::InfoQuery(std::string_view server_addr, int thread_count) {
     // Protobuf obj to be returned
     XStore_Proto::SysInfo_REP to_return;
 
     // Overview info
-    to_return.set_serveraddr(server_addr);
+    to_return.set_serveraddr(server_addr.data(), server_addr.size());
     to_return.set_threadcount(thread_count);
 
     // Loop through all db available in DataStore

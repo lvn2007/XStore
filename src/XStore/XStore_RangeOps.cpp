@@ -112,7 +112,7 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client,
 }
 
 // RANGE QUERY
-void XStore::RangeQuery(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t, std::string_view db_name_view, XStore_Proto::RangeQuery_REP *return_data) {
+void XStore::RangeQuery(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name_view, XStore_Proto::RangeQuery_REP *return_data) {
     // Ensure dbName string is all capitalized
     const std::string &db_name = UpperCaseInto(db_name_view);
 
@@ -256,7 +256,7 @@ void XStore::RangeQuery(const unsigned long long int &start_epoch_t, const unsig
 }
 
 // RANGE DELETE
-XStore_Proto::RangeDelete_REP XStore::RangeDelete(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t, std::string_view db_name_view) {
+XStore_Proto::RangeDelete_REP XStore::RangeDelete(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name_view) {
     // Protobuf obj to be returned
     XStore_Proto::RangeDelete_REP to_return;
     int delete_count = 0;

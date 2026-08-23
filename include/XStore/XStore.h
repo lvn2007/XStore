@@ -164,7 +164,7 @@ class XStore {
         XStore();
 
         // PROCESSING DbStats/info query
-        XStore_Proto::SysInfo_REP InfoQuery(std::string server_addr, int thread_count);
+        XStore_Proto::SysInfo_REP InfoQuery(std::string_view server_addr, int thread_count);
 
         // CREATING new DB instance with row length
         XStore_Proto::CreateDB_REP CreateDB(std::string_view db_name, XStore_Proto::TimeUnit time_resolution, short int row_length);
@@ -176,13 +176,13 @@ class XStore {
         XStore_Proto::RemoveDBFiles_REP RemoveDBFiles(XStore_Proto::RemoveDBFiles_REQ *proto_from_client, std::string_view db_name);
 
         // UNARY INSERT
-        void UnaryInsert(const unsigned long long int &epoch_time, const XStore_Proto::RowData &data, std::string_view db_name, XStore_Proto::UnaryInsert_REP *return_data);
+        void UnaryInsert(unsigned long long int epoch_time, const XStore_Proto::RowData &data, std::string_view db_name, XStore_Proto::UnaryInsert_REP *return_data);
 
         // UNARY QUERY
-        void UnaryQuery(const unsigned long long int &epoch_time, std::string_view db_name, XStore_Proto::UnaryQuery_REP *return_data);
+        void UnaryQuery(unsigned long long int epoch_time, std::string_view db_name, XStore_Proto::UnaryQuery_REP *return_data);
 
         // UNARY DELETE
-        XStore_Proto::UnaryDelete_REP UnaryDelete(const unsigned long long int &epoch_time, std::string_view db_name);
+        XStore_Proto::UnaryDelete_REP UnaryDelete(unsigned long long int epoch_time, std::string_view db_name);
 
         // BATCH INSERT
         void BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStore_Proto::BatchInsert_REP *return_data);
@@ -197,10 +197,10 @@ class XStore {
         void RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client, XStore_Proto::RangeInsert_REP *return_data);
 
         // RANGE QUERY
-        void RangeQuery(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t, std::string_view db_name, XStore_Proto::RangeQuery_REP *return_data);
+        void RangeQuery(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, XStore_Proto::RangeQuery_REP *return_data);
 
         // RANGE DELETE
-        XStore_Proto::RangeDelete_REP RangeDelete(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t, std::string_view db_name);
+        XStore_Proto::RangeDelete_REP RangeDelete(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name);
 
         // Walks [startEpochT, endEpochT] one year-file at a time for
         // Min/Max/Sum/AvgAggregate, read-locking each existing segment and
@@ -259,16 +259,16 @@ class XStore {
                                          double& sum_out, unsigned long long& valid_count_out);
 
         // MIN - AGGREGATE
-        void MinAggregate(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Min_REP *return_data);
+        void MinAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Min_REP *return_data);
 
         // MAX - AGGREGATE
-        void MaxAggregate(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Max_REP *return_data);
+        void MaxAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Max_REP *return_data);
 
         // SUM - AGGREGATE
-        void SumAggregate(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Sum_REP *return_data);
+        void SumAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Sum_REP *return_data);
 
         // AVG - AGGREGATE
-        void AvgAggregate(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Avg_REP *return_data);
+        void AvgAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Avg_REP *return_data);
 
         // Initialize DB
         void InitDB();

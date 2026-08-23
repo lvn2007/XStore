@@ -10,7 +10,7 @@
 #include <vector>
 
 // UNARY INSERT
-void XStore::UnaryInsert(const unsigned long long int &unix_time, const XStore_Proto::RowData &data, std::string_view db_name_view, XStore_Proto::UnaryInsert_REP *return_data) {
+void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::RowData &data, std::string_view db_name_view, XStore_Proto::UnaryInsert_REP *return_data) {
     // Ensure dbName string is all capitalized
     const std::string &db_name = UpperCaseInto(db_name_view);
 
@@ -114,7 +114,7 @@ void XStore::UnaryInsert(const unsigned long long int &unix_time, const XStore_P
 }
 
 // UNARY QUERY
-void XStore::UnaryQuery(const unsigned long long int &unix_time, std::string_view db_name_view, XStore_Proto::UnaryQuery_REP *return_data) {
+void XStore::UnaryQuery(unsigned long long int unix_time, std::string_view db_name_view, XStore_Proto::UnaryQuery_REP *return_data) {
     return_data->set_timestamp(unix_time);
 
     // Ensure dbName string is all capitalized
@@ -196,7 +196,7 @@ void XStore::UnaryQuery(const unsigned long long int &unix_time, std::string_vie
 }
 
 // UNARY DELETE
-XStore_Proto::UnaryDelete_REP XStore::UnaryDelete(const unsigned long long int &epoch_time, std::string_view db_name_view) {
+XStore_Proto::UnaryDelete_REP XStore::UnaryDelete(unsigned long long int epoch_time, std::string_view db_name_view) {
     // Protobuf obj to be returned
     XStore_Proto::UnaryDelete_REP to_return;
 
