@@ -36,31 +36,31 @@ using namespace xstore_test;
 
 namespace {
 
-unsigned long long PerfOpCount(unsigned long long DefaultCount) {
-    if (const char *Env = std::getenv("XSTORE_PERF_N")) {
-        char *End = nullptr;
-        unsigned long long Parsed = std::strtoull(Env, &End, 10);
-        if (End != Env && Parsed > 0) return Parsed;
+unsigned long long PerfOpCount(unsigned long long default_count) {
+    if (const char *env = std::getenv("XSTORE_PERF_N")) {
+        char *end = nullptr;
+        unsigned long long parsed = std::strtoull(env, &end, 10);
+        if (end != env && parsed > 0) return parsed;
     }
-    return DefaultCount;
+    return default_count;
 }
 
 struct PerfStats {
-    std::string Name;
-    unsigned long long Count;
-    double ElapsedSeconds;
+    std::string name;
+    unsigned long long count;
+    double elapsed_seconds;
 
-    double OpsPerSec() const { return ElapsedSeconds > 0 ? (double)Count / ElapsedSeconds : 0.0; }
-    double AvgLatencyUs() const { return Count > 0 ? (ElapsedSeconds * 1'000'000.0) / (double)Count : 0.0; }
+    double OpsPerSec() const { return elapsed_seconds > 0 ? (double)count / elapsed_seconds : 0.0; }
+    double AvgLatencyUs() const { return count > 0 ? (elapsed_seconds * 1'000'000.0) / (double)count : 0.0; }
 };
 
-void ReportPerf(const PerfStats &Stats) {
+void ReportPerf(const PerfStats &stats) {
     std::cout << std::fixed << std::setprecision(2)
-              << "[PERF] " << Stats.Name
-              << " | rows=" << Stats.Count
-              << " | elapsed=" << Stats.ElapsedSeconds << "s"
-              << " | throughput=" << Stats.OpsPerSec() << " rows/sec"
-              << " | avg_latency=" << Stats.AvgLatencyUs() << "us/row"
+              << "[PERF] " << stats.name
+              << " | rows=" << stats.count
+              << " | elapsed=" << stats.elapsed_seconds << "s"
+              << " | throughput=" << stats.OpsPerSec() << " rows/sec"
+              << " | avg_latency=" << stats.AvgLatencyUs() << "us/row"
               << std::endl;
 }
 
@@ -75,16 +75,16 @@ XStore_Proto::RowData PerfRow(unsigned long long i) {
 // fsync+POSIX_FADV_DONTNEED evicts exactly this DB's year files from page
 // cache without touching the rest of the machine's cache. fsync first:
 // DONTNEED on a still-dirty page is not guaranteed to evict it.
-void DropPageCacheForDb(const std::string &dbName) {
-    fs::path DbDir = fs::current_path() / "DataStore" / dbName;
-    if (!fs::exists(DbDir)) return;
-    for (const auto &Entry : fs::directory_iterator(DbDir)) {
-        if (Entry.path().extension() != ".XSTORE") continue;
-        int Fd = open(Entry.path().c_str(), O_RDONLY);
-        if (Fd < 0) continue;
-        fsync(Fd);
-        posix_fadvise(Fd, 0, 0, POSIX_FADV_DONTNEED);
-        close(Fd);
+void DropPageCacheForDb(const std::string &db_name) {
+    fs::path db_dir = fs::current_path() / "DataStore" / db_name;
+    if (!fs::exists(db_dir)) return;
+    for (const auto &entry : fs::directory_iterator(db_dir)) {
+        if (entry.path().extension() != ".XSTORE") continue;
+        int fd = open(entry.path().c_str(), O_RDONLY);
+        if (fd < 0) continue;
+        fsync(fd);
+        posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+        close(fd);
     }
 }
 
@@ -92,23 +92,23 @@ void DropPageCacheForDb(const std::string &dbName) {
 
 class XStorePerfTest : public ::testing::Test {
  protected:
-  std::unique_ptr<ScratchDir> Scratch;
+  std::unique_ptr<ScratchDir> scratch;
   // Mid-year anchor (2024-05-30 12:00:00 UTC) so N sequential seconds from
   // here stay within a single year file for any N used by this suite --
   // isolates steady-state per-row cost from one-time year-file creation.
-  static constexpr unsigned long long BaseTs = 1717070400ULL;
+  static constexpr unsigned long long BASE_TS = 1717070400ULL;
 
   void SetUp() override {
       // XStore logs an [INFO] line per insert/query call via the default
       // spdlog logger; at 200k+ calls that stdout I/O would dominate the
       // timed loops below and measure logging cost instead of XStore's.
       spdlog::set_level(spdlog::level::warn);
-      Scratch = std::make_unique<ScratchDir>("xstore_perf_test");
-      for (auto &Shard : XStore::CfgShards) Shard.Map.clear();
+      scratch = std::make_unique<ScratchDir>("xstore_perf_test");
+      for (auto &shard : XStore::cfg_shards) shard.map.clear();
   }
 
   void TearDown() override {
-      Scratch.reset();
+      scratch.reset();
   }
 };
 
@@ -118,40 +118,40 @@ class XStorePerfTest : public ::testing::Test {
 // ---------------------------------------------------------------------
 
 TEST_F(XStorePerfTest, UnaryInsertThroughput) {
-    XStore Store;
-    Store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
-    const unsigned long long N = PerfOpCount(200'000);
+    XStore store;
+    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    const unsigned long long n = PerfOpCount(200'000);
 
-    XStore_Proto::UnaryInsert_REP Rep;
-    auto Start = std::chrono::steady_clock::now();
-    for (unsigned long long i = 0; i < N; i++) {
-        Store.UnaryInsert(BaseTs + i, PerfRow(i), "PERFDB", &Rep);
+    XStore_Proto::UnaryInsert_REP rep;
+    auto start = std::chrono::steady_clock::now();
+    for (unsigned long long i = 0; i < n; i++) {
+        store.UnaryInsert(BASE_TS + i, PerfRow(i), "PERFDB", &rep);
     }
-    double Elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - Start).count();
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
-    ASSERT_NE(Rep.insertstatus().find("[INFO]"), std::string::npos) << "last insert failed: " << Rep.insertstatus();
-    ReportPerf({"UnaryInsert", N, Elapsed});
+    ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << "last insert failed: " << rep.insertstatus();
+    ReportPerf({"UnaryInsert", n, elapsed});
 }
 
 TEST_F(XStorePerfTest, UnaryQueryThroughput) {
-    XStore Store;
-    Store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
-    const unsigned long long N = PerfOpCount(200'000);
+    XStore store;
+    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    const unsigned long long n = PerfOpCount(200'000);
 
-    for (unsigned long long i = 0; i < N; i++) {
-        XStore_Proto::UnaryInsert_REP SeedRep;
-        Store.UnaryInsert(BaseTs + i, PerfRow(i), "PERFDB", &SeedRep);
+    for (unsigned long long i = 0; i < n; i++) {
+        XStore_Proto::UnaryInsert_REP seed_rep;
+        store.UnaryInsert(BASE_TS + i, PerfRow(i), "PERFDB", &seed_rep);
     }
 
-    XStore_Proto::UnaryQuery_REP QueryRep;
-    auto Start = std::chrono::steady_clock::now();
-    for (unsigned long long i = 0; i < N; i++) {
-        Store.UnaryQuery(BaseTs + i, "PERFDB", &QueryRep);
+    XStore_Proto::UnaryQuery_REP query_rep;
+    auto start = std::chrono::steady_clock::now();
+    for (unsigned long long i = 0; i < n; i++) {
+        store.UnaryQuery(BASE_TS + i, "PERFDB", &query_rep);
     }
-    double Elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - Start).count();
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
-    ASSERT_EQ(QueryRep.data().fielddata_size(), 3) << "last query returned unexpected column count";
-    ReportPerf({"UnaryQuery", N, Elapsed});
+    ASSERT_EQ(query_rep.data().fielddata_size(), 3) << "last query returned unexpected column count";
+    ReportPerf({"UnaryQuery", n, elapsed});
 }
 
 // ---------------------------------------------------------------------
@@ -175,65 +175,65 @@ namespace {
 // requires the exact same insert order/spread each time). Collision retry
 // via unordered_set is fine here: N is always a small fraction of
 // SpanSeconds, so collision odds are negligible.
-std::vector<unsigned long long> UniqueRandomTimestamps(unsigned long long baseTs, unsigned long long spanSeconds, unsigned long long n) {
-    std::mt19937_64 Rng(42);
-    std::uniform_int_distribution<unsigned long long> Dist(0, spanSeconds - 1);
-    std::unordered_set<unsigned long long> Seen;
-    std::vector<unsigned long long> Out;
-    Out.reserve(n);
-    while (Out.size() < n) {
-        unsigned long long Candidate = baseTs + Dist(Rng);
-        if (Seen.insert(Candidate).second) {
-            Out.push_back(Candidate);
+std::vector<unsigned long long> UniqueRandomTimestamps(unsigned long long base_ts, unsigned long long span_seconds, unsigned long long n) {
+    std::mt19937_64 rng(42);
+    std::uniform_int_distribution<unsigned long long> dist(0, span_seconds - 1);
+    std::unordered_set<unsigned long long> seen;
+    std::vector<unsigned long long> out;
+    out.reserve(n);
+    while (out.size() < n) {
+        unsigned long long candidate = base_ts + dist(rng);
+        if (seen.insert(candidate).second) {
+            out.push_back(candidate);
         }
     }
-    return Out;
+    return out;
 }
 
 }  // namespace
 
 TEST_F(XStorePerfTest, UnaryInsertRandomThroughput) {
-    XStore Store;
-    Store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
-    const unsigned long long N = PerfOpCount(200'000);
+    XStore store;
+    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    const unsigned long long n = PerfOpCount(200'000);
 
     // 2020-01-01T00:00:00Z, spanning 5 years -- several distinct year files
     // get touched, same as the real UNARY_RAND workload's multi-year spread.
-    constexpr unsigned long long RandBaseTs = 1577836800ULL;
-    constexpr unsigned long long SpanSeconds = 5ULL * 365 * 86'400;
-    std::vector<unsigned long long> Timestamps = UniqueRandomTimestamps(RandBaseTs, SpanSeconds, N);
+    constexpr unsigned long long rand_base_ts = 1577836800ULL;
+    constexpr unsigned long long span_seconds = 5ULL * 365 * 86'400;
+    std::vector<unsigned long long> timestamps = UniqueRandomTimestamps(rand_base_ts, span_seconds, n);
 
     // Best-of-3, OS page cache for PERFDB's files dropped before every timed
     // pass -- isolates steady-state per-row cost (path build, lock registry
     // lookup, pwrite) from one-shot OS readahead/writeback state, same
     // methodology as RunMinAggregateCompare's cold runs below.
-    constexpr int kRndRepeats = 3;
-    double Best = std::numeric_limits<double>::max();
-    XStore_Proto::UnaryInsert_REP Rep;
-    for (int Iter = 0; Iter < kRndRepeats; Iter++) {
+    constexpr int k_rnd_repeats = 3;
+    double best = std::numeric_limits<double>::max();
+    XStore_Proto::UnaryInsert_REP rep;
+    for (int iter = 0; iter < k_rnd_repeats; iter++) {
         DropPageCacheForDb("PERFDB");
-        auto Start = std::chrono::steady_clock::now();
-        for (unsigned long long i = 0; i < N; i++) {
-            Store.UnaryInsert(Timestamps[i], PerfRow(i), "PERFDB", &Rep);
+        auto start = std::chrono::steady_clock::now();
+        for (unsigned long long i = 0; i < n; i++) {
+            store.UnaryInsert(timestamps[i], PerfRow(i), "PERFDB", &rep);
         }
-        double Elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - Start).count();
-        Best = std::min(Best, Elapsed);
+        double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        best = std::min(best, elapsed);
     }
 
-    ASSERT_NE(Rep.insertstatus().find("[INFO]"), std::string::npos) << "last insert failed: " << Rep.insertstatus();
+    ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << "last insert failed: " << rep.insertstatus();
 
     // Correctness: spot-check every Nth row round-trips through UnaryQuery
     // exactly as inserted -- catches a broken path-cache/lock-registry
     // variant silently writing to (or reading back from) the wrong file.
-    const unsigned long long CheckStride = std::max<unsigned long long>(1, N / 500);
-    for (unsigned long long i = 0; i < N; i += CheckStride) {
-        XStore_Proto::UnaryQuery_REP QueryRep;
-        Store.UnaryQuery(Timestamps[i], "PERFDB", &QueryRep);
-        ASSERT_EQ(QueryRep.data().fielddata_size(), 3) << "row " << i << " (ts=" << Timestamps[i] << ") missing/corrupt after RND insert";
-        ASSERT_DOUBLE_EQ(QueryRep.data().fielddata(0).doubledata(), (double)i) << "row " << i << " (ts=" << Timestamps[i] << ") wrong data -- wrote to/read from wrong file";
+    const unsigned long long check_stride = std::max<unsigned long long>(1, n / 500);
+    for (unsigned long long i = 0; i < n; i += check_stride) {
+        XStore_Proto::UnaryQuery_REP query_rep;
+        store.UnaryQuery(timestamps[i], "PERFDB", &query_rep);
+        ASSERT_EQ(query_rep.data().fielddata_size(), 3) << "row " << i << " (ts=" << timestamps[i] << ") missing/corrupt after RND insert";
+        ASSERT_DOUBLE_EQ(query_rep.data().fielddata(0).doubledata(), (double)i) << "row " << i << " (ts=" << timestamps[i] << ") wrong data -- wrote to/read from wrong file";
     }
 
-    ReportPerf({"UnaryInsertRND", N, Best});
+    ReportPerf({"UnaryInsertRND", n, best});
 }
 
 // Concurrency variant: T worker threads, each its own XStore instance (own
@@ -243,54 +243,54 @@ TEST_F(XStorePerfTest, UnaryInsertRandomThroughput) {
 // contention specifically -- the single-threaded test above can't surface
 // that, since a lone thread never contends with itself.
 TEST_F(XStorePerfTest, UnaryInsertRandomConcurrentThroughput) {
-    XStore Setup;
-    Setup.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    XStore setup;
+    setup.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
 
-    const unsigned long long N = PerfOpCount(200'000);
-    constexpr unsigned int T = 8;
-    constexpr unsigned long long RandBaseTs = 1577836800ULL;
+    const unsigned long long n = PerfOpCount(200'000);
+    constexpr unsigned int num_threads = 8;
+    constexpr unsigned long long rand_base_ts = 1577836800ULL;
     // 30 distinct year files, well past FdCacheCap (8, process-wide) --
     // guarantees the fd cache actually evicts under this test's concurrency
     // instead of every touched file coincidentally fitting in the cache, so
     // this reliably exercises (and regresses against) the eviction-vs.
     // in-flight-use race GetOrOpenFile/GetOrMapFile guard against.
-    constexpr unsigned long long SpanSeconds = 30ULL * 365 * 86'400;
-    std::vector<unsigned long long> Timestamps = UniqueRandomTimestamps(RandBaseTs, SpanSeconds, N);
+    constexpr unsigned long long span_seconds = 30ULL * 365 * 86'400;
+    std::vector<unsigned long long> timestamps = UniqueRandomTimestamps(rand_base_ts, span_seconds, n);
 
     DropPageCacheForDb("PERFDB");
 
-    std::vector<std::thread> Workers;
-    std::vector<XStore_Proto::UnaryInsert_REP> Reps(T);
-    auto Start = std::chrono::steady_clock::now();
-    for (unsigned int t = 0; t < T; t++) {
-        Workers.emplace_back([&, t]() {
-            XStore ThreadStore;
-            for (unsigned long long i = t; i < N; i += T) {
-                ThreadStore.UnaryInsert(Timestamps[i], PerfRow(i), "PERFDB", &Reps[t]);
+    std::vector<std::thread> workers;
+    std::vector<XStore_Proto::UnaryInsert_REP> reps(num_threads);
+    auto start = std::chrono::steady_clock::now();
+    for (unsigned int t = 0; t < num_threads; t++) {
+        workers.emplace_back([&, t]() {
+            XStore thread_store;
+            for (unsigned long long i = t; i < n; i += num_threads) {
+                thread_store.UnaryInsert(timestamps[i], PerfRow(i), "PERFDB", &reps[t]);
             }
         });
     }
-    for (auto &W : Workers) W.join();
-    double Elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - Start).count();
+    for (auto &w : workers) w.join();
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
-    for (unsigned int t = 0; t < T; t++) {
-        ASSERT_NE(Reps[t].insertstatus().find("[INFO]"), std::string::npos) << "thread " << t << " last insert failed: " << Reps[t].insertstatus();
+    for (unsigned int t = 0; t < num_threads; t++) {
+        ASSERT_NE(reps[t].insertstatus().find("[INFO]"), std::string::npos) << "thread " << t << " last insert failed: " << reps[t].insertstatus();
     }
 
     // Correctness: every row round-trips, and (critically for a concurrency
     // bug) no thread's writes clobbered another's -- each timestamp is
     // unique across threads by construction (interleaved partition of
     // Timestamps), so any cross-talk would show up as a wrong value here.
-    XStore Verify;
-    const unsigned long long CheckStride = std::max<unsigned long long>(1, N / 500);
-    for (unsigned long long i = 0; i < N; i += CheckStride) {
-        XStore_Proto::UnaryQuery_REP QueryRep;
-        Verify.UnaryQuery(Timestamps[i], "PERFDB", &QueryRep);
-        ASSERT_EQ(QueryRep.data().fielddata_size(), 3) << "row " << i << " (ts=" << Timestamps[i] << ") missing/corrupt after concurrent RND insert";
-        ASSERT_DOUBLE_EQ(QueryRep.data().fielddata(0).doubledata(), (double)i) << "row " << i << " (ts=" << Timestamps[i] << ") wrong data -- cross-thread clobber";
+    XStore verify;
+    const unsigned long long check_stride = std::max<unsigned long long>(1, n / 500);
+    for (unsigned long long i = 0; i < n; i += check_stride) {
+        XStore_Proto::UnaryQuery_REP query_rep;
+        verify.UnaryQuery(timestamps[i], "PERFDB", &query_rep);
+        ASSERT_EQ(query_rep.data().fielddata_size(), 3) << "row " << i << " (ts=" << timestamps[i] << ") missing/corrupt after concurrent RND insert";
+        ASSERT_DOUBLE_EQ(query_rep.data().fielddata(0).doubledata(), (double)i) << "row " << i << " (ts=" << timestamps[i] << ") wrong data -- cross-thread clobber";
     }
 
-    ReportPerf({"UnaryInsertRND[concurrent T=" + std::to_string(T) + "]", N, Elapsed});
+    ReportPerf({"UnaryInsertRND[concurrent T=" + std::to_string(num_threads) + "]", n, elapsed});
 }
 
 // ---------------------------------------------------------------------
@@ -306,67 +306,67 @@ TEST_F(XStorePerfTest, UnaryInsertRandomConcurrentThroughput) {
 
 namespace {
 
-const std::string& BenchCachedDbBasePath(const std::string &dbName) {
-    thread_local std::unordered_map<std::string, std::string> TlsBasePaths;
-    auto It = TlsBasePaths.find(dbName);
-    if (It != TlsBasePaths.end()) return It->second;
-    return TlsBasePaths.emplace(dbName, "/fake/DataStore/" + dbName).first->second;
+const std::string& BenchCachedDbBasePath(const std::string &db_name) {
+    thread_local std::unordered_map<std::string, std::string> tls_base_paths;
+    auto it = tls_base_paths.find(db_name);
+    if (it != tls_base_paths.end()) return it->second;
+    return tls_base_paths.emplace(db_name, "/fake/DataStore/" + db_name).first->second;
 }
 
-const std::string& BenchCachedYearFilePath(const std::string &dbBasePath, unsigned short year) {
-    thread_local std::unordered_map<std::string, std::unordered_map<unsigned short, std::string>> TlsYearPaths;
-    std::unordered_map<unsigned short, std::string> &YearMap = TlsYearPaths[dbBasePath];
-    auto It = YearMap.find(year);
-    if (It != YearMap.end()) return It->second;
-    return YearMap.emplace(year, fmt::format("{}/{}.XSTORE", dbBasePath, year)).first->second;
+const std::string& BenchCachedYearFilePath(const std::string &db_base_path, unsigned short year) {
+    thread_local std::unordered_map<std::string, std::unordered_map<unsigned short, std::string>> tls_year_paths;
+    std::unordered_map<unsigned short, std::string> &year_map = tls_year_paths[db_base_path];
+    auto it = year_map.find(year);
+    if (it != year_map.end()) return it->second;
+    return year_map.emplace(year, fmt::format("{}/{}.XSTORE", db_base_path, year)).first->second;
 }
 
 }  // namespace
 
 TEST(YearPathCacheMicrobench, HashmapCacheBeatsRawRebuildUnderBoundedRandomYearAccess) {
-    const unsigned long long N = PerfOpCount(2'000'000);
-    constexpr int KYears = 30;  // matches the RND tests' 30-year span above
-    const std::string DbName = "PERFDB";
+    const unsigned long long n = PerfOpCount(2'000'000);
+    constexpr int k_years = 30;  // matches the RND tests' 30-year span above
+    const std::string db_name = "PERFDB";
 
-    std::mt19937 Rng(7);
-    std::uniform_int_distribution<int> YearDist(0, KYears - 1);
-    std::vector<unsigned short> Years(N);
-    for (auto &Y : Years) Y = static_cast<unsigned short>(2000 + YearDist(Rng));
+    std::mt19937 rng(7);
+    std::uniform_int_distribution<int> year_dist(0, k_years - 1);
+    std::vector<unsigned short> years(n);
+    for (auto &y : years) y = static_cast<unsigned short>(2000 + year_dist(rng));
 
-    volatile size_t Sink = 0;  // keeps the optimizer from eliding the calls
+    volatile size_t sink = 0;  // keeps the optimizer from eliding the calls
 
     // Warm the cache once (untimed) so the timed pass measures steady-state
     // hit cost, not KYears' one-time misses -- this IS the behavior a real
     // worker thread gets after its first pass over a bounded year range.
-    for (int y = 0; y < KYears; y++) {
-        Sink += BenchCachedYearFilePath(BenchCachedDbBasePath(DbName), static_cast<unsigned short>(2000 + y)).size();
+    for (int y = 0; y < k_years; y++) {
+        sink += BenchCachedYearFilePath(BenchCachedDbBasePath(db_name), static_cast<unsigned short>(2000 + y)).size();
     }
 
-    auto CachedStart = std::chrono::steady_clock::now();
-    for (unsigned long long i = 0; i < N; i++) {
-        Sink += BenchCachedYearFilePath(BenchCachedDbBasePath(DbName), Years[i]).size();
+    auto cached_start = std::chrono::steady_clock::now();
+    for (unsigned long long i = 0; i < n; i++) {
+        sink += BenchCachedYearFilePath(BenchCachedDbBasePath(db_name), years[i]).size();
     }
-    double CachedElapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - CachedStart).count();
+    double cached_elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - cached_start).count();
 
     // Raw equivalent: what every call paid before these caches existed --
-    // JoinPath(DataStoreDir, dbName) reproduced inline (JoinPath itself is
+    // JoinPath(data_store_dir, dbName) reproduced inline (JoinPath itself is
     // private) followed by fmt::format for the year file, same as
     // DbBasePath()+CachedYearFilePath's miss path.
-    auto RawStart = std::chrono::steady_clock::now();
-    for (unsigned long long i = 0; i < N; i++) {
-        std::string RawBasePath = "/fake/DataStore/" + DbName;
-        Sink += fmt::format("{}/{}.XSTORE", RawBasePath, Years[i]).size();
+    auto raw_start = std::chrono::steady_clock::now();
+    for (unsigned long long i = 0; i < n; i++) {
+        std::string raw_base_path = "/fake/DataStore/" + db_name;
+        sink += fmt::format("{}/{}.XSTORE", raw_base_path, years[i]).size();
     }
-    double RawElapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - RawStart).count();
+    double raw_elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - raw_start).count();
 
-    ASSERT_GT(Sink, 0u);
+    ASSERT_GT(sink, 0u);
 
-    double SpeedupPct = RawElapsed > 0 ? 100.0 * (RawElapsed - CachedElapsed) / RawElapsed : 0.0;
-    ReportPerf({"YearPathCache[hashmap-cached]", N, CachedElapsed});
-    ReportPerf({"YearPathCache[raw-rebuild]", N, RawElapsed});
-    std::cout << "[PERF] YearPathCache: hashmap-cached vs raw rebuild, " << KYears << "-year bounded RND access ("
-              << N << " calls): " << std::fixed << std::setprecision(1) << SpeedupPct << "% "
-              << (SpeedupPct >= 0 ? "faster" : "slower") << std::endl;
+    double speedup_pct = raw_elapsed > 0 ? 100.0 * (raw_elapsed - cached_elapsed) / raw_elapsed : 0.0;
+    ReportPerf({"YearPathCache[hashmap-cached]", n, cached_elapsed});
+    ReportPerf({"YearPathCache[raw-rebuild]", n, raw_elapsed});
+    std::cout << "[PERF] YearPathCache: hashmap-cached vs raw rebuild, " << k_years << "-year bounded RND access ("
+              << n << " calls): " << std::fixed << std::setprecision(1) << speedup_pct << "% "
+              << (speedup_pct >= 0 ? "faster" : "slower") << std::endl;
 }
 
 // ---------------------------------------------------------------------
@@ -375,53 +375,53 @@ TEST(YearPathCacheMicrobench, HashmapCacheBeatsRawRebuildUnderBoundedRandomYearA
 // ---------------------------------------------------------------------
 
 TEST_F(XStorePerfTest, BatchInsertThroughput) {
-    XStore Store;
-    Store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
-    const unsigned long long N = PerfOpCount(200'000);
+    XStore store;
+    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    const unsigned long long n = PerfOpCount(200'000);
 
-    XStore_Proto::BatchInsert_REQ Req;
-    Req.set_dbname("PERFDB");
-    for (unsigned long long i = 0; i < N; i++) {
-        XStore_Proto::BatchInsert_DATA *Entry = Req.add_batchinsert_data();
-        Entry->set_timestamp(BaseTs + i);
-        *Entry->mutable_data() = PerfRow(i);
+    XStore_Proto::BatchInsert_REQ req;
+    req.set_dbname("PERFDB");
+    for (unsigned long long i = 0; i < n; i++) {
+        XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
+        entry->set_timestamp(BASE_TS + i);
+        *entry->mutable_data() = PerfRow(i);
     }
 
-    XStore_Proto::BatchInsert_REP Rep;
-    auto Start = std::chrono::steady_clock::now();
-    Store.BatchInsert(&Req, &Rep);
-    double Elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - Start).count();
+    XStore_Proto::BatchInsert_REP rep;
+    auto start = std::chrono::steady_clock::now();
+    store.BatchInsert(&req, &rep);
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
-    EXPECT_NE(Rep.insertstatus().find(fmt::format("Inserted {} elements", N)), std::string::npos) << Rep.insertstatus();
-    ReportPerf({"BatchInsert", N, Elapsed});
+    EXPECT_NE(rep.insertstatus().find(fmt::format("Inserted {} elements", n)), std::string::npos) << rep.insertstatus();
+    ReportPerf({"BatchInsert", n, elapsed});
 }
 
 TEST_F(XStorePerfTest, BatchQueryThroughput) {
-    XStore Store;
-    Store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
-    const unsigned long long N = PerfOpCount(200'000);
+    XStore store;
+    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    const unsigned long long n = PerfOpCount(200'000);
 
-    XStore_Proto::BatchInsert_REQ InsertReq;
-    InsertReq.set_dbname("PERFDB");
-    for (unsigned long long i = 0; i < N; i++) {
-        XStore_Proto::BatchInsert_DATA *Entry = InsertReq.add_batchinsert_data();
-        Entry->set_timestamp(BaseTs + i);
-        *Entry->mutable_data() = PerfRow(i);
+    XStore_Proto::BatchInsert_REQ insert_req;
+    insert_req.set_dbname("PERFDB");
+    for (unsigned long long i = 0; i < n; i++) {
+        XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
+        entry->set_timestamp(BASE_TS + i);
+        *entry->mutable_data() = PerfRow(i);
     }
-    XStore_Proto::BatchInsert_REP InsertRep;
-    Store.BatchInsert(&InsertReq, &InsertRep);
+    XStore_Proto::BatchInsert_REP insert_rep;
+    store.BatchInsert(&insert_req, &insert_rep);
 
-    XStore_Proto::BatchQuery_REQ QueryReq;
-    QueryReq.set_dbname("PERFDB");
-    for (unsigned long long i = 0; i < N; i++) QueryReq.add_timestamp(BaseTs + i);
+    XStore_Proto::BatchQuery_REQ query_req;
+    query_req.set_dbname("PERFDB");
+    for (unsigned long long i = 0; i < n; i++) query_req.add_timestamp(BASE_TS + i);
 
-    XStore_Proto::BatchQuery_REP QueryRep;
-    auto Start = std::chrono::steady_clock::now();
-    Store.BatchQuery(&QueryReq, &QueryRep);
-    double Elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - Start).count();
+    XStore_Proto::BatchQuery_REP query_rep;
+    auto start = std::chrono::steady_clock::now();
+    store.BatchQuery(&query_req, &query_rep);
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
-    ASSERT_EQ(QueryRep.queryresponse_size(), (int)N) << "batch query lost/gained rows";
-    ReportPerf({"BatchQuery", N, Elapsed});
+    ASSERT_EQ(query_rep.queryresponse_size(), (int)n) << "batch query lost/gained rows";
+    ReportPerf({"BatchQuery", n, elapsed});
 }
 
 // ---------------------------------------------------------------------
@@ -432,49 +432,49 @@ TEST_F(XStorePerfTest, BatchQueryThroughput) {
 // ---------------------------------------------------------------------
 
 TEST_F(XStorePerfTest, RangeInsertThroughput) {
-    XStore Store;
-    Store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
-    const unsigned long long N = PerfOpCount(200'000);
+    XStore store;
+    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    const unsigned long long n = PerfOpCount(200'000);
 
-    XStore_Proto::RangeInsert_REQ Req;
-    Req.set_dbname("PERFDB");
-    for (unsigned long long i = 0; i < N; i++) {
-        XStore_Proto::RangeInsert_DATA *Entry = Req.add_rangeinsert_data();
-        Entry->set_timestamp(BaseTs + i);
-        *Entry->mutable_data() = PerfRow(i);
+    XStore_Proto::RangeInsert_REQ req;
+    req.set_dbname("PERFDB");
+    for (unsigned long long i = 0; i < n; i++) {
+        XStore_Proto::RangeInsert_DATA *entry = req.add_rangeinsert_data();
+        entry->set_timestamp(BASE_TS + i);
+        *entry->mutable_data() = PerfRow(i);
     }
 
-    XStore_Proto::RangeInsert_REP Rep;
-    auto Start = std::chrono::steady_clock::now();
-    Store.RangeInsert(&Req, &Rep);
-    double Elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - Start).count();
+    XStore_Proto::RangeInsert_REP rep;
+    auto start = std::chrono::steady_clock::now();
+    store.RangeInsert(&req, &rep);
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
-    EXPECT_NE(Rep.insertstatus().find(fmt::format("Inserted {} elements", N)), std::string::npos) << Rep.insertstatus();
-    ReportPerf({"RangeInsert", N, Elapsed});
+    EXPECT_NE(rep.insertstatus().find(fmt::format("Inserted {} elements", n)), std::string::npos) << rep.insertstatus();
+    ReportPerf({"RangeInsert", n, elapsed});
 }
 
 TEST_F(XStorePerfTest, RangeQueryThroughput) {
-    XStore Store;
-    Store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
-    const unsigned long long N = PerfOpCount(200'000);
+    XStore store;
+    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    const unsigned long long n = PerfOpCount(200'000);
 
-    XStore_Proto::RangeInsert_REQ InsertReq;
-    InsertReq.set_dbname("PERFDB");
-    for (unsigned long long i = 0; i < N; i++) {
-        XStore_Proto::RangeInsert_DATA *Entry = InsertReq.add_rangeinsert_data();
-        Entry->set_timestamp(BaseTs + i);
-        *Entry->mutable_data() = PerfRow(i);
+    XStore_Proto::RangeInsert_REQ insert_req;
+    insert_req.set_dbname("PERFDB");
+    for (unsigned long long i = 0; i < n; i++) {
+        XStore_Proto::RangeInsert_DATA *entry = insert_req.add_rangeinsert_data();
+        entry->set_timestamp(BASE_TS + i);
+        *entry->mutable_data() = PerfRow(i);
     }
-    XStore_Proto::RangeInsert_REP InsertRep;
-    Store.RangeInsert(&InsertReq, &InsertRep);
+    XStore_Proto::RangeInsert_REP insert_rep;
+    store.RangeInsert(&insert_req, &insert_rep);
 
-    XStore_Proto::RangeQuery_REP QueryRep;
-    auto Start = std::chrono::steady_clock::now();
-    Store.RangeQuery(BaseTs, BaseTs + N - 1, "PERFDB", &QueryRep);
-    double Elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - Start).count();
+    XStore_Proto::RangeQuery_REP query_rep;
+    auto start = std::chrono::steady_clock::now();
+    store.RangeQuery(BASE_TS, BASE_TS + n - 1, "PERFDB", &query_rep);
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
-    ASSERT_EQ(QueryRep.queryresponse_size(), (int)N) << "range query lost/gained rows";
-    ReportPerf({"RangeQuery", N, Elapsed});
+    ASSERT_EQ(query_rep.queryresponse_size(), (int)n) << "range query lost/gained rows";
+    ReportPerf({"RangeQuery", n, elapsed});
 }
 
 // ---------------------------------------------------------------------
@@ -488,99 +488,99 @@ TEST_F(XStorePerfTest, RangeQueryThroughput) {
 // ---------------------------------------------------------------------
 
 TEST_F(XStorePerfTest, MinAggregateThroughput) {
-    XStore Store;
-    Store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
-    const unsigned long long N = PerfOpCount(1'000'000);
+    XStore store;
+    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    const unsigned long long n = PerfOpCount(1'000'000);
 
-    XStore_Proto::BatchInsert_REQ InsertReq;
-    InsertReq.set_dbname("PERFDB");
-    for (unsigned long long i = 0; i < N; i++) {
-        XStore_Proto::BatchInsert_DATA *Entry = InsertReq.add_batchinsert_data();
-        Entry->set_timestamp(BaseTs + i);
-        *Entry->mutable_data() = PerfRow(i);
+    XStore_Proto::BatchInsert_REQ insert_req;
+    insert_req.set_dbname("PERFDB");
+    for (unsigned long long i = 0; i < n; i++) {
+        XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
+        entry->set_timestamp(BASE_TS + i);
+        *entry->mutable_data() = PerfRow(i);
     }
-    XStore_Proto::BatchInsert_REP InsertRep;
-    Store.BatchInsert(&InsertReq, &InsertRep);
+    XStore_Proto::BatchInsert_REP insert_rep;
+    store.BatchInsert(&insert_req, &insert_rep);
 
-    XStore_Proto::Min_REP MinRep;
-    auto Start = std::chrono::steady_clock::now();
-    Store.MinAggregate(BaseTs, BaseTs + N - 1, "PERFDB", 0, &MinRep);
-    double Elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - Start).count();
+    XStore_Proto::Min_REP min_rep;
+    auto start = std::chrono::steady_clock::now();
+    store.MinAggregate(BASE_TS, BASE_TS + n - 1, "PERFDB", 0, &min_rep);
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
-    ASSERT_EQ(MinRep.opstatus(), "SUCCESS");
-    EXPECT_DOUBLE_EQ(MinRep.opresult().doubledata(), 0.0);
-    ReportPerf({"MinAggregate", N, Elapsed});
+    ASSERT_EQ(min_rep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(min_rep.opresult().doubledata(), 0.0);
+    ReportPerf({"MinAggregate", n, elapsed});
 }
 
 TEST_F(XStorePerfTest, MaxAggregateThroughput) {
-    XStore Store;
-    Store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
-    const unsigned long long N = PerfOpCount(1'000'000);
+    XStore store;
+    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    const unsigned long long n = PerfOpCount(1'000'000);
 
-    XStore_Proto::BatchInsert_REQ InsertReq;
-    InsertReq.set_dbname("PERFDB");
-    for (unsigned long long i = 0; i < N; i++) {
-        XStore_Proto::BatchInsert_DATA *Entry = InsertReq.add_batchinsert_data();
-        Entry->set_timestamp(BaseTs + i);
-        *Entry->mutable_data() = PerfRow(i);
+    XStore_Proto::BatchInsert_REQ insert_req;
+    insert_req.set_dbname("PERFDB");
+    for (unsigned long long i = 0; i < n; i++) {
+        XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
+        entry->set_timestamp(BASE_TS + i);
+        *entry->mutable_data() = PerfRow(i);
     }
-    XStore_Proto::BatchInsert_REP InsertRep;
-    Store.BatchInsert(&InsertReq, &InsertRep);
+    XStore_Proto::BatchInsert_REP insert_rep;
+    store.BatchInsert(&insert_req, &insert_rep);
 
-    XStore_Proto::Max_REP MaxRep;
-    auto Start = std::chrono::steady_clock::now();
-    Store.MaxAggregate(BaseTs, BaseTs + N - 1, "PERFDB", 0, &MaxRep);
-    double Elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - Start).count();
+    XStore_Proto::Max_REP max_rep;
+    auto start = std::chrono::steady_clock::now();
+    store.MaxAggregate(BASE_TS, BASE_TS + n - 1, "PERFDB", 0, &max_rep);
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
-    ASSERT_EQ(MaxRep.opstatus(), "SUCCESS");
-    EXPECT_DOUBLE_EQ(MaxRep.opresult().doubledata(), (double)(N - 1));
-    ReportPerf({"MaxAggregate", N, Elapsed});
+    ASSERT_EQ(max_rep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(max_rep.opresult().doubledata(), (double)(n - 1));
+    ReportPerf({"MaxAggregate", n, elapsed});
 }
 
 TEST_F(XStorePerfTest, SumAggregateThroughput) {
-    XStore Store;
-    Store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
-    const unsigned long long N = PerfOpCount(1'000'000);
+    XStore store;
+    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    const unsigned long long n = PerfOpCount(1'000'000);
 
-    XStore_Proto::BatchInsert_REQ InsertReq;
-    InsertReq.set_dbname("PERFDB");
-    for (unsigned long long i = 0; i < N; i++) {
-        XStore_Proto::BatchInsert_DATA *Entry = InsertReq.add_batchinsert_data();
-        Entry->set_timestamp(BaseTs + i);
-        *Entry->mutable_data() = PerfRow(i);
+    XStore_Proto::BatchInsert_REQ insert_req;
+    insert_req.set_dbname("PERFDB");
+    for (unsigned long long i = 0; i < n; i++) {
+        XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
+        entry->set_timestamp(BASE_TS + i);
+        *entry->mutable_data() = PerfRow(i);
     }
-    XStore_Proto::BatchInsert_REP InsertRep;
-    Store.BatchInsert(&InsertReq, &InsertRep);
+    XStore_Proto::BatchInsert_REP insert_rep;
+    store.BatchInsert(&insert_req, &insert_rep);
 
-    XStore_Proto::Sum_REP SumRep;
-    auto Start = std::chrono::steady_clock::now();
-    Store.SumAggregate(BaseTs, BaseTs + N - 1, "PERFDB", 0, &SumRep);
-    double Elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - Start).count();
+    XStore_Proto::Sum_REP sum_rep;
+    auto start = std::chrono::steady_clock::now();
+    store.SumAggregate(BASE_TS, BASE_TS + n - 1, "PERFDB", 0, &sum_rep);
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
-    ASSERT_EQ(SumRep.opstatus(), "SUCCESS");
-    ReportPerf({"SumAggregate", N, Elapsed});
+    ASSERT_EQ(sum_rep.opstatus(), "SUCCESS");
+    ReportPerf({"SumAggregate", n, elapsed});
 }
 
 TEST_F(XStorePerfTest, AvgAggregateThroughput) {
-    XStore Store;
-    Store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
-    const unsigned long long N = PerfOpCount(1'000'000);
+    XStore store;
+    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    const unsigned long long n = PerfOpCount(1'000'000);
 
-    XStore_Proto::BatchInsert_REQ InsertReq;
-    InsertReq.set_dbname("PERFDB");
-    for (unsigned long long i = 0; i < N; i++) {
-        XStore_Proto::BatchInsert_DATA *Entry = InsertReq.add_batchinsert_data();
-        Entry->set_timestamp(BaseTs + i);
-        *Entry->mutable_data() = PerfRow(i);
+    XStore_Proto::BatchInsert_REQ insert_req;
+    insert_req.set_dbname("PERFDB");
+    for (unsigned long long i = 0; i < n; i++) {
+        XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
+        entry->set_timestamp(BASE_TS + i);
+        *entry->mutable_data() = PerfRow(i);
     }
-    XStore_Proto::BatchInsert_REP InsertRep;
-    Store.BatchInsert(&InsertReq, &InsertRep);
+    XStore_Proto::BatchInsert_REP insert_rep;
+    store.BatchInsert(&insert_req, &insert_rep);
 
-    XStore_Proto::Avg_REP AvgRep;
-    auto Start = std::chrono::steady_clock::now();
-    Store.AvgAggregate(BaseTs, BaseTs + N - 1, "PERFDB", 0, &AvgRep);
-    double Elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - Start).count();
+    XStore_Proto::Avg_REP avg_rep;
+    auto start = std::chrono::steady_clock::now();
+    store.AvgAggregate(BASE_TS, BASE_TS + n - 1, "PERFDB", 0, &avg_rep);
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
-    ASSERT_EQ(AvgRep.opstatus(), "SUCCESS");
-    ReportPerf({"AvgAggregate", N, Elapsed});
+    ASSERT_EQ(avg_rep.opstatus(), "SUCCESS");
+    ReportPerf({"AvgAggregate", n, elapsed});
 }

@@ -33,13 +33,13 @@
 class XStore {
     public:
         // Convention: every directory-path member/return value in this class
-        // (BaseDir, DataStoreDir, DbBasePath()'s result) is stored WITHOUT a
+        // (base_dir, data_store_dir, DbBasePath()'s result) is stored WITHOUT a
         // trailing '/'. Joining is always done explicitly via JoinPath (or an
         // explicit '/' in a format string), never by relying on a variable
         // having one baked in -- that made call sites impossible to read
         // without checking how the value upstream was built.
-        std::string BaseDir = GetBaseDir();
-        std::string DataStoreDir = JoinPath(BaseDir, "DataStore");
+        std::string base_dir = GetBaseDir();
+        std::string data_store_dir = JoinPath(base_dir, "DataStore");
 
         // Shared across every XStore instance (one per worker thread) so a config
         // read from disk by one thread is visible to all others. Sharded the
@@ -53,11 +53,11 @@ class XStore {
         // and static per DB, so each shard is just an unordered_map + its
         // own shared_mutex.
         struct CfgShard {
-            std::unordered_map<std::string, XStore_Proto::ConfigStruct> Map;
-            std::shared_mutex Mutex;
+            std::unordered_map<std::string, XStore_Proto::ConfigStruct> map;
+            std::shared_mutex mutex;
         };
-        static constexpr size_t CfgShardCount = 16;
-        static std::array<CfgShard, CfgShardCount> CfgShards;
+        static constexpr size_t CFG_SHARD_COUNT = 16;
+        static std::array<CfgShard, CFG_SHARD_COUNT> cfg_shards;
 
         // Shared cache of PROT_WRITE mmap regions for .XSTORE data files, keyed
         // by full path, so repeat UnaryInserts to the same (dbName, year) file
@@ -65,10 +65,10 @@ class XStore {
         // already-resident page. File size is fixed at creation (ftruncate'd
         // up front to the year's full row count), so one mapping covers the
         // whole file for its lifetime -- no remap needed. MRU-ordered list +
-        // index map = O(1) lookup/promote/evict; bounded (MmapCacheCap) to
+        // index map = O(1) lookup/promote/evict; bounded (MMAP_CACHE_CAP) to
         // avoid unbounded address-space/FD growth.
         //
-        // Sharded across MmapShardCount independent {list, map, mutex}
+        // Sharded across MMAP_SHARD_COUNT independent {list, map, mutex}
         // instances, keyed by hashing the file path, instead of one
         // process-wide mutex: a cold-started server hit by many concurrent
         // first-touches (e.g. N threads each first-mapping a different year
@@ -77,7 +77,7 @@ class XStore {
         // was already unlocked. Two threads touching different files usually
         // land in different shards now and don't share a lock at all; only
         // threads racing on the same file (or a hash collision) still
-        // serialize, same as before. Per-shard cap is MmapCacheCap divided
+        // serialize, same as before. Per-shard cap is MMAP_CACHE_CAP divided
         // across shards so total resident mapping count is unchanged.
         // Distinct row offsets never overlap in memory so concurrent
         // memcpy's to disjoint slots need no extra locking beyond this
@@ -90,21 +90,21 @@ class XStore {
         // and was still mid-access via the raw pointer GetOrMapFile handed
         // back -- a straight use-after-unmap race (corruption or SIGSEGV,
         // reproduced under concurrent RND inserts once the working set
-        // exceeded MmapShardCap). The shared_ptr's refcount now tracks every
+        // exceeded MMAP_SHARD_CAP). The shared_ptr's refcount now tracks every
         // outstanding GetOrMapFile() caller in addition to the cache's own
         // entry: eviction/erase here only drops the CACHE's reference, and
         // the custom deleter's munmap() doesn't actually run until the last
         // holder -- cache or in-flight caller -- releases theirs.
-        struct MappedFile { void *Base; size_t Len; };
+        struct MappedFile { void *base; size_t len; };
         struct MmapShard {
-            std::list<std::pair<std::string, std::shared_ptr<MappedFile>>> Lru;
-            std::unordered_map<std::string, std::list<std::pair<std::string, std::shared_ptr<MappedFile>>>::iterator> Index;
-            std::mutex Mutex;
+            std::list<std::pair<std::string, std::shared_ptr<MappedFile>>> lru;
+            std::unordered_map<std::string, std::list<std::pair<std::string, std::shared_ptr<MappedFile>>>::iterator> index;
+            std::mutex mutex;
         };
-        static constexpr size_t MmapShardCount = 64;
-        static constexpr size_t MmapCacheCap = 256;
-        static constexpr size_t MmapShardCap = MmapCacheCap / MmapShardCount;
-        static std::array<MmapShard, MmapShardCount> MmapShards;
+        static constexpr size_t MMAP_SHARD_COUNT = 64;
+        static constexpr size_t MMAP_CACHE_CAP = 256;
+        static constexpr size_t MMAP_SHARD_CAP = MMAP_CACHE_CAP / MMAP_SHARD_COUNT;
+        static std::array<MmapShard, MMAP_SHARD_COUNT> mmap_shards;
 
         // Shared cache of open fds for .XSTORE data files, keyed by full path --
         // used by UnaryInsert's pwrite() path. Unlike GetOrMapFile, writing
@@ -116,7 +116,7 @@ class XStore {
         // MRU-bounded design as MmapLru, just storing an fd instead of a base
         // pointer.
         //
-        // Sized differently than MmapCacheCap on purpose: a miss here is just
+        // Sized differently than MMAP_CACHE_CAP on purpose: a miss here is just
         // an open() (microseconds, no page-fault-time block allocation), so
         // the cap doesn't need to be large to amortize an expensive miss --
         // it only needs to cover the handful of year files actively being
@@ -128,7 +128,7 @@ class XStore {
         // than inheriting the address-space-driven 256 sizing MmapLru uses.
         //
         // Sharded the same way as the mmap cache (see MmapShard above), just
-        // fewer shards -- FdCacheCap is already tiny (8 total) so 64 shards
+        // fewer shards -- FD_CACHE_CAP is already tiny (8 total) so 64 shards
         // would leave under one slot each. 4 shards keeps a usable 2-slot
         // cap per shard while still splitting the lock so concurrent
         // first-opens of different files don't all serialize on one mutex.
@@ -143,64 +143,64 @@ class XStore {
         // value, risking either a clean EBADF or (worse, if the closed fd
         // number got reused by an unrelated concurrent open() before the
         // racing pwrite/pread ran) a silent write into the wrong file.
-        // FdCacheCap's small size (8, process-wide) made this easy to hit
+        // FD_CACHE_CAP's small size (8, process-wide) made this easy to hit
         // once more than a handful of year files were concurrently hot.
         struct FdShard {
-            std::list<std::pair<std::string, std::shared_ptr<int>>> Lru;
-            std::unordered_map<std::string, std::list<std::pair<std::string, std::shared_ptr<int>>>::iterator> Index;
-            std::mutex Mutex;
+            std::list<std::pair<std::string, std::shared_ptr<int>>> lru;
+            std::unordered_map<std::string, std::list<std::pair<std::string, std::shared_ptr<int>>>::iterator> index;
+            std::mutex mutex;
         };
-        static constexpr size_t FdShardCount = 4;
-        static constexpr size_t FdCacheCap = 8;
-        static constexpr size_t FdShardCap = FdCacheCap / FdShardCount;
-        static std::array<FdShard, FdShardCount> FdShards;
-        std::string PermittedTimeResolution[3] = {"SECOND", "MILLISECOND", "MICROSECOND"};
+        static constexpr size_t FD_SHARD_COUNT = 4;
+        static constexpr size_t FD_CACHE_CAP = 8;
+        static constexpr size_t FD_SHARD_CAP = FD_CACHE_CAP / FD_SHARD_COUNT;
+        static std::array<FdShard, FD_SHARD_COUNT> fd_shards;
+        std::string permitted_time_resolution[3] = {"SECOND", "MILLISECOND", "MICROSECOND"};
 
-        int DbCount = 0;
-        std::vector<std::string> DbNames = { };
-        std::map<std::string, unsigned long long int> ResolutionMap { {"SECOND", 31'536'000}, {"MILLISECOND", 31'536'000'000}, {"MICROSECOND", 31'536'000'000'000}, {"NANOSECOND", 31'536'000'000'000'000} };
+        int db_count = 0;
+        std::vector<std::string> db_names = { };
+        std::map<std::string, unsigned long long int> resolution_map { {"SECOND", 31'536'000}, {"MILLISECOND", 31'536'000'000}, {"MICROSECOND", 31'536'000'000'000}, {"NANOSECOND", 31'536'000'000'000'000} };
 
         // Initialization
         XStore();
 
         // PROCESSING DbStats/info query
-        XStore_Proto::SysInfo_REP InfoQuery(std::string serverAddr, int threadCount);
+        XStore_Proto::SysInfo_REP InfoQuery(std::string server_addr, int thread_count);
 
         // CREATING new DB instance with row length
-        XStore_Proto::CreateDB_REP CreateDB(std::string_view dbName, XStore_Proto::TimeUnit timeResolution, short int rowLength);
+        XStore_Proto::CreateDB_REP CreateDB(std::string_view db_name, XStore_Proto::TimeUnit time_resolution, short int row_length);
 
         // REMOVE DB -- Removing an entire DB and its data files
-        XStore_Proto::RemoveDB_REP RemoveDB(std::string_view dbName);
+        XStore_Proto::RemoveDB_REP RemoveDB(std::string_view db_name);
 
         // REMOVE DB FILES -- Removing file(s) based on name in a certain DB
-        XStore_Proto::RemoveDBFiles_REP RemoveDBFiles(XStore_Proto::RemoveDBFiles_REQ *protoFromClient, std::string_view dbName);
+        XStore_Proto::RemoveDBFiles_REP RemoveDBFiles(XStore_Proto::RemoveDBFiles_REQ *proto_from_client, std::string_view db_name);
 
         // UNARY INSERT
-        void UnaryInsert(const unsigned long long int &epochTime, const XStore_Proto::RowData &data, std::string_view dbName, XStore_Proto::UnaryInsert_REP *returnData);
+        void UnaryInsert(const unsigned long long int &epoch_time, const XStore_Proto::RowData &data, std::string_view db_name, XStore_Proto::UnaryInsert_REP *return_data);
 
         // UNARY QUERY
-        void UnaryQuery(const unsigned long long int &epochTime, std::string_view dbName, XStore_Proto::UnaryQuery_REP *returnData);
+        void UnaryQuery(const unsigned long long int &epoch_time, std::string_view db_name, XStore_Proto::UnaryQuery_REP *return_data);
 
         // UNARY DELETE
-        XStore_Proto::UnaryDelete_REP UnaryDelete(const unsigned long long int &epochTime, std::string_view dbName);
+        XStore_Proto::UnaryDelete_REP UnaryDelete(const unsigned long long int &epoch_time, std::string_view db_name);
 
         // BATCH INSERT
-        void BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_Proto::BatchInsert_REP *returnData);
+        void BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStore_Proto::BatchInsert_REP *return_data);
 
         // BATCH QUERY
-        void BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Proto::BatchQuery_REP *returnData, bool SortTime=true);
+        void BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, XStore_Proto::BatchQuery_REP *return_data, bool sort_time=true);
 
         // BATCH DELETE
-        XStore_Proto::BatchDelete_REP BatchDelete(XStore_Proto::BatchDelete_REQ *protoFromClient);
+        XStore_Proto::BatchDelete_REP BatchDelete(XStore_Proto::BatchDelete_REQ *proto_from_client);
 
         // RANGE INSERT
-        void RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, XStore_Proto::RangeInsert_REP *returnData);
+        void RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client, XStore_Proto::RangeInsert_REP *return_data);
 
         // RANGE QUERY
-        void RangeQuery(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string_view dbName, XStore_Proto::RangeQuery_REP *returnData);
+        void RangeQuery(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t, std::string_view db_name, XStore_Proto::RangeQuery_REP *return_data);
 
         // RANGE DELETE
-        XStore_Proto::RangeDelete_REP RangeDelete(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string_view dbName);
+        XStore_Proto::RangeDelete_REP RangeDelete(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t, std::string_view db_name);
 
         // Walks [startEpochT, endEpochT] one year-file at a time for
         // Min/Max/Sum/AvgAggregate, read-locking each existing segment and
@@ -208,8 +208,8 @@ class XStore {
         // GetOrMapFile's cached mapping -- a member function (not a free
         // one) purely so it can call GetOrMapFile, which is private.
         template <typename Kernel>
-        void WalkYearSpan(const std::string &dbBasePath, const XStore_Proto::ConfigStruct &cfgStruct,
-                          unsigned long long startEpochT, unsigned long long endEpochT, Kernel &&kernel);
+        void WalkYearSpan(const std::string &db_base_path, const XStore_Proto::ConfigStruct &cfg_struct,
+                          unsigned long long start_epoch_t, unsigned long long end_epoch_t, Kernel &&kernel);
 
         // Same year-by-year walk as WalkYearSpan, but distributes segments
         // across a bounded thread pool when the span covers enough distinct
@@ -224,9 +224,9 @@ class XStore {
         // into the running total sequentially after all threads join --
         // cheap, O(#threads) not O(#rows). Returns the fully-merged state.
         template <typename PartialState, typename SegmentKernel, typename MergeFn>
-        PartialState WalkYearSpanParallel(const std::string &dbBasePath, const XStore_Proto::ConfigStruct &cfgStruct,
-                                            unsigned long long startEpochT, unsigned long long endEpochT,
-                                            PartialState initialState, SegmentKernel &&segmentKernel, MergeFn &&mergeFn);
+        PartialState WalkYearSpanParallel(const std::string &db_base_path, const XStore_Proto::ConfigStruct &cfg_struct,
+                                            unsigned long long start_epoch_t, unsigned long long end_epoch_t,
+                                            PartialState initial_state, SegmentKernel &&segment_kernel, MergeFn &&merge_fn);
 
         // Shared mmap-backed scan kernels used by Min/Max/Sum/AvgAggregate ----------
         // rowsBase points directly into GetOrMapFile's cached, already-resident
@@ -244,31 +244,31 @@ class XStore {
         // kernels only ever want ONE column, so decoding every column in the
         // row was pure waste. See the .cpp for how holes/wrong-type/corrupt
         // columns are handled.
-        bool ExtractColumnByIndexSkipParse(const char* rowPtr, size_t rowLen, unsigned short columnIdx, XStore_Proto::FData& outData);
+        bool ExtractColumnByIndexSkipParse(const char* row_ptr, size_t row_len, unsigned short column_idx, XStore_Proto::FData& out_data);
 
         // Select kernel: tracks the single winning row under comparator Cmp(candidate, currentBest).
         //  Cmp = std::less<long double>  -> MIN ;  Cmp = std::greater<long double> -> MAX
         template <typename Cmp>
-        void ProcessFileRangeSelect(const char* rowsBase, unsigned long long totalRows,
-                                     size_t rowLen, unsigned short columnIdx,
-                                     ValueStruct& bestValue, XStore_Proto::FData& bestData);
+        void ProcessFileRangeSelect(const char* rows_base, unsigned long long total_rows,
+                                     size_t row_len, unsigned short column_idx,
+                                     ValueStruct& best_value, XStore_Proto::FData& best_data);
 
         // Accumulate kernel: running sum + valid-row count. Backs SUM directly, AVG divides after.
-        void ProcessFileRangeAccumulate(const char* rowsBase, unsigned long long totalRows,
-                                         size_t rowLen, unsigned short columnIdx,
-                                         double& sumOut, unsigned long long& validCountOut);
+        void ProcessFileRangeAccumulate(const char* rows_base, unsigned long long total_rows,
+                                         size_t row_len, unsigned short column_idx,
+                                         double& sum_out, unsigned long long& valid_count_out);
 
         // MIN - AGGREGATE
-        void MinAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string_view dbName, unsigned short int columnIdx, XStore_Proto::Min_REP *returnData);
+        void MinAggregate(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Min_REP *return_data);
 
         // MAX - AGGREGATE
-        void MaxAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string_view dbName, unsigned short int columnIdx, XStore_Proto::Max_REP *returnData);
+        void MaxAggregate(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Max_REP *return_data);
 
         // SUM - AGGREGATE
-        void SumAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string_view dbName, unsigned short int columnIdx, XStore_Proto::Sum_REP *returnData);
+        void SumAggregate(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Sum_REP *return_data);
 
         // AVG - AGGREGATE
-        void AvgAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string_view dbName, unsigned short int columnIdx, XStore_Proto::Avg_REP *returnData);
+        void AvgAggregate(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Avg_REP *return_data);
 
         // Initialize DB
         void InitDB();
@@ -278,14 +278,14 @@ class XStore {
         std::string GetBaseDir();
 
         // Thread-local memo of dbName -> DbBasePath(dbName). DbBasePath is
-        // pure (DataStoreDir + dbName, no I/O) but JoinPath rebuilds it via a
+        // pure (data_store_dir + dbName, no I/O) but JoinPath rebuilds it via a
         // fresh heap allocation on every call -- and every single op
         // function (Unary/Batch/Range Insert/Query/Delete, all four
         // aggregates) calls it unconditionally, before even checking
         // whether the cfg cache hit. A hashmap (not a single-entry memo)
         // because a worker thread can flip between a small set of DBs
         // across consecutive requests, not just stay on one.
-        const std::string& CachedDbBasePath(const std::string &dbName) const;
+        const std::string& CachedDbBasePath(const std::string &db_name) const;
 
         // Thread-local memo of (dbBasePath, year) -> "<dbBasePath>/<year>.XSTORE".
         // Same reasoning as CachedDbBasePath, for the per-(db,year) file
@@ -302,25 +302,25 @@ class XStore {
         // callers that only know dbBasePath (e.g. WalkYearSpan, shared by
         // all four aggregates) don't need to separately thread dbName
         // through just for this.
-        const std::string& CachedYearFilePath(const std::string &dbBasePath, unsigned short year) const;
+        const std::string& CachedYearFilePath(const std::string &db_base_path, unsigned short year) const;
 
-        // Base directory for dbName's data/config files under DataStoreDir,
-        // e.g. "<DataStoreDir>/<dbName>" -- no trailing '/' (see convention
-        // note above BaseDir). Assumes dbName is already upper-cased (call
+        // Base directory for dbName's data/config files under data_store_dir,
+        // e.g. "<data_store_dir>/<dbName>" -- no trailing '/' (see convention
+        // note above base_dir). Assumes dbName is already upper-cased (call
         // ToUpperCase first, as every public method does).
-        std::string DbBasePath(const std::string &dbName) const;
+        std::string DbBasePath(const std::string &db_name) const;
 
         // Fetch dbName's ConfigStruct from CfgMap, loading it from dbBasePath's
         // .CFG file into the cache on first use. Returns false if the .CFG file
         // does not exist. Thread-safe: shared lock on cache hit, exclusive lock
         // (with re-check) only on cache miss.
-        bool GetOrLoadCfg(const std::string &dbName, const std::string &dbBasePath, XStore_Proto::ConfigStruct &cfgOut);
+        bool GetOrLoadCfg(const std::string &db_name, const std::string &db_base_path, XStore_Proto::ConfigStruct &cfg_out);
 
         // Insert/overwrite dbName's ConfigStruct in CfgMap under exclusive lock.
-        void PutCfg(const std::string &dbName, const XStore_Proto::ConfigStruct &cfg);
+        void PutCfg(const std::string &db_name, const XStore_Proto::ConfigStruct &cfg);
 
         // Remove dbName's ConfigStruct from CfgMap under exclusive lock.
-        void EraseCfg(const std::string &dbName);
+        void EraseCfg(const std::string &db_name);
 
         // Fetch targetFile's cached PROT_WRITE mapping, creating (and
         // ftruncate'ing to totalRows*rowLength if new) the file and mapping it
@@ -330,23 +330,23 @@ class XStore {
         // callers must keep it alive for as long as they touch the mapping,
         // since that's what defers the eventual munmap() past a concurrent
         // eviction.
-        std::shared_ptr<void> GetOrMapFile(const std::string &targetFile, size_t rowLength, unsigned long long totalRows);
+        std::shared_ptr<void> GetOrMapFile(const std::string &target_file, size_t row_length, unsigned long long total_rows);
 
         // munmap + drop targetFile's cached mapping, if present. Used before a
         // file is deleted out from under the cache (RemoveDBFiles).
-        void EraseMappedFile(const std::string &targetFile);
+        void EraseMappedFile(const std::string &target_file);
 
         // munmap + drop every cached mapping whose path falls under dbDirPrefix.
         // Used before a DB directory is deleted out from under the cache
         // (RemoveDB), since a single RemoveDB can span many cached year files.
-        void EraseMappedFilesUnderPrefix(const std::string &dbDirPrefix);
+        void EraseMappedFilesUnderPrefix(const std::string &db_dir_prefix);
 
         // Fetch targetFile's cached fd, creating (and ftruncate'ing to
         // totalRows*rowLength if new) the file on first use. Returns -1 on
         // open/ftruncate failure. Callers must keep the returned shared_ptr
         // alive for as long as they use the fd (see FdShard above) -- that's
         // what defers the eventual close() past a concurrent eviction.
-        std::shared_ptr<int> GetOrOpenFile(const std::string &targetFile, size_t rowLength, unsigned long long totalRows);
+        std::shared_ptr<int> GetOrOpenFile(const std::string &target_file, size_t row_length, unsigned long long total_rows);
 
         // Peek-only: true if targetFile already has a cached fd (no open,
         // no creation). A cache hit here is proof the file exists -- only
@@ -355,13 +355,13 @@ class XStore {
         // entry in the same call that deletes the file -- so callers that
         // otherwise need a filesystem::exists() check purely to avoid
         // GetOrOpenFile's O_CREAT can skip that stat() on a cache hit.
-        bool IsFdCached(const std::string &targetFile);
+        bool IsFdCached(const std::string &target_file);
 
         // close + drop targetFile's cached fd, if present.
-        void EraseOpenFile(const std::string &targetFile);
+        void EraseOpenFile(const std::string &target_file);
 
         // close + drop every cached fd whose path falls under dbDirPrefix.
-        void EraseOpenFilesUnderPrefix(const std::string &dbDirPrefix);
+        void EraseOpenFilesUnderPrefix(const std::string &db_dir_prefix);
 
         // Joins base and child with exactly one '/' between them, regardless
         // of whether base already happens to end with one -- the single
@@ -386,8 +386,8 @@ class XStore {
             }
         };
 
-        void GetFDataValue(const XStore_Proto::FData *fDataInput, unsigned int columnIdx, ValueStruct *ValueStruct);
-        void GetFDataValue(const XStore_Proto::FData *fDataInput, ValueStruct *ValueStruct);
+        void GetFDataValue(const XStore_Proto::FData *f_data_input, unsigned int column_idx, ValueStruct *value_struct);
+        void GetFDataValue(const XStore_Proto::FData *f_data_input, ValueStruct *value_struct);
 };
 
 #endif //XSTORE_XSTORE_H

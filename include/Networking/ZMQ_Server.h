@@ -8,20 +8,20 @@
 #include <zmq_addon.hpp>
 #include "include/Logger/Logger.h"
 
-class ZMQ_Server {
+class ZmqServer {
     private:
         // Prepare ZMQ context & Sockets
-        zmq::context_t Ctx;
+        zmq::context_t ctx;
 
-        int NumThreads;
-        std::string ServerAddr;
+        int num_threads;
+        std::string server_addr;
 
         // Work routine run by each worker thread
-        void WorkerRoutine(std::string serverAddr);
+        void WorkerRoutine(std::string server_addr);
 
     public:
-        ZMQ_Server(int numThreads);
-        void StartServer(std::string listenAddr, std::string listenPort);
+        ZmqServer(int num_threads);
+        void StartServer(std::string listen_addr, std::string listen_port);
 };
 
 #endif //XSTORE_ZMQ_SERVER_H

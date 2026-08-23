@@ -7,22 +7,22 @@
 #include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 #include <google/protobuf/wire_format_lite.h>
 
-std::array<XStore::MmapShard, XStore::MmapShardCount> XStore::MmapShards;
-std::array<XStore::FdShard, XStore::FdShardCount> XStore::FdShards;
+std::array<XStore::MmapShard, XStore::MMAP_SHARD_COUNT> XStore::mmap_shards;
+std::array<XStore::FdShard, XStore::FD_SHARD_COUNT> XStore::fd_shards;
 
-std::shared_ptr<void> XStore::GetOrMapFile(const std::string &targetFile, size_t rowLength, unsigned long long totalRows) {
-    MmapShard &Shard = MmapShards[std::hash<std::string>{}(targetFile) % MmapShardCount];
+std::shared_ptr<void> XStore::GetOrMapFile(const std::string &target_file, size_t row_length, unsigned long long total_rows) {
+    MmapShard &shard = mmap_shards[std::hash<std::string>{}(target_file) % MMAP_SHARD_COUNT];
 
     // Fast path: already mapped -- only the lookup+MRU-promote touches this
     // shard's state, so the lock is held just long enough for that, and
     // only contends with other threads hashing to the same shard.
     {
-        std::lock_guard<std::mutex> Lock(Shard.Mutex);
-        auto it = Shard.Index.find(targetFile);
-        if (it != Shard.Index.end()) {
-            Shard.Lru.splice(Shard.Lru.begin(), Shard.Lru, it->second);
-            std::shared_ptr<MappedFile> Owner = it->second->second;
-            return std::shared_ptr<void>(Owner, Owner->Base);
+        std::lock_guard<std::mutex> lock(shard.mutex);
+        auto it = shard.index.find(target_file);
+        if (it != shard.index.end()) {
+            shard.lru.splice(shard.lru.begin(), shard.lru, it->second);
+            std::shared_ptr<MappedFile> owner = it->second->second;
+            return std::shared_ptr<void>(owner, owner->base);
         }
     }
 
@@ -33,8 +33,8 @@ std::shared_ptr<void> XStore::GetOrMapFile(const std::string &targetFile, size_t
     // to any DB, not just this one -- for that syscall's whole duration. Two
     // threads racing to first-touch the same file both pay this cost
     // unlocked; the loser's redundant mapping is dropped below.
-    int Fd = open(targetFile.c_str(), O_RDWR | O_CREAT, 0644);
-    if (Fd < 0) {
+    int fd = open(target_file.c_str(), O_RDWR | O_CREAT, 0644);
+    if (fd < 0) {
         return nullptr;
     }
 
@@ -43,68 +43,68 @@ std::shared_ptr<void> XStore::GetOrMapFile(const std::string &targetFile, size_t
     // offset totalRows*rowLength -- one row past that span. The original
     // fwrite()-based writer silently grew the file to cover this via
     // EOF-extension; a fixed-size mapping needs the extra row up front.
-    size_t FileLen = (static_cast<size_t>(totalRows) + 1) * rowLength;
+    size_t file_len = (static_cast<size_t>(total_rows) + 1) * row_length;
 
-    struct stat St{};
-    if (fstat(Fd, &St) != 0 || static_cast<size_t>(St.st_size) < FileLen) {
-        if (ftruncate(Fd, FileLen) != 0) {
-            close(Fd);
+    struct stat st{};
+    if (fstat(fd, &st) != 0 || static_cast<size_t>(st.st_size) < file_len) {
+        if (ftruncate(fd, file_len) != 0) {
+            close(fd);
             return nullptr;
         }
     }
 
-    void *Base = mmap(NULL, FileLen, PROT_READ | PROT_WRITE, MAP_SHARED, Fd, 0);
+    void *base = mmap(NULL, file_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     // Mapping stays valid after the fd is closed -- no need to keep it open.
-    close(Fd);
-    if (Base == MAP_FAILED) {
+    close(fd);
+    if (base == MAP_FAILED) {
         return nullptr;
     }
 
     // Deleter fires munmap() only once every shared_ptr copy -- the cache's
     // own entry AND any in-flight caller still holding one from an earlier
     // GetOrMapFile() -- has been released (see MmapShard's comment).
-    std::shared_ptr<MappedFile> Owner(new MappedFile{Base, FileLen}, [](MappedFile *Mf) {
-        munmap(Mf->Base, Mf->Len);
-        delete Mf;
+    std::shared_ptr<MappedFile> owner(new MappedFile{base, file_len}, [](MappedFile *mf) {
+        munmap(mf->base, mf->len);
+        delete mf;
     });
 
     // Re-acquire to install into the cache, double-checked: another thread
     // may have raced us to map this same file while we were unlocked.
-    std::lock_guard<std::mutex> Lock(Shard.Mutex);
-    auto it = Shard.Index.find(targetFile);
-    if (it != Shard.Index.end()) {
+    std::lock_guard<std::mutex> lock(shard.mutex);
+    auto it = shard.index.find(target_file);
+    if (it != shard.index.end()) {
         // Lost the race -- our redundant Owner isn't stored anywhere else,
         // so it unmaps itself when it goes out of scope below; use theirs.
-        std::shared_ptr<MappedFile> Winner = it->second->second;
-        Shard.Lru.splice(Shard.Lru.begin(), Shard.Lru, it->second);
-        return std::shared_ptr<void>(Winner, Winner->Base);
+        std::shared_ptr<MappedFile> winner = it->second->second;
+        shard.lru.splice(shard.lru.begin(), shard.lru, it->second);
+        return std::shared_ptr<void>(winner, winner->base);
     }
 
-    Shard.Lru.emplace_front(targetFile, Owner);
-    Shard.Index[targetFile] = Shard.Lru.begin();
+    shard.lru.emplace_front(target_file, owner);
+    shard.index[target_file] = shard.lru.begin();
 
-    if (Shard.Lru.size() > MmapShardCap) {
+    if (shard.lru.size() > MMAP_SHARD_CAP) {
         // Only the cache's reference is dropped here -- if some other
         // thread is still holding a copy of this entry's shared_ptr from an
         // earlier GetOrMapFile() call, the deleter (and its munmap())
         // doesn't run until that copy is released too.
-        Shard.Index.erase(Shard.Lru.back().first);
-        Shard.Lru.pop_back();
+        shard.index.erase(shard.lru.back().first);
+        shard.lru.pop_back();
     }
 
-    return std::shared_ptr<void>(Owner, Owner->Base);
+    return std::shared_ptr<void>(owner, owner->base);
 }
 
-std::shared_ptr<int> XStore::GetOrOpenFile(const std::string &targetFile, size_t rowLength, unsigned long long totalRows) {
-    FdShard &Shard = FdShards[std::hash<std::string>{}(targetFile) % FdShardCount];
+std::shared_ptr<int> XStore::GetOrOpenFile(const std::string &target_file, size_t row_length, unsigned long long total_rows) {
+    FdShard &shard = fd_shards[std::hash<std::string>{}(target_file) % FD_SHARD_COUNT];
 
     // Fast path: already open -- only the lookup+MRU-promote touches this
     // shard's state, mirrors GetOrMapFile's fast path.
     {
-        std::lock_guard<std::mutex> Lock(Shard.Mutex);
-        auto it = Shard.Index.find(targetFile);
-        if (it != Shard.Index.end()) {
-            Shard.Lru.splice(Shard.Lru.begin(), Shard.Lru, it->second);
+        std::lock_guard<std::mutex> lock(shard.mutex);
+        auto it = shard.index.find(target_file);
+        if (it != shard.index.end()) {
+            shard.lru.splice(shard.lru.begin(), shard.lru, it->second);
             return it->second->second;
         }
     }
@@ -112,18 +112,18 @@ std::shared_ptr<int> XStore::GetOrOpenFile(const std::string &targetFile, size_t
     // Cache miss -> open (create if needed), ensure size. Done WITHOUT the
     // lock for the same reason as GetOrMapFile: these are syscalls whose
     // cost shouldn't serialize every other thread's inserts.
-    int Fd = open(targetFile.c_str(), O_RDWR | O_CREAT, 0644);
-    if (Fd < 0) {
+    int fd = open(target_file.c_str(), O_RDWR | O_CREAT, 0644);
+    if (fd < 0) {
         return nullptr;
     }
 
     // +1 row: see GetOrMapFile for why.
-    size_t FileLen = (static_cast<size_t>(totalRows) + 1) * rowLength;
+    size_t file_len = (static_cast<size_t>(total_rows) + 1) * row_length;
 
-    struct stat St{};
-    if (fstat(Fd, &St) != 0 || static_cast<size_t>(St.st_size) < FileLen) {
-        if (ftruncate(Fd, FileLen) != 0) {
-            close(Fd);
+    struct stat st{};
+    if (fstat(fd, &st) != 0 || static_cast<size_t>(st.st_size) < file_len) {
+        if (ftruncate(fd, file_len) != 0) {
+            close(fd);
             return nullptr;
         }
     }
@@ -131,107 +131,107 @@ std::shared_ptr<int> XStore::GetOrOpenFile(const std::string &targetFile, size_t
     // Deleter fires close() only once every shared_ptr copy -- the cache's
     // own entry AND any in-flight caller still holding one from an earlier
     // GetOrOpenFile() -- has been released (see FdShard's comment).
-    std::shared_ptr<int> Owner(new int(Fd), [](int *FdPtr) {
-        close(*FdPtr);
-        delete FdPtr;
+    std::shared_ptr<int> owner(new int(fd), [](int *fd_ptr) {
+        close(*fd_ptr);
+        delete fd_ptr;
     });
 
     // Re-acquire to install into the cache, double-checked: another thread
     // may have raced us to open this same file while we were unlocked.
-    std::lock_guard<std::mutex> Lock(Shard.Mutex);
-    auto it = Shard.Index.find(targetFile);
-    if (it != Shard.Index.end()) {
+    std::lock_guard<std::mutex> lock(shard.mutex);
+    auto it = shard.index.find(target_file);
+    if (it != shard.index.end()) {
         // Lost the race -- our redundant Owner isn't stored anywhere else,
         // so it closes itself when it goes out of scope below; use theirs.
-        Shard.Lru.splice(Shard.Lru.begin(), Shard.Lru, it->second);
+        shard.lru.splice(shard.lru.begin(), shard.lru, it->second);
         return it->second->second;
     }
 
-    Shard.Lru.emplace_front(targetFile, Owner);
-    Shard.Index[targetFile] = Shard.Lru.begin();
+    shard.lru.emplace_front(target_file, owner);
+    shard.index[target_file] = shard.lru.begin();
 
-    if (Shard.Lru.size() > FdShardCap) {
+    if (shard.lru.size() > FD_SHARD_CAP) {
         // Only the cache's reference is dropped here -- if some other
         // thread is still holding a copy of this entry's shared_ptr from an
         // earlier GetOrOpenFile() call, the deleter (and its close()) doesn't
         // run until that copy is released too.
-        Shard.Index.erase(Shard.Lru.back().first);
-        Shard.Lru.pop_back();
+        shard.index.erase(shard.lru.back().first);
+        shard.lru.pop_back();
     }
 
-    return Owner;
+    return owner;
 }
 
-bool XStore::IsFdCached(const std::string &targetFile) {
-    FdShard &Shard = FdShards[std::hash<std::string>{}(targetFile) % FdShardCount];
-    std::lock_guard<std::mutex> Lock(Shard.Mutex);
-    return Shard.Index.find(targetFile) != Shard.Index.end();
+bool XStore::IsFdCached(const std::string &target_file) {
+    FdShard &shard = fd_shards[std::hash<std::string>{}(target_file) % FD_SHARD_COUNT];
+    std::lock_guard<std::mutex> lock(shard.mutex);
+    return shard.index.find(target_file) != shard.index.end();
 }
 
-void XStore::EraseOpenFile(const std::string &targetFile) {
-    FdShard &Shard = FdShards[std::hash<std::string>{}(targetFile) % FdShardCount];
-    std::lock_guard<std::mutex> Lock(Shard.Mutex);
+void XStore::EraseOpenFile(const std::string &target_file) {
+    FdShard &shard = fd_shards[std::hash<std::string>{}(target_file) % FD_SHARD_COUNT];
+    std::lock_guard<std::mutex> lock(shard.mutex);
 
-    auto It = Shard.Index.find(targetFile);
-    if (It == Shard.Index.end()) {
+    auto it = shard.index.find(target_file);
+    if (it == shard.index.end()) {
         return;
     }
 
     // Only drops the cache's reference -- see FdShard's comment. If a
     // caller is still mid-pwrite()/pread() on a copy of this fd's
     // shared_ptr, close() is deferred until that copy is released too.
-    Shard.Lru.erase(It->second);
-    Shard.Index.erase(It);
+    shard.lru.erase(it->second);
+    shard.index.erase(it);
 }
 
-void XStore::EraseOpenFilesUnderPrefix(const std::string &dbDirPrefix) {
+void XStore::EraseOpenFilesUnderPrefix(const std::string &db_dir_prefix) {
     // Same rationale as EraseMappedFilesUnderPrefix -- sweep each shard
     // under its own lock rather than one lock for the whole sweep.
-    for (FdShard &Shard : FdShards) {
-        std::lock_guard<std::mutex> Lock(Shard.Mutex);
+    for (FdShard &shard : fd_shards) {
+        std::lock_guard<std::mutex> lock(shard.mutex);
 
-        for (auto It = Shard.Lru.begin(); It != Shard.Lru.end();) {
-            if (It->first.compare(0, dbDirPrefix.size(), dbDirPrefix) == 0) {
-                Shard.Index.erase(It->first);
-                It = Shard.Lru.erase(It);
+        for (auto it = shard.lru.begin(); it != shard.lru.end();) {
+            if (it->first.compare(0, db_dir_prefix.size(), db_dir_prefix) == 0) {
+                shard.index.erase(it->first);
+                it = shard.lru.erase(it);
             } else {
-                ++It;
+                ++it;
             }
         }
     }
 }
 
-void XStore::EraseMappedFile(const std::string &targetFile) {
-    MmapShard &Shard = MmapShards[std::hash<std::string>{}(targetFile) % MmapShardCount];
-    std::lock_guard<std::mutex> Lock(Shard.Mutex);
+void XStore::EraseMappedFile(const std::string &target_file) {
+    MmapShard &shard = mmap_shards[std::hash<std::string>{}(target_file) % MMAP_SHARD_COUNT];
+    std::lock_guard<std::mutex> lock(shard.mutex);
 
-    auto It = Shard.Index.find(targetFile);
-    if (It == Shard.Index.end()) {
+    auto it = shard.index.find(target_file);
+    if (it == shard.index.end()) {
         return;
     }
 
     // Only drops the cache's reference -- see MmapShard's comment. If a
     // caller is still mid-read/write on a copy of this mapping's
     // shared_ptr, munmap() is deferred until that copy is released too.
-    Shard.Lru.erase(It->second);
-    Shard.Index.erase(It);
+    shard.lru.erase(it->second);
+    shard.index.erase(it);
 }
 
-void XStore::EraseMappedFilesUnderPrefix(const std::string &dbDirPrefix) {
+void XStore::EraseMappedFilesUnderPrefix(const std::string &db_dir_prefix) {
     // Prefix sweep doesn't know which shard(s) hold matching files, so it
     // walks all of them -- locked one shard at a time (not all at once),
     // so concurrent GetOrMapFile() calls hashing to other shards aren't
     // blocked for the sweep's duration. Rare/administrative path (DB
     // removal), not a hot path, so this is fine.
-    for (MmapShard &Shard : MmapShards) {
-        std::lock_guard<std::mutex> Lock(Shard.Mutex);
+    for (MmapShard &shard : mmap_shards) {
+        std::lock_guard<std::mutex> lock(shard.mutex);
 
-        for (auto It = Shard.Lru.begin(); It != Shard.Lru.end();) {
-            if (It->first.compare(0, dbDirPrefix.size(), dbDirPrefix) == 0) {
-                Shard.Index.erase(It->first);
-                It = Shard.Lru.erase(It);
+        for (auto it = shard.lru.begin(); it != shard.lru.end();) {
+            if (it->first.compare(0, db_dir_prefix.size(), db_dir_prefix) == 0) {
+                shard.index.erase(it->first);
+                it = shard.lru.erase(it);
             } else {
-                ++It;
+                ++it;
             }
         }
     }
@@ -269,32 +269,32 @@ void XStore::EraseMappedFilesUnderPrefix(const std::string &dbDirPrefix) {
 // was nothing worth vectorizing there to begin with -- reverted after
 // measuring.
 template <typename Cmp>
-void XStore::ProcessFileRangeSelect(const char* rowsBase, unsigned long long totalRows,
-                                     size_t rowLen, unsigned short columnIdx,
-                                     ValueStruct& bestValue, XStore_Proto::FData& bestData) {
+void XStore::ProcessFileRangeSelect(const char* rows_base, unsigned long long total_rows,
+                                     size_t row_len, unsigned short column_idx,
+                                     ValueStruct& best_value, XStore_Proto::FData& best_data) {
 
-    if (totalRows == 0) return;
+    if (total_rows == 0) return;
 
-    XStore_Proto::FData CurrData;
-    ValueStruct TempValue;
-    const Cmp Better{}; // stateless functor, no per-call construction cost
+    XStore_Proto::FData curr_data;
+    ValueStruct temp_value;
+    const Cmp better{}; // stateless functor, no per-call construction cost
 
-    for (unsigned long long i = 0; i < totalRows; ++i) {
-        const char* RowPtr = rowsBase + (i * rowLen);
+    for (unsigned long long i = 0; i < total_rows; ++i) {
+        const char* row_ptr = rows_base + (i * row_len);
 
         // Instant skip for empty slots
-        if (RowPtr[0] == 0) continue;
+        if (row_ptr[0] == 0) continue;
 
-        CurrData.Clear();
-        if (!ExtractColumnByIndexSkipParse(RowPtr, rowLen, columnIdx, CurrData)) continue;
+        curr_data.Clear();
+        if (!ExtractColumnByIndexSkipParse(row_ptr, row_len, column_idx, curr_data)) continue;
 
-        if (CurrData.oneOfData_case() > 0 && CurrData.oneOfData_case() <= 12) {
-            XStore::GetFDataValue(&CurrData, &TempValue);
+        if (curr_data.oneOfData_case() > 0 && curr_data.oneOfData_case() <= 12) {
+            XStore::GetFDataValue(&curr_data, &temp_value);
 
-            if (!bestValue.IsInitialized || Better(TempValue.Value, bestValue.Value)) {
-                bestValue.Value = TempValue.Value;
-                bestValue.IsInitialized = true;
-                bestData = CurrData;
+            if (!best_value.is_initialized || better(temp_value.value, best_value.value)) {
+                best_value.value = temp_value.value;
+                best_value.is_initialized = true;
+                best_data = curr_data;
             }
         }
     }
@@ -307,27 +307,27 @@ template void XStore::ProcessFileRangeSelect<std::less<long double>>(
 template void XStore::ProcessFileRangeSelect<std::greater<long double>>(
     const char*, unsigned long long, size_t, unsigned short, ValueStruct&, XStore_Proto::FData&);
 
-void XStore::ProcessFileRangeAccumulate(const char* rowsBase, unsigned long long totalRows,
-                                         size_t rowLen, unsigned short columnIdx,
-                                         double& sumOut, unsigned long long& validCountOut) {
+void XStore::ProcessFileRangeAccumulate(const char* rows_base, unsigned long long total_rows,
+                                         size_t row_len, unsigned short column_idx,
+                                         double& sum_out, unsigned long long& valid_count_out) {
 
-    if (totalRows == 0) return;
+    if (total_rows == 0) return;
 
-    XStore_Proto::FData CurrData;
-    ValueStruct TempValue;
+    XStore_Proto::FData curr_data;
+    ValueStruct temp_value;
 
-    for (unsigned long long i = 0; i < totalRows; ++i) {
-        const char* RowPtr = rowsBase + (i * rowLen);
+    for (unsigned long long i = 0; i < total_rows; ++i) {
+        const char* row_ptr = rows_base + (i * row_len);
 
-        if (RowPtr[0] == 0) continue;
+        if (row_ptr[0] == 0) continue;
 
-        CurrData.Clear();
-        if (!ExtractColumnByIndexSkipParse(RowPtr, rowLen, columnIdx, CurrData)) continue;
+        curr_data.Clear();
+        if (!ExtractColumnByIndexSkipParse(row_ptr, row_len, column_idx, curr_data)) continue;
 
-        if (CurrData.oneOfData_case() > 0 && CurrData.oneOfData_case() <= 12) {
-            XStore::GetFDataValue(&CurrData, &TempValue);
-            sumOut += (double)TempValue.Value;
-            validCountOut++;
+        if (curr_data.oneOfData_case() > 0 && curr_data.oneOfData_case() <= 12) {
+            XStore::GetFDataValue(&curr_data, &temp_value);
+            sum_out += (double)temp_value.value;
+            valid_count_out++;
         }
     }
 }
@@ -349,173 +349,173 @@ void XStore::ProcessFileRangeAccumulate(const char* rowsBase, unsigned long long
 // deliberate difference: because this returns as soon as the target column
 // is read, corruption in a LATER column no longer fails the read of an
 // earlier, valid target column the way a full-row parse would.
-bool XStore::ExtractColumnByIndexSkipParse(const char* rowPtr, size_t rowLen,
-                                            unsigned short columnIdx,
-                                            XStore_Proto::FData& outData) {
+bool XStore::ExtractColumnByIndexSkipParse(const char* row_ptr, size_t row_len,
+                                            unsigned short column_idx,
+                                            XStore_Proto::FData& out_data) {
     using google::protobuf::internal::WireFormatLite;
 
-    google::protobuf::io::ArrayInputStream ArrayIn(rowPtr, (int)rowLen);
-    google::protobuf::io::CodedInputStream CodedIn(&ArrayIn);
+    google::protobuf::io::ArrayInputStream array_in(row_ptr, (int)row_len);
+    google::protobuf::io::CodedInputStream coded_in(&array_in);
 
-    unsigned int Occurrence = 0;
-    uint32_t Tag;
+    unsigned int occurrence = 0;
+    uint32_t tag;
     // ReadTag() returns 0 once it hits the fixed-width slot's zero padding
     // (no valid message ever encodes field number 0) -- same end-of-row
     // signal the old full-parse path relied on.
-    while ((Tag = CodedIn.ReadTag()) != 0) {
-        if (WireFormatLite::GetTagFieldNumber(Tag) != XStore_Proto::RowData::kFieldDataFieldNumber) {
+    while ((tag = coded_in.ReadTag()) != 0) {
+        if (WireFormatLite::GetTagFieldNumber(tag) != XStore_Proto::RowData::kFieldDataFieldNumber) {
             // RowData only ever encodes field 1 -- skip rather than assume
             // this can't happen.
-            if (!WireFormatLite::SkipField(&CodedIn, Tag)) return false;
+            if (!WireFormatLite::SkipField(&coded_in, tag)) return false;
             continue;
         }
 
-        if (Occurrence == columnIdx) {
-            return WireFormatLite::ReadMessage(&CodedIn, &outData);
+        if (occurrence == column_idx) {
+            return WireFormatLite::ReadMessage(&coded_in, &out_data);
         }
 
-        if (!WireFormatLite::SkipField(&CodedIn, Tag)) return false;
-        ++Occurrence;
+        if (!WireFormatLite::SkipField(&coded_in, tag)) return false;
+        ++occurrence;
     }
 
     return false;  // ran out of columns before reaching columnIdx
 }
 
-void XStore::GetFDataValue(const XStore_Proto::FData *fDataInput, unsigned int columnIdx, ValueStruct *returnData) {
-    switch (fDataInput->oneOfData_case()) {
+void XStore::GetFDataValue(const XStore_Proto::FData *f_data_input, unsigned int column_idx, ValueStruct *return_data) {
+    switch (f_data_input->oneOfData_case()) {
         case (XStore_Proto::FData::OneOfDataCase::kDoubleData): {
-            returnData->Index = columnIdx;
-            returnData->Value = fDataInput->doubledata();
+            return_data->index = column_idx;
+            return_data->value = f_data_input->doubledata();
             break;
         }
 
         case (XStore_Proto::FData::OneOfDataCase::kFloatData): {
-            returnData->Index = columnIdx;
-            returnData->Value = fDataInput->floatdata();
+            return_data->index = column_idx;
+            return_data->value = f_data_input->floatdata();
             break;
         }
 
         case (XStore_Proto::FData::OneOfDataCase::kInt32Data): {
-            returnData->Index = columnIdx;
-            returnData->Value = fDataInput->int32data();
+            return_data->index = column_idx;
+            return_data->value = f_data_input->int32data();
             break;
         }
 
         case (XStore_Proto::FData::OneOfDataCase::kInt64Data): {
-            returnData->Index = columnIdx;
-            returnData->Value = fDataInput->int64data();
+            return_data->index = column_idx;
+            return_data->value = f_data_input->int64data();
             break;
         }
 
         case (XStore_Proto::FData::OneOfDataCase::kUint32Data): {
-            returnData->Index = columnIdx;
-            returnData->Value = fDataInput->uint32data();
+            return_data->index = column_idx;
+            return_data->value = f_data_input->uint32data();
             break;
         }
 
         case (XStore_Proto::FData::OneOfDataCase::kUint64Data): {
-            returnData->Index = columnIdx;
-            returnData->Value = fDataInput->uint64data();
+            return_data->index = column_idx;
+            return_data->value = f_data_input->uint64data();
             break;
         }
 
         case (XStore_Proto::FData::OneOfDataCase::kSint32Data): {
-            returnData->Index = columnIdx;
-            returnData->Value = fDataInput->sint32data();
+            return_data->index = column_idx;
+            return_data->value = f_data_input->sint32data();
             break;
         }
 
         case (XStore_Proto::FData::OneOfDataCase::kSint64Data): {
-            returnData->Index = columnIdx;
-            returnData->Value = fDataInput->sint64data();
+            return_data->index = column_idx;
+            return_data->value = f_data_input->sint64data();
             break;
         }
 
         case (XStore_Proto::FData::OneOfDataCase::kFixed32Data): {
-            returnData->Index = columnIdx;
-            returnData->Value = fDataInput->fixed32data();
+            return_data->index = column_idx;
+            return_data->value = f_data_input->fixed32data();
             break;
         }
 
         case (XStore_Proto::FData::OneOfDataCase::kFixed64Data): {
-            returnData->Index = columnIdx;
-            returnData->Value = fDataInput->fixed64data();
+            return_data->index = column_idx;
+            return_data->value = f_data_input->fixed64data();
             break;
         }
 
         case (XStore_Proto::FData::OneOfDataCase::kSfixed32Data): {
-            returnData->Index = columnIdx;
-            returnData->Value = fDataInput->sfixed32data();
+            return_data->index = column_idx;
+            return_data->value = f_data_input->sfixed32data();
             break;
         }
 
         case (XStore_Proto::FData::OneOfDataCase::kSfixed64Data): {
-            returnData->Index = columnIdx;
-            returnData->Value = fDataInput->sfixed64data();
+            return_data->index = column_idx;
+            return_data->value = f_data_input->sfixed64data();
             break;
         }
     }
 }
 
-void XStore::GetFDataValue(const XStore_Proto::FData *fDataInput, ValueStruct *returnData) {
-    switch (fDataInput->oneOfData_case()) {
+void XStore::GetFDataValue(const XStore_Proto::FData *f_data_input, ValueStruct *return_data) {
+    switch (f_data_input->oneOfData_case()) {
         case (XStore_Proto::FData::OneOfDataCase::kDoubleData): {
-            returnData->Value = fDataInput->doubledata();
+            return_data->value = f_data_input->doubledata();
             break;
         }
 
         case (XStore_Proto::FData::OneOfDataCase::kFloatData): {
-            returnData->Value = fDataInput->floatdata();
+            return_data->value = f_data_input->floatdata();
             break;
         }
 
         case (XStore_Proto::FData::OneOfDataCase::kInt32Data): {
-            returnData->Value = fDataInput->int32data();
+            return_data->value = f_data_input->int32data();
             break;
         }
 
         case (XStore_Proto::FData::OneOfDataCase::kInt64Data): {
-            returnData->Value = fDataInput->int64data();
+            return_data->value = f_data_input->int64data();
             break;
         }
 
         case (XStore_Proto::FData::OneOfDataCase::kUint32Data): {
-            returnData->Value = fDataInput->uint32data();
+            return_data->value = f_data_input->uint32data();
             break;
         }
 
         case (XStore_Proto::FData::OneOfDataCase::kUint64Data): {
-            returnData->Value = fDataInput->uint64data();
+            return_data->value = f_data_input->uint64data();
             break;
         }
 
         case (XStore_Proto::FData::OneOfDataCase::kSint32Data): {
-            returnData->Value = fDataInput->sint32data();
+            return_data->value = f_data_input->sint32data();
             break;
         }
 
         case (XStore_Proto::FData::OneOfDataCase::kSint64Data): {
-            returnData->Value = fDataInput->sint64data();
+            return_data->value = f_data_input->sint64data();
             break;
         }
 
         case (XStore_Proto::FData::OneOfDataCase::kFixed32Data): {
-            returnData->Value = fDataInput->fixed32data();
+            return_data->value = f_data_input->fixed32data();
             break;
         }
 
         case (XStore_Proto::FData::OneOfDataCase::kFixed64Data): {
-            returnData->Value = fDataInput->fixed64data();
+            return_data->value = f_data_input->fixed64data();
             break;
         }
 
         case (XStore_Proto::FData::OneOfDataCase::kSfixed32Data): {
-            returnData->Value = fDataInput->sfixed32data();
+            return_data->value = f_data_input->sfixed32data();
             break;
         }
 
         case (XStore_Proto::FData::OneOfDataCase::kSfixed64Data): {
-            returnData->Value = fDataInput->sfixed64data();
+            return_data->value = f_data_input->sfixed64data();
             break;
         }
     }

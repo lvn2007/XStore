@@ -10,28 +10,28 @@
 #include <sys/mman.h>
 
 // RANGE INSERT
-void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, XStore_Proto::RangeInsert_REP *returnData) {
+void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client, XStore_Proto::RangeInsert_REP *return_data) {
     // Ensure DB Name string is all capitalized
-    std::string DbName = protoFromClient->dbname();
-    ToUpperCase(DbName.begin(), DbName.end());
+    std::string db_name = proto_from_client->dbname();
+    ToUpperCase(db_name.begin(), db_name.end());
 
     // Base directory of a DB
-    const std::string &DbBasePathStr = CachedDbBasePath(DbName);
+    const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
     // IF db directory does not exist
-    if (std::filesystem::is_directory(DbBasePathStr) == 0) {
-        std::string ErrMsg = fmt::format("[RANGE INSERT] [DB: {}] - DB does not exist", DbName);
-        SetTaggedStatus(returnData->mutable_insertstatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
+    if (std::filesystem::is_directory(db_base_path_str) == 0) {
+        std::string err_msg = fmt::format("[RANGE INSERT] [DB: {}] - DB does not exist", db_name);
+        SetTaggedStatus(return_data->mutable_insertstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
         return;
     }
 
     // Fetch cfgStruct from cache, loading from disk on first use
-    XStore_Proto::ConfigStruct CfgStruct;
-    if (!GetOrLoadCfg(DbName, DbBasePathStr, CfgStruct)) {
-        std::string ErrMsg = fmt::format("[RANGE INSERT] [DB: {}] - DB does not exist", DbName);
-        SetTaggedStatus(returnData->mutable_insertstatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
+    XStore_Proto::ConfigStruct cfg_struct;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+        std::string err_msg = fmt::format("[RANGE INSERT] [DB: {}] - DB does not exist", db_name);
+        SetTaggedStatus(return_data->mutable_insertstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
         return;
     }
 
@@ -41,7 +41,7 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, X
     // touches only a handful of distinct years, and RangeInsert's response
     // is just a status string, so bucket iteration order doesn't need to be
     // chronological the way BatchQuery's response does.
-    YearBucketMap DataMap;
+    YearBucketMap data_map;
 
     // Granularity check -- year-bucket via TimeStruct's closed-form calendar
     // calc instead of gmtime_r (see BatchInsert for the same change and why:
@@ -51,29 +51,29 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, X
     // above), so consecutive rows usually share the same year: reuse the
     // last TimeStruct's [FirstEpoch, LastEpoch] window via one comparison
     // instead of rerunning the full calendar decomposition on every row.
-    bool HaveWindow = false;
-    unsigned short int CurrYear = 0;
-    int64_t WindowLastEpoch = 0;
-    for (int i = 0; i < protoFromClient->rangeinsert_data_size(); i++) {
-        unsigned long long int Ts = protoFromClient->rangeinsert_data(i).timestamp();
-        if (!HaveWindow || static_cast<int64_t>(Ts) > WindowLastEpoch) {
-            TimeStruct RowTs(static_cast<time_t>(Ts), CfgStruct.timeresolution());
-            CurrYear = RowTs.Year;
-            WindowLastEpoch = RowTs.LastEpoch;
-            HaveWindow = true;
+    bool have_window = false;
+    unsigned short int curr_year = 0;
+    int64_t window_last_epoch = 0;
+    for (int i = 0; i < proto_from_client->rangeinsert_data_size(); i++) {
+        unsigned long long int ts = proto_from_client->rangeinsert_data(i).timestamp();
+        if (!have_window || static_cast<int64_t>(ts) > window_last_epoch) {
+            TimeStruct row_ts(static_cast<time_t>(ts), cfg_struct.timeresolution());
+            curr_year = row_ts.year;
+            window_last_epoch = row_ts.last_epoch;
+            have_window = true;
         }
-        AppendToYearBucket(DataMap, CurrYear, static_cast<unsigned long long int>(i));
+        AppendToYearBucket(data_map, curr_year, static_cast<unsigned long long int>(i));
     }
 
     // Iterate through each key (year) of dataMap
-    for (const std::pair<unsigned short int, std::vector<unsigned long long int>> &Pair : DataMap) {
-        unsigned short int YearKey = Pair.first;
-        const std::vector<unsigned long long int> &Indices = Pair.second;
-        const std::string &TargetFile = CachedYearFilePath(DbBasePathStr, YearKey);
+    for (const std::pair<unsigned short int, std::vector<unsigned long long int>> &pair : data_map) {
+        unsigned short int year_key = pair.first;
+        const std::vector<unsigned long long int> &indices = pair.second;
+        const std::string &target_file = CachedYearFilePath(db_base_path_str, year_key);
 
         // Grab first inserting element for TimeStruct purposes
         //  Get length of time to truncate
-        TimeStruct ThisTs{static_cast<time_t>(protoFromClient->rangeinsert_data(Indices.front()).timestamp()), CfgStruct.timeresolution()};
+        TimeStruct this_ts{static_cast<time_t>(proto_from_client->rangeinsert_data(indices.front()).timestamp()), cfg_struct.timeresolution()};
 
         // Cached fd for this (dbName, year) file -- same fd cache UnaryInsert
         // uses (see GetOrOpenFile). Creates+ftruncates on first use, so the
@@ -85,14 +85,14 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, X
         // Held through WriteRowGroupToFile below so a concurrent eviction on
         // another thread can't close this fd mid-write -- see FdShard's
         // comment in XStore.h.
-        std::shared_ptr<int> FdHandle = GetOrOpenFile(TargetFile, CfgStruct.rowlength(), ThisTs.LastEpoch - ThisTs.FirstEpoch);
-        if (!FdHandle) {
-            std::string ErrMsg = fmt::format("[RANGE INSERT] [DB: {}] - Unable to open {}.XSTORE", DbName, YearKey);
-            SetTaggedStatus(returnData->mutable_insertstatus(), "[ERROR] ", ErrMsg);
-            spdlog::error(ErrMsg);
+        std::shared_ptr<int> fd_handle = GetOrOpenFile(target_file, cfg_struct.rowlength(), this_ts.last_epoch - this_ts.first_epoch);
+        if (!fd_handle) {
+            std::string err_msg = fmt::format("[RANGE INSERT] [DB: {}] - Unable to open {}.XSTORE", db_name, year_key);
+            SetTaggedStatus(return_data->mutable_insertstatus(), "[ERROR] ", err_msg);
+            spdlog::error(err_msg);
             continue;
         }
-        int Fd = *FdHandle;
+        int fd = *fd_handle;
 
         // RegionLength (computed inside the shared helper below) must cover
         // the actual byte span of the writes, not just count*rowLength --
@@ -101,30 +101,30 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *protoFromClient, X
         // Relies on the same "incoming data is sorted" precondition the rest
         // of this function already assumes, so the last entry in the group
         // carries the highest offset.
-        WriteRowGroupToFile(TargetFile, Fd, ThisTs.FirstEpoch, CfgStruct.rowlength(), Indices,
-            [&](unsigned long long int idx) -> const XStore_Proto::RangeInsert_DATA& { return protoFromClient->rangeinsert_data(idx); });
+        WriteRowGroupToFile(target_file, fd, this_ts.first_epoch, cfg_struct.rowlength(), indices,
+            [&](unsigned long long int idx) -> const XStore_Proto::RangeInsert_DATA& { return proto_from_client->rangeinsert_data(idx); });
     }
 
     // Return insert status
-    std::string InfoMsg = fmt::format("[RANGE INSERT] [DB: {}] - Inserted {} elements successfully", DbName, protoFromClient->rangeinsert_data_size());
-    SetTaggedStatus(returnData->mutable_insertstatus(), "[INFO] ", InfoMsg);
-    spdlog::info(InfoMsg);
+    std::string info_msg = fmt::format("[RANGE INSERT] [DB: {}] - Inserted {} elements successfully", db_name, proto_from_client->rangeinsert_data_size());
+    SetTaggedStatus(return_data->mutable_insertstatus(), "[INFO] ", info_msg);
+    spdlog::info(info_msg);
 }
 
 // RANGE QUERY
-void XStore::RangeQuery(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string_view dbNameView, XStore_Proto::RangeQuery_REP *returnData) {
+void XStore::RangeQuery(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t, std::string_view db_name_view, XStore_Proto::RangeQuery_REP *return_data) {
     // Ensure dbName string is all capitalized
-    const std::string &dbName = UpperCaseInto(dbNameView);
+    const std::string &db_name = UpperCaseInto(db_name_view);
 
     // Base directory of a DB
-    const std::string &DbBasePathStr = CachedDbBasePath(dbName);
+    const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
     // Fetch cfgStruct from cache, loading from disk on first use
-    XStore_Proto::ConfigStruct CfgStruct;
-    if (!GetOrLoadCfg(dbName, DbBasePathStr, CfgStruct)) {
-        std::string ErrMsg = fmt::format("[RANGE QUERY] [DB: {}] - {}.CFG does not exist", dbName, dbName);
-        SetTaggedStatus(returnData->mutable_querystatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
+    XStore_Proto::ConfigStruct cfg_struct;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+        std::string err_msg = fmt::format("[RANGE QUERY] [DB: {}] - {}.CFG does not exist", db_name, db_name);
+        SetTaggedStatus(return_data->mutable_querystatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
         return;
     }
 
@@ -132,26 +132,26 @@ void XStore::RangeQuery(const unsigned long long int &startEpochT, const unsigne
     // unsigned, so an inverted range would otherwise underflow (endEpochT -
     // startEpochT) into a huge value and get misreported as ">2GB" instead
     // of the actual "end before start" error.
-    if (startEpochT > endEpochT) {
-        std::string ErrMsg = fmt::format("[RANGE QUERY] [DB: {}] - Target end time must be after start time", dbName);
-        SetTaggedStatus(returnData->mutable_querystatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
+    if (start_epoch_t > end_epoch_t) {
+        std::string err_msg = fmt::format("[RANGE QUERY] [DB: {}] - Target end time must be after start time", db_name);
+        SetTaggedStatus(return_data->mutable_querystatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
         return;
     }
 
     // IF query range > 2GB limit of Protobuf
-    if ((endEpochT - startEpochT) * CfgStruct.rowlength() > 2'000'000'000) {
-        std::string ErrMsg = fmt::format("[RANGE QUERY] [DB: {}] - Query results is larger than 2GB", dbName);
-        SetTaggedStatus(returnData->mutable_querystatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
+    if ((end_epoch_t - start_epoch_t) * cfg_struct.rowlength() > 2'000'000'000) {
+        std::string err_msg = fmt::format("[RANGE QUERY] [DB: {}] - Query results is larger than 2GB", db_name);
+        SetTaggedStatus(return_data->mutable_querystatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
         return;
     }
 
     // IF db directory does not exist
-    if (std::filesystem::is_directory(DbBasePathStr) == 0) {
-        std::string ErrMsg = fmt::format("[RANGE QUERY] [DB: {}] - DB does not exist", dbName);
-        SetTaggedStatus(returnData->mutable_querystatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
+    if (std::filesystem::is_directory(db_base_path_str) == 0) {
+        std::string err_msg = fmt::format("[RANGE QUERY] [DB: {}] - DB does not exist", db_name);
+        SetTaggedStatus(return_data->mutable_querystatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
         return;
     }
 
@@ -161,10 +161,10 @@ void XStore::RangeQuery(const unsigned long long int &startEpochT, const unsigne
     // Reserving it avoids the repeated field's O(log n) reallocations+copies
     // for large spans; the 2GB check above already bounds this to a sane
     // upfront allocation.
-    returnData->mutable_queryresponse()->Reserve(static_cast<int>(endEpochT - startEpochT + 1));
+    return_data->mutable_queryresponse()->Reserve(static_cast<int>(end_epoch_t - start_epoch_t + 1));
 
     // Walk the span one year-file at a time. Each iteration clamps its
-    // segment to [IterEpoch, min(endEpochT, thisYear.LastEpoch)] and always
+    // segment to [IterEpoch, min(endEpochT, thisYear.last_epoch)] and always
     // advances IterEpoch past it before the next iteration -- a single-year
     // span, and every year (including the last) of a multi-year span, are
     // all just this same loop body running once or several times, so there's
@@ -174,11 +174,11 @@ void XStore::RangeQuery(const unsigned long long int &startEpochT, const unsigne
     // undersize by one row; both are structurally impossible here since
     // IterEpoch always advances unconditionally and RegionLength is always
     // derived from the same inclusive SegmentEnd).
-    unsigned long long int IterEpoch = startEpochT;
-    while (IterEpoch <= endEpochT) {
-        TimeStruct CurrTs(IterEpoch, CfgStruct.timeresolution());
-        const std::string &TargetFilePath = CachedYearFilePath(DbBasePathStr, CurrTs.Year);
-        const unsigned long long int SegmentEnd = std::min(endEpochT, static_cast<unsigned long long int>(CurrTs.LastEpoch));
+    unsigned long long int iter_epoch = start_epoch_t;
+    while (iter_epoch <= end_epoch_t) {
+        TimeStruct curr_ts(iter_epoch, cfg_struct.timeresolution());
+        const std::string &target_file_path = CachedYearFilePath(db_base_path_str, curr_ts.year);
+        const unsigned long long int segment_end = std::min(end_epoch_t, static_cast<unsigned long long int>(curr_ts.last_epoch));
 
         // IF target YEAR.XSTORE does NOT exist -- checked explicitly because
         // GetOrMapFile below opens with O_CREAT and would otherwise silently
@@ -187,11 +187,11 @@ void XStore::RangeQuery(const unsigned long long int &startEpochT, const unsigne
         // hole within an existing year, which still gets an empty-field
         // entry -- see RangeQueryUninsertedTimestampsReturnEmptyEntriesNotOmitted
         // vs RangeQuerySpanningThreeYearsWithMissingMiddleYearFile).
-        if (std::filesystem::exists(TargetFilePath) == 0) {
-            std::string WarningMsg = fmt::format("[RANGE QUERY] [DB: {}] - {}.XSTORE does not exist", dbName, CurrTs.Year);
-            SetTaggedStatus(returnData->mutable_querystatus(), "[WARNING] ", WarningMsg);
-            spdlog::warn(WarningMsg);
-            IterEpoch = SegmentEnd + 1;
+        if (std::filesystem::exists(target_file_path) == 0) {
+            std::string warning_msg = fmt::format("[RANGE QUERY] [DB: {}] - {}.XSTORE does not exist", db_name, curr_ts.year);
+            SetTaggedStatus(return_data->mutable_querystatus(), "[WARNING] ", warning_msg);
+            spdlog::warn(warning_msg);
+            iter_epoch = segment_end + 1;
             continue;
         }
 
@@ -203,25 +203,25 @@ void XStore::RangeQuery(const unsigned long long int &startEpochT, const unsigne
         // Held through the read loop below so a concurrent eviction on
         // another thread can't munmap() this mapping mid-read -- see
         // MmapShard's comment in XStore.h.
-        std::shared_ptr<void> MappedHandle = GetOrMapFile(TargetFilePath, CfgStruct.rowlength(), CurrTs.LastEpoch - CurrTs.FirstEpoch);
-        if (MappedHandle == nullptr) {
-            std::string ErrMsg = fmt::format("[RANGE QUERY] [DB: {}] - Unable to open/map {}.XSTORE", dbName, CurrTs.Year);
-            SetTaggedStatus(returnData->mutable_querystatus(), "[ERROR] ", ErrMsg);
-            spdlog::error(ErrMsg);
-            IterEpoch = SegmentEnd + 1;
+        std::shared_ptr<void> mapped_handle = GetOrMapFile(target_file_path, cfg_struct.rowlength(), curr_ts.last_epoch - curr_ts.first_epoch);
+        if (mapped_handle == nullptr) {
+            std::string err_msg = fmt::format("[RANGE QUERY] [DB: {}] - Unable to open/map {}.XSTORE", db_name, curr_ts.year);
+            SetTaggedStatus(return_data->mutable_querystatus(), "[ERROR] ", err_msg);
+            spdlog::error(err_msg);
+            iter_epoch = segment_end + 1;
             continue;
         }
-        void *MappedBase = MappedHandle.get();
+        void *mapped_base = mapped_handle.get();
 
-        const unsigned long long int FirstOffset = (IterEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength();
-        const unsigned long long int RegionLength = (SegmentEnd - IterEpoch + 1) * CfgStruct.rowlength();
+        const unsigned long long int first_offset = (iter_epoch - curr_ts.first_epoch) * cfg_struct.rowlength();
+        const unsigned long long int region_length = (segment_end - iter_epoch + 1) * cfg_struct.rowlength();
 
         {
             // Lock file prior to reading -- READ lock scoped to exactly this
             // segment's byte range, not the whole file, so concurrent reads
             // of disjoint regions (or other years' files entirely) never
             // wait on this one.
-            FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
+            FileRangeLockGuard guard(target_file_path, first_offset, region_length, FileRangeLock::LockType::READ);
 
             // Prefetch the queried span in one shot instead of relying on
             // lazy page-faulting (one fault per first-touched page as the
@@ -230,88 +230,88 @@ void XStore::RangeQuery(const unsigned long long int &startEpochT, const unsigne
             // page-aligned addr/length, so align down to the containing page
             // and extend the length by that slop.
             {
-                static const long PageSize = sysconf(_SC_PAGE_SIZE);
-                char *SpanStart = static_cast<char*>(MappedBase) + FirstOffset;
-                uintptr_t AlignedAddr = reinterpret_cast<uintptr_t>(SpanStart) & ~(static_cast<uintptr_t>(PageSize) - 1);
-                size_t AlignSlop = reinterpret_cast<uintptr_t>(SpanStart) - AlignedAddr;
-                madvise(reinterpret_cast<void*>(AlignedAddr), RegionLength + AlignSlop, MADV_WILLNEED);
+                static const long PAGE_SIZE = sysconf(_SC_PAGE_SIZE);
+                char *span_start = static_cast<char*>(mapped_base) + first_offset;
+                uintptr_t aligned_addr = reinterpret_cast<uintptr_t>(span_start) & ~(static_cast<uintptr_t>(PAGE_SIZE) - 1);
+                size_t align_slop = reinterpret_cast<uintptr_t>(span_start) - aligned_addr;
+                madvise(reinterpret_cast<void*>(aligned_addr), region_length + align_slop, MADV_WILLNEED);
             }
 
             // Iterate over this segment & add queried data and status. Every
             // timestamp in range gets an entry -- unlike BatchQuery, holes
             // are NOT omitted here, they come back as zero-field RowData.
-            for (unsigned long long int EpochTime = IterEpoch; EpochTime <= SegmentEnd; EpochTime++) {
-                unsigned long long int Offset = (EpochTime - CurrTs.FirstEpoch) * CfgStruct.rowlength();
+            for (unsigned long long int epoch_time = iter_epoch; epoch_time <= segment_end; epoch_time++) {
+                unsigned long long int offset = (epoch_time - curr_ts.first_epoch) * cfg_struct.rowlength();
 
                 // Parse straight from the mapped row into the response --
                 // skips the TempData copy the previous fread()-based path paid.
-                XStore_Proto::UnaryQuery_REP *CurrEntry = returnData->add_queryresponse();
-                CurrEntry->set_timestamp(EpochTime);
-                CurrEntry->mutable_data()->ParseFromArray(static_cast<char*>(MappedBase) + Offset, CfgStruct.rowlength());
+                XStore_Proto::UnaryQuery_REP *curr_entry = return_data->add_queryresponse();
+                curr_entry->set_timestamp(epoch_time);
+                curr_entry->mutable_data()->ParseFromArray(static_cast<char*>(mapped_base) + offset, cfg_struct.rowlength());
             }
         }
 
-        IterEpoch = SegmentEnd + 1;
+        iter_epoch = segment_end + 1;
     }
 }
 
 // RANGE DELETE
-XStore_Proto::RangeDelete_REP XStore::RangeDelete(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT, std::string_view dbNameView) {
+XStore_Proto::RangeDelete_REP XStore::RangeDelete(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t, std::string_view db_name_view) {
     // Protobuf obj to be returned
-    XStore_Proto::RangeDelete_REP ToReturn;
-    int DeleteCount = 0;
+    XStore_Proto::RangeDelete_REP to_return;
+    int delete_count = 0;
 
     // Ensure dbName string is all capitalized
-    const std::string &dbName = UpperCaseInto(dbNameView);
+    const std::string &db_name = UpperCaseInto(db_name_view);
 
     // Base directory of a DB
-    const std::string &DbBasePathStr = CachedDbBasePath(dbName);
+    const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
     // Fetch cfgStruct from cache, loading from disk on first use
-    XStore_Proto::ConfigStruct CfgStruct;
-    if (!GetOrLoadCfg(dbName, DbBasePathStr, CfgStruct)) {
-        std::string ErrMsg = fmt::format("[RANGE DELETE] [DB: {}] - {}.CFG does not exist", dbName, dbName);
-        SetTaggedStatus(ToReturn.mutable_deletestatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
-        return ToReturn;
+    XStore_Proto::ConfigStruct cfg_struct;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+        std::string err_msg = fmt::format("[RANGE DELETE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
+        SetTaggedStatus(to_return.mutable_deletestatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return to_return;
     }
 
-    if (startEpochT > endEpochT) {
-        std::string ErrMsg = fmt::format("[RANGE DELETE] [DB: {}] - Target end time must be after start time", dbName);
-        SetTaggedStatus(ToReturn.mutable_deletestatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
-        return ToReturn;
+    if (start_epoch_t > end_epoch_t) {
+        std::string err_msg = fmt::format("[RANGE DELETE] [DB: {}] - Target end time must be after start time", db_name);
+        SetTaggedStatus(to_return.mutable_deletestatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return to_return;
     }
 
     // IF db directory does not exist
-    if (std::filesystem::is_directory(DbBasePathStr) == 0) {
-        std::string ErrMsg = fmt::format("[RANGE DELETE] [DB: {}] - DB does not exist", dbName);
-        SetTaggedStatus(ToReturn.mutable_deletestatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
-        return ToReturn;
+    if (std::filesystem::is_directory(db_base_path_str) == 0) {
+        std::string err_msg = fmt::format("[RANGE DELETE] [DB: {}] - DB does not exist", db_name);
+        SetTaggedStatus(to_return.mutable_deletestatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return to_return;
     }
 
     // Walk the span one year-file at a time. Each iteration clamps its
-    // segment to [IterEpoch, min(endEpochT, thisYear.LastEpoch)] and always
+    // segment to [IterEpoch, min(endEpochT, thisYear.last_epoch)] and always
     // advances IterEpoch past it before the next iteration -- same shape as
     // RangeQuery (see there for why this replaced the old three-branch
     // single-year/multi-year-first/multi-year-last duplication and the bugs
     // that duplication let slip through: a missing final year's file used to
     // spin this forever).
-    unsigned long long int IterEpoch = startEpochT;
-    while (IterEpoch <= endEpochT) {
-        TimeStruct CurrTs(IterEpoch, CfgStruct.timeresolution());
-        const std::string &TargetFilePath = CachedYearFilePath(DbBasePathStr, CurrTs.Year);
-        const unsigned long long int SegmentEnd = std::min(endEpochT, static_cast<unsigned long long int>(CurrTs.LastEpoch));
+    unsigned long long int iter_epoch = start_epoch_t;
+    while (iter_epoch <= end_epoch_t) {
+        TimeStruct curr_ts(iter_epoch, cfg_struct.timeresolution());
+        const std::string &target_file_path = CachedYearFilePath(db_base_path_str, curr_ts.year);
+        const unsigned long long int segment_end = std::min(end_epoch_t, static_cast<unsigned long long int>(curr_ts.last_epoch));
 
         // IF target YEAR.XSTORE does NOT exist -- a missing year contributes
         // nothing to DeleteCount, same as RangeQuery contributes no entries
         // for a missing year.
-        if (std::filesystem::exists(TargetFilePath) == 0) {
-            std::string WarningMsg = fmt::format("[RANGE DELETE] [DB: {}] - {}.XSTORE does not exist", dbName, CurrTs.Year);
-            SetTaggedStatus(ToReturn.mutable_deletestatus(), "[WARNING] ", WarningMsg);
-            spdlog::warn(WarningMsg);
-            IterEpoch = SegmentEnd + 1;
+        if (std::filesystem::exists(target_file_path) == 0) {
+            std::string warning_msg = fmt::format("[RANGE DELETE] [DB: {}] - {}.XSTORE does not exist", db_name, curr_ts.year);
+            SetTaggedStatus(to_return.mutable_deletestatus(), "[WARNING] ", warning_msg);
+            spdlog::warn(warning_msg);
+            iter_epoch = segment_end + 1;
             continue;
         }
 
@@ -324,33 +324,33 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(const unsigned long long int &
         // fallocate64() call below so a concurrent eviction on another
         // thread can't close this fd mid-delete -- see FdShard's comment in
         // XStore.h.
-        std::shared_ptr<int> FdHandle = GetOrOpenFile(TargetFilePath, CfgStruct.rowlength(), CurrTs.LastEpoch - CurrTs.FirstEpoch);
-        if (!FdHandle) {
-            std::string ErrMsg = fmt::format("[RANGE DELETE] [DB: {}] - Unable to open {}.XSTORE", dbName, CurrTs.Year);
-            SetTaggedStatus(ToReturn.mutable_deletestatus(), "[ERROR] ", ErrMsg);
-            spdlog::error(ErrMsg);
-            IterEpoch = SegmentEnd + 1;
+        std::shared_ptr<int> fd_handle = GetOrOpenFile(target_file_path, cfg_struct.rowlength(), curr_ts.last_epoch - curr_ts.first_epoch);
+        if (!fd_handle) {
+            std::string err_msg = fmt::format("[RANGE DELETE] [DB: {}] - Unable to open {}.XSTORE", db_name, curr_ts.year);
+            SetTaggedStatus(to_return.mutable_deletestatus(), "[ERROR] ", err_msg);
+            spdlog::error(err_msg);
+            iter_epoch = segment_end + 1;
             continue;
         }
-        int Fd = *FdHandle;
+        int fd = *fd_handle;
 
-        const unsigned long long int Offset = (IterEpoch - CurrTs.FirstEpoch) * CfgStruct.rowlength();
-        const unsigned long long int RangeCount = SegmentEnd - IterEpoch + 1;
+        const unsigned long long int offset = (iter_epoch - curr_ts.first_epoch) * cfg_struct.rowlength();
+        const unsigned long long int range_count = segment_end - iter_epoch + 1;
 
         {
             // Lock file prior to deleting
-            FileRangeLockGuard Guard(TargetFilePath, Offset, CfgStruct.rowlength() * RangeCount, FileRangeLock::LockType::WRITE);
+            FileRangeLockGuard guard(target_file_path, offset, cfg_struct.rowlength() * range_count, FileRangeLock::LockType::WRITE);
 
             // Deallocate data according to N bytes from rowLength
-            fallocate64(Fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, Offset, CfgStruct.rowlength() * RangeCount);
-            DeleteCount += RangeCount;
+            fallocate64(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfg_struct.rowlength() * range_count);
+            delete_count += range_count;
         }
 
-        IterEpoch = SegmentEnd + 1;
+        iter_epoch = segment_end + 1;
     }
 
-    std::string InfoMsg = fmt::format("[RANGE DELETE] [DB: {}] - Deleted {} items", dbName, DeleteCount);
-    SetTaggedStatus(ToReturn.mutable_deletestatus(), "[INFO] ", InfoMsg);
-    spdlog::info(InfoMsg);
-    return ToReturn;
+    std::string info_msg = fmt::format("[RANGE DELETE] [DB: {}] - Deleted {} items", db_name, delete_count);
+    SetTaggedStatus(to_return.mutable_deletestatus(), "[INFO] ", info_msg);
+    spdlog::info(info_msg);
+    return to_return;
 }

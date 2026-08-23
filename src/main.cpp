@@ -1,47 +1,7 @@
 #include <iostream>
 #include "include/Networking/ZMQ_Server.h"
 #include "include/XStore/XStore.h"
-#include <cmath>
-#include <variant>
-#include <fstream>
-#include <bitset>
 #include <thread>
-
-// Clock init
-std::chrono::time_point<std::chrono::high_resolution_clock> Start, End;
-std::chrono::duration<double> Diff;
-
-struct BenchData {
-    double Usec;
-    size_t OGLength;
-    size_t CompLength;
-
-    BenchData(double usecTimeTaken, size_t originalLength, size_t compressedLength) {
-        Usec = usecTimeTaken;
-        OGLength = originalLength;
-        CompLength = compressedLength;
-    }
-
-    std::string ToString() {
-        return std::to_string(Usec) + "," + std::to_string(OGLength) + "," + std::to_string(CompLength) + "\n";
-    }
-};
-
-// for string delimiter
-std::vector<std::string> Split(std::string s, std::string delimiter) {
-    size_t PosStart = 0, PosEnd, DelimLen = delimiter.length();
-    std::string Token;
-    std::vector<std::string> Res;
-
-    while ((PosEnd = s.find(delimiter, PosStart)) != std::string::npos) {
-        Token = s.substr (PosStart, PosEnd - PosStart);
-        PosStart = PosEnd + DelimLen;
-        Res.push_back (Token);
-    }
-
-    Res.push_back (s.substr (PosStart));
-    return Res;
-}
 
 int main(int argc, char *argv[]) {
     // Handle arguments
@@ -52,27 +12,27 @@ int main(int argc, char *argv[]) {
     }
 
     // Arguments parsing
-    std::string BindAddr = argv[1];
-    std::string BindPort = argv[2];
-    int ThreadCount = atoi(argv[3]);
-    if (ThreadCount <= 0) {
+    std::string bind_addr = argv[1];
+    std::string bind_port = argv[2];
+    int thread_count = atoi(argv[3]);
+    if (thread_count <= 0) {
         // atoi() returns 0 on a non-numeric/missing argument as well as on a
         // literal "0" -- either way a non-positive thread count would launch
         // a server with no workers to ever answer a request, so fall back to
         // the host's hardware concurrency instead of silently doing that.
-        unsigned int Fallback = std::thread::hardware_concurrency();
-        ThreadCount = Fallback > 0 ? static_cast<int>(Fallback) : 1;
+        unsigned int fallback = std::thread::hardware_concurrency();
+        thread_count = fallback > 0 ? static_cast<int>(fallback) : 1;
         std::cout << "[WARNING] [BOOT] - Invalid thread count '" << argv[3]
-                  << "', falling back to " << ThreadCount << std::endl;
+                  << "', falling back to " << thread_count << std::endl;
     }
 
     // ----DEV AREA
-    spdlog::level::level_enum ConsoleLevel = spdlog::level::warn;
-    spdlog::level::level_enum FileLevel = spdlog::level::trace;
-    unsigned short int FlushInterval = 10;
-    Logger LoggerInstance = Logger(ConsoleLevel, FileLevel, FlushInterval);
+    spdlog::level::level_enum console_level = spdlog::level::warn;
+    spdlog::level::level_enum file_level = spdlog::level::trace;
+    unsigned short int flush_interval = 10;
+    Logger logger_instance = Logger(console_level, file_level, flush_interval);
 
     // Spin ZMQ Server
-    ZMQ_Server XStoreZmqServer(ThreadCount);
-    XStoreZmqServer.StartServer(BindAddr, BindPort);
+    ZmqServer x_store_zmq_server(thread_count);
+    x_store_zmq_server.StartServer(bind_addr, bind_port);
 }

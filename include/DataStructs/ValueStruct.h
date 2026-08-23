@@ -2,9 +2,9 @@
 #define XSTORE_VALUESTRUCT_H
 
 struct ValueStruct {
-    unsigned int Index;
-    long double Value;
-    bool IsInitialized = false;
+    unsigned int index;
+    long double value;
+    bool is_initialized = false;
 };
 
 #endif //XSTORE_VALUESTRUCT_H

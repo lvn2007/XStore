@@ -7,17 +7,17 @@
 
 // Data structure to hold time-value together
 struct TimeStruct {
-  std::time_t UnixTime;
-  XStore_Proto::TimeUnit TimeResolution;
-  unsigned short int Year, Month, Day, Hour, Minute, Second;
-  unsigned short int Weekday; // 0 = Sunday .. 6 = Saturday (matches tm_wday)
-  int64_t FirstEpoch, LastEpoch;
+  std::time_t unix_time;
+  XStore_Proto::TimeUnit time_resolution;
+  unsigned short int year, month, day, hour, minute, second;
+  unsigned short int weekday; // 0 = Sunday .. 6 = Saturday (matches tm_wday)
+  int64_t first_epoch, last_epoch;
 
   // Constructor
-  TimeStruct(std::time_t unixTime, XStore_Proto::TimeUnit timeResolution);
+  TimeStruct(std::time_t unix_time, XStore_Proto::TimeUnit time_resolution);
 
   // Returns last day of a given month provided the year given in unixTime
-  unsigned short int GetLastDayOfMonth(unsigned short int iMonth) const;
+  unsigned short int GetLastDayOfMonth(unsigned short int i_month) const;
 
   private:
     void ExtractTimeComponents();

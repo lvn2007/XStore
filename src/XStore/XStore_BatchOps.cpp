@@ -18,11 +18,11 @@ namespace {
 // callers) the overhead alone can cost more than a plain sequential sort
 // would take to run the whole thing. Used by Batch Insert/Query/Delete's
 // "sort incoming timestamps first" step.
-constexpr std::ptrdiff_t ParallelSortThreshold = 10'000;
+constexpr std::ptrdiff_t PARALLEL_SORT_THRESHOLD = 10'000;
 
 template <typename Iterator, typename Compare>
 void SortBatch(Iterator begin, Iterator end, Compare comp) {
-    if (std::distance(begin, end) >= ParallelSortThreshold) {
+    if (std::distance(begin, end) >= PARALLEL_SORT_THRESHOLD) {
         std::sort(std::execution::par_unseq, begin, end, comp);
     } else {
         std::sort(begin, end, comp);
@@ -32,24 +32,24 @@ void SortBatch(Iterator begin, Iterator end, Compare comp) {
 }  // namespace
 
 // BATCH INSERT
-void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_Proto::BatchInsert_REP *returnData) {
+void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStore_Proto::BatchInsert_REP *return_data) {
     // Ensure DB Name string is all capitalized
-    std::string DbName = protoFromClient->dbname();
-    ToUpperCase(DbName.begin(), DbName.end());
+    std::string db_name = proto_from_client->dbname();
+    ToUpperCase(db_name.begin(), db_name.end());
 
     // Base directory of a DB
-    const std::string &DbBasePathStr = CachedDbBasePath(DbName);
+    const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
     // Fetch cfgStruct from cache, loading from disk on first use. This also
     // covers "DB does not exist": GetOrLoadCfg stats the .CFG file itself on
     // a cache miss, so a separate upfront is_directory() check on every call
     // (cache hit or not) would just be a redundant stat -- dropped, same fix
     // already applied to Unary ops.
-    XStore_Proto::ConfigStruct CfgStruct;
-    if (!GetOrLoadCfg(DbName, DbBasePathStr, CfgStruct)) {
-        std::string ErrMsg = fmt::format("[BATCH INSERT] [DB: {}] - DB does not exist", DbName);
-        SetTaggedStatus(returnData->mutable_insertstatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
+    XStore_Proto::ConfigStruct cfg_struct;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+        std::string err_msg = fmt::format("[BATCH INSERT] [DB: {}] - DB does not exist", db_name);
+        SetTaggedStatus(return_data->mutable_insertstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
         return;
     }
 
@@ -63,7 +63,7 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
     // multiple times per row -- a random-order access into the
     // ~1.6MB/200k-row pointer array instead of a sequential scan, losing
     // hardware prefetch. Reverted after measuring).
-    SortBatch(protoFromClient->mutable_batchinsert_data()->begin(), protoFromClient->mutable_batchinsert_data()->end(),
+    SortBatch(proto_from_client->mutable_batchinsert_data()->begin(), proto_from_client->mutable_batchinsert_data()->end(),
               [](const XStore_Proto::BatchInsert_DATA& a, const XStore_Proto::BatchInsert_DATA &b) {
                     return a.timestamp() < b.timestamp();
     });
@@ -71,7 +71,7 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
     // Organize incoming data into year buckets -- flat vector + linear scan
     // (see AppendToYearBucket), not std::map: a single call realistically
     // touches only a handful of distinct years.
-    YearBucketMap DataMap;
+    YearBucketMap data_map;
 
     // Granularity check -- year-bucket via TimeStruct's closed-form calendar
     // calc instead of gmtime_r. Two reasons: (1) gmtime_r always treated the
@@ -83,29 +83,29 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
     // TimeStruct's [FirstEpoch, LastEpoch] window via one comparison instead
     // of rerunning the full calendar decomposition on every row -- only
     // rebuilt on an actual year crossing.
-    bool HaveWindow = false;
-    unsigned short int CurrYear = 0;
-    int64_t WindowLastEpoch = 0;
-    for (int i = 0; i < protoFromClient->batchinsert_data_size(); i++) {
-        unsigned long long int Ts = protoFromClient->batchinsert_data(i).timestamp();
-        if (!HaveWindow || static_cast<int64_t>(Ts) > WindowLastEpoch) {
-            TimeStruct RowTs(static_cast<time_t>(Ts), CfgStruct.timeresolution());
-            CurrYear = RowTs.Year;
-            WindowLastEpoch = RowTs.LastEpoch;
-            HaveWindow = true;
+    bool have_window = false;
+    unsigned short int curr_year = 0;
+    int64_t window_last_epoch = 0;
+    for (int i = 0; i < proto_from_client->batchinsert_data_size(); i++) {
+        unsigned long long int ts = proto_from_client->batchinsert_data(i).timestamp();
+        if (!have_window || static_cast<int64_t>(ts) > window_last_epoch) {
+            TimeStruct row_ts(static_cast<time_t>(ts), cfg_struct.timeresolution());
+            curr_year = row_ts.year;
+            window_last_epoch = row_ts.last_epoch;
+            have_window = true;
         }
-        AppendToYearBucket(DataMap, CurrYear, static_cast<unsigned long long int>(i));
+        AppendToYearBucket(data_map, curr_year, static_cast<unsigned long long int>(i));
     }
 
     // Iterate through each key (year) of dataMap
-    for (const std::pair<unsigned short int, std::vector<unsigned long long int>> &Pair : DataMap) {
-        unsigned short int YearKey = Pair.first;
-        const std::vector<unsigned long long int> &Indices = Pair.second;
-        const std::string &TargetFile = CachedYearFilePath(DbBasePathStr, YearKey);
+    for (const std::pair<unsigned short int, std::vector<unsigned long long int>> &pair : data_map) {
+        unsigned short int year_key = pair.first;
+        const std::vector<unsigned long long int> &indices = pair.second;
+        const std::string &target_file = CachedYearFilePath(db_base_path_str, year_key);
 
         // Grab first inserting element for TimeStruct purposes
         //  Get length of time to truncate
-        TimeStruct ThisTs{static_cast<time_t>(protoFromClient->batchinsert_data(Indices.front()).timestamp()), CfgStruct.timeresolution()};
+        TimeStruct this_ts{static_cast<time_t>(proto_from_client->batchinsert_data(indices.front()).timestamp()), cfg_struct.timeresolution()};
 
         // Cached fd for this (dbName, year) file -- same fd cache UnaryInsert
         // uses (see GetOrOpenFile). Creates+ftruncates on first use, so the
@@ -115,14 +115,14 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
         // Held through WriteRowGroupToFile below so a concurrent eviction on
         // another thread can't close this fd mid-write -- see FdShard's
         // comment in XStore.h.
-        std::shared_ptr<int> FdHandle = GetOrOpenFile(TargetFile, CfgStruct.rowlength(), ThisTs.LastEpoch - ThisTs.FirstEpoch);
-        if (!FdHandle) {
-            std::string ErrMsg = fmt::format("[BATCH INSERT] [DB: {}] - Unable to open {}.XSTORE", DbName, YearKey);
-            SetTaggedStatus(returnData->mutable_insertstatus(), "[ERROR] ", ErrMsg);
-            spdlog::error(ErrMsg);
+        std::shared_ptr<int> fd_handle = GetOrOpenFile(target_file, cfg_struct.rowlength(), this_ts.last_epoch - this_ts.first_epoch);
+        if (!fd_handle) {
+            std::string err_msg = fmt::format("[BATCH INSERT] [DB: {}] - Unable to open {}.XSTORE", db_name, year_key);
+            SetTaggedStatus(return_data->mutable_insertstatus(), "[ERROR] ", err_msg);
+            spdlog::error(err_msg);
             continue;
         }
-        int Fd = *FdHandle;
+        int fd = *fd_handle;
 
         // Single lock spanning this year-group's full min-to-max offset span
         // instead of one lock per row -- Indices is sorted ascending (the
@@ -130,47 +130,47 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *protoFromClient, XStore_
         // the span directly; offset is monotonic in timestamp so this is the
         // same "over-lock the gaps between scattered rows" trick RangeInsert
         // uses too, hence the shared helper.
-        WriteRowGroupToFile(TargetFile, Fd, ThisTs.FirstEpoch, CfgStruct.rowlength(), Indices,
-            [&](unsigned long long int idx) -> const XStore_Proto::BatchInsert_DATA& { return protoFromClient->batchinsert_data(idx); });
+        WriteRowGroupToFile(target_file, fd, this_ts.first_epoch, cfg_struct.rowlength(), indices,
+            [&](unsigned long long int idx) -> const XStore_Proto::BatchInsert_DATA& { return proto_from_client->batchinsert_data(idx); });
     }
 
     // Return insert status
-    std::string SuccessMsg = fmt::format("[BATCH INSERT] [DB: {}] - Inserted {} elements successfully", DbName, protoFromClient->batchinsert_data_size());
-    SetTaggedStatus(returnData->mutable_insertstatus(), "[INFO] ", SuccessMsg);
-    spdlog::info(SuccessMsg);
+    std::string success_msg = fmt::format("[BATCH INSERT] [DB: {}] - Inserted {} elements successfully", db_name, proto_from_client->batchinsert_data_size());
+    SetTaggedStatus(return_data->mutable_insertstatus(), "[INFO] ", success_msg);
+    spdlog::info(success_msg);
 }
 
 // BATCH QUERY
-void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Proto::BatchQuery_REP *returnData, bool SortTime) {
+void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, XStore_Proto::BatchQuery_REP *return_data, bool sort_time) {
     // Ensure dbName string is all capitalized
-    std::string DbName = protoFromClient->dbname();
-    ToUpperCase(DbName.begin(), DbName.end());
+    std::string db_name = proto_from_client->dbname();
+    ToUpperCase(db_name.begin(), db_name.end());
 
     // Base directory of a DB
-    const std::string &DbBasePathStr = CachedDbBasePath(DbName);
+    const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
     // Fetch cfgStruct from cache, loading from disk on first use
-    XStore_Proto::ConfigStruct CfgStruct;
-    if (!GetOrLoadCfg(DbName, DbBasePathStr, CfgStruct)) {
-        std::string ErrMsg = fmt::format("[BATCH QUERY] [DB: {}] - {}.CFG does not exist", DbName, DbName);
-        SetTaggedStatus(returnData->mutable_querystatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
+    XStore_Proto::ConfigStruct cfg_struct;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+        std::string err_msg = fmt::format("[BATCH QUERY] [DB: {}] - {}.CFG does not exist", db_name, db_name);
+        SetTaggedStatus(return_data->mutable_querystatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
         return;
     }
 
     // IF query range > 2GB limit of Protobuf or Empty
-    if ((protoFromClient->timestamp_size() * CfgStruct.rowlength()) > 2'000'000'000 || protoFromClient->timestamp_size() < 0) {
-        std::string ErrMsg = fmt::format("[BATCH QUERY] [DB: {}] - Query results is larger than 2GB or empty", DbName);
-        SetTaggedStatus(returnData->mutable_querystatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
+    if ((proto_from_client->timestamp_size() * cfg_struct.rowlength()) > 2'000'000'000 || proto_from_client->timestamp_size() < 0) {
+        std::string err_msg = fmt::format("[BATCH QUERY] [DB: {}] - Query results is larger than 2GB or empty", db_name);
+        SetTaggedStatus(return_data->mutable_querystatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
         return;
     }
 
     // Assuming incoming batch query is unsorted
     //  -> Ascending sort
-    if (SortTime)
+    if (sort_time)
     {
-        SortBatch(protoFromClient->mutable_timestamp()->begin(), protoFromClient->mutable_timestamp()->end(),
+        SortBatch(proto_from_client->mutable_timestamp()->begin(), proto_from_client->mutable_timestamp()->end(),
                       [](const unsigned long long int& a, const unsigned long long int& b) {
                         return a < b;
         });
@@ -178,7 +178,7 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
 
     // Organize incoming batch query into year buckets -- flat vector + linear
     // scan (see AppendToYearBucket), not std::map.
-    YearBucketMap DataMap;
+    YearBucketMap data_map;
 
     // Granularity check -- same TimeStruct window-reuse BatchInsert uses
     // (see there for the full rationale), gated on SortTime: the reuse trick
@@ -190,18 +190,18 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
     // out-of-order timestamps with SortTime=false and still expects correct
     // per-row bucketing). "!SortTime ||" makes the rebuild condition always
     // true in that case, so behavior there is unchanged from before.
-    bool HaveWindow = false;
-    unsigned short int CurrYear = 0;
-    int64_t WindowLastEpoch = 0;
-    for (int i = 0; i < protoFromClient->timestamp_size(); i++) {
-        unsigned long long int CurrTime = protoFromClient->timestamp(i);
-        if (!SortTime || !HaveWindow || static_cast<int64_t>(CurrTime) > WindowLastEpoch) {
-            TimeStruct CurrTs(CurrTime, CfgStruct.timeresolution());
-            CurrYear = CurrTs.Year;
-            WindowLastEpoch = CurrTs.LastEpoch;
-            HaveWindow = true;
+    bool have_window = false;
+    unsigned short int curr_year = 0;
+    int64_t window_last_epoch = 0;
+    for (int i = 0; i < proto_from_client->timestamp_size(); i++) {
+        unsigned long long int curr_time = proto_from_client->timestamp(i);
+        if (!sort_time || !have_window || static_cast<int64_t>(curr_time) > window_last_epoch) {
+            TimeStruct curr_ts(curr_time, cfg_struct.timeresolution());
+            curr_year = curr_ts.year;
+            window_last_epoch = curr_ts.last_epoch;
+            have_window = true;
         }
-        AppendToYearBucket(DataMap, CurrYear, static_cast<unsigned long long int>(i));
+        AppendToYearBucket(data_map, curr_year, static_cast<unsigned long long int>(i));
     }
 
     // Keep the response chronological across years -- matches the old
@@ -209,29 +209,29 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
     // year-ascending regardless of request/bucket-creation order (relevant
     // when SortTime is false, where buckets can otherwise be created in
     // request order instead of year order).
-    std::sort(DataMap.begin(), DataMap.end(),
+    std::sort(data_map.begin(), data_map.end(),
               [](const auto &a, const auto &b) { return a.first < b.first; });
 
     // Iterate through each key (year) of dataMap
-    for (const std::pair<unsigned short int, std::vector<unsigned long long int>> &Pair : DataMap) {
-        unsigned short int YearKey = Pair.first;
-        const std::vector<unsigned long long int> &Indices = Pair.second;
-        const std::string &TargetFile = CachedYearFilePath(DbBasePathStr, YearKey);
+    for (const std::pair<unsigned short int, std::vector<unsigned long long int>> &pair : data_map) {
+        unsigned short int year_key = pair.first;
+        const std::vector<unsigned long long int> &indices = pair.second;
+        const std::string &target_file = CachedYearFilePath(db_base_path_str, year_key);
 
         // IF target file does NOT exist -- checked explicitly because
         // GetOrMapFile below opens with O_CREAT and would otherwise silently
         // create+map an empty file for a query that should just report no
         // data. IsFdCached short-circuits the stat() syscall on a warm
         // cache, same as UnaryQuery.
-        if (!IsFdCached(TargetFile) && std::filesystem::exists(TargetFile) == 0) {
+        if (!IsFdCached(target_file) && std::filesystem::exists(target_file) == 0) {
             // Skip to next iteration
-            std::string WarnMsg = fmt::format("[BATCH QUERY] [DB: {}] - {}.XSTORE does not exist", DbName, YearKey);
-            SetTaggedStatus(returnData->mutable_querystatus(), "[WARNING] ", WarnMsg);
-            spdlog::warn(WarnMsg);
+            std::string warn_msg = fmt::format("[BATCH QUERY] [DB: {}] - {}.XSTORE does not exist", db_name, year_key);
+            SetTaggedStatus(return_data->mutable_querystatus(), "[WARNING] ", warn_msg);
+            spdlog::warn(warn_msg);
             continue;
         }
 
-        TimeStruct ThisTs{static_cast<time_t>(protoFromClient->timestamp(Indices.front())), CfgStruct.timeresolution()};
+        TimeStruct this_ts{static_cast<time_t>(proto_from_client->timestamp(indices.front())), cfg_struct.timeresolution()};
 
         // BatchQuery deliberately does NOT go through GetOrMapFile/mmap here
         // (unlike Unary/Batch/RangeInsert and RangeQuery, which all share
@@ -256,42 +256,42 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
         // Held through the pread() loop below so a concurrent eviction on
         // another thread can't close this fd mid-read -- see FdShard's
         // comment in XStore.h.
-        std::shared_ptr<int> FdHandle = GetOrOpenFile(TargetFile, CfgStruct.rowlength(), ThisTs.LastEpoch - ThisTs.FirstEpoch);
-        if (!FdHandle) {
-            std::string ErrMsg = fmt::format("[BATCH QUERY] [DB: {}] - Unable to open {}.XSTORE", DbName, YearKey);
-            SetTaggedStatus(returnData->mutable_querystatus(), "[ERROR] ", ErrMsg);
-            spdlog::error(ErrMsg);
+        std::shared_ptr<int> fd_handle = GetOrOpenFile(target_file, cfg_struct.rowlength(), this_ts.last_epoch - this_ts.first_epoch);
+        if (!fd_handle) {
+            std::string err_msg = fmt::format("[BATCH QUERY] [DB: {}] - Unable to open {}.XSTORE", db_name, year_key);
+            SetTaggedStatus(return_data->mutable_querystatus(), "[ERROR] ", err_msg);
+            spdlog::error(err_msg);
             continue;
         }
-        int Fd = *FdHandle;
+        int fd = *fd_handle;
 
         // Single lock spanning this year-group's min-to-max offset span
         // instead of one lock per row. Found via a scan (not just
         // front()/back()) since Indices is only guaranteed sorted when
         // SortTime is true -- BatchInsert always sorts, BatchQuery doesn't
         // have to.
-        auto [MinIt, MaxIt] = std::minmax_element(Indices.begin(), Indices.end(),
+        auto [MinIt, MaxIt] = std::minmax_element(indices.begin(), indices.end(),
             [&](unsigned long long int a, unsigned long long int b) {
-                return protoFromClient->timestamp(a) < protoFromClient->timestamp(b);
+                return proto_from_client->timestamp(a) < proto_from_client->timestamp(b);
         });
-        const unsigned long long int MinOffset = (protoFromClient->timestamp(*MinIt) - ThisTs.FirstEpoch) * CfgStruct.rowlength();
-        const unsigned long long int MaxOffset = (protoFromClient->timestamp(*MaxIt) - ThisTs.FirstEpoch) * CfgStruct.rowlength();
-        const unsigned long long int RegionLength = (MaxOffset + CfgStruct.rowlength()) - MinOffset;
+        const unsigned long long int min_offset = (proto_from_client->timestamp(*MinIt) - this_ts.first_epoch) * cfg_struct.rowlength();
+        const unsigned long long int max_offset = (proto_from_client->timestamp(*MaxIt) - this_ts.first_epoch) * cfg_struct.rowlength();
+        const unsigned long long int region_length = (max_offset + cfg_struct.rowlength()) - min_offset;
 
-        FileRangeLockGuard Guard(TargetFile, MinOffset, RegionLength, FileRangeLock::LockType::READ);
+        FileRangeLockGuard guard(target_file, min_offset, region_length, FileRangeLock::LockType::READ);
 
         // thread_local + grow-only: avoids a fresh heap allocation per
         // year-group per call, same pattern UnaryInsert/UnaryQuery's RowBuf
         // and WriteRowGroupToFile's RunBuf already use.
-        thread_local std::vector<char> BufferIn;
-        if (BufferIn.size() < CfgStruct.rowlength()) {
-            BufferIn.resize(CfgStruct.rowlength());
+        thread_local std::vector<char> buffer_in;
+        if (buffer_in.size() < cfg_struct.rowlength()) {
+            buffer_in.resize(cfg_struct.rowlength());
         }
-        for (unsigned long long int Idx : Indices) {
-            unsigned long long int Timestamp = protoFromClient->timestamp(Idx);
-            unsigned long long int Offset = (Timestamp - ThisTs.FirstEpoch) * CfgStruct.rowlength();
+        for (unsigned long long int idx : indices) {
+            unsigned long long int timestamp = proto_from_client->timestamp(idx);
+            unsigned long long int offset = (timestamp - this_ts.first_epoch) * cfg_struct.rowlength();
 
-            pread(Fd, BufferIn.data(), CfgStruct.rowlength(), static_cast<off_t>(Offset));
+            pread(fd, buffer_in.data(), cfg_struct.rowlength(), static_cast<off_t>(offset));
 
             // IF fetched data contains nothing
             //  -> Skip to next iteration. BufferIn is a fixed-width binary
@@ -299,57 +299,57 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *protoFromClient, XStore_Pr
             //  end whenever a real row's bytes fill the whole slot with no
             //  zero byte in it; checking the first byte (a hole is always
             //  fully zeroed) is what the aggregate scan kernels do too.
-            if (BufferIn[0] == 0) {
+            if (buffer_in[0] == 0) {
                 continue;
             }
 
-            XStore_Proto::UnaryQuery_REP *CurrEntry = returnData->add_queryresponse();
-            CurrEntry->set_timestamp(Timestamp);
-            CurrEntry->mutable_data()->ParseFromArray(BufferIn.data(), CfgStruct.rowlength());
+            XStore_Proto::UnaryQuery_REP *curr_entry = return_data->add_queryresponse();
+            curr_entry->set_timestamp(timestamp);
+            curr_entry->mutable_data()->ParseFromArray(buffer_in.data(), cfg_struct.rowlength());
         }
     }
 }
 
 // BATCH DELETE
-XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ *protoFromClient) {
+XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ *proto_from_client) {
     // Protobuf obj to be returned
-    XStore_Proto::BatchDelete_REP ToReturn;
-    std::string DbName = protoFromClient->dbname();
-    int DeleteCount = 0;
+    XStore_Proto::BatchDelete_REP to_return;
+    std::string db_name = proto_from_client->dbname();
+    int delete_count = 0;
 
     // Ensure dbName string is all capitalized
-    ToUpperCase(DbName.begin(), DbName.end());
+    ToUpperCase(db_name.begin(), db_name.end());
 
     // Base directory of a DB
-    const std::string &DbBasePathStr = CachedDbBasePath(DbName);
+    const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
     // Fetch cfgStruct from cache, loading from disk on first use
-    XStore_Proto::ConfigStruct CfgStruct;
-    if (!GetOrLoadCfg(DbName, DbBasePathStr, CfgStruct)) {
-        std::string ErrMsg = fmt::format("[BATCH DELETE] [DB: {}] - {}.CFG does not exist", DbName, DbName);
-        SetTaggedStatus(ToReturn.mutable_deletestatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
-        return ToReturn;
+    XStore_Proto::ConfigStruct cfg_struct;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+        std::string err_msg = fmt::format("[BATCH DELETE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
+        SetTaggedStatus(to_return.mutable_deletestatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return to_return;
     }
 
     // IF db directory does not exist
-    if (std::filesystem::is_directory(DbBasePathStr) == 0) {
-        std::string ErrMsg = fmt::format("[BATCH DELETE] [DB: {}] - DB does not exist", DbName);
-        SetTaggedStatus(ToReturn.mutable_deletestatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
-        return ToReturn;
+    if (std::filesystem::is_directory(db_base_path_str) == 0) {
+        std::string err_msg = fmt::format("[BATCH DELETE] [DB: {}] - DB does not exist", db_name);
+        SetTaggedStatus(to_return.mutable_deletestatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return to_return;
     }
 
     // Assuming incoming batch query is unsorted
     //  -> Ascending sort
-    SortBatch(protoFromClient->mutable_timestamp()->begin(), protoFromClient->mutable_timestamp()->end(),
+    SortBatch(proto_from_client->mutable_timestamp()->begin(), proto_from_client->mutable_timestamp()->end(),
               [](const unsigned long long int& a, const unsigned long long int& b) {
                 return a < b;
     });
 
     // Organize incoming batch delete timestamps into year buckets -- flat
     // vector + linear scan (see AppendToYearBucket), not std::map.
-    YearBucketMap DataMap;
+    YearBucketMap data_map;
 
     // Granularity check -- TimeStruct instead of gmtime_r (gmtime_r always
     // treated the raw timestamp as whole seconds regardless of
@@ -359,35 +359,35 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
     // the same window-reuse BatchInsert uses. Unconditionally safe here
     // (unlike BatchQuery's SortTime-gated version) since this batch is
     // always sorted ascending just above, with no unsorted-input toggle.
-    bool HaveWindow = false;
-    unsigned short int CurrYear = 0;
-    int64_t WindowLastEpoch = 0;
-    for (int i = 0; i < protoFromClient->timestamp_size(); i++) {
-        unsigned long long int CurrTime = protoFromClient->timestamp(i);
-        if (!HaveWindow || static_cast<int64_t>(CurrTime) > WindowLastEpoch) {
-            TimeStruct RowTs(static_cast<time_t>(CurrTime), CfgStruct.timeresolution());
-            CurrYear = RowTs.Year;
-            WindowLastEpoch = RowTs.LastEpoch;
-            HaveWindow = true;
+    bool have_window = false;
+    unsigned short int curr_year = 0;
+    int64_t window_last_epoch = 0;
+    for (int i = 0; i < proto_from_client->timestamp_size(); i++) {
+        unsigned long long int curr_time = proto_from_client->timestamp(i);
+        if (!have_window || static_cast<int64_t>(curr_time) > window_last_epoch) {
+            TimeStruct row_ts(static_cast<time_t>(curr_time), cfg_struct.timeresolution());
+            curr_year = row_ts.year;
+            window_last_epoch = row_ts.last_epoch;
+            have_window = true;
         }
-        AppendToYearBucket(DataMap, CurrYear, static_cast<unsigned long long int>(i));
+        AppendToYearBucket(data_map, curr_year, static_cast<unsigned long long int>(i));
     }
 
     // Iterate through each key (year) of dataMap
-    for (const std::pair<unsigned short int, std::vector<unsigned long long int>> &Pair : DataMap) {
-        unsigned short int YearKey = Pair.first;
-        const std::vector<unsigned long long int> &Indices = Pair.second;
-        const std::string &TargetFile = CachedYearFilePath(DbBasePathStr, YearKey);
+    for (const std::pair<unsigned short int, std::vector<unsigned long long int>> &pair : data_map) {
+        unsigned short int year_key = pair.first;
+        const std::vector<unsigned long long int> &indices = pair.second;
+        const std::string &target_file = CachedYearFilePath(db_base_path_str, year_key);
 
         // IF target file does NOT exist
-        if (std::filesystem::exists(TargetFile) == 0) {
-            std::string WarningMsg = fmt::format("[BATCH DELETE] [DB: {}] - {}.XSTORE does not exist", DbName, YearKey);
-            SetTaggedStatus(ToReturn.mutable_deletestatus(), "[WARNING] ", WarningMsg);
-            spdlog::warn(WarningMsg);
+        if (std::filesystem::exists(target_file) == 0) {
+            std::string warning_msg = fmt::format("[BATCH DELETE] [DB: {}] - {}.XSTORE does not exist", db_name, year_key);
+            SetTaggedStatus(to_return.mutable_deletestatus(), "[WARNING] ", warning_msg);
+            spdlog::warn(warning_msg);
             continue;
         }
 
-        TimeStruct ThisTs{static_cast<time_t>(protoFromClient->timestamp(Indices.front())), CfgStruct.timeresolution()};
+        TimeStruct this_ts{static_cast<time_t>(proto_from_client->timestamp(indices.front())), cfg_struct.timeresolution()};
 
         // Cached fd instead of a fresh fopen()/fclose() per year-group --
         // fallocate64() just needs a plain fd (punching holes isn't an mmap
@@ -397,14 +397,14 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
         // BatchQuery's fd-cache use. Held through the fallocate64() loop
         // below so a concurrent eviction on another thread can't close this
         // fd mid-delete -- see FdShard's comment in XStore.h.
-        std::shared_ptr<int> FdHandle = GetOrOpenFile(TargetFile, CfgStruct.rowlength(), ThisTs.LastEpoch - ThisTs.FirstEpoch);
-        if (!FdHandle) {
-            std::string ErrMsg = fmt::format("[BATCH DELETE] [DB: {}] - Unable to open {}.XSTORE", DbName, YearKey);
-            SetTaggedStatus(ToReturn.mutable_deletestatus(), "[ERROR] ", ErrMsg);
-            spdlog::error(ErrMsg);
+        std::shared_ptr<int> fd_handle = GetOrOpenFile(target_file, cfg_struct.rowlength(), this_ts.last_epoch - this_ts.first_epoch);
+        if (!fd_handle) {
+            std::string err_msg = fmt::format("[BATCH DELETE] [DB: {}] - Unable to open {}.XSTORE", db_name, year_key);
+            SetTaggedStatus(to_return.mutable_deletestatus(), "[ERROR] ", err_msg);
+            spdlog::error(err_msg);
             continue;
         }
-        int Fd = *FdHandle;
+        int fd = *fd_handle;
 
         // Single lock spanning this year-group's min-to-max offset span
         // instead of one lock per row -- Indices is sorted ascending (the
@@ -415,25 +415,25 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
         // range would also deallocate OTHER rows' data sitting in the gaps
         // between the requested points -- unlike a lock, which is harmless
         // to over-cover.
-        const unsigned long long int FirstOffset = (protoFromClient->timestamp(Indices.front()) - ThisTs.FirstEpoch) * CfgStruct.rowlength();
-        const unsigned long long int LastOffset = (protoFromClient->timestamp(Indices.back()) - ThisTs.FirstEpoch) * CfgStruct.rowlength();
-        const unsigned long long int RegionLength = (LastOffset + CfgStruct.rowlength()) - FirstOffset;
+        const unsigned long long int first_offset = (proto_from_client->timestamp(indices.front()) - this_ts.first_epoch) * cfg_struct.rowlength();
+        const unsigned long long int last_offset = (proto_from_client->timestamp(indices.back()) - this_ts.first_epoch) * cfg_struct.rowlength();
+        const unsigned long long int region_length = (last_offset + cfg_struct.rowlength()) - first_offset;
 
         {
             // Lock prior to file OP
-            FileRangeLockGuard Guard(TargetFile, FirstOffset, RegionLength, FileRangeLock::LockType::WRITE);
+            FileRangeLockGuard guard(target_file, first_offset, region_length, FileRangeLock::LockType::WRITE);
 
-            for (unsigned long long int Idx : Indices) {
-                unsigned long long int Offset = (protoFromClient->timestamp(Idx) - ThisTs.FirstEpoch) * CfgStruct.rowlength();
+            for (unsigned long long int idx : indices) {
+                unsigned long long int offset = (proto_from_client->timestamp(idx) - this_ts.first_epoch) * cfg_struct.rowlength();
 
                 // Deallocate data according to N bytes from rowLength
-                fallocate64(Fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, Offset, CfgStruct.rowlength());
-                DeleteCount++;
+                fallocate64(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfg_struct.rowlength());
+                delete_count++;
             }
         }
     }
-    std::string InfoMsg = fmt::format("[BATCH DELETE] [DB: {}] - Deleted {} items", DbName, DeleteCount);
-    SetTaggedStatus(ToReturn.mutable_deletestatus(), "[INFO] ", InfoMsg);
-    spdlog::info(InfoMsg);
-    return ToReturn;
+    std::string info_msg = fmt::format("[BATCH DELETE] [DB: {}] - Deleted {} items", db_name, delete_count);
+    SetTaggedStatus(to_return.mutable_deletestatus(), "[INFO] ", info_msg);
+    spdlog::info(info_msg);
+    return to_return;
 }

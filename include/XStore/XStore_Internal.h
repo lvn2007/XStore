@@ -32,16 +32,16 @@ std::string* SetTaggedStatus(std::string *status, const char *tag, const std::st
 // them call another XStore public method that would also need this buffer
 // before the first one returns.
 inline const std::string& UpperCaseInto(std::string_view src) {
-    thread_local std::string Buf;
-    Buf.resize(src.size());
+    thread_local std::string buf;
+    buf.resize(src.size());
     for (size_t i = 0; i < src.size(); i++) {
         char c = src[i];
         // Only mask the case bit off actual lowercase letters -- see
         // ToUpperCase's comment in XStore.h for why unconditional masking
         // corrupts other byte ranges.
-        Buf[i] = (c >= 'a' && c <= 'z') ? static_cast<char>(c & ~0x20) : c;
+        buf[i] = (c >= 'a' && c <= 'z') ? static_cast<char>(c & ~0x20) : c;
     }
-    return Buf;
+    return buf;
 }
 
 // Shared by BatchInsert/BatchQuery/BatchDelete/RangeInsert: buckets a
@@ -56,9 +56,9 @@ inline const std::string& UpperCaseInto(std::string_view src) {
 using YearBucketMap = std::vector<std::pair<unsigned short int, std::vector<unsigned long long int>>>;
 
 inline void AppendToYearBucket(YearBucketMap &buckets, unsigned short int year, unsigned long long int idx) {
-    for (auto &Bucket : buckets) {
-        if (Bucket.first == year) {
-            Bucket.second.push_back(idx);
+    for (auto &bucket : buckets) {
+        if (bucket.first == year) {
+            bucket.second.push_back(idx);
             return;
         }
     }
@@ -90,19 +90,19 @@ inline void AppendToYearBucket(YearBucketMap &buckets, unsigned short int year, 
 // living in a single .cpp -- both callers instantiate it with their own
 // accessor lambda.
 template <typename EntryAccessor>
-void WriteRowGroupToFile(const std::string &targetFile, int fd, long firstEpoch,
-                          unsigned int rowLength, const std::vector<unsigned long long int> &indices,
-                          EntryAccessor &&getEntry) {
-    const unsigned long long int FirstOffset = (static_cast<unsigned long long>(getEntry(indices.front()).timestamp()) - firstEpoch) * rowLength;
-    const unsigned long long int LastOffset = (static_cast<unsigned long long>(getEntry(indices.back()).timestamp()) - firstEpoch) * rowLength;
-    const unsigned long long int RegionLength = (LastOffset + rowLength) - FirstOffset;
+void WriteRowGroupToFile(const std::string &target_file, int fd, long first_epoch,
+                          unsigned int row_length, const std::vector<unsigned long long int> &indices,
+                          EntryAccessor &&get_entry) {
+    const unsigned long long int first_offset = (static_cast<unsigned long long>(get_entry(indices.front()).timestamp()) - first_epoch) * row_length;
+    const unsigned long long int last_offset = (static_cast<unsigned long long>(get_entry(indices.back()).timestamp()) - first_epoch) * row_length;
+    const unsigned long long int region_length = (last_offset + row_length) - first_offset;
 
-    FileRangeLockGuard Guard(targetFile, FirstOffset, RegionLength, FileRangeLock::LockType::WRITE);
+    FileRangeLockGuard guard(target_file, first_offset, region_length, FileRangeLock::LockType::WRITE);
 
     struct ValidRow {
-        unsigned long long int Idx;
-        unsigned long long int Offset;
-        size_t SerializedSize;
+        unsigned long long int idx;
+        unsigned long long int offset;
+        size_t serialized_size;
     };
 
     // Rows that don't fit at all are rejected rather than silently truncated
@@ -112,47 +112,47 @@ void WriteRowGroupToFile(const std::string &targetFile, int fd, long firstEpoch,
     // slot of zeros it was never supposed to have. ByteSizeLong() walks
     // every field, so it's computed once here and carried through instead
     // of being recomputed in the write pass.
-    std::vector<ValidRow> Valid;
-    Valid.reserve(indices.size());
-    for (unsigned long long int Idx : indices) {
-        const auto &Entry = getEntry(Idx);
-        size_t SerializedSize = Entry.data().ByteSizeLong();
-        if (SerializedSize <= static_cast<size_t>(rowLength)) {
-            unsigned long long int Offset = (static_cast<unsigned long long>(Entry.timestamp()) - firstEpoch) * rowLength;
-            Valid.push_back({Idx, Offset, SerializedSize});
+    std::vector<ValidRow> valid;
+    valid.reserve(indices.size());
+    for (unsigned long long int idx : indices) {
+        const auto &entry = get_entry(idx);
+        size_t serialized_size = entry.data().ByteSizeLong();
+        if (serialized_size <= static_cast<size_t>(row_length)) {
+            unsigned long long int offset = (static_cast<unsigned long long>(entry.timestamp()) - first_epoch) * row_length;
+            valid.push_back({idx, offset, serialized_size});
         }
     }
 
     // Thread-local scratch buffer, grown to fit the largest run written so
     // far and reused across calls -- avoids a heap allocation per run.
-    thread_local std::vector<char> RunBuf;
+    thread_local std::vector<char> run_buf;
 
-    for (size_t RunStart = 0; RunStart < Valid.size(); ) {
-        size_t RunEnd = RunStart + 1;
-        while (RunEnd < Valid.size() && Valid[RunEnd].Offset == Valid[RunEnd - 1].Offset + rowLength) {
-            ++RunEnd;
+    for (size_t run_start = 0; run_start < valid.size(); ) {
+        size_t run_end = run_start + 1;
+        while (run_end < valid.size() && valid[run_end].offset == valid[run_end - 1].offset + row_length) {
+            ++run_end;
         }
 
-        size_t RunBytes = (RunEnd - RunStart) * static_cast<size_t>(rowLength);
-        if (RunBuf.size() < RunBytes) {
-            RunBuf.resize(RunBytes);
+        size_t run_bytes = (run_end - run_start) * static_cast<size_t>(row_length);
+        if (run_buf.size() < run_bytes) {
+            run_buf.resize(run_bytes);
         }
 
-        for (size_t i = RunStart; i < RunEnd; ++i) {
-            char *Dest = RunBuf.data() + (i - RunStart) * rowLength;
-            const XStore_Proto::RowData &Data = getEntry(Valid[i].Idx).data();
+        for (size_t i = run_start; i < run_end; ++i) {
+            char *dest = run_buf.data() + (i - run_start) * row_length;
+            const XStore_Proto::RowData &data = get_entry(valid[i].idx).data();
 
             // Serialize first, then zero only the tail past the actual
             // serialized size -- no stale trailing bytes from a previous
             // row leak through (same guarantee as UnaryInsert), without
             // redundantly zeroing bytes SerializeToArray is about to
             // overwrite anyway.
-            Data.SerializeToArray(Dest, rowLength);
-            std::memset(Dest + Valid[i].SerializedSize, 0, rowLength - Valid[i].SerializedSize);
+            data.SerializeToArray(dest, row_length);
+            std::memset(dest + valid[i].serialized_size, 0, row_length - valid[i].serialized_size);
         }
 
-        pwrite(fd, RunBuf.data(), RunBytes, static_cast<off_t>(Valid[RunStart].Offset));
-        RunStart = RunEnd;
+        pwrite(fd, run_buf.data(), run_bytes, static_cast<off_t>(valid[run_start].offset));
+        run_start = run_end;
     }
 }
 

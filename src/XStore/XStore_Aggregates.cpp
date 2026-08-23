@@ -21,29 +21,29 @@
 // other read path (Range Query, Unary/Batch/RangeInsert) already reuses --
 // instead of a fresh fopen()+mmap()+munmap() per call like this used to do.
 template <typename Kernel>
-void XStore::WalkYearSpan(const std::string &dbBasePath, const XStore_Proto::ConfigStruct &cfgStruct,
-                           unsigned long long startEpochT, unsigned long long endEpochT, Kernel &&kernel) {
-    unsigned long long IterEpoch = startEpochT;
+void XStore::WalkYearSpan(const std::string &db_base_path, const XStore_Proto::ConfigStruct &cfg_struct,
+                           unsigned long long start_epoch_t, unsigned long long end_epoch_t, Kernel &&kernel) {
+    unsigned long long iter_epoch = start_epoch_t;
 
-    while (IterEpoch <= endEpochT) {
-        TimeStruct CurrTs(IterEpoch, cfgStruct.timeresolution());
-        const std::string &TargetFilePath = CachedYearFilePath(dbBasePath, CurrTs.Year);
+    while (iter_epoch <= end_epoch_t) {
+        TimeStruct curr_ts(iter_epoch, cfg_struct.timeresolution());
+        const std::string &target_file_path = CachedYearFilePath(db_base_path, curr_ts.year);
 
-        unsigned long long EndOfCurrentFile = std::min(endEpochT, static_cast<unsigned long long>(CurrTs.LastEpoch));
-        unsigned long long RowsToProcess = (EndOfCurrentFile - IterEpoch) + 1;
+        unsigned long long end_of_current_file = std::min(end_epoch_t, static_cast<unsigned long long>(curr_ts.last_epoch));
+        unsigned long long rows_to_process = (end_of_current_file - iter_epoch) + 1;
 
-        if (std::filesystem::exists(TargetFilePath)) {
+        if (std::filesystem::exists(target_file_path)) {
             // Held through the kernel() call below so a concurrent eviction
             // on another thread can't munmap() this mapping mid-scan -- see
             // MmapShard's comment in XStore.h.
-            std::shared_ptr<void> MappedHandle = GetOrMapFile(TargetFilePath, cfgStruct.rowlength(), CurrTs.LastEpoch - CurrTs.FirstEpoch);
-            void *MappedBase = MappedHandle.get();
-            if (MappedBase != nullptr) {
-                unsigned long long FirstOffset = (IterEpoch - CurrTs.FirstEpoch) * cfgStruct.rowlength();
-                unsigned long long RegionLength = RowsToProcess * cfgStruct.rowlength();
+            std::shared_ptr<void> mapped_handle = GetOrMapFile(target_file_path, cfg_struct.rowlength(), curr_ts.last_epoch - curr_ts.first_epoch);
+            void *mapped_base = mapped_handle.get();
+            if (mapped_base != nullptr) {
+                unsigned long long first_offset = (iter_epoch - curr_ts.first_epoch) * cfg_struct.rowlength();
+                unsigned long long region_length = rows_to_process * cfg_struct.rowlength();
 
                 {
-                    FileRangeLockGuard Guard(TargetFilePath, FirstOffset, RegionLength, FileRangeLock::LockType::READ);
+                    FileRangeLockGuard guard(target_file_path, first_offset, region_length, FileRangeLock::LockType::READ);
 
                     // Bulk prefetch hint before the kernel's row-by-row walk --
                     // same rationale as RangeQuery (XStore_RangeOps.cpp): one
@@ -53,19 +53,19 @@ void XStore::WalkYearSpan(const std::string &dbBasePath, const XStore_Proto::Con
                     // the full span with no early exit, so the whole region is
                     // always going to be touched.
                     {
-                        static const long PageSize = sysconf(_SC_PAGE_SIZE);
-                        char *SpanStart = static_cast<char*>(MappedBase) + FirstOffset;
-                        uintptr_t AlignedAddr = reinterpret_cast<uintptr_t>(SpanStart) & ~(static_cast<uintptr_t>(PageSize) - 1);
-                        size_t AlignSlop = reinterpret_cast<uintptr_t>(SpanStart) - AlignedAddr;
-                        madvise(reinterpret_cast<void*>(AlignedAddr), RegionLength + AlignSlop, MADV_WILLNEED);
+                        static const long PAGE_SIZE = sysconf(_SC_PAGE_SIZE);
+                        char *span_start = static_cast<char*>(mapped_base) + first_offset;
+                        uintptr_t aligned_addr = reinterpret_cast<uintptr_t>(span_start) & ~(static_cast<uintptr_t>(PAGE_SIZE) - 1);
+                        size_t align_slop = reinterpret_cast<uintptr_t>(span_start) - aligned_addr;
+                        madvise(reinterpret_cast<void*>(aligned_addr), region_length + align_slop, MADV_WILLNEED);
                     }
 
-                    kernel(static_cast<const char*>(MappedBase) + FirstOffset, RowsToProcess);
+                    kernel(static_cast<const char*>(mapped_base) + first_offset, rows_to_process);
                 }
             }
         }
 
-        IterEpoch = EndOfCurrentFile + 1;
+        iter_epoch = end_of_current_file + 1;
     }
 }
 
@@ -76,37 +76,37 @@ void XStore::WalkYearSpan(const std::string &dbBasePath, const XStore_Proto::Con
 // sequential walk would finish just as fast. Only spans wide enough to
 // actually benefit (verified in this session's own benchmark before this
 // number was chosen) take the parallel path.
-constexpr size_t kMinSegmentsForParallelWalk = 4;
+constexpr size_t K_MIN_SEGMENTS_FOR_PARALLEL_WALK = 4;
 
 template <typename PartialState, typename SegmentKernel, typename MergeFn>
-PartialState XStore::WalkYearSpanParallel(const std::string &dbBasePath, const XStore_Proto::ConfigStruct &cfgStruct,
-                                            unsigned long long startEpochT, unsigned long long endEpochT,
-                                            PartialState initialState, SegmentKernel &&segmentKernel, MergeFn &&mergeFn) {
+PartialState XStore::WalkYearSpanParallel(const std::string &db_base_path, const XStore_Proto::ConfigStruct &cfg_struct,
+                                            unsigned long long start_epoch_t, unsigned long long end_epoch_t,
+                                            PartialState initial_state, SegmentKernel &&segment_kernel, MergeFn &&merge_fn) {
     // Enumerate segments first -- O(#years), not O(#rows), so this is cheap
     // even for a wide span -- to know upfront whether parallel dispatch is
     // worth it before committing to any thread spawning.
-    struct Segment { unsigned long long Start; unsigned long long End; };
-    std::vector<Segment> Segments;
+    struct Segment { unsigned long long start; unsigned long long end; };
+    std::vector<Segment> segments;
     {
-        unsigned long long IterEpoch = startEpochT;
-        while (IterEpoch <= endEpochT) {
-            TimeStruct CurrTs(IterEpoch, cfgStruct.timeresolution());
-            unsigned long long EndOfCurrentFile = std::min(endEpochT, static_cast<unsigned long long>(CurrTs.LastEpoch));
-            Segments.push_back({IterEpoch, EndOfCurrentFile});
-            IterEpoch = EndOfCurrentFile + 1;
+        unsigned long long iter_epoch = start_epoch_t;
+        while (iter_epoch <= end_epoch_t) {
+            TimeStruct curr_ts(iter_epoch, cfg_struct.timeresolution());
+            unsigned long long end_of_current_file = std::min(end_epoch_t, static_cast<unsigned long long>(curr_ts.last_epoch));
+            segments.push_back({iter_epoch, end_of_current_file});
+            iter_epoch = end_of_current_file + 1;
         }
     }
 
-    if (Segments.size() < kMinSegmentsForParallelWalk) {
+    if (segments.size() < K_MIN_SEGMENTS_FOR_PARALLEL_WALK) {
         // Narrow span -- delegate straight to the existing sequential walk,
         // no threads, no merge step, byte-for-byte the same code path this
         // function used before parallelism existed.
-        PartialState Result = initialState;
-        WalkYearSpan(dbBasePath, cfgStruct, startEpochT, endEpochT,
-            [&](const char *rowsBase, unsigned long long rowsToProcess) {
-                segmentKernel(Result, rowsBase, rowsToProcess);
+        PartialState result = initial_state;
+        WalkYearSpan(db_base_path, cfg_struct, start_epoch_t, end_epoch_t,
+            [&](const char *rows_base, unsigned long long rows_to_process) {
+                segment_kernel(result, rows_base, rows_to_process);
             });
-        return Result;
+        return result;
     }
 
     // Wide span -- bound THIS request's own thread count to hardware
@@ -118,37 +118,37 @@ PartialState XStore::WalkYearSpanParallel(const std::string &dbBasePath, const X
     // 16-core box and didn't show a clear regression (see the session notes
     // that added this), but that's one data point on one machine shape, not
     // a guarantee against oversubscription in general. Segments are striped
-    // across workers (t, t+NumThreads, t+2*NumThreads, ...) rather than
+    // across workers (t, t+num_threads, t+2*num_threads, ...) rather than
     // chunked, so a handful of unusually large years don't all land on the
     // same thread.
-    size_t NumThreads = std::min(Segments.size(), static_cast<size_t>(std::max(1u, std::thread::hardware_concurrency())));
-    std::vector<PartialState> PartialResults(NumThreads, initialState);
-    std::vector<std::thread> Workers;
-    Workers.reserve(NumThreads);
+    size_t num_threads = std::min(segments.size(), static_cast<size_t>(std::max(1u, std::thread::hardware_concurrency())));
+    std::vector<PartialState> partial_results(num_threads, initial_state);
+    std::vector<std::thread> workers;
+    workers.reserve(num_threads);
 
-    for (size_t T = 0; T < NumThreads; T++) {
-        Workers.emplace_back([&, T]() {
-            for (size_t S = T; S < Segments.size(); S += NumThreads) {
-                const Segment &Seg = Segments[S];
+    for (size_t t = 0; t < num_threads; t++) {
+        workers.emplace_back([&, t]() {
+            for (size_t s = t; s < segments.size(); s += num_threads) {
+                const Segment &seg = segments[s];
                 // Each Segment already falls entirely within one year (built
                 // that way above), so this WalkYearSpan call's internal loop
                 // runs exactly once -- reuses the exact same GetOrMapFile/
                 // lock/madvise/kernel-call logic the sequential path uses,
                 // just invoked per-segment instead of once for the whole span.
-                WalkYearSpan(dbBasePath, cfgStruct, Seg.Start, Seg.End,
-                    [&](const char *rowsBase, unsigned long long rowsToProcess) {
-                        segmentKernel(PartialResults[T], rowsBase, rowsToProcess);
+                WalkYearSpan(db_base_path, cfg_struct, seg.start, seg.end,
+                    [&](const char *rows_base, unsigned long long rows_to_process) {
+                        segment_kernel(partial_results[t], rows_base, rows_to_process);
                     });
             }
         });
     }
-    for (std::thread &W : Workers) W.join();
+    for (std::thread &w : workers) w.join();
 
-    PartialState Result = initialState;
-    for (PartialState &Partial : PartialResults) {
-        mergeFn(Result, Partial);
+    PartialState result = initial_state;
+    for (PartialState &partial : partial_results) {
+        merge_fn(result, partial);
     }
-    return Result;
+    return result;
 }
 
 namespace {
@@ -159,35 +159,35 @@ namespace {
 // ValueStruct objects aren't safe for concurrent mutation from multiple
 // threads even on logically-disjoint fields).
 struct MinMaxPartial {
-    ValueStruct Value;
-    XStore_Proto::FData Data;
+    ValueStruct value;
+    XStore_Proto::FData data;
 };
 
 // Per-thread partial state for Sum/Avg's parallel merge.
 struct SumPartial {
-    double Sum = 0.0;
-    unsigned long long Count = 0;
+    double sum = 0.0;
+    unsigned long long count = 0;
 };
 }  // namespace
 
-void XStore::MinAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT,
-                            std::string_view dbNameView, unsigned short int columnIdx, XStore_Proto::Min_REP *returnData) {
+void XStore::MinAggregate(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t,
+                            std::string_view db_name_view, unsigned short int column_idx, XStore_Proto::Min_REP *return_data) {
 
-    const std::string &dbName = UpperCaseInto(dbNameView);
-    const std::string &DbBasePathStr = CachedDbBasePath(dbName);
+    const std::string &db_name = UpperCaseInto(db_name_view);
+    const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
-    XStore_Proto::ConfigStruct CfgStruct;
-    if (!GetOrLoadCfg(dbName, DbBasePathStr, CfgStruct)) {
-        std::string ErrMsg = fmt::format("[MIN AGGREGATE] [DB: {}] - {}.CFG does not exist", dbName, dbName);
-        SetTaggedStatus(returnData->mutable_opstatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
+    XStore_Proto::ConfigStruct cfg_struct;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+        std::string err_msg = fmt::format("[MIN AGGREGATE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
         return;
     }
 
-    if (startEpochT > endEpochT) {
-        std::string ErrMsg = fmt::format("[MIN AGGREGATE] [DB: {}] - Target end time must be after start time", dbName);
-        SetTaggedStatus(returnData->mutable_opstatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
+    if (start_epoch_t > end_epoch_t) {
+        std::string err_msg = fmt::format("[MIN AGGREGATE] [DB: {}] - Target end time must be after start time", db_name);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
         return;
     }
 
@@ -202,87 +202,87 @@ void XStore::MinAggregate(const unsigned long long int &startEpochT, const unsig
     // exercised by any current test and considered acceptable for the same
     // reason real sensor/metric data essentially never produces an exact
     // cross-year tie on an aggregate extremum.
-    MinMaxPartial Final = WalkYearSpanParallel<MinMaxPartial>(DbBasePathStr, CfgStruct, startEpochT, endEpochT,
+    MinMaxPartial final = WalkYearSpanParallel<MinMaxPartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
         MinMaxPartial{},
-        [&](MinMaxPartial &Partial, const char *rowsBase, unsigned long long rowsToProcess) {
-            ProcessFileRangeSelect<std::less<long double>>(rowsBase, rowsToProcess, CfgStruct.rowlength(), columnIdx, Partial.Value, Partial.Data);
+        [&](MinMaxPartial &partial, const char *rows_base, unsigned long long rows_to_process) {
+            ProcessFileRangeSelect<std::less<long double>>(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.value, partial.data);
         },
-        [](MinMaxPartial &FinalState, MinMaxPartial &Partial) {
-            if (Partial.Value.IsInitialized && (!FinalState.Value.IsInitialized || Partial.Value.Value < FinalState.Value.Value)) {
-                FinalState.Value = Partial.Value;
-                FinalState.Data = Partial.Data;
+        [](MinMaxPartial &final_state, MinMaxPartial &partial) {
+            if (partial.value.is_initialized && (!final_state.value.is_initialized || partial.value.value < final_state.value.value)) {
+                final_state.value = partial.value;
+                final_state.data = partial.data;
             }
         });
 
-    if (Final.Value.IsInitialized) {
-        returnData->set_opstatus("SUCCESS");
-        *returnData->mutable_opresult() = Final.Data;
+    if (final.value.is_initialized) {
+        return_data->set_opstatus("SUCCESS");
+        *return_data->mutable_opresult() = final.data;
     } else {
-        returnData->set_opstatus("ERROR: No valid data found");
-        spdlog::warn("[MIN AGGREGATE] [DB: {}] - No valid data for column {} over [{}, {}]", dbName, columnIdx, startEpochT, endEpochT);
+        return_data->set_opstatus("ERROR: No valid data found");
+        spdlog::warn("[MIN AGGREGATE] [DB: {}] - No valid data for column {} over [{}, {}]", db_name, column_idx, start_epoch_t, end_epoch_t);
     }
 }
 
-void XStore::MaxAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT,
-                            std::string_view dbNameView, unsigned short int columnIdx, XStore_Proto::Max_REP *returnData) {
+void XStore::MaxAggregate(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t,
+                            std::string_view db_name_view, unsigned short int column_idx, XStore_Proto::Max_REP *return_data) {
 
-    const std::string &dbName = UpperCaseInto(dbNameView);
-    const std::string &DbBasePathStr = CachedDbBasePath(dbName);
+    const std::string &db_name = UpperCaseInto(db_name_view);
+    const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
-    XStore_Proto::ConfigStruct CfgStruct;
-    if (!GetOrLoadCfg(dbName, DbBasePathStr, CfgStruct)) {
-        std::string ErrMsg = fmt::format("[MAX AGGREGATE] [DB: {}] - {}.CFG does not exist", dbName, dbName);
-        SetTaggedStatus(returnData->mutable_opstatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
+    XStore_Proto::ConfigStruct cfg_struct;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+        std::string err_msg = fmt::format("[MAX AGGREGATE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
         return;
     }
 
-    if (startEpochT > endEpochT) {
-        std::string ErrMsg = fmt::format("[MAX AGGREGATE] [DB: {}] - Target end time must be after start time", dbName);
-        SetTaggedStatus(returnData->mutable_opstatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
+    if (start_epoch_t > end_epoch_t) {
+        std::string err_msg = fmt::format("[MAX AGGREGATE] [DB: {}] - Target end time must be after start time", db_name);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
         return;
     }
 
-    MinMaxPartial Final = WalkYearSpanParallel<MinMaxPartial>(DbBasePathStr, CfgStruct, startEpochT, endEpochT,
+    MinMaxPartial final = WalkYearSpanParallel<MinMaxPartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
         MinMaxPartial{},
-        [&](MinMaxPartial &Partial, const char *rowsBase, unsigned long long rowsToProcess) {
-            ProcessFileRangeSelect<std::greater<long double>>(rowsBase, rowsToProcess, CfgStruct.rowlength(), columnIdx, Partial.Value, Partial.Data);
+        [&](MinMaxPartial &partial, const char *rows_base, unsigned long long rows_to_process) {
+            ProcessFileRangeSelect<std::greater<long double>>(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.value, partial.data);
         },
-        [](MinMaxPartial &FinalState, MinMaxPartial &Partial) {
-            if (Partial.Value.IsInitialized && (!FinalState.Value.IsInitialized || Partial.Value.Value > FinalState.Value.Value)) {
-                FinalState.Value = Partial.Value;
-                FinalState.Data = Partial.Data;
+        [](MinMaxPartial &final_state, MinMaxPartial &partial) {
+            if (partial.value.is_initialized && (!final_state.value.is_initialized || partial.value.value > final_state.value.value)) {
+                final_state.value = partial.value;
+                final_state.data = partial.data;
             }
         });
 
-    if (Final.Value.IsInitialized) {
-        returnData->set_opstatus("SUCCESS");
-        *returnData->mutable_opresult() = Final.Data;
+    if (final.value.is_initialized) {
+        return_data->set_opstatus("SUCCESS");
+        *return_data->mutable_opresult() = final.data;
     } else {
-        returnData->set_opstatus("ERROR: No valid data found");
-        spdlog::warn("[MAX AGGREGATE] [DB: {}] - No valid data for column {} over [{}, {}]", dbName, columnIdx, startEpochT, endEpochT);
+        return_data->set_opstatus("ERROR: No valid data found");
+        spdlog::warn("[MAX AGGREGATE] [DB: {}] - No valid data for column {} over [{}, {}]", db_name, column_idx, start_epoch_t, end_epoch_t);
     }
 }
 
-void XStore::SumAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT,
-                            std::string_view dbNameView, unsigned short int columnIdx, XStore_Proto::Sum_REP *returnData) {
+void XStore::SumAggregate(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t,
+                            std::string_view db_name_view, unsigned short int column_idx, XStore_Proto::Sum_REP *return_data) {
 
-    const std::string &dbName = UpperCaseInto(dbNameView);
-    const std::string &DbBasePathStr = CachedDbBasePath(dbName);
+    const std::string &db_name = UpperCaseInto(db_name_view);
+    const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
-    XStore_Proto::ConfigStruct CfgStruct;
-    if (!GetOrLoadCfg(dbName, DbBasePathStr, CfgStruct)) {
-        std::string ErrMsg = fmt::format("[SUM AGGREGATE] [DB: {}] - {}.CFG does not exist", dbName, dbName);
-        SetTaggedStatus(returnData->mutable_opstatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
+    XStore_Proto::ConfigStruct cfg_struct;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+        std::string err_msg = fmt::format("[SUM AGGREGATE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
         return;
     }
 
-    if (startEpochT > endEpochT) {
-        std::string ErrMsg = fmt::format("[SUM AGGREGATE] [DB: {}] - Target end time must be after start time", dbName);
-        SetTaggedStatus(returnData->mutable_opstatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
+    if (start_epoch_t > end_epoch_t) {
+        std::string err_msg = fmt::format("[SUM AGGREGATE] [DB: {}] - Target end time must be after start time", db_name);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
         return;
     }
 
@@ -297,66 +297,66 @@ void XStore::SumAggregate(const unsigned long long int &startEpochT, const unsig
     // continuous accumulation. Narrow spans are untouched -- byte-identical
     // to before, including SumAggregateMatchesIndependentlyComputedSumFromRawDiskBytes's
     // exact-value check, which stays on the sequential path (single-year span).
-    SumPartial Final = WalkYearSpanParallel<SumPartial>(DbBasePathStr, CfgStruct, startEpochT, endEpochT,
+    SumPartial final = WalkYearSpanParallel<SumPartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
         SumPartial{},
-        [&](SumPartial &Partial, const char *rowsBase, unsigned long long rowsToProcess) {
-            ProcessFileRangeAccumulate(rowsBase, rowsToProcess, CfgStruct.rowlength(), columnIdx, Partial.Sum, Partial.Count);
+        [&](SumPartial &partial, const char *rows_base, unsigned long long rows_to_process) {
+            ProcessFileRangeAccumulate(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.sum, partial.count);
         },
-        [](SumPartial &FinalState, SumPartial &Partial) {
-            FinalState.Sum += Partial.Sum;
-            FinalState.Count += Partial.Count;
+        [](SumPartial &final_state, SumPartial &partial) {
+            final_state.sum += partial.sum;
+            final_state.count += partial.count;
         });
 
-    if (Final.Count > 0) {
-        returnData->set_opstatus("SUCCESS");
-        returnData->set_opresult(Final.Sum);
+    if (final.count > 0) {
+        return_data->set_opstatus("SUCCESS");
+        return_data->set_opresult(final.sum);
     } else {
-        returnData->set_opstatus("ERROR: No valid data found");
-        spdlog::warn("[SUM AGGREGATE] [DB: {}] - No valid data for column {} over [{}, {}]", dbName, columnIdx, startEpochT, endEpochT);
+        return_data->set_opstatus("ERROR: No valid data found");
+        spdlog::warn("[SUM AGGREGATE] [DB: {}] - No valid data for column {} over [{}, {}]", db_name, column_idx, start_epoch_t, end_epoch_t);
     }
 }
 
-void XStore::AvgAggregate(const unsigned long long int &startEpochT, const unsigned long long int &endEpochT,
-                            std::string_view dbNameView, unsigned short int columnIdx, XStore_Proto::Avg_REP *returnData) {
+void XStore::AvgAggregate(const unsigned long long int &start_epoch_t, const unsigned long long int &end_epoch_t,
+                            std::string_view db_name_view, unsigned short int column_idx, XStore_Proto::Avg_REP *return_data) {
 
-    const std::string &dbName = UpperCaseInto(dbNameView);
-    const std::string &DbBasePathStr = CachedDbBasePath(dbName);
+    const std::string &db_name = UpperCaseInto(db_name_view);
+    const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
-    XStore_Proto::ConfigStruct CfgStruct;
-    if (!GetOrLoadCfg(dbName, DbBasePathStr, CfgStruct)) {
-        std::string ErrMsg = fmt::format("[AVG AGGREGATE] [DB: {}] - {}.CFG does not exist", dbName, dbName);
-        SetTaggedStatus(returnData->mutable_opstatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
+    XStore_Proto::ConfigStruct cfg_struct;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+        std::string err_msg = fmt::format("[AVG AGGREGATE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
         return;
     }
 
-    if (startEpochT > endEpochT) {
-        std::string ErrMsg = fmt::format("[AVG AGGREGATE] [DB: {}] - Target end time must be after start time", dbName);
-        SetTaggedStatus(returnData->mutable_opstatus(), "[WARNING] ", ErrMsg);
-        spdlog::warn(ErrMsg);
+    if (start_epoch_t > end_epoch_t) {
+        std::string err_msg = fmt::format("[AVG AGGREGATE] [DB: {}] - Target end time must be after start time", db_name);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
         return;
     }
 
     // See SumAggregate for the parallel-merge floating-point reassociation
     // note -- same tradeoff applies here since Avg is Sum's kernel plus one
     // divide after.
-    SumPartial Final = WalkYearSpanParallel<SumPartial>(DbBasePathStr, CfgStruct, startEpochT, endEpochT,
+    SumPartial final = WalkYearSpanParallel<SumPartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
         SumPartial{},
-        [&](SumPartial &Partial, const char *rowsBase, unsigned long long rowsToProcess) {
-            ProcessFileRangeAccumulate(rowsBase, rowsToProcess, CfgStruct.rowlength(), columnIdx, Partial.Sum, Partial.Count);
+        [&](SumPartial &partial, const char *rows_base, unsigned long long rows_to_process) {
+            ProcessFileRangeAccumulate(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.sum, partial.count);
         },
-        [](SumPartial &FinalState, SumPartial &Partial) {
-            FinalState.Sum += Partial.Sum;
-            FinalState.Count += Partial.Count;
+        [](SumPartial &final_state, SumPartial &partial) {
+            final_state.sum += partial.sum;
+            final_state.count += partial.count;
         });
-    double SumResult = Final.Sum;
-    unsigned long long ValidCount = Final.Count;
+    double sum_result = final.sum;
+    unsigned long long valid_count = final.count;
 
-    if (ValidCount > 0) {
-        returnData->set_opstatus("SUCCESS");
-        returnData->set_opresult(SumResult / (double)ValidCount);
+    if (valid_count > 0) {
+        return_data->set_opstatus("SUCCESS");
+        return_data->set_opresult(sum_result / (double)valid_count);
     } else {
-        returnData->set_opstatus("ERROR: No valid data found");
-        spdlog::warn("[AVG AGGREGATE] [DB: {}] - No valid data for column {} over [{}, {}]", dbName, columnIdx, startEpochT, endEpochT);
+        return_data->set_opstatus("ERROR: No valid data found");
+        spdlog::warn("[AVG AGGREGATE] [DB: {}] - No valid data for column {} over [{}, {}]", db_name, column_idx, start_epoch_t, end_epoch_t);
     }
 }

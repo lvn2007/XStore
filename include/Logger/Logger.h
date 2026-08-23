@@ -10,21 +10,21 @@
 
 class Logger {
     public:
-        Logger(spdlog::level::level_enum CONSOLE_LEVEL, spdlog::level::level_enum FILE_LEVEL, unsigned short int flushInterval = 5) {
+        Logger(spdlog::level::level_enum console_level, spdlog::level::level_enum file_level, unsigned short int flush_interval = 5) {
             // Console outputs
-            std::shared_ptr<spdlog::sinks::sink> ConsoleSink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-            ConsoleSink->set_level(CONSOLE_LEVEL);
+            std::shared_ptr<spdlog::sinks::sink> console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+            console_sink->set_level(console_level);
 
             // File outputs
             std::filesystem::create_directories("logs");
-            std::shared_ptr<spdlog::sinks::sink> FileSink = std::make_shared<spdlog::sinks::basic_file_sink_mt>("logs/server.log", true);
-            FileSink->set_level(FILE_LEVEL);
+            std::shared_ptr<spdlog::sinks::sink> file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>("logs/server.log", true);
+            file_sink->set_level(file_level);
 
             // Group multi-sinks into one entity
-            std::shared_ptr<spdlog::logger> SpdLogger = std::make_shared<spdlog::logger>(spdlog::logger("SERVER", {ConsoleSink, FileSink}));
-            SpdLogger->set_level(spdlog::level::trace);
-            spdlog::set_default_logger(SpdLogger);
-            spdlog::flush_every(std::chrono::seconds(flushInterval));
+            std::shared_ptr<spdlog::logger> spd_logger = std::make_shared<spdlog::logger>(spdlog::logger("SERVER", {console_sink, file_sink}));
+            spd_logger->set_level(spdlog::level::trace);
+            spdlog::set_default_logger(spd_logger);
+            spdlog::flush_every(std::chrono::seconds(flush_interval));
         }
 };
 
