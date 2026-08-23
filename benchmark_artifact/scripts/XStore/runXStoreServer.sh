@@ -20,9 +20,9 @@ free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_c
 
 # Pre-emptively purge existing dataStore & Start server
 if [ "$isPurge" == "true" ]; then
-    tmux send-keys -t "Server" "cd XStore_Server/build && sudo rm -r DataStore; mkdir -p DataStore && ./XStore 0.0.0.0 9497 $(($(nproc --all)/2))" C-m
+    tmux send-keys -t "Server" "cd XStore_Server/build && sudo rm -r DataStore; mkdir -p DataStore && ./XStore --host 0.0.0.0 --port 9497 --threads $(($(nproc --all)/2))" C-m
 else
-    tmux send-keys -t "Server" "cd XStore_Server/build && ./XStore 0.0.0.0 9497 $(($(nproc --all)/2))" C-m
+    tmux send-keys -t "Server" "cd XStore_Server/build && ./XStore --host 0.0.0.0 --port 9497 --threads $(($(nproc --all)/2))" C-m
 fi
 
 # Delay to make sure server has enough time to be up
