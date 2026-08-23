@@ -13,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
@@ -52,7 +53,7 @@ class XStore {
         // eviction here (unlike Mmap/FdShard) since the config set is small
         // and static per DB, so each shard is just an unordered_map + its
         // own shared_mutex.
-        struct CfgShard {
+        struct alignas(std::hardware_destructive_interference_size) CfgShard {
             std::unordered_map<std::string, XStore_Proto::ConfigStruct> map;
             std::shared_mutex mutex;
         };
@@ -96,7 +97,7 @@ class XStore {
         // the custom deleter's munmap() doesn't actually run until the last
         // holder -- cache or in-flight caller -- releases theirs.
         struct MappedFile { void *base; size_t len; };
-        struct MmapShard {
+        struct alignas(std::hardware_destructive_interference_size) MmapShard {
             std::list<std::pair<std::string, std::shared_ptr<MappedFile>>> lru;
             std::unordered_map<std::string, std::list<std::pair<std::string, std::shared_ptr<MappedFile>>>::iterator> index;
             std::mutex mutex;
@@ -145,7 +146,7 @@ class XStore {
         // racing pwrite/pread ran) a silent write into the wrong file.
         // FD_CACHE_CAP's small size (8, process-wide) made this easy to hit
         // once more than a handful of year files were concurrently hot.
-        struct FdShard {
+        struct alignas(std::hardware_destructive_interference_size) FdShard {
             std::list<std::pair<std::string, std::shared_ptr<int>>> lru;
             std::unordered_map<std::string, std::list<std::pair<std::string, std::shared_ptr<int>>>::iterator> index;
             std::mutex mutex;
@@ -167,13 +168,13 @@ class XStore {
         XStore_Proto::SysInfo_REP InfoQuery(std::string_view server_addr, int thread_count);
 
         // CREATING new DB instance with row length
-        XStore_Proto::CreateDB_REP CreateDB(std::string_view db_name, XStore_Proto::TimeUnit time_resolution, short int row_length);
+        [[nodiscard]] XStore_Proto::CreateDB_REP CreateDB(std::string_view db_name, XStore_Proto::TimeUnit time_resolution, short int row_length);
 
         // REMOVE DB -- Removing an entire DB and its data files
-        XStore_Proto::RemoveDB_REP RemoveDB(std::string_view db_name);
+        [[nodiscard]] XStore_Proto::RemoveDB_REP RemoveDB(std::string_view db_name);
 
         // REMOVE DB FILES -- Removing file(s) based on name in a certain DB
-        XStore_Proto::RemoveDBFiles_REP RemoveDBFiles(XStore_Proto::RemoveDBFiles_REQ *proto_from_client, std::string_view db_name);
+        [[nodiscard]] XStore_Proto::RemoveDBFiles_REP RemoveDBFiles(XStore_Proto::RemoveDBFiles_REQ *proto_from_client, std::string_view db_name);
 
         // UNARY INSERT
         void UnaryInsert(unsigned long long int epoch_time, const XStore_Proto::RowData &data, std::string_view db_name, XStore_Proto::UnaryInsert_REP *return_data);
@@ -182,7 +183,7 @@ class XStore {
         void UnaryQuery(unsigned long long int epoch_time, std::string_view db_name, XStore_Proto::UnaryQuery_REP *return_data);
 
         // UNARY DELETE
-        XStore_Proto::UnaryDelete_REP UnaryDelete(unsigned long long int epoch_time, std::string_view db_name);
+        [[nodiscard]] XStore_Proto::UnaryDelete_REP UnaryDelete(unsigned long long int epoch_time, std::string_view db_name);
 
         // BATCH INSERT
         void BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStore_Proto::BatchInsert_REP *return_data);
@@ -191,7 +192,7 @@ class XStore {
         void BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, XStore_Proto::BatchQuery_REP *return_data, bool sort_time=true);
 
         // BATCH DELETE
-        XStore_Proto::BatchDelete_REP BatchDelete(XStore_Proto::BatchDelete_REQ *proto_from_client);
+        [[nodiscard]] XStore_Proto::BatchDelete_REP BatchDelete(XStore_Proto::BatchDelete_REQ *proto_from_client);
 
         // RANGE INSERT
         void RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client, XStore_Proto::RangeInsert_REP *return_data);
@@ -200,7 +201,7 @@ class XStore {
         void RangeQuery(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, XStore_Proto::RangeQuery_REP *return_data);
 
         // RANGE DELETE
-        XStore_Proto::RangeDelete_REP RangeDelete(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name);
+        [[nodiscard]] XStore_Proto::RangeDelete_REP RangeDelete(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name);
 
         // Walks [startEpochT, endEpochT] one year-file at a time for
         // Min/Max/Sum/AvgAggregate, read-locking each existing segment and
