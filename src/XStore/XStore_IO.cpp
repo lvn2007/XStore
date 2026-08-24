@@ -10,6 +10,101 @@
 std::array<XStore::MmapShard, XStore::MMAP_SHARD_COUNT> XStore::mmap_shards;
 std::array<XStore::FdShard, XStore::FD_SHARD_COUNT> XStore::fd_shards;
 
+namespace {
+
+// Shared helpers for the flat MRU-array shards (MmapShard, FdShard -- see
+// XStore.h). SHARD_CAP is tiny (2-4) for both, so a linear scan over one
+// contiguous array beats a std::list node + std::unordered_map bucket node
+// per entry: no per-touch heap allocation, and the whole shard's live
+// entries typically fit in 1-2 cache lines instead of being scattered
+// across independently-allocated list/hashmap nodes.
+
+// Returns the index of `key` in `shard.entries[0, shard.count)`, or
+// `shard.count` (one past the last live slot) if not found -- callers
+// compare the result against `shard.count` the same way they'd compare an
+// iterator against `.end()`.
+template <typename Shard>
+size_t FindIndex(const Shard &shard, const std::string &key) {
+    for (size_t i = 0; i < shard.count; ++i) {
+        if (shard.entries[i].key == key) {
+            return i;
+        }
+    }
+    return shard.count;
+}
+
+// Moves entries[idx] to entries[0], shifting entries[0, idx) right by one.
+// Every intermediate assignment is a move, so whatever used to live at the
+// slot being overwritten is released (its shared_ptr refcount drops) at
+// that assignment -- no entry is ever left dangling in a slot >= count.
+template <typename Shard>
+void PromoteToFront(Shard &shard, size_t idx) {
+    if (idx == 0) {
+        return;
+    }
+    typename Shard::Entry hit = std::move(shard.entries[idx]);
+    for (size_t j = idx; j > 0; --j) {
+        shard.entries[j] = std::move(shard.entries[j - 1]);
+    }
+    shard.entries[0] = std::move(hit);
+}
+
+// Inserts `entry` at entries[0], shifting existing entries right by one. If
+// the shard is already at capacity, the last (least-recently-used) slot is
+// overwritten by the shift -- its old shared_ptr is released by that move
+// assignment, same as a real eviction. Otherwise `shard.count` grows by one.
+template <typename Shard>
+void InsertAtFront(Shard &shard, typename Shard::Entry entry) {
+    size_t shift_end = (shard.count == shard.entries.size()) ? shard.entries.size() - 1 : shard.count;
+    for (size_t j = shift_end; j > 0; --j) {
+        shard.entries[j] = std::move(shard.entries[j - 1]);
+    }
+    shard.entries[0] = std::move(entry);
+    if (shard.count < shard.entries.size()) {
+        ++shard.count;
+    }
+}
+
+// Removes entries[idx], shifting entries(idx, count) left by one and
+// clearing the now-vacated last live slot so its shared_ptr is released
+// immediately (the shift loop already does this for every idx except the
+// last live slot, which no iteration touches).
+template <typename Shard>
+void EraseAtIndex(Shard &shard, size_t idx) {
+    for (size_t j = idx; j + 1 < shard.count; ++j) {
+        shard.entries[j] = std::move(shard.entries[j + 1]);
+    }
+    shard.entries[shard.count - 1] = typename Shard::Entry{};
+    --shard.count;
+}
+
+// Drops every entry whose key starts with `prefix`, compacting survivors
+// down to entries[0, new_count) in their original relative (MRU) order.
+// Slots past the new count are explicitly cleared, whether they held a
+// dropped entry or were the move-source of a kept one -- otherwise a
+// dropped entry that's never overwritten by a later keep would sit past
+// `count` with its shared_ptr still live, holding the resource open
+// forever instead of releasing it as soon as it's erased.
+template <typename Shard>
+void ErasePrefix(Shard &shard, const std::string &prefix) {
+    size_t write = 0;
+    for (size_t read = 0; read < shard.count; ++read) {
+        if (shard.entries[read].key.compare(0, prefix.size(), prefix) == 0) {
+            continue;
+        }
+        if (write != read) {
+            shard.entries[write] = std::move(shard.entries[read]);
+        }
+        ++write;
+    }
+    for (size_t j = write; j < shard.count; ++j) {
+        shard.entries[j] = typename Shard::Entry{};
+    }
+    shard.count = write;
+}
+
+} // namespace
+
 std::shared_ptr<void> XStore::GetOrMapFile(const std::string &target_file, size_t row_length, unsigned long long total_rows) {
     MmapShard &shard = mmap_shards[std::hash<std::string>{}(target_file) % MMAP_SHARD_COUNT];
 
@@ -18,10 +113,10 @@ std::shared_ptr<void> XStore::GetOrMapFile(const std::string &target_file, size_
     // only contends with other threads hashing to the same shard.
     {
         std::lock_guard<std::mutex> lock(shard.mutex);
-        auto it = shard.index.find(target_file);
-        if (it != shard.index.end()) {
-            shard.lru.splice(shard.lru.begin(), shard.lru, it->second);
-            std::shared_ptr<MappedFile> owner = it->second->second;
+        size_t idx = FindIndex(shard, target_file);
+        if (idx != shard.count) {
+            std::shared_ptr<MappedFile> owner = shard.entries[idx].value;
+            PromoteToFront(shard, idx);
             return std::shared_ptr<void>(owner, owner->base);
         }
     }
@@ -71,26 +166,22 @@ std::shared_ptr<void> XStore::GetOrMapFile(const std::string &target_file, size_
     // Re-acquire to install into the cache, double-checked: another thread
     // may have raced us to map this same file while we were unlocked.
     std::lock_guard<std::mutex> lock(shard.mutex);
-    auto it = shard.index.find(target_file);
-    if (it != shard.index.end()) {
+    size_t idx = FindIndex(shard, target_file);
+    if (idx != shard.count) {
         // Lost the race -- our redundant Owner isn't stored anywhere else,
         // so it unmaps itself when it goes out of scope below; use theirs.
-        std::shared_ptr<MappedFile> winner = it->second->second;
-        shard.lru.splice(shard.lru.begin(), shard.lru, it->second);
+        std::shared_ptr<MappedFile> winner = shard.entries[idx].value;
+        PromoteToFront(shard, idx);
         return std::shared_ptr<void>(winner, winner->base);
     }
 
-    shard.lru.emplace_front(target_file, owner);
-    shard.index[target_file] = shard.lru.begin();
-
-    if (shard.lru.size() > MMAP_SHARD_CAP) {
-        // Only the cache's reference is dropped here -- if some other
-        // thread is still holding a copy of this entry's shared_ptr from an
-        // earlier GetOrMapFile() call, the deleter (and its munmap())
-        // doesn't run until that copy is released too.
-        shard.index.erase(shard.lru.back().first);
-        shard.lru.pop_back();
-    }
+    // Insert-at-front overwrites the LRU tail slot once the shard is at
+    // MMAP_SHARD_CAP -- that assignment is the eviction: only the cache's
+    // reference is dropped there, if some other thread is still holding a
+    // copy of that entry's shared_ptr from an earlier GetOrMapFile() call,
+    // the deleter (and its munmap()) doesn't run until that copy is
+    // released too.
+    InsertAtFront(shard, MmapShard::Entry{target_file, owner});
 
     return std::shared_ptr<void>(owner, owner->base);
 }
@@ -102,10 +193,11 @@ std::shared_ptr<int> XStore::GetOrOpenFile(const std::string &target_file, size_
     // shard's state, mirrors GetOrMapFile's fast path.
     {
         std::lock_guard<std::mutex> lock(shard.mutex);
-        auto it = shard.index.find(target_file);
-        if (it != shard.index.end()) {
-            shard.lru.splice(shard.lru.begin(), shard.lru, it->second);
-            return it->second->second;
+        size_t idx = FindIndex(shard, target_file);
+        if (idx != shard.count) {
+            std::shared_ptr<int> owner = shard.entries[idx].value;
+            PromoteToFront(shard, idx);
+            return owner;
         }
     }
 
@@ -139,25 +231,22 @@ std::shared_ptr<int> XStore::GetOrOpenFile(const std::string &target_file, size_
     // Re-acquire to install into the cache, double-checked: another thread
     // may have raced us to open this same file while we were unlocked.
     std::lock_guard<std::mutex> lock(shard.mutex);
-    auto it = shard.index.find(target_file);
-    if (it != shard.index.end()) {
+    size_t idx = FindIndex(shard, target_file);
+    if (idx != shard.count) {
         // Lost the race -- our redundant Owner isn't stored anywhere else,
         // so it closes itself when it goes out of scope below; use theirs.
-        shard.lru.splice(shard.lru.begin(), shard.lru, it->second);
-        return it->second->second;
+        std::shared_ptr<int> winner = shard.entries[idx].value;
+        PromoteToFront(shard, idx);
+        return winner;
     }
 
-    shard.lru.emplace_front(target_file, owner);
-    shard.index[target_file] = shard.lru.begin();
-
-    if (shard.lru.size() > FD_SHARD_CAP) {
-        // Only the cache's reference is dropped here -- if some other
-        // thread is still holding a copy of this entry's shared_ptr from an
-        // earlier GetOrOpenFile() call, the deleter (and its close()) doesn't
-        // run until that copy is released too.
-        shard.index.erase(shard.lru.back().first);
-        shard.lru.pop_back();
-    }
+    // Insert-at-front overwrites the LRU tail slot once the shard is at
+    // FD_SHARD_CAP -- that assignment is the eviction: only the cache's
+    // reference is dropped there, if some other thread is still holding a
+    // copy of that entry's shared_ptr from an earlier GetOrOpenFile() call,
+    // the deleter (and its close()) doesn't run until that copy is
+    // released too.
+    InsertAtFront(shard, FdShard::Entry{target_file, owner});
 
     return owner;
 }
@@ -165,23 +254,21 @@ std::shared_ptr<int> XStore::GetOrOpenFile(const std::string &target_file, size_
 bool XStore::IsFdCached(const std::string &target_file) {
     FdShard &shard = fd_shards[std::hash<std::string>{}(target_file) % FD_SHARD_COUNT];
     std::lock_guard<std::mutex> lock(shard.mutex);
-    return shard.index.find(target_file) != shard.index.end();
+    return FindIndex(shard, target_file) != shard.count;
 }
 
 void XStore::EraseOpenFile(const std::string &target_file) {
     FdShard &shard = fd_shards[std::hash<std::string>{}(target_file) % FD_SHARD_COUNT];
     std::lock_guard<std::mutex> lock(shard.mutex);
 
-    auto it = shard.index.find(target_file);
-    if (it == shard.index.end()) {
-        return;
-    }
-
     // Only drops the cache's reference -- see FdShard's comment. If a
     // caller is still mid-pwrite()/pread() on a copy of this fd's
     // shared_ptr, close() is deferred until that copy is released too.
-    shard.lru.erase(it->second);
-    shard.index.erase(it);
+    size_t idx = FindIndex(shard, target_file);
+    if (idx == shard.count) {
+        return;
+    }
+    EraseAtIndex(shard, idx);
 }
 
 void XStore::EraseOpenFilesUnderPrefix(const std::string &db_dir_prefix) {
@@ -189,15 +276,7 @@ void XStore::EraseOpenFilesUnderPrefix(const std::string &db_dir_prefix) {
     // under its own lock rather than one lock for the whole sweep.
     for (FdShard &shard : fd_shards) {
         std::lock_guard<std::mutex> lock(shard.mutex);
-
-        for (auto it = shard.lru.begin(); it != shard.lru.end();) {
-            if (it->first.compare(0, db_dir_prefix.size(), db_dir_prefix) == 0) {
-                shard.index.erase(it->first);
-                it = shard.lru.erase(it);
-            } else {
-                ++it;
-            }
-        }
+        ErasePrefix(shard, db_dir_prefix);
     }
 }
 
@@ -205,16 +284,14 @@ void XStore::EraseMappedFile(const std::string &target_file) {
     MmapShard &shard = mmap_shards[std::hash<std::string>{}(target_file) % MMAP_SHARD_COUNT];
     std::lock_guard<std::mutex> lock(shard.mutex);
 
-    auto it = shard.index.find(target_file);
-    if (it == shard.index.end()) {
-        return;
-    }
-
     // Only drops the cache's reference -- see MmapShard's comment. If a
     // caller is still mid-read/write on a copy of this mapping's
     // shared_ptr, munmap() is deferred until that copy is released too.
-    shard.lru.erase(it->second);
-    shard.index.erase(it);
+    size_t idx = FindIndex(shard, target_file);
+    if (idx == shard.count) {
+        return;
+    }
+    EraseAtIndex(shard, idx);
 }
 
 void XStore::EraseMappedFilesUnderPrefix(const std::string &db_dir_prefix) {
@@ -225,15 +302,7 @@ void XStore::EraseMappedFilesUnderPrefix(const std::string &db_dir_prefix) {
     // removal), not a hot path, so this is fine.
     for (MmapShard &shard : mmap_shards) {
         std::lock_guard<std::mutex> lock(shard.mutex);
-
-        for (auto it = shard.lru.begin(); it != shard.lru.end();) {
-            if (it->first.compare(0, db_dir_prefix.size(), db_dir_prefix) == 0) {
-                shard.index.erase(it->first);
-                it = shard.lru.erase(it);
-            } else {
-                ++it;
-            }
-        }
+        ErasePrefix(shard, db_dir_prefix);
     }
 }
 

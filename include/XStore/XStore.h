@@ -9,8 +9,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdio>
-#include <list>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -18,7 +16,6 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <utility>
 #include <vector>
 #include "XStore.pb.h"
 #include "include/DataStructs/ValueStruct.h"
@@ -65,11 +62,19 @@ class XStore {
         // skip open/ftruncate/mmap and become a single memcpy into an
         // already-resident page. File size is fixed at creation (ftruncate'd
         // up front to the year's full row count), so one mapping covers the
-        // whole file for its lifetime -- no remap needed. MRU-ordered list +
-        // index map = O(1) lookup/promote/evict; bounded (MMAP_CACHE_CAP) to
-        // avoid unbounded address-space/FD growth.
+        // whole file for its lifetime -- no remap needed. Bounded
+        // (MMAP_CACHE_CAP) to avoid unbounded address-space/FD growth.
         //
-        // Sharded across MMAP_SHARD_COUNT independent {list, map, mutex}
+        // Per-shard storage is a flat MRU-ordered array (entries[0] = most
+        // recently used), not a list+hashmap: MMAP_SHARD_CAP is tiny (4), so
+        // a linear scan over one contiguous array is both fewer cache misses
+        // and zero per-entry heap allocation compared to a std::list node +
+        // std::unordered_map bucket node per entry -- same reasoning as the
+        // flat vector + linear scan used for year buckets (see
+        // XStore_Internal.h), just applied to this cache instead of a
+        // std::map.
+        //
+        // Sharded across MMAP_SHARD_COUNT independent {array, mutex}
         // instances, keyed by hashing the file path, instead of one
         // process-wide mutex: a cold-started server hit by many concurrent
         // first-touches (e.g. N threads each first-mapping a different year
@@ -96,15 +101,17 @@ class XStore {
         // entry: eviction/erase here only drops the CACHE's reference, and
         // the custom deleter's munmap() doesn't actually run until the last
         // holder -- cache or in-flight caller -- releases theirs.
-        struct MappedFile { void *base; size_t len; };
-        struct alignas(std::hardware_destructive_interference_size) MmapShard {
-            std::list<std::pair<std::string, std::shared_ptr<MappedFile>>> lru;
-            std::unordered_map<std::string, std::list<std::pair<std::string, std::shared_ptr<MappedFile>>>::iterator> index;
-            std::mutex mutex;
-        };
         static constexpr size_t MMAP_SHARD_COUNT = 64;
         static constexpr size_t MMAP_CACHE_CAP = 256;
         static constexpr size_t MMAP_SHARD_CAP = MMAP_CACHE_CAP / MMAP_SHARD_COUNT;
+
+        struct MappedFile { void *base; size_t len; };
+        struct alignas(std::hardware_destructive_interference_size) MmapShard {
+            struct Entry { std::string key; std::shared_ptr<MappedFile> value; };
+            std::array<Entry, MMAP_SHARD_CAP> entries{};
+            size_t count = 0;
+            std::mutex mutex;
+        };
         static std::array<MmapShard, MMAP_SHARD_COUNT> mmap_shards;
 
         // Shared cache of open fds for .XSTORE data files, keyed by full path --
@@ -114,19 +121,20 @@ class XStore {
         // buffered write()/delayed-allocation path the file gets on every
         // access pattern (SEQ or RND), instead of a synchronous mmap
         // write-fault that must allocate a real block before returning. Same
-        // MRU-bounded design as MmapLru, just storing an fd instead of a base
-        // pointer.
+        // MRU-bounded design as MmapLru (flat array per shard, see MmapShard
+        // above), just storing an fd instead of a base pointer.
         //
         // Sized differently than MMAP_CACHE_CAP on purpose: a miss here is just
         // an open() (microseconds, no page-fault-time block allocation), so
         // the cap doesn't need to be large to amortize an expensive miss --
         // it only needs to cover the handful of year files actively being
         // written at once. Kept small so total resident cost (~256B kernel
-        // struct file + ~250B userspace list/map node per entry, no
-        // per-fd userspace buffer -- pwrite() writes straight to the kernel
-        // page cache) stays in the same ballpark as the single ~4KB buffer
-        // glibc's fwrite would have allocated for one open stream, rather
-        // than inheriting the address-space-driven 256 sizing MmapLru uses.
+        // struct file + one inline std::string + shared_ptr<int> per entry,
+        // no per-fd userspace buffer -- pwrite() writes straight to the
+        // kernel page cache) stays in the same ballpark as the single ~4KB
+        // buffer glibc's fwrite would have allocated for one open stream,
+        // rather than inheriting the address-space-driven 256 sizing MmapLru
+        // uses.
         //
         // Sharded the same way as the mmap cache (see MmapShard above), just
         // fewer shards -- FD_CACHE_CAP is already tiny (8 total) so 64 shards
@@ -146,20 +154,21 @@ class XStore {
         // racing pwrite/pread ran) a silent write into the wrong file.
         // FD_CACHE_CAP's small size (8, process-wide) made this easy to hit
         // once more than a handful of year files were concurrently hot.
-        struct alignas(std::hardware_destructive_interference_size) FdShard {
-            std::list<std::pair<std::string, std::shared_ptr<int>>> lru;
-            std::unordered_map<std::string, std::list<std::pair<std::string, std::shared_ptr<int>>>::iterator> index;
-            std::mutex mutex;
-        };
         static constexpr size_t FD_SHARD_COUNT = 4;
         static constexpr size_t FD_CACHE_CAP = 8;
         static constexpr size_t FD_SHARD_CAP = FD_CACHE_CAP / FD_SHARD_COUNT;
+
+        struct alignas(std::hardware_destructive_interference_size) FdShard {
+            struct Entry { std::string key; std::shared_ptr<int> value; };
+            std::array<Entry, FD_SHARD_CAP> entries{};
+            size_t count = 0;
+            std::mutex mutex;
+        };
         static std::array<FdShard, FD_SHARD_COUNT> fd_shards;
         std::string permitted_time_resolution[3] = {"SECOND", "MILLISECOND", "MICROSECOND"};
 
         int db_count = 0;
         std::vector<std::string> db_names = { };
-        std::map<std::string, unsigned long long int> resolution_map { {"SECOND", 31'536'000}, {"MILLISECOND", 31'536'000'000}, {"MICROSECOND", 31'536'000'000'000}, {"NANOSECOND", 31'536'000'000'000'000} };
 
         // Initialization
         XStore();

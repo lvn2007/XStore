@@ -1922,15 +1922,12 @@ TEST_F(XStoreTest, GetOrMapFileEvictsBeyondCapAndEvictedFilesStillReadCorrectly)
     // all shards now that the cache is sharded; each shard independently
     // enforces MmapShardCap, so the total can never exceed their sum
     // (MmapCacheCap) regardless of how hashing distributed the 300 files.
-    size_t total_lru = 0, total_index = 0;
+    size_t total_count = 0;
     for (const auto &shard : XStore::mmap_shards) {
-        EXPECT_LE(shard.lru.size(), XStore::MMAP_SHARD_CAP);
-        EXPECT_EQ(shard.lru.size(), shard.index.size());
-        total_lru += shard.lru.size();
-        total_index += shard.index.size();
+        EXPECT_LE(shard.count, XStore::MMAP_SHARD_CAP);
+        total_count += shard.count;
     }
-    EXPECT_LE(total_lru, XStore::MMAP_CACHE_CAP);
-    EXPECT_EQ(total_lru, total_index);
+    EXPECT_LE(total_count, XStore::MMAP_CACHE_CAP);
 
     // Read every point back, including the ones whose mapping must have been
     // evicted (and therefore has to be transparently re-created by
