@@ -1,4 +1,5 @@
-import time, os, shutil, itertools, math
+import time, os, itertools, math, threading
+from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -101,55 +102,102 @@ def checkTmuxJobIsDone(connectionGroup, timeoutSec=DEFAULT_RESTORE_TIMEOUT_SEC, 
     return pollTmuxUntilDone(connectionGroup, timeoutSec, pollInterval, label="restore")
 
 
+def _fetchClientResults(idx, ip, basePath, fileExt, user, keepalive, tag, printLock):
+    currPath = f"{basePath}Node-{idx}/"
+    os.makedirs(currPath, exist_ok=True)
+    with makeConnection(ip, user=user, keepalive=keepalive) as conn:
+        files = conn.run(f"ls *.{fileExt}", hide=True).stdout.split("\n")
+        files = [f for f in files if f.endswith(f".{fileExt}")]
+        for file in files:
+            # Download straight to this client's own Node-{idx}/ path rather than
+            # staging in the shared cwd then moving -- concurrent clients can share
+            # a leftover filename (e.g. stale files from a prior run), and two
+            # threads racing get()+move() on the same cwd staging path corrupts or
+            # loses a transfer (confirmed live: FileNotFoundError / SFTP size
+            # mismatch under concurrency before this fix).
+            destFile = f"{currPath}{file}"
+            conn.get(file, local=destFile)
+    with printLock:
+        print(f"{tag} [Client: {ip}] - Downloaded {len(files)} result files")
+
+
+def _fetchServerSysStats(serverHost, basePath, user, keepalive, tag, printLock):
+    # Saved under Node-0/, matching the original sequential behavior (sysstats were
+    # always fetched alongside whichever client happened to be selectedClients[0]).
+    currPath = f"{basePath}Node-0/"
+    os.makedirs(currPath, exist_ok=True)
+    with makeConnection(serverHost, user=user, keepalive=keepalive) as sconn:
+        txtFiles = sconn.run("ls *.txt", hide=True).stdout.split("\n")
+        txtFiles = [f for f in txtFiles if f.endswith(".txt")]
+        for file in txtFiles:
+            destFile = f"{currPath}{file}"
+            sconn.get(file, local=destFile)
+    with printLock:
+        print(f"{tag} [Server] - Downloaded {len(txtFiles)} system stats files")
+
+
 def fetchResults(basePath, fileExt, selectedClients, serverGroup, user, fetchSysStats=True,
-                  maxAttempts=12, retryDelay=5, keepalive=DEFAULT_KEEPALIVE_SEC):
+                  maxAttempts=12, retryDelay=5, keepalive=DEFAULT_KEEPALIVE_SEC, label=""):
     """Download each client's result files (fileExt) plus one copy of the server's
-    sysstat .txt files (saved under Node-0). Bounded retries instead of `while True`
-    so a real failure (bad path, dead connection) surfaces as an error instead of
-    spinning forever."""
+    sysstat .txt files (saved under Node-0), concurrently -- each client writes to
+    its own Node-{idx}/ directory, so there's no shared state to race on. Bounded
+    retries instead of `while True` so a real failure (bad path, dead connection)
+    surfaces as an error instead of spinning forever."""
+    tag = f"[Benchmark: {label}] [Fetch Results]" if label else "[Fetch Results]"
+    printLock = threading.Lock()  # serializes only the print() calls, not the transfers
     lastErr = None
     for attempt in range(1, maxAttempts + 1):
         try:
-            hasSysStats = not fetchSysStats
-            for idx, ip in enumerate(selectedClients):
-                currPath = f"{basePath}Node-{idx}/"
-                os.makedirs(currPath, exist_ok=True)
-
-                with makeConnection(ip, user=user, keepalive=keepalive) as conn:
-                    files = conn.run(f"ls *.{fileExt}", hide=True).stdout.split("\n")
-                    files = [f for f in files if f.endswith(f".{fileExt}")]
-                    for file in files:
-                        conn.get(file)
-                        destFile = f"{currPath}{file}"
-                        if os.path.isfile(destFile):
-                            os.remove(destFile)
-                        shutil.move(file, currPath)
-                print(f"[fetchResults] [Client: {ip}] - Downloaded {len(files)} result files")
-
-                if not hasSysStats:
-                    with makeConnection(serverGroup[0].host, user=user, keepalive=keepalive) as sconn:
-                        txtFiles = sconn.run("ls *.txt", hide=True).stdout.split("\n")
-                        txtFiles = [f for f in txtFiles if f.endswith(".txt")]
-                        for file in txtFiles:
-                            sconn.get(file)
-                            destFile = f"{currPath}{file}"
-                            if os.path.isfile(destFile):
-                                os.remove(destFile)
-                            shutil.move(file, currPath)
-                    print(f"[fetchResults] [Server] - Downloaded {len(txtFiles)} system stats files")
-                    hasSysStats = True
+            maxWorkers = len(selectedClients) + (1 if fetchSysStats else 0)
+            with ThreadPoolExecutor(max_workers=maxWorkers) as executor:
+                futures = [
+                    executor.submit(_fetchClientResults, idx, ip, basePath, fileExt, user, keepalive, tag, printLock)
+                    for idx, ip in enumerate(selectedClients)
+                ]
+                if fetchSysStats:
+                    futures.append(executor.submit(_fetchServerSysStats, serverGroup[0].host, basePath, user,
+                                                    keepalive, tag, printLock))
+                for f in futures:
+                    f.result()
             return
         except Exception as e:
             lastErr = e
-            print(f"[fetchResults] attempt {attempt}/{maxAttempts} failed: {e}; retrying in {retryDelay}s")
+            print(f"{tag} attempt {attempt}/{maxAttempts} failed: {e}; retrying in {retryDelay}s")
             time.sleep(retryDelay)
     raise RuntimeError(f"fetchResults: giving up after {maxAttempts} attempts") from lastErr
+
+
+def _dispatchWorkloadToClient(idx, ip, user, keepalive, WORKLOAD_TYPE, EXPERIMENT_TYPE, serverNode, serverPort,
+                               dbName, threadsPerMachine, nIter, batchIter, epochTime, chunkSize, skipSize,
+                               dataFile, totalClients, printLock):
+    """Dispatch one client's benchmarkClient invocation. Each call opens its own
+    Connection (no state shared with other clients), so runWorkload can run these
+    concurrently via ThreadPoolExecutor instead of one machine at a time -- with N
+    machines dispatched sequentially, total dispatch time is sum(per-client time);
+    concurrent, it's max(per-client time), which is what actually determines how
+    much lead time is needed before the scheduled synchronized start."""
+    with makeConnection(ip, user=user, keepalive=keepalive) as conn:
+        if WORKLOAD_TYPE == "INSERT":
+            conn.put(f"../scripts/insertBench.sh")
+            conn.run(f"bash insertBench.sh {EXPERIMENT_TYPE} {idx} {serverNode} {serverPort} {dbName.upper()} {threadsPerMachine} {nIter} {batchIter} {epochTime}")
+        elif WORKLOAD_TYPE == "QUERY":
+            conn.put(f"../scripts/queryBench.sh")
+            conn.run(f"bash queryBench.sh {EXPERIMENT_TYPE} {idx} {serverNode} {serverPort} {dbName.upper()} {threadsPerMachine} {nIter} {batchIter} {epochTime}")
+        elif WORKLOAD_TYPE == "AGG":
+            conn.put(f"../scripts/aggBench.sh")
+            conn.run(f"bash aggBench.sh {EXPERIMENT_TYPE} {idx} {serverNode} {serverPort} {dbName.upper()} {threadsPerMachine} {nIter} {batchIter} {epochTime}")
+        elif WORKLOAD_TYPE == "BACKTEST":
+            conn.put(f"../scripts/backtestBench.sh")
+            conn.run(f"bash backtestBench.sh {threadsPerMachine} {serverNode} {serverPort} {chunkSize} {skipSize} {dataFile} {dbName.upper()} {epochTime}")
+    with printLock:
+        print(f"[Benchmark: {totalClients}] [Client: {ip}] - Time now: {int(time.time())} | Delta: {epochTime - int(time.time())}")
 
 
 def runWorkload(EXPERIMENT_TYPE, targetClients, serverNode, serverPort, dbName, clientNodes, nIter, batchIter,
                  serverGroup, serverWorkingDir, user="cc", chunkSize=1000000, skipSize=900, dataFile="data.csv",
                  sleepInterval=10, secPerOp=0.1, bufferMultiplier=5, minTimeout=600, maxTimeout=10800,
-                 backtestTimeoutSec=7200, keepalive=DEFAULT_KEEPALIVE_SEC, jobTimeoutOverride=None):
+                 backtestTimeoutSec=7200, keepalive=DEFAULT_KEEPALIVE_SEC, jobTimeoutOverride=None,
+                 singleMachineLeadSec=30, multiMachineLeadSec=60):
     WORKLOAD_TYPE = EXPERIMENT_TYPE.split("_")[0]
     EXPERIMENT_TYPE = EXPERIMENT_TYPE[len(WORKLOAD_TYPE) + 1:]
 
@@ -190,25 +238,30 @@ def runWorkload(EXPERIMENT_TYPE, targetClients, serverNode, serverPort, dbName, 
             serverGroup.put(f"../scripts/sysMonitor.sh")
             serverGroup.run(f"bash sysMonitor.sh 50 {dbName}", hide=True)
 
-        # Schedule workload to be dispatch 2 min from now
-        epochTime = int(time.time()) + (60 * 2)
+        # Schedule workload dispatch. Single machine has nothing to synchronize
+        # against, so it only needs enough lead to cover its own put+run; multiple
+        # machines must all be ready at the same instant for a genuine concurrent-
+        # load measurement, so they get a longer lead.
+        leadSec = singleMachineLeadSec if len(selectedClients) == 1 else multiMachineLeadSec
+        epochTime = int(time.time()) + leadSec
         print(f"[Benchmark: {totalClients}] - Schedule workload on {epochTime}")
 
-        for idx, ip in enumerate(selectedClients):
-            with makeConnection(ip, user=user, keepalive=keepalive) as conn:
-                if WORKLOAD_TYPE == "INSERT":
-                    conn.put(f"../scripts/insertBench.sh")
-                    conn.run(f"bash insertBench.sh {EXPERIMENT_TYPE} {idx} {serverNode} {serverPort} {dbName.upper()} {threadsPerMachine} {nIter} {batchIter} {epochTime}")
-                elif WORKLOAD_TYPE == "QUERY":
-                    conn.put(f"../scripts/queryBench.sh")
-                    conn.run(f"bash queryBench.sh {EXPERIMENT_TYPE} {idx} {serverNode} {serverPort} {dbName.upper()} {threadsPerMachine} {nIter} {batchIter} {epochTime}")
-                elif WORKLOAD_TYPE == "AGG":
-                    conn.put(f"../scripts/aggBench.sh")
-                    conn.run(f"bash aggBench.sh {EXPERIMENT_TYPE} {idx} {serverNode} {serverPort} {dbName.upper()} {threadsPerMachine} {nIter} {batchIter} {epochTime}")
-                elif WORKLOAD_TYPE == "BACKTEST":
-                    conn.put(f"../scripts/backtestBench.sh")
-                    conn.run(f"bash backtestBench.sh {threadsPerMachine} {serverNode} {serverPort} {chunkSize} {skipSize} {dataFile} {dbName.upper()} {epochTime}")
-            print(f"[Benchmark: {totalClients}] [Client: {ip}] - Time now: {int(time.time())} | Delta: {epochTime - int(time.time())}")
+        # Dispatch to all clients concurrently instead of one at a time -- with N
+        # machines dispatched sequentially, total dispatch time is sum(per-client
+        # time); concurrent, it's max(per-client time), which is what the lead time
+        # above actually needs to cover.
+        dispatchPrintLock = threading.Lock()  # serializes only the print() calls, not the dispatches
+        with ThreadPoolExecutor(max_workers=len(selectedClients)) as executor:
+            futures = [
+                executor.submit(_dispatchWorkloadToClient, idx, ip, user, keepalive, WORKLOAD_TYPE, EXPERIMENT_TYPE,
+                                 serverNode, serverPort, dbName, threadsPerMachine, nIter, batchIter, epochTime,
+                                 chunkSize, skipSize, dataFile, totalClients, dispatchPrintLock)
+                for idx, ip in enumerate(selectedClients)
+            ]
+            for f in futures:
+                f.result()
+        # Each dispatch above prints its own "Delta: ..." -- a negative value there
+        # already signals insufficient lead time, no separate check needed.
 
         # Poll until and add 1 min delay buffer for workload to finish
         poller(epochTime)
@@ -262,7 +315,7 @@ def runWorkload(EXPERIMENT_TYPE, targetClients, serverNode, serverPort, dbName, 
             basePath = f"{dbName.upper()}_{WORKLOAD_TYPE}/Client-{totalClients}/"
             fileExt = "txt"
         fetchResults(basePath, fileExt, selectedClients, serverGroup, user,
-                     fetchSysStats=(WORKLOAD_TYPE != "BACKTEST"), keepalive=keepalive)
+                     fetchSysStats=(WORKLOAD_TYPE != "BACKTEST"), keepalive=keepalive, label=totalClients)
 
 
 def unaryPlots(WORKLOAD_TYPE, DB_NAME, targetThreads, clientNodes, xLabel, logScale=False):
