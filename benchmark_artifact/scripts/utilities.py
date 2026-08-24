@@ -39,6 +39,27 @@ def makeConnection(host, user="cc", keepalive=DEFAULT_KEEPALIVE_SEC, connect_tim
     return conn
 
 
+def rebootGroup(target):
+    """Fire-and-forget reboot of `target` (a Connection or Group). `disown=True`
+    tells Fabric not to wait for a result, since the command is expected to kill the
+    connection -- but the underlying SSH channel can still surface a raw EOFError (or,
+    for a Group, a GroupException wrapping a mix of clean Nones and EOFErrors across
+    members) if the reboot lands mid-handshake on a given machine. Confirmed live:
+    dispatching to a single Connection reliably returns clean, but a 9-member
+    ThreadingGroup rebooting concurrently hit this on a subset of members. Every
+    exception here is expected -- we just told this connection to die -- so it's
+    caught and logged rather than left to crash the notebook cell."""
+    try:
+        target.run("sudo reboot", disown=True)
+    except Exception as e:
+        print(f"[Reboot Group] Reboot dispatched, connection(s) dropped as expected during shutdown")
+    finally:
+        try:
+            target.close()
+        except Exception:
+            pass
+
+
 def estimateWorkloadTimeout(nIter, batchIter, secPerOp=0.1, bufferMultiplier=5, minTimeout=600, maxTimeout=10800):
     """Upper bound on how long a benchmarkClient run should take, used only to catch
     a genuinely stuck job (tmux session never closes) -- not a tight SLA. batchIter==0
