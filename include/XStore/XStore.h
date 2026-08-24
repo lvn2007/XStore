@@ -101,8 +101,8 @@ class XStore {
         // entry: eviction/erase here only drops the CACHE's reference, and
         // the custom deleter's munmap() doesn't actually run until the last
         // holder -- cache or in-flight caller -- releases theirs.
-        static constexpr size_t MMAP_SHARD_COUNT = 64;
-        static constexpr size_t MMAP_CACHE_CAP = 256;
+        static constexpr size_t MMAP_SHARD_COUNT = 128;
+        static constexpr size_t MMAP_CACHE_CAP = 512;
         static constexpr size_t MMAP_SHARD_CAP = MMAP_CACHE_CAP / MMAP_SHARD_COUNT;
 
         struct MappedFile { void *base; size_t len; };
@@ -127,35 +127,38 @@ class XStore {
         // Sized differently than MMAP_CACHE_CAP on purpose: a miss here is just
         // an open() (microseconds, no page-fault-time block allocation), so
         // the cap doesn't need to be large to amortize an expensive miss --
-        // it only needs to cover the handful of year files actively being
-        // written at once. Kept small so total resident cost (~256B kernel
-        // struct file + one inline std::string + shared_ptr<int> per entry,
-        // no per-fd userspace buffer -- pwrite() writes straight to the
-        // kernel page cache) stays in the same ballpark as the single ~4KB
-        // buffer glibc's fwrite would have allocated for one open stream,
-        // rather than inheriting the address-space-driven 256 sizing MmapLru
-        // uses.
+        // it only needs to cover the year files actively being written at
+        // once without thrashing. Even at 64 total, resident cost (~256B
+        // kernel struct file + one inline std::string + shared_ptr<int> per
+        // entry, no per-fd userspace buffer -- pwrite() writes straight to
+        // the kernel page cache) stays a couple KB, well under the single
+        // ~4KB buffer glibc's fwrite would have allocated for just one open
+        // stream -- comparable open-file-cache sizing in RocksDB
+        // (max_open_files, commonly left unlimited in production) and
+        // LevelDB (table_cache, historically 1000 entries) runs one to
+        // several orders of magnitude higher than this for the same reason:
+        // an open fd is cheap, a reopen isn't.
         //
         // Sharded the same way as the mmap cache (see MmapShard above), just
-        // fewer shards -- FD_CACHE_CAP is already tiny (8 total) so 64 shards
-        // would leave under one slot each. 4 shards keeps a usable 2-slot
-        // cap per shard while still splitting the lock so concurrent
-        // first-opens of different files don't all serialize on one mutex.
-        // Expect a smaller win than the mmap case: an fd-open miss is
-        // already cheap (no page-fault-time block allocation to hide behind
-        // an unlocked window), so the contention this closes is narrower to
-        // start with.
+        // fewer shards -- FD_CACHE_CAP stays tiny enough that MMAP_SHARD_COUNT
+        // shards would leave under one slot each. FD_SHARD_COUNT keeps a
+        // usable few-slot cap per shard while still splitting the lock so
+        // concurrent first-opens of different files don't all serialize on
+        // one mutex. Expect a smaller contention win than the mmap case: an
+        // fd-open miss is already cheap (no page-fault-time block allocation
+        // to hide behind an unlocked window), so the contention this closes
+        // is narrower to start with.
         // shared_ptr<int> entries for the same reason as MmapShard's
         // shared_ptr<MappedFile> above -- eviction/erase used to close()
         // unconditionally with no regard for a thread still mid-pwrite()/
         // pread() on that exact fd via an earlier GetOrOpenFile() return
         // value, risking either a clean EBADF or (worse, if the closed fd
         // number got reused by an unrelated concurrent open() before the
-        // racing pwrite/pread ran) a silent write into the wrong file.
-        // FD_CACHE_CAP's small size (8, process-wide) made this easy to hit
-        // once more than a handful of year files were concurrently hot.
-        static constexpr size_t FD_SHARD_COUNT = 4;
-        static constexpr size_t FD_CACHE_CAP = 8;
+        // racing pwrite/pread ran) a silent write into the wrong file. The
+        // cache's original 8-total size made this easy to hit once more than
+        // a handful of year files were concurrently hot.
+        static constexpr size_t FD_SHARD_COUNT = 16;
+        static constexpr size_t FD_CACHE_CAP = 64;
         static constexpr size_t FD_SHARD_CAP = FD_CACHE_CAP / FD_SHARD_COUNT;
 
         struct alignas(std::hardware_destructive_interference_size) FdShard {
