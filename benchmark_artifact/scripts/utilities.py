@@ -12,15 +12,29 @@ DEFAULT_KEEPALIVE_SEC = 30
 DEFAULT_RESTORE_TIMEOUT_SEC = 3600
 
 
+class _KeepAliveConnection(Connection):
+    """Connection subclass that re-applies SSH keepalive on every open() -- including
+    Fabric's automatic lazy reopen after .close(). Keepalive lives on the Transport,
+    and .close() tears the Transport down; the next .run()/.put() builds a brand new
+    one with no keepalive unless something re-sets it. Plain "set keepalive once after
+    connecting" silently stops protecting a connection the moment anything closes and
+    reopens it -- e.g. a legitimate close on an error path (see pollTmuxUntilDone),
+    or code elsewhere reusing the same long-lived serverGroup/allGroup/clientGroup
+    across a multi-hour notebook run -- so a one-shot fix would only protect a
+    connection up to its first close before quietly reverting to the original
+    unprotected/idle-hang behavior."""
+    def __init__(self, host, user="cc", connect_timeout=30, keepalive=DEFAULT_KEEPALIVE_SEC, **kwargs):
+        super().__init__(host, user=user, connect_timeout=connect_timeout, **kwargs)
+        object.__setattr__(self, "_keepalive_sec", keepalive)
+
+    def open(self):
+        super().open()
+        self.transport.set_keepalive(self._keepalive_sec)
+
+
 def makeConnection(host, user="cc", keepalive=DEFAULT_KEEPALIVE_SEC, connect_timeout=30):
-    """Open a Connection with SSH keepalive on. Without this, a notebook that holds
-    a Connection open across long idle gaps (sleeps between polls, multi-hour runs)
-    can have it silently killed by an idle NAT/firewall timeout -- the socket looks
-    fine locally but every call on it hangs, while a fresh terminal `ssh` works
-    because it's a brand new handshake."""
-    conn = Connection(host, user=user, connect_timeout=connect_timeout)
+    conn = _KeepAliveConnection(host, user=user, connect_timeout=connect_timeout, keepalive=keepalive)
     conn.open()
-    conn.transport.set_keepalive(keepalive)
     return conn
 
 
@@ -47,7 +61,10 @@ def pollTmuxUntilDone(target, timeoutSec, pollInterval=10, label=""):
     tmux session. `tmux ls` exiting non-zero means no session left -- the workload
     closed it itself on completion, so that's success. Any other error (dead
     connection, auth failure) is retried with backoff up to timeoutSec instead of
-    either hanging forever or silently treating a connectivity blip as "done"."""
+    either hanging forever or silently treating a connectivity blip as "done". Holds
+    the connection open across the whole poll (keepalive -- see makeConnection --
+    already handles staleness) rather than closing/reopening every cycle; only closes
+    on an actual error, to force a clean reconnect attempt next time around."""
     tag = f" {label}" if label else ""
     conns = _asConnections(target)
     deadline = time.time() + timeoutSec
@@ -57,7 +74,6 @@ def pollTmuxUntilDone(target, timeoutSec, pollInterval=10, label=""):
         for conn in conns:
             try:
                 result = conn.run("tmux ls", hide=True, warn=True)
-                conn.close()
                 if result.exited == 0:
                     allDone = False
             except Exception as e:
@@ -168,7 +184,6 @@ def runWorkload(EXPERIMENT_TYPE, targetClients, serverNode, serverPort, dbName, 
             else:
                 if "NFS" in dataFile:
                     serverGroup.run(f"bash runNFSServer.sh", hide=True)
-        serverGroup.close()
 
         # Start monitoring system stats (IGNORE BACKTEST)
         if WORKLOAD_TYPE != "BACKTEST":
@@ -209,7 +224,6 @@ def runWorkload(EXPERIMENT_TYPE, targetClients, serverNode, serverPort, dbName, 
             jobTimeout = backtestTimeoutSec
         else:
             jobTimeout = estimateWorkloadTimeout(nIter, batchIter, secPerOp, bufferMultiplier, minTimeout, maxTimeout)
-        print(f"[Benchmark: {totalClients}] - Waiting up to {int(jobTimeout)}s for job completion (fault-detection ceiling, not an SLA)")
 
         waitConns = [makeConnection(ip, user=user, keepalive=keepalive) for ip in selectedClients]
         try:
