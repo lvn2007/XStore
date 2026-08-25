@@ -218,7 +218,7 @@ def runWorkload(EXPERIMENT_TYPE, targetClients, serverNode, serverPort, dbName, 
                  serverGroup, serverWorkingDir, user="cc", chunkSize=1000000, skipSize=900, dataFile="data.csv",
                  sleepInterval=10, secPerOp=0.1, bufferMultiplier=5, minTimeout=600, maxTimeout=10800,
                  backtestTimeoutSec=7200, keepalive=DEFAULT_KEEPALIVE_SEC, jobTimeoutOverride=None,
-                 singleMachineLeadSec=30, multiMachineLeadSec=60):
+                 leadSec=30):
     WORKLOAD_TYPE = EXPERIMENT_TYPE.split("_")[0]
     EXPERIMENT_TYPE = EXPERIMENT_TYPE[len(WORKLOAD_TYPE) + 1:]
 
@@ -257,13 +257,14 @@ def runWorkload(EXPERIMENT_TYPE, targetClients, serverNode, serverPort, dbName, 
         # Start monitoring system stats (IGNORE BACKTEST)
         if WORKLOAD_TYPE != "BACKTEST":
             serverGroup.put(f"../scripts/sysMonitor.sh")
-            serverGroup.run(f"bash sysMonitor.sh 50 {dbName}", hide=True)
+            serverGroup.run(f"bash sysMonitor.sh 20 {dbName}", hide=True)
 
-        # Schedule workload dispatch. Single machine has nothing to synchronize
-        # against, so it only needs enough lead to cover its own put+run; multiple
-        # machines must all be ready at the same instant for a genuine concurrent-
-        # load measurement, so they get a longer lead.
-        leadSec = singleMachineLeadSec if len(selectedClients) == 1 else multiMachineLeadSec
+        # Schedule workload dispatch. Single-machine and multi-machine tiers share
+        # the same lead time so every reading starts from the same reference point
+        # -- this only works because dispatch is concurrent (see ThreadPoolExecutor
+        # below): total dispatch time is max(per-client time) regardless of how many
+        # clients are involved, not sum(per-client time), so multi-machine doesn't
+        # need extra lead just for having more machines to reach.
         epochTime = int(time.time()) + leadSec
         print(f"[Benchmark: {totalClients}] - Schedule workload on {epochTime}")
 
