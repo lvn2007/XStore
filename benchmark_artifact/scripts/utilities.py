@@ -39,6 +39,24 @@ def makeConnection(host, user="cc", keepalive=DEFAULT_KEEPALIVE_SEC, connect_tim
     return conn
 
 
+def waitForSSH(host, user="cc", timeout=1200, interval=10, connect_timeout=10):
+    """Poll `host` by opening and closing a real SSH connection via Fabric/Paramiko,
+    which honors ~/.ssh/config (ProxyJump/IdentityFile/etc). Use this instead of
+    chi.server.wait_for_tcp -- that does a raw socket.create_connection, which has no
+    idea about ProxyJump and will hang for the full timeout against a host only
+    reachable through a jump host."""
+    start = time.time()
+    while True:
+        try:
+            conn = makeConnection(host, user=user, connect_timeout=connect_timeout)
+            conn.close()
+            return
+        except Exception as e:
+            if time.time() - start >= timeout:
+                raise TimeoutError(f"{host}:22 not reachable via SSH after {timeout}s") from e
+            time.sleep(interval)
+
+
 def rebootGroup(target):
     """Fire-and-forget reboot of `target` (a Connection or Group). `disown=True`
     tells Fabric not to wait for a result, since the command is expected to kill the
