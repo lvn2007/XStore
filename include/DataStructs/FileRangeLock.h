@@ -5,7 +5,6 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
-#include <new>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -67,7 +66,7 @@ class FileLockRegistry {
         static FileRangeLock& Get(const std::string &file_path);
 
     private:
-        struct alignas(std::hardware_destructive_interference_size) Shard {
+        struct Shard {
             std::shared_mutex mutex;
             std::unordered_map<std::string, std::unique_ptr<FileRangeLock>> locks;
         };

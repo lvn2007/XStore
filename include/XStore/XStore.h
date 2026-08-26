@@ -11,7 +11,6 @@
 #include <cstdio>
 #include <memory>
 #include <mutex>
-#include <new>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
@@ -50,7 +49,7 @@ class XStore {
         // eviction here (unlike Mmap/FdShard) since the config set is small
         // and static per DB, so each shard is just an unordered_map + its
         // own shared_mutex.
-        struct alignas(std::hardware_destructive_interference_size) CfgShard {
+        struct CfgShard {
             std::unordered_map<std::string, XStore_Proto::ConfigStruct> map;
             std::shared_mutex mutex;
         };
@@ -106,7 +105,7 @@ class XStore {
         static constexpr size_t MMAP_SHARD_CAP = MMAP_CACHE_CAP / MMAP_SHARD_COUNT;
 
         struct MappedFile { void *base; size_t len; };
-        struct alignas(std::hardware_destructive_interference_size) MmapShard {
+        struct MmapShard {
             struct Entry { std::string key; std::shared_ptr<MappedFile> value; };
             std::array<Entry, MMAP_SHARD_CAP> entries{};
             size_t count = 0;
@@ -161,7 +160,7 @@ class XStore {
         static constexpr size_t FD_CACHE_CAP = 64;
         static constexpr size_t FD_SHARD_CAP = FD_CACHE_CAP / FD_SHARD_COUNT;
 
-        struct alignas(std::hardware_destructive_interference_size) FdShard {
+        struct FdShard {
             struct Entry { std::string key; std::shared_ptr<int> value; };
             std::array<Entry, FD_SHARD_CAP> entries{};
             size_t count = 0;
