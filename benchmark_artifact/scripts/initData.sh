@@ -11,7 +11,7 @@ defaultURL=${urlTACC}
 if [ "$SITE_NAME" == "CHI@TACC" ]; then
     defaultURL=${urlTACC}
 elif [ "$SITE_NAME" == "MYSTIC@IIT" ]; then
-    defaultUrl=${urlMystic}
+    defaultURL=${urlMystic}
 fi
 
 # Preemptively remove old stuffs
