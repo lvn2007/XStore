@@ -4,11 +4,10 @@ DB_NAME="$2"
 # Purge existing files
 rm -rf cpu.txt mem.txt io.txt
 
-# IF there's a tmux session exists -> Kill
-if [ $DB_NAME != "XStore" || $DB_NAME != "Graphite" ] && [ $? == 0 ]; then
-    tmux kill-server && sleep 5
-
-    # Intialize tmux
+# XStore/Graphite already have a "Server" tmux session running (started by run<DB>Server.sh);
+# MongoDB/InfluxDB use systemctl/service instead, so no session exists yet -> create one here.
+if [[ "$DB_NAME" != "XStore" && "$DB_NAME" != "Graphite" ]]; then
+    tmux kill-server 2>/dev/null
     tmux new-session -d -s ${DB_NAME} -n Server
 fi
 

@@ -1,13 +1,9 @@
+source "$(dirname "${BASH_SOURCE[0]}")/../_common.sh"
+
 isPurge="$1"
 WORKING_DIR="$2"
 
-# Pre-emptively kill any tmux session
-tmux has-session 2>/dev/null
-
-# IF there's a tmux session exists -> Kill
-if [ $? == 0 ]; then
-    tmux kill-server && sleep 5
-fi
+killTmuxIfRunning 5
 
 # Go to proper working dir
 cd ${WORKING_DIR}
@@ -15,12 +11,11 @@ cd ${WORKING_DIR}
 # Intialize tmux
 tmux new-session -d -s XStore -n Server
 
-# Clear caches
-free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null
+dropPageCache
 
 # Pre-emptively purge existing dataStore & Start server
 if [ "$isPurge" == "true" ]; then
-    tmux send-keys -t "Server" "cd XStore_Server/build && sudo rm -r DataStore; mkdir -p DataStore && ./XStore --host 0.0.0.0 --port 9497 --threads $(($(nproc --all)/2))" C-m
+    tmux send-keys -t "Server" "cd XStore_Server/build && sudo rm -rf DataStore/BENCH_DB DataStore/BACKTESTER; mkdir -p DataStore && ./XStore --host 0.0.0.0 --port 9497 --threads $(($(nproc --all)/2))" C-m
 else
     tmux send-keys -t "Server" "cd XStore_Server/build && ./XStore --host 0.0.0.0 --port 9497 --threads $(($(nproc --all)/2))" C-m
 fi

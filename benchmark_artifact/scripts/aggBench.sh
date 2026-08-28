@@ -1,3 +1,5 @@
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+
 EXPERIMENT_TYPE="$1"
 NODE_NUM="$2"
 SERVER_ADDR="$3"
@@ -12,18 +14,12 @@ INVOKE_AT="$9"
 WORKLOAD=$(echo $EXPERIMENT_TYPE | cut -d '_' -f 1)
 PATTERN=$(echo $EXPERIMENT_TYPE | cut -d '_' -f 2)
 
-tmux has-session 2>/dev/null
-
-# IF there's a tmux session exists -> Kill
-if [ $? == 0 ]; then
-    tmux kill-server
-fi
+killTmuxIfRunning
 
 # Pre-emptively clean any .csv/.parquet files
 rm -f *.csv *.parquet && sleep 5
 
-# Clear caches
-free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null
+dropPageCache
 
 # Copy data to home directory
 cp -r 10Y_128-Cols_Experiments/AGG_$WORKLOAD\_QUERY/AGG_$WORKLOAD\_QUERY\_Node-$NODE_NUM/AGG-$WORKLOAD\-QUERY_Client-* .

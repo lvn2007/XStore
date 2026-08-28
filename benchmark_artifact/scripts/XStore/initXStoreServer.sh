@@ -1,3 +1,5 @@
+source "$(dirname "${BASH_SOURCE[0]}")/../_common.sh"
+
 WORKING_DIR="$1"
 
 # Install dependencies of XStore
@@ -16,7 +18,4 @@ git clone https://github.com/protocolbuffers/protobuf.git; cd protobuf && git re
 cd XStore && bash build.sh
 
 # Configure firewall
-if command -p firewall-cmd >/dev/null 2>&1
-  then
-    sudo firewall-cmd --add-port 9497/tcp --permanent && sudo firewall-cmd --reload
-fi
+openFirewallPorts 9497

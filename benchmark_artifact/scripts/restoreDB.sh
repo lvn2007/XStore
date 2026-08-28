@@ -52,19 +52,3 @@ elif [ "$DB_NAME" == "CSV" ] || [ "$DB_NAME" == "Parquet" ]; then
     # Fetch experiment data from ObjectStore
     tmux send-keys -t "RestoreDB" "wget -qO- ${defaultURL} | tar xvS --zstd && tmux kill-server" C-m
 fi
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

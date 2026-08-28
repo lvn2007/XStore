@@ -1,14 +1,10 @@
+source "$(dirname "${BASH_SOURCE[0]}")/../_common.sh"
+
 isPurge="$1"
 WORKING_DIR="$2"
 
-# Pre-emptively kill any tmux session
-tmux has-session 2>/dev/null
 sudo pkill go-carbon
-
-# IF there's a tmux session exists -> Kill
-if [ $? == 0 ]; then
-    tmux kill-server && sleep 5
-fi
+killTmuxIfRunning 5
 
 # Go to proper working dir
 cd ${WORKING_DIR}
@@ -17,12 +13,11 @@ cd ${WORKING_DIR}
 tmux new-session -d -s Graphite -n Server
 tmux new-window -t Graphite -n API
 
-# Clear caches
-free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null
+dropPageCache
 
-# Purge existing dataStore & Start server
+# Purge existing dataStore (BENCH_DB & BACKTESTER only) & Start server
 if [ "$isPurge" == "true" ]; then
-    sudo rm -r ${WORKING_DIR}/graphite/whisper/
+    sudo rm -rf ${WORKING_DIR}/graphite/whisper/BENCH_DB ${WORKING_DIR}/graphite/whisper/BACKTESTER
     mkdir -p ${WORKING_DIR}/graphite/whisper/
 fi
 

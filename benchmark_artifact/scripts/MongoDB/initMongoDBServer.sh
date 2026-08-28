@@ -1,7 +1,9 @@
+source "$(dirname "${BASH_SOURCE[0]}")/../_common.sh"
+
 WORKING_DIR="$1"
 IS_MANUAL="$2"
 
-# Installing sysstat monitoring 
+# Installing sysstat monitoring
 sudo apt install sysstat -y
 
 # Go to proper working dir
@@ -51,10 +53,7 @@ if [ -d "$WORKING_DIR" ]; then
 fi
 
 # Configure firewall
-if command -p firewall-cmd >/dev/null 2>&1
-  then
-    sudo firewall-cmd --add-port 9491/tcp --permanent && sudo firewall-cmd --reload
-fi
+openFirewallPorts 9491
 
 # Restart MongoDB to reflect all changes
 sudo systemctl restart mongod

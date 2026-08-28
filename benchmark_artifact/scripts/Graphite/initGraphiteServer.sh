@@ -1,3 +1,5 @@
+source "$(dirname "${BASH_SOURCE[0]}")/../_common.sh"
+
 WORKING_DIR="$1"
 
 # Go to proper working dir
@@ -20,8 +22,4 @@ mkdir -p ${WORKING_DIR}/graphite/whisper
 sudo cp ~/storage-schemas.conf /etc/go-carbon/storage-schemas.conf
 
 # Configure firewall
-if command -p firewall-cmd >/dev/null 2>&1
-  then
-    sudo firewall-cmd --add-port 2003/tcp --permanent && sudo firewall-cmd --reload
-    sudo firewall-cmd --add-port 2004/tcp --permanent && sudo firewall-cmd --reload
-fi
+openFirewallPorts 2003 2004

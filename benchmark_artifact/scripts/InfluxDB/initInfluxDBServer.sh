@@ -1,12 +1,11 @@
+source "$(dirname "${BASH_SOURCE[0]}")/../_common.sh"
+
 WORKING_DIR="$1"
 
 # Go to proper working dir
 cd ${WORKING_DIR}
 
 # Add Influx repo & Install
-# wget -q https://repos.influxdata.com/influxdata-archive_compat.key
-# echo '393e8779c89ac8d958f81f942f9ad7fb82a25e133faddaf92e15b16e6ac9ce4c influxdata-archive_compat.key' | sha256sum -c && cat influxdata-archive_compat.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/influxdata-archive_compat.gpg > /dev/null
-# echo 'deb [signed-by=/etc/apt/trusted.gpg.d/influxdata-archive_compat.gpg] https://repos.influxdata.com/debian stable main' | sudo tee /etc/apt/sources.list.d/influxdata.list
 curl -fsSL https://repos.influxdata.com/influxdata-archive_compat-exp2029.key | gpg --dearmor | sudo tee /usr/share/keyrings/influxdata-archive-keyring.gpg > /dev/null
 echo "deb [signed-by=/usr/share/keyrings/influxdata-archive-keyring.gpg] https://repos.influxdata.com/debian stable main" | sudo tee /etc/apt/sources.list.d/influxdata.list
 sudo rm -f /etc/apt/trusted.gpg.d/influxdata-archive_compat.gpg
@@ -46,10 +45,7 @@ if [ -d "$WORKING_DIR" ]; then
 fi
 
 # Configure firewall
-if command -p firewall-cmd >/dev/null 2>&1
-  then
-    sudo firewall-cmd --add-port 9492/tcp --permanent && sudo firewall-cmd --reload
-fi
+openFirewallPorts 9492
 
 # Restart InfluxDB to reflect all changes
 sudo service influxdb restart

@@ -151,11 +151,6 @@ class Backtester:
                 computeEndTime = time.time()
                 totalComputeTime += (computeEndTime - computeStartTime)
 
-            # deallocStartTime = time.time()
-            # del chunkDF
-            # gc.collect()
-            # deallocEndTime = time.time()
-
         ioEndTime = time.time()
         totalIOTime += (ioEndTime - ioStartTime)
         totalIOTime = totalIOTime - totalComputeTime
@@ -177,37 +172,6 @@ class Backtester:
     def _chunks(self, lst, n):
         for i in range(0, len(lst), n):
             yield lst[i:i + n]
-
-    def backtestMongo(self):
-        totalIOTime = totalComputeTime = 0
-
-        mongoClient = MongoClient(host=self._ip_address, port=self._port_number, timeoutMS=1_800_000, maxPoolSize=0)
-        mongoCollection = mongoClient['BACKTESTER']['BACKTESTER']
-
-        queryRange = self._getQueryRange(946684800, 1_262_303_999)
-        queryRangeSkip = self._getQueryRangeSkip(946684800, 1_262_303_999, self._skipSize)
-        queryRangeSkip = [datetime.fromtimestamp(i) for i in queryRangeSkip]
-
-        # Querying random points using $in is extremely slow
-        #   Issue #1: Large chunk size cause error - pymongo.errors.OperationFailure: Failed to optimize pipeline :: caused by :: BufBuilder attempted to grow%0D%0A() to 131072001 bytes, past the 125MB limit
-        #   Issue #2: BSONObjectTooLarge
-        for i in queryRange:
-            ioStartTime = time.time()
-            curQuery = {"Timestamp": {"$gte": datetime.fromtimestamp(i[0]), "$lt": datetime.fromtimestamp(i[1])}}
-            mongoQuery = mongoCollection.find(curQuery).to_list()
-            mongoQuery = pd.DataFrame(mongoQuery, columns=["Timestamp", "Open", "High", "Low", "Close", "Volume"])
-            mongoQuery = mongoQuery[mongoQuery["Timestamp"].isin(queryRangeSkip)]
-            ioEndTime = time.time()
-            totalIOTime += (ioEndTime - ioStartTime)
-
-            for rowIdx, rowTimestamp, rowOpen, rowHigh, rowLow, rowClose, rowVolume in zip(mongoQuery.index, mongoQuery.Timestamp, mongoQuery.Open, mongoQuery.High, mongoQuery.Low, mongoQuery.Close, mongoQuery.Volume):
-                computeStartTime = time.time()
-                tradeSignal = self._strategy.analyze(rowClose)
-                result = self._makeTrade(tradeSignal, rowClose)
-                computeEndTime = time.time()
-                totalComputeTime += (computeEndTime - computeStartTime)
-
-        return [totalIOTime, totalComputeTime, self.cash]
 
     def backtestMongoUnary(self):
         totalIOTime = totalComputeTime = 0
@@ -231,38 +195,6 @@ class Backtester:
                 computeStartTime = time.time()
                 tradeSignal = self._strategy.analyze(data)
                 result = self._makeTrade(tradeSignal, data)
-                computeEndTime = time.time()
-                totalComputeTime += (computeEndTime - computeStartTime)
-
-        return [totalIOTime, totalComputeTime, self.cash]
-
-    def backtestInflux(self):
-        totalIOTime = totalComputeTime = 0
-
-        # influxClient = InfluxDBClient(self._ip_address, self._port_number, database="BACKTESTER")
-        influxClient = DataFrameClient(self._ip_address, self._port_number, database="BACKTESTER")
-
-        queryRange = self._getQueryRange(946684800, 1_262_303_999)
-        queryRangeSkip = self._getQueryRangeSkip(946684800, 1_262_303_999, self._skipSize)
-        queryRangeSkip = [datetime.fromtimestamp(i) for i in queryRangeSkip]
-
-        # InfluxQL doesn't support querying a batch of non-continuous timestamps");
-        # REF 1: https://docs.influxdata.com/influxdb/v1/query_language/explore-data/#syntax-1")
-        # REF 2: https://community.influxdata.com/t/querying-multiple-time-points/35388");
-        for i in queryRange:
-            curQuery = f"SELECT * FROM BACKTESTER WHERE time >= {i[0]}s AND time < {i[1]}s"
-            ioStartTime = time.time()
-            influxQuery = influxClient.query(curQuery)
-            influxQuery = influxQuery["BACKTESTER"]
-            influxQuery.index = influxQuery.index.values.astype("datetime64[s]")
-            influxQuery = influxQuery[influxQuery.index.isin(queryRangeSkip)]
-            ioEndTime = time.time()
-            totalIOTime += (ioEndTime - ioStartTime)
-
-            for rowIdx, rowOpen, rowHigh, rowLow, rowClose, rowVolume in zip(influxQuery.index, influxQuery.Open, influxQuery.High, influxQuery.Low, influxQuery.Close, influxQuery.Volume):
-                computeStartTime = time.time()
-                tradeSignal = self._strategy.analyze(rowClose)
-                result = self._makeTrade(tradeSignal, rowClose)
                 computeEndTime = time.time()
                 totalComputeTime += (computeEndTime - computeStartTime)
 
@@ -352,32 +284,6 @@ class Backtester:
                 ioEndTime = time.time()
                 totalIOTime += (ioEndTime - ioStartTime)
 
-                computeStartTime = time.time()
-                tradeSignal = self._strategy.analyze(data)
-                result = self._makeTrade(tradeSignal, data)
-                computeEndTime = time.time()
-                totalComputeTime += (computeEndTime - computeStartTime)
-
-        return [totalIOTime, totalComputeTime, self.cash]
-
-    def backtestXStoreUnary(self):
-        totalIOTime = totalComputeTime = 0
-
-        xstoreClient = XStoreClient(self._ip_address, self._port_number)
-
-        queryRangeSkip = self._getQueryRangeSkip(946684800, 1_262_303_999, self._skipSize)
-        queryRangeSkip = list(self._chunks(queryRangeSkip, self._chunksize))
-
-        for chunkTime in queryRangeSkip:
-            dataList = []
-            for i in chunkTime:
-                ioStartTime = time.time()
-                xstoreQuery = xstoreClient.unaryQuery(i, "BACKTESTER").data.fieldData[3].doubleData
-                ioEndTime = time.time()
-                totalIOTime += (ioEndTime - ioStartTime)
-                dataList.append(xstoreQuery)
-
-            for data in dataList:
                 computeStartTime = time.time()
                 tradeSignal = self._strategy.analyze(data)
                 result = self._makeTrade(tradeSignal, data)

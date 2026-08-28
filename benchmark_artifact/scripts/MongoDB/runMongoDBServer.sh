@@ -1,3 +1,5 @@
+source "$(dirname "${BASH_SOURCE[0]}")/../_common.sh"
+
 isPurge="$1"
 WORKING_DIR="$2"
 
@@ -10,8 +12,7 @@ fi
 # Stop MongoDB
 sudo systemctl stop mongod
 
-# Clear caches
-free > /dev/null && sync > /dev/null && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' && free > /dev/null
+dropPageCache
 
 # Start MongoDB
 sudo systemctl start mongod && sudo systemctl restart mongod
