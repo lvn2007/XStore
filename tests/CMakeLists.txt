@@ -18,7 +18,7 @@ add_executable(xstore_tests
         ${PROTO_SRCS} ${PROTO_HDRS}
 )
 
-target_link_libraries(xstore_tests PRIVATE GTest::gtest_main protobuf::libprotobuf Threads::Threads "stdc++fs")
+target_link_libraries(xstore_tests PRIVATE GTest::gtest_main protobuf::libprotobuf Threads::Threads "stdc++fs" moodycamel)
 if(TARGET absl::log_internal_check_op)
     target_link_libraries(xstore_tests PRIVATE absl::log_internal_check_op)
 endif()
@@ -54,7 +54,7 @@ add_executable(xstore_network_tests
         ${PROTO_SRCS} ${PROTO_HDRS}
 )
 
-target_link_libraries(xstore_network_tests PRIVATE GTest::gtest_main protobuf::libprotobuf Threads::Threads "stdc++fs" "zmq")
+target_link_libraries(xstore_network_tests PRIVATE GTest::gtest_main protobuf::libprotobuf Threads::Threads "stdc++fs" "zmq" moodycamel)
 if(TARGET absl::log_internal_check_op)
     target_link_libraries(xstore_network_tests PRIVATE absl::log_internal_check_op)
 endif()
@@ -114,7 +114,7 @@ add_executable(xstore_perf_tests
         ${PROTO_SRCS} ${PROTO_HDRS}
 )
 
-target_link_libraries(xstore_perf_tests PRIVATE GTest::gtest_main protobuf::libprotobuf Threads::Threads "stdc++fs")
+target_link_libraries(xstore_perf_tests PRIVATE GTest::gtest_main protobuf::libprotobuf Threads::Threads "stdc++fs" moodycamel)
 if(TARGET absl::log_internal_check_op)
     target_link_libraries(xstore_perf_tests PRIVATE absl::log_internal_check_op)
 endif()

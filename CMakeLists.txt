@@ -29,6 +29,16 @@ add_definitions(-D_LARGEFILE_SOURCE -D_LARGE_FILES -D_FILE_OFFSET_BITS=64)
 
 include(FetchContent)
 
+FetchContent_Declare(
+        moodycamel_concurrentqueue
+        GIT_REPOSITORY https://github.com/cameron314/concurrentqueue.git
+        GIT_TAG v1.0.4
+)
+FetchContent_MakeAvailable(moodycamel_concurrentqueue)
+
+add_library(moodycamel INTERFACE)
+target_include_directories(moodycamel INTERFACE ${moodycamel_concurrentqueue_SOURCE_DIR})
+
 # Protobuf
 find_package(absl REQUIRED)
 find_package(Protobuf REQUIRED)
@@ -83,7 +93,7 @@ add_executable(XStore src/main.cpp
         include/DataStructs/FileRangeLock.h src/DataStructs/FileRangeLock.cpp
         include/Logger/Logger.h)
 
-target_link_libraries(XStore PUBLIC "stdc++fs" protobuf::libprotobuf "zmq" Threads::Threads)
+target_link_libraries(XStore PUBLIC "stdc++fs" protobuf::libprotobuf "zmq" Threads::Threads moodycamel)
 if(TARGET absl::log_internal_check_op)
     target_link_libraries(XStore PUBLIC absl::log_internal_check_op)
 endif()
