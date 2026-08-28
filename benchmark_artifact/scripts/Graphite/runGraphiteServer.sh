@@ -1,4 +1,4 @@
-source "$(dirname "${BASH_SOURCE[0]}")/../_common.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
 isPurge="$1"
 WORKING_DIR="$2"

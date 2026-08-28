@@ -236,6 +236,7 @@ def _dispatchWorkloadToClient(idx, ip, user, keepalive, WORKLOAD_TYPE, EXPERIMEN
     concurrent, it's max(per-client time), which is what actually determines how
     much lead time is needed before the scheduled synchronized start."""
     with makeConnection(ip, user=user, keepalive=keepalive) as conn:
+        conn.put(f"../scripts/_common.sh")
         if WORKLOAD_TYPE == "INSERT":
             conn.put(f"../scripts/insertBench.sh")
             conn.run(f"bash insertBench.sh {EXPERIMENT_TYPE} {idx} {serverNode} {serverPort} {dbName.upper()} {threadsPerMachine} {nIter} {batchIter} {epochTime}")
@@ -278,6 +279,7 @@ def runWorkload(EXPERIMENT_TYPE, targetClients, serverNode, serverPort, dbName, 
 
         # Start server
         if dbName not in ["CSV", "Parquet"]:
+            serverGroup.put(f"../scripts/_common.sh")
             serverGroup.put(f"../scripts/{dbName}/run{dbName}Server.sh")
         else:
             if "NFS" in dataFile:
