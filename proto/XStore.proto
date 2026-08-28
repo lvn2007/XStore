@@ -34,6 +34,15 @@ enum TimeUnit {
   DAY = 6;
 }
 
+// Durability mode for a single write. Zero-value (SYNC_PER_COMMIT) is the
+// safe default: a client that omits this field never silently downgrades to
+// weaker durability. See docs/TODO.md Gap 1 for the full design rationale.
+enum WalDurabilityMode {
+  SYNC_PER_COMMIT = 0;
+  GROUP_COMMIT    = 1;
+  ASYNC_ONLY      = 2;
+}
+
 message ConfigStruct {
   string dbName = 1;
   TimeUnit timeResolution = 2;
@@ -100,6 +109,7 @@ message UnaryInsert_REQ {
   uint64 timestamp = 2;
   RowData data = 3;
   string dbName = 4;
+  WalDurabilityMode durabilityMode = 5;
 }
 
 // --- UNARY QUERY
