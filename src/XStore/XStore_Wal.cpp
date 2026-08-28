@@ -91,7 +91,11 @@ bool ParseWalRecord(const char *data, size_t len, size_t &consumed, XStore::WalR
     if (len < 8) return false;
     uint32_t record_len;
     std::memcpy(&record_len, data, 4);
-    if (len < 4u + record_len || record_len < 4u + 2 + 2 + 4 + 4) return false;
+    // record_len is widened to size_t before the addition -- adding as
+    // 4u + record_len (both 32-bit) can wrap around for a corrupt/torn
+    // record_len near UINT32_MAX, defeating this bounds check and letting
+    // a huge out-of-bounds Crc32 read through below.
+    if (len < static_cast<size_t>(record_len) + 4 || record_len < 4u + 2 + 2 + 4 + 4) return false;
 
     uint32_t stored_crc;
     std::memcpy(&stored_crc, data + 4, 4);
@@ -137,10 +141,12 @@ bool ParseWalRecord(const char *data, size_t len, size_t &consumed, XStore::WalR
 // data_store_dirs -- true in tests (each constructing XStore against its
 // own scratch directory) even though production only ever has one
 // data_store_dir per process.
+// Pure path computation only -- no filesystem syscalls. The caller
+// creates the containing directory only on the fd-cache-miss path (right
+// before open()), not once per record in the batch.
 std::string WalFilePathFor(const std::string &db_base_path, size_t shard_idx) {
     std::filesystem::path data_store_dir = std::filesystem::path(db_base_path).parent_path();
     std::filesystem::path wal_dir = data_store_dir / XStoreTunables::WAL_DIR_NAME;
-    std::filesystem::create_directories(wal_dir);
     return (wal_dir / ("shard_" + std::to_string(shard_idx) + ".wal")).string();
 }
 
@@ -165,8 +171,15 @@ void XStore::ApplyWalRecord(const WalRecord &record_to_apply) {
         int fd = *fd_handle;
 
         unsigned long long offset = (row.epoch_time - curr_ts.first_epoch) * record_to_apply.row_length;
-        FileRangeLockGuard guard(target_file, offset, record_to_apply.row_length, FileRangeLock::LockType::WRITE);
-        pwrite(fd, row.row_bytes.data(), record_to_apply.row_length, static_cast<off_t>(offset));
+        ssize_t written;
+        {
+            FileRangeLockGuard guard(target_file, offset, record_to_apply.row_length, FileRangeLock::LockType::WRITE);
+            written = pwrite(fd, row.row_bytes.data(), record_to_apply.row_length, static_cast<off_t>(offset));
+        }
+        if (written != static_cast<ssize_t>(record_to_apply.row_length)) {
+            spdlog::error("[WAL APPLY] [DB: {}] - Short/failed write to {}.XSTORE", record_to_apply.db_name, curr_ts.year);
+            continue;
+        }
     }
 }
 
@@ -200,8 +213,11 @@ void XStore::WalWriterLoop(size_t shard_idx) {
     WalShard &shard = wal_shards[shard_idx];
     std::vector<WalRecord> batch(XStoreTunables::WAL_BATCH_MAX_RECORDS);
     // Thread-local to this one writer thread -- no lock needed, only this
-    // thread ever touches it.
+    // thread ever touches it. Declared once outside the loop and reused
+    // (via .clear() each iteration) rather than re-declared per batch, to
+    // avoid a fresh heap allocation on the writer's per-batch hot path.
     std::unordered_map<std::string, int> wal_fds;
+    std::unordered_map<std::string, std::string> bytes_by_file;
 
     while (!shard.stop_flag.load(std::memory_order_relaxed)) {
         size_t count = shard.queue.wait_dequeue_bulk_timed(
@@ -212,7 +228,7 @@ void XStore::WalWriterLoop(size_t shard_idx) {
         // Group this batch by target WAL file -- always exactly one group
         // in production (one data_store_dir per process); only tests
         // running multiple data_store_dirs in one binary ever see more.
-        std::unordered_map<std::string, std::string> bytes_by_file;
+        bytes_by_file.clear();
         for (size_t i = 0; i < count; ++i) {
             bytes_by_file[WalFilePathFor(batch[i].db_base_path, shard_idx)] += SerializeWalRecord(batch[i]);
         }
@@ -225,6 +241,10 @@ void XStore::WalWriterLoop(size_t shard_idx) {
             auto it = wal_fds.find(wal_path);
             int fd;
             if (it == wal_fds.end()) {
+                // Only pay for create_directories() the first time this
+                // path is actually opened, not once per record in the
+                // batch -- the directory only needs to exist once.
+                std::filesystem::create_directories(std::filesystem::path(wal_path).parent_path());
                 fd = open(wal_path.c_str(), O_WRONLY | O_CREAT, 0644);
                 if (fd < 0) {
                     spdlog::error("[WAL] - Unable to open {}", wal_path);
