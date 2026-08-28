@@ -79,6 +79,7 @@ add_executable(XStore src/main.cpp
         include/XStore/XStore_Internal.h src/XStore/XStore_Internal.cpp
         src/XStore/XStore_Management.cpp
         src/XStore/XStore_IO.cpp
+        src/XStore/XStore_Wal.cpp
         src/XStore/XStore_UnaryOps.cpp
         src/XStore/XStore_BatchOps.cpp
         src/XStore/XStore_RangeOps.cpp
