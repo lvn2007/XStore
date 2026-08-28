@@ -18,6 +18,7 @@
 #include <vector>
 #include "XStore.pb.h"
 #include "include/DataStructs/ValueStruct.h"
+#include "include/XStore/XStore_Tunables.h"
 
 // Length of msg header
 #define TRACE_LEN 8
@@ -53,7 +54,7 @@ class XStore {
             std::unordered_map<std::string, XStore_Proto::ConfigStruct> map;
             std::shared_mutex mutex;
         };
-        static constexpr size_t CFG_SHARD_COUNT = 16;
+        static constexpr size_t CFG_SHARD_COUNT = XStoreTunables::CFG_SHARD_COUNT;
         static std::array<CfgShard, CFG_SHARD_COUNT> cfg_shards;
 
         // Shared cache of PROT_WRITE mmap regions for .XSTORE data files, keyed
@@ -100,9 +101,9 @@ class XStore {
         // entry: eviction/erase here only drops the CACHE's reference, and
         // the custom deleter's munmap() doesn't actually run until the last
         // holder -- cache or in-flight caller -- releases theirs.
-        static constexpr size_t MMAP_SHARD_COUNT = 128;
-        static constexpr size_t MMAP_CACHE_CAP = 512;
-        static constexpr size_t MMAP_SHARD_CAP = MMAP_CACHE_CAP / MMAP_SHARD_COUNT;
+        static constexpr size_t MMAP_SHARD_COUNT = XStoreTunables::MMAP_SHARD_COUNT;
+        static constexpr size_t MMAP_CACHE_CAP = XStoreTunables::MMAP_CACHE_CAP;
+        static constexpr size_t MMAP_SHARD_CAP = XStoreTunables::MMAP_SHARD_CAP;
 
         struct MappedFile { void *base; size_t len; };
         struct MmapShard {
@@ -156,9 +157,9 @@ class XStore {
         // racing pwrite/pread ran) a silent write into the wrong file. The
         // cache's original 8-total size made this easy to hit once more than
         // a handful of year files were concurrently hot.
-        static constexpr size_t FD_SHARD_COUNT = 16;
-        static constexpr size_t FD_CACHE_CAP = 64;
-        static constexpr size_t FD_SHARD_CAP = FD_CACHE_CAP / FD_SHARD_COUNT;
+        static constexpr size_t FD_SHARD_COUNT = XStoreTunables::FD_SHARD_COUNT;
+        static constexpr size_t FD_CACHE_CAP = XStoreTunables::FD_CACHE_CAP;
+        static constexpr size_t FD_SHARD_CAP = XStoreTunables::FD_SHARD_CAP;
 
         struct FdShard {
             struct Entry { std::string key; std::shared_ptr<int> value; };
