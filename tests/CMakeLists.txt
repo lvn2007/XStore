@@ -120,3 +120,104 @@ if(TARGET absl::log_internal_check_op)
 endif()
 
 gtest_discover_tests(xstore_perf_tests)
+
+# tests/local_bench: opt-in, single-machine benchmark harness (pure Python
+# driver around the real XStore server + XBench's benchmarkClient -- see
+# tests/local_bench/README.md). Same "not part of the default build" stance
+# as xstore_perf_tests above, one level further: these are plain custom
+# targets, never added to ALL, so `cmake --build .` / `make -j` alone never
+# touches them -- only `cmake --build . --target bench_local` (etc.) does.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_FOUND)
+    set(XSTORE_LOCAL_BENCH_DIR ${CMAKE_SOURCE_DIR}/tests/local_bench)
+
+    set(XSTORE_LOCAL_BENCH_CLIENT_BIN "/home/ubuntu/XBench/build/benchmarkClient" CACHE FILEPATH
+        "Path to XBench's benchmarkClient binary, used by bench_local_run/bench_local_seed")
+    set(XSTORE_LOCAL_BENCH_TAG "default" CACHE STRING
+        "Label for this bench_local_run invocation (e.g. 'baseline', 'my-change') -- rerun with a different value and bench_local_summarize compares tags")
+    # Empty = let the Python scripts derive a sane default from this
+    # machine's core count (see bench_common.DEFAULT_TIERS / seed_fixture's
+    # --pool-size default) -- benchmarkClient itself refuses -t above its own
+    # hardware_concurrency(), so there's no point requesting more.
+    set(XSTORE_LOCAL_BENCH_TIERS "" CACHE STRING "Comma list of client tiers to benchmark (empty = auto, e.g. 1,8,16 on a 16-core box)")
+    set(XSTORE_LOCAL_BENCH_WORKLOADS "" CACHE STRING "Comma list of workload names, or 'all' for all 12 (empty = auto, the script's own default: 4 INSERT + 4 QUERY + AGG_MIN)")
+    set(XSTORE_LOCAL_BENCH_POOL_SIZE "" CACHE STRING "Max client tier bench_local_seed prepares a QUERY/AGG fixture for (empty = auto, this machine's core count)")
+
+    set(_local_bench_tiers_arg "")
+    if(XSTORE_LOCAL_BENCH_TIERS)
+        set(_local_bench_tiers_arg --tiers ${XSTORE_LOCAL_BENCH_TIERS})
+    endif()
+    set(_local_bench_workloads_arg "")
+    if(XSTORE_LOCAL_BENCH_WORKLOADS)
+        set(_local_bench_workloads_arg --workloads ${XSTORE_LOCAL_BENCH_WORKLOADS})
+    endif()
+    set(_local_bench_pool_size_arg "")
+    if(XSTORE_LOCAL_BENCH_POOL_SIZE)
+        set(_local_bench_pool_size_arg --pool-size ${XSTORE_LOCAL_BENCH_POOL_SIZE})
+    endif()
+
+    # Standalone pre-warm target: run_local_bench.py/bench_local already seed
+    # the fixture themselves on demand (see run_local_bench.py's docstring),
+    # so this is only useful if you want to pay that one-time cost ahead of
+    # time, e.g. before looping many tagged runs back to back.
+    # USES_TERMINAL (CMake >=3.2): routes the job through the build tool's
+    # console pool instead of the normal buffer-until-the-job-finishes-then-
+    # dump-it-all-at-once behavior Ninja otherwise applies to every custom
+    # command -- without it, run_local_bench.py's tqdm progress bar (and any
+    # other live output) never appears until the whole target is done, and
+    # only then as a garbled one-shot dump of \r-updates. Also serializes
+    # these targets against any other console-pool job, which is fine, they
+    # were never meant to run in parallel with anything else anyway.
+    add_custom_target(bench_local_seed
+        COMMAND ${Python3_EXECUTABLE} seed_fixture.py --start-server
+                --server-build-dir ${CMAKE_BINARY_DIR}
+                ${_local_bench_pool_size_arg}
+        WORKING_DIRECTORY ${XSTORE_LOCAL_BENCH_DIR}
+        COMMENT "[local_bench] pre-warming QUERY/AGG fixture (optional -- bench_local seeds itself on demand too)"
+        USES_TERMINAL
+        VERBATIM
+    )
+    add_dependencies(bench_local_seed XStore)
+
+    add_custom_target(bench_local_run
+        COMMAND ${Python3_EXECUTABLE} run_local_bench.py
+                --tag ${XSTORE_LOCAL_BENCH_TAG}
+                --server-build-dir ${CMAKE_BINARY_DIR}
+                --client-bin ${XSTORE_LOCAL_BENCH_CLIENT_BIN}
+                ${_local_bench_tiers_arg}
+                ${_local_bench_workloads_arg}
+        WORKING_DIRECTORY ${XSTORE_LOCAL_BENCH_DIR}
+        COMMENT "[local_bench] running benchmark harness (tag=${XSTORE_LOCAL_BENCH_TAG})"
+        USES_TERMINAL
+        VERBATIM
+    )
+    add_dependencies(bench_local_run XStore)
+
+    add_custom_target(bench_local_summarize
+        COMMAND ${Python3_EXECUTABLE} summarize_local_bench.py --tags ${XSTORE_LOCAL_BENCH_TAG}
+        WORKING_DIRECTORY ${XSTORE_LOCAL_BENCH_DIR}
+        COMMENT "[local_bench] summarizing results (tag=${XSTORE_LOCAL_BENCH_TAG})"
+        USES_TERMINAL
+        VERBATIM
+    )
+
+    # Convenience target: seed (if needed) + run + summarize in one command.
+    # Multiple COMMAND entries on one custom target execute in the listed
+    # order, so this is guaranteed to summarize only after the run finishes.
+    add_custom_target(bench_local
+        COMMAND ${Python3_EXECUTABLE} run_local_bench.py
+                --tag ${XSTORE_LOCAL_BENCH_TAG}
+                --server-build-dir ${CMAKE_BINARY_DIR}
+                --client-bin ${XSTORE_LOCAL_BENCH_CLIENT_BIN}
+                ${_local_bench_tiers_arg}
+                ${_local_bench_workloads_arg}
+        COMMAND ${Python3_EXECUTABLE} summarize_local_bench.py --tags ${XSTORE_LOCAL_BENCH_TAG}
+        WORKING_DIRECTORY ${XSTORE_LOCAL_BENCH_DIR}
+        COMMENT "[local_bench] running + summarizing (tag=${XSTORE_LOCAL_BENCH_TAG})"
+        USES_TERMINAL
+        VERBATIM
+    )
+    add_dependencies(bench_local XStore)
+else()
+    message(STATUS "Python3 interpreter not found -- skipping tests/local_bench targets (bench_local, bench_local_seed, bench_local_run, bench_local_summarize)")
+endif()

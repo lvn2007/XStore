@@ -19,8 +19,9 @@ class SysInfo:
 
 
 class XStoreClient:
-    def __init__(self, SERVER_ADDR, SERVER_PORT):
-        print(f'Connecting to tcp://{SERVER_ADDR}:{SERVER_PORT}')
+    def __init__(self, SERVER_ADDR, SERVER_PORT, verbose=False):
+        if verbose:
+            print(f'Connecting to tcp://{SERVER_ADDR}:{SERVER_PORT}')
         self.zmqContext = zmq.Context()
         self.socket = self.zmqContext.socket(zmq.REQ)
         self.socket.connect(f'tcp://{SERVER_ADDR}:{SERVER_PORT}')

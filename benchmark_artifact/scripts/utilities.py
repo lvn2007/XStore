@@ -175,19 +175,36 @@ def _fetchServerSysStats(serverHost, basePath, user, keepalive, tag, printLock):
         print(f"{tag} [Server] - Downloaded {len(txtFiles)} system stats files")
 
 
-def fetchResults(basePath, fileExt, selectedClients, serverGroup, user, fetchSysStats=True,
-                  maxAttempts=12, retryDelay=5, keepalive=DEFAULT_KEEPALIVE_SEC, label=""):
+def _fetchServerLog(serverHost, serverWorkingDir, basePath, user, keepalive, tag, printLock):
+    # Saved under Node-0/ alongside the sysstats, matching the original sequential
+    # behavior. server.log is truncated (not appended) by Logger on every server
+    # start (see include/Logger/Logger.h), so it only ever holds this run's log.
+    currPath = f"{basePath}Node-0/"
+    os.makedirs(currPath, exist_ok=True)
+    remotePath = f"{serverWorkingDir}/XStore_Server/build/logs/server.log"
+    with makeConnection(serverHost, user=user, keepalive=keepalive) as sconn:
+        sconn.get(remotePath, local=f"{currPath}server.log")
+    with printLock:
+        print(f"{tag} [Server] - Downloaded server.log")
+
+
+def fetchResults(basePath, fileExt, selectedClients, serverGroup, user, serverWorkingDir=None, fetchSysStats=True,
+                  fetchServerLog=True, maxAttempts=12, retryDelay=5, keepalive=DEFAULT_KEEPALIVE_SEC, label=""):
     """Download each client's result files (fileExt) plus one copy of the server's
-    sysstat .txt files (saved under Node-0), concurrently -- each client writes to
-    its own Node-{idx}/ directory, so there's no shared state to race on. Bounded
-    retries instead of `while True` so a real failure (bad path, dead connection)
-    surfaces as an error instead of spinning forever."""
+    sysstat .txt files and server.log (saved under Node-0), concurrently -- each
+    client writes to its own Node-{idx}/ directory, so there's no shared state to
+    race on. fetchServerLog requires serverWorkingDir (the same path passed to
+    run{dbName}Server.sh) to locate XStore_Server/build/logs/server.log; it's
+    silently skipped when serverWorkingDir isn't given (e.g. non-XStore DBs).
+    Bounded retries instead of `while True` so a real failure (bad path, dead
+    connection) surfaces as an error instead of spinning forever."""
     tag = f"[Benchmark: {label}] [Fetch Results]" if label else "[Fetch Results]"
     printLock = threading.Lock()  # serializes only the print() calls, not the transfers
+    fetchServerLog = fetchServerLog and serverWorkingDir is not None
     lastErr = None
     for attempt in range(1, maxAttempts + 1):
         try:
-            maxWorkers = len(selectedClients) + (1 if fetchSysStats else 0)
+            maxWorkers = len(selectedClients) + (1 if fetchSysStats else 0) + (1 if fetchServerLog else 0)
             with ThreadPoolExecutor(max_workers=maxWorkers) as executor:
                 futures = [
                     executor.submit(_fetchClientResults, idx, ip, basePath, fileExt, user, keepalive, tag, printLock)
@@ -196,6 +213,9 @@ def fetchResults(basePath, fileExt, selectedClients, serverGroup, user, fetchSys
                 if fetchSysStats:
                     futures.append(executor.submit(_fetchServerSysStats, serverGroup[0].host, basePath, user,
                                                     keepalive, tag, printLock))
+                if fetchServerLog:
+                    futures.append(executor.submit(_fetchServerLog, serverGroup[0].host, serverWorkingDir, basePath,
+                                                    user, keepalive, tag, printLock))
                 for f in futures:
                     f.result()
             return
@@ -355,6 +375,7 @@ def runWorkload(EXPERIMENT_TYPE, targetClients, serverNode, serverPort, dbName, 
             basePath = f"{dbName.upper()}_{WORKLOAD_TYPE}/Client-{totalClients}/"
             fileExt = "txt"
         fetchResults(basePath, fileExt, selectedClients, serverGroup, user,
+                     serverWorkingDir=serverWorkingDir if dbName == "XStore" else None,
                      fetchSysStats=(WORKLOAD_TYPE != "BACKTEST"), keepalive=keepalive, label=totalClients)
 
 
