@@ -1,4 +1,4 @@
-import time, os, itertools, math, threading
+import time, os, itertools, math, threading, logging
 from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 import matplotlib as mpl
@@ -6,6 +6,19 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
 from fabric import Connection
+from paramiko.ssh_exception import SSHException
+
+# Paramiko's Transport is itself a background thread; when the SSH banner
+# read fails inside it (see _KeepAliveConnection.open()'s retry below), that
+# thread logs the exception itself via self._log(ERROR, ...) on the
+# "paramiko" logger BEFORE control ever returns to our except block --
+# Jupyter's root handler then prints it as cell output, indistinguishable
+# from a real failure even though open() goes on to retry and succeed. Our
+# own code already surfaces genuine unrecoverable failures (raised
+# exceptions, fetchResults' own retry-attempt prints), so silence
+# paramiko's internal channel rather than leave every transient, already-
+# handled reset looking like a fatal error in the notebook output.
+logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 
 marker = itertools.cycle((">", "o", "s", "^", "v", "p", "P", "d", "*"))
 
@@ -29,6 +42,20 @@ DEFAULT_RESTORE_TIMEOUT_SEC = 3600
 MAX_CONCURRENT_SSH_OPENS = 6
 _openSemaphore = threading.Semaphore(MAX_CONCURRENT_SSH_OPENS)
 
+# The semaphore above only lowers OUR contribution to the gateway's
+# concurrent-handshake count -- it can't control unrelated traffic from
+# other users on the same shared login node, so a reset during the banner
+# read can still happen occasionally even at low concurrency. Confirmed
+# live: with the semaphore in place, a reset still killed a multi-hour
+# workload cell outright at Benchmark 32 -- not in fetchResults (which
+# already retries 12x) but in _dispatchWorkloadToClient's unguarded
+# ThreadPoolExecutor, which had no retry at all. Retrying here instead of
+# only in fetchResults covers every call site uniformly (dispatch, fetch,
+# pollTmuxUntilDone's waitConns, waitForSSH) since they all funnel through
+# this one open().
+MAX_OPEN_RETRIES = 5
+OPEN_RETRY_DELAY_SEC = 2
+
 
 class _KeepAliveConnection(Connection):
     """Connection subclass that re-applies SSH keepalive on every open() -- including
@@ -46,9 +73,18 @@ class _KeepAliveConnection(Connection):
         object.__setattr__(self, "_keepalive_sec", keepalive)
 
     def open(self):
-        with _openSemaphore:
-            super().open()
-        self.transport.set_keepalive(self._keepalive_sec)
+        lastErr = None
+        for attempt in range(1, MAX_OPEN_RETRIES + 1):
+            try:
+                with _openSemaphore:
+                    super().open()
+                self.transport.set_keepalive(self._keepalive_sec)
+                return
+            except (SSHException, EOFError, ConnectionResetError) as e:
+                lastErr = e
+                if attempt < MAX_OPEN_RETRIES:
+                    time.sleep(OPEN_RETRY_DELAY_SEC)
+        raise lastErr
 
 
 def makeConnection(host, user="cc", keepalive=DEFAULT_KEEPALIVE_SEC, connect_timeout=30):
