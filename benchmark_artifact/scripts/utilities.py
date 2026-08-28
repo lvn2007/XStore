@@ -12,6 +12,23 @@ marker = itertools.cycle((">", "o", "s", "^", "v", "p", "P", "d", "*"))
 DEFAULT_KEEPALIVE_SEC = 30
 DEFAULT_RESTORE_TIMEOUT_SEC = 3600
 
+# server_ips/client_ips (64.131.114.*) all route through a single ProxyJump
+# gateway (see ~/.ssh/config: "Host 64.131.114.* / ProxyJump mysticLogin").
+# Every new SSH handshake -- explicit makeConnection() or Fabric's lazy
+# reopen after a .close() -- is therefore a fresh unauthenticated session on
+# that ONE gateway's sshd, which defaults to MaxStartups 10:30:100: at 10
+# concurrent in-flight handshakes it starts randomly resetting the banner
+# read. fetchResults()/dispatch open one fresh connection per selected
+# client (+2 for server sysstats/log), so this is hit deterministically once
+# targetClients reaches 8 (10 concurrent opens) and gets worse at 16/32/64.
+# Confirmed live: "Error reading SSH protocol banner[Errno 104] Connection
+# reset by peer" at Benchmark 8's Fetch Results. Throttling opens here (the
+# one choke point both explicit makeConnection() and lazy reopen share)
+# keeps concurrent in-flight handshakes on the gateway safely under 10 no
+# matter how many total connections a call site needs.
+MAX_CONCURRENT_SSH_OPENS = 6
+_openSemaphore = threading.Semaphore(MAX_CONCURRENT_SSH_OPENS)
+
 
 class _KeepAliveConnection(Connection):
     """Connection subclass that re-applies SSH keepalive on every open() -- including
@@ -29,7 +46,8 @@ class _KeepAliveConnection(Connection):
         object.__setattr__(self, "_keepalive_sec", keepalive)
 
     def open(self):
-        super().open()
+        with _openSemaphore:
+            super().open()
         self.transport.set_keepalive(self._keepalive_sec)
 
 
