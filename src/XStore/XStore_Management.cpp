@@ -107,7 +107,7 @@ const std::string& XStore::CachedDbBasePath(const std::string &db_name) const {
     return dir_map.emplace(db_name, DbBasePath(db_name)).first->second;
 }
 
-const std::string& XStore::CachedYearFilePath(const std::string &db_base_path, unsigned short year) const {
+const std::string& XStore::CachedYearFilePath(const std::string &db_base_path, unsigned short year) {
     thread_local std::unordered_map<std::string, std::unordered_map<unsigned short, std::string>> tls_year_paths;
     std::unordered_map<unsigned short, std::string> &year_map = tls_year_paths[db_base_path];
     auto it = year_map.find(year);

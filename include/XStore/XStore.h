@@ -16,6 +16,10 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+#include <atomic>
+#include <future>
+#include <thread>
+#include <blockingconcurrentqueue.h>
 #include "XStore.pb.h"
 #include "include/DataStructs/ValueStruct.h"
 #include "include/XStore/XStore_Tunables.h"
@@ -168,6 +172,51 @@ class XStore {
             std::mutex mutex;
         };
         static std::array<FdShard, FD_SHARD_COUNT> fd_shards;
+
+        // ---- Write-Ahead Log --------------------------------------------
+        // One append-only WAL file per shard (hash(dbBasePath) %
+        // WAL_SHARD_COUNT), each drained by its own dedicated, process-
+        // lifetime writer thread. UnaryInsert enqueues here instead of
+        // writing the data file directly -- see src/XStore/XStore_Wal.cpp
+        // for the durability/group-commit mechanics.
+        //
+        // A WalRecord represents one WRITE REQUEST, not one row: UnaryInsert
+        // builds a 1-row WalRecord; a future BatchInsert/RangeInsert wiring
+        // (deferred -- see the plan's "Out of Scope" section, revisit after
+        // UnaryInsert's own perf test) would build an N-row WalRecord the
+        // same way, reusing this exact type and EnqueueWalRecord/
+        // ApplyWalRecord rather than needing a parallel WAL path. Durability
+        // is per-REQUEST: one completion future covers every row in the
+        // record, so a batch's caller waits once for the whole batch, not
+        // once per row.
+        struct WalRow {
+            unsigned long long epoch_time = 0;
+            std::string row_bytes;   // already-serialized, zero-padded, exactly row_length bytes
+        };
+
+        struct WalRecord {
+            std::string db_name;               // already upper-cased
+            std::string db_base_path;          // full path -- locates this DB's WAL subdir and, at apply time, its .XSTORE file
+            XStore_Proto::TimeUnit time_resolution = XStore_Proto::SECOND;
+            unsigned short row_length = 0;
+            std::vector<WalRow> rows;          // 1 entry for UnaryInsert; N for a future Batch/Range request
+            XStore_Proto::WalDurabilityMode durability_mode = XStore_Proto::SYNC_PER_COMMIT;
+            // One per REQUEST, not per row -- null for ASYNC_ONLY (nobody
+            // waits). Set once every row in this record has been fsync'd
+            // and applied, regardless of row count. A per-record promise
+            // (not a shared batch counter) sidesteps any question of
+            // cross-producer enqueue ordering: each caller only ever waits
+            // on its own record's flag.
+            std::shared_ptr<std::promise<void>> completion;
+        };
+
+        struct WalShard {
+            moodycamel::BlockingConcurrentQueue<WalRecord> queue;
+            std::thread writer_thread;
+            std::atomic<bool> stop_flag{false};
+        };
+        static std::array<WalShard, XStoreTunables::WAL_SHARD_COUNT> wal_shards;
+
         std::string permitted_time_resolution[3] = {"SECOND", "MILLISECOND", "MICROSECOND"};
 
         int db_count = 0;
@@ -315,7 +364,7 @@ class XStore {
         // callers that only know dbBasePath (e.g. WalkYearSpan, shared by
         // all four aggregates) don't need to separately thread dbName
         // through just for this.
-        const std::string& CachedYearFilePath(const std::string &db_base_path, unsigned short year) const;
+        static const std::string& CachedYearFilePath(const std::string &db_base_path, unsigned short year);
 
         // Base directory for dbName's data/config files under data_store_dir,
         // e.g. "<data_store_dir>/<dbName>" -- no trailing '/' (see convention
@@ -354,12 +403,55 @@ class XStore {
         // (RemoveDB), since a single RemoveDB can span many cached year files.
         void EraseMappedFilesUnderPrefix(const std::string &db_dir_prefix);
 
+        // Starts every shard's dedicated writer thread. Called exactly once
+        // per process via a std::call_once in XStore::XStore() -- static
+        // because wal_shards is process-wide static state, not tied to any
+        // one XStore instance's lifetime (instances are constructed one per
+        // worker thread; the WAL writer pool must outlive all of them).
+        static void StartWalWriters();
+
+        // Hashes recordToEnqueue.db_base_path to a shard, pushes it onto
+        // that shard's queue, and -- unless durability_mode is ASYNC_ONLY --
+        // blocks until that shard's writer thread has fsync'd and applied
+        // it. Returns false only if the underlying queue push itself fails
+        // (allocation failure, extremely rare).
+        static bool EnqueueWalRecord(WalRecord record);
+
+        // Writes every row in recordToApply.rows to its actual .XSTORE data
+        // file, at the offset each row's epoch_time (combined with
+        // recordToApply's time_resolution/row_length) computes to -- the
+        // same logic UnaryInsert used to run inline, now shared between the
+        // writer thread's normal path and ReplayWal's crash-recovery path
+        // (both call this with a fully self-contained WalRecord, no cfg
+        // lookup needed). One row at a time for v1 -- coalescing same-year
+        // rows into fewer pwrites, the way WriteRowGroupToFile already does
+        // for Batch/Range's direct-write path (XStore_Internal.h), is a
+        // natural follow-up once a real multi-row caller exists to
+        // benchmark against; premature before then.
+        static void ApplyWalRecord(const WalRecord &record_to_apply);
+
+        // Body of one shard's dedicated writer thread: waits (bounded by
+        // WAL_GROUP_COMMIT_WINDOW_US) for records to batch, fsyncs the
+        // batch to WAL, applies every record, truncates the WAL file back
+        // to empty (checkpoint), then releases every synchronous caller's
+        // completion future.
+        static void WalWriterLoop(size_t shard_idx);
+
+        // Called once from InitDB, before the server starts taking traffic:
+        // replays any non-empty shard WAL file left over from an unclean
+        // shutdown, then truncates it. Idempotent by construction (XStore's
+        // direct-offset addressing means re-applying an already-applied
+        // record is a harmless overwrite of identical bytes) so this never
+        // needs to track which records were already durable in the data
+        // file before the crash.
+        void ReplayWal();
+
         // Fetch targetFile's cached fd, creating (and ftruncate'ing to
         // totalRows*rowLength if new) the file on first use. Returns -1 on
         // open/ftruncate failure. Callers must keep the returned shared_ptr
         // alive for as long as they use the fd (see FdShard above) -- that's
         // what defers the eventual close() past a concurrent eviction.
-        std::shared_ptr<int> GetOrOpenFile(const std::string &target_file, size_t row_length, unsigned long long total_rows);
+        static std::shared_ptr<int> GetOrOpenFile(const std::string &target_file, size_t row_length, unsigned long long total_rows);
 
         // Peek-only: true if targetFile already has a cached fd (no open,
         // no creation). A cache hit here is proof the file exists -- only
