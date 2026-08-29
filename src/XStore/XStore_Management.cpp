@@ -361,6 +361,13 @@ void XStore::InitDB() {
         // carries a trailing '/' or not.
         std::string curr_db_name = p.path().filename().string();
 
+        // WAL/ lives as a sibling of the per-DB directories directly under
+        // data_store_dir (see WalFilePathFor) -- it holds shard_<N>.wal
+        // files, not a DB, so it must never be treated as one here.
+        if (curr_db_name == XStoreTunables::WAL_DIR_NAME) {
+            continue;
+        }
+
         // Open & Read cfgStruct of all DB currently exists
         std::string cfg_file_path = JoinPath(p.path().string(), curr_db_name + ".CFG");
 

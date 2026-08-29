@@ -6,6 +6,7 @@
 # xstore_network_tests below via the real wire protocol.
 add_executable(xstore_tests
         integration/XStoreTest.cpp
+        integration/XStoreWalTest.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Internal.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Management.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_IO.cpp
