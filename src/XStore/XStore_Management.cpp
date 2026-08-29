@@ -362,7 +362,7 @@ void XStore::InitDB() {
         std::string curr_db_name = p.path().filename().string();
 
         // WAL/ lives as a sibling of the per-DB directories directly under
-        // data_store_dir (see WalFilePathFor) -- it holds shard_<N>.wal
+        // data_store_dir (see WalFilePathFor) -- it holds shard_<N>.WAL
         // files, not a DB, so it must never be treated as one here.
         if (curr_db_name == XStoreTunables::WAL_DIR_NAME) {
             continue;
@@ -460,7 +460,7 @@ void XStore::ReplayWal() {
     }
 
     for (size_t shard_idx = 0; shard_idx < XStoreTunables::WAL_SHARD_COUNT; ++shard_idx) {
-        std::filesystem::path wal_path = wal_dir / ("shard_" + std::to_string(shard_idx) + ".wal");
+        std::filesystem::path wal_path = wal_dir / ("shard_" + std::to_string(shard_idx) + ".WAL");
         if (!std::filesystem::exists(wal_path) || std::filesystem::file_size(wal_path) == 0) {
             continue;
         }

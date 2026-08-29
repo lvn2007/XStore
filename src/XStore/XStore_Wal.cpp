@@ -134,7 +134,7 @@ bool ParseWalRecord(const char *data, size_t len, size_t &consumed, XStore::WalR
     return true;
 }
 
-// Returns "<data_store_dir>/WAL/shard_<shardIdx>.wal" for the
+// Returns "<data_store_dir>/WAL/shard_<shardIdx>.WAL" for the
 // data_store_dir that owns dbBasePath (dbBasePath's parent directory).
 // Derived per-record, not fixed at thread-start, so one shard's writer
 // thread can safely multiplex records from multiple distinct
@@ -147,7 +147,7 @@ bool ParseWalRecord(const char *data, size_t len, size_t &consumed, XStore::WalR
 std::string WalFilePathFor(const std::string &db_base_path, size_t shard_idx) {
     std::filesystem::path data_store_dir = std::filesystem::path(db_base_path).parent_path();
     std::filesystem::path wal_dir = data_store_dir / XStoreTunables::WAL_DIR_NAME;
-    return (wal_dir / ("shard_" + std::to_string(shard_idx) + ".wal")).string();
+    return (wal_dir / ("shard_" + std::to_string(shard_idx) + ".WAL")).string();
 }
 
 } // namespace

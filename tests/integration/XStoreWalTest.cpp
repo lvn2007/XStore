@@ -103,7 +103,7 @@ TEST_F(XStoreWalTest, ReplayRecoversUnappliedRecord) {
     size_t shard_idx = std::hash<std::string>{}(db_base_path.string()) % XStoreTunables::WAL_SHARD_COUNT;
     std::filesystem::path wal_dir = scratch->test_root / "DataStore" / "WAL";
     std::filesystem::create_directories(wal_dir);
-    std::filesystem::path wal_file = wal_dir / ("shard_" + std::to_string(shard_idx) + ".wal");
+    std::filesystem::path wal_file = wal_dir / ("shard_" + std::to_string(shard_idx) + ".WAL");
 
     XStore_Proto::RowData row = MakeRow(99.25);
     std::string row_bytes(64, '\0');
