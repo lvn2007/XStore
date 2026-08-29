@@ -10,7 +10,8 @@
 #include <vector>
 
 // UNARY INSERT
-void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::RowData &data, std::string_view db_name_view, XStore_Proto::UnaryInsert_REP *return_data) {
+void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::RowData &data, std::string_view db_name_view,
+                          XStore_Proto::UnaryInsert_REP *return_data, XStore_Proto::WalDurabilityMode durability_mode) {
     // Ensure dbName string is all capitalized
     const std::string &db_name = UpperCaseInto(db_name_view);
 
@@ -29,38 +30,9 @@ void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::R
         return;
     }
 
-    // Time structure contains all components per UNIXTIME:
-    //  Year, month, day, hour, minute, sec, ...
-    TimeStruct curr_ts(unix_time, cfg_struct.timeresolution());
-
-    // Cached fd for this (dbName, year) file -- created and ftruncate'd to
-    // the full year's row count once; every subsequent UnaryInsert to the
-    // same file reuses it (see GetOrOpenFile). Writes go through pwrite()
-    // rather than a PROT_WRITE mmap: a pwrite() into a still-sparse region
-    // is a buffered write that defers real block allocation to async
-    // writeback, same cost whether the target offset is sequential or
-    // random. An mmap write-fault into an untouched page can't defer that
-    // -- it has to synchronously allocate the block before the fault
-    // returns -- which made random-offset inserts far more expensive than
-    // sequential ones.
-    const std::string &target_file = CachedYearFilePath(db_base_path_str, curr_ts.year);
-    // Held for the rest of this function's scope (through the pwrite()
-    // below) so a concurrent eviction on another thread can't close this
-    // fd out from under us -- see FdShard's comment in XStore.h.
-    std::shared_ptr<int> fd_handle = GetOrOpenFile(target_file, cfg_struct.rowlength(), curr_ts.last_epoch - curr_ts.first_epoch);
-    if (!fd_handle) {
-        std::string err_msg = fmt::format("[UNARY INSERT] [DB: {}] - Unable to open {}.XSTORE", db_name, curr_ts.year);
-        SetTaggedStatus(return_data->mutable_insertstatus(), "[ERROR] ", err_msg);
-        spdlog::error(err_msg);
-        return;
-    }
-    int fd = *fd_handle;
-
     // A row that doesn't fit in the configured slot would otherwise silently
     // truncate (SerializeToArray's return value was previously unchecked),
     // corrupting whatever follows it in the file. Reject up front instead.
-    // ByteSizeLong() walks every field, so it's computed once here and
-    // reused below rather than called again to learn the same size.
     size_t serialized_size = data.ByteSizeLong();
     if (serialized_size > static_cast<size_t>(cfg_struct.rowlength())) {
         std::string err_msg = fmt::format("[UNARY INSERT] [DB: {}] - Row size {} exceeds configured row length {}", db_name, serialized_size, cfg_struct.rowlength());
@@ -69,17 +41,9 @@ void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::R
         return;
     }
 
-    //  Computes diff & offset
-    unsigned long long int diff = unix_time - curr_ts.first_epoch;
-    unsigned long long int offset = diff * cfg_struct.rowlength();
-
-    // Thread-local scratch buffer, grown once and reused across calls --
-    // avoids the SerializeAsString() heap allocation the original fwrite()
-    // path paid on every insert. Serialize first, then zero only the tail
-    // past the actual serialized size -- covers the same "no stale bytes
-    // from a previous larger row leak through" guarantee as zeroing the
-    // whole buffer up front, without redundantly touching the bytes
-    // SerializeToArray is about to overwrite anyway.
+    // Thread-local scratch buffer, grown once and reused across calls.
+    // Serialize first, then zero only the tail past the actual serialized
+    // size -- no stale bytes from a previous larger row leak through.
     thread_local std::vector<char> row_buf;
     if (row_buf.size() < cfg_struct.rowlength()) {
         row_buf.resize(cfg_struct.rowlength());
@@ -87,30 +51,32 @@ void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::R
     data.SerializeToArray(row_buf.data(), cfg_struct.rowlength());
     std::memset(row_buf.data() + serialized_size, 0, cfg_struct.rowlength() - serialized_size);
 
-    ssize_t written;
-    {
-        // Lock prior to file OP
-        FileRangeLockGuard guard(target_file, offset, cfg_struct.rowlength(), FileRangeLock::LockType::WRITE);
-        written = pwrite(fd, row_buf.data(), cfg_struct.rowlength(), static_cast<off_t>(offset));
-    }
-    if (written != static_cast<ssize_t>(cfg_struct.rowlength())) {
-        std::string err_msg = fmt::format("[UNARY INSERT] [DB: {}] - Short/failed write to {}.XSTORE", db_name, curr_ts.year);
+    // Hand off to the WAL instead of writing the data file directly here --
+    // EnqueueWalRecord's shard writer thread fsyncs (for SYNC_PER_COMMIT/
+    // GROUP_COMMIT) and applies this exact row before returning control
+    // (ASYNC_ONLY returns immediately after the lock-free enqueue). A
+    // WalRecord represents one write REQUEST (1..N rows, one completion
+    // future per request) -- UnaryInsert's request is always exactly 1 row;
+    // a future Batch/Range wiring builds the same type with N rows instead
+    // of needing a separate WAL path.
+    WalRecord record;
+    record.db_name = db_name;
+    record.db_base_path = db_base_path_str;
+    record.time_resolution = cfg_struct.timeresolution();
+    record.row_length = cfg_struct.rowlength();
+    record.durability_mode = durability_mode;
+    record.rows.push_back(WalRow{unix_time, std::string(row_buf.data(), cfg_struct.rowlength())});
+
+    if (!EnqueueWalRecord(std::move(record))) {
+        std::string err_msg = fmt::format("[UNARY INSERT] [DB: {}] - Failed to enqueue WAL record", db_name);
         SetTaggedStatus(return_data->mutable_insertstatus(), "[ERROR] ", err_msg);
         spdlog::error(err_msg);
         return;
     }
 
-    // Tried fmt::format_to() straight into the destination field here to
-    // save the SuccessMsg temporary's copy -- benchmarked SLOWER (~13%) than
-    // this, even with an upfront reserve(): format_to() through a generic
-    // back_insert_iterator loses fmt::format()'s internal contiguous-buffer
-    // fast path, so it does more per-byte work than fmt::format() + a plain
-    // reserve()'d assign/append despite looking like fewer copies on paper.
-    // SetTaggedStatus already reserves the exact final size once and does
-    // two flat memcpy-style writes -- reverted to it after measuring.
+    TimeStruct curr_ts(unix_time, cfg_struct.timeresolution());
     std::string success_msg = fmt::format("[UNARY INSERT] [DB: {}] - Inserted {} to {}.XSTORE", db_name, unix_time, curr_ts.year);
     SetTaggedStatus(return_data->mutable_insertstatus(), "[INFO] ", success_msg);
-    return;
 }
 
 // UNARY QUERY

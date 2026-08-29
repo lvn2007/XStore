@@ -161,7 +161,7 @@ void ZmqServer::WorkerRoutine(std::string server_addr) {
             case XStore_Proto::Request::kUnaryinsert: {
                 const auto &req = client_request->unaryinsert();
                 XStore_Proto::UnaryInsert_REP rep;
-                my_store.UnaryInsert(req.timestamp(), req.data(), req.dbname(), &rep);
+                my_store.UnaryInsert(req.timestamp(), req.data(), req.dbname(), &rep, req.durabilitymode());
                 SendProto(socket, rep);
                 break;
             }

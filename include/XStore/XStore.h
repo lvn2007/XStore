@@ -238,7 +238,8 @@ class XStore {
         [[nodiscard]] XStore_Proto::RemoveDBFiles_REP RemoveDBFiles(XStore_Proto::RemoveDBFiles_REQ *proto_from_client, std::string_view db_name);
 
         // UNARY INSERT
-        void UnaryInsert(unsigned long long int epoch_time, const XStore_Proto::RowData &data, std::string_view db_name, XStore_Proto::UnaryInsert_REP *return_data);
+        void UnaryInsert(unsigned long long int epoch_time, const XStore_Proto::RowData &data, std::string_view db_name, XStore_Proto::UnaryInsert_REP *return_data,
+                          XStore_Proto::WalDurabilityMode durability_mode = XStore_Proto::SYNC_PER_COMMIT);
 
         // UNARY QUERY
         void UnaryQuery(unsigned long long int epoch_time, std::string_view db_name, XStore_Proto::UnaryQuery_REP *return_data);
