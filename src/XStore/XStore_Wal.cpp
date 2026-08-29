@@ -207,6 +207,24 @@ void XStore::StartWalWriters() {
     for (size_t i = 0; i < XStoreTunables::WAL_SHARD_COUNT; ++i) {
         wal_shards[i].writer_thread = std::thread(&XStore::WalWriterLoop, i);
     }
+    // Writer threads must be stopped and joined before other static-storage
+    // objects they touch (the moodycamel queue, spdlog's default logger)
+    // begin their own destruction at process exit -- a still-running thread
+    // racing that teardown corrupts the heap rather than cleanly
+    // terminating. std::atexit callbacks run in reverse registration order,
+    // before any static destructors registered after this call, so
+    // registering here (at the moment the threads are actually started)
+    // guarantees this runs first.
+    std::atexit([]() {
+        for (size_t i = 0; i < XStoreTunables::WAL_SHARD_COUNT; ++i) {
+            wal_shards[i].stop_flag.store(true, std::memory_order_relaxed);
+        }
+        for (size_t i = 0; i < XStoreTunables::WAL_SHARD_COUNT; ++i) {
+            if (wal_shards[i].writer_thread.joinable()) {
+                wal_shards[i].writer_thread.join();
+            }
+        }
+    });
 }
 
 void XStore::WalWriterLoop(size_t shard_idx) {
