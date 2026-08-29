@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <memory>
+#include <optional>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
@@ -207,7 +208,7 @@ class XStore {
             // (not a shared batch counter) sidesteps any question of
             // cross-producer enqueue ordering: each caller only ever waits
             // on its own record's flag.
-            std::shared_ptr<std::promise<void>> completion;
+            std::optional<std::promise<void>> completion;
         };
 
         struct WalShard {

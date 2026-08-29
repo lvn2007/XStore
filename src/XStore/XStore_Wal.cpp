@@ -189,7 +189,7 @@ bool XStore::EnqueueWalRecord(WalRecord record) {
 
     std::future<void> completion_future;
     if (record.durability_mode != XStore_Proto::ASYNC_ONLY) {
-        record.completion = std::make_shared<std::promise<void>>();
+        record.completion.emplace();
         completion_future = record.completion->get_future();
     }
 
