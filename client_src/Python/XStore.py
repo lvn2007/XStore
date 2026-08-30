@@ -82,12 +82,14 @@ class XStoreClient:
         recvObj = self._sendRecv(envelope, XStore_Proto.CreateDB_REP)
         return recvObj.createDBStatus
 
-    def unaryInsert(self, insertUnixTime: int, data: [object, list], targetDBName: str) -> str:
+    def unaryInsert(self, insertUnixTime: int, data: [object, list], targetDBName: str,
+                     durabilityMode=XStore_Proto.ASYNC_ONLY) -> str:
         envelope = XStore_Proto.Request()
         payload = envelope.unaryinsert
         payload.RType = XStore_Proto.UNARYINSERT
         payload.timestamp = insertUnixTime
         payload.dbName = targetDBName
+        payload.durabilityMode = durabilityMode
 
         # IF data is list -> Assume worse case scenario for space-efficiency
         if isinstance(data, list):

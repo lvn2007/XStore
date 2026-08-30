@@ -216,13 +216,19 @@ class XStoreClient {
   }
 
   // ==== Unary ====
-  [[nodiscard]] std::string UnaryInsert(std::time_t insert_unix_time, const XStore_Proto::RowData &data, std::string_view db_name) {
+  // durability_mode defaults to ASYNC_ONLY -- no fsync wait, lowest latency.
+  // A row is only in-memory/queued until the writer thread flushes it, so a
+  // crash before that flush loses it. Pass SYNC_PER_COMMIT explicitly for
+  // writes that must survive a crash.
+  [[nodiscard]] std::string UnaryInsert(std::time_t insert_unix_time, const XStore_Proto::RowData &data, std::string_view db_name,
+                                         XStore_Proto::WalDurabilityMode durability_mode = XStore_Proto::ASYNC_ONLY) {
       XStore_Proto::Request to_server;
       auto *payload = to_server.mutable_unaryinsert();
       payload->set_rtype(XStore_Proto::UNARYINSERT);
       payload->set_timestamp(insert_unix_time);
       *payload->mutable_data() = data;
       payload->set_dbname(std::string(db_name));
+      payload->set_durabilitymode(durability_mode);
       return SendRecv<XStore_Proto::UnaryInsert_REP>(to_server).insertstatus();
   }
 
