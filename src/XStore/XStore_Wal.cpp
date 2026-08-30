@@ -4,6 +4,7 @@
 #include "include/DataStructs/TimeStruct.h"
 #include <spdlog/fmt/fmt.h>
 #include "include/Logger/Logger.h"
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <chrono>
@@ -48,6 +49,8 @@ void AppendPod(std::string &out, T value) {
     out.append(reinterpret_cast<const char *>(&value), sizeof(value));
 }
 
+} // namespace
+
 // Wire format (native-endian -- WAL files aren't portable across
 // architectures, same assumption XStore's .XSTORE data files already
 // make). One record = one write REQUEST, carrying 1..N rows (1 for
@@ -58,8 +61,12 @@ void AppendPod(std::string &out, T value) {
 //   repeated rowCount times: [u64 epochTime][row bytes]
 // recordLen counts every byte AFTER itself. crc32 covers every byte after
 // itself (dbNameLen through the last row's bytes) so ReplayWal can
-// validate a record before trusting it.
-std::string SerializeWalRecord(const XStore::WalRecord &record) {
+// validate a record before trusting it. XStore:: member (not file-local)
+// so ReplayWal's crash-recovery path (a different translation unit) uses
+// this exact implementation instead of an independently-maintained copy --
+// that duplication is what let a since-fixed bounds-check bug survive
+// uncaught in the duplicate.
+std::string XStore::SerializeWalRecord(const XStore::WalRecord &record) {
     std::string payload;
     size_t row_block_size = record.rows.size() * (8 + static_cast<size_t>(record.row_length));
     payload.reserve(2 + 2 + 4 + 4 + record.db_name.size() + row_block_size);
@@ -86,8 +93,9 @@ std::string SerializeWalRecord(const XStore::WalRecord &record) {
 // Parses one record starting at data[0]. Returns false (consumed left
 // unset) if fewer than one full, CRC-valid record is available -- ReplayWal
 // treats that as "stop here" (a torn tail record from a crash mid-write),
-// not a hard error.
-bool ParseWalRecord(const char *data, size_t len, size_t &consumed, XStore::WalRecord &out_record) {
+// not a hard error. XStore:: member for the same sharing reason as
+// SerializeWalRecord above.
+bool XStore::ParseWalRecord(const char *data, size_t len, size_t &consumed, XStore::WalRecord &out_record) {
     if (len < 8) return false;
     uint32_t record_len;
     std::memcpy(&record_len, data, 4);
@@ -134,6 +142,8 @@ bool ParseWalRecord(const char *data, size_t len, size_t &consumed, XStore::WalR
     return true;
 }
 
+namespace {
+
 // Returns "<data_store_dir>/WAL/shard_<shardIdx>.WAL" for the
 // data_store_dir that owns dbBasePath (dbBasePath's parent directory).
 // Derived per-record, not fixed at thread-start, so one shard's writer
@@ -152,12 +162,18 @@ std::string WalFilePathFor(const std::string &db_base_path, size_t shard_idx) {
 
 } // namespace
 
-void XStore::ApplyWalRecord(const WalRecord &record_to_apply) {
+bool XStore::ApplyWalRecord(const WalRecord &record_to_apply) {
     // One row at a time for v1 -- each row gets its own offset/lock, same
     // shape as UnaryInsert's pre-WAL inline path. Coalescing same-year rows
     // into fewer pwrites (the way WriteRowGroupToFile already does for
     // Batch/Range's direct-write path, XStore_Internal.h) is a natural
     // follow-up once a real multi-row caller exists to benchmark against.
+    //
+    // Returns true only if every row applied cleanly -- the writer loop's
+    // caller uses this (combined with the WAL fsync's own success) to
+    // decide whether this record was actually durable, instead of always
+    // reporting success regardless of what happened here.
+    bool all_rows_ok = true;
     for (const WalRow &row : record_to_apply.rows) {
         TimeStruct curr_ts(row.epoch_time, record_to_apply.time_resolution);
         const std::string &target_file = CachedYearFilePath(record_to_apply.db_base_path, curr_ts.year);
@@ -166,6 +182,7 @@ void XStore::ApplyWalRecord(const WalRecord &record_to_apply) {
                                                         curr_ts.last_epoch - curr_ts.first_epoch);
         if (!fd_handle) {
             spdlog::error("[WAL APPLY] [DB: {}] - Unable to open {}.XSTORE", record_to_apply.db_name, curr_ts.year);
+            all_rows_ok = false;
             continue;
         }
         int fd = *fd_handle;
@@ -178,16 +195,18 @@ void XStore::ApplyWalRecord(const WalRecord &record_to_apply) {
         }
         if (written != static_cast<ssize_t>(record_to_apply.row_length)) {
             spdlog::error("[WAL APPLY] [DB: {}] - Short/failed write to {}.XSTORE", record_to_apply.db_name, curr_ts.year);
+            all_rows_ok = false;
             continue;
         }
     }
+    return all_rows_ok;
 }
 
 bool XStore::EnqueueWalRecord(WalRecord record) {
     size_t shard_idx = std::hash<std::string>{}(record.db_base_path) % XStoreTunables::WAL_SHARD_COUNT;
     WalShard &shard = wal_shards[shard_idx];
 
-    std::future<void> completion_future;
+    std::future<bool> completion_future;
     if (record.durability_mode != XStore_Proto::ASYNC_ONLY) {
         record.completion.emplace();
         completion_future = record.completion->get_future();
@@ -198,7 +217,11 @@ bool XStore::EnqueueWalRecord(WalRecord record) {
     }
 
     if (completion_future.valid()) {
-        completion_future.wait();
+        // Blocks until the writer thread resolves it; get() returns the
+        // real durability outcome (false on a WAL fsync failure or a
+        // failed apply) instead of unconditionally reporting success --
+        // ASYNC_ONLY skips this and only reports "enqueued", by design.
+        return completion_future.get();
     }
     return true;
 }
@@ -232,10 +255,27 @@ void XStore::WalWriterLoop(size_t shard_idx) {
     std::vector<WalRecord> batch(XStoreTunables::WAL_BATCH_MAX_RECORDS);
     // Thread-local to this one writer thread -- no lock needed, only this
     // thread ever touches it. Declared once outside the loop and reused
-    // (via .clear() each iteration) rather than re-declared per batch, to
-    // avoid a fresh heap allocation on the writer's per-batch hot path.
+    // (via .clear()/reset each iteration, or sized once and indexed) rather
+    // than re-declared per batch, to avoid a fresh heap allocation on the
+    // writer's per-batch hot path.
     std::unordered_map<std::string, int> wal_fds;
     std::unordered_map<std::string, std::string> bytes_by_file;
+    // Per-file durability outcome for THIS batch -- replaces a single
+    // all_durable flag so one file's fsync failure in a multi-DB batch
+    // doesn't wrongly withhold the checkpoint (truncate) for a DIFFERENT
+    // file that genuinely succeeded, and doesn't wrongly report success for
+    // records that share that failed file.
+    std::unordered_map<std::string, bool> file_durable;
+    // Which wal_path each dequeued record's bytes went into, so the
+    // per-record durability check below doesn't need to recompute
+    // WalFilePathFor a second time.
+    std::vector<std::string> record_wal_path(XStoreTunables::WAL_BATCH_MAX_RECORDS);
+    // Tracks which records in the current batch have already had their
+    // completion promise resolved -- lets the catch block below resolve
+    // only the ones an exception left unresolved, instead of risking a
+    // second set_value() (undefined/throws) on one already resolved by the
+    // code that ran before the exception.
+    std::vector<bool> resolved(XStoreTunables::WAL_BATCH_MAX_RECORDS);
 
     while (!shard.stop_flag.load(std::memory_order_relaxed)) {
         size_t count = shard.queue.wait_dequeue_bulk_timed(
@@ -243,68 +283,106 @@ void XStore::WalWriterLoop(size_t shard_idx) {
             std::chrono::microseconds(XStoreTunables::WAL_GROUP_COMMIT_WINDOW_US));
         if (count == 0) continue;
 
-        // Group this batch by target WAL file -- always exactly one group
-        // in production (one data_store_dir per process); only tests
-        // running multiple data_store_dirs in one binary ever see more.
-        bytes_by_file.clear();
-        for (size_t i = 0; i < count; ++i) {
-            bytes_by_file[WalFilePathFor(batch[i].db_base_path, shard_idx)] += SerializeWalRecord(batch[i]);
-        }
+        std::fill(resolved.begin(), resolved.begin() + static_cast<long>(count), false);
 
-        bool all_durable = true;
-        for (auto &entry : bytes_by_file) {
-            const std::string &wal_path = entry.first;
-            const std::string &bytes = entry.second;
+        // A std::thread's entry function must never let an exception
+        // escape -- doing so calls std::terminate() and kills the whole
+        // process, silently dropping every in-flight request across all
+        // WAL_SHARD_COUNT shards, not just this one. The realistic source
+        // here is std::bad_alloc from the string/map allocations below
+        // under memory pressure; catching it and failing just this batch
+        // (still resolving every caller's future, so nobody hangs forever
+        // either) is the graceful-degradation behavior a durability layer
+        // is expected to have.
+        try {
+            // Group this batch by target WAL file -- always exactly one
+            // group in production (one data_store_dir per process); only
+            // tests running multiple data_store_dirs in one binary ever
+            // see more.
+            bytes_by_file.clear();
+            for (size_t i = 0; i < count; ++i) {
+                record_wal_path[i] = WalFilePathFor(batch[i].db_base_path, shard_idx);
+                bytes_by_file[record_wal_path[i]] += SerializeWalRecord(batch[i]);
+            }
 
-            auto it = wal_fds.find(wal_path);
-            int fd;
-            if (it == wal_fds.end()) {
-                // Only pay for create_directories() the first time this
-                // path is actually opened, not once per record in the
-                // batch -- the directory only needs to exist once.
-                std::filesystem::create_directories(std::filesystem::path(wal_path).parent_path());
-                fd = open(wal_path.c_str(), O_WRONLY | O_CREAT, 0644);
-                if (fd < 0) {
-                    spdlog::error("[WAL] - Unable to open {}", wal_path);
-                    all_durable = false;
+            file_durable.clear();
+            for (auto &entry : bytes_by_file) {
+                const std::string &wal_path = entry.first;
+                const std::string &bytes = entry.second;
+                file_durable[wal_path] = false;
+
+                auto it = wal_fds.find(wal_path);
+                int fd;
+                if (it == wal_fds.end()) {
+                    // Only pay for create_directories() the first time this
+                    // path is actually opened, not once per record in the
+                    // batch -- the directory only needs to exist once.
+                    std::filesystem::create_directories(std::filesystem::path(wal_path).parent_path());
+                    fd = open(wal_path.c_str(), O_WRONLY | O_CREAT, 0644);
+                    if (fd < 0) {
+                        spdlog::error("[WAL] - Unable to open {}", wal_path);
+                        continue;
+                    }
+                    wal_fds.emplace(wal_path, fd);
+                } else {
+                    fd = it->second;
+                }
+
+                ssize_t written = pwrite(fd, bytes.data(), bytes.size(), 0);
+                if (written != static_cast<ssize_t>(bytes.size()) || fsync(fd) != 0) {
+                    spdlog::error("[WAL] - Failed to durably write/fsync {}", wal_path);
                     continue;
                 }
-                wal_fds.emplace(wal_path, fd);
-            } else {
-                fd = it->second;
+                file_durable[wal_path] = true;
             }
 
-            ssize_t written = pwrite(fd, bytes.data(), bytes.size(), 0);
-            if (written != static_cast<ssize_t>(bytes.size()) || fsync(fd) != 0) {
-                spdlog::error("[WAL] - Failed to durably write/fsync {}", wal_path);
-                all_durable = false;
+            // Apply every request's rows to their real data files -- same
+            // in-memory bytes already held from enqueue, no WAL re-read
+            // (WAL is only ever read back during ReplayWal, never
+            // mid-batch). A record only counts as durable if BOTH its
+            // WAL file's fsync succeeded above AND every one of its rows
+            // applied cleanly here -- either failing means the caller must
+            // be told, not silently given a success signal.
+            for (size_t i = 0; i < count; ++i) {
+                bool wal_ok = file_durable[record_wal_path[i]];
+                bool apply_ok = ApplyWalRecord(batch[i]);
+                bool record_ok = wal_ok && apply_ok;
+                if (!record_ok) {
+                    spdlog::error("[WAL] [DB: {}] - Record not durably persisted (wal_durable={}, applied={})",
+                                  batch[i].db_name, wal_ok, apply_ok);
+                }
+                if (batch[i].completion) {
+                    batch[i].completion->set_value(record_ok);
+                }
+                resolved[i] = true;
             }
-        }
 
-        // Apply every request's rows to their real data files -- same
-        // in-memory bytes already held from enqueue, no WAL re-read (WAL is
-        // only ever read back during ReplayWal, never mid-batch). Applied
-        // even for a file that failed its fsync above -- see the plan's
-        // "Out of Scope" note on non-crash apply failures not self-healing
-        // in v1.
-        for (size_t i = 0; i < count; ++i) {
-            ApplyWalRecord(batch[i]);
-        }
-
-        // Checkpoint: everything just fsync'd above is now also applied to
-        // its data file, so the WAL file no longer needs to hold it --
-        // truncate back to empty. Keeps each shard's WAL file bounded to
-        // "at most one in-flight batch" instead of growing for the life of
-        // the process.
-        if (all_durable) {
+            // Checkpoint: only truncate a file that actually fsync'd
+            // successfully above -- truncating a file whose fsync FAILED
+            // would discard bytes that were never durable anywhere else,
+            // and truncating unconditionally on a shared "all succeeded"
+            // flag risked wiping a DIFFERENT file's still-needed bytes
+            // whenever a batch touched more than one file. Each file's
+            // truncate decision is now independent, matching its own
+            // fsync outcome.
             for (auto &entry : bytes_by_file) {
-                ftruncate(wal_fds[entry.first], 0);
+                if (file_durable[entry.first]) {
+                    ftruncate(wal_fds[entry.first], 0);
+                }
             }
-        }
-
-        for (size_t i = 0; i < count; ++i) {
-            if (batch[i].completion) {
-                batch[i].completion->set_value();
+        } catch (const std::exception &ex) {
+            spdlog::error("[WAL] - Writer loop caught exception, failing this batch: {}", ex.what());
+            for (size_t i = 0; i < count; ++i) {
+                if (!resolved[i] && batch[i].completion) {
+                    batch[i].completion->set_value(false);
+                }
+            }
+        } catch (...) {
+            spdlog::error("[WAL] - Writer loop caught unknown exception, failing this batch");
+            for (size_t i = 0; i < count; ++i) {
+                if (!resolved[i] && batch[i].completion) {
+                    batch[i].completion->set_value(false);
+                }
             }
         }
     }

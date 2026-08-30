@@ -383,76 +383,6 @@ void XStore::InitDB() {
     }
 }
 
-namespace {
-// Same wire-format parse as XStore_Wal.cpp's ParseWalRecord -- duplicated
-// here (rather than shared via a header) because it's a small, self-
-// contained ~25-line function and the alternative (a shared header just for
-// this one helper) isn't worth it for a single caller in each translation
-// unit. Keep the two in sync if the wire format changes.
-bool ParseWalRecordForReplay(const char *data, size_t len, size_t &consumed, XStore::WalRecord &out_record) {
-    if (len < 8) return false;
-    uint32_t record_len;
-    std::memcpy(&record_len, data, 4);
-    if (len < 4u + record_len || record_len < 4u + 2 + 2 + 4 + 4) return false;
-
-    uint32_t stored_crc;
-    std::memcpy(&stored_crc, data + 4, 4);
-
-    const char *payload = data + 8;
-    size_t payload_len = record_len - 4;
-
-    // CRC-32 (IEEE 802.3 / zlib polynomial), same algorithm as
-    // XStore_Wal.cpp's Crc32 -- recomputed here rather than shared for the
-    // same reason as this function itself.
-    static const std::array<uint32_t, 256> table = [] {
-        std::array<uint32_t, 256> t{};
-        for (uint32_t i = 0; i < 256; ++i) {
-            uint32_t c = i;
-            for (int k = 0; k < 8; ++k) {
-                c = (c & 1u) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-            }
-            t[i] = c;
-        }
-        return t;
-    }();
-    uint32_t crc = 0xFFFFFFFFu;
-    for (size_t i = 0; i < payload_len; ++i) {
-        crc = table[(crc ^ static_cast<unsigned char>(payload[i])) & 0xFFu] ^ (crc >> 8);
-    }
-    crc ^= 0xFFFFFFFFu;
-    if (crc != stored_crc) return false;
-
-    size_t off = 0;
-    uint16_t db_name_len; std::memcpy(&db_name_len, payload + off, 2); off += 2;
-    uint16_t row_length;  std::memcpy(&row_length, payload + off, 2); off += 2;
-    int32_t time_res;     std::memcpy(&time_res, payload + off, 4); off += 4;
-    uint32_t row_count;   std::memcpy(&row_count, payload + off, 4); off += 4;
-
-    if (off + db_name_len > payload_len) return false;
-    out_record.db_name.assign(payload + off, db_name_len);
-    off += db_name_len;
-
-    size_t expected_rows_bytes = static_cast<size_t>(row_count) * (8u + row_length);
-    if (off + expected_rows_bytes != payload_len) return false;
-
-    out_record.row_length = row_length;
-    out_record.time_resolution = static_cast<XStore_Proto::TimeUnit>(time_res);
-    out_record.rows.clear();
-    out_record.rows.reserve(row_count);
-    for (uint32_t i = 0; i < row_count; ++i) {
-        uint64_t epoch_time; std::memcpy(&epoch_time, payload + off, 8); off += 8;
-        XStore::WalRow row;
-        row.epoch_time = epoch_time;
-        row.row_bytes.assign(payload + off, row_length);
-        off += row_length;
-        out_record.rows.push_back(std::move(row));
-    }
-
-    consumed = 4 + record_len;
-    return true;
-}
-} // namespace
-
 void XStore::ReplayWal() {
     std::filesystem::path wal_dir = std::filesystem::path(data_store_dir) / XStoreTunables::WAL_DIR_NAME;
     if (!std::filesystem::is_directory(wal_dir)) {
@@ -474,14 +404,16 @@ void XStore::ReplayWal() {
         while (offset < contents.size()) {
             XStore::WalRecord record;
             size_t consumed = 0;
-            if (!ParseWalRecordForReplay(contents.data() + offset, contents.size() - offset, consumed, record)) {
+            if (!ParseWalRecord(contents.data() + offset, contents.size() - offset, consumed, record)) {
                 // Torn tail record (crash mid-write) or corruption -- stop
                 // here; every record before this point already passed its
                 // own CRC check.
                 break;
             }
             record.db_base_path = DbBasePath(record.db_name);
-            ApplyWalRecord(record);
+            if (!ApplyWalRecord(record)) {
+                spdlog::error("[WAL REPLAY] [DB: {}] - One or more rows failed to apply", record.db_name);
+            }
             replayed_count += static_cast<unsigned>(record.rows.size());
             offset += consumed;
         }

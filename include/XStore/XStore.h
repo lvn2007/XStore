@@ -203,12 +203,15 @@ class XStore {
             std::vector<WalRow> rows;          // 1 entry for UnaryInsert; N for a future Batch/Range request
             XStore_Proto::WalDurabilityMode durability_mode = XStore_Proto::SYNC_PER_COMMIT;
             // One per REQUEST, not per row -- null for ASYNC_ONLY (nobody
-            // waits). Set once every row in this record has been fsync'd
-            // and applied, regardless of row count. A per-record promise
-            // (not a shared batch counter) sidesteps any question of
+            // waits). Carries whether this record was actually durably
+            // fsync'd AND applied (true) or not (false on any failure --
+            // WAL write/fsync failure or a failed ApplyWalRecord row), so a
+            // caller can tell "queued" from "actually durable" instead of
+            // being told success unconditionally. A per-record promise (not
+            // a shared batch counter) sidesteps any question of
             // cross-producer enqueue ordering: each caller only ever waits
             // on its own record's flag.
-            std::optional<std::promise<void>> completion;
+            std::optional<std::promise<bool>> completion;
         };
 
         struct WalShard {
@@ -415,9 +418,21 @@ class XStore {
         // Hashes recordToEnqueue.db_base_path to a shard, pushes it onto
         // that shard's queue, and -- unless durability_mode is ASYNC_ONLY --
         // blocks until that shard's writer thread has fsync'd and applied
-        // it. Returns false only if the underlying queue push itself fails
-        // (allocation failure, extremely rare).
+        // it, returning whether it was actually durable (false on a WAL
+        // write/fsync failure or a failed apply, not just on the queue push
+        // itself failing). ASYNC_ONLY returns true immediately after a
+        // successful enqueue -- no durability signal is available yet by
+        // design.
         static bool EnqueueWalRecord(WalRecord record);
+
+        // Serializes/parses the on-disk WAL wire format (see
+        // XStore_Wal.cpp's SerializeWalRecord/ParseWalRecord definitions
+        // for the exact byte layout and CRC framing). Shared between the
+        // writer thread's normal flush path and ReplayWal's crash-recovery
+        // path so there is exactly one implementation of the wire format to
+        // keep correct, not two independently-maintained copies.
+        static std::string SerializeWalRecord(const WalRecord &record);
+        static bool ParseWalRecord(const char *data, size_t len, size_t &consumed, WalRecord &out_record);
 
         // Writes every row in recordToApply.rows to its actual .XSTORE data
         // file, at the offset each row's epoch_time (combined with
@@ -425,12 +440,15 @@ class XStore {
         // same logic UnaryInsert used to run inline, now shared between the
         // writer thread's normal path and ReplayWal's crash-recovery path
         // (both call this with a fully self-contained WalRecord, no cfg
-        // lookup needed). One row at a time for v1 -- coalescing same-year
-        // rows into fewer pwrites, the way WriteRowGroupToFile already does
-        // for Batch/Range's direct-write path (XStore_Internal.h), is a
-        // natural follow-up once a real multi-row caller exists to
-        // benchmark against; premature before then.
-        static void ApplyWalRecord(const WalRecord &record_to_apply);
+        // lookup needed). Returns true only if every row was durably
+        // written -- a caller that discards this return value silently
+        // loses the failure signal. One row at a time for v1 -- coalescing
+        // same-year rows into fewer pwrites, the way WriteRowGroupToFile
+        // already does for Batch/Range's direct-write path
+        // (XStore_Internal.h), is a natural follow-up once a real
+        // multi-row caller exists to benchmark against; premature before
+        // then.
+        [[nodiscard]] static bool ApplyWalRecord(const WalRecord &record_to_apply);
 
         // Body of one shard's dedicated writer thread: waits (bounded by
         // WAL_GROUP_COMMIT_WINDOW_US) for records to batch, fsyncs the
