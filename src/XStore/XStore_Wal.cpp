@@ -238,6 +238,19 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply) {
     return all_rows_ok;
 }
 
+void XStore::InvalidateWalFileHeader(int fd, const std::string &wal_path) {
+    static constexpr char ZERO_LEN_HEADER[4] = {0, 0, 0, 0};
+    if (pwrite(fd, ZERO_LEN_HEADER, sizeof(ZERO_LEN_HEADER), 0) != static_cast<ssize_t>(sizeof(ZERO_LEN_HEADER)) || fsync(fd) != 0) {
+        // Not fatal to the batch that just durably applied -- those rows
+        // are safely on disk in the real data file regardless. Worst case
+        // on a crash before this is retried: the stale record replays
+        // again next restart, which is only wrong if its DB was deleted
+        // and recreated in between -- log it so that's diagnosable instead
+        // of silently risking a future "unable to open" surprise.
+        spdlog::error("[WAL] - Failed to invalidate checkpoint header for {}", wal_path);
+    }
+}
+
 bool XStore::EnqueueWalRecord(WalRecord record) {
     // Round-robin, not content-derived: the WAL is a short-lived staging
     // log (each batch's bytes get overwritten wholesale by the next one,
@@ -450,16 +463,18 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
                 }
                 resolved[i] = true;
             }
-            // No checkpoint/truncate step: the file is preallocated once
-            // (OpenAndPreallocateWalFile) and stays at that size. The next
-            // batch's pwrite at offset 0 overwrites this one's bytes
-            // directly; anything a shorter overwrite leaves behind past the
-            // new valid length is either a stale-but-still-CRC-valid older
-            // record (safe: replaying an already-applied record is a
-            // harmless idempotent overwrite) or fails ParseWalRecord's CRC
-            // check and is correctly treated as "nothing more here" --
-            // either way nothing needs to physically shrink the file to
-            // mark this batch as checkpointed.
+
+            // Checkpoint: invalidate (not truncate) every file this batch
+            // durably wrote to. Skips a file whose fsync FAILED above --
+            // its bytes are the only durable record of those rows, so
+            // leaving them intact (to be retried on the next restart) beats
+            // erasing the one copy that exists. No file-size change here,
+            // so no metadata-journal cost -- see InvalidateWalFileHeader.
+            for (auto &entry : bytes_by_file) {
+                if (file_durable[entry.first]) {
+                    InvalidateWalFileHeader(wal_fds[entry.first], entry.first);
+                }
+            }
         } catch (const std::exception &ex) {
             spdlog::error("[WAL] - Writer loop caught exception, failing this batch: {}", ex.what());
             for (size_t i = 0; i < count; ++i) {

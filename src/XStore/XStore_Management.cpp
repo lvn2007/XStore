@@ -437,11 +437,23 @@ void XStore::ReplayWal() {
         if (replayed_count > 0) {
             spdlog::info("[WAL REPLAY] - Replayed {} record(s) from {}", replayed_count, wal_path.string());
         }
-        // No truncate: same reasoning as WalWriterLoop's own checkpoint
-        // removal -- the file stays at its preallocated size, and the next
-        // real write simply overwrites from offset 0. Re-replaying these
-        // same bytes on a hypothetical second ReplayWal call is a harmless
-        // idempotent re-apply, not a correctness concern.
+
+        // Checkpoint unconditionally, whether or not any record was found
+        // and regardless of individual ApplyWalRecord outcomes -- this
+        // file's WAL evidence has now been fully consulted. Critically
+        // NOT conditioned on apply success: a record here can legitimately
+        // fail to apply because its DB no longer exists (deleted, or -- as
+        // here -- not yet recreated at this point in startup, since
+        // ReplayWal always runs before any client can reach CreateDB), and
+        // that failure will recur identically on every future restart
+        // unless the stale bytes are invalidated now. No file-size
+        // change, so no metadata-journal cost -- see
+        // InvalidateWalFileHeader.
+        int fd = open(wal_path.c_str(), O_WRONLY);
+        if (fd >= 0) {
+            InvalidateWalFileHeader(fd, wal_path.string());
+            close(fd);
+        }
     }
 }
 

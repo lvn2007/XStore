@@ -15,7 +15,7 @@ dropPageCache
 
 # Pre-emptively purge existing dataStore & Start server
 if [ "$isPurge" == "true" ]; then
-    tmux send-keys -t "Server" "cd XStore_Server/build && sudo rm -rf DataStore/BENCH_DB DataStore/BACKTESTER; mkdir -p DataStore && ./XStore --host 0.0.0.0 --port 9497 --threads $(($(nproc --all)/2))" C-m
+    tmux send-keys -t "Server" "cd XStore_Server/build && sudo rm -rf DataStore/BENCH_DB DataStore/BACKTESTER DataStore/WAL; mkdir -p DataStore && ./XStore --host 0.0.0.0 --port 9497 --threads $(($(nproc --all)/2))" C-m
 else
     tmux send-keys -t "Server" "cd XStore_Server/build && ./XStore --host 0.0.0.0 --port 9497 --threads $(($(nproc --all)/2))" C-m
 fi

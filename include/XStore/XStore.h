@@ -479,20 +479,33 @@ class XStore {
         // then.
         [[nodiscard]] static bool ApplyWalRecord(const WalRecord &record_to_apply);
 
+        // Checkpoint step for a preallocated WAL file: zeroes just the
+        // 4-byte record_len header at offset 0 and fsyncs that (tiny, in-
+        // place, already-allocated) write -- never ftruncate/resize.
+        // record_len=0 fails ParseWalRecord's own length check immediately,
+        // so a zeroed file replays as "nothing pending", same as an empty
+        // one did under the old truncate-based design, but without the
+        // shrink-then-must-reallocate metadata-journal cost that design
+        // paid on every single commit (see WalWriterLoop). Durability
+        // matters here: a DB can be deleted and recreated (RemoveDB, or an
+        // external wipe) between this record's apply and the next process
+        // restart -- if the invalidation itself weren't fsync'd before a
+        // crash, the still-valid-looking old bytes would resurface at the
+        // next ReplayWal and get reapplied against whatever now lives at
+        // that path, not the DB they actually belonged to.
+        static void InvalidateWalFileHeader(int fd, const std::string &wal_path);
+
         // Body of one shard's dedicated writer thread: waits (bounded by
         // WAL_GROUP_COMMIT_WINDOW_US) for the first record, then makes
         // WAL_GATHER_EXTRA_DRAINS more non-blocking dequeue attempts to
         // pick up anything that landed a few microseconds later (batches
         // concurrent commits into one fsync without ever sleeping), fsyncs
-        // the batch to WAL, applies every record, then releases every
-        // synchronous caller's completion future. Does not truncate the
-        // WAL file -- it's preallocated once (see StartWalWriters/
-        // OpenAndPreallocateWalFile) and each batch's self-framed,
-        // CRC-checked bytes simply overwrite from offset 0; ReplayWal's
-        // parse loop stops cleanly the instant it hits a torn/stale tail,
-        // and re-applying an already-applied record is a harmless
-        // idempotent overwrite, so nothing needs to physically shrink the
-        // file to mark "nothing pending".
+        // the batch to WAL, applies every record, checkpoints via
+        // InvalidateWalFileHeader, then releases every synchronous
+        // caller's completion future. Never ftruncates the file -- it's
+        // preallocated once (see StartWalWriters/OpenAndPreallocateWalFile)
+        // and each batch's self-framed, CRC-checked bytes simply overwrite
+        // from offset 0.
         //
         // preopened_path/preopened_fd: when StartWalWriters already
         // opened+fallocated this shard's file up front (the production
@@ -506,14 +519,17 @@ class XStore {
         // Called once from InitDB, before the server starts taking traffic:
         // replays every shard WAL file left over from an unclean shutdown
         // (WAL_SHARD_COUNT of them, regardless of how many were actually
-        // active as writers in this run -- see active_wal_shard_count).
-        // Does not truncate afterward -- same reasoning as WalWriterLoop:
-        // preallocated files, CRC-framed records, idempotent by
-        // construction (XStore's direct-offset addressing means
-        // re-applying an already-applied record is a harmless overwrite of
-        // identical bytes) so this never needs to track which records were
-        // already durable in the data
-        // file before the crash.
+        // active as writers in this run -- see active_wal_shard_count),
+        // then checkpoints via InvalidateWalFileHeader (never ftruncate --
+        // same reasoning as WalWriterLoop). Idempotent by construction
+        // (XStore's direct-offset addressing means re-applying an already-
+        // applied record is a harmless overwrite of identical bytes) so
+        // this never needs to track which records were already durable in
+        // the data file before the crash -- but the checkpoint still must
+        // run and must be durable, since the DB a stale record targets can
+        // be deleted and recreated by the time of a *later* restart, at
+        // which point "idempotent re-apply" no longer holds (see
+        // InvalidateWalFileHeader).
         void ReplayWal();
 
         // Fetch targetFile's cached fd, creating (and ftruncate'ing to

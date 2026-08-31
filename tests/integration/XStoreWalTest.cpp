@@ -216,3 +216,105 @@ TEST_F(XStoreWalTest, ConcurrentInsertsAllPersist) {
         }
     }
 }
+
+// Regression test for a real bug found via the XBench benchmark harness:
+// its reset script does `rm -rf DataStore/BENCH_DB` between runs but never
+// touches DataStore/WAL/ -- so a WAL record durably written in a PRIOR run,
+// for a DB deleted before THIS run's InitDB ever gets a chance to replay
+// it, would fail ApplyWalRecord ("Unable to open <year>.XSTORE" -- the DB's
+// directory doesn't exist yet, since ReplayWal always runs before any
+// client can reach CreateDB). Under the original truncate-per-commit
+// design this self-healed within one run (the file was ~always empty by
+// the time of the next crash); the preallocated/never-truncated redesign
+// needed an explicit checkpoint (InvalidateWalFileHeader) to avoid
+// replaying -- and failing on -- the same orphaned record on every single
+// future restart forever.
+TEST_F(XStoreWalTest, ReplayOfOrphanedRecordIsNotRetriedForever) {
+    // Hand-write a WAL record for a DB that was never created in this
+    // scratch dir at all -- standing in for "existed in a prior run, its
+    // directory was since deleted out from under this one".
+    std::filesystem::path wal_dir = scratch->test_root / "DataStore" / "WAL";
+    std::filesystem::create_directories(wal_dir);
+    std::filesystem::path wal_file = wal_dir / "shard_0.WAL";
+
+    XStore_Proto::RowData row = MakeRow(13.0);
+    std::string row_bytes(64, '\0');
+    row.SerializeToArray(row_bytes.data(), static_cast<int>(row.ByteSizeLong()));
+
+    std::string db_name = "GONE_DB";
+    std::string payload;
+    auto append_pod = [&](auto value) {
+        payload.append(reinterpret_cast<const char *>(&value), sizeof(value));
+    };
+    uint16_t db_name_len = static_cast<uint16_t>(db_name.size());
+    uint16_t row_length = 64;
+    int32_t time_res = static_cast<int32_t>(XStore_Proto::SECOND);
+    uint32_t row_count = 1;
+    uint64_t epoch_time = 1700000003ULL;
+    append_pod(db_name_len);
+    append_pod(row_length);
+    append_pod(time_res);
+    append_pod(row_count);
+    payload.append(db_name);
+    append_pod(epoch_time);
+    payload.append(row_bytes);
+
+    auto crc32 = [](const std::string &data) {
+        static const std::array<uint32_t, 256> table = [] {
+            std::array<uint32_t, 256> t{};
+            for (uint32_t i = 0; i < 256; ++i) {
+                uint32_t c = i;
+                for (int k = 0; k < 8; ++k) {
+                    c = (c & 1u) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+                }
+                t[i] = c;
+            }
+            return t;
+        }();
+        uint32_t crc = 0xFFFFFFFFu;
+        for (unsigned char byte : data) {
+            crc = table[(crc ^ byte) & 0xFFu] ^ (crc >> 8);
+        }
+        return crc ^ 0xFFFFFFFFu;
+    };
+    uint32_t crc = crc32(payload);
+
+    std::string record;
+    auto append_pod_record = [&](auto value) {
+        record.append(reinterpret_cast<const char *>(&value), sizeof(value));
+    };
+    uint32_t record_len = static_cast<uint32_t>(4 + payload.size());
+    append_pod_record(record_len);
+    append_pod_record(crc);
+    record.append(payload);
+
+    std::ofstream out(wal_file, std::ios::binary | std::ios::trunc);
+    out.write(record.data(), static_cast<std::streamsize>(record.size()));
+    out.close();
+
+    // Constructing XStore runs InitDB -> ReplayWal once, automatically
+    // (the "first restart after the crash"). GONE_DB's directory was
+    // never created, so ApplyWalRecord must fail (logged, not fatal) --
+    // the real assertion is that the checkpoint still ran anyway.
+    XStore store;
+
+    std::ifstream in(wal_file, std::ios::binary);
+    uint32_t header_after_first_replay = 0xFFFFFFFFu;
+    in.read(reinterpret_cast<char *>(&header_after_first_replay), 4);
+    in.close();
+    EXPECT_EQ(header_after_first_replay, 0u)
+        << "orphaned record's WAL header must be invalidated after replay, "
+           "even though ApplyWalRecord failed -- otherwise it replays (and "
+           "fails) again on every future restart";
+
+    // A second explicit "restart" against the same file must find nothing
+    // left to replay (and therefore log no further apply failure) -- calls
+    // InitDB directly since the constructor-level once-per-directory guard
+    // already ran it once above (same pattern as ReplayRecoversUnappliedRecord).
+    store.InitDB();
+    std::ifstream in2(wal_file, std::ios::binary);
+    uint32_t header_after_second_replay = 0xFFFFFFFFu;
+    in2.read(reinterpret_cast<char *>(&header_after_second_replay), 4);
+    in2.close();
+    EXPECT_EQ(header_after_second_replay, 0u);
+}
