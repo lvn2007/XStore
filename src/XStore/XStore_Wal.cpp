@@ -16,7 +16,6 @@
 
 std::array<XStore::WalShard, XStoreTunables::WAL_SHARD_COUNT> XStore::wal_shards;
 std::atomic<size_t> XStore::active_wal_shard_count{XStoreTunables::WAL_SHARD_COUNT};
-std::atomic<size_t> XStore::next_wal_shard{0};
 
 namespace {
 
@@ -252,17 +251,19 @@ void XStore::InvalidateWalFileHeader(int fd, const std::string &wal_path) {
 }
 
 bool XStore::EnqueueWalRecord(WalRecord record) {
-    // Round-robin, not content-derived: the WAL is a short-lived staging
-    // log (each batch's bytes get overwritten wholesale by the next one,
-    // not appended), so a given row has no need to keep landing in the
-    // same shard across separate requests -- ApplyWalRecord's own
-    // per-offset locking is what actually orders/serializes writes to the
-    // same row in the real data file. Ticket-counter assignment spreads
-    // load evenly regardless of DB count or timestamp pattern (a hash of
-    // db_base_path or of the row's timestamp both collapse to ~1 shard for
-    // a single hot DB doing current-time inserts -- the common case).
+    // Per-DB hash, not round-robin: tried round-robin first (spreads a
+    // single hot DB across every active shard), but on a single physical
+    // storage device that backfires -- it splits what could be one shard's
+    // large, well-amortized batch into N shards' worth of smaller batches,
+    // each paying its own fsync, when the device likely can't actually
+    // fsync those N streams in parallel anyway. Per-DB hashing keeps one
+    // DB's writers funneled through one shard, which lets the group-commit
+    // gather window (see WalWriterLoop) batch them into fewer, bigger
+    // fsyncs -- the thing that actually amortizes cost on one device.
+    // Multiple DBs still parallelize naturally across shards, same as
+    // before either version of this code existed.
     size_t active = active_wal_shard_count.load(std::memory_order_relaxed);
-    size_t shard_idx = next_wal_shard.fetch_add(1, std::memory_order_relaxed) % active;
+    size_t shard_idx = std::hash<std::string>{}(record.db_base_path) % active;
     WalShard &shard = wal_shards[shard_idx];
 
     // Backpressure: wait (never reject) for this shard's queue to drain
@@ -375,20 +376,29 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
             std::chrono::microseconds(XStoreTunables::WAL_GROUP_COMMIT_WINDOW_US));
         if (count == 0) continue;
 
-        // Opportunistic group-commit gather: the blocking wait above
-        // returns the instant the first record arrives, which alone gives
-        // near-zero batching under concurrent load. A few cheap,
-        // non-blocking follow-up drains (no sleep -- either something's
-        // already there or it isn't) catch anything from other producers
-        // that landed in the last few microseconds, so their fsync gets
-        // amortized across the whole group instead of each paying for
-        // their own. Stops the moment a drain comes back empty or the
-        // batch fills, so a lone writer pays for at most
-        // WAL_GATHER_EXTRA_DRAINS extra atomic checks, never a wait.
-        for (unsigned extra = 0; extra < XStoreTunables::WAL_GATHER_EXTRA_DRAINS && count < XStoreTunables::WAL_BATCH_MAX_RECORDS; ++extra) {
-            size_t got = shard.queue.try_dequeue_bulk(batch.data() + count, XStoreTunables::WAL_BATCH_MAX_RECORDS - count);
-            if (got == 0) break;
-            count += got;
+        // Group-commit gather: the blocking wait above returns the instant
+        // the first record arrives, which alone gives near-zero batching
+        // under concurrent load (a non-blocking peek only catches what's
+        // already sitting in the queue at that exact instant -- tried that
+        // first, it didn't move the needle). Instead, actively linger for
+        // up to WAL_GATHER_WINDOW_US, polling every WAL_GATHER_POLL_US,
+        // stopping the moment the batch fills or the window elapses --
+        // whichever comes first, same dual-trigger shape as Kafka's
+        // linger.ms + batch.size. This DOES cost a lone writer real added
+        // latency (up to the full window, every commit) in exchange for
+        // real batching once per-DB hashing (see EnqueueWalRecord) funnels
+        // concurrent writers of the same DB onto this one shard.
+        if (count < XStoreTunables::WAL_BATCH_MAX_RECORDS) {
+            auto gather_deadline = std::chrono::steady_clock::now()
+                + std::chrono::microseconds(XStoreTunables::WAL_GATHER_WINDOW_US);
+            while (count < XStoreTunables::WAL_BATCH_MAX_RECORDS) {
+                size_t got = shard.queue.try_dequeue_bulk(batch.data() + count, XStoreTunables::WAL_BATCH_MAX_RECORDS - count);
+                count += got;
+                if (count >= XStoreTunables::WAL_BATCH_MAX_RECORDS || std::chrono::steady_clock::now() >= gather_deadline) {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::microseconds(XStoreTunables::WAL_GATHER_POLL_US));
+            }
         }
 
         std::fill(resolved.begin(), resolved.begin() + static_cast<long>(count), false);
@@ -464,17 +474,18 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
                 resolved[i] = true;
             }
 
-            // Checkpoint: invalidate (not truncate) every file this batch
-            // durably wrote to. Skips a file whose fsync FAILED above --
-            // its bytes are the only durable record of those rows, so
-            // leaving them intact (to be retried on the next restart) beats
-            // erasing the one copy that exists. No file-size change here,
-            // so no metadata-journal cost -- see InvalidateWalFileHeader.
-            for (auto &entry : bytes_by_file) {
-                if (file_durable[entry.first]) {
-                    InvalidateWalFileHeader(wal_fds[entry.first], entry.first);
-                }
-            }
+            // No per-commit checkpoint here (used to call
+            // InvalidateWalFileHeader on every durable batch -- a second
+            // fsync on every single commit). Not needed: ReplayWal already
+            // invalidates every shard file unconditionally on every
+            // startup, regardless of whether anything was found to replay
+            // or whether the apply succeeded. That alone fully closes the
+            // "orphaned record replays forever" bug -- the record left
+            // sitting here after a live commit gets naturally overwritten
+            // by this shard's next real write (offset-0 overwrite, same as
+            // always), and if no next write ever comes, the worst case is
+            // one redundant (harmless, idempotent) re-apply attempt the
+            // next time the process restarts, not a repeat-forever failure.
         } catch (const std::exception &ex) {
             spdlog::error("[WAL] - Writer loop caught exception, failing this batch: {}", ex.what());
             for (size_t i = 0; i < count; ++i) {

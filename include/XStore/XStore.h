@@ -226,8 +226,6 @@ class XStore {
         // so any (theoretical) use before StartWalWriters runs still stays
         // in-bounds rather than modulo-by-zero.
         static std::atomic<size_t> active_wal_shard_count;
-        // Enqueue-side round-robin ticket counter -- see EnqueueWalRecord.
-        static std::atomic<size_t> next_wal_shard;
 
         std::string permitted_time_resolution[3] = {"SECOND", "MILLISECOND", "MICROSECOND"};
 
@@ -434,10 +432,13 @@ class XStore {
         // active count is still fully recovered.
         static void StartWalWriters(const std::string &data_store_dir);
 
-        // Round-robins recordToEnqueue onto one of the active WAL shards
-        // (ticket-counter assignment, not content-derived -- see
-        // next_wal_shard; a single hot DB spreads across every active
-        // shard instead of collapsing onto one), pushes it onto that
+        // Hashes recordToEnqueue.db_base_path onto one of the active WAL
+        // shards (tried round-robin first -- spreads one hot DB across
+        // every shard, but on a single physical device that fragments what
+        // could be one shard's large, well-amortized batch into many
+        // smaller ones, each paying its own fsync; per-DB hashing keeps one
+        // DB's writes funneled through one shard so the group-commit
+        // gather window can actually batch them). Pushes it onto that
         // shard's queue, and -- unless durability_mode is ASYNC_ONLY --
         // blocks until that shard's writer thread has fsync'd and applied
         // it, returning whether it was actually durable (false on a WAL
@@ -479,33 +480,42 @@ class XStore {
         // then.
         [[nodiscard]] static bool ApplyWalRecord(const WalRecord &record_to_apply);
 
-        // Checkpoint step for a preallocated WAL file: zeroes just the
-        // 4-byte record_len header at offset 0 and fsyncs that (tiny, in-
-        // place, already-allocated) write -- never ftruncate/resize.
-        // record_len=0 fails ParseWalRecord's own length check immediately,
-        // so a zeroed file replays as "nothing pending", same as an empty
-        // one did under the old truncate-based design, but without the
-        // shrink-then-must-reallocate metadata-journal cost that design
-        // paid on every single commit (see WalWriterLoop). Durability
-        // matters here: a DB can be deleted and recreated (RemoveDB, or an
-        // external wipe) between this record's apply and the next process
-        // restart -- if the invalidation itself weren't fsync'd before a
-        // crash, the still-valid-looking old bytes would resurface at the
-        // next ReplayWal and get reapplied against whatever now lives at
-        // that path, not the DB they actually belonged to.
+        // Checkpoint step for a preallocated WAL file, called only from
+        // ReplayWal (not from every live commit -- see WalWriterLoop):
+        // zeroes just the 4-byte record_len header at offset 0 and fsyncs
+        // that (tiny, in-place, already-allocated) write -- never
+        // ftruncate/resize. record_len=0 fails ParseWalRecord's own length
+        // check immediately, so a zeroed file replays as "nothing
+        // pending". Durability matters here: a DB can be deleted and
+        // recreated (RemoveDB, or an external wipe) between a record's
+        // apply and the next process restart -- if the invalidation itself
+        // weren't fsync'd before a crash, the still-valid-looking old
+        // bytes would resurface at the *next* ReplayWal too and get
+        // reapplied against whatever now lives at that path, not the DB
+        // they actually belonged to. Calling this once per shard file per
+        // restart (regardless of what was or wasn't found to replay) is
+        // enough to guarantee that -- a live commit's own record doesn't
+        // additionally need it: the shard's next real write naturally
+        // overwrites it (offset-0 overwrite, same mechanism), and if no
+        // next write ever comes, the only cost is one redundant, harmless,
+        // idempotent re-apply attempt at the next restart, not a
+        // repeat-forever failure -- not worth a second fsync on every
+        // single commit to avoid.
         static void InvalidateWalFileHeader(int fd, const std::string &wal_path);
 
         // Body of one shard's dedicated writer thread: waits (bounded by
-        // WAL_GROUP_COMMIT_WINDOW_US) for the first record, then makes
-        // WAL_GATHER_EXTRA_DRAINS more non-blocking dequeue attempts to
-        // pick up anything that landed a few microseconds later (batches
-        // concurrent commits into one fsync without ever sleeping), fsyncs
-        // the batch to WAL, applies every record, checkpoints via
-        // InvalidateWalFileHeader, then releases every synchronous
+        // WAL_GROUP_COMMIT_WINDOW_US) for the first record, then actively
+        // lingers up to WAL_GATHER_WINDOW_US (polling every
+        // WAL_GATHER_POLL_US) for more to arrive on the same shard --
+        // stopping the moment the batch fills or the window elapses,
+        // whichever first -- so genuinely concurrent commits share one
+        // fsync instead of each paying for their own. Fsyncs the batch to
+        // WAL, applies every record, then releases every synchronous
         // caller's completion future. Never ftruncates the file -- it's
         // preallocated once (see StartWalWriters/OpenAndPreallocateWalFile)
         // and each batch's self-framed, CRC-checked bytes simply overwrite
-        // from offset 0.
+        // from offset 0; no per-commit checkpoint either (see
+        // InvalidateWalFileHeader for why that's safe to skip here).
         //
         // preopened_path/preopened_fd: when StartWalWriters already
         // opened+fallocated this shard's file up front (the production

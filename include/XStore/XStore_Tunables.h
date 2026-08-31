@@ -66,12 +66,24 @@ inline constexpr const char* WAL_DIR_NAME                = "WAL";
 // this stays a conservative fraction of core count rather than 1:1.
 inline constexpr size_t      WAL_MIN_ACTIVE_SHARDS       = 2;
 
-// Extra, non-blocking dequeue attempts a writer makes right after its
-// first (blocking) dequeue returns, before starting the fsync -- lets
-// genuinely concurrent enqueues that landed a few microseconds later ride
-// along in the same batch/fsync, without ever sleeping (so a lone writer
-// pays ~zero added latency: these are cheap atomic checks, not a wait).
-inline constexpr unsigned    WAL_GATHER_EXTRA_DRAINS     = 2;
+// Group-commit gather window: a real, bounded LINGER after the first
+// record arrives -- not just a couple of free non-blocking peeks (that
+// version measured out to ~zero real batching under load: a peek only
+// catches something already sitting in the queue at that exact instant).
+// The writer actively waits (short poll loop, not the full window as one
+// sleep) until EITHER this many microseconds have elapsed OR the batch
+// hits WAL_BATCH_MAX_RECORDS, whichever comes first -- same dual-trigger
+// shape as Kafka producer batching (linger.ms + batch.size). Unlike the
+// non-blocking version, this DOES cost a lone writer up to this much
+// added latency every commit, even with nothing else to batch with --
+// deliberate trade: kept short (500us, two orders of magnitude below
+// WAL_GROUP_COMMIT_WINDOW_US) so that cost stays small, while still being
+// long enough for concurrent writers on the SAME shard (which per-DB
+// hashing now funnels together -- see EnqueueWalRecord) to land in the
+// same batch and share its fsync.
+inline constexpr unsigned    WAL_GATHER_WINDOW_US        = 500;
+// Poll interval while waiting out the gather window above.
+inline constexpr unsigned    WAL_GATHER_POLL_US          = 50;
 
 // Real block allocation (fallocate, not a sparse ftruncate) reserved once
 // per WAL shard file so ordinary commits never pay a filesystem metadata
