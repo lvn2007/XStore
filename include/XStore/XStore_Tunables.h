@@ -1,5 +1,6 @@
 #pragma once
 #include <cstddef>
+#include <cstdint>
 
 // Single source of truth for every tunable cap/shard-count/timing knob in
 // XStore. XStore.h re-exposes the cache-related ones as XStore::<NAME>
@@ -89,12 +90,36 @@ inline constexpr unsigned    WAL_GATHER_POLL_US          = 50;
 // per WAL shard file so ordinary commits never pay a filesystem metadata
 // journal update (block alloc + extent-map growth) on top of the data
 // fsync -- see the removed per-commit ftruncate(fd,0) this replaces.
-// Large enough to comfortably hold a full WAL_BATCH_MAX_RECORDS batch of
-// realistically-sized rows; a batch that somehow exceeds it still works
-// correctly (pwrite just extends the file, same as before this change),
-// it only loses the no-metadata-journal benefit for that one oversized
-// write.
-inline constexpr size_t      WAL_FILE_PREALLOC_BYTES     = 8u * 1024 * 1024;
+//
+// Sized to make growth-past-preallocation structurally IMPOSSIBLE for
+// today's only WAL producer, not just unlikely: the bound below is the
+// true worst case allowed by the wire format's field widths (dbNameLen/
+// rowLength are each a wire u16, so 65535 is a real reachable max, not a
+// practical guess), times WAL_BATCH_MAX_RECORDS. This is what lets the
+// writer loop use a plain fdatasync() instead of fsync() unconditionally
+// (XStore_Wal.cpp) -- fdatasync() alone is only correct when the pwrite
+// it syncs never changes file size/metadata, which requires the write to
+// always land inside the preallocated region. The static_assert below
+// enforces that invariant so it can't silently break if WAL_BATCH_MAX_
+// RECORDS is ever raised.
+//
+// NOTE: this bound assumes every WalRecord carries exactly 1 row (true
+// for UnaryInsert, the only current WAL producer -- see EnqueueWalRecord
+// call sites). A future multi-row Batch/Range WAL path would need to
+// either bound row count per record too, or bring back a runtime size
+// check before the live-commit fsync/fdatasync call.
+inline constexpr size_t WAL_RECORD_HEADER_BYTES = 20; // recordLen(4)+crc32(4)+dbNameLen(2)+rowLength(2)+timeResolution(4)+rowCount(4) -- see SerializeWalRecord
+inline constexpr size_t WAL_MAX_DB_NAME_BYTES   = 65535; // dbNameLen wire field is a u16
+inline constexpr size_t WAL_MAX_ROW_BYTES       = 65535; // rowLength wire field is a u16
+inline constexpr size_t WAL_MAX_RECORD_BYTES    =
+    WAL_RECORD_HEADER_BYTES + WAL_MAX_DB_NAME_BYTES + sizeof(uint64_t) /* epoch_time */ + WAL_MAX_ROW_BYTES;
+inline constexpr size_t WAL_MAX_BATCH_BYTES     = WAL_BATCH_MAX_RECORDS * WAL_MAX_RECORD_BYTES;
+
+inline constexpr size_t      WAL_FILE_PREALLOC_BYTES     = 40u * 1024 * 1024;
+static_assert(WAL_FILE_PREALLOC_BYTES >= WAL_MAX_BATCH_BYTES,
+              "WAL_FILE_PREALLOC_BYTES must cover the worst-case batch so the live-commit "
+              "fdatasync() (not fsync()) stays correct -- a batch write must never be able "
+              "to grow the file past its preallocated region.");
 
 // Enqueue-side backpressure: once a shard's queue depth reaches this many
 // pending records, EnqueueWalRecord blocks the calling (client-handling)

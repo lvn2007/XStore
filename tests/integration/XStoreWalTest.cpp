@@ -2,6 +2,9 @@
 #include <gtest/gtest.h>
 #include "include/XStore/XStore.h"
 #include "XStoreTestSupport.h"
+#include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -215,6 +218,70 @@ TEST_F(XStoreWalTest, ConcurrentInsertsAllPersist) {
             EXPECT_DOUBLE_EQ(rep.data().fielddata(0).doubledata(), static_cast<double>(t * kPerThread + i));
         }
     }
+}
+
+// Regression guard for the durability-mode-aware gather fix: a
+// SYNC_PER_COMMIT insert must not pay the (up to WAL_GATHER_WINDOW_US)
+// group-commit linger even while a concurrent GROUP_COMMIT workload is
+// actively hammering the SAME DB (and therefore the same shard, via the
+// per-DB hash) -- before the fix, SYNC_PER_COMMIT and GROUP_COMMIT ran
+// identical gather code, so a SYNC_PER_COMMIT record landing mid-gather
+// behind concurrent GROUP_COMMIT traffic paid the full window too.
+// Compares SYNC_PER_COMMIT latency solo vs. under concurrent GROUP_COMMIT
+// load rather than asserting an absolute latency bound, since real fsync
+// cost varies by machine/storage -- what must NOT happen is systematic
+// inflation by anywhere near WAL_GATHER_WINDOW_US once the fix is in place.
+TEST_F(XStoreWalTest, SyncPerCommitLatencyUnaffectedByConcurrentGroupCommit) {
+    XStore store;
+    store.CreateDB("WALMIXED", XStore_Proto::SECOND, 64);
+
+    constexpr int kBaselineSamples = 20;
+    constexpr int kConcurrentSamples = 20;
+
+    auto median_latency_us = [&](int samples, unsigned long long ts_start) {
+        std::vector<long long> latencies;
+        latencies.reserve(static_cast<size_t>(samples));
+        for (int i = 0; i < samples; ++i) {
+            XStore_Proto::UnaryInsert_REP rep;
+            auto t0 = std::chrono::steady_clock::now();
+            store.UnaryInsert(ts_start + static_cast<unsigned long long>(i), MakeRow(1.0), "WALMIXED", &rep, XStore_Proto::SYNC_PER_COMMIT);
+            auto t1 = std::chrono::steady_clock::now();
+            latencies.push_back(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+        }
+        std::sort(latencies.begin(), latencies.end());
+        return latencies[latencies.size() / 2];
+    };
+
+    long long baseline_median_us = median_latency_us(kBaselineSamples, 1700200000ULL);
+
+    std::atomic<bool> stop_background{false};
+    std::thread background([&]() {
+        unsigned long long ts = 1700300000ULL;
+        while (!stop_background.load(std::memory_order_relaxed)) {
+            XStore_Proto::UnaryInsert_REP rep;
+            store.UnaryInsert(ts++, MakeRow(2.0), "WALMIXED", &rep, XStore_Proto::GROUP_COMMIT);
+        }
+    });
+
+    // Give the background thread a moment to actually start hammering
+    // before measuring, so the concurrent-load samples really do land
+    // mid-gather-window against real GROUP_COMMIT traffic.
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    long long concurrent_median_us = median_latency_us(kConcurrentSamples, 1700400000ULL);
+
+    stop_background.store(true, std::memory_order_relaxed);
+    background.join();
+
+    // Tolerance well under WAL_GATHER_WINDOW_US (500us): the old (pre-fix)
+    // behavior would add up to that much, every single commit. This guards
+    // specifically against a regression back to that -- not against
+    // ordinary run-to-run fsync noise.
+    long long tolerance_us = static_cast<long long>(XStoreTunables::WAL_GATHER_WINDOW_US) / 2;
+    EXPECT_LE(concurrent_median_us, baseline_median_us + tolerance_us)
+        << "SYNC_PER_COMMIT median latency under concurrent GROUP_COMMIT load ("
+        << concurrent_median_us << "us) inflated well past solo baseline ("
+        << baseline_median_us << "us) -- looks like it's paying the group-commit "
+           "gather window again";
 }
 
 // Regression test for a real bug found via the XBench benchmark harness:

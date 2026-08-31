@@ -239,7 +239,10 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply) {
 
 void XStore::InvalidateWalFileHeader(int fd, const std::string &wal_path) {
     static constexpr char ZERO_LEN_HEADER[4] = {0, 0, 0, 0};
-    if (pwrite(fd, ZERO_LEN_HEADER, sizeof(ZERO_LEN_HEADER), 0) != static_cast<ssize_t>(sizeof(ZERO_LEN_HEADER)) || fsync(fd) != 0) {
+    // fdatasync, not fsync: this write never changes file size (always inside
+    // the preallocated region, see WAL_FILE_PREALLOC_BYTES), so metadata
+    // durability isn't needed, only the 4 written bytes.
+    if (pwrite(fd, ZERO_LEN_HEADER, sizeof(ZERO_LEN_HEADER), 0) != static_cast<ssize_t>(sizeof(ZERO_LEN_HEADER)) || fdatasync(fd) != 0) {
         // Not fatal to the batch that just durably applied -- those rows
         // are safely on disk in the real data file regardless. Worst case
         // on a crash before this is retried: the stale record replays
@@ -376,24 +379,45 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
             std::chrono::microseconds(XStoreTunables::WAL_GROUP_COMMIT_WINDOW_US));
         if (count == 0) continue;
 
+        // SYNC_PER_COMMIT wants the lowest latency possible: fsync as soon
+        // as whatever's already queued is grabbed, no added wait. GROUP_
+        // COMMIT explicitly opts into lingering for more batching. Scan
+        // whatever the blocking dequeue above just grabbed for a
+        // SYNC_PER_COMMIT record up front, so a batch that already has one
+        // skips the gather loop below entirely instead of paying the gather
+        // window for no reason.
+        auto has_sync_per_commit = [&](size_t begin, size_t end) {
+            for (size_t i = begin; i < end; ++i) {
+                if (batch[i].durability_mode == XStore_Proto::SYNC_PER_COMMIT) return true;
+            }
+            return false;
+        };
+        bool flush_now = has_sync_per_commit(0, count);
+
         // Group-commit gather: the blocking wait above returns the instant
         // the first record arrives, which alone gives near-zero batching
         // under concurrent load (a non-blocking peek only catches what's
         // already sitting in the queue at that exact instant -- tried that
         // first, it didn't move the needle). Instead, actively linger for
         // up to WAL_GATHER_WINDOW_US, polling every WAL_GATHER_POLL_US,
-        // stopping the moment the batch fills or the window elapses --
-        // whichever comes first, same dual-trigger shape as Kafka's
-        // linger.ms + batch.size. This DOES cost a lone writer real added
-        // latency (up to the full window, every commit) in exchange for
-        // real batching once per-DB hashing (see EnqueueWalRecord) funnels
-        // concurrent writers of the same DB onto this one shard.
-        if (count < XStoreTunables::WAL_BATCH_MAX_RECORDS) {
+        // stopping the moment the batch fills, the window elapses, or a
+        // SYNC_PER_COMMIT record joins the batch -- whichever comes first,
+        // same dual-trigger shape as Kafka's linger.ms + batch.size, plus
+        // the SYNC_PER_COMMIT override. This DOES cost a lone GROUP_COMMIT
+        // writer real added latency (up to the full window, every commit)
+        // in exchange for real batching once per-DB hashing (see
+        // EnqueueWalRecord) funnels concurrent writers of the same DB onto
+        // this one shard. A lone SYNC_PER_COMMIT writer pays none of it.
+        if (!flush_now && count < XStoreTunables::WAL_BATCH_MAX_RECORDS) {
             auto gather_deadline = std::chrono::steady_clock::now()
                 + std::chrono::microseconds(XStoreTunables::WAL_GATHER_WINDOW_US);
             while (count < XStoreTunables::WAL_BATCH_MAX_RECORDS) {
+                size_t before = count;
                 size_t got = shard.queue.try_dequeue_bulk(batch.data() + count, XStoreTunables::WAL_BATCH_MAX_RECORDS - count);
                 count += got;
+                if (got > 0 && has_sync_per_commit(before, count)) {
+                    break;
+                }
                 if (count >= XStoreTunables::WAL_BATCH_MAX_RECORDS || std::chrono::steady_clock::now() >= gather_deadline) {
                     break;
                 }
@@ -445,9 +469,15 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
                     fd = it->second;
                 }
 
+                // fdatasync, not fsync: WAL_FILE_PREALLOC_BYTES is sized (see
+                // its comment in XStore_Tunables.h, enforced by a
+                // static_assert there) to make this write structurally
+                // unable to grow the file past its preallocated region, so
+                // there's no metadata (st_size) change to durably persist --
+                // only the written bytes matter.
                 ssize_t written = pwrite(fd, bytes.data(), bytes.size(), 0);
-                if (written != static_cast<ssize_t>(bytes.size()) || fsync(fd) != 0) {
-                    spdlog::error("[WAL] - Failed to durably write/fsync {}", wal_path);
+                if (written != static_cast<ssize_t>(bytes.size()) || fdatasync(fd) != 0) {
+                    spdlog::error("[WAL] - Failed to durably write/fdatasync {}", wal_path);
                     continue;
                 }
                 file_durable[wal_path] = true;

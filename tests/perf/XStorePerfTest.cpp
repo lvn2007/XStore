@@ -133,6 +133,49 @@ TEST_F(XStorePerfTest, UnaryInsertThroughput) {
     ReportPerf({"UnaryInsert", n, elapsed});
 }
 
+// Same shape as UnaryInsertThroughput above, explicit GROUP_COMMIT. Single-
+// threaded/single-client, so this is NOT expected to show GROUP_COMMIT's
+// amortized-fsync benefit (nothing concurrent to batch with) -- it exists to
+// confirm GROUP_COMMIT's own per-commit gather-window cost in isolation, and
+// as a baseline to compare against UnaryInsertRandomConcurrentThroughput-style
+// concurrent runs where the batching payoff should actually show up.
+TEST_F(XStorePerfTest, UnaryInsertThroughput_GroupCommit) {
+    XStore store;
+    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    const unsigned long long n = PerfOpCount(200'000);
+
+    XStore_Proto::UnaryInsert_REP rep;
+    auto start = std::chrono::steady_clock::now();
+    for (unsigned long long i = 0; i < n; i++) {
+        store.UnaryInsert(BASE_TS + i, PerfRow(i), "PERFDB", &rep, XStore_Proto::GROUP_COMMIT);
+    }
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+    ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << "last insert failed: " << rep.insertstatus();
+    ReportPerf({"UnaryInsert[GROUP_COMMIT]", n, elapsed});
+}
+
+// Same shape, explicit ASYNC_ONLY -- the "doesn't wait for durability" mode.
+// Existing implementation still routes this through the full WAL pipeline
+// (enqueue/gather/fsync/apply), just without the caller waiting on the
+// promise; this number is what a future WAL-bypass-for-ASYNC_ONLY decision
+// should be compared against.
+TEST_F(XStorePerfTest, UnaryInsertThroughput_AsyncOnly) {
+    XStore store;
+    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    const unsigned long long n = PerfOpCount(200'000);
+
+    XStore_Proto::UnaryInsert_REP rep;
+    auto start = std::chrono::steady_clock::now();
+    for (unsigned long long i = 0; i < n; i++) {
+        store.UnaryInsert(BASE_TS + i, PerfRow(i), "PERFDB", &rep, XStore_Proto::ASYNC_ONLY);
+    }
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+    ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << "last insert failed: " << rep.insertstatus();
+    ReportPerf({"UnaryInsert[ASYNC_ONLY]", n, elapsed});
+}
+
 TEST_F(XStorePerfTest, UnaryQueryThroughput) {
     XStore store;
     store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
