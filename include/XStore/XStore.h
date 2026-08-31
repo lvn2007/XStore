@@ -220,6 +220,14 @@ class XStore {
             std::atomic<bool> stop_flag{false};
         };
         static std::array<WalShard, XStoreTunables::WAL_SHARD_COUNT> wal_shards;
+        // How many of wal_shards' WAL_SHARD_COUNT slots actually have a
+        // running writer thread -- set once by StartWalWriters from
+        // hardware_concurrency(). Defaults to the full compile-time count
+        // so any (theoretical) use before StartWalWriters runs still stays
+        // in-bounds rather than modulo-by-zero.
+        static std::atomic<size_t> active_wal_shard_count;
+        // Enqueue-side round-robin ticket counter -- see EnqueueWalRecord.
+        static std::atomic<size_t> next_wal_shard;
 
         std::string permitted_time_resolution[3] = {"SECOND", "MILLISECOND", "MICROSECOND"};
 
@@ -413,16 +421,37 @@ class XStore {
         // because wal_shards is process-wide static state, not tied to any
         // one XStore instance's lifetime (instances are constructed one per
         // worker thread; the WAL writer pool must outlive all of them).
-        static void StartWalWriters();
+        // Takes the first instance's data_store_dir (production: every
+        // instance shares one, see the constructor) to eagerly open and
+        // fallocate each active shard's WAL file up front, rather than
+        // lazily on that shard's first write.
+        //
+        // Also computes active_wal_shard_count from hardware_concurrency(),
+        // clamped to [WAL_MIN_ACTIVE_SHARDS, WAL_SHARD_COUNT] -- only that
+        // many of the WAL_SHARD_COUNT array slots get a writer thread /
+        // ever get routed traffic; ReplayWal still scans the full
+        // WAL_SHARD_COUNT range regardless, so a prior run with a higher
+        // active count is still fully recovered.
+        static void StartWalWriters(const std::string &data_store_dir);
 
-        // Hashes recordToEnqueue.db_base_path to a shard, pushes it onto
-        // that shard's queue, and -- unless durability_mode is ASYNC_ONLY --
+        // Round-robins recordToEnqueue onto one of the active WAL shards
+        // (ticket-counter assignment, not content-derived -- see
+        // next_wal_shard; a single hot DB spreads across every active
+        // shard instead of collapsing onto one), pushes it onto that
+        // shard's queue, and -- unless durability_mode is ASYNC_ONLY --
         // blocks until that shard's writer thread has fsync'd and applied
         // it, returning whether it was actually durable (false on a WAL
         // write/fsync failure or a failed apply, not just on the queue push
         // itself failing). ASYNC_ONLY returns true immediately after a
         // successful enqueue -- no durability signal is available yet by
         // design.
+        //
+        // Before enqueueing, blocks the calling thread (polling, not
+        // rejecting) if the target shard's queue is already at
+        // WAL_QUEUE_HIGH_WATERMARK -- applies to every durability mode,
+        // including ASYNC_ONLY, so a writer that can't keep up bounds
+        // memory growth and the crash-loss window instead of accepting
+        // unboundedly while still reporting "success".
         static bool EnqueueWalRecord(WalRecord record);
 
         // Serializes/parses the on-disk WAL wire format (see
@@ -451,18 +480,39 @@ class XStore {
         [[nodiscard]] static bool ApplyWalRecord(const WalRecord &record_to_apply);
 
         // Body of one shard's dedicated writer thread: waits (bounded by
-        // WAL_GROUP_COMMIT_WINDOW_US) for records to batch, fsyncs the
-        // batch to WAL, applies every record, truncates the WAL file back
-        // to empty (checkpoint), then releases every synchronous caller's
-        // completion future.
-        static void WalWriterLoop(size_t shard_idx);
+        // WAL_GROUP_COMMIT_WINDOW_US) for the first record, then makes
+        // WAL_GATHER_EXTRA_DRAINS more non-blocking dequeue attempts to
+        // pick up anything that landed a few microseconds later (batches
+        // concurrent commits into one fsync without ever sleeping), fsyncs
+        // the batch to WAL, applies every record, then releases every
+        // synchronous caller's completion future. Does not truncate the
+        // WAL file -- it's preallocated once (see StartWalWriters/
+        // OpenAndPreallocateWalFile) and each batch's self-framed,
+        // CRC-checked bytes simply overwrite from offset 0; ReplayWal's
+        // parse loop stops cleanly the instant it hits a torn/stale tail,
+        // and re-applying an already-applied record is a harmless
+        // idempotent overwrite, so nothing needs to physically shrink the
+        // file to mark "nothing pending".
+        //
+        // preopened_path/preopened_fd: when StartWalWriters already
+        // opened+fallocated this shard's file up front (the production
+        // case, one known data_store_dir), seeds this thread's local fd
+        // cache with it so the very first batch skips the lazy-open path.
+        // Empty path / fd < 0 means "no such shard file yet" (open lazily
+        // on first use instead) -- true for shard indices beyond the
+        // constructor's data_store_dir in multi-directory test scenarios.
+        static void WalWriterLoop(size_t shard_idx, std::string preopened_path, int preopened_fd);
 
         // Called once from InitDB, before the server starts taking traffic:
-        // replays any non-empty shard WAL file left over from an unclean
-        // shutdown, then truncates it. Idempotent by construction (XStore's
-        // direct-offset addressing means re-applying an already-applied
-        // record is a harmless overwrite of identical bytes) so this never
-        // needs to track which records were already durable in the data
+        // replays every shard WAL file left over from an unclean shutdown
+        // (WAL_SHARD_COUNT of them, regardless of how many were actually
+        // active as writers in this run -- see active_wal_shard_count).
+        // Does not truncate afterward -- same reasoning as WalWriterLoop:
+        // preallocated files, CRC-framed records, idempotent by
+        // construction (XStore's direct-offset addressing means
+        // re-applying an already-applied record is a harmless overwrite of
+        // identical bytes) so this never needs to track which records were
+        // already durable in the data
         // file before the crash.
         void ReplayWal();
 

@@ -15,6 +15,8 @@
 #include <vector>
 
 std::array<XStore::WalShard, XStoreTunables::WAL_SHARD_COUNT> XStore::wal_shards;
+std::atomic<size_t> XStore::active_wal_shard_count{XStoreTunables::WAL_SHARD_COUNT};
+std::atomic<size_t> XStore::next_wal_shard{0};
 
 namespace {
 
@@ -160,6 +162,40 @@ std::string WalFilePathFor(const std::string &db_base_path, size_t shard_idx) {
     return (wal_dir / ("shard_" + std::to_string(shard_idx) + ".WAL")).string();
 }
 
+// Same path, computed directly from a data_store_dir instead of reverse-
+// engineering one out of a WalRecord's db_base_path -- used by
+// StartWalWriters, which has data_store_dir up front and no record yet.
+std::string WalFilePathForDataStoreDir(const std::string &data_store_dir, size_t shard_idx) {
+    std::filesystem::path wal_dir = std::filesystem::path(data_store_dir) / XStoreTunables::WAL_DIR_NAME;
+    return (wal_dir / ("shard_" + std::to_string(shard_idx) + ".WAL")).string();
+}
+
+// Opens wal_path (creating it if needed) and ensures it has at least
+// WAL_FILE_PREALLOC_BYTES of real, block-allocated space (fallocate, not a
+// sparse ftruncate) -- called both eagerly (StartWalWriters, the known-
+// data_store_dir production case) and lazily (WalWriterLoop's fd-cache-miss
+// path, the multi-data_store_dir test case). fallocate only ever grows an
+// existing file's allocated range, never truncates/zeroes bytes already
+// written, so this is always safe to call on a file that may already hold
+// real not-yet-replayed WAL data. Returns -1 on any failure.
+int OpenAndPreallocateWalFile(const std::string &wal_path) {
+    std::filesystem::create_directories(std::filesystem::path(wal_path).parent_path());
+    int fd = open(wal_path.c_str(), O_WRONLY | O_CREAT, 0644);
+    if (fd < 0) {
+        spdlog::error("[WAL] - Unable to open {}", wal_path);
+        return -1;
+    }
+    // posix_fallocate (POSIX-portable) over the Linux-specific fallocate()
+    // -- same real-block-allocation guarantee, no _GNU_SOURCE dependency.
+    // Returns the errno value directly rather than setting errno.
+    if (int err = posix_fallocate(fd, 0, static_cast<off_t>(XStoreTunables::WAL_FILE_PREALLOC_BYTES)); err != 0) {
+        spdlog::error("[WAL] - Unable to preallocate {}: {}", wal_path, std::strerror(err));
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
 } // namespace
 
 bool XStore::ApplyWalRecord(const WalRecord &record_to_apply) {
@@ -203,8 +239,28 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply) {
 }
 
 bool XStore::EnqueueWalRecord(WalRecord record) {
-    size_t shard_idx = std::hash<std::string>{}(record.db_base_path) % XStoreTunables::WAL_SHARD_COUNT;
+    // Round-robin, not content-derived: the WAL is a short-lived staging
+    // log (each batch's bytes get overwritten wholesale by the next one,
+    // not appended), so a given row has no need to keep landing in the
+    // same shard across separate requests -- ApplyWalRecord's own
+    // per-offset locking is what actually orders/serializes writes to the
+    // same row in the real data file. Ticket-counter assignment spreads
+    // load evenly regardless of DB count or timestamp pattern (a hash of
+    // db_base_path or of the row's timestamp both collapse to ~1 shard for
+    // a single hot DB doing current-time inserts -- the common case).
+    size_t active = active_wal_shard_count.load(std::memory_order_relaxed);
+    size_t shard_idx = next_wal_shard.fetch_add(1, std::memory_order_relaxed) % active;
     WalShard &shard = wal_shards[shard_idx];
+
+    // Backpressure: wait (never reject) for this shard's queue to drain
+    // below the high watermark before adding to it. Uniform across every
+    // durability mode, including ASYNC_ONLY -- otherwise a writer that
+    // can't keep up would let the queue (and the un-fsync'd, would-be-lost-
+    // on-crash backlog) grow without bound while still telling ASYNC_ONLY
+    // callers "success".
+    while (shard.queue.size_approx() >= XStoreTunables::WAL_QUEUE_HIGH_WATERMARK) {
+        std::this_thread::sleep_for(std::chrono::microseconds(XStoreTunables::WAL_BACKPRESSURE_POLL_US));
+    }
 
     std::future<bool> completion_future;
     if (record.durability_mode != XStore_Proto::ASYNC_ONLY) {
@@ -226,9 +282,29 @@ bool XStore::EnqueueWalRecord(WalRecord record) {
     return true;
 }
 
-void XStore::StartWalWriters() {
-    for (size_t i = 0; i < XStoreTunables::WAL_SHARD_COUNT; ++i) {
-        wal_shards[i].writer_thread = std::thread(&XStore::WalWriterLoop, i);
+void XStore::StartWalWriters(const std::string &data_store_dir) {
+    // Writer threads are almost entirely I/O-bound (blocked in fsync() or
+    // on the queue's semaphore -- near-zero idle CPU, see the
+    // WAL_GROUP_COMMIT_WINDOW_US tunable comment), so the real ceiling on
+    // "how many is too many" is contention at the storage device, not CPU
+    // headroom -- stays a conservative fraction of core count, not 1:1.
+    unsigned hw = std::thread::hardware_concurrency();
+    size_t desired = hw == 0 ? XStoreTunables::WAL_SHARD_COUNT : static_cast<size_t>(hw) / 4;
+    size_t active = std::clamp(desired, XStoreTunables::WAL_MIN_ACTIVE_SHARDS, XStoreTunables::WAL_SHARD_COUNT);
+    active_wal_shard_count.store(active, std::memory_order_relaxed);
+
+    for (size_t i = 0; i < active; ++i) {
+        // Eagerly open + fallocate here (not lazily on first write) --
+        // production has exactly one data_store_dir, known now, so there's
+        // no reason to pay the first commit's latency for it. Safe even if
+        // this file already holds real crash-recovery data from an
+        // unclean shutdown: OpenAndPreallocateWalFile's fallocate only
+        // ever grows, never truncates/zeroes existing bytes, and this runs
+        // before ReplayWal (called later, from InitDB) gets a chance to
+        // read it.
+        std::string wal_path = WalFilePathForDataStoreDir(data_store_dir, i);
+        int fd = OpenAndPreallocateWalFile(wal_path);
+        wal_shards[i].writer_thread = std::thread(&XStore::WalWriterLoop, i, wal_path, fd);
     }
     // Writer threads must be stopped and joined before other static-storage
     // objects they touch (the moodycamel queue, spdlog's default logger)
@@ -250,7 +326,7 @@ void XStore::StartWalWriters() {
     });
 }
 
-void XStore::WalWriterLoop(size_t shard_idx) {
+void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int preopened_fd) {
     WalShard &shard = wal_shards[shard_idx];
     std::vector<WalRecord> batch(XStoreTunables::WAL_BATCH_MAX_RECORDS);
     // Thread-local to this one writer thread -- no lock needed, only this
@@ -259,6 +335,9 @@ void XStore::WalWriterLoop(size_t shard_idx) {
     // than re-declared per batch, to avoid a fresh heap allocation on the
     // writer's per-batch hot path.
     std::unordered_map<std::string, int> wal_fds;
+    if (preopened_fd >= 0) {
+        wal_fds.emplace(std::move(preopened_path), preopened_fd);
+    }
     std::unordered_map<std::string, std::string> bytes_by_file;
     // Per-file durability outcome for THIS batch -- replaces a single
     // all_durable flag so one file's fsync failure in a multi-DB batch
@@ -282,6 +361,22 @@ void XStore::WalWriterLoop(size_t shard_idx) {
             batch.data(), XStoreTunables::WAL_BATCH_MAX_RECORDS,
             std::chrono::microseconds(XStoreTunables::WAL_GROUP_COMMIT_WINDOW_US));
         if (count == 0) continue;
+
+        // Opportunistic group-commit gather: the blocking wait above
+        // returns the instant the first record arrives, which alone gives
+        // near-zero batching under concurrent load. A few cheap,
+        // non-blocking follow-up drains (no sleep -- either something's
+        // already there or it isn't) catch anything from other producers
+        // that landed in the last few microseconds, so their fsync gets
+        // amortized across the whole group instead of each paying for
+        // their own. Stops the moment a drain comes back empty or the
+        // batch fills, so a lone writer pays for at most
+        // WAL_GATHER_EXTRA_DRAINS extra atomic checks, never a wait.
+        for (unsigned extra = 0; extra < XStoreTunables::WAL_GATHER_EXTRA_DRAINS && count < XStoreTunables::WAL_BATCH_MAX_RECORDS; ++extra) {
+            size_t got = shard.queue.try_dequeue_bulk(batch.data() + count, XStoreTunables::WAL_BATCH_MAX_RECORDS - count);
+            if (got == 0) break;
+            count += got;
+        }
 
         std::fill(resolved.begin(), resolved.begin() + static_cast<long>(count), false);
 
@@ -314,13 +409,12 @@ void XStore::WalWriterLoop(size_t shard_idx) {
                 auto it = wal_fds.find(wal_path);
                 int fd;
                 if (it == wal_fds.end()) {
-                    // Only pay for create_directories() the first time this
-                    // path is actually opened, not once per record in the
-                    // batch -- the directory only needs to exist once.
-                    std::filesystem::create_directories(std::filesystem::path(wal_path).parent_path());
-                    fd = open(wal_path.c_str(), O_WRONLY | O_CREAT, 0644);
+                    // Test-only path in production (StartWalWriters already
+                    // pre-opened+preallocated the one data_store_dir it
+                    // knows about) -- reached for a second/third distinct
+                    // data_store_dir in a multi-instance test binary.
+                    fd = OpenAndPreallocateWalFile(wal_path);
                     if (fd < 0) {
-                        spdlog::error("[WAL] - Unable to open {}", wal_path);
                         continue;
                     }
                     wal_fds.emplace(wal_path, fd);
@@ -356,20 +450,16 @@ void XStore::WalWriterLoop(size_t shard_idx) {
                 }
                 resolved[i] = true;
             }
-
-            // Checkpoint: only truncate a file that actually fsync'd
-            // successfully above -- truncating a file whose fsync FAILED
-            // would discard bytes that were never durable anywhere else,
-            // and truncating unconditionally on a shared "all succeeded"
-            // flag risked wiping a DIFFERENT file's still-needed bytes
-            // whenever a batch touched more than one file. Each file's
-            // truncate decision is now independent, matching its own
-            // fsync outcome.
-            for (auto &entry : bytes_by_file) {
-                if (file_durable[entry.first]) {
-                    ftruncate(wal_fds[entry.first], 0);
-                }
-            }
+            // No checkpoint/truncate step: the file is preallocated once
+            // (OpenAndPreallocateWalFile) and stays at that size. The next
+            // batch's pwrite at offset 0 overwrites this one's bytes
+            // directly; anything a shorter overwrite leaves behind past the
+            // new valid length is either a stale-but-still-CRC-valid older
+            // record (safe: replaying an already-applied record is a
+            // harmless idempotent overwrite) or fails ParseWalRecord's CRC
+            // check and is correctly treated as "nothing more here" --
+            // either way nothing needs to physically shrink the file to
+            // mark this batch as checkpointed.
         } catch (const std::exception &ex) {
             spdlog::error("[WAL] - Writer loop caught exception, failing this batch: {}", ex.what());
             for (size_t i = 0; i < count; ++i) {

@@ -56,4 +56,43 @@ inline constexpr unsigned    WAL_GROUP_COMMIT_WINDOW_US  = 10000;
 inline constexpr size_t      WAL_BATCH_MAX_RECORDS       = 256;
 inline constexpr const char* WAL_DIR_NAME                = "WAL";
 
+// WAL_SHARD_COUNT above is the compile-time ceiling (array size); the
+// *active* shard/writer-thread count is computed at startup from
+// hardware_concurrency(), clamped to [WAL_MIN_ACTIVE_SHARDS,
+// WAL_SHARD_COUNT] -- see StartWalWriters. Writer threads are mostly
+// blocked in fsync()/on the queue semaphore (near-zero idle CPU cost, see
+// the WAL_GROUP_COMMIT_WINDOW_US comment above), so the real ceiling on
+// "how many is too many" is contention at the storage device, not CPU --
+// this stays a conservative fraction of core count rather than 1:1.
+inline constexpr size_t      WAL_MIN_ACTIVE_SHARDS       = 2;
+
+// Extra, non-blocking dequeue attempts a writer makes right after its
+// first (blocking) dequeue returns, before starting the fsync -- lets
+// genuinely concurrent enqueues that landed a few microseconds later ride
+// along in the same batch/fsync, without ever sleeping (so a lone writer
+// pays ~zero added latency: these are cheap atomic checks, not a wait).
+inline constexpr unsigned    WAL_GATHER_EXTRA_DRAINS     = 2;
+
+// Real block allocation (fallocate, not a sparse ftruncate) reserved once
+// per WAL shard file so ordinary commits never pay a filesystem metadata
+// journal update (block alloc + extent-map growth) on top of the data
+// fsync -- see the removed per-commit ftruncate(fd,0) this replaces.
+// Large enough to comfortably hold a full WAL_BATCH_MAX_RECORDS batch of
+// realistically-sized rows; a batch that somehow exceeds it still works
+// correctly (pwrite just extends the file, same as before this change),
+// it only loses the no-metadata-journal benefit for that one oversized
+// write.
+inline constexpr size_t      WAL_FILE_PREALLOC_BYTES     = 8u * 1024 * 1024;
+
+// Enqueue-side backpressure: once a shard's queue depth reaches this many
+// pending records, EnqueueWalRecord blocks the calling (client-handling)
+// thread -- polling every WAL_BACKPRESSURE_POLL_US -- until the writer
+// thread drains it back down, instead of accepting unboundedly and
+// risking unbounded memory growth (and, for ASYNC_ONLY, an ever-growing
+// crash-loss window while still telling the client "success"). Applies
+// uniformly to every durability mode; deliberately makes the client WAIT
+// rather than rejecting the write.
+inline constexpr size_t      WAL_QUEUE_HIGH_WATERMARK    = WAL_BATCH_MAX_RECORDS * 4;
+inline constexpr unsigned    WAL_BACKPRESSURE_POLL_US    = 200;
+
 } // namespace XStoreTunables

@@ -19,7 +19,7 @@ XStore::XStore() {
     // independent of how many distinct data_store_dirs get initialized
     // below (unlike InitDB, which is per-directory).
     static std::once_flag wal_writers_once;
-    std::call_once(wal_writers_once, &XStore::StartWalWriters);
+    std::call_once(wal_writers_once, &XStore::StartWalWriters, data_store_dir);
 
     // One XStore instance is constructed per worker thread (see ZMQ_Server),
     // and in production every one of them shares the same data_store_dir for
@@ -136,6 +136,17 @@ XStore_Proto::SysInfo_REP XStore::InfoQuery(std::string_view server_addr, int th
     // Loop through all db available in DataStore
     for (auto& dir : std::filesystem::directory_iterator(data_store_dir)) {
         std::string curr_db_name = dir.path().filename().string();
+
+        // WAL/ lives as a sibling of the per-DB directories directly under
+        // data_store_dir (see WalFilePathFor/InitDB) -- it holds
+        // shard_<N>.WAL files, not a DB, and now exists eagerly from
+        // StartWalWriters (constructor time) rather than lazily on first
+        // insert, so it must be excluded here the same way InitDB already
+        // excludes it.
+        if (curr_db_name == XStoreTunables::WAL_DIR_NAME) {
+            continue;
+        }
+
         std::string curr_db_dir = JoinPath(data_store_dir, curr_db_name);
 
         // Set DB Name
@@ -391,7 +402,12 @@ void XStore::ReplayWal() {
 
     for (size_t shard_idx = 0; shard_idx < XStoreTunables::WAL_SHARD_COUNT; ++shard_idx) {
         std::filesystem::path wal_path = wal_dir / ("shard_" + std::to_string(shard_idx) + ".WAL");
-        if (!std::filesystem::exists(wal_path) || std::filesystem::file_size(wal_path) == 0) {
+        // No file_size()==0 fast-skip: shard files are now preallocated
+        // (see OpenAndPreallocateWalFile) and stay at that fixed size even
+        // when logically empty, so a real "nothing pending" file no longer
+        // reads as size 0 -- ParseWalRecord's CRC check below correctly
+        // and cheaply finds nothing on the first attempt instead.
+        if (!std::filesystem::exists(wal_path)) {
             continue;
         }
 
@@ -421,10 +437,11 @@ void XStore::ReplayWal() {
         if (replayed_count > 0) {
             spdlog::info("[WAL REPLAY] - Replayed {} record(s) from {}", replayed_count, wal_path.string());
         }
-
-        // Checkpoint -- everything in this file has now been reapplied,
-        // truncate so a future crash-free restart doesn't redo this work.
-        std::ofstream(wal_path, std::ios::binary | std::ios::trunc).close();
+        // No truncate: same reasoning as WalWriterLoop's own checkpoint
+        // removal -- the file stays at its preallocated size, and the next
+        // real write simply overwrites from offset 0. Re-replaying these
+        // same bytes on a hypothetical second ReplayWal call is a harmless
+        // idempotent re-apply, not a correctness concern.
     }
 }
 
