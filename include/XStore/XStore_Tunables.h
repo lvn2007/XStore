@@ -58,14 +58,45 @@ inline constexpr size_t      WAL_BATCH_MAX_RECORDS       = 256;
 inline constexpr const char* WAL_DIR_NAME                = "WAL";
 
 // WAL_SHARD_COUNT above is the compile-time ceiling (array size); the
-// *active* shard/writer-thread count is computed at startup from
-// hardware_concurrency(), clamped to [WAL_MIN_ACTIVE_SHARDS,
-// WAL_SHARD_COUNT] -- see StartWalWriters. Writer threads are mostly
-// blocked in fsync()/on the queue semaphore (near-zero idle CPU cost, see
-// the WAL_GROUP_COMMIT_WINDOW_US comment above), so the real ceiling on
-// "how many is too many" is contention at the storage device, not CPU --
-// this stays a conservative fraction of core count rather than 1:1.
+// *active* shard/writer-thread count is computed at startup as
+// hardware_concurrency() / WAL_ACTIVE_SHARDS_CORE_DIVISOR, clamped to
+// [WAL_MIN_ACTIVE_SHARDS, WAL_SHARD_COUNT] -- see StartWalWriters. Writer
+// threads are mostly blocked in fsync()/on the queue semaphore (near-zero
+// idle CPU cost, see the WAL_GROUP_COMMIT_WINDOW_US comment above), so the
+// real ceiling on "how many is too many" is contention at the storage
+// device, not CPU -- this stays a conservative fraction of core count
+// rather than 1:1. Named out (not an inline literal in StartWalWriters)
+// specifically so testing "does more active-shard capacity help" is a
+// one-line edit here + rebuild, not a hunt for a magic number.
+inline constexpr size_t      WAL_ACTIVE_SHARDS_CORE_DIVISOR = 4;
 inline constexpr size_t      WAL_MIN_ACTIVE_SHARDS       = 2;
+
+// Experiment knob, default 1 (= today's exact per-DB-hash behavior,
+// unchanged): how many of the active shards ONE DB's writes are allowed to
+// spread across (see EnqueueWalRecord). Raising this does NOT create new
+// writer-thread capacity -- active shard count is fixed by hardware
+// (above), independent of DB count or this value; `min(active, this)` is
+// the real cap. Helps only when there are few hot DBs relative to active
+// shard count (today's default funnels each DB onto exactly 1 of possibly
+// many idle shards). Actively HURTS when DB count already meets/exceeds
+// active shard count: those DBs already share shards by pigeonhole even
+// at the default, and spreading each one across MORE of that same small
+// pool just makes assignment less sticky -- more batches end up mixing
+// records from different DBs, which pays a separate pwrite+fdatasync per
+// distinct file within one batch anyway, not a shared one, for no
+// benefit. Whether raising this helps AT ALL is also storage-device-
+// dependent (deep-queue NVMe vs. a device that can't actually flush
+// multiple streams in parallel) -- benchmark before committing to a
+// non-default value, don't assume. Compile-time, not runtime-mutable: a
+// mid-run change would need to reconcile with the process-wide-static
+// wal_shards array and any in-flight records already hashed under the
+// old span.
+inline constexpr size_t      WAL_SHARDS_PER_DB           = 1;
+
+// Debug/benchmark-only (see the XSTORE_WAL_STATS CMake option): how often
+// WalStatsReporterLoop logs each shard's average batch size. Only compiled
+// in / used when that flag is on -- harmless as a plain constant otherwise.
+inline constexpr unsigned    WAL_STATS_LOG_INTERVAL_S    = 10;
 
 // Group-commit gather window: a real, bounded LINGER after the first
 // record arrives -- not just a couple of free non-blocking peeks (that

@@ -27,6 +27,16 @@ message(STATUS "Using C++ Standard: ${CMAKE_CXX_STANDARD}")
 # Definitions for large files support
 add_definitions(-D_LARGEFILE_SOURCE -D_LARGE_FILES -D_FILE_OFFSET_BITS=64)
 
+# WAL batching observability -- a compile-time-gated debug/benchmarking tool
+# (per-shard batch-size counters + periodic log line), NOT permanent
+# production instrumentation. Off by default: zero cost, nothing compiled
+# in. Turn on only for a benchmarking session:
+#   cmake -B build -DXSTORE_WAL_STATS=ON
+option(XSTORE_WAL_STATS "Enable WAL batching observability counters (compile-time debug/benchmark tool, off by default)" OFF)
+if(XSTORE_WAL_STATS)
+    add_compile_definitions(XSTORE_WAL_STATS_ENABLED)
+endif()
+
 include(FetchContent)
 
 FetchContent_Declare(

@@ -218,6 +218,16 @@ class XStore {
             moodycamel::BlockingConcurrentQueue<WalRecord> queue;
             std::thread writer_thread;
             std::atomic<bool> stop_flag{false};
+#ifdef XSTORE_WAL_STATS_ENABLED
+            // Batching observability -- compile-time debug/benchmark tool
+            // only (XSTORE_WAL_STATS CMake option), not permanent
+            // production instrumentation. Incremented once per drained
+            // batch in WalWriterLoop; read by StartWalWriters' periodic
+            // stats-reporter thread (also gated). Relaxed: single writer
+            // (this shard's own writer thread), purely diagnostic reads.
+            std::atomic<uint64_t> total_batches_processed{0};
+            std::atomic<uint64_t> total_records_processed{0};
+#endif
         };
         static std::array<WalShard, XStoreTunables::WAL_SHARD_COUNT> wal_shards;
         // How many of wal_shards' WAL_SHARD_COUNT slots actually have a
@@ -525,6 +535,17 @@ class XStore {
         // on first use instead) -- true for shard indices beyond the
         // constructor's data_store_dir in multi-directory test scenarios.
         static void WalWriterLoop(size_t shard_idx, std::string preopened_path, int preopened_fd);
+
+#ifdef XSTORE_WAL_STATS_ENABLED
+        // Debug/benchmark-only (XSTORE_WAL_STATS): periodically logs each
+        // active shard's average batch size (records/batch) since the last
+        // report, using WalShard's total_batches_processed/
+        // total_records_processed counters. Started/joined the same way as
+        // the writer threads themselves -- see StartWalWriters.
+        static void WalStatsReporterLoop();
+        static std::atomic<bool> wal_stats_stop_flag;
+        static std::thread wal_stats_reporter_thread;
+#endif
 
         // Called once from InitDB, before the server starts taking traffic:
         // replays every shard WAL file left over from an unclean shutdown

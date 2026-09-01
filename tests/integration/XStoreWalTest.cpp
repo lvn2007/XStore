@@ -220,6 +220,48 @@ TEST_F(XStoreWalTest, ConcurrentInsertsAllPersist) {
     }
 }
 
+#ifdef XSTORE_WAL_STATS_ENABLED
+// Debug/benchmark-only (XSTORE_WAL_STATS): confirms WalShard's batching
+// counters actually move, and that real batching (avg batch size > 1)
+// happens under concurrent GROUP_COMMIT load on one DB -- the counters'
+// whole purpose is answering "is it actually grouping," so this is the
+// direct check that they do.
+TEST_F(XStoreWalTest, WalStatsCountersReflectRealBatching) {
+    XStore store;
+    store.CreateDB("WALSTATS", XStore_Proto::SECOND, 64);
+
+    std::filesystem::path db_base_path = scratch->test_root / "DataStore" / "WALSTATS";
+    size_t active = XStore::active_wal_shard_count.load(std::memory_order_relaxed);
+    size_t shard_idx = std::hash<std::string>{}(db_base_path.string()) % active;
+    XStore::WalShard &shard = XStore::wal_shards[shard_idx];
+
+    uint64_t batches_before = shard.total_batches_processed.load(std::memory_order_relaxed);
+    uint64_t records_before = shard.total_records_processed.load(std::memory_order_relaxed);
+
+    constexpr int kThreads = 8;
+    constexpr int kPerThread = 100;
+    std::vector<std::thread> workers;
+    for (int t = 0; t < kThreads; ++t) {
+        workers.emplace_back([&store, t]() {
+            for (int i = 0; i < kPerThread; ++i) {
+                XStore_Proto::UnaryInsert_REP rep;
+                unsigned long long ts = 1700500000ULL + static_cast<unsigned long long>(t * kPerThread + i);
+                store.UnaryInsert(ts, MakeRow(1.0), "WALSTATS", &rep, XStore_Proto::GROUP_COMMIT);
+            }
+        });
+    }
+    for (auto &w : workers) w.join();
+
+    uint64_t d_batches = shard.total_batches_processed.load(std::memory_order_relaxed) - batches_before;
+    uint64_t d_records = shard.total_records_processed.load(std::memory_order_relaxed) - records_before;
+
+    ASSERT_GT(d_batches, 0u) << "no batches observed -- counters aren't moving";
+    EXPECT_EQ(d_records, static_cast<uint64_t>(kThreads * kPerThread));
+    EXPECT_GT(d_records, d_batches) << "avg batch size was 1 (" << d_records << " records / " << d_batches
+                                     << " batches) -- no real batching occurred under concurrent load";
+}
+#endif
+
 // Regression guard for the durability-mode-aware gather fix: a
 // SYNC_PER_COMMIT insert must not pay the (up to WAL_GATHER_WINDOW_US)
 // group-commit linger even while a concurrent GROUP_COMMIT workload is

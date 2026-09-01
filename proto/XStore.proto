@@ -34,13 +34,15 @@ enum TimeUnit {
   DAY = 6;
 }
 
-// Durability mode for a single write. Zero-value (SYNC_PER_COMMIT) is the
-// safe default: a client that omits this field never silently downgrades to
-// weaker durability. See docs/TODO.md Gap 1 for the full design rationale.
+// Durability mode for a single write. Zero-value (ASYNC_ONLY) is the
+// intended default -- lowest latency, no fsync wait; a client that omits
+// this field gets ASYNC_ONLY, not a durability guarantee. Pass
+// SYNC_PER_COMMIT/GROUP_COMMIT explicitly to opt into durability. See
+// docs/TODO.md Gap 1 for the full design rationale.
 enum WalDurabilityMode {
-  SYNC_PER_COMMIT = 0;
+  ASYNC_ONLY      = 0;
   GROUP_COMMIT    = 1;
-  ASYNC_ONLY      = 2;
+  SYNC_PER_COMMIT = 2;
 }
 
 message ConfigStruct {

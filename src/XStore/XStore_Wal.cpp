@@ -16,6 +16,10 @@
 
 std::array<XStore::WalShard, XStoreTunables::WAL_SHARD_COUNT> XStore::wal_shards;
 std::atomic<size_t> XStore::active_wal_shard_count{XStoreTunables::WAL_SHARD_COUNT};
+#ifdef XSTORE_WAL_STATS_ENABLED
+std::atomic<bool> XStore::wal_stats_stop_flag{false};
+std::thread XStore::wal_stats_reporter_thread;
+#endif
 
 namespace {
 
@@ -264,9 +268,26 @@ bool XStore::EnqueueWalRecord(WalRecord record) {
     // gather window (see WalWriterLoop) batch them into fewer, bigger
     // fsyncs -- the thing that actually amortizes cost on one device.
     // Multiple DBs still parallelize naturally across shards, same as
-    // before either version of this code existed.
+    // before either version of this code existed. WAL_SHARDS_PER_DB (see
+    // its comment in XStore_Tunables.h) is the escape hatch for actually
+    // testing that "device can't fsync N streams in parallel anyway"
+    // assumption instead of just asserting it -- default 1 keeps this
+    // function's behavior bit-for-bit identical to the paragraph above.
     size_t active = active_wal_shard_count.load(std::memory_order_relaxed);
-    size_t shard_idx = std::hash<std::string>{}(record.db_base_path) % active;
+    size_t base_shard_idx = std::hash<std::string>{}(record.db_base_path) % active;
+    size_t shard_idx = base_shard_idx;
+    if constexpr (XStoreTunables::WAL_SHARDS_PER_DB > 1) {
+        // Low-cardinality salt (which calling thread, not full round-robin)
+        // spreads one DB's writes across up to WAL_SHARDS_PER_DB of the
+        // active shards, capped at `active` itself -- can never exceed the
+        // box's real shard count no matter how high the tunable is set.
+        // Salting by thread-id (not a per-record random/atomic counter)
+        // keeps one thread's own sequential commits landing on the same
+        // shard, only spreading DIFFERENT concurrent callers apart.
+        size_t db_shard_span = std::min(active, XStoreTunables::WAL_SHARDS_PER_DB);
+        size_t salt = std::hash<std::thread::id>{}(std::this_thread::get_id()) % db_shard_span;
+        shard_idx = (base_shard_idx + salt) % active;
+    }
     WalShard &shard = wal_shards[shard_idx];
 
     // Backpressure: wait (never reject) for this shard's queue to drain
@@ -306,7 +327,8 @@ void XStore::StartWalWriters(const std::string &data_store_dir) {
     // "how many is too many" is contention at the storage device, not CPU
     // headroom -- stays a conservative fraction of core count, not 1:1.
     unsigned hw = std::thread::hardware_concurrency();
-    size_t desired = hw == 0 ? XStoreTunables::WAL_SHARD_COUNT : static_cast<size_t>(hw) / 4;
+    size_t desired = hw == 0 ? XStoreTunables::WAL_SHARD_COUNT
+                             : static_cast<size_t>(hw) / XStoreTunables::WAL_ACTIVE_SHARDS_CORE_DIVISOR;
     size_t active = std::clamp(desired, XStoreTunables::WAL_MIN_ACTIVE_SHARDS, XStoreTunables::WAL_SHARD_COUNT);
     active_wal_shard_count.store(active, std::memory_order_relaxed);
 
@@ -323,6 +345,9 @@ void XStore::StartWalWriters(const std::string &data_store_dir) {
         int fd = OpenAndPreallocateWalFile(wal_path);
         wal_shards[i].writer_thread = std::thread(&XStore::WalWriterLoop, i, wal_path, fd);
     }
+#ifdef XSTORE_WAL_STATS_ENABLED
+    wal_stats_reporter_thread = std::thread(&XStore::WalStatsReporterLoop);
+#endif
     // Writer threads must be stopped and joined before other static-storage
     // objects they touch (the moodycamel queue, spdlog's default logger)
     // begin their own destruction at process exit -- a still-running thread
@@ -340,8 +365,46 @@ void XStore::StartWalWriters(const std::string &data_store_dir) {
                 wal_shards[i].writer_thread.join();
             }
         }
+#ifdef XSTORE_WAL_STATS_ENABLED
+        wal_stats_stop_flag.store(true, std::memory_order_relaxed);
+        if (wal_stats_reporter_thread.joinable()) {
+            wal_stats_reporter_thread.join();
+        }
+#endif
     });
 }
+
+#ifdef XSTORE_WAL_STATS_ENABLED
+// Debug/benchmark-only (XSTORE_WAL_STATS CMake option). Wakes every
+// WAL_STATS_LOG_INTERVAL_S, logs each active shard's average batch size
+// (records/batch) since the LAST report (a delta, not a cumulative
+// average), so the number reflects current load rather than being diluted
+// by an idle period earlier in the run. No lock needed: reads its own
+// prior-snapshot locals plus each shard's relaxed atomics, writer threads
+// never read these back.
+void XStore::WalStatsReporterLoop() {
+    std::vector<uint64_t> prev_batches(XStoreTunables::WAL_SHARD_COUNT, 0);
+    std::vector<uint64_t> prev_records(XStoreTunables::WAL_SHARD_COUNT, 0);
+    while (!wal_stats_stop_flag.load(std::memory_order_relaxed)) {
+        std::this_thread::sleep_for(std::chrono::seconds(XStoreTunables::WAL_STATS_LOG_INTERVAL_S));
+        if (wal_stats_stop_flag.load(std::memory_order_relaxed)) break;
+
+        size_t active = active_wal_shard_count.load(std::memory_order_relaxed);
+        for (size_t i = 0; i < active; ++i) {
+            uint64_t batches = wal_shards[i].total_batches_processed.load(std::memory_order_relaxed);
+            uint64_t records = wal_shards[i].total_records_processed.load(std::memory_order_relaxed);
+            uint64_t d_batches = batches - prev_batches[i];
+            uint64_t d_records = records - prev_records[i];
+            prev_batches[i] = batches;
+            prev_records[i] = records;
+            if (d_batches == 0) continue; // idle shard this interval -- nothing to report
+            double avg_batch_size = static_cast<double>(d_records) / static_cast<double>(d_batches);
+            spdlog::info("[WAL STATS] shard={} batches={} records={} avg_batch_size={:.2f}",
+                         i, d_batches, d_records, avg_batch_size);
+        }
+    }
+}
+#endif
 
 void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int preopened_fd) {
     WalShard &shard = wal_shards[shard_idx];
@@ -426,6 +489,11 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
         }
 
         std::fill(resolved.begin(), resolved.begin() + static_cast<long>(count), false);
+
+#ifdef XSTORE_WAL_STATS_ENABLED
+        shard.total_batches_processed.fetch_add(1, std::memory_order_relaxed);
+        shard.total_records_processed.fetch_add(count, std::memory_order_relaxed);
+#endif
 
         // A std::thread's entry function must never let an exception
         // escape -- doing so calls std::terminate() and kills the whole
