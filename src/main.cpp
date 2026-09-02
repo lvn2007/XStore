@@ -1,7 +1,6 @@
 #include "include/Networking/ZMQ_Server.h"
 #include "include/XStore/XStore.h"
 #include <argparse/argparse.hpp>
-#include <thread>
 
 int main(int argc, char *argv[]) {
     spdlog::level::level_enum console_level = spdlog::level::warn;
@@ -24,7 +23,7 @@ int main(int argc, char *argv[]) {
     program.add_argument("-t", "--threads")
         .default_value(0)
         .scan<'i', int>()
-        .help("worker thread count (<=0 or omitted falls back to hardware_concurrency)");
+        .help("worker thread count (<=0 or omitted defaults to one per physical core)");
 
     try {
         program.parse_args(argc, argv);
@@ -39,12 +38,17 @@ int main(int argc, char *argv[]) {
     std::string port = program.get<std::string>("--port");
     int thread_count = program.get<int>("--threads");
     if (thread_count <= 0) {
-        // A non-positive thread count would launch a server with no workers
-        // to ever answer a request, so fall back to the host's hardware
-        // concurrency instead of silently doing that.
-        int fallback = std::thread::hardware_concurrency();
-        thread_count = fallback > 0 ? static_cast<int>(fallback) : 1;
-        spdlog::warn("[BOOT] - Invalid thread count, falling back to {}", thread_count);
+        // Default to one worker per PHYSICAL core (not this host's
+        // logical/SMT-inclusive hardware_concurrency()) -- measured best
+        // on real hardware: going past physical core count leaves no free
+        // SMT sibling lane for the WAL writer threads to run on relatively
+        // uncontended, ~6% worse p50 under real concurrent load in that
+        // configuration (see ZmqServer::DefaultThreadCount()'s comment,
+        // ZMQ_Server.cpp). Still user-overridable via -t/--threads --
+        // don't assume this default is right for every deployment's own
+        // hardware/workload without benchmarking it there too.
+        thread_count = ZmqServer::DefaultThreadCount();
+        spdlog::info("[BOOT] - No/invalid thread count given, defaulting to {} (one per physical core)", thread_count);
     }
 
     // Spin ZMQ Server

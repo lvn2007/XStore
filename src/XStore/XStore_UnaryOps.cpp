@@ -67,7 +67,22 @@ void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::R
     record.durability_mode = durability_mode;
     record.rows.push_back(WalRow{unix_time, std::string(row_buf.data(), cfg_struct.rowlength())});
 
-    if (!EnqueueWalRecord(std::move(record))) {
+    if (durability_mode == XStore_Proto::BYPASS) {
+        // Skip WAL entirely -- no queue, no CRC32, no second write. Applies
+        // the row straight to the data file on THIS (ZMQ worker) thread,
+        // reusing the exact same helper the WAL writer thread calls for
+        // every other mode's apply step (GetOrOpenFile fd cache +
+        // FileRangeLockGuard + pwrite) -- no WAL record is ever written for
+        // this row, so a crash before the OS's own writeback flushes it is
+        // unrecoverable (see the BYPASS comment in XStore.proto: durability
+        // window is kernel writeback timing, not a fast WAL fdatasync).
+        if (!ApplyWalRecord(record)) {
+            std::string err_msg = fmt::format("[UNARY INSERT] [DB: {}] - BYPASS write failed", db_name);
+            SetTaggedStatus(return_data->mutable_insertstatus(), "[ERROR] ", err_msg);
+            spdlog::error(err_msg);
+            return;
+        }
+    } else if (!EnqueueWalRecord(std::move(record))) {
         std::string err_msg = fmt::format("[UNARY INSERT] [DB: {}] - Failed to enqueue WAL record", db_name);
         SetTaggedStatus(return_data->mutable_insertstatus(), "[ERROR] ", err_msg);
         spdlog::error(err_msg);

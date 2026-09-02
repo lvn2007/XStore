@@ -220,6 +220,13 @@ TEST_F(XStoreZmqNetworkTest, UnaryInsertThenUnaryQueryRoundTripsDataOverWire) {
     insert_req.set_rtype(XStore_Proto::UNARYINSERT);
     insert_req.set_dbname("ZMQ_UNARY_DB");
     insert_req.set_timestamp(TS_2005_MID);
+    // SYNC_PER_COMMIT, not the wire default (ASYNC_ONLY): this test's whole
+    // point is "insert then query sees it immediately" -- ASYNC_ONLY
+    // explicitly does not guarantee that (the row may not be applied yet
+    // when the query runs right after), which isn't a bug, just a
+    // different durability mode than this test needs to make its own
+    // assertion meaningful.
+    insert_req.set_durabilitymode(XStore_Proto::SYNC_PER_COMMIT);
     *insert_req.mutable_data() = MakeRow({FDouble(2.71828), FString("wire-data"), FBool(true)});
     auto insert_rep = SendRequest<XStore_Proto::UnaryInsert_REP>(Wrap(insert_req));
     EXPECT_NE(insert_rep.insertstatus().find("[INFO]"), std::string::npos);
@@ -258,6 +265,9 @@ TEST_F(XStoreZmqNetworkTest, UnaryDeleteOverWirePunchesHoleThenQueryReturnsEmpty
     insert_req.set_rtype(XStore_Proto::UNARYINSERT);
     insert_req.set_dbname("ZMQ_DELETE_DB");
     insert_req.set_timestamp(TS_2012_MID);
+    // SYNC_PER_COMMIT: the row must actually be applied before the delete
+    // below runs, same reasoning as UnaryInsertThenUnaryQueryRoundTripsDataOverWire above.
+    insert_req.set_durabilitymode(XStore_Proto::SYNC_PER_COMMIT);
     *insert_req.mutable_data() = MakeRow({FString("to-be-deleted")});
     SendRequest<XStore_Proto::UnaryInsert_REP>(Wrap(insert_req));
 
@@ -395,6 +405,10 @@ TEST_F(XStoreZmqNetworkTest, RemoveDBFilesThenRemoveDBOverWire) {
     insert_req.set_rtype(XStore_Proto::UNARYINSERT);
     insert_req.set_dbname("ZMQ_REMOVE_DB");
     insert_req.set_timestamp(TS_2005_MID);
+    // SYNC_PER_COMMIT: RemoveDBFiles below needs 2005.XSTORE to actually
+    // exist on disk yet -- ApplyWalRecord is what creates it, and under the
+    // wire default (ASYNC_ONLY) that may not have happened yet.
+    insert_req.set_durabilitymode(XStore_Proto::SYNC_PER_COMMIT);
     *insert_req.mutable_data() = MakeRow({FBool(false)});
     SendRequest<XStore_Proto::UnaryInsert_REP>(Wrap(insert_req));
 
@@ -516,6 +530,11 @@ TEST_F(XStoreZmqConcurrentTest, ConcurrentClientsUnaryInsertAndQueryOverWireDoNo
                 insert_req.set_rtype(XStore_Proto::UNARYINSERT);
                 insert_req.set_dbname("ZMQ_CONCURRENT_DB");
                 insert_req.set_timestamp(ts);
+                // SYNC_PER_COMMIT: this test asserts the immediately-following
+                // query sees exactly what was just inserted -- needs the row
+                // actually applied, not just enqueued (the wire default,
+                // ASYNC_ONLY, doesn't guarantee that by the time the query runs).
+                insert_req.set_durabilitymode(XStore_Proto::SYNC_PER_COMMIT);
                 *insert_req.mutable_data() = MakeRow({FInt64(expected)});
                 auto insert_rep = SendRequest<XStore_Proto::UnaryInsert_REP>(socket, Wrap(insert_req));
                 if (insert_rep.insertstatus().find("[INFO]") == std::string::npos) {

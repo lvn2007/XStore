@@ -1,5 +1,72 @@
 #include "include/Networking/ZMQ_Server.h"
 #include <google/protobuf/arena.h>
+#include <chrono>
+#include <fstream>
+#include <set>
+#include <string>
+#include <utility>
+
+namespace {
+
+// Physical core count, not std::thread::hardware_concurrency()'s logical
+// (SMT-inclusive) count. Measured on real hardware (torusnode15: 16
+// physical cores, 2 SMT threads/core = 32 logical): running one spinning
+// ZMQ worker per LOGICAL core (32 workers) under real concurrent load
+// (t=64) was ~6% SLOWER at the p50 than one per PHYSICAL core (16
+// workers) -- going past physical-core count leaves no free SMT sibling
+// lane for the WAL writer threads (also spinning, WAL_ADAPTIVE_POLL_
+// WINDOW_US) to run relatively uncontended on, forcing genuine execution-
+// resource contention between front-end and back-end threads that doesn't
+// exist when worker count matches physical cores. Parses /proc/cpuinfo
+// (Linux-only -- consistent with this project's existing POSIX/Linux-only
+// assumptions elsewhere: pwritev, posix_fallocate) by counting distinct
+// (physical id, core id) pairs, since neither hardware_concurrency() nor
+// std::thread::hardware_concurrency() report physical topology, only
+// logical CPU count.
+int PhysicalCoreCount() {
+    std::ifstream cpuinfo("/proc/cpuinfo");
+    if (!cpuinfo.is_open()) return 0;
+
+    std::set<std::pair<int, int>> cores; // (physical_id, core_id)
+    int physical_id = -1;
+    std::string line;
+    while (std::getline(cpuinfo, line)) {
+        auto colon = line.find(':');
+        if (colon == std::string::npos) continue;
+        std::string key = line.substr(0, colon);
+        std::string value = line.substr(colon + 1);
+        // Trim trailing whitespace off the key (fields are "name\t: value").
+        while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
+
+        if (key == "physical id") {
+            try { physical_id = std::stoi(value); } catch (...) { physical_id = -1; }
+        } else if (key == "core id" && physical_id >= 0) {
+            try {
+                cores.insert({physical_id, std::stoi(value)});
+            } catch (...) {
+                // Malformed line -- skip rather than crash boot over a
+                // parsing edge case; falls through to the hardware_
+                // concurrency fallback below if this leaves the set empty.
+            }
+        }
+    }
+    return static_cast<int>(cores.size());
+}
+
+}  // namespace
+
+int ZmqServer::DefaultThreadCount() {
+    int physical = PhysicalCoreCount();
+    if (physical > 0) return physical;
+
+    // /proc/cpuinfo unavailable or unparseable (non-Linux, containerized/
+    // restricted environment, etc.) -- assume SMT2 as a reasonable guess
+    // rather than defaulting to the (measurably worse, per the comment
+    // above) logical count outright.
+    unsigned logical = std::thread::hardware_concurrency();
+    if (logical >= 2) return static_cast<int>(logical / 2);
+    return logical > 0 ? static_cast<int>(logical) : 1;
+}
 
 namespace {
 // Shared by every case below: serialize a response proto and dispatch it to
@@ -98,10 +165,36 @@ void ZmqServer::WorkerRoutine(std::string server_addr) {
     // pure overhead here, never exercised in practice.
     zmq::message_t client_msg;
 
+    // Same adaptive-poll idea as the WAL writer's own queue wait (see
+    // ZMQ_ADAPTIVE_POLL_WINDOW_US, XStore_Tunables.h): epoch (not "now") so
+    // the first iteration always takes the normal blocking path.
+    auto last_activity = std::chrono::steady_clock::time_point{};
+
     while (true) {
         // RECEIVING
         //  Wait for next request from CLIENT
-        socket.recv(client_msg);
+        if constexpr (XStoreTunables::ZMQ_ADAPTIVE_POLL_WINDOW_US > 0) {
+            auto window = std::chrono::microseconds(XStoreTunables::ZMQ_ADAPTIVE_POLL_WINDOW_US);
+            if (std::chrono::steady_clock::now() - last_activity < window) {
+                // Recently active: tight non-blocking spin, bypassing the
+                // socket's own blocking recv entirely, so a request
+                // arriving during this window is picked up without paying
+                // an OS park/wake. Self-terminates the moment the window
+                // lapses with nothing arriving -- falls through to the
+                // blocking path on the next outer-loop iteration.
+                bool got = false;
+                while (!got) {
+                    got = socket.recv(client_msg, zmq::recv_flags::dontwait).has_value();
+                    if (!got && std::chrono::steady_clock::now() - last_activity >= window) break;
+                }
+                if (!got) continue;
+            } else {
+                socket.recv(client_msg);
+            }
+        } else {
+            socket.recv(client_msg);
+        }
+        last_activity = std::chrono::steady_clock::now();
 
         // Free everything the previous iteration allocated in one shot --
         // safe here because that request's response was already serialized

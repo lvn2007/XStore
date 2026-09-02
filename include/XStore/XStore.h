@@ -10,7 +10,6 @@
 #include <cstddef>
 #include <cstdio>
 #include <memory>
-#include <optional>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
@@ -18,7 +17,6 @@
 #include <unordered_map>
 #include <vector>
 #include <atomic>
-#include <future>
 #include <thread>
 #include <blockingconcurrentqueue.h>
 #include "XStore.pb.h"
@@ -195,6 +193,42 @@ class XStore {
             std::string row_bytes;   // already-serialized, zero-padded, exactly row_length bytes
         };
 
+        // Cross-thread completion signal for one WalRecord -- replaces
+        // std::promise<bool>/std::future<bool> (measured on real hardware:
+        // comparable typical-case cost once compared fairly -- a fresh
+        // heap-allocated handle per request either way, since WalRecord
+        // gets std::move'd into the queue so the enqueuing thread can't
+        // wait on its own stack copy -- but promise/future's shared state
+        // carries extra machinery (exception storage, type-erased
+        // ownership shared between two distinct objects) this doesn't
+        // need). LightweightSemaphore is the same primitive the WAL
+        // queue's own blocking wait already uses -- reusing a proven
+        // mechanism, not introducing a new one. Checked out from/returned
+        // to completion_pool below rather than newed/deleted per request
+        // -- see that member's comment.
+        struct WalCompletion {
+            moodycamel::LightweightSemaphore sem;
+            bool result = false;
+        };
+
+        // Self-sizing, process-lifetime pool of WalCompletion objects --
+        // true one-time allocation, not "smaller allocation every request"
+        // (which is all a bare new/delete per record would have bought
+        // over std::promise/future). Checkout (EnqueueWalRecord): pop one
+        // via try_dequeue; on the rare empty case (still growing toward
+        // its natural peak, or a burst past whatever that peak has been so
+        // far), fall back to `new` for just that one. Return (after
+        // sem.wait() returns -- same happens-before safety as the
+        // heap-allocated version): always push back into the pool instead
+        // of deleting, whether this particular object came from the pool
+        // or the `new` fallback -- so the pool organically grows to
+        // whatever the real peak concurrent-outstanding-completions count
+        // turns out to be, with no capacity guess needed up front and no
+        // hard cap to run past. No LightweightSemaphore state to reset
+        // between uses: a matched signal()/wait() pair always leaves its
+        // count back at 0.
+        static moodycamel::ConcurrentQueue<WalCompletion*> completion_pool;
+
         struct WalRecord {
             std::string db_name;               // already upper-cased
             std::string db_base_path;          // full path -- locates this DB's WAL subdir and, at apply time, its .XSTORE file
@@ -207,11 +241,11 @@ class XStore {
             // fsync'd AND applied (true) or not (false on any failure --
             // WAL write/fsync failure or a failed ApplyWalRecord row), so a
             // caller can tell "queued" from "actually durable" instead of
-            // being told success unconditionally. A per-record promise (not
+            // being told success unconditionally. A per-record handle (not
             // a shared batch counter) sidesteps any question of
             // cross-producer enqueue ordering: each caller only ever waits
             // on its own record's flag.
-            std::optional<std::promise<bool>> completion;
+            WalCompletion *completion = nullptr;
         };
 
         struct WalShard {
@@ -465,13 +499,12 @@ class XStore {
         // unboundedly while still reporting "success".
         static bool EnqueueWalRecord(WalRecord record);
 
-        // Serializes/parses the on-disk WAL wire format (see
-        // XStore_Wal.cpp's SerializeWalRecord/ParseWalRecord definitions
-        // for the exact byte layout and CRC framing). Shared between the
-        // writer thread's normal flush path and ReplayWal's crash-recovery
-        // path so there is exactly one implementation of the wire format to
-        // keep correct, not two independently-maintained copies.
-        static std::string SerializeWalRecord(const WalRecord &record);
+        // Parses the on-disk WAL wire format (see XStore_Wal.cpp's
+        // WalWriterLoop pwritev path and ParseWalRecord definition for the
+        // exact byte layout and CRC framing). ParseWalRecord is an
+        // XStore:: member so ReplayWal's crash-recovery path (a different
+        // translation unit) uses this exact implementation instead of an
+        // independently-maintained copy.
         static bool ParseWalRecord(const char *data, size_t len, size_t &consumed, WalRecord &out_record);
 
         // Writes every row in recordToApply.rows to its actual .XSTORE data
@@ -515,8 +548,9 @@ class XStore {
 
         // Body of one shard's dedicated writer thread: waits (bounded by
         // WAL_GROUP_COMMIT_WINDOW_US) for the first record, then actively
-        // lingers up to WAL_GATHER_WINDOW_US (polling every
-        // WAL_GATHER_POLL_US) for more to arrive on the same shard --
+        // lingers up to an adaptive window between WAL_GATHER_WINDOW_MIN_US
+        // and WAL_GATHER_WINDOW_MAX_US (polling every WAL_GATHER_POLL_US)
+        // for more to arrive on the same shard --
         // stopping the moment the batch fills or the window elapses,
         // whichever first -- so genuinely concurrent commits share one
         // fsync instead of each paying for their own. Fsyncs the batch to

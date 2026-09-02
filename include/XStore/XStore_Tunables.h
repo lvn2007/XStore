@@ -93,6 +93,65 @@ inline constexpr size_t      WAL_MIN_ACTIVE_SHARDS       = 2;
 // old span.
 inline constexpr size_t      WAL_SHARDS_PER_DB           = 1;
 
+// Adaptive WAL writer polling. After a batch is dequeued, the writer stays
+// in a tight try_dequeue_bulk spin (bypasses wait_dequeue_bulk_timed's
+// LightweightSemaphore entirely -- no CAS-spin-then-park, just a raw
+// non-blocking poll) for up to this many microseconds of continued silence
+// before falling back to the normal blocking wait. Real client traffic's
+// inter-request gap (~1.1-1.2ms, measured) exceeds the semaphore's own
+// ~10k-iteration spin window (~5us, measured via spin_measure.cpp), which
+// is what pays the ~350-800us OS park/wake tax on the NEXT commit after any
+// gap -- this window is sized to outlast that gap so a shard mid-burst
+// never pays it, while a genuinely idle shard still falls back to near-zero
+// CPU (see WAL_GROUP_COMMIT_WINDOW_US) once the window lapses. Unlike a
+// permanent poll-always mode (spin forever = ~100% of one core per active
+// shard even at total idle, rejected -- see fsync_floor/spin_measure
+// investigation notes), this only spends CPU right after real activity,
+// not on shards nobody is using. Default 0 disables adaptive polling
+// entirely (falls straight to wait_dequeue_bulk_timed every iteration,
+// today's exact behavior) -- opt in after benchmarking, same as
+// WAL_SHARDS_PER_DB.
+//
+// Measured on torusnode15 (real client machines, real network, GROUP_COMMIT):
+// with the SMALL (~8-byte) row payload used in early testing, showed no
+// latency change at 1500us or 50000us, and live per-thread CPU sampling
+// (/proc utime+stime deltas, not ps's decaying %cpu average) showed the
+// writer thread almost never actually spinning at that payload size.
+// RE-TESTED with a realistic ~1.5KB row payload at t=1/16/64 real
+// concurrent clients (properly spread across multiple client machines):
+// this DOES show a real, consistent win at every concurrency level --
+// p50 latency dropped ~8% at t=1 and t=16, ~3.4% at t=64 (never a
+// regression at any tested point). Payload size matters here: a bigger
+// row means more per-batch serialize/CRC/write work, which changes the
+// writer thread's real idle-vs-busy timing enough to make the semaphore
+// park/wake path get hit meaningfully more often than the small-payload
+// test suggested. Conclusion from the earlier (small-payload) measurement
+// -- "not the bottleneck" -- does not hold at realistic row sizes.
+// Shipped ON (50ms): real, measured win at every concurrency level tested
+// (1/16/64 real clients, ~3.4-8%), never a regression -- decided default-on
+// given this project's priority is latency, not idle-CPU minimization on
+// this deployment. Costs ~1 core per active shard (4-8, not all
+// WAL_SHARD_COUNT) near 100% even at total idle -- re-evaluate if deployed
+// somewhere that tradeoff doesn't hold (e.g. a cost-constrained box with no
+// spare cores).
+inline constexpr unsigned    WAL_ADAPTIVE_POLL_WINDOW_US = 50000;
+
+// Same idea as WAL_ADAPTIVE_POLL_WINDOW_US above, applied to each ZMQ
+// worker thread's socket.recv() instead of the WAL writer's queue wait --
+// see WorkerRoutine (ZMQ_Server.cpp). Shipped ON (50ms): measured a real
+// ~37% p50 latency win at t=1, and no regression at t=16 (noise-level, all
+// 16 workers were already ~100% spin-serviced at both levels -- confirmed
+// via direct per-worker instrumentation, not assumed). Costs more than the
+// WAL writer's own poll above: ALL num_threads workers spin, not just
+// active shards, and -- per real measurement -- that's true even under
+// single-client traffic (ZMQ's DEALER round-robins fairly across every
+// registered worker regardless of actual concurrent client count, so a
+// worker only needs to be revisited within its own window to stay hot,
+// which happens for all of them even at t=1). Re-evaluate on a deployment
+// that's usually busy with no idle stretches, or one without spare
+// cores/SMT lanes for this to share with other work.
+inline constexpr unsigned    ZMQ_ADAPTIVE_POLL_WINDOW_US = 50000;
+
 // Debug/benchmark-only (see the XSTORE_WAL_STATS CMake option): how often
 // WalStatsReporterLoop logs each shard's average batch size. Only compiled
 // in / used when that flag is on -- harmless as a plain constant otherwise.
@@ -103,17 +162,63 @@ inline constexpr unsigned    WAL_STATS_LOG_INTERVAL_S    = 10;
 // version measured out to ~zero real batching under load: a peek only
 // catches something already sitting in the queue at that exact instant).
 // The writer actively waits (short poll loop, not the full window as one
-// sleep) until EITHER this many microseconds have elapsed OR the batch
-// hits WAL_BATCH_MAX_RECORDS, whichever comes first -- same dual-trigger
-// shape as Kafka producer batching (linger.ms + batch.size). Unlike the
-// non-blocking version, this DOES cost a lone writer up to this much
-// added latency every commit, even with nothing else to batch with --
-// deliberate trade: kept short (500us, two orders of magnitude below
-// WAL_GROUP_COMMIT_WINDOW_US) so that cost stays small, while still being
-// long enough for concurrent writers on the SAME shard (which per-DB
-// hashing now funnels together -- see EnqueueWalRecord) to land in the
-// same batch and share its fsync.
-inline constexpr unsigned    WAL_GATHER_WINDOW_US        = 500;
+// sleep) until EITHER the window has elapsed OR the batch hits
+// WAL_BATCH_MAX_RECORDS, whichever comes first -- same dual-trigger shape
+// as Kafka producer batching (linger.ms + batch.size). This DOES cost a
+// lone writer up to the window's added latency every commit, even with
+// nothing else to batch with.
+//
+// The window itself is now ADAPTIVE, not a single flat constant (an
+// earlier fixed 500us was measured on real hardware/real clients to cost
+// ~500-800us of latency for no real batching benefit whenever a shard's
+// traffic was sparse -- confirmed via avg_batch_size staying close to 1.0
+// under low concurrency). Each shard's writer thread tracks its own
+// exponential moving average of recent batch sizes (thread-local, no
+// locks/atomics -- only that shard's own writer thread ever reads or
+// writes it) and derives its NEXT window from it: close to
+// WAL_GATHER_WINDOW_MIN_US when the EMA is near 1.0 (no real grouping
+// happening, don't make this shard pay for nothing), scaling up toward
+// WAL_GATHER_WINDOW_MAX_US as the EMA climbs (real concurrent batching is
+// happening on this shard, worth paying more to catch more of it). A
+// sparse/lone-writer shard self-tunes down near MIN (matching the real
+// measured floor); a genuinely concurrent shard self-tunes up toward MAX
+// (preserving the original amortization benefit) -- automatically, per
+// shard, without assuming the traffic shape up front.
+//
+// MAX_US swept on torusnode15 against {250, 500, 750, 1000} x ALPHA
+// {0.1, 0.2, 0.4}, then the winner re-tested across client counts
+// {1, 4, 16, 32, 64} (each spread across up to 16 threads/machine over
+// multiple real client machines, not piled onto one -- piling threads past
+// a client machine's own core count confounds the measurement with
+// client-side NUMA/overload, not server behavior). 250us won cleanly at
+// EVERY concurrency level tested, including 64 clients against this
+// server's 16 worker threads (deliberate over-provisioning): a higher
+// MAX_US measurably raised avg_batch_size (more records/batch under real
+// concurrency) but that batching NEVER translated into lower latency on
+// this hardware -- e.g. at 64 clients, MAX_US=1000 reached avg_batch_size
+// 15.9 vs 250's 8.3, yet still measured slower (11.4ms mean vs 8.7ms).
+// This cluster's actual bottleneck isn't fsync-call-count amortization, so
+// paying extra linger for more batching is pure latency cost here with no
+// offsetting throughput win. Re-benchmark before raising this on different
+// storage/hardware -- this conclusion is a measured fact about this
+// device, not a universal one.
+inline constexpr unsigned    WAL_GATHER_WINDOW_MIN_US    = 50;
+inline constexpr unsigned    WAL_GATHER_WINDOW_MAX_US    = 250;
+// EMA smoothing factor for the batch-size average above: new_ema =
+// ALPHA*batch_size + (1-ALPHA)*old_ema. Higher = adapts faster to recent
+// traffic changes but noisier off a single outlier batch; lower = smoother
+// but slower to react. Swept alongside MAX_US above (0.1/0.2/0.4): effect
+// was noise-level at low concurrency, but 0.1 was part of the combo that
+// won cleanly at every concurrency level in the follow-up sweep, and never
+// lost to 0.2/0.4 in any single measurement -- no evidence favors a faster
+// reaction here on this hardware.
+inline constexpr double      WAL_GATHER_ADAPT_ALPHA      = 0.1;
+// EMA at/below this maps to WAL_GATHER_WINDOW_MIN_US; EMA at/above this
+// maps to WAL_GATHER_WINDOW_MAX_US, linearly interpolated between. 4.0
+// chosen as "a real, multi-record batch is consistently forming" --
+// higher than the bare >1.0 threshold for "any grouping at all" so a
+// single occasional 2-record batch doesn't swing the window to MAX.
+inline constexpr double      WAL_GATHER_ADAPT_EMA_SATURATE = 4.0;
 // Poll interval while waiting out the gather window above.
 inline constexpr unsigned    WAL_GATHER_POLL_US          = 50;
 

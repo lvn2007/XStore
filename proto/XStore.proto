@@ -39,10 +39,24 @@ enum TimeUnit {
 // this field gets ASYNC_ONLY, not a durability guarantee. Pass
 // SYNC_PER_COMMIT/GROUP_COMMIT explicitly to opt into durability. See
 // docs/TODO.md Gap 1 for the full design rationale.
+//
+// BYPASS skips WAL entirely -- no queue, no CRC32, no second write. The row
+// is pwrite()'d straight to the data file on the calling (ZMQ worker)
+// thread, same as ASYNC_ONLY's eventual apply but with no WAL record ever
+// written for it. Durability window is therefore bounded by the OS's own
+// writeback timing (dirty_expire_centisecs, default ~30s), NOT by a fast
+// WAL fdatasync like ASYNC_ONLY gets -- meaningfully weaker than
+// ASYNC_ONLY's existing bound, not an upgrade from it. No corruption risk
+// the way SYNC_PER_COMMIT/GROUP_COMMIT bypassed entirely (fsync=off-style)
+// would have, since XStore's flat offset-addressed row layout has no
+// cross-referencing structure for an ordering inversion to break -- worst
+// case is exactly the row(s) in flight at crash time being stale/lost,
+// nothing else. Explicit opt-in only, never a default.
 enum WalDurabilityMode {
   ASYNC_ONLY      = 0;
   GROUP_COMMIT    = 1;
   SYNC_PER_COMMIT = 2;
+  BYPASS          = 3;
 }
 
 message ConfigStruct {

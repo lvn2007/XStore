@@ -8,14 +8,17 @@
 #include <array>
 #include <cstring>
 #include <chrono>
+#include <deque>
 #include <fcntl.h>
 #include <filesystem>
+#include <sys/uio.h>
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
 
 std::array<XStore::WalShard, XStoreTunables::WAL_SHARD_COUNT> XStore::wal_shards;
 std::atomic<size_t> XStore::active_wal_shard_count{XStoreTunables::WAL_SHARD_COUNT};
+moodycamel::ConcurrentQueue<XStore::WalCompletion*> XStore::completion_pool;
 #ifdef XSTORE_WAL_STATS_ENABLED
 std::atomic<bool> XStore::wal_stats_stop_flag{false};
 std::thread XStore::wal_stats_reporter_thread;
@@ -28,7 +31,19 @@ namespace {
 // C++11+). Detects a torn/partial record from a crash mid-write during
 // ReplayWal -- not hardware-accelerated CRC32C (see docs/TODO.md Gap 1 for
 // that as a documented future optimization); correctness first here.
-uint32_t Crc32(const void *data, size_t len) {
+//
+// Split into Init/Update/Final so a record spread across multiple
+// non-contiguous buffers (the pwritev path below never concatenates a
+// record's pieces into one buffer, specifically to avoid that copy) can
+// still be CRC'd correctly -- call Update once per piece, in wire order,
+// threading the running crc value through, same as any streaming CRC API.
+// Crc32() below is the single-buffer convenience wrapper kept for
+// ReplayWal's read-side validation, where the record already exists as one
+// contiguous mmap'd/read buffer and there's nothing to gain from
+// streaming it.
+uint32_t Crc32Init() { return 0xFFFFFFFFu; }
+
+uint32_t Crc32Update(uint32_t crc, const void *data, size_t len) {
     static const std::array<uint32_t, 256> table = [] {
         std::array<uint32_t, 256> t{};
         for (uint32_t i = 0; i < 256; ++i) {
@@ -41,12 +56,17 @@ uint32_t Crc32(const void *data, size_t len) {
         return t;
     }();
 
-    uint32_t crc = 0xFFFFFFFFu;
     const auto *bytes = static_cast<const unsigned char *>(data);
     for (size_t i = 0; i < len; ++i) {
         crc = table[(crc ^ bytes[i]) & 0xFFu] ^ (crc >> 8);
     }
-    return crc ^ 0xFFFFFFFFu;
+    return crc;
+}
+
+uint32_t Crc32Final(uint32_t crc) { return crc ^ 0xFFFFFFFFu; }
+
+uint32_t Crc32(const void *data, size_t len) {
+    return Crc32Final(Crc32Update(Crc32Init(), data, len));
 }
 
 template <typename T>
@@ -66,34 +86,15 @@ void AppendPod(std::string &out, T value) {
 //   repeated rowCount times: [u64 epochTime][row bytes]
 // recordLen counts every byte AFTER itself. crc32 covers every byte after
 // itself (dbNameLen through the last row's bytes) so ReplayWal can
-// validate a record before trusting it. XStore:: member (not file-local)
-// so ReplayWal's crash-recovery path (a different translation unit) uses
-// this exact implementation instead of an independently-maintained copy --
-// that duplication is what let a since-fixed bounds-check bug survive
-// uncaught in the duplicate.
-std::string XStore::SerializeWalRecord(const XStore::WalRecord &record) {
-    std::string payload;
-    size_t row_block_size = record.rows.size() * (8 + static_cast<size_t>(record.row_length));
-    payload.reserve(2 + 2 + 4 + 4 + record.db_name.size() + row_block_size);
-    AppendPod<uint16_t>(payload, static_cast<uint16_t>(record.db_name.size()));
-    AppendPod<uint16_t>(payload, record.row_length);
-    AppendPod<int32_t>(payload, static_cast<int32_t>(record.time_resolution));
-    AppendPod<uint32_t>(payload, static_cast<uint32_t>(record.rows.size()));
-    payload.append(record.db_name);
-    for (const auto &row : record.rows) {
-        AppendPod<uint64_t>(payload, row.epoch_time);
-        payload.append(row.row_bytes);
-    }
-
-    uint32_t crc = Crc32(payload.data(), payload.size());
-
-    std::string out;
-    out.reserve(4 + 4 + payload.size());
-    AppendPod<uint32_t>(out, static_cast<uint32_t>(4 + payload.size()));
-    AppendPod<uint32_t>(out, crc);
-    out.append(payload);
-    return out;
-}
+// validate a record before trusting it. Written by WalWriterLoop's
+// pwritev path below directly (no dedicated SerializeWalRecord function --
+// removed: building one contiguous buffer per record was itself the copy
+// this format switch to vectored I/O exists to avoid). Parsed by
+// ParseWalRecord, an XStore:: member (not file-local) so ReplayWal's
+// crash-recovery path (a different translation unit) uses this exact
+// implementation instead of an independently-maintained copy -- that
+// duplication is what let a since-fixed bounds-check bug survive uncaught
+// in the duplicate.
 
 // Parses one record starting at data[0]. Returns false (consumed left
 // unset) if fewer than one full, CRC-valid record is available -- ReplayWal
@@ -300,22 +301,38 @@ bool XStore::EnqueueWalRecord(WalRecord record) {
         std::this_thread::sleep_for(std::chrono::microseconds(XStoreTunables::WAL_BACKPRESSURE_POLL_US));
     }
 
-    std::future<bool> completion_future;
+    // Not embedded in WalRecord by value: the record gets std::move'd into
+    // the queue below, so this caller's own stack frame is a different
+    // object than whatever the writer thread eventually sees -- the
+    // completion handle needs a stable address reachable by pointer from
+    // both sides. Checked out from completion_pool (true one-time
+    // allocation, not a fresh malloc per request -- see that member's
+    // comment, XStore.h); returned to the pool by this thread after
+    // sem.wait() returns instead of being freed.
+    WalCompletion *completion = nullptr;
     if (record.durability_mode != XStore_Proto::ASYNC_ONLY) {
-        record.completion.emplace();
-        completion_future = record.completion->get_future();
+        if (!completion_pool.try_dequeue(completion)) {
+            completion = new WalCompletion();
+        }
+        record.completion = completion;
     }
 
     if (!shard.queue.enqueue(std::move(record))) {
+        if (completion != nullptr) {
+            completion_pool.enqueue(completion);
+        }
         return false;
     }
 
-    if (completion_future.valid()) {
-        // Blocks until the writer thread resolves it; get() returns the
+    if (completion != nullptr) {
+        // Blocks until the writer thread resolves it; result reflects the
         // real durability outcome (false on a WAL fsync failure or a
         // failed apply) instead of unconditionally reporting success --
         // ASYNC_ONLY skips this and only reports "enqueued", by design.
-        return completion_future.get();
+        completion->sem.wait();
+        bool result = completion->result;
+        completion_pool.enqueue(completion);
+        return result;
     }
     return true;
 }
@@ -399,7 +416,11 @@ void XStore::WalStatsReporterLoop() {
             prev_records[i] = records;
             if (d_batches == 0) continue; // idle shard this interval -- nothing to report
             double avg_batch_size = static_cast<double>(d_records) / static_cast<double>(d_batches);
-            spdlog::info("[WAL STATS] shard={} batches={} records={} avg_batch_size={:.2f}",
+            // warn, not info: the server's default log level filters info
+            // entirely (see the perf test's own comment on why -- per-request
+            // info logging would flood stdout), which would silently drop
+            // every one of these diagnostic-only lines otherwise.
+            spdlog::warn("[WAL STATS] shard={} batches={} records={} avg_batch_size={:.2f}",
                          i, d_batches, d_records, avg_batch_size);
         }
     }
@@ -418,7 +439,49 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
     if (preopened_fd >= 0) {
         wal_fds.emplace(std::move(preopened_path), preopened_fd);
     }
-    std::unordered_map<std::string, std::string> bytes_by_file;
+    // Per-file list of {pointer, length} pieces for one pwritev() call,
+    // built to point DIRECTLY at each record's already-owned memory
+    // (db_base_path/rows[].row_bytes, both alive in `batch` until the next
+    // dequeue) instead of copying every record's bytes into one
+    // concatenated buffer first -- the thing that used to cost a full
+    // extra payload-sized memcpy per record here. record_headers/
+    // extra_epoch_bufs below hold the small (tens of bytes) per-record
+    // metadata pieces that DO need their own scratch storage (they're
+    // computed values, not already-owned memory); everything else is a
+    // reference into memory the batch already owns.
+    //
+    // iovec count per file is bounded by 2 * (rows in this batch for that
+    // file), since today's only WAL producer (UnaryInsert) always builds
+    // exactly 1 row/record: worst case WAL_BATCH_MAX_RECORDS(256) * 2 = 512
+    // iovecs if an entire batch lands in one file (the common case, one
+    // shard/file per batch in production) -- comfortably under Linux's
+    // IOV_MAX/UIO_MAXIOV of 1024 (confirmed via getconf IOV_MAX on the
+    // deployment target), which pwritev fails past with EINVAL rather than
+    // silently truncating. Revisit this bound if a future multi-row
+    // WalRecord producer (Batch/Range wiring) is added -- N rows/record
+    // pushes the worst case up by (N-1) extra iovecs per record.
+    std::unordered_map<std::string, std::vector<struct iovec>> iovecs_by_file;
+    // Deques, not vectors: push_back on a deque never invalidates
+    // references to earlier elements (only vector's does, on reallocation)
+    // -- iovecs above hold raw pointers into these, taken before all of
+    // this batch's records have been processed, so that stability matters.
+    // Each entry: [recordLen(4)][crc32(4)][dbNameLen(2)][rowLength(2)]
+    // [timeResolution(4)][rowCount(4)][dbName][first row's epochTime(8) if
+    // any] -- everything on the wire except row bytes themselves (kept as
+    // separate iovec entries pointing straight at WalRow::row_bytes) and
+    // any 2nd-or-later row's epochTime (in extra_epoch_bufs, rare/unused
+    // today -- WAL's only current producer, UnaryInsert, always builds
+    // exactly 1 row per record).
+    std::deque<std::string> record_headers;
+    std::deque<std::array<char, sizeof(uint64_t)>> extra_epoch_bufs;
+    // Memoizes WalFilePathFor within one batch: it's pure path computation
+    // (filesystem::path construction + string concat, no syscalls) but
+    // still real allocation work, and most records in one shard's batch
+    // share the same db_base_path (they landed on this shard together
+    // precisely because EnqueueWalRecord hashes by db_base_path) -- no
+    // reason to recompute the identical path once per record when it's
+    // usually the same 1-2 distinct paths for the whole batch.
+    std::unordered_map<std::string, std::string> wal_path_cache;
     // Per-file durability outcome for THIS batch -- replaces a single
     // all_durable flag so one file's fsync failure in a multi-DB batch
     // doesn't wrongly withhold the checkpoint (truncate) for a DIFFERENT
@@ -430,17 +493,54 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
     // WalFilePathFor a second time.
     std::vector<std::string> record_wal_path(XStoreTunables::WAL_BATCH_MAX_RECORDS);
     // Tracks which records in the current batch have already had their
-    // completion promise resolved -- lets the catch block below resolve
-    // only the ones an exception left unresolved, instead of risking a
-    // second set_value() (undefined/throws) on one already resolved by the
-    // code that ran before the exception.
+    // completion resolved -- lets the catch block below resolve only the
+    // ones an exception left unresolved, instead of risking a second
+    // sem.signal() (double-wake, harmless with LightweightSemaphore but
+    // still wrong -- the client-side wait() would return early using a
+    // stale result/count) on one already resolved by the code that ran
+    // before the exception.
     std::vector<bool> resolved(XStoreTunables::WAL_BATCH_MAX_RECORDS);
+    // Epoch (not "now") so the very first iteration is always outside the
+    // adaptive window and takes the normal blocking path -- no spin paid on
+    // a freshly-started, not-yet-active shard.
+    auto last_activity = std::chrono::steady_clock::time_point{};
+    // This shard's own exponential moving average of batch size -- see
+    // WAL_GATHER_WINDOW_MIN_US/MAX_US/ADAPT_ALPHA in XStore_Tunables.h.
+    // Thread-local (no lock/atomic needed -- only this writer thread ever
+    // touches it). Starts at 1.0 so the very first gather window is MIN,
+    // not an assumed MAX -- a fresh/idle shard shouldn't pay for batching
+    // it hasn't demonstrated yet.
+    double batch_size_ema = 1.0;
 
     while (!shard.stop_flag.load(std::memory_order_relaxed)) {
-        size_t count = shard.queue.wait_dequeue_bulk_timed(
-            batch.data(), XStoreTunables::WAL_BATCH_MAX_RECORDS,
-            std::chrono::microseconds(XStoreTunables::WAL_GROUP_COMMIT_WINDOW_US));
-        if (count == 0) continue;
+        size_t count = 0;
+        if constexpr (XStoreTunables::WAL_ADAPTIVE_POLL_WINDOW_US > 0) {
+            auto window = std::chrono::microseconds(XStoreTunables::WAL_ADAPTIVE_POLL_WINDOW_US);
+            if (std::chrono::steady_clock::now() - last_activity < window) {
+                // Recently active: tight non-blocking spin, bypassing
+                // wait_dequeue_bulk_timed's semaphore entirely, so a record
+                // arriving during this window is picked up without paying
+                // the OS park/wake tax. Self-terminates the moment the
+                // window lapses with nothing arriving -- falls through to
+                // the blocking path on the next outer-loop iteration.
+                while (count == 0) {
+                    count = shard.queue.try_dequeue_bulk(batch.data(), XStoreTunables::WAL_BATCH_MAX_RECORDS);
+                    if (count == 0 && std::chrono::steady_clock::now() - last_activity >= window) break;
+                }
+                if (count == 0) continue;
+            } else {
+                count = shard.queue.wait_dequeue_bulk_timed(
+                    batch.data(), XStoreTunables::WAL_BATCH_MAX_RECORDS,
+                    std::chrono::microseconds(XStoreTunables::WAL_GROUP_COMMIT_WINDOW_US));
+                if (count == 0) continue;
+            }
+        } else {
+            count = shard.queue.wait_dequeue_bulk_timed(
+                batch.data(), XStoreTunables::WAL_BATCH_MAX_RECORDS,
+                std::chrono::microseconds(XStoreTunables::WAL_GROUP_COMMIT_WINDOW_US));
+            if (count == 0) continue;
+        }
+        last_activity = std::chrono::steady_clock::now();
 
         // SYNC_PER_COMMIT wants the lowest latency possible: fsync as soon
         // as whatever's already queued is grabbed, no added wait. GROUP_
@@ -462,18 +562,29 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
         // under concurrent load (a non-blocking peek only catches what's
         // already sitting in the queue at that exact instant -- tried that
         // first, it didn't move the needle). Instead, actively linger for
-        // up to WAL_GATHER_WINDOW_US, polling every WAL_GATHER_POLL_US,
-        // stopping the moment the batch fills, the window elapses, or a
+        // up to an ADAPTIVE window (derived from batch_size_ema below, see
+        // its declaration and WAL_GATHER_WINDOW_MIN_US/MAX_US in
+        // XStore_Tunables.h), polling every WAL_GATHER_POLL_US, stopping
+        // the moment the batch fills, the window elapses, or a
         // SYNC_PER_COMMIT record joins the batch -- whichever comes first,
         // same dual-trigger shape as Kafka's linger.ms + batch.size, plus
         // the SYNC_PER_COMMIT override. This DOES cost a lone GROUP_COMMIT
-        // writer real added latency (up to the full window, every commit)
-        // in exchange for real batching once per-DB hashing (see
+        // writer real added latency (up to the window, every commit) in
+        // exchange for real batching once per-DB hashing (see
         // EnqueueWalRecord) funnels concurrent writers of the same DB onto
-        // this one shard. A lone SYNC_PER_COMMIT writer pays none of it.
+        // this one shard -- but a shard whose recent batches show no real
+        // grouping self-tunes that window down toward MIN instead of
+        // assuming MAX. A lone SYNC_PER_COMMIT writer pays none of it.
         if (!flush_now && count < XStoreTunables::WAL_BATCH_MAX_RECORDS) {
+            double saturate_t = (batch_size_ema - 1.0)
+                / (XStoreTunables::WAL_GATHER_ADAPT_EMA_SATURATE - 1.0);
+            saturate_t = std::clamp(saturate_t, 0.0, 1.0);
+            auto gather_window_us = static_cast<unsigned>(
+                XStoreTunables::WAL_GATHER_WINDOW_MIN_US
+                + saturate_t * (XStoreTunables::WAL_GATHER_WINDOW_MAX_US - XStoreTunables::WAL_GATHER_WINDOW_MIN_US));
+
             auto gather_deadline = std::chrono::steady_clock::now()
-                + std::chrono::microseconds(XStoreTunables::WAL_GATHER_WINDOW_US);
+                + std::chrono::microseconds(gather_window_us);
             while (count < XStoreTunables::WAL_BATCH_MAX_RECORDS) {
                 size_t before = count;
                 size_t got = shard.queue.try_dequeue_bulk(batch.data() + count, XStoreTunables::WAL_BATCH_MAX_RECORDS - count);
@@ -487,6 +598,15 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
                 std::this_thread::sleep_for(std::chrono::microseconds(XStoreTunables::WAL_GATHER_POLL_US));
             }
         }
+
+        // Feed this batch's real size back into the EMA that decides the
+        // NEXT batch's gather window -- updated regardless of which path
+        // produced `count` (flush_now/full-batch included), since a
+        // SYNC_PER_COMMIT-triggered early flush that still caught several
+        // queued records is just as real evidence of concurrent traffic on
+        // this shard as one the gather loop assembled itself.
+        batch_size_ema = XStoreTunables::WAL_GATHER_ADAPT_ALPHA * static_cast<double>(count)
+            + (1.0 - XStoreTunables::WAL_GATHER_ADAPT_ALPHA) * batch_size_ema;
 
         std::fill(resolved.begin(), resolved.begin() + static_cast<long>(count), false);
 
@@ -509,16 +629,71 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
             // group in production (one data_store_dir per process); only
             // tests running multiple data_store_dirs in one binary ever
             // see more.
-            bytes_by_file.clear();
+            iovecs_by_file.clear();
+            record_headers.clear();
+            extra_epoch_bufs.clear();
+            wal_path_cache.clear();
             for (size_t i = 0; i < count; ++i) {
-                record_wal_path[i] = WalFilePathFor(batch[i].db_base_path, shard_idx);
-                bytes_by_file[record_wal_path[i]] += SerializeWalRecord(batch[i]);
+                const WalRecord &record = batch[i];
+                auto [path_it, inserted] = wal_path_cache.try_emplace(record.db_base_path);
+                if (inserted) {
+                    path_it->second = WalFilePathFor(record.db_base_path, shard_idx);
+                }
+                record_wal_path[i] = path_it->second;
+
+                // Header piece: everything on the wire except row bytes
+                // (kept as separate iovecs below, no copy) -- recordLen and
+                // crc32 are patched in after being computed further down,
+                // but the iovec pointing at this buffer's final address can
+                // be pushed now since pwritev only reads it after the patch.
+                record_headers.emplace_back();
+                std::string &hdr = record_headers.back();
+                hdr.reserve(XStoreTunables::WAL_RECORD_HEADER_BYTES + record.db_name.size() + sizeof(uint64_t));
+                hdr.resize(8); // recordLen+crc32 placeholder, patched below
+                AppendPod<uint16_t>(hdr, static_cast<uint16_t>(record.db_name.size()));
+                AppendPod<uint16_t>(hdr, record.row_length);
+                AppendPod<int32_t>(hdr, static_cast<int32_t>(record.time_resolution));
+                AppendPod<uint32_t>(hdr, static_cast<uint32_t>(record.rows.size()));
+                hdr.append(record.db_name);
+                if (!record.rows.empty()) {
+                    AppendPod<uint64_t>(hdr, record.rows[0].epoch_time);
+                }
+
+                std::vector<struct iovec> &iov_list = iovecs_by_file[record_wal_path[i]];
+                iov_list.push_back({hdr.data(), hdr.size()});
+
+                uint32_t crc = Crc32Update(Crc32Init(), hdr.data() + 8, hdr.size() - 8);
+                size_t payload_size_after_header = hdr.size() - 8;
+                if (!record.rows.empty()) {
+                    const std::string &row_bytes = record.rows[0].row_bytes;
+                    iov_list.push_back({const_cast<char *>(row_bytes.data()), row_bytes.size()});
+                    crc = Crc32Update(crc, row_bytes.data(), row_bytes.size());
+                    payload_size_after_header += row_bytes.size();
+                }
+                for (size_t r = 1; r < record.rows.size(); ++r) {
+                    extra_epoch_bufs.emplace_back();
+                    auto &eb = extra_epoch_bufs.back();
+                    uint64_t epoch = record.rows[r].epoch_time;
+                    std::memcpy(eb.data(), &epoch, sizeof(epoch));
+                    iov_list.push_back({eb.data(), eb.size()});
+                    crc = Crc32Update(crc, eb.data(), eb.size());
+
+                    const std::string &row_bytes = record.rows[r].row_bytes;
+                    iov_list.push_back({const_cast<char *>(row_bytes.data()), row_bytes.size()});
+                    crc = Crc32Update(crc, row_bytes.data(), row_bytes.size());
+                    payload_size_after_header += eb.size() + row_bytes.size();
+                }
+                crc = Crc32Final(crc);
+
+                uint32_t record_len = static_cast<uint32_t>(4 + payload_size_after_header);
+                std::memcpy(hdr.data(), &record_len, sizeof(record_len));
+                std::memcpy(hdr.data() + 4, &crc, sizeof(crc));
             }
 
             file_durable.clear();
-            for (auto &entry : bytes_by_file) {
+            for (auto &entry : iovecs_by_file) {
                 const std::string &wal_path = entry.first;
-                const std::string &bytes = entry.second;
+                std::vector<struct iovec> &iov_list = entry.second;
                 file_durable[wal_path] = false;
 
                 auto it = wal_fds.find(wal_path);
@@ -537,14 +712,22 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
                     fd = it->second;
                 }
 
+                size_t total_size = 0;
+                for (const struct iovec &iov : iov_list) total_size += iov.iov_len;
+
                 // fdatasync, not fsync: WAL_FILE_PREALLOC_BYTES is sized (see
                 // its comment in XStore_Tunables.h, enforced by a
                 // static_assert there) to make this write structurally
                 // unable to grow the file past its preallocated region, so
                 // there's no metadata (st_size) change to durably persist --
-                // only the written bytes matter.
-                ssize_t written = pwrite(fd, bytes.data(), bytes.size(), 0);
-                if (written != static_cast<ssize_t>(bytes.size()) || fdatasync(fd) != 0) {
+                // only the written bytes matter. pwritev, not pwrite: writes
+                // straight from every piece's own memory (record headers
+                // above, row bytes still owned by `batch`) in one syscall,
+                // without first concatenating them into one contiguous
+                // buffer -- same on-disk byte layout either way, no format
+                // change, just no extra copy of every row's payload bytes.
+                ssize_t written = pwritev(fd, iov_list.data(), static_cast<int>(iov_list.size()), 0);
+                if (written != static_cast<ssize_t>(total_size) || fdatasync(fd) != 0) {
                     spdlog::error("[WAL] - Failed to durably write/fdatasync {}", wal_path);
                     continue;
                 }
@@ -567,7 +750,8 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
                                   batch[i].db_name, wal_ok, apply_ok);
                 }
                 if (batch[i].completion) {
-                    batch[i].completion->set_value(record_ok);
+                    batch[i].completion->result = record_ok;
+                    batch[i].completion->sem.signal();
                 }
                 resolved[i] = true;
             }
@@ -588,14 +772,16 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
             spdlog::error("[WAL] - Writer loop caught exception, failing this batch: {}", ex.what());
             for (size_t i = 0; i < count; ++i) {
                 if (!resolved[i] && batch[i].completion) {
-                    batch[i].completion->set_value(false);
+                    batch[i].completion->result = false;
+                    batch[i].completion->sem.signal();
                 }
             }
         } catch (...) {
             spdlog::error("[WAL] - Writer loop caught unknown exception, failing this batch");
             for (size_t i = 0; i < count; ++i) {
                 if (!resolved[i] && batch[i].completion) {
-                    batch[i].completion->set_value(false);
+                    batch[i].completion->result = false;
+                    batch[i].completion->sem.signal();
                 }
             }
         }

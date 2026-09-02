@@ -87,6 +87,72 @@ TEST_F(XStoreWalTest, AsyncOnlyEventuallyApplies) {
     EXPECT_TRUE(became_visible);
 }
 
+// BYPASS applies straight to the data file on the calling thread, same
+// synchronous-before-returning guarantee as SYNC_PER_COMMIT -- no polling
+// needed, unlike ASYNC_ONLY.
+TEST_F(XStoreWalTest, BypassAppliesBeforeReturning) {
+    XStore store;
+    store.CreateDB("WALBYPASS", XStore_Proto::SECOND, 64);
+
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    store.UnaryInsert(1700000003ULL, MakeRow(13.5), "WALBYPASS", &insert_rep, XStore_Proto::BYPASS);
+    EXPECT_NE(insert_rep.insertstatus().find("[INFO]"), std::string::npos);
+
+    XStore_Proto::UnaryQuery_REP query_rep;
+    store.UnaryQuery(1700000003ULL, "WALBYPASS", &query_rep);
+    ASSERT_TRUE(query_rep.has_data());
+    ASSERT_EQ(query_rep.data().fielddata_size(), 1);
+    EXPECT_DOUBLE_EQ(query_rep.data().fielddata(0).doubledata(), 13.5);
+}
+
+// BYPASS's whole point is skipping WAL entirely -- confirms no WAL record is
+// ever written for it, unlike every other durability mode (which all funnel
+// through EnqueueWalRecord). A shard's WAL file is only created lazily, on
+// its data_store_dir's first REAL (non-BYPASS) WAL write (StartWalWriters
+// itself only eagerly preallocates for the one data_store_dir the whole
+// test binary happened to construct first -- every other scratch dir's WAL
+// file comes from WalWriterLoop's fd-cache-miss path instead) -- so this
+// primes the file with a SYNC_PER_COMMIT insert first, snapshots its bytes
+// (offset-0-overwrite format: one record always lives at the same offset),
+// then does a BYPASS insert on the SAME db/shard and confirms the file is
+// byte-for-byte unchanged, while the BYPASS row is independently visible
+// via query (proving it landed in the data file, not lost).
+TEST_F(XStoreWalTest, BypassWritesNoWalRecord) {
+    XStore store;
+    store.CreateDB("WALBYPASSNOWAL", XStore_Proto::SECOND, 64);
+
+    XStore_Proto::UnaryInsert_REP priming_rep;
+    store.UnaryInsert(1700000004ULL, MakeRow(5.0), "WALBYPASSNOWAL", &priming_rep, XStore_Proto::SYNC_PER_COMMIT);
+    ASSERT_NE(priming_rep.insertstatus().find("[INFO]"), std::string::npos);
+
+    // active_wal_shard_count, not the WAL_SHARD_COUNT compile-time ceiling:
+    // matches EnqueueWalRecord's own modulo for which shard file this DB
+    // actually landed on.
+    std::filesystem::path db_base_path = scratch->test_root / "DataStore" / "WALBYPASSNOWAL";
+    size_t active = XStore::active_wal_shard_count.load();
+    size_t shard_idx = std::hash<std::string>{}(db_base_path.string()) % active;
+    std::filesystem::path wal_file = scratch->test_root / "DataStore" / "WAL" / ("shard_" + std::to_string(shard_idx) + ".WAL");
+
+    auto read_file = [&]() {
+        std::ifstream in(wal_file, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+    std::string wal_bytes_before = read_file();
+    ASSERT_FALSE(wal_bytes_before.empty());
+
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    store.UnaryInsert(1700000005ULL, MakeRow(21.0), "WALBYPASSNOWAL", &insert_rep, XStore_Proto::BYPASS);
+    ASSERT_NE(insert_rep.insertstatus().find("[INFO]"), std::string::npos);
+
+    std::string wal_bytes_after = read_file();
+    EXPECT_EQ(wal_bytes_after, wal_bytes_before) << "BYPASS must never write a WAL record";
+
+    XStore_Proto::UnaryQuery_REP query_rep;
+    store.UnaryQuery(1700000005ULL, "WALBYPASSNOWAL", &query_rep);
+    ASSERT_TRUE(query_rep.has_data());
+    EXPECT_DOUBLE_EQ(query_rep.data().fielddata(0).doubledata(), 21.0);
+}
+
 // Crash-recovery replay: writes directly into a shard's WAL file the same
 // way the writer thread would (bypassing UnaryInsert entirely, simulating
 // "process crashed after fsync, before apply"), then constructs a fresh
@@ -263,7 +329,7 @@ TEST_F(XStoreWalTest, WalStatsCountersReflectRealBatching) {
 #endif
 
 // Regression guard for the durability-mode-aware gather fix: a
-// SYNC_PER_COMMIT insert must not pay the (up to WAL_GATHER_WINDOW_US)
+// SYNC_PER_COMMIT insert must not pay the (up to WAL_GATHER_WINDOW_MAX_US)
 // group-commit linger even while a concurrent GROUP_COMMIT workload is
 // actively hammering the SAME DB (and therefore the same shard, via the
 // per-DB hash) -- before the fix, SYNC_PER_COMMIT and GROUP_COMMIT ran
@@ -272,7 +338,8 @@ TEST_F(XStoreWalTest, WalStatsCountersReflectRealBatching) {
 // Compares SYNC_PER_COMMIT latency solo vs. under concurrent GROUP_COMMIT
 // load rather than asserting an absolute latency bound, since real fsync
 // cost varies by machine/storage -- what must NOT happen is systematic
-// inflation by anywhere near WAL_GATHER_WINDOW_US once the fix is in place.
+// inflation by anywhere near WAL_GATHER_WINDOW_MAX_US once the fix is in
+// place.
 TEST_F(XStoreWalTest, SyncPerCommitLatencyUnaffectedByConcurrentGroupCommit) {
     XStore store;
     store.CreateDB("WALMIXED", XStore_Proto::SECOND, 64);
@@ -314,11 +381,12 @@ TEST_F(XStoreWalTest, SyncPerCommitLatencyUnaffectedByConcurrentGroupCommit) {
     stop_background.store(true, std::memory_order_relaxed);
     background.join();
 
-    // Tolerance well under WAL_GATHER_WINDOW_US (500us): the old (pre-fix)
-    // behavior would add up to that much, every single commit. This guards
+    // Tolerance well under WAL_GATHER_WINDOW_MAX_US (the worst-case gather
+    // window the adaptive logic can reach): the old (pre-fix) behavior
+    // would add up to that much, every single commit. This guards
     // specifically against a regression back to that -- not against
     // ordinary run-to-run fsync noise.
-    long long tolerance_us = static_cast<long long>(XStoreTunables::WAL_GATHER_WINDOW_US) / 2;
+    long long tolerance_us = static_cast<long long>(XStoreTunables::WAL_GATHER_WINDOW_MAX_US) / 2;
     EXPECT_LE(concurrent_median_us, baseline_median_us + tolerance_us)
         << "SYNC_PER_COMMIT median latency under concurrent GROUP_COMMIT load ("
         << concurrent_median_us << "us) inflated well past solo baseline ("
