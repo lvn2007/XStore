@@ -17,6 +17,7 @@ class DBInfo:
     dbResolution: str
     totalSizeInByte: int    # sum of every file's actualSizeBytes -- real disk usage of this DB
     files: List[FileInfo]
+    rowLength: int          # configured per-row slot size (bytes); every row is zero-padded to this
 
 
 @dataclasses.dataclass
@@ -68,7 +69,7 @@ class XStoreClient:
         # Extract & Append each DB Info into list
         for i in recvObj.dbInfo:
             files = [FileInfo(f.fileName, f.actualSizeBytes, f.apparentSizeBytes) for f in i.files]
-            currDB = DBInfo(i.dbName, i.dbResolution, i.totalSizeInByte, files)
+            currDB = DBInfo(i.dbName, i.dbResolution, i.totalSizeInByte, files, i.rowLength)
             dbInfo.append(currDB)
 
         # SysInfo as returning object

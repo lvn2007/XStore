@@ -161,6 +161,7 @@ XStore_Proto::SysInfo_REP XStore::InfoQuery(std::string_view server_addr, int th
         if (GetOrLoadCfg(curr_db_name, curr_db_dir, cfg_struct)) {
             // Set DB Resolution
             curr_db->set_dbresolution(cfg_struct.timeresolution());
+            curr_db->set_rowlength(cfg_struct.rowlength());
         }
 
         // Size of all data files in current DB

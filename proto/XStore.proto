@@ -277,6 +277,13 @@ message DbStats {
   TimeUnit dbResolution = 2;
   uint64 totalSizeInByte = 3; // sum of every file's actualSizeBytes -- real disk usage of this DB
   repeated FileStats files = 4;
+  // Configured per-row slot size (bytes), from this DB's CFG (matches
+  // ConfigStruct.rowLength). Every row is serialized RowData zero-padded to
+  // exactly this many bytes -- compare against a real row's actual
+  // serialized size (see docs/xstore-viewer-stats-handoff.md's sizing
+  // guide) to tell whether rowLength was sized too large (wasted padding
+  // per row) or too small (would reject/truncate real data).
+  sfixed32 rowLength = 5;
 }
 
 // --- SYS INFO

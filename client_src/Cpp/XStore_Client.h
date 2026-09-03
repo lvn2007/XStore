@@ -39,6 +39,11 @@ struct DbInfo {
   // real time-series file.
   uint64_t total_size_in_byte;
   std::vector<FileInfo> files;
+  // Matches XStore_Proto::DbStats.rowLength -- the configured per-row slot
+  // size (bytes) every insert's serialized RowData is zero-padded to.
+  // Compare against a real row's actual serialized size to tell whether
+  // this was sized too large (wasted padding/row) or too small.
+  int32_t row_length;
 };
 
 struct SysInfo {
@@ -183,6 +188,7 @@ class XStoreClient {
           curr_db.db_name = from_server.dbinfo(i).dbname();
           curr_db.db_resolution = from_server.dbinfo(i).dbresolution();
           curr_db.total_size_in_byte = from_server.dbinfo(i).totalsizeinbyte();
+          curr_db.row_length = from_server.dbinfo(i).rowlength();
 
           for (int j = 0; j < from_server.dbinfo(i).files_size(); j++) {
               const XStore_Proto::FileStats &f = from_server.dbinfo(i).files(j);
