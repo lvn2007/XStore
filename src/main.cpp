@@ -1,5 +1,6 @@
 #include "include/Networking/ZMQ_Server.h"
 #include "include/XStore/XStore.h"
+#include "include/XStore/XStore_SysStats.h"
 #include <argparse/argparse.hpp>
 
 int main(int argc, char *argv[]) {
@@ -24,6 +25,11 @@ int main(int argc, char *argv[]) {
         .default_value(0)
         .scan<'i', int>()
         .help("worker thread count (<=0 or omitted defaults to one per physical core)");
+
+    program.add_argument("-s", "--stats-port")
+        .default_value(0)
+        .scan<'i', int>()
+        .help("port for the host-stats PUB broadcast (<=0 or omitted defaults to --port minus 1)");
 
     try {
         program.parse_args(argc, argv);
@@ -50,6 +56,27 @@ int main(int argc, char *argv[]) {
         thread_count = ZmqServer::DefaultThreadCount();
         spdlog::info("[BOOT] - No/invalid thread count given, defaulting to {} (one per physical core)", thread_count);
     }
+
+    int stats_port = program.get<int>("--stats-port");
+    if (stats_port <= 0) {
+        // Default convention: one below the main port (e.g. main 9497 ->
+        // stats 9496) -- keeps the two sockets adjacent without requiring
+        // a second required CLI arg for the common case. Still overridable
+        // via -s/--stats-port for deployments where port-1 collides with
+        // something else.
+        try {
+            stats_port = std::stoi(port) - 1;
+        } catch (const std::exception &) {
+            spdlog::error("[BOOT] - --port ('{}') is not numeric, cannot derive a default --stats-port; pass -s/--stats-port explicitly", port);
+            exit(1);
+        }
+    }
+
+    // Host-metrics broadcast: independent background thread + its own PUB
+    // socket, started before the ZMQ server so it's already publishing by
+    // the time any client (desktop viewer or otherwise) connects. Never
+    // touches ZmqServer/XStore state -- see XStore_SysStats.h.
+    SysStatsCollector::Start(host, stats_port);
 
     // Spin ZMQ Server
     ZmqServer x_store_zmq_server(thread_count);

@@ -173,9 +173,20 @@ XStore_Proto::SysInfo_REP XStore::InfoQuery(std::string_view server_addr, int th
             std::string curr_file_name = db_dir.path().filename().string();
             stat(JoinPath(curr_db_dir, curr_file_name).c_str(), &stat_struct);
 
-            // Number of 512B blocks allocated
-            all_size += stat_struct.st_blocks * 512;
-            curr_db->add_filename(curr_file_name);
+            // actual = real bytes on disk (st_blocks*512, sparse-hole-aware);
+            // apparent = logical/reported size (st_size) -- data files are
+            // preallocated via fallocate and may still have unwritten holes,
+            // so apparent can exceed actual for a file that hasn't been
+            // fully written yet.
+            uint64_t actual_size = static_cast<uint64_t>(stat_struct.st_blocks) * 512;
+            uint64_t apparent_size = static_cast<uint64_t>(stat_struct.st_size);
+
+            all_size += actual_size;
+
+            XStore_Proto::FileStats *curr_file = curr_db->add_files();
+            curr_file->set_filename(curr_file_name);
+            curr_file->set_actualsizebytes(actual_size);
+            curr_file->set_apparentsizebytes(apparent_size);
         }
         curr_db->set_totalsizeinbyte(all_size);
     }

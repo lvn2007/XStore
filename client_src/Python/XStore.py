@@ -5,10 +5,18 @@ import dataclasses
 
 
 @dataclasses.dataclass
+class FileInfo:
+    fileName: str
+    actualSizeBytes: int    # real bytes on disk (st_blocks*512, sparse-hole-aware)
+    apparentSizeBytes: int  # logical/reported size (st_size); >= actualSizeBytes for a sparse file
+
+
+@dataclasses.dataclass
 class DBInfo:
     dbName: str
     dbResolution: str
-    totalSizeInByte: int
+    totalSizeInByte: int    # sum of every file's actualSizeBytes -- real disk usage of this DB
+    files: List[FileInfo]
 
 
 @dataclasses.dataclass
@@ -59,7 +67,8 @@ class XStoreClient:
 
         # Extract & Append each DB Info into list
         for i in recvObj.dbInfo:
-            currDB = DBInfo(i.dbName, i.dbResolution, i.totalSizeInByte)
+            files = [FileInfo(f.fileName, f.actualSizeBytes, f.apparentSizeBytes) for f in i.files]
+            currDB = DBInfo(i.dbName, i.dbResolution, i.totalSizeInByte, files)
             dbInfo.append(currDB)
 
         # SysInfo as returning object

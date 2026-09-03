@@ -268,4 +268,14 @@ static_assert(WAL_FILE_PREALLOC_BYTES >= WAL_MAX_BATCH_BYTES,
 inline constexpr size_t      WAL_QUEUE_HIGH_WATERMARK    = WAL_BATCH_MAX_RECORDS * 4;
 inline constexpr unsigned    WAL_BACKPRESSURE_POLL_US    = 200;
 
+// SysStatsCollector (XStore_SysStats.*): how often the background host-metrics
+// thread samples /proc + statvfs and re-publishes on its dedicated PUB
+// socket. 2s matches the desktop viewer's poll/render cadence -- a shorter
+// interval buys nothing (the viewer can't render faster than it renders)
+// while raising wakeup count on a thread that's deliberately SCHED_IDLE, and
+// a longer one would make CPU%/IOPS/net-rate deltas laggy relative to what
+// the panel implies it's showing. This thread never touches the WAL/ZMQ
+// hot path, so this knob has zero effect on insert/query latency either way.
+inline constexpr unsigned    SYS_STATS_COLLECT_INTERVAL_MS = 2000;
+
 } // namespace XStoreTunables

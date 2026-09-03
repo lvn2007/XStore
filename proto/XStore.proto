@@ -263,11 +263,20 @@ message Request {
 
 // ======== RESPONSE section ========
 // --- DB Stats & Info REP
+// Per-file size, both actual (real disk usage, sparse-hole-aware) and
+// apparent (logical/reported size, what a sparse file's holes count as if
+// they held real bytes) -- see InfoQuery's st_blocks vs st_size comment.
+message FileStats {
+  string fileName            = 1;
+  uint64 actualSizeBytes     = 2; // st_blocks * 512 -- real bytes on disk
+  uint64 apparentSizeBytes   = 3; // st_size -- logical size, >= actualSizeBytes for a sparse file
+}
+
 message DbStats {
   string dbName = 1;
   TimeUnit dbResolution = 2;
-  uint64 totalSizeInByte = 3;
-  repeated string fileName = 4;
+  uint64 totalSizeInByte = 3; // sum of every file's actualSizeBytes -- real disk usage of this DB
+  repeated FileStats files = 4;
 }
 
 // --- SYS INFO
@@ -280,6 +289,27 @@ message SysInfo_REP {
 // --- PING: empty ack, no server-side work beyond the round trip. Used to
 // force the ZMTP handshake (warmup) without InfoQuery's directory scan.
 message Ping_REP {
+}
+
+// --- SYS STATS: host-level resource snapshot, broadcast over a dedicated
+// PUB socket (default port = main port - 1) -- NOT part of the
+// Request/Response RPC envelope above, so there is no matching
+// RequestType/Request.oneof entry. The server's background collector
+// thread (SysStatsCollector, XStore_SysStats.*) serializes one of these
+// directly onto the wire every SYS_STATS_COLLECT_INTERVAL_MS regardless of
+// subscriber count; a client just connects a ZMQ_SUB socket and decodes
+// each incoming frame as this message.
+message SysStats_PUB {
+  double cpuUtilPercent = 1;  // 0-100, delta since the previous tick
+  uint64 memTotalBytes  = 2;
+  uint64 memUsedBytes   = 3;  // MemTotal - MemAvailable
+  double netRxKBps      = 4;  // summed across non-loopback interfaces
+  double netTxKBps      = 5;
+  uint64 diskReadIOPS   = 6;  // block device backing the data store dir
+  uint64 diskWriteIOPS  = 7;
+  uint64 diskFreeBytes  = 8;
+  uint64 diskTotalBytes = 9;
+  uint64 snapshotUnixMs = 10; // collector's sample time -- staleness check
 }
 
 // --- CREATE DB response

@@ -21,14 +21,24 @@
 #include <zmq_addon.hpp>
 #include "XStore.pb.h"
 
+struct FileInfo {
+  std::string file_name;
+  // actual = real bytes on disk (st_blocks*512, sparse-hole-aware);
+  // apparent = logical/reported size (st_size). apparent can exceed actual
+  // for a preallocated file that still has unwritten holes.
+  uint64_t actual_size_bytes;
+  uint64_t apparent_size_bytes;
+};
+
 struct DbInfo {
   std::string db_name;
   XStore_Proto::TimeUnit db_resolution;
-  // Matches XStore_Proto::DbStats.totalSizeInByte (uint64). A float here
+  // Matches XStore_Proto::DbStats.totalSizeInByte (uint64) -- sum of every
+  // file's actual_size_bytes, i.e. real disk usage of this DB. A float here
   // silently loses precision past 2^24 bytes (16MB) -- easy to hit for any
   // real time-series file.
   uint64_t total_size_in_byte;
-  std::vector<std::string> file_name;
+  std::vector<FileInfo> files;
 };
 
 struct SysInfo {
@@ -174,8 +184,9 @@ class XStoreClient {
           curr_db.db_resolution = from_server.dbinfo(i).dbresolution();
           curr_db.total_size_in_byte = from_server.dbinfo(i).totalsizeinbyte();
 
-          for (int j = 0; j < from_server.dbinfo(i).filename_size(); j++) {
-              curr_db.file_name.push_back(from_server.dbinfo(i).filename(j));
+          for (int j = 0; j < from_server.dbinfo(i).files_size(); j++) {
+              const XStore_Proto::FileStats &f = from_server.dbinfo(i).files(j);
+              curr_db.files.push_back(FileInfo{f.filename(), f.actualsizebytes(), f.apparentsizebytes()});
           }
           to_return.db_info_list.push_back(curr_db);
       }
