@@ -5,12 +5,15 @@
 #include <sys/statvfs.h>
 #include <sys/sysmacros.h>
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <set>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <zmq.hpp>
 
@@ -58,6 +61,57 @@ std::pair<unsigned, unsigned> DataDirDevice() {
         }
     }
     return {major(st.st_dev), minor(st.st_dev)};
+}
+
+// Which block device(s) the disk-iops gauge tracks. The data dir's own
+// device number may match NOTHING in /proc/diskstats -- container,
+// virtiofs (e.g. Docker Desktop bind mounts), overlay, NFS and tmpfs mounts
+// all report pseudo device numbers that no block device line carries.
+// Silently publishing 0/0 in that case is useless, so the collector falls
+// back to the host-wide sum of every whole disk and says so at startup.
+struct DiskTarget {
+    bool hostwide = true; // fallback unless the device is positively matched
+    unsigned major_num = 0;
+    unsigned minor_num = 0;
+    std::string device_name; // /proc/diskstats name of the data dir's device
+};
+
+DiskTarget ResolveDiskTarget(unsigned major_num, unsigned minor_num) {
+    DiskTarget target;
+    target.major_num = major_num;
+    target.minor_num = minor_num;
+    if (major_num == 0 && minor_num == 0) return target; // hostwide fallback
+    std::ifstream f("/proc/diskstats");
+    if (!f.is_open()) return target; // no /proc at all -- hostwide path no-ops
+    unsigned maj, min;
+    std::string name;
+    while (f >> maj >> min >> name) {
+        if (maj == major_num && min == minor_num) {
+            target.hostwide = false;
+            target.device_name = name;
+            return target;
+        }
+        std::string rest;
+        std::getline(f, rest);
+    }
+    return target; // data dir's device not listed -> hostwide fallback
+}
+
+// A partition's name extends its whole disk's name with a trailing number
+// ("sda" -> "sda1", "nvme0n1" -> "nvme0n1p1", "mmcblk0" -> "mmcblk0p1"), so
+// summing whole disks only counts each block of IO exactly once.
+bool IsDiskPartition(const std::string &n, const std::set<std::string> &all_names) {
+    const auto all_digits = [](const std::string &s) {
+        return !s.empty() &&
+               std::all_of(s.begin(), s.end(), [](char c) { return c >= '0' && c <= '9'; });
+    };
+    for (size_t cut = n.size(); cut > 0; --cut) { // n == M + digits
+        if (all_digits(n.substr(cut)) && all_names.count(n.substr(0, cut))) return true;
+    }
+    for (size_t p = n.find('p'); p != std::string::npos; p = n.find('p', p + 1)) { // n == M + "p" + digits
+        if (all_digits(n.substr(p + 1)) && all_names.count(n.substr(0, p))) return true;
+    }
+    return false;
 }
 
 // /proc/stat's first line: "cpu  user nice system idle iowait irq softirq
@@ -127,12 +181,36 @@ void ReadNetBytes(uint64_t &rx_bytes, uint64_t &tx_bytes) {
     }
 }
 
-void ReadDiskCounters(unsigned major_num, unsigned minor_num, uint64_t &reads, uint64_t &writes) {
+void ReadDiskCounters(const DiskTarget &target, uint64_t &reads, uint64_t &writes) {
     reads = 0;
     writes = 0;
-    if (major_num == 0 && minor_num == 0) return;
     std::ifstream f("/proc/diskstats");
     if (!f.is_open()) return;
+    if (target.hostwide) {
+        struct Line {
+            std::string name;
+            uint64_t r, w;
+        };
+        std::vector<Line> lines;
+        std::set<std::string> names;
+        unsigned maj, min;
+        std::string name;
+        while (f >> maj >> min >> name) {
+            uint64_t r, r_merged, sectors_r, time_r, w, w_merged, sectors_w, time_w;
+            if (!(f >> r >> r_merged >> sectors_r >> time_r >> w >> w_merged >> sectors_w >> time_w)) break;
+            names.insert(name);
+            lines.push_back({name, r, w});
+            std::string rest;
+            std::getline(f, rest);
+        }
+        for (const auto &L : lines) {
+            if (L.name.rfind("zram", 0) == 0) continue; // RAM-backed, not disk IO
+            if (IsDiskPartition(L.name, names)) continue;
+            reads += L.r;
+            writes += L.w;
+        }
+        return;
+    }
     unsigned maj, min;
     std::string name;
     while (f >> maj >> min >> name) {
@@ -141,7 +219,7 @@ void ReadDiskCounters(unsigned major_num, unsigned minor_num, uint64_t &reads, u
         f >> reads_completed >> reads_merged >> sectors_read >> time_reading
           >> writes_completed >> writes_merged >> sectors_written >> time_writing;
         if (f.fail()) break;
-        if (maj == major_num && min == minor_num) {
+        if (maj == target.major_num && min == target.minor_num) {
             reads = reads_completed;
             writes = writes_completed;
             return;
@@ -214,11 +292,25 @@ void SysStatsCollector::CollectorLoop(std::string host, int port) {
     spdlog::info("[SYSSTATS] - Broadcasting host stats on {} every {}ms", bind_addr, XStoreTunables::SYS_STATS_COLLECT_INTERVAL_MS);
 
     auto [dev_major, dev_minor] = DataDirDevice();
+    const DiskTarget disk_target = ResolveDiskTarget(dev_major, dev_minor);
+    // Logged once at startup so a 0/0 iops reading is diagnosable without
+    // re-deriving the mount layout: this line says exactly which device
+    // the gauge tracks (or that it fell back to host-wide).
+    if (disk_target.hostwide) {
+        spdlog::warn("[SYSSTATS] - DataStore dir device {}:{} not listed in /proc/diskstats "
+                     "(container/virtiofs/overlay/NFS/tmpfs mount?) -- disk iops will be the "
+                     "HOST-WIDE sum of all whole disks, not the data dir's own device",
+                     dev_major, dev_minor);
+    } else {
+        spdlog::info("[SYSSTATS] - DataStore dir backed by /proc/diskstats device {} ({}:{}) -- "
+                     "disk iops track that block device",
+                     disk_target.device_name, dev_major, dev_minor);
+    }
 
     RawSample prev{};
     ReadCpuJiffies(prev.cpu_active_jiffies, prev.cpu_total_jiffies);
     ReadNetBytes(prev.net_rx_bytes, prev.net_tx_bytes);
-    ReadDiskCounters(dev_major, dev_minor, prev.disk_reads, prev.disk_writes);
+    ReadDiskCounters(disk_target, prev.disk_reads, prev.disk_writes);
     prev.sampled_at = std::chrono::steady_clock::now();
 
     while (!stop_flag.load(std::memory_order_relaxed)) {
@@ -228,7 +320,7 @@ void SysStatsCollector::CollectorLoop(std::string host, int port) {
         RawSample curr{};
         ReadCpuJiffies(curr.cpu_active_jiffies, curr.cpu_total_jiffies);
         ReadNetBytes(curr.net_rx_bytes, curr.net_tx_bytes);
-        ReadDiskCounters(dev_major, dev_minor, curr.disk_reads, curr.disk_writes);
+        ReadDiskCounters(disk_target, curr.disk_reads, curr.disk_writes);
         curr.sampled_at = std::chrono::steady_clock::now();
 
         double elapsed_s = std::chrono::duration<double>(curr.sampled_at - prev.sampled_at).count();
