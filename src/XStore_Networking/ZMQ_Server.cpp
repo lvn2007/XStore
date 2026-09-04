@@ -297,17 +297,20 @@ void ZmqServer::WorkerRoutine(std::string server_addr) {
 
             // BATCH QUERY
             case XStore_Proto::Request::kBatchquery: {
+                // No Arena/BatchQuery_REP here -- BatchQueryStreamed shares
+                // RangeQueryStreamed's zero-object-tree encoder (same wire
+                // shape, see XStore_WireEncode.h), for the same reason: no
+                // UnaryQuery_REP/RowData/FData tree ever gets built, so
+                // there's nothing for Reset() to leave stranded as a
+                // permanent per-worker RSS floor. Multi-frame reply,
+                // reassembled transparently by the client library.
                 auto *req = client_request->mutable_batchquery();
-                // Arena-allocated: queryResponse is repeated UnaryQuery_REP,
-                // each entry owning its own RowData -> repeated FData, so a
-                // wide/long response means one heap alloc per row plus one
-                // per column inside it via the ordinary allocator. Arena
-                // turns that whole tree into bump-pointer allocations off
-                // one block, freed in one shot when Arena is Reset() at the
-                // top of the loop -- no per-message new/delete.
-                auto *rep = google::protobuf::Arena::Create<XStore_Proto::BatchQuery_REP>(&arena);
-                my_store.BatchQuery(req, rep);
-                SendProto(socket, *rep);
+                my_store.BatchQueryStreamed(req, /*sort_time=*/true, XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                    [&](std::string &&chunk, bool is_last) {
+                        socket.send(zmq::buffer(chunk),
+                                    is_last ? zmq::send_flags::dontwait
+                                            : (zmq::send_flags::dontwait | zmq::send_flags::sndmore));
+                    });
                 break;
             }
 
@@ -336,14 +339,25 @@ void ZmqServer::WorkerRoutine(std::string server_addr) {
 
             // RANGE QUERY
             case XStore_Proto::Request::kRangequery: {
+                // No Arena/RangeQuery_REP here -- RangeQueryStreamed never
+                // builds a UnaryQuery_REP/RowData/FData tree for this
+                // response (see its declaration comment in XStore.h and the
+                // wire-encode helpers in XStore_RangeOps.cpp), which is the
+                // fix for the OOM a big single-shot range used to cause: the
+                // old path's arena tree, once built, was never freed
+                // (Reset() keeps blocks) and became this worker's permanent
+                // RSS floor. Each chunk here is sent as its own ZMQ frame
+                // (SNDMORE on all but the last), reassembled by the client
+                // library into one logical RangeQuery_REP -- transparent to
+                // whatever called RangeQuery at the API level.
                 const auto &req = client_request->rangequery();
-                // Arena-allocated -- see BatchQuery's case above for why.
-                // RangeQuery's row count scales with span (not a fixed
-                // batch size), so this is where the per-row allocation
-                // count matters most.
-                auto *rep = google::protobuf::Arena::Create<XStore_Proto::RangeQuery_REP>(&arena);
-                my_store.RangeQuery(req.starttime(), req.endtime(), req.dbname(), rep);
-                SendProto(socket, *rep);
+                my_store.RangeQueryStreamed(req.starttime(), req.endtime(), req.dbname(),
+                    XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                    [&](std::string &&chunk, bool is_last) {
+                        socket.send(zmq::buffer(chunk),
+                                    is_last ? zmq::send_flags::dontwait
+                                            : (zmq::send_flags::dontwait | zmq::send_flags::sndmore));
+                    });
                 break;
             }
 

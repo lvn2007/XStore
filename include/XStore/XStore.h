@@ -18,6 +18,7 @@
 #include <vector>
 #include <atomic>
 #include <thread>
+#include <functional>
 #include <blockingconcurrentqueue.h>
 #include "XStore.pb.h"
 #include "include/DataStructs/ValueStruct.h"
@@ -307,6 +308,17 @@ class XStore {
         // BATCH QUERY
         void BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, XStore_Proto::BatchQuery_REP *return_data, bool sort_time=true);
 
+        // BATCH QUERY (streamed, wire-format encode -- the network-facing
+        // path). Same query semantics/output as BatchQuery -- including
+        // holes being OMITTED, not included as empty entries, unlike
+        // RangeQuery -- just without ever building a UnaryQuery_REP/RowData/
+        // FData tree; see RangeQueryStreamed's declaration comment above for
+        // the general contract (chunking, emit_chunk semantics). Takes
+        // proto_from_client non-const for the same reason BatchQuery does:
+        // sort_time=true sorts the request's timestamps in place.
+        void BatchQueryStreamed(XStore_Proto::BatchQuery_REQ *proto_from_client, bool sort_time, size_t chunk_size_bytes,
+                                 const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk);
+
         // BATCH DELETE
         [[nodiscard]] XStore_Proto::BatchDelete_REP BatchDelete(XStore_Proto::BatchDelete_REQ *proto_from_client);
 
@@ -315,6 +327,24 @@ class XStore {
 
         // RANGE QUERY
         void RangeQuery(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, XStore_Proto::RangeQuery_REP *return_data);
+
+        // RANGE QUERY (streamed, wire-format encode -- the network-facing path).
+        // Same query semantics/output as RangeQuery (byte-identical
+        // RangeQuery_REP once a caller concatenates every emitted chunk and
+        // parses the result), but never builds a UnaryQuery_REP/RowData/FData
+        // object tree: each row's already-serialized on-disk bytes are
+        // copied directly into a plain buffer (see XStore_RangeOps.cpp for
+        // the wire-encode helpers), which is handed to emit_chunk once it
+        // reaches chunk_size_bytes -- bounding peak memory to ~chunk_size_
+        // bytes regardless of how many rows the query spans, instead of the
+        // whole response tree living in the arena at once. emit_chunk's
+        // bool argument is true only for the final call. A query whose
+        // total output never reaches chunk_size_bytes still calls
+        // emit_chunk exactly once (is_last=true) -- chunking is not a
+        // separate code path, just what this naturally degenerates to.
+        void RangeQueryStreamed(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
+                                 std::string_view db_name, size_t chunk_size_bytes,
+                                 const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk);
 
         // RANGE DELETE
         [[nodiscard]] XStore_Proto::RangeDelete_REP RangeDelete(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name);

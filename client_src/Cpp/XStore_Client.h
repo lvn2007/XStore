@@ -108,7 +108,24 @@ class XStoreClient {
       }
 
       RepT from_server;
-      from_server.ParseFromArray(recv_buf.back().data(), recv_buf.back().size());
+      // Every existing RPC replies with exactly one frame -- this is the
+      // same single ParseFromArray as before, zero behavior change. A
+      // streamed reply (currently only RangeQuery, see RangeQueryStreamed)
+      // arrives as several frames that are pieces of ONE logical message's
+      // bytes (protobuf doesn't care where a message's serialized bytes get
+      // split, only that they're concatenated back in order before
+      // parsing) -- reassembled here so this stays invisible to every
+      // caller above SendRecv.
+      if (recv_buf.size() == 1) {
+          from_server.ParseFromArray(recv_buf.front().data(), recv_buf.front().size());
+      } else {
+          std::string joined;
+          size_t total = 0;
+          for (const auto &part : recv_buf) total += part.size();
+          joined.reserve(total);
+          for (const auto &part : recv_buf) joined.append(static_cast<const char *>(part.data()), part.size());
+          from_server.ParseFromArray(joined.data(), joined.size());
+      }
       return from_server;
   }
 

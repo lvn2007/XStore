@@ -1,4 +1,5 @@
 #include "include/XStore/XStore_Internal.h"
+#include "include/XStore/XStore_WireEncode.h"
 #include "include/DataStructs/TimeStruct.h"
 #include "include/DataStructs/FileRangeLock.h"
 #include <spdlog/fmt/fmt.h>
@@ -8,6 +9,8 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <sys/mman.h>
+
+using namespace XStoreWireEncode;
 
 // RANGE INSERT
 void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client, XStore_Proto::RangeInsert_REP *return_data) {
@@ -253,6 +256,143 @@ void XStore::RangeQuery(unsigned long long int start_epoch_t, unsigned long long
 
         iter_epoch = segment_end + 1;
     }
+}
+
+// RANGE QUERY (streamed) -- see XStore.h's declaration comment for the
+// contract. Mirrors RangeQuery's walk/lock/madvise structure exactly (kept
+// as its own loop rather than factored out, matching RangeQuery's existing
+// independence from the aggregates' WalkYearSpan -- these two already don't
+// share a walker, so this isn't new duplication); the only real difference
+// is what happens to each row once it's mapped: EncodeQueryResponseEntry
+// writes its bytes straight into chunk_buf instead of building a
+// UnaryQuery_REP/RowData/FData tree.
+void XStore::RangeQueryStreamed(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
+                                 std::string_view db_name_view, size_t chunk_size_bytes,
+                                 const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk) {
+    const std::string &db_name = UpperCaseInto(db_name_view);
+    const std::string &db_base_path_str = CachedDbBasePath(db_name);
+
+    // querystatus (RangeQuery_REP field 3) semantics match RangeQuery
+    // exactly: SetTaggedStatus OVERWRITES, so if several segments in one
+    // query each hit a warning, only the last one survives -- tracked here
+    // the same way, applied once at the very end rather than per-occurrence.
+    bool has_warning = false;
+    std::string last_warning;
+    auto set_warning = [&](const char *tag, const std::string &body) {
+        has_warning = true;
+        last_warning = tag;
+        last_warning += body;
+    };
+
+    // Appends querystatus (field 3, only if set) to the last chunk and
+    // emits it. The only exit point of this function -- every return path
+    // below funnels through here so emit_chunk is always called at least
+    // once (a reply must exist even for a zero-row/error query, or the
+    // caller's REQ socket would hang forever waiting for one).
+    auto finish = [&](std::string &&chunk_buf) {
+        if (has_warning) {
+            AppendQueryStatus(chunk_buf, last_warning);
+        }
+        emit_chunk(std::move(chunk_buf), true);
+    };
+
+    XStore_Proto::ConfigStruct cfg_struct;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+        set_warning("[WARNING] ", fmt::format("[RANGE QUERY] [DB: {}] - {}.CFG does not exist", db_name, db_name));
+        finish(std::string());
+        return;
+    }
+
+    if (start_epoch_t > end_epoch_t) {
+        set_warning("[WARNING] ", fmt::format("[RANGE QUERY] [DB: {}] - Target end time must be after start time", db_name));
+        finish(std::string());
+        return;
+    }
+
+    // Chunking bounds THIS SERVER's peak memory (never more than
+    // ~chunk_size_bytes live at once) -- it does NOT lift protobuf's real
+    // ~2GB ceiling on a single message, because the client still
+    // concatenates every chunk back into one buffer before ParseFromArray/
+    // ParseFromString (see XStore_Client.h's SendRecv) -- a >2GB
+    // reassembled result would corrupt on the CLIENT side even though this
+    // server never held more than one chunk at a time. So this guard stays,
+    // unchanged from RangeQuery, checked before any chunk is sent (an abort
+    // partway through a multipart reply has no clean way to signal
+    // "actually, error" to a client already receiving frames).
+    if ((end_epoch_t - start_epoch_t) * cfg_struct.rowlength() > 2'000'000'000) {
+        set_warning("[WARNING] ", fmt::format("[RANGE QUERY] [DB: {}] - Query results is larger than 2GB", db_name));
+        finish(std::string());
+        return;
+    }
+
+    if (std::filesystem::is_directory(db_base_path_str) == 0) {
+        set_warning("[WARNING] ", fmt::format("[RANGE QUERY] [DB: {}] - DB does not exist", db_name));
+        finish(std::string());
+        return;
+    }
+
+    std::string chunk_buf;
+    chunk_buf.reserve(chunk_size_bytes + 4096);
+
+    unsigned long long int iter_epoch = start_epoch_t;
+    while (iter_epoch <= end_epoch_t) {
+        TimeStruct curr_ts(iter_epoch, cfg_struct.timeresolution());
+        const std::string &target_file_path = CachedYearFilePath(db_base_path_str, curr_ts.year);
+        const unsigned long long int segment_end = std::min(end_epoch_t, static_cast<unsigned long long int>(curr_ts.last_epoch));
+
+        if (std::filesystem::exists(target_file_path) == 0) {
+            set_warning("[WARNING] ", fmt::format("[RANGE QUERY] [DB: {}] - {}.XSTORE does not exist", db_name, curr_ts.year));
+            iter_epoch = segment_end + 1;
+            continue;
+        }
+
+        std::shared_ptr<void> mapped_handle = GetOrMapFile(target_file_path, cfg_struct.rowlength(), curr_ts.last_epoch - curr_ts.first_epoch);
+        if (mapped_handle == nullptr) {
+            set_warning("[ERROR] ", fmt::format("[RANGE QUERY] [DB: {}] - Unable to open/map {}.XSTORE", db_name, curr_ts.year));
+            iter_epoch = segment_end + 1;
+            continue;
+        }
+        void *mapped_base = mapped_handle.get();
+
+        const unsigned long long int first_offset = (iter_epoch - curr_ts.first_epoch) * cfg_struct.rowlength();
+        const unsigned long long int region_length = (segment_end - iter_epoch + 1) * cfg_struct.rowlength();
+
+        {
+            FileRangeLockGuard guard(target_file_path, first_offset, region_length, FileRangeLock::LockType::READ);
+
+            {
+                static const long PAGE_SIZE = sysconf(_SC_PAGE_SIZE);
+                char *span_start = static_cast<char*>(mapped_base) + first_offset;
+                uintptr_t aligned_addr = reinterpret_cast<uintptr_t>(span_start) & ~(static_cast<uintptr_t>(PAGE_SIZE) - 1);
+                size_t align_slop = reinterpret_cast<uintptr_t>(span_start) - aligned_addr;
+                madvise(reinterpret_cast<void*>(aligned_addr), region_length + align_slop, MADV_WILLNEED);
+            }
+
+            for (unsigned long long int epoch_time = iter_epoch; epoch_time <= segment_end; epoch_time++) {
+                unsigned long long int offset = (epoch_time - curr_ts.first_epoch) * cfg_struct.rowlength();
+                const char *row_ptr = static_cast<const char*>(mapped_base) + offset;
+                EncodeQueryResponseEntry(chunk_buf, epoch_time, row_ptr, cfg_struct.rowlength());
+
+                // Flush whenever a completed row has pushed the buffer to
+                // (or past) the target -- never mid-row, so every emitted
+                // chunk's bytes still concatenate back into a stream of
+                // whole, valid queryresponse entries regardless of where
+                // the cut lands. Small queries never hit this at all: one
+                // buffer, one emit_chunk call at the end (see finish()) --
+                // chunking isn't a separate path, just what this becomes
+                // once a query is big enough to reach the target.
+                if (chunk_buf.size() >= chunk_size_bytes) {
+                    emit_chunk(std::move(chunk_buf), false);
+                    chunk_buf.clear();
+                    chunk_buf.reserve(chunk_size_bytes + 4096);
+                }
+            }
+        }
+
+        iter_epoch = segment_end + 1;
+    }
+
+    finish(std::move(chunk_buf));
 }
 
 // RANGE DELETE

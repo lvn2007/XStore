@@ -1,5 +1,6 @@
 #include "include/Networking/ZMQ_Server.h"
 #include "include/XStore/XStore.h"
+#include "include/XStore/XStore_PreadPool.h"
 #include "include/XStore/XStore_SysStats.h"
 #include <argparse/argparse.hpp>
 
@@ -71,6 +72,16 @@ int main(int argc, char *argv[]) {
             exit(1);
         }
     }
+
+    // Tells XStorePreadPool how many threads the ZMQ server is about to
+    // claim, so its own worker count sizes off whatever's left over on
+    // this box instead of independently sizing off hardware_concurrency()
+    // too -- must run before ZmqServer starts (any query that reaches
+    // BatchQueryStreamed starts the pread pool's threads on first use, and
+    // that count is fixed from then on). See XStore_Tunables.h's
+    // BATCH_QUERY_PREAD_POOL_SIZE_CAP comment for the regression this
+    // fixes.
+    XStorePreadPool::Init(static_cast<size_t>(thread_count));
 
     // Host-metrics broadcast: independent background thread + its own PUB
     // socket, started before the ZMQ server so it's already publishing by

@@ -268,6 +268,33 @@ static_assert(WAL_FILE_PREALLOC_BYTES >= WAL_MAX_BATCH_BYTES,
 inline constexpr size_t      WAL_QUEUE_HIGH_WATERMARK    = WAL_BATCH_MAX_RECORDS * 4;
 inline constexpr unsigned    WAL_BACKPRESSURE_POLL_US    = 200;
 
+// RangeQueryStreamed and BatchQueryStreamed (XStore_RangeOps.cpp,
+// XStore_BatchOps.cpp): target size of each emitted wire-format chunk. A
+// query whose total output stays under this is sent as a single ZMQ frame
+// (chunking is not a separate path -- it's just what a small query
+// naturally never triggers); a bigger query streams as multiple frames of
+// roughly this size each, bounding server peak memory to ~this value
+// regardless of total row count. Shared by both ops since they emit the
+// identical wire shape (repeated UnaryQuery_REP) via the same encoder --
+// see XStore_WireEncode.h.
+//
+// Swept 8/16/32/64/128/256/512 MB on torusnode15 against a real 15M-row/
+// 975MB-wire RangeQuery (BACKTESTER, rowLength=64) over a loopback client:
+// latency stayed flat (5.7-6.3s) across every chunk size -- ZMQ's send()
+// buffers locally rather than blocking on frame count, so per-frame
+// overhead doesn't show up on a low-latency link the way it would over a
+// real WAN to a desktop client. Peak RSS climbed with chunk size (1.91GB at
+// 8MB -> 2.49GB at 512MB), though most of that floor is unavoidable mmap'd
+// source-data residency from the madvise(WILLNEED) prefetch (same for every
+// chunk size), not the chunk buffer itself -- 64MB (this default) sits
+// right where RSS is still close to the 32MB/8MB end (1.99GB, vs 1.96GB and
+// 1.91GB) while keeping frame count low (15 frames for this query, vs 117
+// at 8MB) -- fewer frames matters once a real network's per-message
+// overhead isn't zero, which this loopback benchmark can't measure. Same
+// query against the pre-chunking object-tree RangeQuery peaked at 6.6GB
+// RSS for comparison -- see the RangeQuery OOM handoff doc's history.
+inline constexpr size_t      STREAMED_QUERY_CHUNK_SIZE_BYTES = 64ull * 1024 * 1024;
+
 // SysStatsCollector (XStore_SysStats.*): how often the background host-metrics
 // thread samples /proc + statvfs and re-publishes on its dedicated PUB
 // socket. 2s matches the desktop viewer's poll/render cadence -- a shorter
@@ -277,5 +304,107 @@ inline constexpr unsigned    WAL_BACKPRESSURE_POLL_US    = 200;
 // the panel implies it's showing. This thread never touches the WAL/ZMQ
 // hot path, so this knob has zero effect on insert/query latency either way.
 inline constexpr unsigned    SYS_STATS_COLLECT_INTERVAL_MS = 2000;
+
+// BatchQueryStreamed (XStore_BatchOps.cpp) + XStorePreadPool
+// (XStore_PreadPool.*): pread() is a syscall -- on BatchQuery's scattered
+// access pattern (the whole reason it uses pread-per-row instead of mmap,
+// see there) a large batch pays hundreds of thousands of these, serially,
+// on one thread. Two separate costs hide in that: (a) fixed per-syscall CPU
+// overhead (mode switch, page-cache lookup), paid whether the row is cached
+// or not; (b) real device wait when a row is NOT in page cache -- a single
+// blocking thread can only ever have one read in flight, so a device's own
+// concurrency (NVMe/SSD: dozens of outstanding requests; a spinning disk
+// with NCQ: a much smaller but still real handful) goes unused. Fanning
+// pread() out across threads attacks both: divides the fixed overhead
+// across cores, and lets multiple reads be in flight at once.
+//
+// BATCH_QUERY_PREAD_POOL_SIZE_CAP is how many worker threads actually
+// exist to do this, system-wide -- not "how many threads this one query
+// spawns". XStorePreadPool starts this many threads ONCE at process
+// startup (first use) and every BatchQueryStreamed call, from every
+// concurrent client, submits its pread work to that SAME fixed pool. That's
+// the difference between a real device-concurrency cap and a per-call fan-
+// out limit: with the latter, two concurrent queries each capped at K
+// threads still put 2K readers on the disk at once; with a shared pool
+// capped at K, the whole server never exceeds K concurrent preads no matter
+// how many clients are querying. This is what makes the cap trustworthy on
+// a spinning disk under real concurrent load, not just in a single-query
+// benchmark.
+//
+// Tune by device: NVMe/SSD (deep hardware queue) wants this reasonably
+// high. A spinning disk with NCQ still benefits from a SMALL amount of
+// concurrency (2-4 -- lets the drive's scheduler reorder/merge nearby
+// seeks) but degrades past that as the head thrashes between unrelated
+// requests; a disk with no queuing at all wants 1 (= fully serial, single
+// reader at a time -- never worse than the pre-optimization pread-per-row
+// loop, since a 1-worker pool degenerates to exactly that). Benchmark
+// before trusting the default on unfamiliar storage -- don't assume, same
+// rule as WAL_SHARDS_PER_DB above.
+//
+// THE ACTUAL POOL SIZE IS NOT THIS CONSTANT -- it's computed at runtime
+// (XStorePreadPool::PoolSize, XStore_PreadPool.cpp) as hardware_concurrency()
+// minus however many ZMQ worker threads THIS server instance was actually
+// started with (XStorePreadPool::Init, called once from main.cpp right
+// after -t/--threads resolves to its final value), clamped to
+// [BATCH_QUERY_PREAD_POOL_SIZE_MIN, this cap]. Measured need for this: a
+// flat hardware_concurrency()-sized pool regressed BatchQuery throughput at
+// high client concurrency (32/64 clients) on a 16-core/32-thread box --
+// the pool's own worker threads were competing with the ZMQ worker threads
+// (also sized from hardware_concurrency()) for the same physical cores,
+// two independently-sized consumers oversubscribing one budget. Sizing off
+// "cores minus what ZMQ already claimed" fixes this on ANY machine
+// automatically -- a small box naturally gets a small pool, a big box a
+// big one, without a manual per-deployment multiplier. This cap remains a
+// hard ceiling on top of that (mainly relevant on a very large box, where
+// "cores minus ZMQ threads" alone could still exceed how many concurrent
+// preads are actually useful against one storage device).
+//
+// BATCH_QUERY_PARALLEL_PREAD_MIN_ROWS is a separate, smaller guard: below
+// this many rows in one year-bucket, skip the pool entirely and pread
+// serially inline -- avoids paying a job-submit + semaphore-wait round trip
+// for a handful of rows where the overhead could plausibly exceed the work.
+//
+// BATCH_QUERY_PREAD_WAVE_ROWS bounds the scratch buffer used for one
+// dispatch to a fixed size independent of the batch's total row count -- a
+// 500k-row batch still only ever holds this many rows' worth of scratch
+// memory live at once, preserving the same server-memory-bounded design
+// BatchQueryStreamed's chunking already gives on the encode side. Decoupled
+// from pool size on purpose: this bounds MEMORY per dispatch, the pool cap
+// above bounds DEVICE CONCURRENCY -- unrelated resources, no reason one
+// number should have to serve both.
+inline constexpr size_t      BATCH_QUERY_PREAD_POOL_SIZE_CAP      = 32;
+// Floor under the "cores minus ZMQ threads" computation -- a heavily
+// loaded/small box (e.g. ZMQ threads already >= hardware_concurrency())
+// still gets at least this many pread workers rather than the pool
+// disappearing to 0. 1 is always safe (degenerates to the pre-optimization
+// serial pread-per-row loop, never worse); raised slightly above 1 by
+// default so a tight box still gets a little real concurrency rather than
+// none.
+inline constexpr size_t      BATCH_QUERY_PREAD_POOL_SIZE_MIN      = 2;
+inline constexpr size_t      BATCH_QUERY_PREAD_WAVE_ROWS          = 4096;
+inline constexpr size_t      BATCH_QUERY_PARALLEL_PREAD_MIN_ROWS  = 256;
+
+// TRIED AND REVERTED: fanning RangeQueryStreamed's per-row wire-encode
+// transform out across XStorePreadPool, the same way BatchQuery's pread
+// fan-out uses it. Measured on Mystic (real 8-machine multi-client sweep,
+// 500k-row RangeQuery, BACKTESTER's 64-byte rows): 41-77% THROUGHPUT
+// REGRESSION at every concurrency level (1/8/16/32/64 clients), not a
+// small one. Root cause: BatchQuery's dispatched unit of work is a real
+// blocking pread() syscall (microseconds of actual I/O wait), so a wave's
+// job-submit-and-wait round trip through the pool is negligible next to
+// it. RangeQuery's read side is already free (mmap + madvise(WILLNEED) --
+// page-cache-resident, no syscalls at all), so its dispatched unit of work
+// is just a few dozen nanoseconds of in-memory transform (tag byte,
+// varint, memcpy) -- cheaper than the dispatch overhead itself. A 500k-row
+// query paying ~122 such wave round trips (at a 4096-row wave size) lost
+// badly to a single core just running the plain loop. Larger wave sizes
+// might not fix this either -- the per-row work may simply be too cheap to
+// ever amortize a thread-pool hop, even a lock-free one. Don't re-attempt
+// this without a cheap local microbenchmark FIRST (encode throughput
+// with/without the fan-out, no network/Mystic round trip needed) -- that
+// would have caught this before ever reaching real infrastructure. Might
+// be worth revisiting once rows are large enough that the per-row
+// transform itself is expensive (this measurement used 64-byte rows;
+// unproven at, say, a 128-column/1KB-row dataset).
 
 } // namespace XStoreTunables

@@ -12,6 +12,7 @@ add_executable(xstore_tests
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_IO.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Wal.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_UnaryOps.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_PreadPool.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_BatchOps.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_RangeOps.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Aggregates.cpp
@@ -48,6 +49,7 @@ add_executable(xstore_network_tests
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_IO.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Wal.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_UnaryOps.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_PreadPool.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_BatchOps.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_RangeOps.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Aggregates.cpp
@@ -110,6 +112,7 @@ add_executable(xstore_perf_tests
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_IO.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Wal.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_UnaryOps.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_PreadPool.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_BatchOps.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_RangeOps.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Aggregates.cpp

@@ -26,6 +26,7 @@
 
 #include "include/DataStructs/TimeStruct.h"
 #include "include/DataStructs/FileRangeLock.h"
+#include "include/XStore/XStore_PreadPool.h"
 #include <spdlog/fmt/fmt.h>
 #include "XStoreTestSupport.h"
 
@@ -1326,6 +1327,248 @@ TEST_F(XStoreTest, BatchQuerySortTimeFalseWithUnsortedTimestampsRoundTrips) {
     }
 }
 
+// --- BatchQueryStreamed: the network-facing, zero-object-tree path (shares
+// RangeQueryStreamed's wire encoder -- see XStore_WireEncode.h). Every test
+// below asserts byte-for-byte SerializeAsString() equality against the
+// existing object-based BatchQuery for the same query, same as
+// RangeQueryStreamed's tests.
+namespace {
+XStore_Proto::BatchQuery_REP RunBatchStreamedAndReassemble(XStore &store, XStore_Proto::BatchQuery_REQ *req, bool sort_time,
+                                                             size_t chunk_size_bytes, int *chunk_count_out = nullptr) {
+    std::string joined;
+    int chunk_count = 0;
+    store.BatchQueryStreamed(req, sort_time, chunk_size_bytes,
+        [&](std::string &&chunk, bool /*is_last*/) {
+            chunk_count++;
+            joined += chunk;
+        });
+    if (chunk_count_out) *chunk_count_out = chunk_count;
+    XStore_Proto::BatchQuery_REP rep;
+    rep.ParseFromString(joined);
+    return rep;
+}
+}  // namespace
+
+TEST_F(XStoreTest, BatchQueryStreamedMatchesBatchQueryForDenseMultiColumnRows) {
+    XStore store;
+    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+
+    std::vector<unsigned long long> timestamps = {TS_2031_MID, TS_1998_MID, TS_2016_MID, TS_2009_MID, TS_2003_MID};
+    XStore_Proto::BatchInsert_REQ insert_req;
+    insert_req.set_dbname("TESTDB");
+    for (size_t i = 0; i < timestamps.size(); i++) {
+        XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
+        entry->set_timestamp(timestamps[i]);
+        // Negative int32/int64 exercises the 10-byte-varint case, same as
+        // RangeQueryStreamed's equivalent test.
+        *entry->mutable_data() = MakeRow({
+            FDouble(3.14159 * static_cast<double>(i)),
+            FInt32(-static_cast<int32_t>(i)),
+            FInt64(-9000000000LL - static_cast<int64_t>(i)),
+            FBool(i % 2 == 0),
+            FString("row-" + std::to_string(i)),
+        });
+    }
+    XStore_Proto::BatchInsert_REP insert_rep;
+    store.BatchInsert(&insert_req, &insert_rep);
+
+    XStore_Proto::BatchQuery_REQ query_req1;
+    query_req1.set_dbname("TESTDB");
+    for (auto ts : timestamps) query_req1.add_timestamp(ts);
+    XStore_Proto::BatchQuery_REP expected;
+    store.BatchQuery(&query_req1, &expected);
+
+    XStore_Proto::BatchQuery_REQ query_req2;
+    query_req2.set_dbname("TESTDB");
+    for (auto ts : timestamps) query_req2.add_timestamp(ts);
+    int chunk_count = 0;
+    XStore_Proto::BatchQuery_REP actual = RunBatchStreamedAndReassemble(store, &query_req2, /*sort_time=*/true, 1ull << 30, &chunk_count);
+
+    EXPECT_EQ(chunk_count, 1);
+    ASSERT_EQ(actual.queryresponse_size(), expected.queryresponse_size());
+    EXPECT_EQ(actual.SerializeAsString(), expected.SerializeAsString())
+        << "BatchQueryStreamed's hand-encoded bytes diverge from BatchQuery's object-tree serialization";
+}
+
+TEST_F(XStoreTest, BatchQueryStreamedOmitsHolesSameAsBatchQuery) {
+    XStore store;
+    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+
+    XStore_Proto::BatchInsert_REQ insert_req;
+    insert_req.set_dbname("TESTDB");
+    for (unsigned long long ts : {TS_2009_MID, TS_2009_MID + 10, TS_2009_MID + 20,
+                                   TS_2031_MID, TS_2031_MID + 15}) {
+        XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
+        entry->set_timestamp(ts);
+        *entry->mutable_data() = MakeRow({FUInt32(1)});
+    }
+    XStore_Proto::BatchInsert_REP insert_rep;
+    store.BatchInsert(&insert_req, &insert_rep);
+
+    std::vector<unsigned long long> query_ts = {TS_2009_MID, TS_2009_MID + 5, TS_2009_MID + 10, TS_2009_MID + 15, TS_2009_MID + 20,
+                                                 TS_2031_MID, TS_2031_MID + 7, TS_2031_MID + 15};
+
+    XStore_Proto::BatchQuery_REQ req1;
+    req1.set_dbname("TESTDB");
+    for (auto ts : query_ts) req1.add_timestamp(ts);
+    XStore_Proto::BatchQuery_REP expected;
+    store.BatchQuery(&req1, &expected);
+
+    XStore_Proto::BatchQuery_REQ req2;
+    req2.set_dbname("TESTDB");
+    for (auto ts : query_ts) req2.add_timestamp(ts);
+    XStore_Proto::BatchQuery_REP actual = RunBatchStreamedAndReassemble(store, &req2, /*sort_time=*/true, 1ull << 30);
+
+    ASSERT_EQ(actual.queryresponse_size(), 5) << "holes must be omitted, not encoded as empty entries";
+    EXPECT_EQ(actual.SerializeAsString(), expected.SerializeAsString());
+}
+
+TEST_F(XStoreTest, BatchQueryStreamedSplitsAcrossMultipleChunksAndReassemblesToMatchBatchQuery) {
+    XStore store;
+    store.CreateDB("TESTDB", XStore_Proto::SECOND, 64);
+
+    constexpr int kRows = 500;
+    std::vector<unsigned long long> timestamps;
+    XStore_Proto::BatchInsert_REQ insert_req;
+    insert_req.set_dbname("TESTDB");
+    for (int i = 0; i < kRows; i++) {
+        unsigned long long ts = TS_2024_MID + i;
+        timestamps.push_back(ts);
+        XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
+        entry->set_timestamp(ts);
+        *entry->mutable_data() = MakeRow({FDouble(i * 1.5), FInt64(i)});
+    }
+    XStore_Proto::BatchInsert_REP insert_rep;
+    store.BatchInsert(&insert_req, &insert_rep);
+
+    XStore_Proto::BatchQuery_REQ req1;
+    req1.set_dbname("TESTDB");
+    for (auto ts : timestamps) req1.add_timestamp(ts);
+    XStore_Proto::BatchQuery_REP expected;
+    store.BatchQuery(&req1, &expected);
+
+    XStore_Proto::BatchQuery_REQ req2;
+    req2.set_dbname("TESTDB");
+    for (auto ts : timestamps) req2.add_timestamp(ts);
+    int chunk_count = 0;
+    XStore_Proto::BatchQuery_REP actual = RunBatchStreamedAndReassemble(store, &req2, /*sort_time=*/true, 200, &chunk_count);
+
+    EXPECT_GT(chunk_count, 10) << "test setup didn't actually force multiple chunks";
+    ASSERT_EQ(actual.queryresponse_size(), kRows);
+    EXPECT_EQ(actual.SerializeAsString(), expected.SerializeAsString())
+        << "reassembled multi-chunk output diverges from a single-shot BatchQuery -- a chunk boundary is corrupting an entry";
+}
+
+TEST_F(XStoreTest, BatchQueryStreamedParallelPreadWaveSpansMultipleWavesWithHolesMatchesBatchQuery) {
+    // Exercises the wave-parallel pread path (BATCH_QUERY_PARALLEL_PREAD_MIN_ROWS
+    // = 256, BATCH_QUERY_PREAD_WAVE_ROWS = 4096) across multiple full waves
+    // plus a partial final wave, with holes scattered throughout (every 7th
+    // timestamp uninserted) so the per-wave hole check is covered too.
+    XStore store;
+    store.CreateDB("TESTDB", XStore_Proto::SECOND, 64);
+
+    constexpr int kRows = 10000;  // > 2 * BATCH_QUERY_PREAD_WAVE_ROWS -- forces 3 waves
+    std::vector<unsigned long long> all_ts;
+    XStore_Proto::BatchInsert_REQ insert_req;
+    insert_req.set_dbname("TESTDB");
+    int inserted_count = 0;
+    for (int i = 0; i < kRows; i++) {
+        unsigned long long ts = TS_2024_MID + i;
+        all_ts.push_back(ts);
+        if (i % 7 == 0) continue;  // leave a hole
+        XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
+        entry->set_timestamp(ts);
+        *entry->mutable_data() = MakeRow({FDouble(i * 0.5), FInt64(i)});
+        inserted_count++;
+    }
+    XStore_Proto::BatchInsert_REP insert_rep;
+    store.BatchInsert(&insert_req, &insert_rep);
+
+    XStore_Proto::BatchQuery_REQ req1;
+    req1.set_dbname("TESTDB");
+    for (auto ts : all_ts) req1.add_timestamp(ts);
+    XStore_Proto::BatchQuery_REP expected;
+    store.BatchQuery(&req1, &expected);
+
+    XStore_Proto::BatchQuery_REQ req2;
+    req2.set_dbname("TESTDB");
+    for (auto ts : all_ts) req2.add_timestamp(ts);
+    int chunk_count = 0;
+    XStore_Proto::BatchQuery_REP actual = RunBatchStreamedAndReassemble(store, &req2, /*sort_time=*/true, 1ull << 30, &chunk_count);
+
+    ASSERT_EQ(actual.queryresponse_size(), inserted_count);
+    EXPECT_EQ(actual.SerializeAsString(), expected.SerializeAsString())
+        << "wave-parallel pread path diverges from BatchQuery's object-tree serialization";
+}
+
+TEST_F(XStoreTest, BatchQueryStreamedPreservesMissingYearWarningMessage) {
+    XStore store;
+    store.CreateDB("TESTDB", XStore_Proto::SECOND, 32);
+
+    XStore_Proto::BatchInsert_REQ insert_req;
+    insert_req.set_dbname("TESTDB");
+    for (unsigned long long ts : {TS_1998_MID, TS_2009_MID}) {
+        XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
+        entry->set_timestamp(ts);
+        *entry->mutable_data() = MakeRow({FString("present")});
+    }
+    XStore_Proto::BatchInsert_REP insert_rep;
+    store.BatchInsert(&insert_req, &insert_rep);
+    // TS_2016_MID's year (2016.XSTORE) is never created -- queried below anyway.
+
+    XStore_Proto::BatchQuery_REQ req1;
+    req1.set_dbname("TESTDB");
+    for (auto ts : {TS_1998_MID, TS_2016_MID, TS_2009_MID}) req1.add_timestamp(ts);
+    XStore_Proto::BatchQuery_REP expected;
+    store.BatchQuery(&req1, &expected);
+
+    XStore_Proto::BatchQuery_REQ req2;
+    req2.set_dbname("TESTDB");
+    for (auto ts : {TS_1998_MID, TS_2016_MID, TS_2009_MID}) req2.add_timestamp(ts);
+    XStore_Proto::BatchQuery_REP actual = RunBatchStreamedAndReassemble(store, &req2, /*sort_time=*/true, 1ull << 30);
+
+    EXPECT_EQ(actual.querystatus(), expected.querystatus());
+    EXPECT_NE(actual.querystatus().find("2016.XSTORE does not exist"), std::string::npos) << actual.querystatus();
+    EXPECT_EQ(actual.SerializeAsString(), expected.SerializeAsString());
+}
+
+TEST_F(XStoreTest, BatchQueryStreamedSortTimeFalseWithUnsortedTimestampsRoundTrips) {
+    XStore store;
+    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+
+    std::map<unsigned long long, std::string> expected_vals = {
+        {TS_2016_MID + 50000, "mid"},
+        {TS_2016_MID, "low"},
+        {TS_2016_MID + 100000, "high"},
+        {TS_2016_MID + 25000, "low-mid"},
+    };
+    XStore_Proto::BatchInsert_REQ insert_req;
+    insert_req.set_dbname("TESTDB");
+    for (auto &[ts, val] : expected_vals) {
+        XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
+        entry->set_timestamp(ts);
+        *entry->mutable_data() = MakeRow({FString(val)});
+    }
+    XStore_Proto::BatchInsert_REP insert_rep;
+    store.BatchInsert(&insert_req, &insert_rep);
+
+    std::vector<unsigned long long> query_order = {TS_2016_MID + 100000, TS_2016_MID, TS_2016_MID + 50000, TS_2016_MID + 25000};
+
+    XStore_Proto::BatchQuery_REQ req1;
+    req1.set_dbname("TESTDB");
+    for (auto ts : query_order) req1.add_timestamp(ts);
+    XStore_Proto::BatchQuery_REP expected;
+    store.BatchQuery(&req1, &expected, /*sort_time=*/false);
+
+    XStore_Proto::BatchQuery_REQ req2;
+    req2.set_dbname("TESTDB");
+    for (auto ts : query_order) req2.add_timestamp(ts);
+    XStore_Proto::BatchQuery_REP actual = RunBatchStreamedAndReassemble(store, &req2, /*sort_time=*/false, 1ull << 30);
+
+    ASSERT_EQ(actual.queryresponse_size(), 4);
+    EXPECT_EQ(actual.SerializeAsString(), expected.SerializeAsString());
+}
+
 // ---------------------------------------------------------------------
 // RangeInsert / RangeQuery / RangeDelete
 // ---------------------------------------------------------------------
@@ -1702,6 +1945,169 @@ TEST_F(XStoreTest, RangeQuerySpanningThreeYearsWithMissingMiddleYearFile) {
     }
     EXPECT_EQ(found[ts_1998_last], "end-of-1998");
     EXPECT_EQ(found[ts_2000_first_plus], "start-of-2000");
+}
+
+// --- RangeQueryStreamed: the network-facing, zero-object-tree path. Every
+// test below asserts byte-for-byte SerializeAsString() equality against the
+// existing object-based RangeQuery for the same query -- not just "looks
+// right" -- since RangeQueryStreamed hand-encodes the wire format directly
+// and any bug there would silently produce wrong bytes, not a crash.
+namespace {
+// Collects every emitted chunk (in order) and hands back the concatenated
+// bytes parsed as a RangeQuery_REP -- what any real caller (the C++ client's
+// SendRecv, ZMQ_Server.cpp) does with a streamed reply's frames.
+XStore_Proto::RangeQuery_REP RunStreamedAndReassemble(XStore &store, unsigned long long start, unsigned long long end,
+                                                       const std::string &db_name, size_t chunk_size_bytes,
+                                                       int *chunk_count_out = nullptr) {
+    std::string joined;
+    int chunk_count = 0;
+    store.RangeQueryStreamed(start, end, db_name, chunk_size_bytes,
+        [&](std::string &&chunk, bool /*is_last*/) {
+            chunk_count++;
+            joined += chunk;
+        });
+    if (chunk_count_out) *chunk_count_out = chunk_count;
+    XStore_Proto::RangeQuery_REP rep;
+    rep.ParseFromString(joined);
+    return rep;
+}
+}  // namespace
+
+TEST_F(XStoreTest, RangeQueryStreamedMatchesRangeQueryForDenseMultiColumnRows) {
+    XStore store;
+    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+
+    // Mixes every FData oneof case reachable from a normal insert, including
+    // the negative-int32/int64 wire gotcha (always a 10-byte varint --
+    // exactly the case that would break a skip-scan that assumed varints
+    // are always short).
+    for (int i = 0; i < 20; i++) {
+        XStore_Proto::UnaryInsert_REP rep;
+        store.UnaryInsert(TS_2016_MID + i, MakeRow({
+            FDouble(3.14159 * i),
+            FInt32(-i),
+            FInt64(-9000000000LL - i),
+            FUInt64(static_cast<uint64_t>(i) * 1'000'000'007ULL),
+            FBool(i % 2 == 0),
+            FString("row-" + std::to_string(i)),
+            FBytes(std::string(10, static_cast<char>('a' + (i % 26)))),
+        }), "TESTDB", &rep);
+    }
+
+    XStore_Proto::RangeQuery_REP expected;
+    store.RangeQuery(TS_2016_MID, TS_2016_MID + 19, "TESTDB", &expected);
+
+    // Huge chunk size -- the whole response fits in one chunk, exercising
+    // the "small query never actually chunks" degenerate case.
+    int chunk_count = 0;
+    XStore_Proto::RangeQuery_REP actual = RunStreamedAndReassemble(store, TS_2016_MID, TS_2016_MID + 19, "TESTDB",
+                                                                     1ull << 30, &chunk_count);
+
+    EXPECT_EQ(chunk_count, 1);
+    ASSERT_EQ(actual.queryresponse_size(), expected.queryresponse_size());
+    EXPECT_EQ(actual.SerializeAsString(), expected.SerializeAsString())
+        << "RangeQueryStreamed's hand-encoded bytes diverge from RangeQuery's object-tree serialization for dense multi-type rows";
+}
+
+TEST_F(XStoreTest, RangeQueryStreamedHandlesHolesAndSparseColumnsSameAsRangeQuery) {
+    XStore store;
+    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+
+    // Deliberate gaps (holes) between inserts, and rows with different
+    // column counts (sparse columns) -- both need to round-trip identically
+    // to the object-based path without any special-casing in the encoder.
+    XStore_Proto::UnaryInsert_REP rep;
+    store.UnaryInsert(TS_2009_MID, MakeRow({FString("only-one-column")}), "TESTDB", &rep);
+    store.UnaryInsert(TS_2009_MID + 3, MakeRow({FInt64(42), FDouble(2.5)}), "TESTDB", &rep);
+    store.UnaryInsert(TS_2009_MID + 7, MakeRow({}), "TESTDB", &rep);  // explicit empty row, not a hole
+    // TS_2009_MID+1, +2, +4, +5, +6 are left as real holes (never inserted).
+
+    XStore_Proto::RangeQuery_REP expected;
+    store.RangeQuery(TS_2009_MID, TS_2009_MID + 7, "TESTDB", &expected);
+
+    XStore_Proto::RangeQuery_REP actual = RunStreamedAndReassemble(store, TS_2009_MID, TS_2009_MID + 7, "TESTDB", 1ull << 30);
+
+    ASSERT_EQ(actual.queryresponse_size(), 8);
+    EXPECT_EQ(actual.SerializeAsString(), expected.SerializeAsString());
+}
+
+TEST_F(XStoreTest, RangeQueryStreamedSplitsAcrossMultipleChunksAndReassemblesToMatchRangeQuery) {
+    XStore store;
+    store.CreateDB("TESTDB", XStore_Proto::SECOND, 64);
+
+    constexpr int kRows = 500;
+    for (int i = 0; i < kRows; i++) {
+        XStore_Proto::UnaryInsert_REP rep;
+        store.UnaryInsert(TS_2024_MID + i, MakeRow({FDouble(i * 1.5), FInt64(i)}), "TESTDB", &rep);
+    }
+
+    XStore_Proto::RangeQuery_REP expected;
+    store.RangeQuery(TS_2024_MID, TS_2024_MID + kRows - 1, "TESTDB", &expected);
+
+    // 200 bytes/chunk against ~500 rows of ~20-30 bytes each guarantees this
+    // splits into well over a dozen chunks -- the actual behavior under
+    // test, not just a theoretical code path.
+    int chunk_count = 0;
+    XStore_Proto::RangeQuery_REP actual = RunStreamedAndReassemble(store, TS_2024_MID, TS_2024_MID + kRows - 1,
+                                                                     "TESTDB", 200, &chunk_count);
+
+    EXPECT_GT(chunk_count, 10) << "test setup didn't actually force multiple chunks -- widen the row count or shrink chunk_size_bytes";
+    ASSERT_EQ(actual.queryresponse_size(), kRows);
+    EXPECT_EQ(actual.SerializeAsString(), expected.SerializeAsString())
+        << "reassembled multi-chunk output diverges from a single-shot RangeQuery -- a chunk boundary is corrupting an entry";
+}
+
+TEST_F(XStoreTest, RangeQueryStreamedPreservesMissingYearWarningMessage) {
+    XStore store;
+    store.CreateDB("TESTDB", XStore_Proto::SECOND, 32);
+
+    constexpr unsigned long long ts_1998_last = 915148799ULL;
+    constexpr unsigned long long ts_2000_first_plus = 946684810ULL;
+
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    store.UnaryInsert(ts_1998_last, MakeRow({FString("end-of-1998")}), "TESTDB", &insert_rep);
+    store.UnaryInsert(ts_2000_first_plus, MakeRow({FString("start-of-2000")}), "TESTDB", &insert_rep);
+    // 1999.XSTORE never created.
+
+    XStore_Proto::RangeQuery_REP expected;
+    store.RangeQuery(ts_1998_last, ts_2000_first_plus, "TESTDB", &expected);
+
+    XStore_Proto::RangeQuery_REP actual = RunStreamedAndReassemble(store, ts_1998_last, ts_2000_first_plus, "TESTDB", 1ull << 30);
+
+    EXPECT_EQ(actual.querystatus(), expected.querystatus());
+    EXPECT_NE(actual.querystatus().find("1999.XSTORE does not exist"), std::string::npos) << actual.querystatus();
+    EXPECT_EQ(actual.SerializeAsString(), expected.SerializeAsString());
+}
+
+TEST_F(XStoreTest, RangeQueryStreamedMissingFinalYearFileReturnsInsteadOfHanging) {
+    XStore store;
+    store.CreateDB("TESTDB", XStore_Proto::SECOND, 32);
+
+    constexpr unsigned long long ts_1998_last = 915148799ULL;
+    constexpr unsigned long long ts_1999_early = 915148810ULL;  // 1999.XSTORE never created
+
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    store.UnaryInsert(ts_1998_last, MakeRow({FString("end-of-1998")}), "TESTDB", &insert_rep);
+
+    std::atomic<bool> completed{false};
+    XStore_Proto::RangeQuery_REP actual;
+    std::thread worker([&]() {
+        actual = RunStreamedAndReassemble(store, ts_1998_last, ts_1999_early, "TESTDB", 1ull << 30);
+        completed = true;
+    });
+
+    for (int i = 0; i < 100 && !completed; i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    if (!completed) {
+        worker.detach();
+        FAIL() << "RangeQueryStreamed hung instead of returning when the final year's file was missing";
+        return;
+    }
+    worker.join();
+
+    EXPECT_EQ(actual.queryresponse_size(), 1);
+    EXPECT_NE(actual.querystatus().find("1999.XSTORE does not exist"), std::string::npos) << actual.querystatus();
 }
 
 TEST_F(XStoreTest, RangeQueryMissingFinalYearFileReturnsInsteadOfHanging) {
@@ -2915,4 +3321,53 @@ TEST_F(XStoreTest, SumAggregateMatchesIndependentlyComputedSumFromRawDiskBytes) 
     store.SumAggregate(TS_2016_MID, TS_2016_MID + 40, "TESTDB", 0, &sum_rep);
     EXPECT_EQ(sum_rep.opstatus(), "SUCCESS");
     EXPECT_DOUBLE_EQ(sum_rep.opresult(), expected_sum);
+}
+
+// XStorePreadPool -- standalone (no DB/XStore instance needed, unlike every
+// test above): this is a regression test for a real bug found on Mystic
+// under real multi-client concurrent load, that no single-threaded/single-
+// call test could ever catch. Root cause: a Job's lifetime was originally
+// tied to its work-completion counter reaching zero, not to every one of
+// its pushed "tickets" actually being consumed -- under real concurrency,
+// a few fast pool workers can drain a whole Job before its sibling tickets
+// even get dequeued, so the submitter returned (destroying the stack-local
+// Job) while other tickets for that SAME job were still sitting in the
+// shared queue, later dereferencing a dangling pointer. Fixed by tying Job
+// lifetime to all pushed tickets retiring (see XStore_PreadPool.cpp's Job
+// comment). This test hammers ParallelFor from many threads at once,
+// repeatedly, with varying job sizes -- the exact shape that exposed the
+// bug live -- so a future change to XStorePreadPool that reintroduces a
+// similar lifetime bug fails HERE, in the normal test suite, instead of
+// needing a live multi-client crash on real infrastructure to notice.
+TEST(XStorePreadPoolTest, ConcurrentParallelForFromManyThreadsNeverMissesOrDuplicatesWork) {
+    constexpr int kCallerThreads = 16;
+    constexpr int kItersPerThread = 50;
+    std::atomic<bool> mismatch{false};
+
+    auto caller = [&](int seed) {
+        std::mt19937 rng(static_cast<unsigned>(seed));
+        std::uniform_int_distribution<int> size_dist(1, 3000);
+        for (int iter = 0; iter < kItersPerThread; iter++) {
+            size_t n = static_cast<size_t>(size_dist(rng));
+            std::vector<std::atomic<int>> hit(n);
+            for (auto &h : hit) h.store(0, std::memory_order_relaxed);
+
+            XStorePreadPool::ParallelFor(n, [&](size_t i) {
+                hit[i].fetch_add(1, std::memory_order_relaxed);
+            });
+
+            for (size_t i = 0; i < n; i++) {
+                if (hit[i].load(std::memory_order_relaxed) != 1) {
+                    mismatch.store(true, std::memory_order_relaxed);
+                }
+            }
+        }
+    };
+
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kCallerThreads; t++) threads.emplace_back(caller, t * 7919 + 13);
+    for (auto &t : threads) t.join();
+
+    EXPECT_FALSE(mismatch.load()) << "some index was processed zero or multiple times -- "
+                                      "XStorePreadPool lost or duplicated work under concurrent callers";
 }

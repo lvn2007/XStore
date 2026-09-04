@@ -93,6 +93,8 @@ add_executable(XStore src/main.cpp
         src/XStore/XStore_SysStats.cpp
         include/XStore/XStore_SysStats.h
         src/XStore/XStore_UnaryOps.cpp
+        src/XStore/XStore_PreadPool.cpp
+        include/XStore/XStore_PreadPool.h
         src/XStore/XStore_BatchOps.cpp
         src/XStore/XStore_RangeOps.cpp
         src/XStore/XStore_Aggregates.cpp
