@@ -52,9 +52,9 @@ void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::R
     std::memset(row_buf.data() + serialized_size, 0, cfg_struct.rowlength() - serialized_size);
 
     // Hand off to the WAL instead of writing the data file directly here --
-    // EnqueueWalRecord's shard writer thread fsyncs (for SYNC_PER_COMMIT/
-    // GROUP_COMMIT) and applies this exact row before returning control
-    // (ASYNC_ONLY returns immediately after the lock-free enqueue). A
+    // EnqueueWalRecord's shard writer thread fsyncs (for SYNC) and applies
+    // this exact row before returning control (ASYNC returns immediately
+    // after the lock-free enqueue). A
     // WalRecord represents one write REQUEST (1..N rows, one completion
     // future per request) -- UnaryInsert's request is always exactly 1 row;
     // a future Batch/Range wiring builds the same type with N rows instead

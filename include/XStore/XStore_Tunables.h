@@ -112,7 +112,8 @@ inline constexpr size_t      WAL_SHARDS_PER_DB           = 1;
 // today's exact behavior) -- opt in after benchmarking, same as
 // WAL_SHARDS_PER_DB.
 //
-// Measured on torusnode15 (real client machines, real network, GROUP_COMMIT):
+// Measured on torusnode15 (real client machines, real network, SYNC --
+// GROUP_COMMIT at the time of this measurement, since merged into SYNC):
 // with the SMALL (~8-byte) row payload used in early testing, showed no
 // latency change at 1500us or 50000us, and live per-thread CPU sampling
 // (/proc utime+stime deltas, not ps's decaying %cpu average) showed the
@@ -239,11 +240,15 @@ inline constexpr unsigned    WAL_GATHER_POLL_US          = 50;
 // enforces that invariant so it can't silently break if WAL_BATCH_MAX_
 // RECORDS is ever raised.
 //
-// NOTE: this bound assumes every WalRecord carries exactly 1 row (true
-// for UnaryInsert, the only current WAL producer -- see EnqueueWalRecord
-// call sites). A future multi-row Batch/Range WAL path would need to
-// either bound row count per record too, or bring back a runtime size
-// check before the live-commit fsync/fdatasync call.
+// NOTE: this bound assumes every WalRecord carries exactly 1 row (true for
+// UnaryInsert, the only WAL producer -- see EnqueueWalRecord call sites).
+// Batch/Range durability deliberately does NOT reuse this WAL path (see the
+// durabilityMode comment on BatchInsert_REQ/RangeInsert_REQ in XStore.proto):
+// their rows are already sequential, so a WAL's log-then-apply double-write
+// buys nothing a direct fdatasync() on the touched data file doesn't already
+// give for free. If that decision is ever revisited, a multi-row WAL record
+// would need to either bound row count per record too, or bring back a
+// runtime size check before the live-commit fsync/fdatasync call.
 inline constexpr size_t WAL_RECORD_HEADER_BYTES = 20; // recordLen(4)+crc32(4)+dbNameLen(2)+rowLength(2)+timeResolution(4)+rowCount(4) -- see SerializeWalRecord
 inline constexpr size_t WAL_MAX_DB_NAME_BYTES   = 65535; // dbNameLen wire field is a u16
 inline constexpr size_t WAL_MAX_ROW_BYTES       = 65535; // rowLength wire field is a u16
@@ -261,12 +266,25 @@ static_assert(WAL_FILE_PREALLOC_BYTES >= WAL_MAX_BATCH_BYTES,
 // pending records, EnqueueWalRecord blocks the calling (client-handling)
 // thread -- polling every WAL_BACKPRESSURE_POLL_US -- until the writer
 // thread drains it back down, instead of accepting unboundedly and
-// risking unbounded memory growth (and, for ASYNC_ONLY, an ever-growing
+// risking unbounded memory growth (and, for ASYNC, an ever-growing
 // crash-loss window while still telling the client "success"). Applies
 // uniformly to every durability mode; deliberately makes the client WAIT
 // rather than rejecting the write.
 inline constexpr size_t      WAL_QUEUE_HIGH_WATERMARK    = WAL_BATCH_MAX_RECORDS * 4;
 inline constexpr unsigned    WAL_BACKPRESSURE_POLL_US    = 200;
+
+// Data-file fsync coalescer (XStore_Wal.cpp's DataFsyncCoalescerLoop): the
+// background sweep interval for Batch/Range's ASYNC durability mode. Not a
+// WAL -- no queue of records, just a set of already-touched fds waiting on a
+// deferred fdatasync(). Batch/Range calls are coarse-grained and far less
+// frequent than Unary's per-row hot path, so one thread and one flat
+// polling interval is enough (no per-shard/adaptive-window machinery like
+// the WAL writer's, unlike that path this isn't sized against a torusnode15
+// benchmark yet -- revisit once Batch/Range durability gets its own Mystic
+// run). Bounds ASYNC's crash-loss window for Batch/Range the same way the
+// WAL bounds it for Unary: "soon", not "whenever the OS's own dirty-page
+// writeback gets around to it" (BYPASS's much weaker ~30s bound).
+inline constexpr unsigned    DATA_FSYNC_COALESCE_WINDOW_US = 1000;
 
 // RangeQuery and BatchQuery (XStore_RangeOps.cpp,
 // XStore_BatchOps.cpp): target size of each emitted wire-format chunk. A

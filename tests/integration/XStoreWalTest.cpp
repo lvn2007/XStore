@@ -2,8 +2,6 @@
 #include <gtest/gtest.h>
 #include "include/XStore/XStore.h"
 #include "XStoreTestSupport.h"
-#include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -43,16 +41,16 @@ XStore_Proto::RowData MakeRow(double value) {
 
 } // namespace
 
-// SYNC_PER_COMMIT (the default) must return only after the row is durable
-// AND applied -- a query for the same key immediately after UnaryInsert
-// returns must see it, with no wait/retry needed on the test's side.
-TEST_F(XStoreWalTest, SyncPerCommitAppliesBeforeReturning) {
+// SYNC (the default) must return only after the row is durable AND applied
+// -- a query for the same key immediately after UnaryInsert returns must
+// see it, with no wait/retry needed on the test's side.
+TEST_F(XStoreWalTest, SyncAppliesBeforeReturning) {
     XStore store;
     XStore_Proto::CreateDB_REP create_rep = store.CreateDB("WALTEST", XStore_Proto::SECOND, 64);
     ASSERT_NE(create_rep.createdbstatus().find("[INFO]"), std::string::npos);
 
     XStore_Proto::UnaryInsert_REP insert_rep;
-    store.UnaryInsert(1700000000ULL, MakeRow(42.5), "WALTEST", &insert_rep, XStore_Proto::SYNC_PER_COMMIT);
+    store.UnaryInsert(1700000000ULL, MakeRow(42.5), "WALTEST", &insert_rep, XStore_Proto::SYNC);
     EXPECT_NE(insert_rep.insertstatus().find("[INFO]"), std::string::npos);
 
     XStore_Proto::UnaryQuery_REP query_rep;
@@ -62,16 +60,16 @@ TEST_F(XStoreWalTest, SyncPerCommitAppliesBeforeReturning) {
     EXPECT_DOUBLE_EQ(query_rep.data().fielddata(0).doubledata(), 42.5);
 }
 
-// ASYNC_ONLY must still return successfully (enqueue succeeded) and the row
-// must become visible eventually -- this test polls with a bounded timeout
-// instead of asserting immediate visibility, since ASYNC_ONLY explicitly
-// does not wait for apply.
-TEST_F(XStoreWalTest, AsyncOnlyEventuallyApplies) {
+// ASYNC must still return successfully (enqueue succeeded) and the row must
+// become visible eventually -- this test polls with a bounded timeout
+// instead of asserting immediate visibility, since ASYNC explicitly does
+// not wait for apply.
+TEST_F(XStoreWalTest, AsyncEventuallyApplies) {
     XStore store;
     store.CreateDB("WALASYNC", XStore_Proto::SECOND, 64);
 
     XStore_Proto::UnaryInsert_REP insert_rep;
-    store.UnaryInsert(1700000001ULL, MakeRow(7.0), "WALASYNC", &insert_rep, XStore_Proto::ASYNC_ONLY);
+    store.UnaryInsert(1700000001ULL, MakeRow(7.0), "WALASYNC", &insert_rep, XStore_Proto::ASYNC);
     EXPECT_NE(insert_rep.insertstatus().find("[INFO]"), std::string::npos);
 
     bool became_visible = false;
@@ -88,8 +86,8 @@ TEST_F(XStoreWalTest, AsyncOnlyEventuallyApplies) {
 }
 
 // BYPASS applies straight to the data file on the calling thread, same
-// synchronous-before-returning guarantee as SYNC_PER_COMMIT -- no polling
-// needed, unlike ASYNC_ONLY.
+// synchronous-before-returning guarantee as SYNC -- no polling needed,
+// unlike ASYNC.
 TEST_F(XStoreWalTest, BypassAppliesBeforeReturning) {
     XStore store;
     store.CreateDB("WALBYPASS", XStore_Proto::SECOND, 64);
@@ -112,7 +110,7 @@ TEST_F(XStoreWalTest, BypassAppliesBeforeReturning) {
 // itself only eagerly preallocates for the one data_store_dir the whole
 // test binary happened to construct first -- every other scratch dir's WAL
 // file comes from WalWriterLoop's fd-cache-miss path instead) -- so this
-// primes the file with a SYNC_PER_COMMIT insert first, snapshots its bytes
+// primes the file with a SYNC insert first, snapshots its bytes
 // (offset-0-overwrite format: one record always lives at the same offset),
 // then does a BYPASS insert on the SAME db/shard and confirms the file is
 // byte-for-byte unchanged, while the BYPASS row is independently visible
@@ -122,7 +120,7 @@ TEST_F(XStoreWalTest, BypassWritesNoWalRecord) {
     store.CreateDB("WALBYPASSNOWAL", XStore_Proto::SECOND, 64);
 
     XStore_Proto::UnaryInsert_REP priming_rep;
-    store.UnaryInsert(1700000004ULL, MakeRow(5.0), "WALBYPASSNOWAL", &priming_rep, XStore_Proto::SYNC_PER_COMMIT);
+    store.UnaryInsert(1700000004ULL, MakeRow(5.0), "WALBYPASSNOWAL", &priming_rep, XStore_Proto::SYNC);
     ASSERT_NE(priming_rep.insertstatus().find("[INFO]"), std::string::npos);
 
     // active_wal_shard_count, not the WAL_SHARD_COUNT compile-time ceiling:
@@ -151,6 +149,114 @@ TEST_F(XStoreWalTest, BypassWritesNoWalRecord) {
     store.UnaryQuery(1700000005ULL, "WALBYPASSNOWAL", &query_rep);
     ASSERT_TRUE(query_rep.has_data());
     EXPECT_DOUBLE_EQ(query_rep.data().fielddata(0).doubledata(), 21.0);
+}
+
+// BatchInsert/RangeInsert durabilityMode does NOT route through the WAL
+// (see the field's comment on BatchInsert_REQ/RangeInsert_REQ in
+// XStore.proto) -- it dispatches to either an inline fdatasync() (SYNC), the
+// background data-fsync coalescer (ASYNC), or neither (BYPASS). None of
+// that should be visible from the caller's side beyond "the write landed
+// and is queryable" -- this exercises all three modes for both ops end to
+// end, which also happens to be the first coverage the coalescer thread
+// (XStore::DataFsyncCoalescerLoop) gets at all.
+TEST_F(XStoreWalTest, BatchInsertDurabilityModesAllApplyCorrectly) {
+    XStore store;
+    store.CreateDB("WALBATCHDUR", XStore_Proto::SECOND, 64);
+
+    XStore_Proto::BatchInsert_REQ async_req;
+    async_req.set_dbname("WALBATCHDUR");
+    async_req.set_durabilitymode(XStore_Proto::ASYNC);
+    XStore_Proto::BatchInsert_DATA *async_entry = async_req.add_batchinsert_data();
+    async_entry->set_timestamp(1700600000ULL);
+    *async_entry->mutable_data() = MakeRow(1.0);
+    XStore_Proto::BatchInsert_REP async_rep;
+    store.BatchInsert(&async_req, &async_rep);
+    EXPECT_NE(async_rep.insertstatus().find("[INFO]"), std::string::npos) << async_rep.insertstatus();
+
+    XStore_Proto::BatchInsert_REQ sync_req;
+    sync_req.set_dbname("WALBATCHDUR");
+    sync_req.set_durabilitymode(XStore_Proto::SYNC);
+    XStore_Proto::BatchInsert_DATA *sync_entry = sync_req.add_batchinsert_data();
+    sync_entry->set_timestamp(1700600001ULL);
+    *sync_entry->mutable_data() = MakeRow(2.0);
+    XStore_Proto::BatchInsert_REP sync_rep;
+    store.BatchInsert(&sync_req, &sync_rep);
+    EXPECT_NE(sync_rep.insertstatus().find("[INFO]"), std::string::npos) << sync_rep.insertstatus();
+
+    XStore_Proto::BatchInsert_REQ bypass_req;
+    bypass_req.set_dbname("WALBATCHDUR");
+    bypass_req.set_durabilitymode(XStore_Proto::BYPASS);
+    XStore_Proto::BatchInsert_DATA *bypass_entry = bypass_req.add_batchinsert_data();
+    bypass_entry->set_timestamp(1700600002ULL);
+    *bypass_entry->mutable_data() = MakeRow(3.0);
+    XStore_Proto::BatchInsert_REP bypass_rep;
+    store.BatchInsert(&bypass_req, &bypass_rep);
+    EXPECT_NE(bypass_rep.insertstatus().find("[INFO]"), std::string::npos) << bypass_rep.insertstatus();
+
+    XStore_Proto::UnaryQuery_REP q1, q2, q3;
+    store.UnaryQuery(1700600000ULL, "WALBATCHDUR", &q1);
+    store.UnaryQuery(1700600001ULL, "WALBATCHDUR", &q2);
+    store.UnaryQuery(1700600002ULL, "WALBATCHDUR", &q3);
+    ASSERT_TRUE(q1.has_data());
+    ASSERT_TRUE(q2.has_data());
+    ASSERT_TRUE(q3.has_data());
+    EXPECT_DOUBLE_EQ(q1.data().fielddata(0).doubledata(), 1.0);
+    EXPECT_DOUBLE_EQ(q2.data().fielddata(0).doubledata(), 2.0);
+    EXPECT_DOUBLE_EQ(q3.data().fielddata(0).doubledata(), 3.0);
+
+    // Give the coalescer (DATA_FSYNC_COALESCE_WINDOW_US) a chance to sweep
+    // the ASYNC write's pending fd -- not asserting on internal state here,
+    // just confirming the background thread's sweep doesn't crash/hang with
+    // real pending work queued.
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+}
+
+TEST_F(XStoreWalTest, RangeInsertDurabilityModesAllApplyCorrectly) {
+    XStore store;
+    store.CreateDB("WALRANGEDUR", XStore_Proto::SECOND, 64);
+
+    XStore_Proto::RangeInsert_REQ async_req;
+    async_req.set_dbname("WALRANGEDUR");
+    async_req.set_durabilitymode(XStore_Proto::ASYNC);
+    XStore_Proto::RangeInsert_DATA *async_entry = async_req.add_rangeinsert_data();
+    async_entry->set_timestamp(1700700000ULL);
+    *async_entry->mutable_data() = MakeRow(4.0);
+    XStore_Proto::RangeInsert_REP async_rep;
+    store.RangeInsert(&async_req, &async_rep);
+    EXPECT_NE(async_rep.insertstatus().find("[INFO]"), std::string::npos) << async_rep.insertstatus();
+
+    XStore_Proto::RangeInsert_REQ sync_req;
+    sync_req.set_dbname("WALRANGEDUR");
+    sync_req.set_durabilitymode(XStore_Proto::SYNC);
+    XStore_Proto::RangeInsert_DATA *sync_entry = sync_req.add_rangeinsert_data();
+    sync_entry->set_timestamp(1700700001ULL);
+    *sync_entry->mutable_data() = MakeRow(5.0);
+    XStore_Proto::RangeInsert_REP sync_rep;
+    store.RangeInsert(&sync_req, &sync_rep);
+    EXPECT_NE(sync_rep.insertstatus().find("[INFO]"), std::string::npos) << sync_rep.insertstatus();
+
+    XStore_Proto::RangeInsert_REQ bypass_req;
+    bypass_req.set_dbname("WALRANGEDUR");
+    bypass_req.set_durabilitymode(XStore_Proto::BYPASS);
+    XStore_Proto::RangeInsert_DATA *bypass_entry = bypass_req.add_rangeinsert_data();
+    bypass_entry->set_timestamp(1700700002ULL);
+    *bypass_entry->mutable_data() = MakeRow(6.0);
+    XStore_Proto::RangeInsert_REP bypass_rep;
+    store.RangeInsert(&bypass_req, &bypass_rep);
+    EXPECT_NE(bypass_rep.insertstatus().find("[INFO]"), std::string::npos) << bypass_rep.insertstatus();
+
+    XStore_Proto::UnaryQuery_REP q1, q2, q3;
+    store.UnaryQuery(1700700000ULL, "WALRANGEDUR", &q1);
+    store.UnaryQuery(1700700001ULL, "WALRANGEDUR", &q2);
+    store.UnaryQuery(1700700002ULL, "WALRANGEDUR", &q3);
+    ASSERT_TRUE(q1.has_data());
+    ASSERT_TRUE(q2.has_data());
+    ASSERT_TRUE(q3.has_data());
+    EXPECT_DOUBLE_EQ(q1.data().fielddata(0).doubledata(), 4.0);
+    EXPECT_DOUBLE_EQ(q2.data().fielddata(0).doubledata(), 5.0);
+    EXPECT_DOUBLE_EQ(q3.data().fielddata(0).doubledata(), 6.0);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
 }
 
 // Crash-recovery replay: writes directly into a shard's WAL file the same
@@ -269,7 +375,7 @@ TEST_F(XStoreWalTest, ConcurrentInsertsAllPersist) {
             for (int i = 0; i < kPerThread; ++i) {
                 XStore_Proto::UnaryInsert_REP rep;
                 unsigned long long ts = 1700100000ULL + static_cast<unsigned long long>(t * kPerThread + i);
-                store.UnaryInsert(ts, MakeRow(static_cast<double>(t * kPerThread + i)), "WALCONC", &rep, XStore_Proto::GROUP_COMMIT);
+                store.UnaryInsert(ts, MakeRow(static_cast<double>(t * kPerThread + i)), "WALCONC", &rep, XStore_Proto::SYNC);
             }
         });
     }
@@ -289,9 +395,9 @@ TEST_F(XStoreWalTest, ConcurrentInsertsAllPersist) {
 #ifdef XSTORE_WAL_STATS_ENABLED
 // Debug/benchmark-only (XSTORE_WAL_STATS): confirms WalShard's batching
 // counters actually move, and that real batching (avg batch size > 1)
-// happens under concurrent GROUP_COMMIT load on one DB -- the counters'
-// whole purpose is answering "is it actually grouping," so this is the
-// direct check that they do.
+// happens under concurrent SYNC load on one DB -- the counters' whole
+// purpose is answering "is it actually grouping," so this is the direct
+// check that they do.
 TEST_F(XStoreWalTest, WalStatsCountersReflectRealBatching) {
     XStore store;
     store.CreateDB("WALSTATS", XStore_Proto::SECOND, 64);
@@ -312,7 +418,7 @@ TEST_F(XStoreWalTest, WalStatsCountersReflectRealBatching) {
             for (int i = 0; i < kPerThread; ++i) {
                 XStore_Proto::UnaryInsert_REP rep;
                 unsigned long long ts = 1700500000ULL + static_cast<unsigned long long>(t * kPerThread + i);
-                store.UnaryInsert(ts, MakeRow(1.0), "WALSTATS", &rep, XStore_Proto::GROUP_COMMIT);
+                store.UnaryInsert(ts, MakeRow(1.0), "WALSTATS", &rep, XStore_Proto::SYNC);
             }
         });
     }
@@ -328,71 +434,19 @@ TEST_F(XStoreWalTest, WalStatsCountersReflectRealBatching) {
 }
 #endif
 
-// Regression guard for the durability-mode-aware gather fix: a
-// SYNC_PER_COMMIT insert must not pay the (up to WAL_GATHER_WINDOW_MAX_US)
-// group-commit linger even while a concurrent GROUP_COMMIT workload is
-// actively hammering the SAME DB (and therefore the same shard, via the
-// per-DB hash) -- before the fix, SYNC_PER_COMMIT and GROUP_COMMIT ran
-// identical gather code, so a SYNC_PER_COMMIT record landing mid-gather
-// behind concurrent GROUP_COMMIT traffic paid the full window too.
-// Compares SYNC_PER_COMMIT latency solo vs. under concurrent GROUP_COMMIT
-// load rather than asserting an absolute latency bound, since real fsync
-// cost varies by machine/storage -- what must NOT happen is systematic
-// inflation by anywhere near WAL_GATHER_WINDOW_MAX_US once the fix is in
-// place.
-TEST_F(XStoreWalTest, SyncPerCommitLatencyUnaffectedByConcurrentGroupCommit) {
-    XStore store;
-    store.CreateDB("WALMIXED", XStore_Proto::SECOND, 64);
-
-    constexpr int kBaselineSamples = 20;
-    constexpr int kConcurrentSamples = 20;
-
-    auto median_latency_us = [&](int samples, unsigned long long ts_start) {
-        std::vector<long long> latencies;
-        latencies.reserve(static_cast<size_t>(samples));
-        for (int i = 0; i < samples; ++i) {
-            XStore_Proto::UnaryInsert_REP rep;
-            auto t0 = std::chrono::steady_clock::now();
-            store.UnaryInsert(ts_start + static_cast<unsigned long long>(i), MakeRow(1.0), "WALMIXED", &rep, XStore_Proto::SYNC_PER_COMMIT);
-            auto t1 = std::chrono::steady_clock::now();
-            latencies.push_back(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
-        }
-        std::sort(latencies.begin(), latencies.end());
-        return latencies[latencies.size() / 2];
-    };
-
-    long long baseline_median_us = median_latency_us(kBaselineSamples, 1700200000ULL);
-
-    std::atomic<bool> stop_background{false};
-    std::thread background([&]() {
-        unsigned long long ts = 1700300000ULL;
-        while (!stop_background.load(std::memory_order_relaxed)) {
-            XStore_Proto::UnaryInsert_REP rep;
-            store.UnaryInsert(ts++, MakeRow(2.0), "WALMIXED", &rep, XStore_Proto::GROUP_COMMIT);
-        }
-    });
-
-    // Give the background thread a moment to actually start hammering
-    // before measuring, so the concurrent-load samples really do land
-    // mid-gather-window against real GROUP_COMMIT traffic.
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    long long concurrent_median_us = median_latency_us(kConcurrentSamples, 1700400000ULL);
-
-    stop_background.store(true, std::memory_order_relaxed);
-    background.join();
-
-    // Tolerance well under WAL_GATHER_WINDOW_MAX_US (the worst-case gather
-    // window the adaptive logic can reach): the old (pre-fix) behavior
-    // would add up to that much, every single commit. This guards
-    // specifically against a regression back to that -- not against
-    // ordinary run-to-run fsync noise.
-    long long tolerance_us = static_cast<long long>(XStoreTunables::WAL_GATHER_WINDOW_MAX_US) / 2;
-    EXPECT_LE(concurrent_median_us, baseline_median_us + tolerance_us)
-        << "SYNC_PER_COMMIT median latency under concurrent GROUP_COMMIT load ("
-        << concurrent_median_us << "us) inflated well past solo baseline ("
-        << baseline_median_us << "us) -- looks like it's paying the group-commit "
-           "gather window again";
-}
+// A prior version of this file had a regression guard here
+// (SyncPerCommitLatencyUnaffectedByConcurrentGroupCommit) asserting that a
+// SYNC_PER_COMMIT insert didn't inherit GROUP_COMMIT's gather-window linger
+// when the two modes coexisted on one shard. That distinction no longer
+// exists: SYNC_PER_COMMIT and GROUP_COMMIT were collapsed into one SYNC mode
+// (see WalDurabilityMode in XStore.proto) that always rides the adaptive
+// gather window -- a lone SYNC writer under concurrent SYNC load riding that
+// same window with everyone else is now the INTENDED behavior, not a
+// regression, so the old assertion no longer describes a real invariant.
+// Removed rather than mechanically renamed. Re-add a real regression guard
+// here once the Mystic-cluster benchmark (see the WAL_GATHER_WINDOW_MIN_US
+// comment in XStore_Tunables.h) has established what a lone SYNC writer's
+// latency SHOULD look like under the merged mode.
 
 // Regression test for a real bug found via the XBench benchmark harness:
 // its reset script does `rm -rf DataStore/BENCH_DB` between runs but never

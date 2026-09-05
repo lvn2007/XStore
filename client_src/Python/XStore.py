@@ -100,7 +100,7 @@ class XStoreClient:
         return recvObj.createDBStatus
 
     def unaryInsert(self, insertUnixTime: int, data: [object, list], targetDBName: str,
-                     durabilityMode=XStore_Proto.ASYNC_ONLY) -> str:
+                     durabilityMode=XStore_Proto.ASYNC) -> str:
         envelope = XStore_Proto.Request()
         payload = envelope.unaryinsert
         payload.RType = XStore_Proto.UNARYINSERT
@@ -151,16 +151,21 @@ class XStoreClient:
         recvObj = self._sendRecv(envelope, XStore_Proto.UnaryDelete_REP)
         return recvObj.deleteStatus
 
-    def rangeInsert(self, dataList, targetDBName):
+    def rangeInsert(self, dataList, targetDBName, durabilityMode=XStore_Proto.ASYNC):
         """
         :param dataList:
         :param targetDBName:
+        :param durabilityMode: no WAL detour for Range/Batch -- see
+            RangeInsert_REQ's durabilityMode comment in XStore.proto. SYNC
+            fdatasync()'s the touched data file(s) before returning; ASYNC
+            defers that to a background coalescer without blocking.
         :return:
         """
         envelope = XStore_Proto.Request()
         payload = envelope.rangeinsert
         payload.RType = XStore_Proto.RANGEINSERT
         payload.dbName = targetDBName
+        payload.durabilityMode = durabilityMode
 
         # IF first element in dataList is not type rangeInsert_DATA
         #   -> Inferred data type -- Assume worse case scenario for space-efficiency
@@ -185,16 +190,21 @@ class XStoreClient:
         recvObj = self._sendRecv(envelope, XStore_Proto.RangeInsert_REP)
         return recvObj.insertStatus
 
-    def batchInsert(self, dataList, targetDBName):
+    def batchInsert(self, dataList, targetDBName, durabilityMode=XStore_Proto.ASYNC):
         """
         :param dataList:
         :param targetDBName:
+        :param durabilityMode: no WAL detour for Range/Batch -- see
+            BatchInsert_REQ's durabilityMode comment in XStore.proto. SYNC
+            fdatasync()'s the touched data file(s) before returning; ASYNC
+            defers that to a background coalescer without blocking.
         :return:
         """
         envelope = XStore_Proto.Request()
         payload = envelope.batchinsert
         payload.RType = XStore_Proto.BATCHINSERT
         payload.dbName = targetDBName
+        payload.durabilityMode = durabilityMode
 
         # IF first element in dataList is not type batchInsert_DATA
         #   -> Inferred data type -- Assume worse case scenario for space-efficiency

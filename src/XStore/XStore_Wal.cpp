@@ -19,6 +19,10 @@
 std::array<XStore::WalShard, XStoreTunables::WAL_SHARD_COUNT> XStore::wal_shards;
 std::atomic<size_t> XStore::active_wal_shard_count{XStoreTunables::WAL_SHARD_COUNT};
 moodycamel::ConcurrentQueue<XStore::WalCompletion*> XStore::completion_pool;
+std::mutex XStore::data_fsync_pending_mutex;
+std::unordered_map<int, std::shared_ptr<int>> XStore::data_fsync_pending;
+std::atomic<bool> XStore::data_fsync_stop_flag{false};
+std::thread XStore::data_fsync_coalescer_thread;
 #ifdef XSTORE_WAL_STATS_ENABLED
 std::atomic<bool> XStore::wal_stats_stop_flag{false};
 std::thread XStore::wal_stats_reporter_thread;
@@ -293,10 +297,10 @@ bool XStore::EnqueueWalRecord(WalRecord record) {
 
     // Backpressure: wait (never reject) for this shard's queue to drain
     // below the high watermark before adding to it. Uniform across every
-    // durability mode, including ASYNC_ONLY -- otherwise a writer that
-    // can't keep up would let the queue (and the un-fsync'd, would-be-lost-
-    // on-crash backlog) grow without bound while still telling ASYNC_ONLY
-    // callers "success".
+    // durability mode, including ASYNC -- otherwise a writer that can't
+    // keep up would let the queue (and the un-fsync'd, would-be-lost-on-
+    // crash backlog) grow without bound while still telling ASYNC callers
+    // "success".
     while (shard.queue.size_approx() >= XStoreTunables::WAL_QUEUE_HIGH_WATERMARK) {
         std::this_thread::sleep_for(std::chrono::microseconds(XStoreTunables::WAL_BACKPRESSURE_POLL_US));
     }
@@ -310,7 +314,7 @@ bool XStore::EnqueueWalRecord(WalRecord record) {
     // comment, XStore.h); returned to the pool by this thread after
     // sem.wait() returns instead of being freed.
     WalCompletion *completion = nullptr;
-    if (record.durability_mode != XStore_Proto::ASYNC_ONLY) {
+    if (record.durability_mode != XStore_Proto::ASYNC) {
         if (!completion_pool.try_dequeue(completion)) {
             completion = new WalCompletion();
         }
@@ -328,7 +332,7 @@ bool XStore::EnqueueWalRecord(WalRecord record) {
         // Blocks until the writer thread resolves it; result reflects the
         // real durability outcome (false on a WAL fsync failure or a
         // failed apply) instead of unconditionally reporting success --
-        // ASYNC_ONLY skips this and only reports "enqueued", by design.
+        // ASYNC skips this and only reports "enqueued", by design.
         completion->sem.wait();
         bool result = completion->result;
         completion_pool.enqueue(completion);
@@ -365,6 +369,14 @@ void XStore::StartWalWriters(const std::string &data_store_dir) {
 #ifdef XSTORE_WAL_STATS_ENABLED
     wal_stats_reporter_thread = std::thread(&XStore::WalStatsReporterLoop);
 #endif
+
+    // Started here (same call_once gate as the writer threads above, see
+    // XStore_Management.cpp) rather than its own separate startup call --
+    // Batch/Range's fsync coalescer is durability infrastructure the same
+    // way the WAL writers are, just not the WAL itself (see its own comment
+    // in XStore.h).
+    data_fsync_coalescer_thread = std::thread(&XStore::DataFsyncCoalescerLoop);
+
     // Writer threads must be stopped and joined before other static-storage
     // objects they touch (the moodycamel queue, spdlog's default logger)
     // begin their own destruction at process exit -- a still-running thread
@@ -388,7 +400,63 @@ void XStore::StartWalWriters(const std::string &data_store_dir) {
             wal_stats_reporter_thread.join();
         }
 #endif
+        data_fsync_stop_flag.store(true, std::memory_order_relaxed);
+        if (data_fsync_coalescer_thread.joinable()) {
+            data_fsync_coalescer_thread.join();
+        }
     });
+}
+
+// See the ScheduleAsyncDataFsync/DataFsyncCoalescerLoop declarations in
+// XStore.h for why this exists instead of reusing the WAL above.
+void XStore::ScheduleAsyncDataFsync(std::shared_ptr<int> fd_handle) {
+    int fd = *fd_handle;
+    std::lock_guard<std::mutex> lock(data_fsync_pending_mutex);
+    // insert_or_assign, not emplace: a second ASYNC write to the same fd
+    // before the coalescer has swept the first one through should still
+    // only cost one fdatasync() covering both -- overwriting the handle is
+    // harmless (same fd, same underlying file) and keeps the pending set
+    // sized by distinct fd, not by write count.
+    data_fsync_pending.insert_or_assign(fd, std::move(fd_handle));
+}
+
+void XStore::DataFsyncCoalescerLoop() {
+    while (!data_fsync_stop_flag.load(std::memory_order_relaxed)) {
+        std::this_thread::sleep_for(std::chrono::microseconds(XStoreTunables::DATA_FSYNC_COALESCE_WINDOW_US));
+
+        // Swap the pending set out under the lock, then fsync without
+        // holding it -- so a Batch/Range call scheduling a NEW fsync while
+        // this sweep is in flight isn't blocked behind however long
+        // fdatasync() itself takes.
+        std::unordered_map<int, std::shared_ptr<int>> to_sync;
+        {
+            std::lock_guard<std::mutex> lock(data_fsync_pending_mutex);
+            if (data_fsync_pending.empty()) continue;
+            to_sync.swap(data_fsync_pending);
+        }
+
+        for (const auto &[fd, handle] : to_sync) {
+            if (fdatasync(fd) != 0) {
+                spdlog::error("[DATA FSYNC] - fdatasync failed for fd {}", fd);
+            }
+        }
+        // to_sync's handles drop here, releasing these fds back to
+        // GetOrOpenFile's normal eviction eligibility now that they're
+        // durably synced.
+    }
+
+    // Final drain on shutdown -- best-effort, matches every other shutdown
+    // path in this file (a process exit right after an ASYNC Batch/Range
+    // write is the same crash-loss window ASYNC already documents, not a
+    // new gap).
+    std::unordered_map<int, std::shared_ptr<int>> to_sync;
+    {
+        std::lock_guard<std::mutex> lock(data_fsync_pending_mutex);
+        to_sync.swap(data_fsync_pending);
+    }
+    for (const auto &[fd, handle] : to_sync) {
+        fdatasync(fd);
+    }
 }
 
 #ifdef XSTORE_WAL_STATS_ENABLED
@@ -542,21 +610,6 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
         }
         last_activity = std::chrono::steady_clock::now();
 
-        // SYNC_PER_COMMIT wants the lowest latency possible: fsync as soon
-        // as whatever's already queued is grabbed, no added wait. GROUP_
-        // COMMIT explicitly opts into lingering for more batching. Scan
-        // whatever the blocking dequeue above just grabbed for a
-        // SYNC_PER_COMMIT record up front, so a batch that already has one
-        // skips the gather loop below entirely instead of paying the gather
-        // window for no reason.
-        auto has_sync_per_commit = [&](size_t begin, size_t end) {
-            for (size_t i = begin; i < end; ++i) {
-                if (batch[i].durability_mode == XStore_Proto::SYNC_PER_COMMIT) return true;
-            }
-            return false;
-        };
-        bool flush_now = has_sync_per_commit(0, count);
-
         // Group-commit gather: the blocking wait above returns the instant
         // the first record arrives, which alone gives near-zero batching
         // under concurrent load (a non-blocking peek only catches what's
@@ -565,17 +618,26 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
         // up to an ADAPTIVE window (derived from batch_size_ema below, see
         // its declaration and WAL_GATHER_WINDOW_MIN_US/MAX_US in
         // XStore_Tunables.h), polling every WAL_GATHER_POLL_US, stopping
-        // the moment the batch fills, the window elapses, or a
-        // SYNC_PER_COMMIT record joins the batch -- whichever comes first,
-        // same dual-trigger shape as Kafka's linger.ms + batch.size, plus
-        // the SYNC_PER_COMMIT override. This DOES cost a lone GROUP_COMMIT
-        // writer real added latency (up to the window, every commit) in
-        // exchange for real batching once per-DB hashing (see
-        // EnqueueWalRecord) funnels concurrent writers of the same DB onto
-        // this one shard -- but a shard whose recent batches show no real
-        // grouping self-tunes that window down toward MIN instead of
-        // assuming MAX. A lone SYNC_PER_COMMIT writer pays none of it.
-        if (!flush_now && count < XStoreTunables::WAL_BATCH_MAX_RECORDS) {
+        // the moment the batch fills or the window elapses -- same
+        // dual-trigger shape as Kafka's linger.ms + batch.size. This DOES
+        // cost a lone SYNC writer real added latency (up to the window,
+        // every commit) in exchange for real batching once per-DB hashing
+        // (see EnqueueWalRecord) funnels concurrent writers of the same DB
+        // onto this one shard -- but a shard whose recent batches show no
+        // real grouping self-tunes that window down toward MIN instead of
+        // assuming MAX, so a lone writer pays close to nothing.
+        //
+        // No per-record "flush immediately" override here anymore -- an
+        // earlier design had a separate SYNC_PER_COMMIT mode that skipped
+        // this gather loop entirely, distinct from GROUP_COMMIT which rode
+        // it. The two were collapsed into one SYNC mode (see
+        // WalDurabilityMode in XStore.proto): the adaptive window above
+        // already self-tunes to near-MIN for a lone writer, so a separate
+        // caller-visible "never batch me" mode bought nothing the adaptive
+        // logic wasn't already doing, and MIN_US itself is the actual knob
+        // for how little a lone SYNC writer pays -- see the Mystic
+        // benchmark note on that constant before retuning it further.
+        if (count < XStoreTunables::WAL_BATCH_MAX_RECORDS) {
             double saturate_t = (batch_size_ema - 1.0)
                 / (XStoreTunables::WAL_GATHER_ADAPT_EMA_SATURATE - 1.0);
             saturate_t = std::clamp(saturate_t, 0.0, 1.0);
@@ -586,12 +648,8 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
             auto gather_deadline = std::chrono::steady_clock::now()
                 + std::chrono::microseconds(gather_window_us);
             while (count < XStoreTunables::WAL_BATCH_MAX_RECORDS) {
-                size_t before = count;
                 size_t got = shard.queue.try_dequeue_bulk(batch.data() + count, XStoreTunables::WAL_BATCH_MAX_RECORDS - count);
                 count += got;
-                if (got > 0 && has_sync_per_commit(before, count)) {
-                    break;
-                }
                 if (count >= XStoreTunables::WAL_BATCH_MAX_RECORDS || std::chrono::steady_clock::now() >= gather_deadline) {
                     break;
                 }
@@ -600,11 +658,8 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
         }
 
         // Feed this batch's real size back into the EMA that decides the
-        // NEXT batch's gather window -- updated regardless of which path
-        // produced `count` (flush_now/full-batch included), since a
-        // SYNC_PER_COMMIT-triggered early flush that still caught several
-        // queued records is just as real evidence of concurrent traffic on
-        // this shard as one the gather loop assembled itself.
+        // NEXT batch's gather window -- updated regardless of whether the
+        // gather loop ran its full course or broke early on a full batch.
         batch_size_ema = XStoreTunables::WAL_GATHER_ADAPT_ALPHA * static_cast<double>(count)
             + (1.0 - XStoreTunables::WAL_GATHER_ADAPT_ALPHA) * batch_size_ema;
 

@@ -236,8 +236,8 @@ class XStore {
             XStore_Proto::TimeUnit time_resolution = XStore_Proto::SECOND;
             unsigned short row_length = 0;
             std::vector<WalRow> rows;          // 1 entry for UnaryInsert; N for a future Batch/Range request
-            XStore_Proto::WalDurabilityMode durability_mode = XStore_Proto::SYNC_PER_COMMIT;
-            // One per REQUEST, not per row -- null for ASYNC_ONLY (nobody
+            XStore_Proto::WalDurabilityMode durability_mode = XStore_Proto::SYNC;
+            // One per REQUEST, not per row -- null for ASYNC (nobody
             // waits). Carries whether this record was actually durably
             // fsync'd AND applied (true) or not (false on any failure --
             // WAL write/fsync failure or a failed ApplyWalRecord row), so a
@@ -294,7 +294,7 @@ class XStore {
 
         // UNARY INSERT
         void UnaryInsert(unsigned long long int epoch_time, const XStore_Proto::RowData &data, std::string_view db_name, XStore_Proto::UnaryInsert_REP *return_data,
-                          XStore_Proto::WalDurabilityMode durability_mode = XStore_Proto::SYNC_PER_COMMIT);
+                          XStore_Proto::WalDurabilityMode durability_mode = XStore_Proto::SYNC);
 
         // UNARY QUERY
         void UnaryQuery(unsigned long long int epoch_time, std::string_view db_name, XStore_Proto::UnaryQuery_REP *return_data);
@@ -513,18 +513,18 @@ class XStore {
         // smaller ones, each paying its own fsync; per-DB hashing keeps one
         // DB's writes funneled through one shard so the group-commit
         // gather window can actually batch them). Pushes it onto that
-        // shard's queue, and -- unless durability_mode is ASYNC_ONLY --
+        // shard's queue, and -- unless durability_mode is ASYNC --
         // blocks until that shard's writer thread has fsync'd and applied
         // it, returning whether it was actually durable (false on a WAL
         // write/fsync failure or a failed apply, not just on the queue push
-        // itself failing). ASYNC_ONLY returns true immediately after a
+        // itself failing). ASYNC returns true immediately after a
         // successful enqueue -- no durability signal is available yet by
         // design.
         //
         // Before enqueueing, blocks the calling thread (polling, not
         // rejecting) if the target shard's queue is already at
         // WAL_QUEUE_HIGH_WATERMARK -- applies to every durability mode,
-        // including ASYNC_ONLY, so a writer that can't keep up bounds
+        // including ASYNC, so a writer that can't keep up bounds
         // memory growth and the crash-loss window instead of accepting
         // unboundedly while still reporting "success".
         static bool EnqueueWalRecord(WalRecord record);
@@ -599,6 +599,38 @@ class XStore {
         // on first use instead) -- true for shard indices beyond the
         // constructor's data_store_dir in multi-directory test scenarios.
         static void WalWriterLoop(size_t shard_idx, std::string preopened_path, int preopened_fd);
+
+        // ---- Data-file fsync coalescer (Batch/Range durability) ---------
+        // NOT the WAL above -- Batch/Range rows are already written
+        // sequentially (year-bucketed, run-coalesced pwrite via
+        // WriteRowGroupToFile), so there's no scattered-write pattern for a
+        // WAL's log-then-apply double-write to amortize away (see the
+        // durabilityMode comment on BatchInsert_REQ/RangeInsert_REQ in
+        // XStore.proto). This is just a deferred, coalesced fdatasync() on
+        // whichever fds Batch/Range already wrote to -- no queue of
+        // records, no CRC, no replay format.
+        //
+        // Holds the fd-cache handle (shared_ptr<int>), not a bare int: a
+        // bare fd could be evicted from GetOrOpenFile's cache and closed --
+        // then reused by the OS for an unrelated file -- before this
+        // background thread gets to it, which would fdatasync() the WRONG
+        // file. Keeping the handle alive here pins the cache entry (same
+        // "held for the scope a concurrent eviction can't close this out
+        // from under us" contract FdShard already documents) until this
+        // thread has actually synced it.
+        static void ScheduleAsyncDataFsync(std::shared_ptr<int> fd_handle);
+
+        // Started once from StartWalWriters (same call_once gate, no
+        // separate startup wiring needed) and stopped via the same
+        // atexit-registered shutdown. A single thread/flat poll interval is
+        // enough here -- Batch/Range calls are coarse-grained and far less
+        // frequent than Unary's per-row hot path, unlike the WAL writer
+        // this doesn't need per-shard/adaptive-window machinery.
+        static void DataFsyncCoalescerLoop();
+        static std::mutex data_fsync_pending_mutex;
+        static std::unordered_map<int, std::shared_ptr<int>> data_fsync_pending;
+        static std::atomic<bool> data_fsync_stop_flag;
+        static std::thread data_fsync_coalescer_thread;
 
 #ifdef XSTORE_WAL_STATS_ENABLED
         // Debug/benchmark-only (XSTORE_WAL_STATS): periodically logs each

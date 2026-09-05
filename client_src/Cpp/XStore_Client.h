@@ -250,12 +250,12 @@ class XStoreClient {
   }
 
   // ==== Unary ====
-  // durability_mode defaults to ASYNC_ONLY -- no fsync wait, lowest latency.
-  // A row is only in-memory/queued until the writer thread flushes it, so a
-  // crash before that flush loses it. Pass SYNC_PER_COMMIT explicitly for
-  // writes that must survive a crash.
+  // durability_mode defaults to ASYNC -- no fsync wait, lowest latency. A
+  // row is only in-memory/queued until the writer thread flushes it, so a
+  // crash before that flush loses it. Pass SYNC explicitly for writes that
+  // must survive a crash.
   [[nodiscard]] std::string UnaryInsert(std::time_t insert_unix_time, const XStore_Proto::RowData &data, std::string_view db_name,
-                                         XStore_Proto::WalDurabilityMode durability_mode = XStore_Proto::ASYNC_ONLY) {
+                                         XStore_Proto::WalDurabilityMode durability_mode = XStore_Proto::ASYNC) {
       XStore_Proto::Request to_server;
       auto *payload = to_server.mutable_unaryinsert();
       payload->set_rtype(XStore_Proto::UNARYINSERT);
@@ -285,11 +285,18 @@ class XStoreClient {
   }
 
   // ==== Batch (arbitrary timestamp set) ====
-  [[nodiscard]] std::string BatchInsert(std::string_view db_name, const std::vector<std::pair<uint64_t, XStore_Proto::RowData>> &rows) {
+  // durability_mode defaults to ASYNC, same semantics as UnaryInsert's --
+  // though for Batch/Range this does NOT route through the WAL: see
+  // BatchInsert_REQ's durabilityMode comment in XStore.proto. SYNC
+  // fdatasync()'s the touched data file(s) before returning; ASYNC defers
+  // that fsync to a background coalescer without blocking the caller.
+  [[nodiscard]] std::string BatchInsert(std::string_view db_name, const std::vector<std::pair<uint64_t, XStore_Proto::RowData>> &rows,
+                                         XStore_Proto::WalDurabilityMode durability_mode = XStore_Proto::ASYNC) {
       XStore_Proto::Request to_server;
       auto *payload = to_server.mutable_batchinsert();
       payload->set_rtype(XStore_Proto::BATCHINSERT);
       payload->set_dbname(std::string(db_name));
+      payload->set_durabilitymode(durability_mode);
       payload->mutable_batchinsert_data()->Reserve(static_cast<int>(rows.size()));
       for (const auto &row : rows) {
           XStore_Proto::BatchInsert_DATA *entry = payload->add_batchinsert_data();
@@ -332,11 +339,15 @@ class XStoreClient {
   }
 
   // ==== Range (contiguous timestamp span) ====
-  [[nodiscard]] std::string RangeInsert(std::string_view db_name, const std::vector<std::pair<uint64_t, XStore_Proto::RowData>> &rows) {
+  // durability_mode: same semantics as BatchInsert's overload above (no WAL
+  // detour -- see RangeInsert_REQ's durabilityMode comment in XStore.proto).
+  [[nodiscard]] std::string RangeInsert(std::string_view db_name, const std::vector<std::pair<uint64_t, XStore_Proto::RowData>> &rows,
+                                         XStore_Proto::WalDurabilityMode durability_mode = XStore_Proto::ASYNC) {
       XStore_Proto::Request to_server;
       auto *payload = to_server.mutable_rangeinsert();
       payload->set_rtype(XStore_Proto::RANGEINSERT);
       payload->set_dbname(std::string(db_name));
+      payload->set_durabilitymode(durability_mode);
       payload->mutable_rangeinsert_data()->Reserve(static_cast<int>(rows.size()));
       for (const auto &row : rows) {
           XStore_Proto::RangeInsert_DATA *entry = payload->add_rangeinsert_data();

@@ -101,6 +101,15 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStor
         AppendToYearBucket(data_map, curr_year, static_cast<unsigned long long int>(i));
     }
 
+    // durabilityMode here does NOT route through the WAL -- see the field's
+    // comment on BatchInsert_REQ in XStore.proto. Rows below are already
+    // written sequentially (year-bucketed, run-coalesced pwrite), so ASYNC/
+    // SYNC instead control whether/when the touched data file(s) get
+    // fdatasync()'d: SYNC inline before returning, ASYNC via the background
+    // coalescer (bounded staleness, no wait), BYPASS neither.
+    const XStore_Proto::WalDurabilityMode durability_mode = proto_from_client->durabilitymode();
+    bool any_sync_failed = false;
+
     // Iterate through each key (year) of dataMap
     for (const std::pair<unsigned short int, std::vector<unsigned long long int>> &pair : data_map) {
         unsigned short int year_key = pair.first;
@@ -118,7 +127,8 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStor
         // PROT_WRITE mapping -- see WriteRowGroupToFile for why.
         // Held through WriteRowGroupToFile below so a concurrent eviction on
         // another thread can't close this fd mid-write -- see FdShard's
-        // comment in XStore.h.
+        // comment in XStore.h. Also held through the SYNC/ASYNC fsync
+        // dispatch below it, for the same reason.
         std::shared_ptr<int> fd_handle = GetOrOpenFile(target_file, cfg_struct.rowlength(), this_ts.last_epoch - this_ts.first_epoch);
         if (!fd_handle) {
             std::string err_msg = fmt::format("[BATCH INSERT] [DB: {}] - Unable to open {}.XSTORE", db_name, year_key);
@@ -136,9 +146,29 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStor
         // uses too, hence the shared helper.
         WriteRowGroupToFile(target_file, fd, this_ts.first_epoch, cfg_struct.rowlength(), indices,
             [&](unsigned long long int idx) -> const XStore_Proto::BatchInsert_DATA& { return proto_from_client->batchinsert_data(idx); });
+
+        if (durability_mode == XStore_Proto::SYNC) {
+            if (fdatasync(fd) != 0) {
+                spdlog::error("[BATCH INSERT] [DB: {}] - fdatasync failed for {}.XSTORE", db_name, year_key);
+                any_sync_failed = true;
+            }
+        } else if (durability_mode == XStore_Proto::ASYNC) {
+            XStore::ScheduleAsyncDataFsync(fd_handle);
+        }
+        // BYPASS: neither -- relies on OS writeback, same as before this
+        // durability mode existed.
     }
 
-    // Return insert status
+    // Return insert status. A SYNC fsync failure means the rows are on disk
+    // but not provably durable yet -- surfaced instead of letting the
+    // unconditional success message below paper over it.
+    if (durability_mode == XStore_Proto::SYNC && any_sync_failed) {
+        std::string err_msg = fmt::format("[BATCH INSERT] [DB: {}] - Inserted {} elements, but SYNC fdatasync failed for at least one file",
+                                           db_name, proto_from_client->batchinsert_data_size());
+        SetTaggedStatus(return_data->mutable_insertstatus(), "[ERROR] ", err_msg);
+        spdlog::error(err_msg);
+        return;
+    }
     std::string success_msg = fmt::format("[BATCH INSERT] [DB: {}] - Inserted {} elements successfully", db_name, proto_from_client->batchinsert_data_size());
     SetTaggedStatus(return_data->mutable_insertstatus(), "[INFO] ", success_msg);
     spdlog::info(success_msg);

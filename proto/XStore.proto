@@ -34,29 +34,37 @@ enum TimeUnit {
   DAY = 6;
 }
 
-// Durability mode for a single write. Zero-value (ASYNC_ONLY) is the
-// intended default -- lowest latency, no fsync wait; a client that omits
-// this field gets ASYNC_ONLY, not a durability guarantee. Pass
-// SYNC_PER_COMMIT/GROUP_COMMIT explicitly to opt into durability. See
-// docs/TODO.md Gap 1 for the full design rationale.
+// Durability mode for a single write. Zero-value (ASYNC) is the intended
+// default -- lowest latency, no fsync wait; a client that omits this field
+// gets ASYNC, not a durability guarantee. Pass SYNC explicitly to opt into
+// durability. See docs/TODO.md Gap 1 for the full design rationale.
 //
-// BYPASS skips WAL entirely -- no queue, no CRC32, no second write. The row
-// is pwrite()'d straight to the data file on the calling (ZMQ worker)
-// thread, same as ASYNC_ONLY's eventual apply but with no WAL record ever
-// written for it. Durability window is therefore bounded by the OS's own
-// writeback timing (dirty_expire_centisecs, default ~30s), NOT by a fast
-// WAL fdatasync like ASYNC_ONLY gets -- meaningfully weaker than
-// ASYNC_ONLY's existing bound, not an upgrade from it. No corruption risk
-// the way SYNC_PER_COMMIT/GROUP_COMMIT bypassed entirely (fsync=off-style)
-// would have, since XStore's flat offset-addressed row layout has no
-// cross-referencing structure for an ordering inversion to break -- worst
-// case is exactly the row(s) in flight at crash time being stale/lost,
-// nothing else. Explicit opt-in only, never a default.
+// Collapsed from four modes (ASYNC_ONLY/GROUP_COMMIT/SYNC_PER_COMMIT/BYPASS)
+// down to three: GROUP_COMMIT and SYNC_PER_COMMIT differed only in whether a
+// commit forced an immediate flush vs. rode the adaptive gather window --
+// the window already self-tunes toward its MIN for a lone writer (see
+// WAL_GATHER_WINDOW_MIN_US/MAX_US in XStore_Tunables.h), so a caller-visible
+// choice between the two bought nothing a client could reason about that the
+// adaptive logic wasn't already doing. SYNC now covers both; the low-vs-
+// high-concurrency tradeoff is purely an internal tuning knob, not a wire
+// contract callers need to pick between.
+//
+// BYPASS skips WAL entirely -- no queue, no CRC32, no second write. For
+// UnaryInsert, the row is pwrite()'d straight to the data file on the
+// calling (ZMQ worker) thread, same as ASYNC's eventual apply but with no
+// WAL record ever written for it. Durability window is therefore bounded by
+// the OS's own writeback timing (dirty_expire_centisecs, default ~30s), NOT
+// by a fast WAL fdatasync like ASYNC gets -- meaningfully weaker than
+// ASYNC's existing bound, not an upgrade from it. No corruption risk the way
+// SYNC bypassed entirely (fsync=off-style) would have, since XStore's flat
+// offset-addressed row layout has no cross-referencing structure for an
+// ordering inversion to break -- worst case is exactly the row(s) in flight
+// at crash time being stale/lost, nothing else. Explicit opt-in only, never
+// a default.
 enum WalDurabilityMode {
-  ASYNC_ONLY      = 0;
-  GROUP_COMMIT    = 1;
-  SYNC_PER_COMMIT = 2;
-  BYPASS          = 3;
+  ASYNC  = 0;
+  SYNC   = 1;
+  BYPASS = 2;
 }
 
 message ConfigStruct {
@@ -149,10 +157,19 @@ message BatchInsert_DATA {
 }
 
 // --- BATCH INSERT
+// durabilityMode here does NOT route through the WAL the way UnaryInsert's
+// does -- Batch/Range rows are already written sequentially (year-bucketed,
+// run-coalesced pwrite), so there's no random-write pattern for a WAL's
+// log-then-apply double-write to amortize away. ASYNC/SYNC instead control
+// whether/when the touched data file(s) get fdatasync()'d directly: SYNC
+// fsyncs inline before returning, ASYNC hands the touched fd off to a
+// background coalescer (bounded staleness, caller doesn't wait), BYPASS
+// does neither (relies on OS writeback, same as today's only behavior).
 message BatchInsert_REQ {
   RequestType RType = 1;
   string dbName = 2;
   repeated BatchInsert_DATA batchInsert_DATA = 3;
+  WalDurabilityMode durabilityMode = 4;
 }
 
 // --- BATCH QUERY
@@ -177,10 +194,14 @@ message RangeInsert_DATA {
 }
 
 // --- RANGE INSERT
+// durabilityMode: same direct-fsync semantics as BatchInsert_REQ's field
+// above (see its comment) -- no WAL involvement, RangeInsert's rows are
+// already sequential.
 message RangeInsert_REQ {
   RequestType RType = 1;
   string dbName = 2;
   repeated RangeInsert_DATA rangeInsert_DATA = 3;
+  WalDurabilityMode durabilityMode = 4;
 }
 
 // --- RANGE QUERY
