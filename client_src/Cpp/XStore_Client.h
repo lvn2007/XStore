@@ -110,7 +110,7 @@ class XStoreClient {
       RepT from_server;
       // Every existing RPC replies with exactly one frame -- this is the
       // same single ParseFromArray as before, zero behavior change. A
-      // streamed reply (currently only RangeQuery, see RangeQueryStreamed)
+      // streamed reply (currently only RangeQuery, see RangeQuery)
       // arrives as several frames that are pieces of ONE logical message's
       // bytes (protobuf doesn't care where a message's serialized bytes get
       // split, only that they're concatenated back in order before

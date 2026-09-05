@@ -789,7 +789,7 @@ TEST_F(XStoreTest, BatchInsertThenBatchQueryExactTimestampsRoundTrip) {
     }
 
     XStore_Proto::BatchQuery_REP query_rep;
-    store.BatchQuery(&query_req, &query_rep);
+    query_rep = BatchQuery(store, &query_req);
 
     ASSERT_EQ(query_rep.queryresponse_size(), 5);
     for (int i = 0; i < query_rep.queryresponse_size(); i++) {
@@ -827,7 +827,7 @@ TEST_F(XStoreTest, BatchQueryHolesAreOmittedFromResults) {
     }
 
     XStore_Proto::BatchQuery_REP query_rep;
-    store.BatchQuery(&query_req, &query_rep);
+    query_rep = BatchQuery(store, &query_req);
 
     ASSERT_EQ(query_rep.queryresponse_size(), 5);
     std::set<unsigned long long> returned;
@@ -870,7 +870,7 @@ TEST_F(XStoreTest, BatchInsertMixedColumnCountsPerTimestamp) {
     for (unsigned long long ts : {ts1, ts2, ts3, ts4, ts_hole}) query_req.add_timestamp(ts);
 
     XStore_Proto::BatchQuery_REP query_rep;
-    store.BatchQuery(&query_req, &query_rep);
+    query_rep = BatchQuery(store, &query_req);
 
     ASSERT_EQ(query_rep.queryresponse_size(), 4);
     std::map<unsigned long long, XStore_Proto::UnaryQuery_REP> by_ts;
@@ -947,7 +947,7 @@ TEST_F(XStoreTest, BatchInsertRandomTimestampsThenRandomBatchQuerySubset) {
     for (unsigned long long ts : queried_set) query_req.add_timestamp(ts);
 
     XStore_Proto::BatchQuery_REP query_rep;
-    store.BatchQuery(&query_req, &query_rep);
+    query_rep = BatchQuery(store, &query_req);
 
     std::set<unsigned long long> expected_hits;
     for (unsigned long long ts : queried_set) {
@@ -1014,7 +1014,7 @@ TEST_F(XStoreTest, BatchDeleteThenBatchQueryDeletedEntriesOmitted) {
     for (unsigned long long ts : {TS_2009_MID, TS_2009_MID + 10, TS_2031_MID}) query_req.add_timestamp(ts);
 
     XStore_Proto::BatchQuery_REP query_rep;
-    store.BatchQuery(&query_req, &query_rep);
+    query_rep = BatchQuery(store, &query_req);
 
     ASSERT_EQ(query_rep.queryresponse_size(), 2);
     std::set<unsigned long long> returned;
@@ -1147,7 +1147,7 @@ TEST_F(XStoreTest, BatchInsertRepeatedCallsToSameYearFileAccumulateViaCachedMapp
     for (int i = 0; i < 20; i++) query_req.add_timestamp(TS_2016_MID + i);
 
     XStore_Proto::BatchQuery_REP query_rep;
-    store.BatchQuery(&query_req, &query_rep);
+    query_rep = BatchQuery(store, &query_req);
 
     ASSERT_EQ(query_rep.queryresponse_size(), 20) << "an earlier call's rows were lost -- cached mapping must have been re-truncated instead of reused";
     std::map<unsigned long long, int64_t> by_ts;
@@ -1230,7 +1230,7 @@ TEST_F(XStoreTest, BatchQueryRowFillingEntireBufferWithNoZeroByteIsNotTreatedAsH
     query_req.set_dbname("TESTDB");
     query_req.add_timestamp(TS_2016_MID);
     XStore_Proto::BatchQuery_REP query_rep;
-    store.BatchQuery(&query_req, &query_rep);
+    query_rep = BatchQuery(store, &query_req);
 
     ASSERT_EQ(query_rep.queryresponse_size(), 1);
     ASSERT_EQ(query_rep.queryresponse(0).data().fielddata_size(), 1);
@@ -1245,7 +1245,7 @@ TEST_F(XStoreTest, BatchQueryEmptyTimestampListSucceedsWithNoResults) {
     query_req.set_dbname("TESTDB");  // no timestamps at all
 
     XStore_Proto::BatchQuery_REP query_rep;
-    store.BatchQuery(&query_req, &query_rep);
+    query_rep = BatchQuery(store, &query_req);
     EXPECT_EQ(query_rep.queryresponse_size(), 0);
 }
 
@@ -1262,7 +1262,7 @@ TEST_F(XStoreTest, BatchQueryAllRequestedTimestampsAreHolesReturnsEmptyResponse)
     query_req.add_timestamp(TS_2016_MID + 20);
 
     XStore_Proto::BatchQuery_REP query_rep;
-    store.BatchQuery(&query_req, &query_rep);
+    query_rep = BatchQuery(store, &query_req);
     EXPECT_EQ(query_rep.queryresponse_size(), 0);
 }
 
@@ -1278,7 +1278,7 @@ TEST_F(XStoreTest, BatchQueryRejectsRequestOver2GBLimit) {
     }
 
     XStore_Proto::BatchQuery_REP query_rep;
-    store.BatchQuery(&query_req, &query_rep);
+    query_rep = BatchQuery(store, &query_req);
     EXPECT_NE(query_rep.querystatus().find("larger than 2GB"), std::string::npos) << query_rep.querystatus();
     EXPECT_EQ(query_rep.queryresponse_size(), 0);
 }
@@ -1316,7 +1316,7 @@ TEST_F(XStoreTest, BatchQuerySortTimeFalseWithUnsortedTimestampsRoundTrips) {
     }
 
     XStore_Proto::BatchQuery_REP query_rep;
-    store.BatchQuery(&query_req, &query_rep, /*SortTime=*/false);
+    query_rep = BatchQuery(store, &query_req, /*SortTime=*/false);
 
     ASSERT_EQ(query_rep.queryresponse_size(), 4);
     for (int i = 0; i < query_rep.queryresponse_size(); i++) {
@@ -1327,17 +1327,17 @@ TEST_F(XStoreTest, BatchQuerySortTimeFalseWithUnsortedTimestampsRoundTrips) {
     }
 }
 
-// --- BatchQueryStreamed: the network-facing, zero-object-tree path (shares
-// RangeQueryStreamed's wire encoder -- see XStore_WireEncode.h). Every test
+// --- BatchQuery: the network-facing, zero-object-tree path (shares
+// RangeQuery's wire encoder -- see XStore_WireEncode.h). Every test
 // below asserts byte-for-byte SerializeAsString() equality against the
 // existing object-based BatchQuery for the same query, same as
-// RangeQueryStreamed's tests.
+// RangeQuery's tests.
 namespace {
 XStore_Proto::BatchQuery_REP RunBatchStreamedAndReassemble(XStore &store, XStore_Proto::BatchQuery_REQ *req, bool sort_time,
                                                              size_t chunk_size_bytes, int *chunk_count_out = nullptr) {
     std::string joined;
     int chunk_count = 0;
-    store.BatchQueryStreamed(req, sort_time, chunk_size_bytes,
+    store.BatchQuery(req, sort_time, chunk_size_bytes,
         [&](std::string &&chunk, bool /*is_last*/) {
             chunk_count++;
             joined += chunk;
@@ -1360,7 +1360,7 @@ TEST_F(XStoreTest, BatchQueryStreamedMatchesBatchQueryForDenseMultiColumnRows) {
         XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
         entry->set_timestamp(timestamps[i]);
         // Negative int32/int64 exercises the 10-byte-varint case, same as
-        // RangeQueryStreamed's equivalent test.
+        // RangeQuery's equivalent test.
         *entry->mutable_data() = MakeRow({
             FDouble(3.14159 * static_cast<double>(i)),
             FInt32(-static_cast<int32_t>(i)),
@@ -1376,7 +1376,7 @@ TEST_F(XStoreTest, BatchQueryStreamedMatchesBatchQueryForDenseMultiColumnRows) {
     query_req1.set_dbname("TESTDB");
     for (auto ts : timestamps) query_req1.add_timestamp(ts);
     XStore_Proto::BatchQuery_REP expected;
-    store.BatchQuery(&query_req1, &expected);
+    expected = BatchQuery(store, &query_req1);
 
     XStore_Proto::BatchQuery_REQ query_req2;
     query_req2.set_dbname("TESTDB");
@@ -1387,7 +1387,7 @@ TEST_F(XStoreTest, BatchQueryStreamedMatchesBatchQueryForDenseMultiColumnRows) {
     EXPECT_EQ(chunk_count, 1);
     ASSERT_EQ(actual.queryresponse_size(), expected.queryresponse_size());
     EXPECT_EQ(actual.SerializeAsString(), expected.SerializeAsString())
-        << "BatchQueryStreamed's hand-encoded bytes diverge from BatchQuery's object-tree serialization";
+        << "BatchQuery's hand-encoded bytes diverge from BatchQuery's object-tree serialization";
 }
 
 TEST_F(XStoreTest, BatchQueryStreamedOmitsHolesSameAsBatchQuery) {
@@ -1412,7 +1412,7 @@ TEST_F(XStoreTest, BatchQueryStreamedOmitsHolesSameAsBatchQuery) {
     req1.set_dbname("TESTDB");
     for (auto ts : query_ts) req1.add_timestamp(ts);
     XStore_Proto::BatchQuery_REP expected;
-    store.BatchQuery(&req1, &expected);
+    expected = BatchQuery(store, &req1);
 
     XStore_Proto::BatchQuery_REQ req2;
     req2.set_dbname("TESTDB");
@@ -1445,7 +1445,7 @@ TEST_F(XStoreTest, BatchQueryStreamedSplitsAcrossMultipleChunksAndReassemblesToM
     req1.set_dbname("TESTDB");
     for (auto ts : timestamps) req1.add_timestamp(ts);
     XStore_Proto::BatchQuery_REP expected;
-    store.BatchQuery(&req1, &expected);
+    expected = BatchQuery(store, &req1);
 
     XStore_Proto::BatchQuery_REQ req2;
     req2.set_dbname("TESTDB");
@@ -1488,7 +1488,7 @@ TEST_F(XStoreTest, BatchQueryStreamedParallelPreadWaveSpansMultipleWavesWithHole
     req1.set_dbname("TESTDB");
     for (auto ts : all_ts) req1.add_timestamp(ts);
     XStore_Proto::BatchQuery_REP expected;
-    store.BatchQuery(&req1, &expected);
+    expected = BatchQuery(store, &req1);
 
     XStore_Proto::BatchQuery_REQ req2;
     req2.set_dbname("TESTDB");
@@ -1520,7 +1520,7 @@ TEST_F(XStoreTest, BatchQueryStreamedPreservesMissingYearWarningMessage) {
     req1.set_dbname("TESTDB");
     for (auto ts : {TS_1998_MID, TS_2016_MID, TS_2009_MID}) req1.add_timestamp(ts);
     XStore_Proto::BatchQuery_REP expected;
-    store.BatchQuery(&req1, &expected);
+    expected = BatchQuery(store, &req1);
 
     XStore_Proto::BatchQuery_REQ req2;
     req2.set_dbname("TESTDB");
@@ -1558,7 +1558,7 @@ TEST_F(XStoreTest, BatchQueryStreamedSortTimeFalseWithUnsortedTimestampsRoundTri
     req1.set_dbname("TESTDB");
     for (auto ts : query_order) req1.add_timestamp(ts);
     XStore_Proto::BatchQuery_REP expected;
-    store.BatchQuery(&req1, &expected, /*sort_time=*/false);
+    expected = BatchQuery(store, &req1, /*sort_time=*/false);
 
     XStore_Proto::BatchQuery_REQ req2;
     req2.set_dbname("TESTDB");
@@ -1589,7 +1589,7 @@ TEST_F(XStoreTest, RangeInsertThenRangeQueryContiguousRangeAllPresent) {
     EXPECT_NE(insert_rep.insertstatus().find("Inserted 10 elements"), std::string::npos);
 
     XStore_Proto::RangeQuery_REP query_rep;
-    store.RangeQuery(TS_2031_MID, TS_2031_MID + 9, "TESTDB", &query_rep);
+    query_rep = RangeQuery(store, TS_2031_MID, TS_2031_MID + 9, "TESTDB");
 
     ASSERT_EQ(query_rep.queryresponse_size(), 10);
     for (int i = 0; i < 10; i++) {
@@ -1619,7 +1619,7 @@ TEST_F(XStoreTest, RangeInsertThenRangeQueryMultiColumnRowsRoundTrip) {
     store.RangeInsert(&insert_req, &insert_rep);
 
     XStore_Proto::RangeQuery_REP query_rep;
-    store.RangeQuery(TS_2024_MID, TS_2024_MID + K_WIDE_ROW_COUNT - 1, "TESTDB", &query_rep);
+    query_rep = RangeQuery(store, TS_2024_MID, TS_2024_MID + K_WIDE_ROW_COUNT - 1, "TESTDB");
 
     ASSERT_EQ(query_rep.queryresponse_size(), K_WIDE_ROW_COUNT);
     for (int i = 0; i < K_WIDE_ROW_COUNT; i++) {
@@ -1652,7 +1652,7 @@ TEST_F(XStoreTest, RangeQueryUninsertedTimestampsReturnEmptyEntriesNotOmitted) {
     store.RangeInsert(&insert_req, &insert_rep);
 
     XStore_Proto::RangeQuery_REP query_rep;
-    store.RangeQuery(TS_2009_MID, TS_2009_MID + 4, "TESTDB", &query_rep);
+    query_rep = RangeQuery(store, TS_2009_MID, TS_2009_MID + 4, "TESTDB");
 
     // Unlike BatchQuery, RangeQuery does NOT omit holes -- every timestamp in
     // range gets an entry, with holes coming back as zero-field RowData.
@@ -1676,7 +1676,7 @@ TEST_F(XStoreTest, RangeQuerySpanningTwoYearBoundary) {
     store.UnaryInsert(TS_2017_FIRST, MakeRow({FString("first-of-2017")}), "TESTDB", &insert_rep);
 
     XStore_Proto::RangeQuery_REP query_rep;
-    store.RangeQuery(TS_2016_LAST, TS_2017_FIRST, "TESTDB", &query_rep);
+    query_rep = RangeQuery(store, TS_2016_LAST, TS_2017_FIRST, "TESTDB");
 
     ASSERT_EQ(query_rep.queryresponse_size(), 2);
     EXPECT_EQ(query_rep.queryresponse(0).timestamp(), TS_2016_LAST);
@@ -1736,7 +1736,7 @@ TEST_F(XStoreTest, RangeDeleteReclaimsDiskSpaceAndMmapCacheReflectsTheHole) {
     // separate, freshly-opened fd -- confirms that hole is visible through
     // an *already-mapped* MAP_SHARED region too, not just to fresh reads.
     XStore_Proto::RangeQuery_REP pre_delete_query;
-    store.RangeQuery(TS_2024_MID, TS_2024_MID + k_row_count - 1, "TESTDB", &pre_delete_query);
+    pre_delete_query = RangeQuery(store, TS_2024_MID, TS_2024_MID + k_row_count - 1, "TESTDB");
     ASSERT_EQ(pre_delete_query.queryresponse_size(), k_row_count);
     for (int i = 0; i < k_row_count; i++) {
         ASSERT_EQ(pre_delete_query.queryresponse(i).data().fielddata_size(), 1) << "i=" << i;
@@ -1762,7 +1762,7 @@ TEST_F(XStoreTest, RangeDeleteReclaimsDiskSpaceAndMmapCacheReflectsTheHole) {
 
     // Data actually gone, read back through the same cached mapping RangeInsert/RangeQuery used above.
     XStore_Proto::RangeQuery_REP post_delete_query;
-    store.RangeQuery(TS_2024_MID, TS_2024_MID + k_row_count - 1, "TESTDB", &post_delete_query);
+    post_delete_query = RangeQuery(store, TS_2024_MID, TS_2024_MID + k_row_count - 1, "TESTDB");
     ASSERT_EQ(post_delete_query.queryresponse_size(), k_row_count);
     for (int i = 0; i < k_row_count; i++) {
         EXPECT_EQ(post_delete_query.queryresponse(i).data().fielddata_size(), 0) << "i=" << i << " -- stale data read through an already-mapped region after fallocate hole-punch on a different fd";
@@ -1905,7 +1905,7 @@ TEST_F(XStoreTest, RangeQueryLastRowInSpanIsLockedAgainstConcurrentWriter) {
 
     auto query_start = std::chrono::steady_clock::now();
     XStore_Proto::RangeQuery_REP rep;
-    store.RangeQuery(start, end, "TESTDB", &rep);
+    rep = RangeQuery(store, start, end, "TESTDB");
     auto elapsed = std::chrono::steady_clock::now() - query_start;
 
     holder.join();
@@ -1934,7 +1934,7 @@ TEST_F(XStoreTest, RangeQuerySpanningThreeYearsWithMissingMiddleYearFile) {
     // Deliberately nothing inserted for 1999 -> 1999.XSTORE never gets created.
 
     XStore_Proto::RangeQuery_REP query_rep;
-    store.RangeQuery(ts_1998_last, ts_2000_first_plus, "TESTDB", &query_rep);
+    query_rep = RangeQuery(store, ts_1998_last, ts_2000_first_plus, "TESTDB");
 
     std::map<unsigned long long, std::string> found;
     for (int i = 0; i < query_rep.queryresponse_size(); i++) {
@@ -1947,10 +1947,10 @@ TEST_F(XStoreTest, RangeQuerySpanningThreeYearsWithMissingMiddleYearFile) {
     EXPECT_EQ(found[ts_2000_first_plus], "start-of-2000");
 }
 
-// --- RangeQueryStreamed: the network-facing, zero-object-tree path. Every
+// --- RangeQuery: the network-facing, zero-object-tree path. Every
 // test below asserts byte-for-byte SerializeAsString() equality against the
 // existing object-based RangeQuery for the same query -- not just "looks
-// right" -- since RangeQueryStreamed hand-encodes the wire format directly
+// right" -- since RangeQuery hand-encodes the wire format directly
 // and any bug there would silently produce wrong bytes, not a crash.
 namespace {
 // Collects every emitted chunk (in order) and hands back the concatenated
@@ -1961,7 +1961,7 @@ XStore_Proto::RangeQuery_REP RunStreamedAndReassemble(XStore &store, unsigned lo
                                                        int *chunk_count_out = nullptr) {
     std::string joined;
     int chunk_count = 0;
-    store.RangeQueryStreamed(start, end, db_name, chunk_size_bytes,
+    store.RangeQuery(start, end, db_name, chunk_size_bytes,
         [&](std::string &&chunk, bool /*is_last*/) {
             chunk_count++;
             joined += chunk;
@@ -1995,7 +1995,7 @@ TEST_F(XStoreTest, RangeQueryStreamedMatchesRangeQueryForDenseMultiColumnRows) {
     }
 
     XStore_Proto::RangeQuery_REP expected;
-    store.RangeQuery(TS_2016_MID, TS_2016_MID + 19, "TESTDB", &expected);
+    expected = RangeQuery(store, TS_2016_MID, TS_2016_MID + 19, "TESTDB");
 
     // Huge chunk size -- the whole response fits in one chunk, exercising
     // the "small query never actually chunks" degenerate case.
@@ -2006,7 +2006,7 @@ TEST_F(XStoreTest, RangeQueryStreamedMatchesRangeQueryForDenseMultiColumnRows) {
     EXPECT_EQ(chunk_count, 1);
     ASSERT_EQ(actual.queryresponse_size(), expected.queryresponse_size());
     EXPECT_EQ(actual.SerializeAsString(), expected.SerializeAsString())
-        << "RangeQueryStreamed's hand-encoded bytes diverge from RangeQuery's object-tree serialization for dense multi-type rows";
+        << "RangeQuery's hand-encoded bytes diverge from RangeQuery's object-tree serialization for dense multi-type rows";
 }
 
 TEST_F(XStoreTest, RangeQueryStreamedHandlesHolesAndSparseColumnsSameAsRangeQuery) {
@@ -2023,7 +2023,7 @@ TEST_F(XStoreTest, RangeQueryStreamedHandlesHolesAndSparseColumnsSameAsRangeQuer
     // TS_2009_MID+1, +2, +4, +5, +6 are left as real holes (never inserted).
 
     XStore_Proto::RangeQuery_REP expected;
-    store.RangeQuery(TS_2009_MID, TS_2009_MID + 7, "TESTDB", &expected);
+    expected = RangeQuery(store, TS_2009_MID, TS_2009_MID + 7, "TESTDB");
 
     XStore_Proto::RangeQuery_REP actual = RunStreamedAndReassemble(store, TS_2009_MID, TS_2009_MID + 7, "TESTDB", 1ull << 30);
 
@@ -2042,7 +2042,7 @@ TEST_F(XStoreTest, RangeQueryStreamedSplitsAcrossMultipleChunksAndReassemblesToM
     }
 
     XStore_Proto::RangeQuery_REP expected;
-    store.RangeQuery(TS_2024_MID, TS_2024_MID + kRows - 1, "TESTDB", &expected);
+    expected = RangeQuery(store, TS_2024_MID, TS_2024_MID + kRows - 1, "TESTDB");
 
     // 200 bytes/chunk against ~500 rows of ~20-30 bytes each guarantees this
     // splits into well over a dozen chunks -- the actual behavior under
@@ -2070,7 +2070,7 @@ TEST_F(XStoreTest, RangeQueryStreamedPreservesMissingYearWarningMessage) {
     // 1999.XSTORE never created.
 
     XStore_Proto::RangeQuery_REP expected;
-    store.RangeQuery(ts_1998_last, ts_2000_first_plus, "TESTDB", &expected);
+    expected = RangeQuery(store, ts_1998_last, ts_2000_first_plus, "TESTDB");
 
     XStore_Proto::RangeQuery_REP actual = RunStreamedAndReassemble(store, ts_1998_last, ts_2000_first_plus, "TESTDB", 1ull << 30);
 
@@ -2101,7 +2101,7 @@ TEST_F(XStoreTest, RangeQueryStreamedMissingFinalYearFileReturnsInsteadOfHanging
     }
     if (!completed) {
         worker.detach();
-        FAIL() << "RangeQueryStreamed hung instead of returning when the final year's file was missing";
+        FAIL() << "RangeQuery hung instead of returning when the final year's file was missing";
         return;
     }
     worker.join();
@@ -2133,7 +2133,7 @@ TEST_F(XStoreTest, RangeQueryMissingFinalYearFileReturnsInsteadOfHanging) {
     std::atomic<bool> completed{false};
     XStore_Proto::RangeQuery_REP query_rep;
     std::thread worker([&]() {
-        store.RangeQuery(ts_1998_last, ts_1999_early, "TESTDB", &query_rep);
+        query_rep = RangeQuery(store, ts_1998_last, ts_1999_early, "TESTDB");
         completed = true;
     });
 
@@ -2229,7 +2229,7 @@ TEST_F(XStoreTest, RangeQueryRejectsRequestOver2GBLimit) {
 
     XStore_Proto::RangeQuery_REP query_rep;
     // (end-start) * rowLength > 2GB -- just over RangeQuery's hard limit.
-    store.RangeQuery(TS_2016_MID, TS_2016_MID + 63000, "TESTDB", &query_rep);
+    query_rep = RangeQuery(store, TS_2016_MID, TS_2016_MID + 63000, "TESTDB");
     EXPECT_NE(query_rep.querystatus().find("larger than 2GB"), std::string::npos) << query_rep.querystatus();
     EXPECT_EQ(query_rep.queryresponse_size(), 0);
 }
@@ -2275,7 +2275,7 @@ TEST_F(XStoreTest, UnaryBatchAndRangeInsertQueryShareSameCachedMappingWithinAYea
     query_req.set_dbname("TESTDB");
     for (int i = 0; i < 3; i++) query_req.add_timestamp(TS_2009_MID + i);
     XStore_Proto::BatchQuery_REP query_rep;
-    store.BatchQuery(&query_req, &query_rep);
+    query_rep = BatchQuery(store, &query_req);
     ASSERT_EQ(query_rep.queryresponse_size(), 3);
     std::map<unsigned long long, std::string> by_ts;
     for (int i = 0; i < query_rep.queryresponse_size(); i++) {
@@ -2287,7 +2287,7 @@ TEST_F(XStoreTest, UnaryBatchAndRangeInsertQueryShareSameCachedMappingWithinAYea
 
     // Read every point back through RangeQuery.
     XStore_Proto::RangeQuery_REP range_query_rep;
-    store.RangeQuery(TS_2009_MID, TS_2009_MID + 2, "TESTDB", &range_query_rep);
+    range_query_rep = RangeQuery(store, TS_2009_MID, TS_2009_MID + 2, "TESTDB");
     ASSERT_EQ(range_query_rep.queryresponse_size(), 3);
     EXPECT_EQ(range_query_rep.queryresponse(0).data().fielddata(0).stringdata(), "via-unary");
     EXPECT_EQ(range_query_rep.queryresponse(1).data().fielddata(0).stringdata(), "via-batch");

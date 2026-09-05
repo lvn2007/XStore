@@ -268,7 +268,7 @@ static_assert(WAL_FILE_PREALLOC_BYTES >= WAL_MAX_BATCH_BYTES,
 inline constexpr size_t      WAL_QUEUE_HIGH_WATERMARK    = WAL_BATCH_MAX_RECORDS * 4;
 inline constexpr unsigned    WAL_BACKPRESSURE_POLL_US    = 200;
 
-// RangeQueryStreamed and BatchQueryStreamed (XStore_RangeOps.cpp,
+// RangeQuery and BatchQuery (XStore_RangeOps.cpp,
 // XStore_BatchOps.cpp): target size of each emitted wire-format chunk. A
 // query whose total output stays under this is sent as a single ZMQ frame
 // (chunking is not a separate path -- it's just what a small query
@@ -305,7 +305,7 @@ inline constexpr size_t      STREAMED_QUERY_CHUNK_SIZE_BYTES = 64ull * 1024 * 10
 // hot path, so this knob has zero effect on insert/query latency either way.
 inline constexpr unsigned    SYS_STATS_COLLECT_INTERVAL_MS = 2000;
 
-// BatchQueryStreamed (XStore_BatchOps.cpp) + XStorePreadPool
+// BatchQuery (XStore_BatchOps.cpp) + XStorePreadPool
 // (XStore_PreadPool.*): pread() is a syscall -- on BatchQuery's scattered
 // access pattern (the whole reason it uses pread-per-row instead of mmap,
 // see there) a large batch pays hundreds of thousands of these, serially,
@@ -321,7 +321,7 @@ inline constexpr unsigned    SYS_STATS_COLLECT_INTERVAL_MS = 2000;
 // BATCH_QUERY_PREAD_POOL_SIZE_CAP is how many worker threads actually
 // exist to do this, system-wide -- not "how many threads this one query
 // spawns". XStorePreadPool starts this many threads ONCE at process
-// startup (first use) and every BatchQueryStreamed call, from every
+// startup (first use) and every BatchQuery call, from every
 // concurrent client, submits its pread work to that SAME fixed pool. That's
 // the difference between a real device-concurrency cap and a per-call fan-
 // out limit: with the latter, two concurrent queries each capped at K
@@ -368,7 +368,7 @@ inline constexpr unsigned    SYS_STATS_COLLECT_INTERVAL_MS = 2000;
 // dispatch to a fixed size independent of the batch's total row count -- a
 // 500k-row batch still only ever holds this many rows' worth of scratch
 // memory live at once, preserving the same server-memory-bounded design
-// BatchQueryStreamed's chunking already gives on the encode side. Decoupled
+// BatchQuery's chunking already gives on the encode side. Decoupled
 // from pool size on purpose: this bounds MEMORY per dispatch, the pool cap
 // above bounds DEVICE CONCURRENCY -- unrelated resources, no reason one
 // number should have to serve both.
@@ -384,7 +384,7 @@ inline constexpr size_t      BATCH_QUERY_PREAD_POOL_SIZE_MIN      = 2;
 inline constexpr size_t      BATCH_QUERY_PREAD_WAVE_ROWS          = 4096;
 inline constexpr size_t      BATCH_QUERY_PARALLEL_PREAD_MIN_ROWS  = 256;
 
-// TRIED AND REVERTED: fanning RangeQueryStreamed's per-row wire-encode
+// TRIED AND REVERTED: fanning RangeQuery's per-row wire-encode
 // transform out across XStorePreadPool, the same way BatchQuery's pread
 // fan-out uses it. Measured on Mystic (real 8-machine multi-client sweep,
 // 500k-row RangeQuery, BACKTESTER's 64-byte rows): 41-77% THROUGHPUT

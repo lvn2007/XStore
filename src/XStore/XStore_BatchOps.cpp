@@ -144,176 +144,6 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStor
     spdlog::info(success_msg);
 }
 
-// BATCH QUERY
-void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, XStore_Proto::BatchQuery_REP *return_data, bool sort_time) {
-    // Ensure dbName string is all capitalized
-    std::string db_name = proto_from_client->dbname();
-    ToUpperCase(db_name.begin(), db_name.end());
-
-    // Base directory of a DB
-    const std::string &db_base_path_str = CachedDbBasePath(db_name);
-
-    // Fetch cfgStruct from cache, loading from disk on first use
-    XStore_Proto::ConfigStruct cfg_struct;
-    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
-        std::string err_msg = fmt::format("[BATCH QUERY] [DB: {}] - {}.CFG does not exist", db_name, db_name);
-        SetTaggedStatus(return_data->mutable_querystatus(), "[WARNING] ", err_msg);
-        spdlog::warn(err_msg);
-        return;
-    }
-
-    // IF query range > 2GB limit of Protobuf or Empty
-    if ((proto_from_client->timestamp_size() * cfg_struct.rowlength()) > 2'000'000'000 || proto_from_client->timestamp_size() < 0) {
-        std::string err_msg = fmt::format("[BATCH QUERY] [DB: {}] - Query results is larger than 2GB or empty", db_name);
-        SetTaggedStatus(return_data->mutable_querystatus(), "[WARNING] ", err_msg);
-        spdlog::warn(err_msg);
-        return;
-    }
-
-    // Assuming incoming batch query is unsorted
-    //  -> Ascending sort
-    if (sort_time)
-    {
-        SortBatch(proto_from_client->mutable_timestamp()->begin(), proto_from_client->mutable_timestamp()->end(),
-                      [](const unsigned long long int& a, const unsigned long long int& b) {
-                        return a < b;
-        });
-    }
-
-    // Organize incoming batch query into year buckets -- flat vector + linear
-    // scan (see AppendToYearBucket), not std::map.
-    YearBucketMap data_map;
-
-    // Granularity check -- same TimeStruct window-reuse BatchInsert uses
-    // (see there for the full rationale), gated on SortTime: the reuse trick
-    // only checks an upper bound (has this row crossed into a later year
-    // than the current window's LastEpoch), never a lower bound, so it's
-    // only valid when consecutive rows are non-decreasing -- guaranteed when
-    // SortTime just sorted them, NOT guaranteed otherwise (see
-    // BatchQuerySortTimeFalseWithUnsortedTimestampsRoundTrips, which sends
-    // out-of-order timestamps with SortTime=false and still expects correct
-    // per-row bucketing). "!SortTime ||" makes the rebuild condition always
-    // true in that case, so behavior there is unchanged from before.
-    bool have_window = false;
-    unsigned short int curr_year = 0;
-    int64_t window_last_epoch = 0;
-    for (int i = 0; i < proto_from_client->timestamp_size(); i++) {
-        unsigned long long int curr_time = proto_from_client->timestamp(i);
-        if (!sort_time || !have_window || static_cast<int64_t>(curr_time) > window_last_epoch) {
-            TimeStruct curr_ts(curr_time, cfg_struct.timeresolution());
-            curr_year = curr_ts.year;
-            window_last_epoch = curr_ts.last_epoch;
-            have_window = true;
-        }
-        AppendToYearBucket(data_map, curr_year, static_cast<unsigned long long int>(i));
-    }
-
-    // Keep the response chronological across years -- matches the old
-    // std::map-based version's iteration order, which was always
-    // year-ascending regardless of request/bucket-creation order (relevant
-    // when SortTime is false, where buckets can otherwise be created in
-    // request order instead of year order).
-    std::sort(data_map.begin(), data_map.end(),
-              [](const auto &a, const auto &b) { return a.first < b.first; });
-
-    // Iterate through each key (year) of dataMap
-    for (const std::pair<unsigned short int, std::vector<unsigned long long int>> &pair : data_map) {
-        unsigned short int year_key = pair.first;
-        const std::vector<unsigned long long int> &indices = pair.second;
-        const std::string &target_file = CachedYearFilePath(db_base_path_str, year_key);
-
-        // IF target file does NOT exist -- checked explicitly because
-        // GetOrMapFile below opens with O_CREAT and would otherwise silently
-        // create+map an empty file for a query that should just report no
-        // data. IsFdCached short-circuits the stat() syscall on a warm
-        // cache, same as UnaryQuery.
-        if (!IsFdCached(target_file) && std::filesystem::exists(target_file) == 0) {
-            // Skip to next iteration
-            std::string warn_msg = fmt::format("[BATCH QUERY] [DB: {}] - {}.XSTORE does not exist", db_name, year_key);
-            SetTaggedStatus(return_data->mutable_querystatus(), "[WARNING] ", warn_msg);
-            spdlog::warn(warn_msg);
-            continue;
-        }
-
-        TimeStruct this_ts{static_cast<time_t>(proto_from_client->timestamp(indices.front())), cfg_struct.timeresolution()};
-
-        // BatchQuery deliberately does NOT go through GetOrMapFile/mmap here
-        // (unlike Unary/Batch/RangeInsert and RangeQuery, which all share
-        // that cache). Those all walk a file in offset order -- sequential
-        // or nearly so -- where mmap's page-fault-on-touch model plus the
-        // kernel's default readahead is a win. BatchQuery's row order is
-        // request order, i.e. scattered across the year's full offset span,
-        // and mmap random access degrades badly there: each page fault is
-        // costlier than a pread() of the same bytes, readahead prefetches
-        // pages this loop will never touch, and per-call madvise(MADV_RANDOM)
-        // to suppress that isn't free either once a lot of the mapping is
-        // resident. A plain pread() per row sidesteps all of it.
-        //
-        // The fd itself, though, goes through the same shared fd cache
-        // Unary/BatchInsert use (see GetOrOpenFile) instead of a fresh
-        // open()/close() every call -- existence was already confirmed
-        // above, so O_CREAT there is a no-op, and any ftruncate is a no-op
-        // too since the file is never smaller than the size this computes.
-        // A warm cache turns "open syscall + N preads + close syscall" into
-        // "one shard-mutex lookup + N preads", and the fd is left open for
-        // the next call (or Insert traffic on the same file) to reuse.
-        // Held through the pread() loop below so a concurrent eviction on
-        // another thread can't close this fd mid-read -- see FdShard's
-        // comment in XStore.h.
-        std::shared_ptr<int> fd_handle = GetOrOpenFile(target_file, cfg_struct.rowlength(), this_ts.last_epoch - this_ts.first_epoch);
-        if (!fd_handle) {
-            std::string err_msg = fmt::format("[BATCH QUERY] [DB: {}] - Unable to open {}.XSTORE", db_name, year_key);
-            SetTaggedStatus(return_data->mutable_querystatus(), "[ERROR] ", err_msg);
-            spdlog::error(err_msg);
-            continue;
-        }
-        int fd = *fd_handle;
-
-        // Single lock spanning this year-group's min-to-max offset span
-        // instead of one lock per row. Found via a scan (not just
-        // front()/back()) since Indices is only guaranteed sorted when
-        // SortTime is true -- BatchInsert always sorts, BatchQuery doesn't
-        // have to.
-        auto [MinIt, MaxIt] = std::minmax_element(indices.begin(), indices.end(),
-            [&](unsigned long long int a, unsigned long long int b) {
-                return proto_from_client->timestamp(a) < proto_from_client->timestamp(b);
-        });
-        const unsigned long long int min_offset = (proto_from_client->timestamp(*MinIt) - this_ts.first_epoch) * cfg_struct.rowlength();
-        const unsigned long long int max_offset = (proto_from_client->timestamp(*MaxIt) - this_ts.first_epoch) * cfg_struct.rowlength();
-        const unsigned long long int region_length = (max_offset + cfg_struct.rowlength()) - min_offset;
-
-        FileRangeLockGuard guard(target_file, min_offset, region_length, FileRangeLock::LockType::READ);
-
-        // thread_local + grow-only: avoids a fresh heap allocation per
-        // year-group per call, same pattern UnaryInsert/UnaryQuery's RowBuf
-        // and WriteRowGroupToFile's RunBuf already use.
-        thread_local std::vector<char> buffer_in;
-        if (buffer_in.size() < cfg_struct.rowlength()) {
-            buffer_in.resize(cfg_struct.rowlength());
-        }
-        for (unsigned long long int idx : indices) {
-            unsigned long long int timestamp = proto_from_client->timestamp(idx);
-            unsigned long long int offset = (timestamp - this_ts.first_epoch) * cfg_struct.rowlength();
-
-            pread(fd, buffer_in.data(), cfg_struct.rowlength(), static_cast<off_t>(offset));
-
-            // IF fetched data contains nothing
-            //  -> Skip to next iteration. BufferIn is a fixed-width binary
-            //  buffer (not a C string), so strlen() would over-read past its
-            //  end whenever a real row's bytes fill the whole slot with no
-            //  zero byte in it; checking the first byte (a hole is always
-            //  fully zeroed) is what the aggregate scan kernels do too.
-            if (buffer_in[0] == 0) {
-                continue;
-            }
-
-            XStore_Proto::UnaryQuery_REP *curr_entry = return_data->add_queryresponse();
-            curr_entry->set_timestamp(timestamp);
-            curr_entry->mutable_data()->ParseFromArray(buffer_in.data(), cfg_struct.rowlength());
-        }
-    }
-}
-
 // BATCH QUERY (streamed) -- see XStore.h's declaration comment for the
 // contract. Mirrors BatchQuery's structure exactly (sort/bucket/lock, the
 // same pread-not-mmap fd path since BatchQuery's scattered access pattern
@@ -322,7 +152,7 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, XStore_
 // RangeQuery). The only real difference is what happens to each non-hole
 // row: EncodeQueryResponseEntry writes its bytes straight into chunk_buf
 // instead of building a UnaryQuery_REP/RowData/FData tree.
-void XStore::BatchQueryStreamed(XStore_Proto::BatchQuery_REQ *proto_from_client, bool sort_time, size_t chunk_size_bytes,
+void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, bool sort_time, size_t chunk_size_bytes,
                                  const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk) {
     std::string db_name = proto_from_client->dbname();
     ToUpperCase(db_name.begin(), db_name.end());
@@ -471,7 +301,7 @@ void XStore::BatchQueryStreamed(XStore_Proto::BatchQuery_REQ *proto_from_client,
         // FileRangeLockGuard above is already a READ lock, so concurrent
         // readers inside it are fine too). Unlike a plain std::execution::
         // par_unseq fan-out, the pool's worker count is fixed and SHARED
-        // across every concurrent BatchQueryStreamed call server-wide --
+        // across every concurrent BatchQuery call server-wide --
         // see XStoreTunables::BATCH_QUERY_PREAD_POOL_SIZE_CAP for why that
         // matters (a real device-concurrency cap, not just a per-call
         // limit two concurrent queries could still multiply past). The
@@ -480,7 +310,7 @@ void XStore::BatchQueryStreamed(XStore_Proto::BatchQuery_REQ *proto_from_client,
         // identical to the serial path's regardless of which pool worker
         // happened to finish first. Wave size (not the full indices.size())
         // bounds the scratch buffer to a fixed footprint independent of
-        // batch size, preserving BatchQueryStreamed's server-memory-bounded
+        // batch size, preserving BatchQuery's server-memory-bounded
         // design -- decoupled from the pool's worker count on purpose, see
         // XStore_Tunables.h.
         // NOT thread_local: this buffer is written by XStorePreadPool's

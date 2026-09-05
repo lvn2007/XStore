@@ -460,7 +460,7 @@ TEST_F(XStorePerfTest, BatchQueryThroughput) {
 
     XStore_Proto::BatchQuery_REP query_rep;
     auto start = std::chrono::steady_clock::now();
-    store.BatchQuery(&query_req, &query_rep);
+    query_rep = BatchQuery(store, &query_req);
     double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
     ASSERT_EQ(query_rep.queryresponse_size(), (int)n) << "batch query lost/gained rows";
@@ -513,7 +513,7 @@ TEST_F(XStorePerfTest, RangeQueryThroughput) {
 
     XStore_Proto::RangeQuery_REP query_rep;
     auto start = std::chrono::steady_clock::now();
-    store.RangeQuery(BASE_TS, BASE_TS + n - 1, "PERFDB", &query_rep);
+    query_rep = RangeQuery(store, BASE_TS, BASE_TS + n - 1, "PERFDB");
     double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
     ASSERT_EQ(query_rep.queryresponse_size(), (int)n) << "range query lost/gained rows";

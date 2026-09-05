@@ -297,15 +297,15 @@ void ZmqServer::WorkerRoutine(std::string server_addr) {
 
             // BATCH QUERY
             case XStore_Proto::Request::kBatchquery: {
-                // No Arena/BatchQuery_REP here -- BatchQueryStreamed shares
-                // RangeQueryStreamed's zero-object-tree encoder (same wire
+                // No Arena/BatchQuery_REP here -- BatchQuery shares
+                // RangeQuery's zero-object-tree encoder (same wire
                 // shape, see XStore_WireEncode.h), for the same reason: no
                 // UnaryQuery_REP/RowData/FData tree ever gets built, so
                 // there's nothing for Reset() to leave stranded as a
                 // permanent per-worker RSS floor. Multi-frame reply,
                 // reassembled transparently by the client library.
                 auto *req = client_request->mutable_batchquery();
-                my_store.BatchQueryStreamed(req, /*sort_time=*/true, XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                my_store.BatchQuery(req, /*sort_time=*/true, XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
                     [&](std::string &&chunk, bool is_last) {
                         socket.send(zmq::buffer(chunk),
                                     is_last ? zmq::send_flags::dontwait
@@ -339,7 +339,7 @@ void ZmqServer::WorkerRoutine(std::string server_addr) {
 
             // RANGE QUERY
             case XStore_Proto::Request::kRangequery: {
-                // No Arena/RangeQuery_REP here -- RangeQueryStreamed never
+                // No Arena/RangeQuery_REP here -- RangeQuery never
                 // builds a UnaryQuery_REP/RowData/FData tree for this
                 // response (see its declaration comment in XStore.h and the
                 // wire-encode helpers in XStore_RangeOps.cpp), which is the
@@ -351,7 +351,7 @@ void ZmqServer::WorkerRoutine(std::string server_addr) {
                 // library into one logical RangeQuery_REP -- transparent to
                 // whatever called RangeQuery at the API level.
                 const auto &req = client_request->rangequery();
-                my_store.RangeQueryStreamed(req.starttime(), req.endtime(), req.dbname(),
+                my_store.RangeQuery(req.starttime(), req.endtime(), req.dbname(),
                     XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
                     [&](std::string &&chunk, bool is_last) {
                         socket.send(zmq::buffer(chunk),

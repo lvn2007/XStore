@@ -77,7 +77,7 @@ int main(int argc, char *argv[]) {
     // claim, so its own worker count sizes off whatever's left over on
     // this box instead of independently sizing off hardware_concurrency()
     // too -- must run before ZmqServer starts (any query that reaches
-    // BatchQueryStreamed starts the pread pool's threads on first use, and
+    // BatchQuery starts the pread pool's threads on first use, and
     // that count is fixed from then on). See XStore_Tunables.h's
     // BATCH_QUERY_PREAD_POOL_SIZE_CAP comment for the regression this
     // fixes.

@@ -43,6 +43,34 @@ inline XStore_Proto::RowData MakeRow(const std::vector<XStore_Proto::FData> &fie
     return row;
 }
 
+// XStore's production class only exposes RangeQuery/BatchQuery
+// (see XStore.h) -- the network server is the only production caller, and it
+// needs their bounded-memory chunked contract, not a materialized REP. Tests
+// want the old synchronous shape (call it, get a filled-in REP back) so they
+// can assert on it directly without each writing its own accumulate+parse
+// boilerplate -- these two centralize that, matching RangeQuery/BatchQuery's
+// former behavior exactly (same checks, same wire shape, just reassembled
+// from the streamed implementation instead of a separate one).
+inline XStore_Proto::RangeQuery_REP RangeQuery(XStore &store, unsigned long long int start_epoch_t,
+                                                unsigned long long int end_epoch_t, std::string_view db_name) {
+    std::string buffer;
+    store.RangeQuery(start_epoch_t, end_epoch_t, db_name, XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+        [&](std::string &&chunk, bool /*is_last*/) { buffer += chunk; });
+    XStore_Proto::RangeQuery_REP rep;
+    rep.ParseFromString(buffer);
+    return rep;
+}
+
+inline XStore_Proto::BatchQuery_REP BatchQuery(XStore &store, XStore_Proto::BatchQuery_REQ *proto_from_client,
+                                                bool sort_time = true) {
+    std::string buffer;
+    store.BatchQuery(proto_from_client, sort_time, XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+        [&](std::string &&chunk, bool /*is_last*/) { buffer += chunk; });
+    XStore_Proto::BatchQuery_REP rep;
+    rep.ParseFromString(buffer);
+    return rep;
+}
+
 inline std::atomic<int> &DirCounter() {
     static std::atomic<int> counter{0};
     return counter;
