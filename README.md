@@ -55,6 +55,89 @@ Builds XStore via CMake and stages a runnable server directory at `../XStore_Ser
 * [C++ client](client_src/Cpp/) — see [example](client_src/Cpp/example/XStore_Client_Example.cpp)
 * [Python client](client_src/Python/XStore.py)
 
+### XStore Viewer
+Desktop GUI (Tauri + Rust) for browsing an XStore server: database and per-year file browser with row-slot fit badges, range queries rendered as plots or windowed raw tables, server-side min/max/sum/avg aggregates over any range, click-to-inspect raw rows, and a live server CPU/memory/network/disk monitor. Source: [tools/xstore-viewer/](tools/xstore-viewer/)
+
+![XStore Viewer](tools/xstore-viewer/XStore_Viewer.png)
+
+#### Building the XStore Viewer
+
+Open the dropdown for your platform and run the numbered steps in order; every command is copy-pasteable. No Node.js/npm needed (the frontend is static HTML/JS/CSS), and ZeroMQ is compiled from source at build time (only a C compiler is required, no library install).
+
+<details><summary>Linux (Ubuntu/Debian)</summary>
+
+```bash
+# 1. Rust toolchain
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -sSf | sh
+source "$HOME/.cargo/env"
+
+# 2. Tauri CLI (v2)
+curl --proto '=https' --tlsv1.2 -sSf https://tauri.app/installer | sh
+
+# 3. System dependencies: WebKit/GTK (Tauri), C toolchain, protoc
+sudo apt update
+sudo apt install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libgtk-3-dev protobuf-compiler
+```
+
+Other distros: install the webkit2gtk 4.1 + GTK 3 development packages and `protoc` via your package manager, plus steps 1–2.
+
+</details>
+
+<details><summary>macOS</summary>
+
+```bash
+# 1. Xcode command line tools (a dialog appears; click "Install")
+xcode-select --install
+
+# 2. Homebrew (skip if already installed; on Apple Silicon, run
+#    eval "$(/opt/homebrew/bin/brew shellenv)" afterwards)
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# 3. Rust toolchain
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -sSf | sh
+
+# 4. protoc
+brew install protobuf
+
+# 5. Tauri CLI (v2)
+curl --proto '=https' --tlsv1.2 -sSf https://tauri.app/installer | sh
+```
+
+</details>
+
+<details><summary>Windows</summary>
+
+Run in PowerShell:
+
+```powershell
+# 1. Rust toolchain
+winget install -e --id Rustlang.Rustup
+
+# 2. MSVC C++ toolchain (Visual Studio Build Tools)
+winget install -e --id Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+
+# 3. protoc (or download protoc-*-win64.zip from the
+#    protobuf releases and add its bin/ to PATH)
+winget install -e --id Google.Protobuf
+
+# 4. Tauri CLI (v2)
+powershell -c "irm https://tauri.app/installer | iex"
+```
+
+The WebView2 runtime (required by Tauri) is preinstalled on current Windows 10/11. Open a **new** terminal afterwards so `PATH` picks up the new tools.
+
+</details>
+
+**Build & run** (all platforms, from `tools/xstore-viewer/`):
+
+```bash
+cargo tauri build    # release build
+```
+
+* `cargo tauri build` produces only the raw executable (`target/release/xstore-viewer`, or `xstore-viewer.exe` on Windows) because `bundle.active` is `false` in [`tauri.conf.json`](tools/xstore-viewer/tauri.conf.json); set it to `true` to generate installers. `cargo run --release` works too.
+* The viewer connects to a **running XStore server** (UI default: `127.0.0.1:9497`, the same port the deployment scripts open).
+* [`examples/`](tools/xstore-viewer/examples/) holds standalone CLI probes against a live server, e.g. `cargo run --example probe`. The host/port are hardcoded; edit them to match your server.
+
 # Benchmarks
 Performance evaluated across latency, throughput, aggregate/analytical queries, and backtesting workloads.
 
