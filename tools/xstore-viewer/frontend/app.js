@@ -1,6 +1,28 @@
 "use strict";
 
-const invoke = window.__TAURI__.core.invoke;
+// Transport: desktop runs in the Tauri webview (IPC bridge); browser mode is
+// served by the built-in web server — same-origin HTTP for commands and a
+// WebSocket for the stats feed. Each browser gets its own ZMQ session on the
+// server (sid), so concurrent users never share a connection; the stats feed
+// is shared server-side and fanned out to every connection.
+const IN_TAURI = typeof window.__TAURI__ !== "undefined";
+const SID = IN_TAURI
+  ? ""
+  : (window.crypto && crypto.randomUUID
+      ? crypto.randomUUID()
+      : "s" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10));
+const invoke = IN_TAURI
+  ? window.__TAURI__.core.invoke
+  : async (cmd, args) => {
+      const r = await fetch("/api/" + cmd + "?sid=" + SID, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(args || {}),
+      });
+      const text = await r.text();
+      if (!r.ok) throw text || ("HTTP " + r.status);
+      return JSON.parse(text);
+    };
 const $ = (id) => document.getElementById(id);
 
 const COLORS = [
@@ -20,7 +42,7 @@ const TABLE_CAP = 2_000_000;
 
 // bump on every frontend change — shown in the status line so a stale
 // binary (old bundled frontend) is visible at a glance
-const BUILD = "ui18";
+const BUILD = "ui19";
 
 const S = {
   connected: false,
@@ -1445,7 +1467,19 @@ setInterval(() => {
   }
 }, 5000);
 
-window.__TAURI__.event.listen("sys-stats", (e) => onStats(e.payload));
+// Host resource stats (SysStats PUB, ~2s cadence): Tauri event in desktop
+// mode, WebSocket in browser mode (auto-reconnects on drop).
+function connectStatsFeed() {
+  if (IN_TAURI) {
+    window.__TAURI__.event.listen("sys-stats", (e) => onStats(e.payload));
+    return;
+  }
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(proto + "://" + location.host + "/api/stats");
+  ws.onmessage = (m) => onStats(JSON.parse(m.data));
+  ws.onclose = () => setTimeout(connectStatsFeed, 2000);
+}
+connectStatsFeed();
 
 // db sizes/file lists only come from InfoQuery (the 2s PUB feed is
 // cpu/memory/network/disk only), so refresh them in the background — this

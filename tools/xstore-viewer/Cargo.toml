@@ -15,6 +15,11 @@ tauri-plugin-opener = "2"
 serde_json = "1"
 zmq = "0.9"
 prost = "0.13"
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["compression-gzip", "fs"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "fs"] }
+dashmap = "6"
 
 [profile.release]
 strip = true

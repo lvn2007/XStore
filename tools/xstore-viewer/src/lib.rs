@@ -2,6 +2,7 @@ pub mod client;
 pub mod convert;
 pub mod proto;
 pub mod stats;
+pub mod web;
 
 use std::sync::mpsc;
 
@@ -13,33 +14,16 @@ pub struct AppState {
     stats_tx: mpsc::Sender<stats::StatsCmd>,
 }
 
-fn do_roundtrip(
-    tx: &mpsc::Sender<client::ClientMsg>,
-    msg: client::ClientMsg,
-    rrx: mpsc::Receiver<client::ClientRes>,
-) -> Result<serde_json::Value, String> {
-    tx.send(msg).map_err(|e| e.to_string())?;
-    match rrx.recv() {
-        Ok(Ok(v)) => Ok(v),
-        Ok(Err(e)) => Err(e),
-        Err(e) => Err(format!("client worker gone: {}", e)),
-    }
-}
-
 // Tauri runs sync commands on the main (UI) thread; a blocking ZMQ wait there
-// freezes the whole window (the "hang"). Every command is async and defers
-// the blocking roundtrip to the async runtime's blocking pool.
+// freezes the whole window (the "hang"). Every command is async: the blocking
+// roundtrip happens on the client worker thread, this task only suspends on
+// the oneshot reply.
 async fn run_cmd(
     state: State<'_, AppState>,
-    build: impl FnOnce(mpsc::Sender<client::ClientRes>) -> client::ClientMsg + Send + 'static,
+    build: impl FnOnce(client::Reply) -> client::ClientMsg + Send + 'static,
 ) -> Result<serde_json::Value, String> {
     let tx = state.tx.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let (rtx, rrx) = mpsc::channel();
-        do_roundtrip(&tx, build(rtx), rrx)
-    })
-    .await
-    .map_err(|e| format!("command task failed: {}", e))?
+    client::call(&tx, build).await
 }
 
 #[tauri::command]
@@ -214,4 +198,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .run(tauri::generate_context!())
         .expect("failed to run XStore Viewer");
     Ok(())
+}
+
+// Web-server mode: the same frontend over HTTP + WebSocket, one ZMQ client
+// session per browser (see web.rs). Own runtime — the Tauri desktop path
+// above keeps its.
+pub fn run_web(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    Ok(rt.block_on(web::run(port))?)
 }

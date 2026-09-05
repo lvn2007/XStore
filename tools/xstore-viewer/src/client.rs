@@ -1,20 +1,24 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use prost::Message as _;
+use tokio::sync::oneshot;
 
 use crate::convert;
 use crate::proto::xstore as pb;
 
 pub type ClientRes = Result<serde_json::Value, String>;
+// One-shot reply handle: the caller awaits the receiver (async, no thread
+// parked in a blocking wait) — the worker thread owns the blocking ZMQ I/O.
+pub type Reply = oneshot::Sender<ClientRes>;
 
 pub enum ClientMsg {
     Connect {
         host: String,
         port: u16,
-        reply: Sender<ClientRes>,
+        reply: Reply,
     },
     Info {
-        reply: Sender<ClientRes>,
+        reply: Reply,
     },
     RangeQuery {
         db: String,
@@ -22,12 +26,12 @@ pub enum ClientMsg {
         end: u64,
         // table mode: skip the plot-mode downsampling, return every row
         raw: bool,
-        reply: Sender<ClientRes>,
+        reply: Reply,
     },
     UnaryQuery {
         db: String,
         ts: u64,
-        reply: Sender<ClientRes>,
+        reply: Reply,
     },
     Aggregate {
         op: String,
@@ -35,10 +39,10 @@ pub enum ClientMsg {
         start: u64,
         end: u64,
         col: i32,
-        reply: Sender<ClientRes>,
+        reply: Reply,
     },
     Ping {
-        reply: Sender<ClientRes>,
+        reply: Reply,
     },
     Shutdown,
 }
@@ -55,6 +59,18 @@ pub fn spawn() -> Sender<ClientMsg> {
         .spawn(move || worker(rx))
         .expect("failed to spawn XStore client worker thread");
     tx
+}
+
+// Send one command to the worker and await its reply. The blocking ZMQ
+// roundtrip happens on the worker thread; the caller only suspends on the
+// oneshot, so an async runtime never parks a runtime thread (no
+// spawn_blocking hop, no blocking-pool saturation under load).
+pub async fn call(tx: &Sender<ClientMsg>, build: impl FnOnce(Reply) -> ClientMsg) -> ClientRes {
+    let (reply, rx) = oneshot::channel();
+    if tx.send(build(reply)).is_err() {
+        return Err("client worker gone".into());
+    }
+    rx.await.unwrap_or_else(|_| Err("client worker gone".into()))
 }
 
 fn new_req(ctx: &zmq::Context, host: &str, port: u16) -> Result<zmq::Socket, String> {
@@ -85,36 +101,23 @@ fn warm_up(sock: &zmq::Socket) -> Result<(), String> {
 // Business command needs a live socket: reuse the current one, or — if it was
 // dropped after a timeout — transparently reconnect to the last connected
 // host. Without this, a dropped socket left every subsequent query failing
-// with "not connected" until the user clicked Connect again.
+// with "not connected" until the user clicked Connect again. The caller
+// sends the error reply itself: a oneshot sender is consumed on send.
 fn ensure_sock<'a>(
     sock: &'a mut Option<zmq::Socket>,
     conn: &Option<(String, u16)>,
     ctx: &zmq::Context,
-    reply: &Sender<ClientRes>,
-) -> Option<&'a zmq::Socket> {
+) -> Result<&'a zmq::Socket, String> {
     if sock.is_some() {
-        return sock.as_ref();
+        return Ok(sock.as_ref().unwrap());
     }
     let Some((host, port)) = conn else {
-        let _ = reply.send(Err("not connected".into()));
-        return None;
+        return Err("not connected".into());
     };
-    match new_req(ctx, host, *port) {
-        Ok(s) => match warm_up(&s) {
-            Ok(()) => {
-                *sock = Some(s);
-                sock.as_ref()
-            }
-            Err(e) => {
-                let _ = reply.send(Err(e));
-                None
-            }
-        },
-        Err(e) => {
-            let _ = reply.send(Err(e));
-            None
-        }
-    }
+    let s = new_req(ctx, host, *port)?;
+    warm_up(&s)?;
+    *sock = Some(s);
+    Ok(sock.as_ref().unwrap())
 }
 
 fn rpc_bytes(sock: &zmq::Socket, req: &pb::Request) -> Result<Vec<u8>, String> {
@@ -154,7 +157,7 @@ fn fetch_info(sock: &zmq::Socket) -> Result<serde_json::Value, String> {
     Ok(convert::sys_info_to_json(&rep))
 }
 
-fn send_info(sock: &zmq::Socket, reply: &Sender<ClientRes>) {
+fn send_info(sock: &zmq::Socket, reply: Reply) {
     let _ = reply.send(fetch_info(sock));
 }
 
@@ -201,12 +204,14 @@ fn worker(rx: Receiver<ClientMsg>) {
                     }
                 }
             }
-            ClientMsg::Info { reply } => match ensure_sock(&mut sock, &conn, &ctx, &reply) {
-                Some(s) => send_info(s, &reply),
-                None => {}
+            ClientMsg::Info { reply } => match ensure_sock(&mut sock, &conn, &ctx) {
+                Ok(s) => send_info(s, reply),
+                Err(e) => {
+                    let _ = reply.send(Err(e));
+                }
             },
-            ClientMsg::RangeQuery { db, start, end, raw, reply } => match ensure_sock(&mut sock, &conn, &ctx, &reply) {
-                Some(s) => {
+            ClientMsg::RangeQuery { db, start, end, raw, reply } => match ensure_sock(&mut sock, &conn, &ctx) {
+                Ok(s) => {
                     let req = pb::Request {
                         payload: Some(pb::request::Payload::Rangequery(pb::RangeQueryReq {
                             r_type: 0,
@@ -237,10 +242,12 @@ fn worker(rx: Receiver<ClientMsg>) {
                         }
                     }
                 }
-                None => {}
+                Err(e) => {
+                    let _ = reply.send(Err(e));
+                }
             },
-            ClientMsg::UnaryQuery { db, ts, reply } => match ensure_sock(&mut sock, &conn, &ctx, &reply) {
-                Some(s) => {
+            ClientMsg::UnaryQuery { db, ts, reply } => match ensure_sock(&mut sock, &conn, &ctx) {
+                Ok(s) => {
                     let req = pb::Request {
                         payload: Some(pb::request::Payload::Unaryquery(pb::UnaryQueryReq {
                             r_type: 0,
@@ -263,10 +270,12 @@ fn worker(rx: Receiver<ClientMsg>) {
                         }
                     }
                 }
-                None => {}
+                Err(e) => {
+                    let _ = reply.send(Err(e));
+                }
             },
-            ClientMsg::Aggregate { op, db, start, end, col, reply } => match ensure_sock(&mut sock, &conn, &ctx, &reply) {
-                Some(s) => {
+            ClientMsg::Aggregate { op, db, start, end, col, reply } => match ensure_sock(&mut sock, &conn, &ctx) {
+                Ok(s) => {
                     let payload = match op.as_str() {
                         "min" => pb::request::Payload::Min(pb::MinReq {
                             r_type: 0,
@@ -328,10 +337,12 @@ fn worker(rx: Receiver<ClientMsg>) {
                         }
                     }
                 }
-                None => {}
+                Err(e) => {
+                    let _ = reply.send(Err(e));
+                }
             },
-            ClientMsg::Ping { reply } => match ensure_sock(&mut sock, &conn, &ctx, &reply) {
-                Some(s) => {
+            ClientMsg::Ping { reply } => match ensure_sock(&mut sock, &conn, &ctx) {
+                Ok(s) => {
                     let ping = pb::Request {
                         payload: Some(pb::request::Payload::Ping(pb::ReqCmd { r_type: 0 })),
                     };
@@ -346,7 +357,9 @@ fn worker(rx: Receiver<ClientMsg>) {
                         }
                     }
                 }
-                None => {}
+                Err(e) => {
+                    let _ = reply.send(Err(e));
+                }
             },
             ClientMsg::Shutdown => break,
         }

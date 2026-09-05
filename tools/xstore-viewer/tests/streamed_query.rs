@@ -16,7 +16,7 @@ use std::process::{Child, Command};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use xstore_viewer::client::{spawn, ClientMsg, ClientRes};
+use xstore_viewer::client::{spawn, ClientMsg, ClientRes, Reply};
 
 const HOST: &str = "127.0.0.1";
 const PORT: u16 = 19998;
@@ -28,7 +28,45 @@ const END: u64 = START + 5_097_600 - 1;
 const EXPECTED_ROWS: u64 = 5_097_600;
 
 type Tx = mpsc::Sender<ClientMsg>;
-type Rx = mpsc::Receiver<ClientRes>;
+
+// The reply path is a tokio oneshot; the test stays std-threaded, so a
+// throwaway current-thread runtime bridges the oneshot await with a timeout.
+fn call_with_timeout(
+    tx: &Tx,
+    d: Duration,
+    build: impl FnOnce(Reply) -> ClientMsg,
+) -> Option<ClientRes> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .ok()?;
+    rt.block_on(async move {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        tx.send(build(reply)).ok()?;
+        // rx itself resolves to a Result (Err if the worker dies); None on
+        // timeout, on worker death, or on send failure
+        match tokio::time::timeout(d, rx).await {
+            Ok(Ok(res)) => Some(res),
+            Ok(Err(_)) | Err(_) => None,
+        }
+    })
+}
+
+fn connect(tx: &Tx) -> Option<ClientRes> {
+    call_with_timeout(tx, Duration::from_secs(3), |reply| {
+        ClientMsg::Connect { host: HOST.into(), port: PORT, reply }
+    })
+}
+
+fn range_query(tx: &Tx, db: &str, start: u64, end: u64, raw: bool, d: Duration) -> Option<ClientRes> {
+    call_with_timeout(tx, d, move |reply| {
+        ClientMsg::RangeQuery { db: db.into(), start, end, raw, reply }
+    })
+}
+
+fn ping(tx: &Tx) -> Option<ClientRes> {
+    call_with_timeout(tx, Duration::from_secs(10), |reply| ClientMsg::Ping { reply })
+}
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
@@ -43,27 +81,6 @@ fn find_server() -> Option<PathBuf> {
     }
     let p = repo_root().join("build/XStore");
     p.is_file().then_some(p)
-}
-
-fn connect(tx: &Tx) -> Rx {
-    let (rtx, rrx) = mpsc::channel();
-    tx.send(ClientMsg::Connect { host: HOST.into(), port: PORT, reply: rtx })
-        .expect("client worker gone");
-    rrx
-}
-
-fn range_query(tx: &Tx, db: &str, start: u64, end: u64, raw: bool) -> Rx {
-    let (rtx, rrx) = mpsc::channel();
-    tx.send(ClientMsg::RangeQuery { db: db.into(), start, end, raw, reply: rtx })
-        .expect("client worker gone");
-    rrx
-}
-
-fn ping(tx: &Tx) -> Rx {
-    let (rtx, rrx) = mpsc::channel();
-    tx.send(ClientMsg::Ping { reply: rtx })
-        .expect("client worker gone");
-    rrx
 }
 
 #[test]
@@ -83,21 +100,17 @@ fn range_query_reassembles_streamed_frames() {
     // wait for the server to accept the ZMQ handshake
     let mut connected = false;
     for _ in 0..50 {
-        let rrx = connect(&tx);
-        match rrx.recv_timeout(Duration::from_secs(3)) {
-            Ok(Ok(v)) => {
-                assert!(v["dbs"].as_array().map(|a| a.len()).unwrap_or(0) >= 1);
-                connected = true;
-                break;
-            }
-            _ => std::thread::sleep(Duration::from_millis(200)),
+        if let Some(Ok(v)) = connect(&tx) {
+            assert!(v["dbs"].as_array().map(|a| a.len()).unwrap_or(0) >= 1);
+            connected = true;
+            break;
         }
+        std::thread::sleep(Duration::from_millis(200));
     }
     assert!(connected, "XStore server did not come up on port {PORT}");
 
     // 1) the multi-frame query: response ~=66MB -> 2+ streamed frames
-    let v = range_query(&tx, "TESTDB", START, END, false)
-        .recv_timeout(Duration::from_secs(120))
+    let v = range_query(&tx, "TESTDB", START, END, false, Duration::from_secs(120))
         .expect("range query timed out")
         .expect("range query failed");
     assert_eq!(v["rowsReturned"].as_u64(), Some(EXPECTED_ROWS));
@@ -108,14 +121,12 @@ fn range_query_reassembles_streamed_frames() {
     // 2) same socket must still be in sync: this reply must be the ping's
     //    reply, not a leftover streamed frame of the query above
     let v = ping(&tx)
-        .recv_timeout(Duration::from_secs(10))
         .expect("ping timed out")
         .expect("ping failed");
     assert!(v["ms"].as_f64().unwrap() >= 0.0);
 
     // 3) a second small range query on the same socket
-    let v = range_query(&tx, "TESTDB", START, START + 999, false)
-        .recv_timeout(Duration::from_secs(30))
+    let v = range_query(&tx, "TESTDB", START, START + 999, false, Duration::from_secs(30))
         .expect("small range query timed out")
         .expect("small range query failed");
     assert_eq!(v["rowsReturned"].as_u64(), Some(1_000));

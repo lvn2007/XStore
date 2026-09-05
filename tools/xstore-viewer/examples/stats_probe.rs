@@ -1,6 +1,12 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
+use xstore_viewer::client::{call, spawn, ClientMsg, ClientRes, Reply};
+
+fn rpc(rt: &tokio::runtime::Runtime, tx: &mpsc::Sender<ClientMsg>, build: impl FnOnce(Reply) -> ClientMsg) -> ClientRes {
+    rt.block_on(call(tx, build))
+}
+
 fn main() {
     // args: [host] [port] [db] [start] [end] — defaults match the local bench box
     let a: Vec<String> = std::env::args().collect();
@@ -10,16 +16,19 @@ fn main() {
     let start: u64 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(1577838490);
     let end: u64 = a.get(5).and_then(|s| s.parse().ok()).unwrap_or(1577838510);
 
-    let tx = xstore_viewer::client::spawn();
+    let tx = spawn();
+    // replies are tokio oneshots — a single-thread runtime bridges the awaits
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
 
     // 1) main RPC port: connect (ping+info) — verify rowLength + per-file sizes
-    let (rtx, rrx) = mpsc::channel();
-    tx.send(xstore_viewer::client::ClientMsg::Connect {
+    match rpc(&rt, &tx, |reply| ClientMsg::Connect {
         host: host.clone(),
         port,
-        reply: rtx,
-    }).unwrap();
-    match rrx.recv().unwrap() {
+        reply,
+    }) {
         Ok(info) => {
             println!("server={} workers={}", info["serverAddr"], info["threadCount"]);
             for d in info["dbs"].as_array().unwrap() {
@@ -39,15 +48,14 @@ fn main() {
     }
 
     // 2) range query — verify rowSizes sizing stats
-    let (rtx, rrx) = mpsc::channel();
-    tx.send(xstore_viewer::client::ClientMsg::RangeQuery {
+    let q = rpc(&rt, &tx, |reply| ClientMsg::RangeQuery {
         db,
         start,
         end,
         raw: false,
-        reply: rtx,
-    }).unwrap();
-    let q = rrx.recv().unwrap().unwrap();
+        reply,
+    })
+    .unwrap();
     println!("rowsReturned={} rowSizes={}", q["rowsReturned"], q["rowSizes"]);
 
     // 3) stats PUB port (main-1): subscribe, collect 3 snapshots, unsubscribe
@@ -55,7 +63,8 @@ fn main() {
     stx.send(xstore_viewer::stats::StatsCmd::Subscribe {
         host,
         port: port - 1,
-    }).unwrap();
+    })
+    .unwrap();
     let t0 = std::time::Instant::now();
     let mut got = 0;
     while let Ok(v) = srx.recv_timeout(Duration::from_secs(10)) {
@@ -74,6 +83,6 @@ fn main() {
     stx.send(xstore_viewer::stats::StatsCmd::Unsubscribe).unwrap();
     println!("stats: {} snapshots in {:.1}s — {}", got, t0.elapsed().as_secs_f64(), if got >= 3 { "PASS" } else { "FAIL" });
 
-    tx.send(xstore_viewer::client::ClientMsg::Shutdown).unwrap();
+    tx.send(ClientMsg::Shutdown).unwrap();
     std::process::exit(if got >= 3 { 0 } else { 1 });
 }
