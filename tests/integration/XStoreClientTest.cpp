@@ -36,3 +36,42 @@ TEST(XStoreClientWarmupTest, WarmupDefaultsToOnMatchingPreviousBehavior) {
         XStoreClient(K_UNREACHABLE_ADDR, K_UNREACHABLE_PORT, K_SHORT_TIMEOUT_MS),
         std::runtime_error);
 }
+
+// SuggestRowLength is a pure static function (no socket needed) -- mirrors
+// XBench's XStore_Adapter::ComputeRowLength. Default Alignment=8,
+// PROTOBUF_FIELD_OVERHEAD=3 per field (see XStore_Client.h for why).
+TEST(XStoreClientSuggestRowLengthTest, ExactFitNeedsNoPadding) {
+    // 2 bool fields: (sizeof(bool)=1 + 3) * 2 = 8 -- already 8-aligned.
+    XStore_Proto::RowData row;
+    *row.add_fielddata() = xstore_fdata::Bool(true);
+    *row.add_fielddata() = xstore_fdata::Bool(false);
+    EXPECT_EQ(XStoreClient::SuggestRowLength(row), 8u);
+}
+
+TEST(XStoreClientSuggestRowLengthTest, PartialPaddingRoundsUpToAlignment) {
+    // 1 bool field: sizeof(bool)=1 + 3 = 4 -- rounds up to 8.
+    XStore_Proto::RowData row;
+    *row.add_fielddata() = xstore_fdata::Bool(true);
+    EXPECT_EQ(XStoreClient::SuggestRowLength(row), 8u);
+}
+
+TEST(XStoreClientSuggestRowLengthTest, EmptyRowSuggestsZeroLength) {
+    XStore_Proto::RowData row;
+    EXPECT_EQ(XStoreClient::SuggestRowLength(row), 0u);
+}
+
+TEST(XStoreClientSuggestRowLengthTest, SingleFieldRowAlignsUp) {
+    // 1 int32 field: sizeof(int32_t)=4 + 3 = 7 -- rounds up to 8.
+    XStore_Proto::RowData row;
+    *row.add_fielddata() = xstore_fdata::Int32(42);
+    EXPECT_EQ(XStoreClient::SuggestRowLength(row), 8u);
+}
+
+TEST(XStoreClientSuggestRowLengthTest, CustomAlignmentIsRespected) {
+    // 3 int32 fields: (4 + 3) * 3 = 21 -- rounds up to 32 under Alignment=16.
+    XStore_Proto::RowData row;
+    *row.add_fielddata() = xstore_fdata::Int32(1);
+    *row.add_fielddata() = xstore_fdata::Int32(2);
+    *row.add_fielddata() = xstore_fdata::Int32(3);
+    EXPECT_EQ((XStoreClient::SuggestRowLength<16>(row)), 32u);
+}

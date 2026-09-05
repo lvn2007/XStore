@@ -249,6 +249,69 @@ class XStoreClient {
       return SendRecv<XStore_Proto::RemoveDBFiles_REP>(to_server);
   }
 
+  // ==== Row sizing ====
+  // Suggests a CreateDB rowLength/slot size from one sample RowData, so
+  // callers don't have to hand-guess a value (and over/under-provision --
+  // see DbInfo::row_length above). Mirrors XBench's
+  // XStore_Adapter::ComputeRowLength, ported here so client_src callers get
+  // it natively instead of reimplementing it.
+  //
+  // PROTOBUF_FIELD_OVERHEAD=3 is exact for every fixed-width/varint oneof
+  // case (double/int32/int64/etc.): 1B outer repeated-field tag (RowData's
+  // fieldData=1) + 1B outer length-varint (assumes the encoded FData stays
+  // under 128B, true for any scalar or short string) + 1B inner oneof tag.
+  // It undercounts stringData/bytesData by 1B: those are themselves
+  // length-delimited, so they need a second inner length-varint the
+  // fixed/varint cases don't. That 1B/string-field gap already existed in
+  // the XBench original this mirrors -- flagged here, not silently fixed,
+  // since this helper is meant to match, not diverge from, the logic it's
+  // porting.
+  template <uint32_t Alignment = 8>
+  [[nodiscard]] static uint32_t SuggestRowLength(const XStore_Proto::RowData &sample_row) {
+      static_assert((Alignment & (Alignment - 1)) == 0, "Alignment must be power of 2");
+      constexpr uint32_t PROTOBUF_FIELD_OVERHEAD = 3;
+
+      uint32_t row_size = 0;
+      for (int i = 0; i < sample_row.fielddata_size(); i++) {
+          const XStore_Proto::FData &field = sample_row.fielddata(i);
+          switch (field.oneOfData_case()) {
+              case XStore_Proto::FData::kStringData:
+                  row_size += static_cast<uint32_t>(field.stringdata().size()) + PROTOBUF_FIELD_OVERHEAD;
+                  break;
+              case XStore_Proto::FData::kBytesData:
+                  row_size += static_cast<uint32_t>(field.bytesdata().size()) + PROTOBUF_FIELD_OVERHEAD;
+                  break;
+              case XStore_Proto::FData::kDoubleData:
+                  row_size += sizeof(double) + PROTOBUF_FIELD_OVERHEAD;
+                  break;
+              case XStore_Proto::FData::kFloatData:
+                  row_size += sizeof(float) + PROTOBUF_FIELD_OVERHEAD;
+                  break;
+              case XStore_Proto::FData::kBoolData:
+                  row_size += sizeof(bool) + PROTOBUF_FIELD_OVERHEAD;
+                  break;
+              case XStore_Proto::FData::kInt32Data:
+              case XStore_Proto::FData::kUint32Data:
+              case XStore_Proto::FData::kSint32Data:
+              case XStore_Proto::FData::kFixed32Data:
+              case XStore_Proto::FData::kSfixed32Data:
+                  row_size += sizeof(int32_t) + PROTOBUF_FIELD_OVERHEAD;
+                  break;
+              case XStore_Proto::FData::kInt64Data:
+              case XStore_Proto::FData::kUint64Data:
+              case XStore_Proto::FData::kSint64Data:
+              case XStore_Proto::FData::kFixed64Data:
+              case XStore_Proto::FData::kSfixed64Data:
+                  row_size += sizeof(int64_t) + PROTOBUF_FIELD_OVERHEAD;
+                  break;
+              case XStore_Proto::FData::ONEOFDATA_NOT_SET:
+                  break;
+          }
+      }
+
+      return (row_size + Alignment - 1) & ~(Alignment - 1);
+  }
+
   // ==== Unary ====
   // durability_mode defaults to ASYNC -- no fsync wait, lowest latency. A
   // row is only in-memory/queued until the writer thread flushes it, so a
