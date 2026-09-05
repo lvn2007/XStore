@@ -42,7 +42,7 @@ const TABLE_CAP = 2_000_000;
 
 // bump on every frontend change — shown in the status line so a stale
 // binary (old bundled frontend) is visible at a glance
-const BUILD = "ui19";
+const BUILD = "ui21";
 
 const S = {
   connected: false,
@@ -55,6 +55,8 @@ const S = {
   rowsReturned: 0,
   rowsPlotted: 0,
   selCols: new Set(),
+  colsOpen: true,     // column picker expanded (persisted across re-renders)
+  colsCount: 0,       // column checkboxes currently in the DOM (skip rebuilds)
   view: null,        // {t0, t1} in DB time units
   liveTimer: null,
   // rows per range_query request. The server streams its replies (no size
@@ -238,14 +240,15 @@ async function connect() {
 }
 
 // slot vs measured row size, shown in the db list + db bar (not the stats
-// bar): XStore pads every serialized row out to its power-of-two slot, so
-// the proper slot for the data is the next power of two over the largest
-// row (rowSizes.formulaMax — a 55B row needs 64B, 2^5=32 is too small).
-// slot == proper: green tick; slot > proper: red X; slot < proper: red X
-// (data would not even fit). The (N% waste) is ALWAYS shown once rows are
-// known: (slot - largest row) / slot — the pad paid on every row, even when
-// the slot fits (a 55B row in a 64B slot is 14% waste). Unknown until a
-// query for that DB has sampled real rows.
+// bar): XStore pads every serialized row out to its slot, which is aligned
+// to a power of two (8B = word size), so the proper slot for the data is the
+// largest row rounded UP to that alignment (rowSizes.formulaMax — a 55B row
+// needs 56B, not the next power of two 64B). slot == proper: green tick;
+// slot > proper: red X; slot < proper: red X (data would not even fit). The
+// (N% waste) is ALWAYS shown once rows are known: (slot - largest row) /
+// slot — the pad paid on every row, even when the slot fits (a 55B row in a
+// 64B slot is 14% waste). Unknown until a query for that DB has sampled real
+// rows.
 function slotBadge(d) {
   if (!d || !d.rowLength) return "";
   const rs = S.dbRowSizes[d.name];
@@ -649,21 +652,52 @@ function syncRangeInputs() {
   updateDtHints();
 }
 
+// Column picker: a header (collapse toggle + All/None) over a scrollable list
+// of per-column checkboxes. The list scrolls instead of growing without bound
+// when a DB has many columns, and the whole picker can be collapsed to free
+// vertical space.
 function renderColsBar() {
   const el = $("cols-bar");
-  el.innerHTML = "";
   const n = S.data ? Object.keys(S.data.cols).length : 0;
-  if (!n) return;
+  if (!n) { el.innerHTML = ""; S.colsCount = 0; return; }
+  const list = el.querySelector(".cols-list");
+  if (!list || S.colsCount !== n) {
+    buildColsBar(el, n);
+    S.colsCount = n;
+  } else {
+    // Col set unchanged (a checkbox / All / None / collapse toggle): refresh
+    // in place so the picker's scroll position and open/collapsed state
+    // survive. Rebuilding the DOM here would reset both.
+    const boxes = list.querySelectorAll("input[type=checkbox]");
+    for (let i = 0; i < boxes.length; i++) boxes[i].checked = S.selCols.has(i);
+    list.hidden = !S.colsOpen;
+    const t = el.querySelector(".cols-toggle");
+    if (t) t.textContent = `${S.colsOpen ? "▾" : "▸"} columns (${n})`;
+  }
+}
+
+function buildColsBar(el, n) {
+  el.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "cols-head";
+  const toggle = document.createElement("button");
+  toggle.className = "cols-toggle";
+  toggle.title = "show / hide the column picker";
+  toggle.textContent = `${S.colsOpen ? "▾" : "▸"} columns (${n})`;
+  toggle.onclick = () => { S.colsOpen = !S.colsOpen; renderColsBar(); };
+  head.appendChild(toggle);
   const mk = (label, fn) => {
     const b = document.createElement("button");
     b.textContent = label;
-    b.style.fontSize = "11px";
-    b.style.padding = "3px 8px";
     b.onclick = () => { fn(); renderColsBar(); renderStats(); requestRender(); };
-    el.appendChild(b);
+    head.appendChild(b);
   };
   mk("All", () => { for (let i = 0; i < n; i++) S.selCols.add(i); });
   mk("None", () => S.selCols.clear());
+  el.appendChild(head);
+  const list = document.createElement("div");
+  list.className = "cols-list";
+  list.hidden = !S.colsOpen;
   for (let i = 0; i < n; i++) {
     const label = document.createElement("label");
     const cb = document.createElement("input");
@@ -672,8 +706,9 @@ function renderColsBar() {
     cb.onchange = () => {
       if (cb.checked) S.selCols.add(i);
       else S.selCols.delete(i);
-      requestRender();
+      renderColsBar();   // in-place refresh (keeps scroll + open state)
       renderStats();
+      requestRender();
     };
     const sw = document.createElement("span");
     sw.className = "swatch";
@@ -681,8 +716,9 @@ function renderColsBar() {
     label.appendChild(cb);
     label.appendChild(sw);
     label.appendChild(document.createTextNode(`col ${i}`));
-    el.appendChild(label);
+    list.appendChild(label);
   }
+  el.appendChild(list);
 }
 
 // ---------- live tail ----------
@@ -1520,6 +1556,22 @@ function stopInfoRefresh() {
 statusMsg(`build ${BUILD} — connect to start`);
 
 $("btn-connect").onclick = connect;
+// Desktop has the About page as a native-menu window; web mode has no menu,
+// so this button is the only entry point there — an in-page modal in the
+// same tab (no new tab, no redirect).
+$("btn-about").onclick = () => {
+  if (IN_TAURI) invoke("open_about", {});
+  else openAbout();
+};
+function openAbout() { $("about-modal").hidden = false; }
+function closeAbout() { $("about-modal").hidden = true; }
+$("about-close").onclick = closeAbout;
+$("about-modal").addEventListener("click", (e) => {
+  if (e.target === $("about-modal")) closeAbout();
+});
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeAbout();
+});
 $("btn-query").onclick = query;
 $("btn-clear").onclick = clearData;
 $("live").onchange = toggleLive;

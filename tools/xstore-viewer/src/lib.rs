@@ -107,6 +107,14 @@ fn show_about(app: &tauri::AppHandle) {
 
 // Native menu bar. The default menu names the app after the Cargo package
 // ("xstore-viewer"), so the app menu is built explicitly.
+// The web-mode UI has no native menu, so the header "About" button opens the
+// same page: a centered Tauri window here, or a new browser tab in web mode
+// (the frontend picks the path — see app.js).
+#[tauri::command]
+fn open_about(app: tauri::AppHandle) {
+    show_about(&app);
+}
+
 fn build_menu(app: &tauri::App) -> tauri::Result<()> {
     let handle = app.handle();
     let about = MenuItem::with_id(handle, "about", "About XStore Viewer", true, None::<&str>)?;
@@ -193,7 +201,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             range_query,
             unary_query,
             aggregate,
-            ping
+            ping,
+            open_about
         ])
         .run(tauri::generate_context!())
         .expect("failed to run XStore Viewer");

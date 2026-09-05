@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>About XStore Viewer</title>
+  <link rel="icon" type="image/png" href="favicon.png" />
   <link rel="stylesheet" href="style.css" />
   <style>
     body { display: flex; }
@@ -39,14 +40,17 @@
   </div>
   <script>
     // The Tauri webview swallows external link clicks (plain <a href> /
-    // target=_blank do nothing), so route through the opener plugin:
-    // the repo opens in the system browser, the email in the mail client.
-    document.querySelectorAll("a[data-url]").forEach((a) => {
-      a.addEventListener("click", (e) => {
-        e.preventDefault();
-        window.__TAURI__.opener.openUrl(a.dataset.url);
+    // target=_blank do nothing), so route them through the opener plugin:
+    // the repo opens in the system browser, the email in the mail client. In a
+    // plain browser (web-server mode) the links work natively — no handler.
+    if (typeof window.__TAURI__ !== "undefined") {
+      document.querySelectorAll("a[data-url]").forEach((a) => {
+        a.addEventListener("click", (e) => {
+          e.preventDefault();
+          window.__TAURI__.opener.openUrl(a.dataset.url);
+        });
       });
-    });
+    }
   </script>
 </body>
 </html>

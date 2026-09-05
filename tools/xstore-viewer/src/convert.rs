@@ -97,11 +97,15 @@ pub fn range_query_to_json(rep: &pb::RangeQueryRep, raw: bool) -> Value {
     // chunk costs ~10k encodes, not 4M.
     const SIZE_SAMPLE_CAP: usize = 10_000;
     let stride = (idx.len() / SIZE_SAMPLE_CAP).max(1);
-    // slot_max = the PROPER slot for the data: XStore row slots are
-    // power-of-two sized, so the correct size is the next power of two over
-    // the serialized row size (a 55B row needs 64B — 2^5=32 is too small,
-    // 2^6=64 fits). The frontend warns only when the configured slot
-    // exceeds this.
+    // slot_max = the PROPER slot for the data. XStore row slots are aligned
+    // to a power of two (8B = 64-bit word size), so the correct size rounds
+    // the serialized row up to that alignment: (row + (align - 1)) & ~(align
+    // - 1). A 55B row needs 56B — NOT the next power of two (64B): power-of-
+    // two rounding over-allocates (a 1408B row would "need" 2048B, 46%
+    // wasted). Max padding waste is (align - 1) = 7B per row. The frontend
+    // warns only when the configured slot exceeds this (or is too small to
+    // fit the row).
+    const SLOT_ALIGN: u64 = 8;
     let mut sz_min: Option<usize> = None;
     let mut sz_max: usize = 0;
     let mut sz_sum: u64 = 0;
@@ -118,7 +122,7 @@ pub fn range_query_to_json(rep: &pb::RangeQueryRep, raw: bool) -> Value {
         sz_min = Some(sz_min.map_or(sz as usize, |m| m.min(sz as usize)));
         sz_max = sz_max.max(sz as usize);
         sz_sum += sz;
-        slot_max = slot_max.max(sz.next_power_of_two() as usize);
+        slot_max = slot_max.max(((sz + SLOT_ALIGN - 1) & !(SLOT_ALIGN - 1)) as usize);
         sz_n += 1;
     }
     let row_sizes = if sz_n > 0 {

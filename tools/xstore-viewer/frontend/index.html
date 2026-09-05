@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>XStore Viewer</title>
+  <link rel="icon" type="image/png" href="favicon.png" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -14,6 +15,7 @@
     <button id="btn-connect" class="primary">Connect</button>
     <span id="conn-status" class="status off">offline</span>
     <span id="server-info" class="dim"></span>
+    <button id="btn-about" title="About XStore Viewer">About</button>
   </header>
 
   <div id="layout">
@@ -72,6 +74,26 @@
       <div id="table-wrap" hidden><table id="data-table"></table></div>
       <div id="stats"></div>
     </main>
+  </div>
+
+  <div id="about-modal" hidden>
+    <div id="about-card">
+      <button id="about-close" title="Close">&times;</button>
+      <h2>About XStore Viewer</h2>
+      <div class="dim">version 0.1.0</div>
+      <p>
+        Desktop viewer for XStore time-series databases. Connect to an XStore
+        server over ZMQ, browse databases and per-year files, query time ranges
+        as a plot or raw table, run min/max/sum/avg aggregates over any range
+        (computed server-side), and watch live server CPU/memory/network/disk
+        stats.
+      </p>
+      <p>
+        Lan Nguyen<br />
+        <a href="mailto:gbnservices9999@gmail.com">gbnservices9999@gmail.com</a>
+      </p>
+      <p><a href="https://gitlab.com/lvn2007/XStore">https://gitlab.com/lvn2007/XStore</a></p>
+    </div>
   </div>
 
   <script src="app.js"></script>

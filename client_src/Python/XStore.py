@@ -99,6 +99,43 @@ class XStoreClient:
         recvObj = self._sendRecv(envelope, XStore_Proto.CreateDB_REP)
         return recvObj.createDBStatus
 
+    @staticmethod
+    def suggestRowLength(sampleRow, alignment: int = 8) -> int:
+        """
+        Suggests a CreateDB rowLength/slot size from one sample RowData, so
+        callers don't have to hand-guess a value. Mirrors XStore_Client.h's
+        SuggestRowLength (C++) field-for-field.
+
+        PROTOBUF_FIELD_OVERHEAD=3 is exact for every fixed-width/varint oneof
+        case (double/int32/int64/etc.): 1B outer repeated-field tag
+        (RowData.fieldData=1) + 1B outer length-varint (assumes the encoded
+        FData stays under 128B, true for any scalar or short string) + 1B
+        inner oneof tag. It undercounts stringData/bytesData by 1B: those are
+        themselves length-delimited, so they need a second inner
+        length-varint the fixed/varint cases don't -- same known gap as the
+        C++ helper, flagged there and here, not silently fixed.
+        """
+        if alignment <= 0 or (alignment & (alignment - 1)) != 0:
+            raise ValueError("alignment must be a power of 2")
+        PROTOBUF_FIELD_OVERHEAD = 3
+
+        rowSize = 0
+        for field in sampleRow.fieldData:
+            case = field.WhichOneof("oneOfData")
+            if case == "stringData":
+                rowSize += len(field.stringData.encode("utf-8")) + PROTOBUF_FIELD_OVERHEAD
+            elif case == "bytesData":
+                rowSize += len(field.bytesData) + PROTOBUF_FIELD_OVERHEAD
+            elif case in ("doubleData", "int64Data", "uint64Data", "sint64Data", "fixed64Data", "sfixed64Data"):
+                rowSize += 8 + PROTOBUF_FIELD_OVERHEAD
+            elif case in ("floatData", "int32Data", "uint32Data", "sint32Data", "fixed32Data", "sfixed32Data"):
+                rowSize += 4 + PROTOBUF_FIELD_OVERHEAD
+            elif case == "boolData":
+                rowSize += 1 + PROTOBUF_FIELD_OVERHEAD
+            # case is None -> oneof unset, contributes 0 bytes
+
+        return (rowSize + alignment - 1) & ~(alignment - 1)
+
     def unaryInsert(self, insertUnixTime: int, data: [object, list], targetDBName: str,
                      durabilityMode=XStore_Proto.ASYNC) -> str:
         envelope = XStore_Proto.Request()
