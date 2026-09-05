@@ -56,13 +56,12 @@ Builds XStore via CMake and stages a runnable server directory at `../XStore_Ser
 * [Python client](client_src/Python/XStore.py)
 
 ### XStore Viewer
-Desktop GUI (Tauri + Rust) for browsing an XStore server: database and per-year file browser with row-slot fit badges, range queries rendered as plots or windowed raw tables, server-side min/max/sum/avg aggregates over any range, click-to-inspect raw rows, and a live server CPU/memory/network/disk monitor. Source: [tools/xstore-viewer/](tools/xstore-viewer/)
+A Tauri + Rust GUI for browsing an XStore server: database and per-year file browser with row-slot fit badges, range queries rendered as plots or windowed raw tables, server-side min/max/sum/avg aggregates over any range, click-to-inspect raw rows, and a live server CPU/memory/network/disk monitor. Runs as a native desktop app or as a self-hosted web server. Source: [tools/xstore-viewer/](tools/xstore-viewer/)
 
 ![XStore Viewer](tools/xstore-viewer/XStore_Viewer.png)
 
-#### Building the XStore Viewer
-
-Open the dropdown for your platform and run the numbered steps in order; every command is copy-pasteable. No Node.js/npm needed (the frontend is static HTML/JS/CSS), and ZeroMQ is compiled from source at build time (only a C compiler is required, no library install).
+#### 1. Install prerequisites
+No Node.js/npm needed (the frontend is static HTML/JS/CSS), and ZeroMQ is compiled from source at build time (only a C compiler is required, no library install). Open the dropdown for your platform and run the numbered steps in order; every command is copy-pasteable.
 
 <details><summary>Linux (Ubuntu/Debian)</summary>
 
@@ -128,15 +127,23 @@ The WebView2 runtime (required by Tauri) is preinstalled on current Windows 10/1
 
 </details>
 
-**Build & run** (all platforms, from `tools/xstore-viewer/`):
+#### 2. Build
+From `tools/xstore-viewer/`:
 
 ```bash
-cargo tauri build    # release build
+cargo build --release
 ```
 
-* `cargo tauri build` produces only the raw executable (`target/release/xstore-viewer`, or `xstore-viewer.exe` on Windows) because `bundle.active` is `false` in [`tauri.conf.json`](tools/xstore-viewer/tauri.conf.json); set it to `true` to generate installers. `cargo run --release` works too.
-* The viewer connects to a **running XStore server** (UI default: `127.0.0.1:9497`, the same port the deployment scripts open).
-* [`examples/`](tools/xstore-viewer/examples/) holds standalone CLI probes against a live server, e.g. `cargo run --example probe`. The host/port are hardcoded; edit them to match your server.
+Executable lands at `target/release/xstore-viewer` (`xstore-viewer.exe` on Windows). `cargo tauri build` works too — same binary, plus it produces an installer if `bundle.active` is `true` in [`tauri.conf.json`](tools/xstore-viewer/tauri.conf.json) (`false` by default).
+
+#### 3. Run
+
+| Mode | Command | Use it when |
+|---|---|---|
+| Desktop (default) | `./target/release/xstore-viewer` | you're on a machine with a display |
+| Web server | `./target/release/xstore-viewer web --port 8080`, then open `http://<host>:8080` | headless machine, or you'd rather use a browser |
+
+Either mode connects to a running XStore server, `127.0.0.1:9497` by default (the port the deployment scripts open). Run with `-h`/`--help` or `-V`/`--version` for CLI details.
 
 # Benchmarks
 Performance evaluated across latency, throughput, aggregate/analytical queries, and backtesting workloads.
