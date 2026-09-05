@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>About XStore Viewer</title>
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    body { display: flex; }
+    #about { margin: auto; text-align: center; padding: 28px 32px; }
+    #about .brand { font-size: 20px; margin-right: 0; }
+    #about p { margin: 14px 0; }
+    #about a:hover { text-decoration: underline; }
+    /* the app-wide user-select:none (style.css) made the email uncopyable;
+       this page is static info, so lift it on the contact links */
+    #about a {
+      color: #4fc3f7; text-decoration: none;
+      user-select: text; -webkit-user-select: text;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div id="about">
+    <div class="brand">XSTORE<span> VIEWER</span></div>
+    <div class="dim">version 0.1.0</div>
+    <p>
+      Desktop viewer for XStore time-series databases. Connect to an XStore
+      server over ZMQ, browse databases and per-year files, query time ranges
+      as a plot or raw table, run min/max/sum/avg aggregates over any range
+      (computed server-side), and watch live server CPU/memory/network/disk
+      stats.
+    </p>
+    <p>
+      Lan Nguyen<br />
+      <a href="mailto:gbnservices9999@gmail.com" data-url="mailto:gbnservices9999@gmail.com">gbnservices9999@gmail.com</a>
+    </p>
+    <p><a href="https://gitlab.com/lvn2007/XStore" data-url="https://gitlab.com/lvn2007/XStore">https://gitlab.com/lvn2007/XStore</a></p>
+  </div>
+  <script>
+    // The Tauri webview swallows external link clicks (plain <a href> /
+    // target=_blank do nothing), so route through the opener plugin:
+    // the repo opens in the system browser, the email in the mail client.
+    document.querySelectorAll("a[data-url]").forEach((a) => {
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        window.__TAURI__.opener.openUrl(a.dataset.url);
+      });
+    });
+  </script>
+</body>
+</html>

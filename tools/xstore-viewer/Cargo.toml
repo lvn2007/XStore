@@ -1,0 +1,21 @@
+[package]
+name = "xstore-viewer"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+description = "Desktop viewer for XStore time-series data (Tauri v2 prototype)"
+
+[build-dependencies]
+tauri-build = "2"
+prost-build = "0.13"
+
+[dependencies]
+tauri = { version = "2", features = ["image-png"] }
+tauri-plugin-opener = "2"
+serde_json = "1"
+zmq = "0.9"
+prost = "0.13"
+
+[profile.release]
+strip = true
+lto = true

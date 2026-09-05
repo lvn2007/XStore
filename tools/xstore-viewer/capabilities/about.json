@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "about",
+  "description": "About window: open external links (repo URL, mailto) via the opener plugin",
+  "windows": ["about"],
+  "permissions": ["opener:default"]
+}

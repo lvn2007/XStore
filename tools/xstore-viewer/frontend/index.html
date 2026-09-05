@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>XStore Viewer</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">XSTORE<span> VIEWER</span></div>
+    <input id="host" type="text" value="127.0.0.1" spellcheck="false" />
+    <input id="port" type="text" value="9497" spellcheck="false" />
+    <button id="btn-connect" class="primary">Connect</button>
+    <span id="conn-status" class="status off">offline</span>
+    <span id="server-info" class="dim"></span>
+  </header>
+
+  <div id="layout">
+    <aside>
+      <div class="panel-title">Databases</div>
+      <div id="db-list"><div class="dim" style="padding:4px 10px">not connected</div></div>
+      <div id="file-detail-wrap"></div>
+      <div class="panel-title">Inspector</div>
+      <div id="inspector" class="dim">click a point on the chart to inspect the raw row</div>
+      <div class="panel-title">Server Monitor</div>
+      <div id="monitor">
+        <div class="mrow"><span class="mkey">ping RTT <button id="btn-ping" class="mini">ping</button></span><b id="mon-rtt">—</b></div>
+        <div class="mrow"><span class="mkey">last query</span><b id="mon-query">—</b></div>
+        <div class="mrow"><span class="mkey">cpu</span><b id="mon-cpu">—</b><canvas id="spark-cpu" class="spark"></canvas></div>
+        <div class="mrow"><span class="mkey">memory</span><b id="mon-mem">—</b><canvas id="spark-mem" class="spark"></canvas></div>
+        <div class="mrow"><span class="mkey">network (rx/tx)</span><b id="mon-net">—</b><canvas id="spark-net" class="spark"></canvas></div>
+        <div class="mrow"><span class="mkey">disk i/o</span><b id="mon-disk">—</b><canvas id="spark-disk" class="spark"></canvas></div>
+        <details class="note">
+          <summary>field notes</summary>
+          <ul>
+            <li>rx/tx = bytes received/transmitted per second.</li>
+            <li>Per-file sizes: <b>actual</b> = allocated blocks (st_blocks × 512), <b>logical</b> = reported file size (st_size).</li>
+            <li>cpu/memory/network/disk come from the SysStats PUB feed (main port − 1), one snapshot every 2s — <b>Linux servers only</b> (reads /proc); a non-Linux server reads 0.</li>
+            <li>Disk iops = the block device under the data dir; if that device isn't in /proc/diskstats (container/virtiofs/overlay mount) the server reports the host-wide sum of all whole disks instead. 0 can also mean the IO was served from the RAM page cache.</li>
+            <li><b>·stale</b> = the feed's snapshot time stopped advancing (collector wedged) or the feed went silent.</li>
+          </ul>
+        </details>
+      </div>
+    </aside>
+
+    <main>
+      <div id="db-bar" class="dim">connect to a server to browse databases</div>
+      <div id="controls" hidden>
+        <label>From <input id="t0" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" /><span id="t0-dt" class="dim"></span></label>
+        <label>To <input id="t1" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" /><span id="t1-dt" class="dim"></span></label>
+        <button id="btn-query">Query</button>
+        <button id="btn-clear" title="drop the fetched data — keeps the connection and the range">CLEAR</button>
+        <button id="btn-scale" title="y-axis scale: auto log-scales when the value span is large">SCALE: AUTO</button>
+        <button id="btn-view" title="toggle between plot and table rendering">VIEW: PLOT</button>
+        <span id="table-slice-ctl" hidden>
+          <span class="dim">table</span>
+          <select id="table-slice" title="show all rows, or a sample of the first/last N rows of the query range">
+            <option value="all">ALL</option>
+            <option value="head">HEAD</option>
+            <option value="tail">TAIL</option>
+          </select>
+          <input id="table-n" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" value="100" title="N rows for HEAD/TAIL" />
+          <span id="table-slice-note" class="dim"></span>
+        </span>
+        <span class="quick" id="quick-ranges"></span>
+        <label class="live"><input type="checkbox" id="live" /> live tail</label>
+        <span id="query-status" class="dim"></span>
+      </div>
+      <div id="cols-bar"></div>
+      <canvas id="chart"></canvas>
+      <div id="table-wrap" hidden><table id="data-table"></table></div>
+      <div id="stats"></div>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

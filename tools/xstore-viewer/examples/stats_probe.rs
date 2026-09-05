@@ -1,0 +1,79 @@
+use std::sync::mpsc;
+use std::time::Duration;
+
+fn main() {
+    // args: [host] [port] [db] [start] [end] — defaults match the local bench box
+    let a: Vec<String> = std::env::args().collect();
+    let host = a.get(1).cloned().unwrap_or_else(|| "127.0.0.1".into());
+    let port: u16 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(5555);
+    let db = a.get(3).cloned().unwrap_or_else(|| "BENCHDB".into());
+    let start: u64 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(1577838490);
+    let end: u64 = a.get(5).and_then(|s| s.parse().ok()).unwrap_or(1577838510);
+
+    let tx = xstore_viewer::client::spawn();
+
+    // 1) main RPC port: connect (ping+info) — verify rowLength + per-file sizes
+    let (rtx, rrx) = mpsc::channel();
+    tx.send(xstore_viewer::client::ClientMsg::Connect {
+        host: host.clone(),
+        port,
+        reply: rtx,
+    }).unwrap();
+    match rrx.recv().unwrap() {
+        Ok(info) => {
+            println!("server={} workers={}", info["serverAddr"], info["threadCount"]);
+            for d in info["dbs"].as_array().unwrap() {
+                println!(
+                    "db={} res={} sizeBytes={} rowLength={}",
+                    d["name"], d["resolution"], d["sizeBytes"], d["rowLength"]
+                );
+                for f in d["files"].as_array().unwrap().iter().take(4) {
+                    println!(
+                        "  file={} actual={} apparent={}",
+                        f["name"], f["actualBytes"], f["apparentBytes"]
+                    );
+                }
+            }
+        }
+        Err(e) => panic!("connect failed: {}", e),
+    }
+
+    // 2) range query — verify rowSizes sizing stats
+    let (rtx, rrx) = mpsc::channel();
+    tx.send(xstore_viewer::client::ClientMsg::RangeQuery {
+        db,
+        start,
+        end,
+        raw: false,
+        reply: rtx,
+    }).unwrap();
+    let q = rrx.recv().unwrap().unwrap();
+    println!("rowsReturned={} rowSizes={}", q["rowsReturned"], q["rowSizes"]);
+
+    // 3) stats PUB port (main-1): subscribe, collect 3 snapshots, unsubscribe
+    let (stx, srx) = xstore_viewer::stats::spawn();
+    stx.send(xstore_viewer::stats::StatsCmd::Subscribe {
+        host,
+        port: port - 1,
+    }).unwrap();
+    let t0 = std::time::Instant::now();
+    let mut got = 0;
+    while let Ok(v) = srx.recv_timeout(Duration::from_secs(10)) {
+        println!(
+            "stats: cpu={} mem={}/{} net={}/{} diskRdWr={}/{} free/total={}/{} snapMs={}",
+            v["cpu"], v["memUsed"], v["memTotal"],
+            v["netRx"], v["netTx"],
+            v["diskRdIops"], v["diskWrIops"],
+            v["diskFree"], v["diskTotal"], v["snapMs"]
+        );
+        got += 1;
+        if got >= 3 {
+            break;
+        }
+    }
+    stx.send(xstore_viewer::stats::StatsCmd::Unsubscribe).unwrap();
+    println!("stats: {} snapshots in {:.1}s — {}", got, t0.elapsed().as_secs_f64(), if got >= 3 { "PASS" } else { "FAIL" });
+
+    tx.send(xstore_viewer::client::ClientMsg::Shutdown).unwrap();
+    std::process::exit(if got >= 3 { 0 } else { 1 });
+}
