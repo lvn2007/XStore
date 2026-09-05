@@ -41,7 +41,14 @@ class XStoreClient:
         # (payload_case()), so a bare/unwrapped request message never gets
         # routed anywhere -- it must always be the Request wrapper on the wire.
         self.socket.send(envelope.SerializeToString())
-        recvData = self.socket.recv()
+        # A streamed reply (BatchQuery/RangeQuery) arrives as several frames
+        # that are pieces of ONE logical message's bytes (protobuf doesn't
+        # care where a message's serialized bytes get split, only that
+        # they're concatenated back in order before parsing) -- reassembled
+        # here so this stays invisible to every caller above _sendRecv. Same
+        # approach as XStore_Client.h's SendRecv.
+        frames = self.socket.recv_multipart()
+        recvData = frames[0] if len(frames) == 1 else b"".join(frames)
         recvObj = repClass()
         recvObj.ParseFromString(recvData)
         return recvObj
