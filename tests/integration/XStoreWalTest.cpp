@@ -1,6 +1,7 @@
 // tests/integration/XStoreWalTest.cpp
 #include <gtest/gtest.h>
 #include "include/XStore/XStore.h"
+#include "include/XStore/XStore_Crc32c.h"
 #include "XStoreTestSupport.h"
 #include <chrono>
 #include <filesystem>
@@ -305,27 +306,7 @@ TEST_F(XStoreWalTest, ReplayRecoversUnappliedRecord) {
     append_pod(epoch_time);
     payload.append(row_bytes);
 
-    // Same CRC-32 as XStore_Wal.cpp's Crc32 -- duplicated here for the same
-    // reason ReplayWal's own copy is duplicated (small, single-caller).
-    auto crc32 = [](const std::string &data) {
-        static const std::array<uint32_t, 256> table = [] {
-            std::array<uint32_t, 256> t{};
-            for (uint32_t i = 0; i < 256; ++i) {
-                uint32_t c = i;
-                for (int k = 0; k < 8; ++k) {
-                    c = (c & 1u) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-                }
-                t[i] = c;
-            }
-            return t;
-        }();
-        uint32_t crc = 0xFFFFFFFFu;
-        for (unsigned char byte : data) {
-            crc = table[(crc ^ byte) & 0xFFu] ^ (crc >> 8);
-        }
-        return crc ^ 0xFFFFFFFFu;
-    };
-    uint32_t crc = crc32(payload);
+    uint32_t crc = Crc32c(payload.data(), payload.size());
 
     std::string record;
     auto append_pod_record = [&](auto value) {
@@ -490,25 +471,7 @@ TEST_F(XStoreWalTest, ReplayOfOrphanedRecordIsNotRetriedForever) {
     append_pod(epoch_time);
     payload.append(row_bytes);
 
-    auto crc32 = [](const std::string &data) {
-        static const std::array<uint32_t, 256> table = [] {
-            std::array<uint32_t, 256> t{};
-            for (uint32_t i = 0; i < 256; ++i) {
-                uint32_t c = i;
-                for (int k = 0; k < 8; ++k) {
-                    c = (c & 1u) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-                }
-                t[i] = c;
-            }
-            return t;
-        }();
-        uint32_t crc = 0xFFFFFFFFu;
-        for (unsigned char byte : data) {
-            crc = table[(crc ^ byte) & 0xFFu] ^ (crc >> 8);
-        }
-        return crc ^ 0xFFFFFFFFu;
-    };
-    uint32_t crc = crc32(payload);
+    uint32_t crc = Crc32c(payload.data(), payload.size());
 
     std::string record;
     auto append_pod_record = [&](auto value) {

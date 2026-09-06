@@ -1,5 +1,6 @@
 // src/XStore/XStore_Wal.cpp
 #include "include/XStore/XStore.h"
+#include "include/XStore/XStore_Crc32c.h"
 #include "include/DataStructs/FileRangeLock.h"
 #include "include/DataStructs/TimeStruct.h"
 #include <spdlog/fmt/fmt.h>
@@ -30,49 +31,6 @@ std::thread XStore::wal_stats_reporter_thread;
 
 namespace {
 
-// Standard reflected CRC-32 (IEEE 802.3 / zlib polynomial 0xEDB88320),
-// table built once via a function-local static (thread-safe init in
-// C++11+). Detects a torn/partial record from a crash mid-write during
-// ReplayWal -- not hardware-accelerated CRC32C (see docs/TODO.md Gap 1 for
-// that as a documented future optimization); correctness first here.
-//
-// Split into Init/Update/Final so a record spread across multiple
-// non-contiguous buffers (the pwritev path below never concatenates a
-// record's pieces into one buffer, specifically to avoid that copy) can
-// still be CRC'd correctly -- call Update once per piece, in wire order,
-// threading the running crc value through, same as any streaming CRC API.
-// Crc32() below is the single-buffer convenience wrapper kept for
-// ReplayWal's read-side validation, where the record already exists as one
-// contiguous mmap'd/read buffer and there's nothing to gain from
-// streaming it.
-uint32_t Crc32Init() { return 0xFFFFFFFFu; }
-
-uint32_t Crc32Update(uint32_t crc, const void *data, size_t len) {
-    static const std::array<uint32_t, 256> table = [] {
-        std::array<uint32_t, 256> t{};
-        for (uint32_t i = 0; i < 256; ++i) {
-            uint32_t c = i;
-            for (int k = 0; k < 8; ++k) {
-                c = (c & 1u) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-            }
-            t[i] = c;
-        }
-        return t;
-    }();
-
-    const auto *bytes = static_cast<const unsigned char *>(data);
-    for (size_t i = 0; i < len; ++i) {
-        crc = table[(crc ^ bytes[i]) & 0xFFu] ^ (crc >> 8);
-    }
-    return crc;
-}
-
-uint32_t Crc32Final(uint32_t crc) { return crc ^ 0xFFFFFFFFu; }
-
-uint32_t Crc32(const void *data, size_t len) {
-    return Crc32Final(Crc32Update(Crc32Init(), data, len));
-}
-
 template <typename T>
 void AppendPod(std::string &out, T value) {
     out.append(reinterpret_cast<const char *>(&value), sizeof(value));
@@ -85,10 +43,10 @@ void AppendPod(std::string &out, T value) {
 // make). One record = one write REQUEST, carrying 1..N rows (1 for
 // UnaryInsert; a future Batch/Range wiring reuses this same framing with
 // N rows instead of a separate format):
-//   [u32 recordLen][u32 crc32][u16 dbNameLen][u16 rowLength]
+//   [u32 recordLen][u32 crc32c][u16 dbNameLen][u16 rowLength]
 //   [i32 timeResolution][u32 rowCount][dbName bytes]
 //   repeated rowCount times: [u64 epochTime][row bytes]
-// recordLen counts every byte AFTER itself. crc32 covers every byte after
+// recordLen counts every byte AFTER itself. crc32c covers every byte after
 // itself (dbNameLen through the last row's bytes) so ReplayWal can
 // validate a record before trusting it. Written by WalWriterLoop's
 // pwritev path below directly (no dedicated SerializeWalRecord function --
@@ -120,7 +78,7 @@ bool XStore::ParseWalRecord(const char *data, size_t len, size_t &consumed, XSto
 
     const char *payload = data + 8;
     size_t payload_len = record_len - 4;
-    if (Crc32(payload, payload_len) != stored_crc) return false;
+    if (Crc32c(payload, payload_len) != stored_crc) return false;
 
     size_t off = 0;
     uint16_t db_name_len; std::memcpy(&db_name_len, payload + off, 2); off += 2;
@@ -533,7 +491,7 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
     // references to earlier elements (only vector's does, on reallocation)
     // -- iovecs above hold raw pointers into these, taken before all of
     // this batch's records have been processed, so that stability matters.
-    // Each entry: [recordLen(4)][crc32(4)][dbNameLen(2)][rowLength(2)]
+    // Each entry: [recordLen(4)][crc32c(4)][dbNameLen(2)][rowLength(2)]
     // [timeResolution(4)][rowCount(4)][dbName][first row's epochTime(8) if
     // any] -- everything on the wire except row bytes themselves (kept as
     // separate iovec entries pointing straight at WalRow::row_bytes) and
@@ -698,13 +656,13 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
 
                 // Header piece: everything on the wire except row bytes
                 // (kept as separate iovecs below, no copy) -- recordLen and
-                // crc32 are patched in after being computed further down,
+                // crc32c are patched in after being computed further down,
                 // but the iovec pointing at this buffer's final address can
                 // be pushed now since pwritev only reads it after the patch.
                 record_headers.emplace_back();
                 std::string &hdr = record_headers.back();
                 hdr.reserve(XStoreTunables::WAL_RECORD_HEADER_BYTES + record.db_name.size() + sizeof(uint64_t));
-                hdr.resize(8); // recordLen+crc32 placeholder, patched below
+                hdr.resize(8); // recordLen+crc32c placeholder, patched below
                 AppendPod<uint16_t>(hdr, static_cast<uint16_t>(record.db_name.size()));
                 AppendPod<uint16_t>(hdr, record.row_length);
                 AppendPod<int32_t>(hdr, static_cast<int32_t>(record.time_resolution));
@@ -717,12 +675,12 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
                 std::vector<struct iovec> &iov_list = iovecs_by_file[record_wal_path[i]];
                 iov_list.push_back({hdr.data(), hdr.size()});
 
-                uint32_t crc = Crc32Update(Crc32Init(), hdr.data() + 8, hdr.size() - 8);
+                uint32_t crc = Crc32cUpdate(Crc32cInit(), hdr.data() + 8, hdr.size() - 8);
                 size_t payload_size_after_header = hdr.size() - 8;
                 if (!record.rows.empty()) {
                     const std::string &row_bytes = record.rows[0].row_bytes;
                     iov_list.push_back({const_cast<char *>(row_bytes.data()), row_bytes.size()});
-                    crc = Crc32Update(crc, row_bytes.data(), row_bytes.size());
+                    crc = Crc32cUpdate(crc, row_bytes.data(), row_bytes.size());
                     payload_size_after_header += row_bytes.size();
                 }
                 for (size_t r = 1; r < record.rows.size(); ++r) {
@@ -731,14 +689,14 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
                     uint64_t epoch = record.rows[r].epoch_time;
                     std::memcpy(eb.data(), &epoch, sizeof(epoch));
                     iov_list.push_back({eb.data(), eb.size()});
-                    crc = Crc32Update(crc, eb.data(), eb.size());
+                    crc = Crc32cUpdate(crc, eb.data(), eb.size());
 
                     const std::string &row_bytes = record.rows[r].row_bytes;
                     iov_list.push_back({const_cast<char *>(row_bytes.data()), row_bytes.size()});
-                    crc = Crc32Update(crc, row_bytes.data(), row_bytes.size());
+                    crc = Crc32cUpdate(crc, row_bytes.data(), row_bytes.size());
                     payload_size_after_header += eb.size() + row_bytes.size();
                 }
-                crc = Crc32Final(crc);
+                crc = Crc32cFinal(crc);
 
                 uint32_t record_len = static_cast<uint32_t>(4 + payload_size_after_header);
                 std::memcpy(hdr.data(), &record_len, sizeof(record_len));

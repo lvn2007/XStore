@@ -178,7 +178,8 @@ aside {
 #file-detail tr.clickable:hover { background: #1c2530; }
 
 /* slot-fit badge in the db list + db bar: green tick = row fits its
-   8-byte-aligned slot exactly, red X = oversized (waste %) or too small */
+   8-byte-aligned slot exactly, red X = oversized (waste %) or unaligned
+   (rowLength not 8B-aligned — a padding note, never a data-fit problem) */
 .ok { color: #66d9a2; }
 .bad-x { color: #ef5350; }
 

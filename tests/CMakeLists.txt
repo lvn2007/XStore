@@ -7,10 +7,12 @@
 add_executable(xstore_tests
         integration/XStoreTest.cpp
         integration/XStoreWalTest.cpp
+        integration/XStoreCrc32cTest.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Internal.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Management.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_IO.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Wal.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Crc32c.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_UnaryOps.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_PreadPool.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_BatchOps.cpp
@@ -48,6 +50,7 @@ add_executable(xstore_network_tests
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Management.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_IO.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Wal.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Crc32c.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_UnaryOps.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_PreadPool.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_BatchOps.cpp
@@ -111,6 +114,7 @@ add_executable(xstore_perf_tests
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Management.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_IO.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Wal.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Crc32c.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_UnaryOps.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_PreadPool.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_BatchOps.cpp

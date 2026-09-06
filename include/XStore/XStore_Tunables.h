@@ -249,7 +249,7 @@ inline constexpr unsigned    WAL_GATHER_POLL_US          = 50;
 // give for free. If that decision is ever revisited, a multi-row WAL record
 // would need to either bound row count per record too, or bring back a
 // runtime size check before the live-commit fsync/fdatasync call.
-inline constexpr size_t WAL_RECORD_HEADER_BYTES = 20; // recordLen(4)+crc32(4)+dbNameLen(2)+rowLength(2)+timeResolution(4)+rowCount(4) -- see SerializeWalRecord
+inline constexpr size_t WAL_RECORD_HEADER_BYTES = 20; // recordLen(4)+crc32c(4)+dbNameLen(2)+rowLength(2)+timeResolution(4)+rowCount(4) -- see SerializeWalRecord
 inline constexpr size_t WAL_MAX_DB_NAME_BYTES   = 65535; // dbNameLen wire field is a u16
 inline constexpr size_t WAL_MAX_ROW_BYTES       = 65535; // rowLength wire field is a u16
 inline constexpr size_t WAL_MAX_RECORD_BYTES    =

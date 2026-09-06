@@ -90,6 +90,7 @@ add_executable(XStore src/main.cpp
         src/XStore/XStore_Management.cpp
         src/XStore/XStore_IO.cpp
         src/XStore/XStore_Wal.cpp
+        src/XStore/XStore_Crc32c.cpp
         src/XStore/XStore_SysStats.cpp
         include/XStore/XStore_SysStats.h
         src/XStore/XStore_UnaryOps.cpp
