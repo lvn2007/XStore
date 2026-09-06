@@ -37,7 +37,7 @@ enum TimeUnit {
 // Durability mode for a single write. Zero-value (ASYNC) is the intended
 // default -- lowest latency, no fsync wait; a client that omits this field
 // gets ASYNC, not a durability guarantee. Pass SYNC explicitly to opt into
-// durability. See docs/TODO.md Gap 1 for the full design rationale.
+// durability.
 //
 // Collapsed from four modes (ASYNC_ONLY/GROUP_COMMIT/SYNC_PER_COMMIT/BYPASS)
 // down to three: GROUP_COMMIT and SYNC_PER_COMMIT differed only in whether a
@@ -300,10 +300,15 @@ message DbStats {
   repeated FileStats files = 4;
   // Configured per-row slot size (bytes), from this DB's CFG (matches
   // ConfigStruct.rowLength). Every row is serialized RowData zero-padded to
-  // exactly this many bytes -- compare against a real row's actual
-  // serialized size (see docs/xstore-viewer-stats-handoff.md's sizing
-  // guide) to tell whether rowLength was sized too large (wasted padding
-  // per row) or too small (would reject/truncate real data).
+  // exactly this many bytes -- xstore-viewer's sizing diagnostic
+  // (tools/xstore-viewer/src/convert.rs's formulaMax + frontend/app.js's
+  // slotBadge()) compares this against real rows' actual serialized size to
+  // flag wasted padding, and separately whether rowLength itself is a
+  // multiple of the 8-byte slot-alignment unit. It can only ever detect
+  // those two things -- never "data doesn't fit": XStore rejects (never
+  // truncates) any insert whose serialized size exceeds rowLength, so an
+  // oversized row can never reach disk to be sampled by this diagnostic in
+  // the first place.
   sfixed32 rowLength = 5;
 }
 

@@ -244,11 +244,15 @@ async function connect() {
 // to a power of two (8B = word size), so the proper slot for the data is the
 // largest row rounded UP to that alignment (rowSizes.formulaMax — a 55B row
 // needs 56B, not the next power of two 64B). slot == proper: green tick;
-// slot > proper: red X; slot < proper: red X (data would not even fit). The
-// (N% waste) is ALWAYS shown once rows are known: (slot - largest row) /
-// slot — the pad paid on every row, even when the slot fits (a 55B row in a
-// 64B slot is 14% waste). Unknown until a query for that DB has sampled real
-// rows.
+// slot > proper: red X (unnecessary padding waste); slot < proper: red X
+// (rowLength isn't itself 8-byte-aligned, even though it's big enough — NOT
+// a "data doesn't fit" warning: rows sampled here already round-tripped
+// through the server, and XStore rejects, never truncates, any insert whose
+// serialized size exceeds rowLength, so real data too big to fit can never
+// appear in this sample). The (N% waste) is ALWAYS shown once rows are
+// known: (slot - largest row) / slot — the pad paid on every row, even when
+// the slot fits (a 55B row in a 64B slot is 14% waste). Unknown until a
+// query for that DB has sampled real rows.
 function slotBadge(d) {
   if (!d || !d.rowLength) return "";
   const rs = S.dbRowSizes[d.name];
@@ -256,7 +260,7 @@ function slotBadge(d) {
   const row = rs.min === rs.max ? `${rs.min}B` : `${rs.min}–${rs.max}B`;
   const proper = rs.formulaMax || 0;
   if (proper && d.rowLength < proper) {
-    return `slot ${d.rowLength}B · row ${row} <span class="bad-x">✗ too small</span>`;
+    return `slot ${d.rowLength}B · row ${row} <span class="bad-x">✗ unaligned</span>`;
   }
   const waste = Math.max(0, Math.round((1 - rs.max / d.rowLength) * 100));
   const mark = proper && d.rowLength === proper

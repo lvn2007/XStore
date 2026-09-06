@@ -102,9 +102,16 @@ pub fn range_query_to_json(rep: &pb::RangeQueryRep, raw: bool) -> Value {
     // the serialized row up to that alignment: (row + (align - 1)) & ~(align
     // - 1). A 55B row needs 56B — NOT the next power of two (64B): power-of-
     // two rounding over-allocates (a 1408B row would "need" 2048B, 46%
-    // wasted). Max padding waste is (align - 1) = 7B per row. The frontend
-    // warns only when the configured slot exceeds this (or is too small to
-    // fit the row).
+    // wasted). Max padding waste is (align - 1) = 7B per row.
+    //
+    // Note sz_max here is drawn from rows the server already returned, i.e.
+    // already-stored rows — XStore rejects (never truncates) any insert
+    // whose serialized size exceeds rowLength, so sz_max <= rowLength is a
+    // server-enforced invariant, not a heuristic. slot_max can only exceed
+    // rowLength when rowLength itself isn't a multiple of SLOT_ALIGN (still
+    // >= sz_max) — this is an alignment mismatch, never a "data doesn't fit"
+    // condition; genuinely-oversized rows never appear in this sample at
+    // all, since they were never accepted in the first place.
     const SLOT_ALIGN: u64 = 8;
     let mut sz_min: Option<usize> = None;
     let mut sz_max: usize = 0;
