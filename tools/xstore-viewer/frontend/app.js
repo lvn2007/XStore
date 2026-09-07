@@ -241,32 +241,25 @@ async function connect() {
 
 // slot vs measured row size, shown in the db list + db bar (not the stats
 // bar): XStore pads every serialized row out to its slot, which is aligned
-// to a power of two (8B = word size), so the proper slot for the data is the
-// largest row rounded UP to that alignment (rowSizes.formulaMax — a 55B row
-// needs 56B, not the next power of two 64B). slot == proper: green tick;
-// slot > proper: red X (unnecessary padding waste); slot < proper: red X
-// (rowLength isn't itself 8-byte-aligned, even though it's big enough — NOT
-// a "data doesn't fit" warning: rows sampled here already round-tripped
-// through the server, and XStore rejects, never truncates, any insert whose
-// serialized size exceeds rowLength, so real data too big to fit can never
-// appear in this sample). The (N% waste) is ALWAYS shown once rows are
-// known: (slot - largest row) / slot — the pad paid on every row, even when
-// the slot fits (a 55B row in a 64B slot is 14% waste). Unknown until a
-// query for that DB has sampled real rows.
+// to a power of two (8B = word size). The (N% free) is ALWAYS shown once rows
+// are known: (slot - largest row) / slot — the headroom left over the largest
+// row, present on every row (a 55B row in a 64B slot is 14% free). The
+// trailing mark is rowLength's OWN 8B alignment (✓ aligned / ✗ unaligned) — a
+// property of rowLength alone, so it shows even before any rows are sampled.
+// It's a padding note, NOT a "data doesn't fit" warning: XStore rejects, never
+// truncates, any insert whose serialized size exceeds rowLength, so real data
+// too big to fit can never appear in this sample.
 function slotBadge(d) {
   if (!d || !d.rowLength) return "";
   const rs = S.dbRowSizes[d.name];
-  if (!rs || !rs.sampled) return `slot ${d.rowLength}B`;
+  const aligned = d.rowLength % 8 === 0;
+  const mark = aligned
+    ? '<span class="ok" title="rowLength is 8-byte aligned">✓</span>'
+    : '<span class="bad-x" title="rowLength is not 8-byte aligned">✗</span>';
+  if (!rs || !rs.sampled) return `slot ${d.rowLength}B ${mark}`;
   const row = rs.min === rs.max ? `${rs.min}B` : `${rs.min}–${rs.max}B`;
-  const proper = rs.formulaMax || 0;
-  if (proper && d.rowLength < proper) {
-    return `slot ${d.rowLength}B · row ${row} <span class="bad-x">✗ unaligned</span>`;
-  }
-  const waste = Math.max(0, Math.round((1 - rs.max / d.rowLength) * 100));
-  const mark = proper && d.rowLength === proper
-    ? '<span class="ok">✓</span>'
-    : '<span class="bad-x">✗</span>';
-  return `slot ${d.rowLength}B · row ${row} ${mark} (${waste}% waste)`;
+  const free = Math.max(0, Math.round((1 - rs.max / d.rowLength) * 100));
+  return `slot ${d.rowLength}B · row ${row} (${free}% free) ${mark}`;
 }
 
 function renderDbs() {
@@ -276,7 +269,8 @@ function renderDbs() {
     const item = document.createElement("div");
     item.className = "db-item" + (S.db && S.db.name === d.name ? " sel" : "");
     // two deliberate lines: summary, then the slot badge on its own nowrap
-    // line — one run-on line wrapped mid-phrase ("slot 64B · row" / "55B ✓")
+    // line — one run-on line wrapped mid-phrase ("slot 64B · row" /
+    // "55B (14% free)")
     item.innerHTML =
       `<div class="name">${d.name}</div>` +
       `<div class="meta">${RES_NAME[d.resolution] ?? d.resolution} · ${fmtBytes(d.sizeBytes)} disk` +
@@ -408,7 +402,7 @@ function selectDb(name) {
   // default range: From = start of the first available year, To = From + 1
   // day (the first day of data). Prefill only; no auto-query — a full-span
   // chunked query over every year would saturate the server on connect.
-  // The year chips / ALL cover the wider ranges.
+  // The year chips cover the wider ranges.
   const files = S.db.files || [];
   const years = files.map((f) => parseInt(fileName(f), 10)).filter((y) => y > 1900 && y < 2200);
   if (years.length) {
@@ -419,13 +413,14 @@ function selectDb(name) {
   }
   updateDtHints();
   statusMsg(`${S.db.name} selected — default range: From + 1 day${years.length ? ` (first day of ${Math.min(...years)})` : ""} · query, or pick a year/range`);
-  probeRowSize(); // fills the badge's "row NNNB ✓" part — needs real rows
+  probeRowSize(); // fills the badge's "row NNNB (N% free)" part — needs real rows
 }
 
 // The slot badge's row-size half is only knowable from actual data
 // (serialized RowData length), so a freshly selected DB shows just
-// "slot NNNB" until rows have been sampled. Fire one small first-day query
-// on selection to measure it — WITHOUT touching the From/To inputs, the
+// "slot NNNB ✓/✗" (alignment, from rowLength alone) until rows have been
+// sampled. Fire one small first-day query on selection to measure it —
+// WITHOUT touching the From/To inputs, the
 // view or the chart: the user still decides when to run the real query.
 // A hole-only first day falls back to the first week; if that comes up
 // empty too, the 10s refresh keeps retrying until rows are sampled.
@@ -466,18 +461,6 @@ function renderQuickRanges() {
     };
     el.appendChild(b);
   }
-  const all = document.createElement("button");
-  all.textContent = "ALL";
-  all.onclick = () => {
-    if (!years.length) return;
-    const [t0] = yearBounds(Math.min(...years));
-    const [, t1] = yearBounds(Math.max(...years));
-    $("t0").value = t0;
-    $("t1").value = t1;
-    updateDtHints();
-    query();
-  };
-  el.appendChild(all);
 }
 
 // ---------- query ----------
@@ -594,7 +577,7 @@ async function query() {
     S.rowsPlotted = res.timestamps.length;
     S.rowSizes = res.rowSizes || null;
     if (res.rowSizes) {
-      // measured row size lands in the db list + db bar badge (slot fit)
+      // measured row size lands in the db list + db bar badge (slot vs row)
       S.dbRowSizes[S.db.name] = res.rowSizes;
       renderDbs();
       renderDbBar();
@@ -1556,8 +1539,6 @@ function stopInfoRefresh() {
 }
 
 // ---------- wire up ----------
-
-statusMsg(`build ${BUILD} — connect to start`);
 
 $("btn-connect").onclick = connect;
 // Desktop has the About page as a native-menu window; web mode has no menu,

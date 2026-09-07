@@ -7,7 +7,7 @@ pub mod web;
 use std::sync::mpsc;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, PhysicalPosition, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 pub struct AppState {
     tx: mpsc::Sender<client::ClientMsg>,
@@ -92,17 +92,41 @@ async fn aggregate(
 // page is a small window of its own, centered on every open.
 fn show_about(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("about") {
-        // already open: re-center instead of stacking a duplicate
-        let _ = w.center();
+        // already open: re-center over the parent instead of stacking a duplicate
+        center_about_over_main(app, &w);
         let _ = w.set_focus();
         return;
     }
-    let _ = WebviewWindowBuilder::new(app, "about", WebviewUrl::App("about.html".into()))
+    let w = WebviewWindowBuilder::new(app, "about", WebviewUrl::App("about.html".into()))
         .title("About XStore Viewer")
         .inner_size(460.0, 330.0)
         .resizable(false)
-        .center()
+        .center() // initial monitor-centered guess; corrected to parent-centered below
         .build();
+    if let Ok(w) = w {
+        center_about_over_main(app, &w);
+    }
+}
+
+// Tauri's .center() centers on the MONITOR, so with the main window parked off
+// screen-center the dialog lands in the wrong spot. Position it over the main
+// window's outer rect instead: (parent rect center) - (dialog half-size). The
+// dialog size is its logical inner_size (460x330) scaled to physical px.
+fn center_about_over_main(app: &tauri::AppHandle, about: &WebviewWindow) {
+    let Some(main) = app.get_webview_window("main") else {
+        let _ = about.center();
+        return;
+    };
+    let (Ok(mp), Ok(ms), Ok(sf)) = (main.outer_position(), main.outer_size(), main.scale_factor()) else {
+        let _ = about.center();
+        return;
+    };
+    const ABOUT: (f64, f64) = (460.0, 330.0);
+    let aw = (ABOUT.0 * sf).round() as i32;
+    let ah = (ABOUT.1 * sf).round() as i32;
+    let x = mp.x + ((ms.width as i32) - aw) / 2;
+    let y = mp.y + ((ms.height as i32) - ah) / 2;
+    let _ = about.set_position(PhysicalPosition::new(x, y));
 }
 
 // Native menu bar. The default menu names the app after the Cargo package

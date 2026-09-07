@@ -177,9 +177,11 @@ aside {
 #file-detail tr.clickable { cursor: pointer; }
 #file-detail tr.clickable:hover { background: #1c2530; }
 
-/* slot-fit badge in the db list + db bar: green tick = row fits its
-   8-byte-aligned slot exactly, red X = oversized (waste %) or unaligned
-   (rowLength not 8B-aligned — a padding note, never a data-fit problem) */
+/* slot badge in the db list + db bar: "slot NNNB · row NN-NB (N% free) ✓/✗"
+   — the free headroom is (slot - largest row) / slot, and the trailing mark
+   is rowLength's own 8B alignment (✓ aligned / ✗ unaligned; a padding note,
+   never a data-fit problem: XStore rejects, never truncates, any oversized
+   insert) */
 .ok { color: #66d9a2; }
 .bad-x { color: #ef5350; }
 
@@ -379,8 +381,10 @@ main {
   padding: 26px 30px;
   text-align: center;
 }
+#about-card .brand-row { display: flex; align-items: center; justify-content: center; gap: 8px; }
+#about-card .brand-logo { flex-shrink: 0; }
 #about-card h2 {
-  margin: 0 0 4px;
+  margin: 0;
   font-size: 15px;
   font-weight: 700;
   letter-spacing: 1px;

@@ -38,6 +38,7 @@
           <ul>
             <li>rx/tx = bytes received/transmitted per second.</li>
             <li>Per-file sizes: <b>actual</b> = allocated blocks (st_blocks × 512), <b>logical</b> = reported file size (st_size).</li>
+            <li>Slot badge (db list / db bar): <b>slot</b> = configured per-row size (rowLength); <b>row</b> = measured serialized row size; <b>N% free</b> = headroom over the largest row ((slot − row) / slot). <span class="ok">✓</span> = rowLength is 8-byte aligned, <span class="bad-x">✗</span> = not — a padding note, never a data-loss problem (XStore rejects, never truncates, an oversized insert).</li>
             <li>cpu/memory/network/disk come from the SysStats PUB feed (main port − 1), one snapshot every 2s — <b>Linux servers only</b> (reads /proc); a non-Linux server reads 0.</li>
             <li>Disk iops = the block device under the data dir; if that device isn't in /proc/diskstats (container/virtiofs/overlay mount) the server reports the host-wide sum of all whole disks instead. 0 can also mean the IO was served from the RAM page cache.</li>
             <li><b>·stale</b> = the feed's snapshot time stopped advancing (collector wedged) or the feed went silent.</li>
@@ -79,7 +80,10 @@
   <div id="about-modal" hidden>
     <div id="about-card">
       <button id="about-close" title="Close">&times;</button>
-      <h2>About XStore Viewer</h2>
+      <div class="brand-row">
+        <img class="brand-logo" src="favicon.png" alt="" width="28" height="28" />
+        <h2>About XStore Viewer</h2>
+      </div>
       <div class="dim">version 0.1.0</div>
       <p>
         Desktop viewer for XStore time-series databases. Connect to an XStore

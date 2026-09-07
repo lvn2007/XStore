@@ -9,6 +9,8 @@
   <style>
     body { display: flex; }
     #about { margin: auto; text-align: center; padding: 28px 32px; }
+    #about .brand-row { display: flex; align-items: center; justify-content: center; gap: 10px; }
+    #about .brand-logo { flex-shrink: 0; }
     #about .brand { font-size: 20px; margin-right: 0; }
     #about p { margin: 14px 0; }
     #about a:hover { text-decoration: underline; }
@@ -23,7 +25,10 @@
 </head>
 <body>
   <div id="about">
-    <div class="brand">XSTORE<span> VIEWER</span></div>
+    <div class="brand-row">
+      <img class="brand-logo" src="favicon.png" alt="" width="32" height="32" />
+      <div class="brand">XSTORE<span> VIEWER</span></div>
+    </div>
     <div class="dim">version 0.1.0</div>
     <p>
       Desktop viewer for XStore time-series databases. Connect to an XStore
