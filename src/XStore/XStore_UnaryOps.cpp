@@ -45,7 +45,7 @@ void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::R
     // Serialize first, then zero only the tail past the actual serialized
     // size -- no stale bytes from a previous larger row leak through.
     thread_local std::vector<char> row_buf;
-    if (row_buf.size() < cfg_struct.rowlength()) {
+    if (row_buf.size() < static_cast<size_t>(cfg_struct.rowlength())) {
         row_buf.resize(cfg_struct.rowlength());
     }
     data.SerializeToArray(row_buf.data(), cfg_struct.rowlength());
@@ -163,14 +163,15 @@ void XStore::UnaryQuery(unsigned long long int unix_time, std::string_view db_na
     // Thread-local scratch buffer, grown once and reused across calls --
     // same reasoning as UnaryInsert's RowBuf.
     thread_local std::vector<char> row_buf;
-    if (row_buf.size() < cfg_struct.rowlength()) {
+    if (row_buf.size() < static_cast<size_t>(cfg_struct.rowlength())) {
         row_buf.resize(cfg_struct.rowlength());
     }
 
     {
         //  Lock range prior to reading
         FileRangeLockGuard guard(target_file_path, offset, cfg_struct.rowlength(), FileRangeLock::LockType::READ);
-        pread(fd, row_buf.data(), cfg_struct.rowlength(), static_cast<off_t>(offset));
+        // (void) doesn't suppress __wur under _FORTIFY_SOURCE; short read is ignored on purpose.
+        [[maybe_unused]] ssize_t pread_ret = pread(fd, row_buf.data(), cfg_struct.rowlength(), static_cast<off_t>(offset));
     }
 
     return_data->mutable_data()->ParseFromArray(row_buf.data(), cfg_struct.rowlength());

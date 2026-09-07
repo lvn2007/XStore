@@ -119,7 +119,7 @@ class XStorePerfTest : public ::testing::Test {
 
 TEST_F(XStorePerfTest, UnaryInsertThroughput) {
     XStore store;
-    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
     const unsigned long long n = PerfOpCount(200'000);
 
     XStore_Proto::UnaryInsert_REP rep;
@@ -145,7 +145,7 @@ TEST_F(XStorePerfTest, UnaryInsertThroughput) {
 // batching payoff should actually show up.
 TEST_F(XStorePerfTest, UnaryInsertThroughput_Sync) {
     XStore store;
-    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
     const unsigned long long n = PerfOpCount(200'000);
 
     XStore_Proto::UnaryInsert_REP rep;
@@ -166,7 +166,7 @@ TEST_F(XStorePerfTest, UnaryInsertThroughput_Sync) {
 // should be compared against.
 TEST_F(XStorePerfTest, UnaryInsertThroughput_Async) {
     XStore store;
-    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
     const unsigned long long n = PerfOpCount(200'000);
 
     XStore_Proto::UnaryInsert_REP rep;
@@ -182,7 +182,7 @@ TEST_F(XStorePerfTest, UnaryInsertThroughput_Async) {
 
 TEST_F(XStorePerfTest, UnaryQueryThroughput) {
     XStore store;
-    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
     const unsigned long long n = PerfOpCount(200'000);
 
     for (unsigned long long i = 0; i < n; i++) {
@@ -241,7 +241,7 @@ std::vector<unsigned long long> UniqueRandomTimestamps(unsigned long long base_t
 
 TEST_F(XStorePerfTest, UnaryInsertRandomThroughput) {
     XStore store;
-    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
     const unsigned long long n = PerfOpCount(200'000);
 
     // 2020-01-01T00:00:00Z, spanning 5 years -- several distinct year files
@@ -291,7 +291,7 @@ TEST_F(XStorePerfTest, UnaryInsertRandomThroughput) {
 // that, since a lone thread never contends with itself.
 TEST_F(XStorePerfTest, UnaryInsertRandomConcurrentThroughput) {
     XStore setup;
-    setup.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    CreateTestDb(setup, "PERFDB", XStore_Proto::SECOND, 64);
 
     const unsigned long long n = PerfOpCount(200'000);
     constexpr unsigned int num_threads = 8;
@@ -423,7 +423,7 @@ TEST(YearPathCacheMicrobench, HashmapCacheBeatsRawRebuildUnderBoundedRandomYearA
 
 TEST_F(XStorePerfTest, BatchInsertThroughput) {
     XStore store;
-    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
     const unsigned long long n = PerfOpCount(200'000);
 
     XStore_Proto::BatchInsert_REQ req;
@@ -445,7 +445,7 @@ TEST_F(XStorePerfTest, BatchInsertThroughput) {
 
 TEST_F(XStorePerfTest, BatchQueryThroughput) {
     XStore store;
-    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
     const unsigned long long n = PerfOpCount(200'000);
 
     XStore_Proto::BatchInsert_REQ insert_req;
@@ -480,7 +480,7 @@ TEST_F(XStorePerfTest, BatchQueryThroughput) {
 
 TEST_F(XStorePerfTest, RangeInsertThroughput) {
     XStore store;
-    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
     const unsigned long long n = PerfOpCount(200'000);
 
     XStore_Proto::RangeInsert_REQ req;
@@ -502,7 +502,7 @@ TEST_F(XStorePerfTest, RangeInsertThroughput) {
 
 TEST_F(XStorePerfTest, RangeQueryThroughput) {
     XStore store;
-    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
     const unsigned long long n = PerfOpCount(200'000);
 
     XStore_Proto::RangeInsert_REQ insert_req;
@@ -536,7 +536,7 @@ TEST_F(XStorePerfTest, RangeQueryThroughput) {
 
 TEST_F(XStorePerfTest, MinAggregateThroughput) {
     XStore store;
-    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
     const unsigned long long n = PerfOpCount(1'000'000);
 
     XStore_Proto::BatchInsert_REQ insert_req;
@@ -561,7 +561,7 @@ TEST_F(XStorePerfTest, MinAggregateThroughput) {
 
 TEST_F(XStorePerfTest, MaxAggregateThroughput) {
     XStore store;
-    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
     const unsigned long long n = PerfOpCount(1'000'000);
 
     XStore_Proto::BatchInsert_REQ insert_req;
@@ -586,7 +586,7 @@ TEST_F(XStorePerfTest, MaxAggregateThroughput) {
 
 TEST_F(XStorePerfTest, SumAggregateThroughput) {
     XStore store;
-    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
     const unsigned long long n = PerfOpCount(1'000'000);
 
     XStore_Proto::BatchInsert_REQ insert_req;
@@ -610,7 +610,7 @@ TEST_F(XStorePerfTest, SumAggregateThroughput) {
 
 TEST_F(XStorePerfTest, AvgAggregateThroughput) {
     XStore store;
-    store.CreateDB("PERFDB", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
     const unsigned long long n = PerfOpCount(1'000'000);
 
     XStore_Proto::BatchInsert_REQ insert_req;

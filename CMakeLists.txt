@@ -1,9 +1,6 @@
 # Minimum CMake required
 cmake_minimum_required(VERSION 3.20)
 
-# Suppress warnings
-add_definitions(-w)
-
 # Project
 project(XStore)
 
@@ -12,6 +9,14 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 set(CMAKE_CXX_FLAGS_RELEASE "-O3")
+
+# Warnings. -Wall -Wextra for all targets in this tree; in practice the
+# generated protobuf translation units and the vendored third-party headers
+# don't trigger these warnings, so the build stays clean without masking real
+# warnings in the project's own code. If a future protobuf bump or dependency
+# starts warning, exempt it per-file via set_source_files_properties(...)
+# COMPILE_OPTIONS -w rather than re-adding a blanket -w.
+add_compile_options(-Wall -Wextra)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Sanitizers for debugging (uncomment when you need to find the bug)

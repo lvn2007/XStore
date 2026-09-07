@@ -5,8 +5,11 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <unistd.h>
 #include <vector>
+
+#include <gtest/gtest.h>
 
 #include "include/XStore/XStore.h"
 
@@ -41,6 +44,20 @@ inline XStore_Proto::RowData MakeRow(const std::vector<XStore_Proto::FData> &fie
         *row.add_fielddata() = f;
     }
     return row;
+}
+
+// Creates a DB and asserts it succeeded (fatal -- a failure here means the test's own premise is broken).
+inline void CreateTestDb(XStore &store, std::string_view name, XStore_Proto::TimeUnit resolution, short row_length) {
+    XStore_Proto::CreateDB_REP rep = store.CreateDB(name, resolution, row_length);
+    // Replicates UpperCaseInto's 'a'-'z' masking (XStore_Internal.h), not std::toupper.
+    std::string upper_name(name);
+    for (char &c : upper_name) {
+        if (c >= 'a' && c <= 'z') {
+            c = static_cast<char>(c & ~0x20);
+        }
+    }
+    ASSERT_EQ(rep.createdbstatus(), "[INFO] [CREATE DB] [DB: " + upper_name + "] - Created DB")
+        << rep.createdbstatus();
 }
 
 // XStore's production class only exposes RangeQuery/BatchQuery

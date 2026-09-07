@@ -151,7 +151,8 @@ void WriteRowGroupToFile(const std::string &target_file, int fd, long first_epoc
             std::memset(dest + valid[i].serialized_size, 0, row_length - valid[i].serialized_size);
         }
 
-        pwrite(fd, run_buf.data(), run_bytes, static_cast<off_t>(valid[run_start].offset));
+        // (void) doesn't suppress __wur under _FORTIFY_SOURCE; short write is ignored on purpose.
+        [[maybe_unused]] ssize_t pwrite_ret = pwrite(fd, run_buf.data(), run_bytes, static_cast<off_t>(valid[run_start].offset));
         run_start = run_end;
     }
 }

@@ -8,7 +8,8 @@ int main(int argc, char *argv[]) {
     spdlog::level::level_enum console_level = spdlog::level::warn;
     spdlog::level::level_enum file_level = spdlog::level::trace;
     unsigned short int flush_interval = 10;
-    Logger logger_instance = Logger(console_level, file_level, flush_interval);
+    // Ctor only sets process-global spdlog state; temporary avoids -Wunused-but-set-variable.
+    Logger(console_level, file_level, flush_interval);
 
     argparse::ArgumentParser program("XStore");
     program.add_description(

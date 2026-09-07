@@ -301,7 +301,8 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, bool so
                 unsigned long long int timestamp = proto_from_client->timestamp(idx);
                 unsigned long long int offset = (timestamp - this_ts.first_epoch) * row_len;
 
-                pread(fd, buffer_in.data(), row_len, static_cast<off_t>(offset));
+                // (void) doesn't suppress __wur under _FORTIFY_SOURCE; short read is ignored on purpose.
+                [[maybe_unused]] ssize_t pread_ret = pread(fd, buffer_in.data(), row_len, static_cast<off_t>(offset));
 
                 // A hole is always fully zeroed, so checking the first byte
                 // is enough (buffer_in is a fixed-width binary buffer, not a
@@ -363,7 +364,8 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, bool so
             XStorePreadPool::ParallelFor(wave_end - wave_start, [&](size_t local_i) {
                 const unsigned long long int timestamp = proto_from_client->timestamp(wave_base[local_i]);
                 const unsigned long long int offset = (timestamp - this_ts.first_epoch) * row_len;
-                pread(fd, wave_buf.data() + local_i * row_len, row_len, static_cast<off_t>(offset));
+                // Same __wur note as serial path above.
+                [[maybe_unused]] ssize_t pread_ret = pread(fd, wave_buf.data() + local_i * row_len, row_len, static_cast<off_t>(offset));
             });
 
             for (size_t local_i = 0; local_i < wave_end - wave_start; local_i++) {

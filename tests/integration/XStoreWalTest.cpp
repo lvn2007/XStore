@@ -13,6 +13,7 @@
 namespace {
 
 using xstore_test::ScratchDir;
+using xstore_test::CreateTestDb;
 
 // Reuses the same scratch-directory helper as tests/integration/XStoreTest.cpp
 // (pid + monotonic counter, not this-pointer-based -- gtest fixture objects
@@ -67,7 +68,7 @@ TEST_F(XStoreWalTest, SyncAppliesBeforeReturning) {
 // not wait for apply.
 TEST_F(XStoreWalTest, AsyncEventuallyApplies) {
     XStore store;
-    store.CreateDB("WALASYNC", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "WALASYNC", XStore_Proto::SECOND, 64);
 
     XStore_Proto::UnaryInsert_REP insert_rep;
     store.UnaryInsert(1700000001ULL, MakeRow(7.0), "WALASYNC", &insert_rep, XStore_Proto::ASYNC);
@@ -91,7 +92,7 @@ TEST_F(XStoreWalTest, AsyncEventuallyApplies) {
 // unlike ASYNC.
 TEST_F(XStoreWalTest, BypassAppliesBeforeReturning) {
     XStore store;
-    store.CreateDB("WALBYPASS", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "WALBYPASS", XStore_Proto::SECOND, 64);
 
     XStore_Proto::UnaryInsert_REP insert_rep;
     store.UnaryInsert(1700000003ULL, MakeRow(13.5), "WALBYPASS", &insert_rep, XStore_Proto::BYPASS);
@@ -118,7 +119,7 @@ TEST_F(XStoreWalTest, BypassAppliesBeforeReturning) {
 // via query (proving it landed in the data file, not lost).
 TEST_F(XStoreWalTest, BypassWritesNoWalRecord) {
     XStore store;
-    store.CreateDB("WALBYPASSNOWAL", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "WALBYPASSNOWAL", XStore_Proto::SECOND, 64);
 
     XStore_Proto::UnaryInsert_REP priming_rep;
     store.UnaryInsert(1700000004ULL, MakeRow(5.0), "WALBYPASSNOWAL", &priming_rep, XStore_Proto::SYNC);
@@ -162,7 +163,7 @@ TEST_F(XStoreWalTest, BypassWritesNoWalRecord) {
 // (XStore::DataFsyncCoalescerLoop) gets at all.
 TEST_F(XStoreWalTest, BatchInsertDurabilityModesAllApplyCorrectly) {
     XStore store;
-    store.CreateDB("WALBATCHDUR", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "WALBATCHDUR", XStore_Proto::SECOND, 64);
 
     XStore_Proto::BatchInsert_REQ async_req;
     async_req.set_dbname("WALBATCHDUR");
@@ -214,7 +215,7 @@ TEST_F(XStoreWalTest, BatchInsertDurabilityModesAllApplyCorrectly) {
 
 TEST_F(XStoreWalTest, RangeInsertDurabilityModesAllApplyCorrectly) {
     XStore store;
-    store.CreateDB("WALRANGEDUR", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "WALRANGEDUR", XStore_Proto::SECOND, 64);
 
     XStore_Proto::RangeInsert_REQ async_req;
     async_req.set_dbname("WALRANGEDUR");
@@ -268,7 +269,7 @@ TEST_F(XStoreWalTest, RangeInsertDurabilityModesAllApplyCorrectly) {
 TEST_F(XStoreWalTest, ReplayRecoversUnappliedRecord) {
     {
         XStore store;
-        store.CreateDB("WALCRASH", XStore_Proto::SECOND, 64);
+        CreateTestDb(store, "WALCRASH", XStore_Proto::SECOND, 64);
     }
 
     // Locate this DB's WAL shard file the same way EnqueueWalRecord would
@@ -346,7 +347,7 @@ TEST_F(XStoreWalTest, ReplayRecoversUnappliedRecord) {
 // shard hashing or the writer thread's batching.
 TEST_F(XStoreWalTest, ConcurrentInsertsAllPersist) {
     XStore store;
-    store.CreateDB("WALCONC", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "WALCONC", XStore_Proto::SECOND, 64);
 
     constexpr int kThreads = 8;
     constexpr int kPerThread = 50;
@@ -381,7 +382,7 @@ TEST_F(XStoreWalTest, ConcurrentInsertsAllPersist) {
 // check that they do.
 TEST_F(XStoreWalTest, WalStatsCountersReflectRealBatching) {
     XStore store;
-    store.CreateDB("WALSTATS", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "WALSTATS", XStore_Proto::SECOND, 64);
 
     std::filesystem::path db_base_path = scratch->test_root / "DataStore" / "WALSTATS";
     size_t active = XStore::active_wal_shard_count.load(std::memory_order_relaxed);

@@ -8,8 +8,8 @@
 // Disabled by default: every TEST_F here is a live network call, so it only
 // runs when both XSTORE_LIVE_ADDR and XSTORE_LIVE_PORT are set in the
 // environment, e.g.:
-//   XSTORE_LIVE_ADDR=64.131.114.155 XSTORE_LIVE_PORT=19497 \
-//       ./xstore_client_tests --gtest_filter='XStoreClientLiveTest.*'
+//   XSTORE_LIVE_ADDR=64.131.114.155 XSTORE_LIVE_PORT=19497
+//   ./xstore_client_tests --gtest_filter='XStoreClientLiveTest.*'
 // With neither set (the default for a plain build/ctest run) every test
 // GTEST_SKIPs immediately, so this file never touches the network or fails a
 // build that has no live server to talk to.
@@ -93,11 +93,11 @@ class XStoreClientLiveTest : public ::testing::Test {
   // actual test's result.
   void DropDb(const std::string &db_name, const std::vector<std::string> &files) {
       std::string mutable_db_name = db_name;
-      if (!files.empty()) {
-          std::vector<std::string> mutable_files = files;
-          client->RemoveDBFiles(mutable_db_name, mutable_files);
-      }
-      client->RemoveDB(mutable_db_name);
+    if (!files.empty()) {
+        std::vector<std::string> mutable_files = files;
+        (void) client->RemoveDBFiles(mutable_db_name, mutable_files);
+    }
+    (void) client->RemoveDB(mutable_db_name);
   }
 };
 

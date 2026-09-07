@@ -128,8 +128,8 @@ void ZmqServer::StartServer(std::string listen_addr, std::string listen_port) {
     }
     spdlog::info("[NETWORKING] - Launched: {0:d} worker thread", num_threads);
 
-    // Connect WORKER threads to CLIENT threads via queue
-    zmq::proxy(static_cast<void*>(client_socket), static_cast<void*>(worker_socket), nullptr);
+    // socket_t overload (void* one deprecated since cppzmq 4.3.1); same as previous nullptr capture.
+    zmq::proxy(client_socket, worker_socket);
 }
 
 void ZmqServer::WorkerRoutine(std::string server_addr) {
@@ -189,10 +189,10 @@ void ZmqServer::WorkerRoutine(std::string server_addr) {
                 }
                 if (!got) continue;
             } else {
-                socket.recv(client_msg);
+                (void) socket.recv(client_msg);
             }
         } else {
-            socket.recv(client_msg);
+            (void) socket.recv(client_msg);
         }
         last_activity = std::chrono::steady_clock::now();
 

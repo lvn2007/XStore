@@ -154,7 +154,7 @@ TEST_F(XStoreTest, InfoQueryOnEmptyServerReturnsNoDatabases) {
 
 TEST_F(XStoreTest, InfoQueryReflectsCreatedDatabase) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::SysInfo_REP info = store.InfoQuery("127.0.0.1", 2);
 
@@ -167,9 +167,9 @@ TEST_F(XStoreTest, InfoQueryReflectsMultipleCreatedDatabases) {
     XStore store;
     // Distinct resolutions per DB so each dbinfo entry can be matched back to
     // its creator unambiguously, not just counted.
-    store.CreateDB("ALPHADB", XStore_Proto::SECOND, 64);
-    store.CreateDB("BETADB", XStore_Proto::MILLISECOND, 128);
-    store.CreateDB("GAMMADB", XStore_Proto::MICROSECOND, 256);
+    CreateTestDb(store, "ALPHADB", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "BETADB", XStore_Proto::MILLISECOND, 128);
+    CreateTestDb(store, "GAMMADB", XStore_Proto::MICROSECOND, 256);
 
     XStore_Proto::SysInfo_REP info = store.InfoQuery("127.0.0.1", 3);
 
@@ -207,7 +207,7 @@ TEST_F(XStoreTest, CreateDBSucceedsAndWritesConfigFile) {
 
 TEST_F(XStoreTest, CreateDBRejectsDuplicateName) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
     XStore_Proto::CreateDB_REP rep = store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
 
     EXPECT_EQ(rep.createdbstatus(), "[WARNING] [CREATE DB] [DB: TESTDB] - Already existed");
@@ -238,7 +238,7 @@ TEST_F(XStoreTest, RemoveDBOnMissingDBReturnsError) {
 
 TEST_F(XStoreTest, RemoveDBDeletesDirectoryAndDropsFromInfoQuery) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::RemoveDB_REP rep = store.RemoveDB("TESTDB");
     EXPECT_EQ(rep.removestatus(), "[INFO] [REMOVE DB] [DB: TESTDB] - Removed DB with name: TESTDB");
@@ -255,13 +255,13 @@ TEST_F(XStoreTest, RemoveDBThenRecreateSameNameDoesNotReadStaleMmapData) {
     // fresh DB reusing the old name must not see the previous DB's data
     // through a stale cached mapping the erase should have dropped.
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
     XStore_Proto::UnaryInsert_REP first_insert_rep;
     store.UnaryInsert(TS_2016_MID, MakeRow({FString("old-generation")}), "TESTDB", &first_insert_rep);
     ASSERT_NE(first_insert_rep.insertstatus().find("[INFO]"), std::string::npos);
 
-    store.RemoveDB("TESTDB");
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    (void) store.RemoveDB("TESTDB");
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     // Same year, same offset as the old generation's write -- if the old
     // mapping survived, this read would incorrectly find "old-generation".
@@ -285,7 +285,7 @@ TEST_F(XStoreTest, RemoveDBThenRecreateSameNameDoesNotReadStaleMmapData) {
 
 TEST_F(XStoreTest, RemoveDBFilesRemovesDataFileButProtectsConfig) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
     XStore_Proto::UnaryInsert_REP insert_rep;
     store.UnaryInsert(TS_2016_MID, MakeRow({FString("hello")}), "TESTDB", &insert_rep);
 
@@ -308,7 +308,7 @@ TEST_F(XStoreTest, RemoveDBFilesThenReinsertSameYearDoesNotReadStaleMmapData) {
     // file via EraseMappedFile (RemoveDBFiles's call site comment references
     // the same reasoning).
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
     XStore_Proto::UnaryInsert_REP first_insert_rep;
     store.UnaryInsert(TS_2016_MID, MakeRow({FString("old-generation")}), "TESTDB", &first_insert_rep);
     ASSERT_NE(first_insert_rep.insertstatus().find("[INFO]"), std::string::npos);
@@ -346,7 +346,7 @@ TEST_F(XStoreTest, UnaryInsertOnMissingDBReturnsError) {
 
 TEST_F(XStoreTest, UnaryInsertExactTimestampHasInsertedData) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::UnaryInsert_REP insert_rep;
     store.UnaryInsert(TS_2016_MID, MakeRow({FDouble(3.14), FString("abc"), FBool(true)}), "TESTDB", &insert_rep);
@@ -364,7 +364,7 @@ TEST_F(XStoreTest, UnaryInsertExactTimestampHasInsertedData) {
 
 TEST_F(XStoreTest, UnaryInsertAllProtoDataTypesRoundTrip) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 256);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 256);
 
     // Exercises every branch of FData's oneof (see proto/XStore.proto),
     // not just the double/string/bool trio used elsewhere in this file.
@@ -412,7 +412,7 @@ TEST_F(XStoreTest, UnaryInsertAllProtoDataTypesRoundTrip) {
 
 TEST_F(XStoreTest, UnaryQueryNeighboringUninsertedTimestampsReturnEmptyData) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::UnaryInsert_REP insert_rep;
     store.UnaryInsert(TS_2009_MID, MakeRow({FDouble(1.0)}), "TESTDB", &insert_rep);
@@ -436,7 +436,7 @@ TEST_F(XStoreTest, UnaryQueryNeighboringUninsertedTimestampsReturnEmptyData) {
 
 TEST_F(XStoreTest, UnaryInsertOverwriteSameTimestampKeepsLatestValue) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::UnaryInsert_REP insert_rep;
     store.UnaryInsert(TS_2003_MID, MakeRow({FString("first")}), "TESTDB", &insert_rep);
@@ -451,7 +451,7 @@ TEST_F(XStoreTest, UnaryInsertOverwriteSameTimestampKeepsLatestValue) {
 
 TEST_F(XStoreTest, UnaryQueryWithDbButNoYearFileReturnsError) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);  // DB exists, but nothing was ever inserted for TS_2016_MID's year
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);  // DB exists, but nothing was ever inserted for TS_2016_MID's year
 
     XStore_Proto::UnaryQuery_REP query_rep;
     store.UnaryQuery(TS_2016_MID, "TESTDB", &query_rep);
@@ -473,7 +473,7 @@ TEST_F(XStoreTest, UnaryQueryOnNeverCreatedDBReturnsErrorInsteadOfCrashing) {
 
 TEST_F(XStoreTest, UnaryInsertDbNameIsCaseInsensitive) {
     XStore store;
-    store.CreateDB("testdb", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "testdb", XStore_Proto::SECOND, 128);
 
     XStore_Proto::UnaryInsert_REP insert_rep;
     store.UnaryInsert(TS_1998_MID, MakeRow({FString("mixed-case")}), "TestDb", &insert_rep);
@@ -487,7 +487,7 @@ TEST_F(XStoreTest, UnaryInsertDbNameIsCaseInsensitive) {
 
 TEST_F(XStoreTest, UnaryInsertDifferentYearsWriteToSeparateFiles) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::UnaryInsert_REP insert_rep;
     store.UnaryInsert(TS_2016_MID, MakeRow({FString("year-2016")}), "TESTDB", &insert_rep);
@@ -508,7 +508,7 @@ TEST_F(XStoreTest, UnaryInsertDifferentYearsWriteToSeparateFiles) {
 
 TEST_F(XStoreTest, UnaryDeletePunchesHoleThenUnaryQueryReturnsEmptyData) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::UnaryInsert_REP insert_rep;
     store.UnaryInsert(TS_2024_MID, MakeRow({FString("to-be-deleted")}), "TESTDB", &insert_rep);
@@ -529,7 +529,7 @@ TEST_F(XStoreTest, UnaryDeleteOnMissingDBReturnsError) {
 
 TEST_F(XStoreTest, UnaryDeleteOnMissingYearFileReturnsError) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
     // DB exists but nothing was ever inserted for this year -> no 2016.XSTORE file.
     XStore_Proto::UnaryDelete_REP delete_rep = store.UnaryDelete(TS_2016_MID, "TESTDB");
     EXPECT_EQ(delete_rep.deletestatus(), "[WARNING] [UNARY DELETE] [DB: TESTDB] - 2016.XSTORE does not exist");
@@ -537,7 +537,7 @@ TEST_F(XStoreTest, UnaryDeleteOnMissingYearFileReturnsError) {
 
 TEST_F(XStoreTest, UnaryInsertAtFirstAndLastEpochOfYearRoundTrip) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     // TS_2017_FIRST/TS_2016_LAST are exactly TimeStruct's FirstEpoch/LastEpoch
     // for their respective years (see TimeStruct::ExtractTimeComponents).
@@ -562,7 +562,7 @@ TEST_F(XStoreTest, UnaryInsertAtFirstAndLastEpochOfYearRoundTrip) {
 
 TEST_F(XStoreTest, UnaryInsertAdjacentTimestampsDoNotOverlap) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     constexpr int k_rows = 40;
     XStore_Proto::UnaryInsert_REP insert_rep;
@@ -586,7 +586,7 @@ TEST_F(XStoreTest, UnaryInsertAdjacentTimestampsDoNotOverlapWithTightRowLength) 
     constexpr int k_rows = 20;  // all values < 128 -> single-byte varint, so every row serializes to the same size
     XStore_Proto::RowData sample = MakeRow({FInt64(0)});
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, (short)sample.ByteSizeLong());
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, (short)sample.ByteSizeLong());
 
     XStore_Proto::UnaryInsert_REP insert_rep;
     for (int i = 0; i < k_rows; i++) {
@@ -604,7 +604,7 @@ TEST_F(XStoreTest, UnaryInsertAdjacentTimestampsDoNotOverlapWithTightRowLength) 
 
 TEST_F(XStoreTest, UnaryInsertRowLargerThanRowLengthIsRejectedAndDoesNotCorruptNeighbor) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 8);  // just enough for a short row, not more
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 8);  // just enough for a short row, not more
 
     XStore_Proto::UnaryInsert_REP neighbor_rep;
     store.UnaryInsert(TS_2009_MID, MakeRow({FInt32(1)}), "TESTDB", &neighbor_rep);
@@ -631,7 +631,7 @@ TEST_F(XStoreTest, UnaryInsertRowLargerThanRowLengthIsRejectedAndDoesNotCorruptN
 
 TEST_F(XStoreTest, UnaryInsertRowWith32PlusMixedTypeColumnsRoundTrips) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 1024);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 1024);
 
     // Two full passes over all 15 oneof branches (30 columns) plus a couple
     // extra, so this goes well past the 15-column ceiling every existing
@@ -691,7 +691,7 @@ TEST_F(XStoreTest, UnaryInsertRowWith32PlusMixedTypeColumnsRoundTrips) {
 
 TEST_F(XStoreTest, UnaryInsertCreatesDataFileAsSparseFile) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::UnaryInsert_REP insert_rep;
     store.UnaryInsert(TS_2016_MID, MakeRow({FInt32(1)}), "TESTDB", &insert_rep);
@@ -712,7 +712,7 @@ TEST_F(XStoreTest, UnaryInsertCreatesDataFileAsSparseFile) {
 
 TEST_F(XStoreTest, UnaryInsertUnsetFieldDataRoundTripsAsEmpty) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::UnaryInsert_REP insert_rep;
     // FData with no oneof branch set at all -- not FInt32(0), an actually-unset field.
@@ -732,7 +732,7 @@ TEST_F(XStoreTest, UnaryInsertMillisecondResolutionRoundTrips) {
     // Every other test in this suite uses SECOND resolution -- this exercises
     // TimeStruct's MILLISECOND scaling path instead (NANOSECOND is rejected
     // by CreateDB; PermittedTimeResolution only allows SECOND/MILLISECOND/MICROSECOND).
-    store.CreateDB("TESTDB", XStore_Proto::MILLISECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::MILLISECOND, 128);
 
     const unsigned long long ts_ms = TS_2016_MID * 1000ULL + 250;  // same instant, +250ms
 
@@ -758,7 +758,7 @@ TEST_F(XStoreTest, UnaryInsertMillisecondResolutionRoundTrips) {
 
 TEST_F(XStoreTest, BatchInsertThenBatchQueryExactTimestampsRoundTrip) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     // Spread across five different years (rather than one clustered block) so
     // this also exercises BatchInsert/BatchQuery's per-year file bucketing.
@@ -802,7 +802,7 @@ TEST_F(XStoreTest, BatchInsertThenBatchQueryExactTimestampsRoundTrip) {
 
 TEST_F(XStoreTest, BatchQueryHolesAreOmittedFromResults) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     // Two unrelated years, each with a small gap between its own points, so
     // hole-detection is verified without clustering all data into one year.
@@ -840,7 +840,7 @@ TEST_F(XStoreTest, BatchQueryHolesAreOmittedFromResults) {
 
 TEST_F(XStoreTest, BatchInsertMixedColumnCountsPerTimestamp) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     const unsigned long long ts1 = TS_1998_MID;              // 1 column
     const unsigned long long ts2 = TS_2003_MID;               // 2 columns
@@ -897,7 +897,7 @@ TEST_F(XStoreTest, BatchInsertMixedColumnCountsPerTimestamp) {
 
 TEST_F(XStoreTest, BatchInsertRandomTimestampsThenRandomBatchQuerySubset) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     std::mt19937 rng(12345);
     std::uniform_int_distribution<unsigned long long> epoch_dist(RANDOM_RANGE_LOW, RANDOM_RANGE_HIGH);
@@ -978,7 +978,7 @@ TEST_F(XStoreTest, BatchInsertToNonexistentDBReturnsError) {
 
 TEST_F(XStoreTest, BatchInsertEmptyPayloadOnExistingDBSucceedsWithZeroInserted) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");  // no batchinsert_data entries at all
@@ -990,7 +990,7 @@ TEST_F(XStoreTest, BatchInsertEmptyPayloadOnExistingDBSucceedsWithZeroInserted) 
 
 TEST_F(XStoreTest, BatchDeleteThenBatchQueryDeletedEntriesOmitted) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     // Spread across two distinct years; only one entry (in the 2009 file) gets deleted.
     XStore_Proto::BatchInsert_REQ insert_req;
@@ -1024,7 +1024,7 @@ TEST_F(XStoreTest, BatchDeleteThenBatchQueryDeletedEntriesOmitted) {
 
 TEST_F(XStoreTest, BatchDeleteTargetingMissingYearFileStillReportsCount) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
     // TESTDB exists but nothing was ever inserted for 2016 -> no 2016.XSTORE.
     // BatchDelete used to silently `continue` here with no status set at all
     // mid-loop (unlike BatchQuery/RangeDelete, which both warn) -- the
@@ -1042,7 +1042,7 @@ TEST_F(XStoreTest, BatchDeleteTargetingMissingYearFileStillReportsCount) {
 
 TEST_F(XStoreTest, BatchDeleteWithWidelySeparatedTimestampsLocksFullSpanAgainstConcurrentWriter) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     // Two widely-spaced (same-year) timestamps in one BatchDelete call.
     // BatchDelete now takes a single lock spanning [min offset, max offset]
@@ -1066,7 +1066,7 @@ TEST_F(XStoreTest, BatchDeleteWithWidelySeparatedTimestampsLocksFullSpanAgainstC
             req.set_dbname("TESTDB");
             req.add_timestamp(near);
             req.add_timestamp(far);
-            bd_store.BatchDelete(&req);
+            (void) bd_store.BatchDelete(&req);
         }
     };
     auto far_writer = [&]() {
@@ -1097,7 +1097,7 @@ TEST_F(XStoreTest, BatchDeleteWithWidelySeparatedTimestampsLocksFullSpanAgainstC
 
 TEST_F(XStoreTest, BatchInsertOverwriteWithSmallerRowLeavesNoStaleTrailingBytes) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     // First write a wide row directly at this offset...
     XStore_Proto::UnaryInsert_REP seed_rep;
@@ -1127,7 +1127,7 @@ TEST_F(XStoreTest, BatchInsertOverwriteWithSmallerRowLeavesNoStaleTrailingBytes)
 
 TEST_F(XStoreTest, BatchInsertRepeatedCallsToSameYearFileAccumulateViaCachedMapping) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     // First call creates+maps 2016.XSTORE via GetOrMapFile; every later call
     // to the same year must hit that cached mapping instead of re-creating/
@@ -1161,7 +1161,7 @@ TEST_F(XStoreTest, BatchInsertRepeatedCallsToSameYearFileAccumulateViaCachedMapp
 
 TEST_F(XStoreTest, BatchInsertWithWidelySeparatedTimestampsLocksFullSpanAgainstConcurrentWriter) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     // Two widely-spaced (same-year) timestamps in one BatchInsert call.
     // BatchInsert now takes a single lock spanning [min offset, max offset]
@@ -1216,7 +1216,7 @@ TEST_F(XStoreTest, BatchQueryRowFillingEntireBufferWithNoZeroByteIsNotTreatedAsH
     // non-null-terminated buffer in exactly this situation.
     XStore_Proto::RowData sample = MakeRow({FBytes(std::string(20, '\xFF'))});
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, (short)sample.ByteSizeLong());
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, (short)sample.ByteSizeLong());
 
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");
@@ -1239,7 +1239,7 @@ TEST_F(XStoreTest, BatchQueryRowFillingEntireBufferWithNoZeroByteIsNotTreatedAsH
 
 TEST_F(XStoreTest, BatchQueryEmptyTimestampListSucceedsWithNoResults) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::BatchQuery_REQ query_req;
     query_req.set_dbname("TESTDB");  // no timestamps at all
@@ -1251,7 +1251,7 @@ TEST_F(XStoreTest, BatchQueryEmptyTimestampListSucceedsWithNoResults) {
 
 TEST_F(XStoreTest, BatchQueryAllRequestedTimestampsAreHolesReturnsEmptyResponse) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::UnaryInsert_REP seed_rep;
     store.UnaryInsert(TS_2016_MID, MakeRow({FInt32(1)}), "TESTDB", &seed_rep);  // creates 2016.XSTORE
@@ -1268,7 +1268,7 @@ TEST_F(XStoreTest, BatchQueryAllRequestedTimestampsAreHolesReturnsEmptyResponse)
 
 TEST_F(XStoreTest, BatchQueryRejectsRequestOver2GBLimit) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 32000);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 32000);
 
     XStore_Proto::BatchQuery_REQ query_req;
     query_req.set_dbname("TESTDB");
@@ -1285,7 +1285,7 @@ TEST_F(XStoreTest, BatchQueryRejectsRequestOver2GBLimit) {
 
 TEST_F(XStoreTest, BatchQuerySortTimeFalseWithUnsortedTimestampsRoundTrips) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     // All in the same year, deliberately far apart and inserted/queried in a
     // non-ascending order. With SortTime=false, BatchQuery's per-year index
@@ -1351,7 +1351,7 @@ XStore_Proto::BatchQuery_REP RunBatchStreamedAndReassemble(XStore &store, XStore
 
 TEST_F(XStoreTest, BatchQueryStreamedMatchesBatchQueryForDenseMultiColumnRows) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     std::vector<unsigned long long> timestamps = {TS_2031_MID, TS_1998_MID, TS_2016_MID, TS_2009_MID, TS_2003_MID};
     XStore_Proto::BatchInsert_REQ insert_req;
@@ -1392,7 +1392,7 @@ TEST_F(XStoreTest, BatchQueryStreamedMatchesBatchQueryForDenseMultiColumnRows) {
 
 TEST_F(XStoreTest, BatchQueryStreamedOmitsHolesSameAsBatchQuery) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");
@@ -1425,7 +1425,7 @@ TEST_F(XStoreTest, BatchQueryStreamedOmitsHolesSameAsBatchQuery) {
 
 TEST_F(XStoreTest, BatchQueryStreamedSplitsAcrossMultipleChunksAndReassemblesToMatchBatchQuery) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 64);
 
     constexpr int kRows = 500;
     std::vector<unsigned long long> timestamps;
@@ -1465,7 +1465,7 @@ TEST_F(XStoreTest, BatchQueryStreamedParallelPreadWaveSpansMultipleWavesWithHole
     // plus a partial final wave, with holes scattered throughout (every 7th
     // timestamp uninserted) so the per-wave hole check is covered too.
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 64);
 
     constexpr int kRows = 10000;  // > 2 * BATCH_QUERY_PREAD_WAVE_ROWS -- forces 3 waves
     std::vector<unsigned long long> all_ts;
@@ -1503,7 +1503,7 @@ TEST_F(XStoreTest, BatchQueryStreamedParallelPreadWaveSpansMultipleWavesWithHole
 
 TEST_F(XStoreTest, BatchQueryStreamedPreservesMissingYearWarningMessage) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 32);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 32);
 
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");
@@ -1534,7 +1534,7 @@ TEST_F(XStoreTest, BatchQueryStreamedPreservesMissingYearWarningMessage) {
 
 TEST_F(XStoreTest, BatchQueryStreamedSortTimeFalseWithUnsortedTimestampsRoundTrips) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     std::map<unsigned long long, std::string> expected_vals = {
         {TS_2016_MID + 50000, "mid"},
@@ -1575,7 +1575,7 @@ TEST_F(XStoreTest, BatchQueryStreamedSortTimeFalseWithUnsortedTimestampsRoundTri
 
 TEST_F(XStoreTest, RangeInsertThenRangeQueryContiguousRangeAllPresent) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::RangeInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");
@@ -1606,7 +1606,7 @@ TEST_F(XStoreTest, RangeInsertThenRangeQueryContiguousRangeAllPresent) {
 // BatchInsertMixedColumnCountsPerTimestamp).
 TEST_F(XStoreTest, RangeInsertThenRangeQueryMultiColumnRowsRoundTrip) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 1024);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 1024);
 
     XStore_Proto::RangeInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");
@@ -1635,7 +1635,7 @@ TEST_F(XStoreTest, RangeInsertThenRangeQueryMultiColumnRowsRoundTrip) {
 
 TEST_F(XStoreTest, RangeQueryUninsertedTimestampsReturnEmptyEntriesNotOmitted) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     // Sparse insert: only the two endpoints of a 5-wide window. Positions
     // +1, +2, +3 are holes (unallocated -- never written).
@@ -1669,7 +1669,7 @@ TEST_F(XStoreTest, RangeQueryUninsertedTimestampsReturnEmptyEntriesNotOmitted) {
 
 TEST_F(XStoreTest, RangeQuerySpanningTwoYearBoundary) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::UnaryInsert_REP insert_rep;
     store.UnaryInsert(TS_2016_LAST, MakeRow({FString("last-of-2016")}), "TESTDB", &insert_rep);
@@ -1700,7 +1700,7 @@ TEST_F(XStoreTest, RangeInsertToNonexistentDBReturnsError) {
 
 TEST_F(XStoreTest, RangeDeleteSingleYearMissingFileReturnsCountSummaryNotDbNotExistError) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
     // TESTDB directory exists (CreateDB above), but no year file was ever
     // written -- 2009.XSTORE specifically doesn't exist. RangeDelete's old
     // single-year branch special-cased this with an early-return "[ERROR]
@@ -1716,7 +1716,7 @@ TEST_F(XStoreTest, RangeDeleteSingleYearMissingFileReturnsCountSummaryNotDbNotEx
 
 TEST_F(XStoreTest, RangeDeleteReclaimsDiskSpaceAndMmapCacheReflectsTheHole) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     // Wide-enough span (5000 rows) that real block allocation is easily
     // measurable and not noise from filesystem allocation granularity.
@@ -1771,7 +1771,7 @@ TEST_F(XStoreTest, RangeDeleteReclaimsDiskSpaceAndMmapCacheReflectsTheHole) {
 
 TEST_F(XStoreTest, RangeDeleteSpanningTwoYearBoundaryDeletesBothEndpoints) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::UnaryInsert_REP insert_rep;
     store.UnaryInsert(TS_2016_LAST, MakeRow({FString("last-of-2016")}), "TESTDB", &insert_rep);
@@ -1792,7 +1792,7 @@ TEST_F(XStoreTest, RangeDeleteSpanningTwoYearBoundaryDeletesBothEndpoints) {
 
 TEST_F(XStoreTest, RangeInsertOverwriteWithSmallerRowLeavesNoStaleTrailingBytes) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::UnaryInsert_REP seed_rep;
     store.UnaryInsert(TS_2009_MID, MakeRow({FString("a-fairly-long-first-payload-value")}), "TESTDB", &seed_rep);
@@ -1816,7 +1816,7 @@ TEST_F(XStoreTest, RangeInsertOverwriteWithSmallerRowLeavesNoStaleTrailingBytes)
 
 TEST_F(XStoreTest, RangeInsertWithNonContiguousTimestampsLocksFullSpanAgainstConcurrentWriter) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     // Two widely-spaced (but ascending) timestamps within the same year --
     // before the fix, RangeInsert's combined lock only covered
@@ -1866,7 +1866,7 @@ TEST_F(XStoreTest, RangeInsertWithNonContiguousTimestampsLocksFullSpanAgainstCon
 
 TEST_F(XStoreTest, RangeQueryLastRowInSpanIsLockedAgainstConcurrentWriter) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     // RegionLength used to be sized as count-1 rows (missing a "+1" to cover
     // the inclusive [start, end] the read loop actually walks), so the very
@@ -1920,7 +1920,7 @@ TEST_F(XStoreTest, RangeQuerySpanningThreeYearsWithMissingMiddleYearFile) {
     // A ~31.5M-second span (nearly 2 full years) at the usual 128-byte
     // rowLength would exceed RangeQuery's 2GB result-size guard, so this
     // uses a much narrower row -- still comfortably enough for a short string.
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 32);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 32);
 
     // 1998, 1999 (missing), 2000 -- exercises the multi-year while loop
     // running more than one full iteration, including a year whose
@@ -1975,7 +1975,7 @@ XStore_Proto::RangeQuery_REP RunStreamedAndReassemble(XStore &store, unsigned lo
 
 TEST_F(XStoreTest, RangeQueryStreamedMatchesRangeQueryForDenseMultiColumnRows) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     // Mixes every FData oneof case reachable from a normal insert, including
     // the negative-int32/int64 wire gotcha (always a 10-byte varint --
@@ -2011,7 +2011,7 @@ TEST_F(XStoreTest, RangeQueryStreamedMatchesRangeQueryForDenseMultiColumnRows) {
 
 TEST_F(XStoreTest, RangeQueryStreamedHandlesHolesAndSparseColumnsSameAsRangeQuery) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     // Deliberate gaps (holes) between inserts, and rows with different
     // column counts (sparse columns) -- both need to round-trip identically
@@ -2033,7 +2033,7 @@ TEST_F(XStoreTest, RangeQueryStreamedHandlesHolesAndSparseColumnsSameAsRangeQuer
 
 TEST_F(XStoreTest, RangeQueryStreamedSplitsAcrossMultipleChunksAndReassemblesToMatchRangeQuery) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 64);
 
     constexpr int kRows = 500;
     for (int i = 0; i < kRows; i++) {
@@ -2059,7 +2059,7 @@ TEST_F(XStoreTest, RangeQueryStreamedSplitsAcrossMultipleChunksAndReassemblesToM
 
 TEST_F(XStoreTest, RangeQueryStreamedPreservesMissingYearWarningMessage) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 32);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 32);
 
     constexpr unsigned long long ts_1998_last = 915148799ULL;
     constexpr unsigned long long ts_2000_first_plus = 946684810ULL;
@@ -2081,7 +2081,7 @@ TEST_F(XStoreTest, RangeQueryStreamedPreservesMissingYearWarningMessage) {
 
 TEST_F(XStoreTest, RangeQueryStreamedMissingFinalYearFileReturnsInsteadOfHanging) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 32);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 32);
 
     constexpr unsigned long long ts_1998_last = 915148799ULL;
     constexpr unsigned long long ts_1999_early = 915148810ULL;  // 1999.XSTORE never created
@@ -2112,7 +2112,7 @@ TEST_F(XStoreTest, RangeQueryStreamedMissingFinalYearFileReturnsInsteadOfHanging
 
 TEST_F(XStoreTest, RangeQueryMissingFinalYearFileReturnsInsteadOfHanging) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 32);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 32);
 
     constexpr unsigned long long ts_1998_last = 915148799ULL;   // 1998-12-31 23:59:59 UTC
     constexpr unsigned long long ts_1999_early = 915148810ULL;  // 1999-01-01 00:00:10 UTC -- 1999.XSTORE never created
@@ -2160,7 +2160,7 @@ TEST_F(XStoreTest, RangeQueryMissingFinalYearFileReturnsInsteadOfHanging) {
 
 TEST_F(XStoreTest, RangeDeleteSpanningThreeYearsWithMissingMiddleYearFileDeletesExistingEndpoints) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     constexpr unsigned long long ts_1998_last = 915148799ULL;
     constexpr unsigned long long ts_2000_first_plus = 946684810ULL;
@@ -2170,7 +2170,7 @@ TEST_F(XStoreTest, RangeDeleteSpanningThreeYearsWithMissingMiddleYearFileDeletes
     store.UnaryInsert(ts_2000_first_plus, MakeRow({FString("start-of-2000")}), "TESTDB", &insert_rep);
     // 1999.XSTORE never created.
 
-    store.RangeDelete(ts_1998_last, ts_2000_first_plus, "TESTDB");
+    (void) store.RangeDelete(ts_1998_last, ts_2000_first_plus, "TESTDB");
 
     // Confirms the delete reaches (and clears) both endpoints without
     // hanging or skipping past them while walking through the missing
@@ -2184,7 +2184,7 @@ TEST_F(XStoreTest, RangeDeleteSpanningThreeYearsWithMissingMiddleYearFileDeletes
 
 TEST_F(XStoreTest, RangeDeleteMissingFinalYearFileReturnsInsteadOfHanging) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     constexpr unsigned long long ts_1998_last = 915148799ULL;   // 1998-12-31 23:59:59 UTC
     constexpr unsigned long long ts_1999_early = 915148810ULL;  // 1999-01-01 00:00:10 UTC -- 1999.XSTORE never created
@@ -2225,7 +2225,7 @@ TEST_F(XStoreTest, RangeDeleteMissingFinalYearFileReturnsInsteadOfHanging) {
 
 TEST_F(XStoreTest, RangeQueryRejectsRequestOver2GBLimit) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 32000);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 32000);
 
     XStore_Proto::RangeQuery_REP query_rep;
     // (end-start) * rowLength > 2GB -- just over RangeQuery's hard limit.
@@ -2236,7 +2236,7 @@ TEST_F(XStoreTest, RangeQueryRejectsRequestOver2GBLimit) {
 
 TEST_F(XStoreTest, UnaryBatchAndRangeInsertQueryShareSameCachedMappingWithinAYear) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     // Write the same year's file through all three insert paths, then read
     // every point back through all three query paths -- Unary, Batch and
@@ -2302,7 +2302,7 @@ TEST_F(XStoreTest, UnaryBatchAndRangeInsertQueryShareSameCachedMappingWithinAYea
 
 TEST_F(XStoreTest, GetOrMapFileEvictsBeyondCapAndEvictedFilesStillReadCorrectly) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 8);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 8);
 
     constexpr int k_year_count = 300;  // > MmapCacheCap (256) -- forces eviction
     std::vector<unsigned long long> timestamps;
@@ -2354,7 +2354,7 @@ TEST_F(XStoreTest, GetOrMapFileEvictsBeyondCapAndEvictedFilesStillReadCorrectly)
 
 TEST_F(XStoreTest, AggregatesOverContiguousNumericColumn) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     const std::vector<double> values = {10.0, 3.0, 7.0, 20.0, 1.0};
     XStore_Proto::RangeInsert_REQ insert_req;
@@ -2390,7 +2390,7 @@ TEST_F(XStoreTest, AggregatesOverContiguousNumericColumn) {
 
 TEST_F(XStoreTest, MinAggregateColumnIndexOutOfRangeReturnsNoValidData) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::UnaryInsert_REP insert_rep;
     store.UnaryInsert(TS_2031_MID, MakeRow({FDouble(1.0)}), "TESTDB", &insert_rep);  // only column 0 exists
@@ -2435,7 +2435,7 @@ TEST_F(XStoreTest, AvgAggregateOnMissingDBReturnsError) {
 // after the GetOrLoadCfg check above -- covered for none of them until now.
 TEST_F(XStoreTest, MinAggregateRejectsStartAfterEnd) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
     XStore_Proto::Min_REP min_rep;
     store.MinAggregate(TS_2016_MID + 1, TS_2016_MID, "TESTDB", 0, &min_rep);
     EXPECT_EQ(min_rep.opstatus(), "[WARNING] [MIN AGGREGATE] [DB: TESTDB] - Target end time must be after start time");
@@ -2443,7 +2443,7 @@ TEST_F(XStoreTest, MinAggregateRejectsStartAfterEnd) {
 
 TEST_F(XStoreTest, MaxAggregateRejectsStartAfterEnd) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
     XStore_Proto::Max_REP max_rep;
     store.MaxAggregate(TS_2016_MID + 1, TS_2016_MID, "TESTDB", 0, &max_rep);
     EXPECT_EQ(max_rep.opstatus(), "[WARNING] [MAX AGGREGATE] [DB: TESTDB] - Target end time must be after start time");
@@ -2451,7 +2451,7 @@ TEST_F(XStoreTest, MaxAggregateRejectsStartAfterEnd) {
 
 TEST_F(XStoreTest, SumAggregateRejectsStartAfterEnd) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
     XStore_Proto::Sum_REP sum_rep;
     store.SumAggregate(TS_2016_MID + 1, TS_2016_MID, "TESTDB", 0, &sum_rep);
     EXPECT_EQ(sum_rep.opstatus(), "[WARNING] [SUM AGGREGATE] [DB: TESTDB] - Target end time must be after start time");
@@ -2459,7 +2459,7 @@ TEST_F(XStoreTest, SumAggregateRejectsStartAfterEnd) {
 
 TEST_F(XStoreTest, AvgAggregateRejectsStartAfterEnd) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
     XStore_Proto::Avg_REP avg_rep;
     store.AvgAggregate(TS_2016_MID + 1, TS_2016_MID, "TESTDB", 0, &avg_rep);
     EXPECT_EQ(avg_rep.opstatus(), "[WARNING] [AVG AGGREGATE] [DB: TESTDB] - Target end time must be after start time");
@@ -2467,7 +2467,7 @@ TEST_F(XStoreTest, AvgAggregateRejectsStartAfterEnd) {
 
 TEST_F(XStoreTest, SumAndAvgAggregateWithRemainderDivisor) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     const std::vector<double> values = {2.0, 3.0, 5.0};  // sum=10, avg=3.333...
     XStore_Proto::RangeInsert_REQ insert_req;
@@ -2491,7 +2491,7 @@ TEST_F(XStoreTest, SumAndAvgAggregateWithRemainderDivisor) {
 
 TEST_F(XStoreTest, AggregateOverMultiYearRangeSpansAllYears) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     // Data sits right at the 2016/2017 year boundary (not mid-year) so the
     // aggregate kernels only need to scan a couple of rows to prove the
@@ -2542,7 +2542,7 @@ TEST_F(XStoreTest, AggregateOverWideMultiYearSpanUsesParallelWalkCorrectly) {
     // exists() check skips them for free -- they still count toward the
     // segment total that triggers parallel dispatch.
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     // TimeStruct (not hand-computed epoch arithmetic) finds the exact start
     // of "about 6 years after 2016" -- avoids an off-by-a-leap-day error
@@ -2590,7 +2590,7 @@ TEST_F(XStoreTest, MinAggregateTieAcrossYearsUnderParallelWalkPicksCorrectValue)
     // AggregateOverWideMultiYearSpanUsesParallelWalkCorrectly, for the same
     // "don't force a full-year scan on a middle year" reason.
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     unsigned long long approx_future_ts = TS_2016_LAST + (6ULL * 365 * 86400);
     TimeStruct future_year(static_cast<time_t>(approx_future_ts), XStore_Proto::SECOND);
@@ -2616,7 +2616,7 @@ TEST_F(XStoreTest, AggregateOverRangeWithMissingMiddleYearFileSkipsItAndReflects
     // ProcessFileRangeSelect (Min, via MinAggregate) and
     // ProcessFileRangeAccumulate (Sum, via SumAggregate).
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     constexpr unsigned long long ts_1998_last = 915148799ULL;       // 1998-12-31 23:59:59 UTC
     constexpr unsigned long long ts_2000_first_plus = 946684810ULL; // 2000-01-01 00:00:10 UTC
@@ -2643,7 +2643,7 @@ TEST_F(XStoreTest, MinMaxAggregateTieBreakReturnsFirstEncounteredRow) {
     // must be the one returned. Column 1 carries a per-row marker so the
     // winning row's identity (not just its column-0 value) can be checked.
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::RangeInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");
@@ -2676,7 +2676,7 @@ TEST_F(XStoreTest, AggregateSkipsUnsetFieldData) {
     // actually-unset FData (oneOfData_case() == 0) fails the kernels'
     // "case() > 0" check, not the "case() <= 12" one.
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::RangeInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");
@@ -2710,7 +2710,7 @@ TEST_F(XStoreTest, AggregateTreatsExplicitlyEmptyRowSameAsHole) {
     // degenerate case doesn't crash and is simply excluded, same as a real
     // hole would be.
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::UnaryInsert_REP insert_rep;
     store.UnaryInsert(TS_2016_MID, MakeRow({FDouble(4.0)}), "TESTDB", &insert_rep);
@@ -2725,7 +2725,7 @@ TEST_F(XStoreTest, AggregateTreatsExplicitlyEmptyRowSameAsHole) {
 
 TEST_F(XStoreTest, AggregateSkipsNonNumericColumnValues) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     // Column 0 alternates between numeric and string/bool/bytes across rows
     // -- only the numeric rows may contribute to the aggregate (the kernels
@@ -2757,7 +2757,7 @@ TEST_F(XStoreTest, AggregateSkipsNonNumericColumnValues) {
 
 TEST_F(XStoreTest, AggregateOverAllNonNumericColumnReturnsNoValidData) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::UnaryInsert_REP insert_rep;
     store.UnaryInsert(TS_2031_MID, MakeRow({FString("only-a-string")}), "TESTDB", &insert_rep);
@@ -2776,7 +2776,7 @@ TEST_F(XStoreTest, AggregateOverAllNonNumericColumnReturnsNoValidData) {
 // target with a distinct value (rowIndex) per row.
 TEST_F(XStoreTest, AggregateOnSpecificColumnAmongMixedTypeColumnsIgnoresOtherColumns) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 1024);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 1024);
     constexpr unsigned short target_column = 2;
 
     XStore_Proto::RangeInsert_REQ insert_req;
@@ -2825,7 +2825,7 @@ TEST_F(XStoreTest, AggregateOnSpecificColumnAmongMixedTypeColumnsIgnoresOtherCol
 // whether the row has numeric data somewhere.
 TEST_F(XStoreTest, AggregateTargetingNonNumericColumnAmongMixedTypeRowReturnsNoValidData) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 1024);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 1024);
 
     XStore_Proto::RangeInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");
@@ -2859,7 +2859,7 @@ TEST_F(XStoreTest, AggregateTargetingNonNumericColumnAmongMixedTypeRowReturnsNoV
 
 TEST_F(XStoreTest, AggregateOverRangeContainingHolesOnlyReflectsPresentRows) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     // Sparse: only positions 0, 2, 4 of a 5-wide window are written; 1 and 3
     // are holes (never inserted).
@@ -2879,7 +2879,7 @@ TEST_F(XStoreTest, AggregateOverRangeContainingHolesOnlyReflectsPresentRows) {
 
 TEST_F(XStoreTest, ConcurrentSumAggregateDuringConcurrentInsertsDoesNotCrashOrTear) {
     XStore seed_store;
-    seed_store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(seed_store, "TESTDB", XStore_Proto::SECOND, 128);
     XStore_Proto::UnaryInsert_REP seed_rep;
     seed_store.UnaryInsert(TS_2024_MID, MakeRow({FDouble(1.0)}), "TESTDB", &seed_rep);  // pre-allocate the year file
 
@@ -2918,7 +2918,7 @@ TEST_F(XStoreTest, ConcurrentSumAggregateDuringConcurrentInsertsDoesNotCrashOrTe
 // exercised on its own.
 TEST_F(XStoreTest, ConcurrentMinAggregateDuringConcurrentInsertsDoesNotCrashOrTear) {
     XStore seed_store;
-    seed_store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(seed_store, "TESTDB", XStore_Proto::SECOND, 128);
     XStore_Proto::UnaryInsert_REP seed_rep;
     seed_store.UnaryInsert(TS_2024_MID, MakeRow({FDouble(1.0)}), "TESTDB", &seed_rep);  // pre-allocate the year file
 
@@ -2962,7 +2962,7 @@ TEST_F(XStoreTest, ConcurrentMinAggregateDuringConcurrentInsertsDoesNotCrashOrTe
 
 TEST_F(XStoreTest, ConcurrentWritesToSameRegionAreSerializedAndDoNotCorruptData) {
     XStore seed_store;
-    seed_store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(seed_store, "TESTDB", XStore_Proto::SECOND, 128);
     XStore_Proto::UnaryInsert_REP seed_rep;
     seed_store.UnaryInsert(TS_2024_MID, MakeRow({FInt64(-1)}), "TESTDB", &seed_rep);  // pre-allocate the year file
 
@@ -2997,7 +2997,7 @@ TEST_F(XStoreTest, ConcurrentWritesToSameRegionAreSerializedAndDoNotCorruptData)
 
 TEST_F(XStoreTest, ConcurrentWritesToDifferentRegionsOfSameFileDoNotInterfere) {
     XStore seed_store;
-    seed_store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(seed_store, "TESTDB", XStore_Proto::SECOND, 128);
     XStore_Proto::UnaryInsert_REP seed_rep;
     seed_store.UnaryInsert(TS_2009_MID, MakeRow({FInt64(-1)}), "TESTDB", &seed_rep);  // pre-allocate 2009.XSTORE once
 
@@ -3032,7 +3032,7 @@ TEST_F(XStoreTest, ConcurrentWritesToDifferentRegionsOfSameFileDoNotInterfere) {
 
 TEST_F(XStoreTest, ConcurrentWritesToDifferentYearFilesDoNotInterfere) {
     XStore seed_store;
-    seed_store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(seed_store, "TESTDB", XStore_Proto::SECOND, 128);
     XStore_Proto::UnaryInsert_REP seed_rep;
     seed_store.UnaryInsert(TS_1998_MID, MakeRow({FInt64(-1)}), "TESTDB", &seed_rep);  // pre-allocate 1998.XSTORE
     seed_store.UnaryInsert(TS_2031_MID, MakeRow({FInt64(-1)}), "TESTDB", &seed_rep);  // pre-allocate 2031.XSTORE
@@ -3086,7 +3086,7 @@ TEST_F(XStoreTest, ConcurrentWritesToDifferentYearFilesDoNotInterfere) {
 // UNARY_RAND workload under concurrency.
 TEST_F(XStoreTest, ConcurrentUnaryInsertAcrossManyYearFilesDoesNotLoseDataToFdCacheEviction) {
     XStore seed_store;
-    seed_store.CreateDB("TESTDB", XStore_Proto::SECOND, 64);
+    CreateTestDb(seed_store, "TESTDB", XStore_Proto::SECOND, 64);
 
     constexpr int k_years = 48;
     constexpr int k_rows_per_year = 50;
@@ -3125,7 +3125,7 @@ TEST_F(XStoreTest, ConcurrentUnaryInsertAcrossManyYearFilesDoesNotLoseDataToFdCa
 
 TEST_F(XStoreTest, ConcurrentUnaryInsertAndUnaryQuerySameOffsetDoNotRace) {
     XStore seed_store;
-    seed_store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(seed_store, "TESTDB", XStore_Proto::SECOND, 128);
     XStore_Proto::UnaryInsert_REP seed_rep;
     seed_store.UnaryInsert(TS_2024_MID, MakeRow({FInt64(-1)}), "TESTDB", &seed_rep);  // pre-allocate the year file
 
@@ -3174,7 +3174,7 @@ TEST_F(XStoreTest, CfgCachedByOneXStoreInstanceIsVisibleToAnotherInstance) {
     XStore reader;
 
     XStore creator;
-    creator.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(creator, "TESTDB", XStore_Proto::SECOND, 128);
 
     // Make the on-disk .CFG diverge from what Creator just cached. If Reader
     // had to fall back to reading disk itself instead of hitting the shared
@@ -3205,7 +3205,7 @@ TEST_F(XStoreTest, CfgCachedByOneXStoreInstanceIsVisibleToAnotherInstance) {
 
 TEST_F(XStoreTest, ConcurrentXStoreInstancesShareCfgMapWithoutCorruption) {
     XStore creator;
-    creator.CreateDB("TESTDB", XStore_Proto::SECOND, 64);
+    CreateTestDb(creator, "TESTDB", XStore_Proto::SECOND, 64);
 
     // Force every worker below to race on a genuine cache miss instead of
     // trivially hitting what CreateDB already cached.
@@ -3249,7 +3249,7 @@ TEST_F(XStoreTest, ConcurrentXStoreInstancesShareCfgMapWithoutCorruption) {
 
 TEST_F(XStoreTest, UnaryInsertWritesExactBytesIndependentlyReadableFromDisk) {
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 128);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::UnaryInsert_REP insert_rep;
     store.UnaryInsert(TS_2016_MID, MakeRow({FDouble(2.71828), FString("raw-check"), FInt32(-42)}), "TESTDB", &insert_rep);
@@ -3270,7 +3270,7 @@ TEST_F(XStoreTest, BatchInsertWritesExactBytesIndependentlyReadableFromDisk) {
     // include/XStore/XStore_Internal.h), so this test's coverage extends to
     // it too -- a near-duplicate RangeInsert version would just repeat it.
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 64);
 
     std::vector<unsigned long long> timestamps = {TS_2016_MID, TS_2016_MID + 500000, TS_2016_MID - 500000};
     XStore_Proto::BatchInsert_REQ req;
@@ -3299,7 +3299,7 @@ TEST_F(XStoreTest, SumAggregateMatchesIndependentlyComputedSumFromRawDiskBytes) 
     // pread and BatchQuery's pread-per-row, so a bug specific to that
     // kernel wouldn't show up in either test above.
     XStore store;
-    store.CreateDB("TESTDB", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 64);
 
     std::vector<unsigned long long> timestamps = {TS_2016_MID, TS_2016_MID + 10, TS_2016_MID + 25, TS_2016_MID + 40};
     std::vector<double> values = {12.5, -30.25, 100.0, -0.75};

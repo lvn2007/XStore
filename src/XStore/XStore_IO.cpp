@@ -523,6 +523,10 @@ void XStore::GetFDataValue(const XStore_Proto::FData *f_data_input, unsigned int
             return_data->value = f_data_input->sfixed64data();
             break;
         }
+
+        // Unreachable: callers guard oneOfData_case() to numeric 1..12. Keeps switch -Wswitch-exhaustive.
+        default:
+            break;
     }
 }
 
@@ -587,5 +591,9 @@ void XStore::GetFDataValue(const XStore_Proto::FData *f_data_input, ValueStruct 
             return_data->value = f_data_input->sfixed64data();
             break;
         }
+
+        // Same as the column_idx overload above: unreachable, keeps switch -Wswitch-exhaustive.
+        default:
+            break;
     }
 }
