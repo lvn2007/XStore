@@ -304,6 +304,7 @@ TEST_F(XStoreZmqNetworkTest, BatchInsertThenBatchQueryOverWireOmitsHoles) {
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_rtype(XStore_Proto::BATCHINSERT);
     insert_req.set_dbname("ZMQ_BATCH_DB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
 
     XStore_Proto::BatchInsert_DATA *entry1 = insert_req.add_batchinsert_data();
     entry1->set_timestamp(ts1);

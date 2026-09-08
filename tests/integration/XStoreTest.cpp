@@ -772,6 +772,7 @@ TEST_F(XStoreTest, BatchInsertThenBatchQueryExactTimestampsRoundTrip) {
 
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     for (auto &[ts, val] : expected) {
         XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
         entry->set_timestamp(ts);
@@ -808,6 +809,7 @@ TEST_F(XStoreTest, BatchQueryHolesAreOmittedFromResults) {
     // hole-detection is verified without clustering all data into one year.
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     for (unsigned long long ts : {TS_2009_MID, TS_2009_MID + 10, TS_2009_MID + 20,
                                    TS_2031_MID, TS_2031_MID + 15}) {
         XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
@@ -852,6 +854,7 @@ TEST_F(XStoreTest, BatchInsertMixedColumnCountsPerTimestamp) {
     // double/string/bool) so column-count mixing is also type-diverse.
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     auto add_entry = [&](unsigned long long ts, const std::vector<XStore_Proto::FData> &vals) {
         XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
         entry->set_timestamp(ts);
@@ -913,6 +916,7 @@ TEST_F(XStoreTest, BatchInsertRandomTimestampsThenRandomBatchQuerySubset) {
 
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     for (unsigned long long ts : inserted_timestamps) {
         XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
         entry->set_timestamp(ts);
@@ -995,6 +999,7 @@ TEST_F(XStoreTest, BatchDeleteThenBatchQueryDeletedEntriesOmitted) {
     // Spread across two distinct years; only one entry (in the 2009 file) gets deleted.
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     for (unsigned long long ts : {TS_2009_MID, TS_2009_MID + 10, TS_2031_MID}) {
         XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
         entry->set_timestamp(ts);
@@ -1109,6 +1114,7 @@ TEST_F(XStoreTest, BatchInsertOverwriteWithSmallerRowLeavesNoStaleTrailingBytes)
     // belong to the old occupant.
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
     entry->set_timestamp(TS_2009_MID);
     *entry->mutable_data() = MakeRow({FInt32(7)});
@@ -1135,6 +1141,7 @@ TEST_F(XStoreTest, BatchInsertRepeatedCallsToSameYearFileAccumulateViaCachedMapp
     for (int i = 0; i < 20; i++) {
         XStore_Proto::BatchInsert_REQ req;
         req.set_dbname("TESTDB");
+        req.set_durabilitymode(XStore_Proto::SYNC);
         XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
         entry->set_timestamp(TS_2016_MID + i);
         *entry->mutable_data() = MakeRow({FInt64(i)});
@@ -1220,6 +1227,7 @@ TEST_F(XStoreTest, BatchQueryRowFillingEntireBufferWithNoZeroByteIsNotTreatedAsH
 
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
     entry->set_timestamp(TS_2016_MID);
     *entry->mutable_data() = sample;
@@ -1301,6 +1309,7 @@ TEST_F(XStoreTest, BatchQuerySortTimeFalseWithUnsortedTimestampsRoundTrips) {
 
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     for (auto &[ts, val] : expected) {
         XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
         entry->set_timestamp(ts);
@@ -1396,6 +1405,7 @@ TEST_F(XStoreTest, BatchQueryStreamedOmitsHolesSameAsBatchQuery) {
 
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     for (unsigned long long ts : {TS_2009_MID, TS_2009_MID + 10, TS_2009_MID + 20,
                                    TS_2031_MID, TS_2031_MID + 15}) {
         XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
@@ -1431,6 +1441,7 @@ TEST_F(XStoreTest, BatchQueryStreamedSplitsAcrossMultipleChunksAndReassemblesToM
     std::vector<unsigned long long> timestamps;
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     for (int i = 0; i < kRows; i++) {
         unsigned long long ts = TS_2024_MID + i;
         timestamps.push_back(ts);
@@ -1471,6 +1482,7 @@ TEST_F(XStoreTest, BatchQueryStreamedParallelPreadWaveSpansMultipleWavesWithHole
     std::vector<unsigned long long> all_ts;
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     int inserted_count = 0;
     for (int i = 0; i < kRows; i++) {
         unsigned long long ts = TS_2024_MID + i;
@@ -1544,6 +1556,7 @@ TEST_F(XStoreTest, BatchQueryStreamedSortTimeFalseWithUnsortedTimestampsRoundTri
     };
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     for (auto &[ts, val] : expected_vals) {
         XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
         entry->set_timestamp(ts);
@@ -2249,6 +2262,7 @@ TEST_F(XStoreTest, UnaryBatchAndRangeInsertQueryShareSameCachedMappingWithinAYea
 
     XStore_Proto::BatchInsert_REQ batch_req;
     batch_req.set_dbname("TESTDB");
+    batch_req.set_durabilitymode(XStore_Proto::SYNC);
     XStore_Proto::BatchInsert_DATA *batch_entry = batch_req.add_batchinsert_data();
     batch_entry->set_timestamp(TS_2009_MID + 1);
     *batch_entry->mutable_data() = MakeRow({FString("via-batch")});
@@ -3275,6 +3289,7 @@ TEST_F(XStoreTest, BatchInsertWritesExactBytesIndependentlyReadableFromDisk) {
     std::vector<unsigned long long> timestamps = {TS_2016_MID, TS_2016_MID + 500000, TS_2016_MID - 500000};
     XStore_Proto::BatchInsert_REQ req;
     req.set_dbname("TESTDB");
+    req.set_durabilitymode(XStore_Proto::SYNC);
     for (size_t i = 0; i < timestamps.size(); i++) {
         auto *entry = req.add_batchinsert_data();
         entry->set_timestamp(timestamps[i]);

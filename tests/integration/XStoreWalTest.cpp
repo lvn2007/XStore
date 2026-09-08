@@ -153,14 +153,12 @@ TEST_F(XStoreWalTest, BypassWritesNoWalRecord) {
     EXPECT_DOUBLE_EQ(query_rep.data().fielddata(0).doubledata(), 21.0);
 }
 
-// BatchInsert/RangeInsert durabilityMode does NOT route through the WAL
-// (see the field's comment on BatchInsert_REQ/RangeInsert_REQ in
-// XStore.proto) -- it dispatches to either an inline fdatasync() (SYNC), the
-// background data-fsync coalescer (ASYNC), or neither (BYPASS). None of
-// that should be visible from the caller's side beyond "the write landed
-// and is queryable" -- this exercises all three modes for both ops end to
-// end, which also happens to be the first coverage the coalescer thread
-// (XStore::DataFsyncCoalescerLoop) gets at all.
+// BatchInsert now routes through the same WAL EnqueueWalRecord/ApplyWalRecord
+// path UnaryInsert uses (see Task 1 of the WAL-safety-net plan) -- SYNC/BYPASS
+// apply before returning (immediately queryable, same as before), but ASYNC
+// now defers the actual data-file write itself (not just its fsync) to the
+// WAL writer thread's gather window, matching UnaryInsert's own ASYNC
+// behavior exactly. Poll for ASYNC instead of asserting immediate visibility.
 TEST_F(XStoreWalTest, BatchInsertDurabilityModesAllApplyCorrectly) {
     XStore store;
     CreateTestDb(store, "WALBATCHDUR", XStore_Proto::SECOND, 64);
@@ -195,22 +193,57 @@ TEST_F(XStoreWalTest, BatchInsertDurabilityModesAllApplyCorrectly) {
     store.BatchInsert(&bypass_req, &bypass_rep);
     EXPECT_NE(bypass_rep.insertstatus().find("[INFO]"), std::string::npos) << bypass_rep.insertstatus();
 
-    XStore_Proto::UnaryQuery_REP q1, q2, q3;
-    store.UnaryQuery(1700600000ULL, "WALBATCHDUR", &q1);
+    // SYNC and BYPASS apply before returning -- immediately queryable.
+    XStore_Proto::UnaryQuery_REP q2, q3;
     store.UnaryQuery(1700600001ULL, "WALBATCHDUR", &q2);
     store.UnaryQuery(1700600002ULL, "WALBATCHDUR", &q3);
-    ASSERT_TRUE(q1.has_data());
     ASSERT_TRUE(q2.has_data());
     ASSERT_TRUE(q3.has_data());
-    EXPECT_DOUBLE_EQ(q1.data().fielddata(0).doubledata(), 1.0);
     EXPECT_DOUBLE_EQ(q2.data().fielddata(0).doubledata(), 2.0);
     EXPECT_DOUBLE_EQ(q3.data().fielddata(0).doubledata(), 3.0);
 
-    // Give the coalescer (DATA_FSYNC_COALESCE_WINDOW_US) a chance to sweep
-    // the ASYNC write's pending fd -- not asserting on internal state here,
-    // just confirming the background thread's sweep doesn't crash/hang with
-    // real pending work queued.
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    // ASYNC: poll with a bounded timeout, same pattern as
+    // XStoreWalTest.AsyncEventuallyApplies for UnaryInsert.
+    bool became_visible = false;
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        XStore_Proto::UnaryQuery_REP q1;
+        store.UnaryQuery(1700600000ULL, "WALBATCHDUR", &q1);
+        if (q1.has_data() && q1.data().fielddata_size() == 1) {
+            EXPECT_DOUBLE_EQ(q1.data().fielddata(0).doubledata(), 1.0);
+            became_visible = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    EXPECT_TRUE(became_visible);
+}
+
+// A single BatchInsert call spanning multiple rows in one year-group must
+// build exactly one WalRecord for that group and apply every row -- proves
+// the year-bucket -> WalRecord mapping introduced in Task 1 doesn't drop or
+// misorder rows within a group.
+TEST_F(XStoreWalTest, BatchInsertMultiRowSingleYearGroupAppliesAllRows) {
+    XStore store;
+    CreateTestDb(store, "WALBATCHMULTI", XStore_Proto::SECOND, 64);
+
+    XStore_Proto::BatchInsert_REQ req;
+    req.set_dbname("WALBATCHMULTI");
+    req.set_durabilitymode(XStore_Proto::SYNC);
+    for (int i = 0; i < 5; ++i) {
+        XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
+        entry->set_timestamp(1700610000ULL + static_cast<unsigned long long>(i));
+        *entry->mutable_data() = MakeRow(10.0 + i);
+    }
+    XStore_Proto::BatchInsert_REP rep;
+    store.BatchInsert(&req, &rep);
+    ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+
+    for (int i = 0; i < 5; ++i) {
+        XStore_Proto::UnaryQuery_REP q;
+        store.UnaryQuery(1700610000ULL + static_cast<unsigned long long>(i), "WALBATCHMULTI", &q);
+        ASSERT_TRUE(q.has_data()) << "row " << i;
+        EXPECT_DOUBLE_EQ(q.data().fielddata(0).doubledata(), 10.0 + i) << "row " << i;
+    }
 }
 
 TEST_F(XStoreWalTest, RangeInsertDurabilityModesAllApplyCorrectly) {

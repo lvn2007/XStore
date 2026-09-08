@@ -101,12 +101,12 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStor
         AppendToYearBucket(data_map, curr_year, static_cast<unsigned long long int>(i));
     }
 
-    // durabilityMode here does NOT route through the WAL -- see the field's
-    // comment on BatchInsert_REQ in XStore.proto. Rows below are already
-    // written sequentially (year-bucketed, run-coalesced pwrite), so ASYNC/
-    // SYNC instead control whether/when the touched data file(s) get
-    // fdatasync()'d: SYNC inline before returning, ASYNC via the background
-    // coalescer (bounded staleness, no wait), BYPASS neither.
+    // BatchInsert now routes through the same WAL EnqueueWalRecord/
+    // ApplyWalRecord path UnaryInsert uses -- one WalRecord per year-bucket
+    // group instead of one per row (see WalRecord's comment in XStore.h).
+    // SYNC/BYPASS apply before returning (immediately queryable); ASYNC
+    // enqueues and returns immediately, deferring the actual data-file write
+    // (not just its fsync) to the WAL writer thread's gather window.
     const XStore_Proto::WalDurabilityMode durability_mode = proto_from_client->durabilitymode();
     bool any_sync_failed = false;
 
@@ -114,56 +114,60 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStor
     for (const std::pair<unsigned short int, std::vector<unsigned long long int>> &pair : data_map) {
         unsigned short int year_key = pair.first;
         const std::vector<unsigned long long int> &indices = pair.second;
-        const std::string &target_file = CachedYearFilePath(db_base_path_str, year_key);
 
-        // Grab first inserting element for TimeStruct purposes
-        //  Get length of time to truncate
-        TimeStruct this_ts{static_cast<time_t>(proto_from_client->batchinsert_data(indices.front()).timestamp()), cfg_struct.timeresolution()};
+        // One WalRecord per year-bucket group -- same grouping BatchInsert
+        // already used for its direct-write path, now handed to the WAL
+        // instead. Rows within one group share this call's cfg_struct, so
+        // db_name/db_base_path/time_resolution/row_length/durability_mode
+        // are constant per record; only rows differ.
+        WalRecord record;
+        record.db_name = db_name;
+        record.db_base_path = db_base_path_str;
+        record.time_resolution = cfg_struct.timeresolution();
+        record.row_length = cfg_struct.rowlength();
+        record.durability_mode = durability_mode;
+        record.rows.reserve(indices.size());
 
-        // Cached fd for this (dbName, year) file -- same fd cache UnaryInsert
-        // uses (see GetOrOpenFile). Creates+ftruncates on first use, so the
-        // separate open/ftruncate branch this used to have is gone. Every
-        // row below becomes a pwrite() rather than a memcpy into a
-        // PROT_WRITE mapping -- see WriteRowGroupToFile for why.
-        // Held through WriteRowGroupToFile below so a concurrent eviction on
-        // another thread can't close this fd mid-write -- see FdShard's
-        // comment in XStore.h. Also held through the SYNC/ASYNC fsync
-        // dispatch below it, for the same reason.
-        std::shared_ptr<int> fd_handle = GetOrOpenFile(target_file, cfg_struct.rowlength(), this_ts.last_epoch - this_ts.first_epoch);
-        if (!fd_handle) {
-            std::string err_msg = fmt::format("[BATCH INSERT] [DB: {}] - Unable to open {}.XSTORE", db_name, year_key);
-            SetTaggedStatus(return_data->mutable_insertstatus(), "[ERROR] ", err_msg);
-            spdlog::error(err_msg);
+        for (unsigned long long int idx : indices) {
+            const XStore_Proto::BatchInsert_DATA &entry = proto_from_client->batchinsert_data(idx);
+            size_t serialized_size = entry.data().ByteSizeLong();
+            // Reject-not-truncate, same guarantee as UnaryInsert/
+            // WriteRowGroupToFile: a row that doesn't fit its slot is
+            // dropped rather than silently corrupting whatever follows it.
+            if (serialized_size > static_cast<size_t>(cfg_struct.rowlength())) {
+                continue;
+            }
+            std::string row_bytes(cfg_struct.rowlength(), '\0');
+            entry.data().SerializeToArray(row_bytes.data(), static_cast<int>(cfg_struct.rowlength()));
+            std::memset(row_bytes.data() + serialized_size, 0, cfg_struct.rowlength() - serialized_size);
+            record.rows.push_back(WalRow{entry.timestamp(), std::move(row_bytes)});
+        }
+
+        if (record.rows.empty()) {
+            // Every row in this year-group was rejected as oversized --
+            // nothing to write, not a failure of the write path itself.
             continue;
         }
-        int fd = *fd_handle;
 
-        // Single lock spanning this year-group's full min-to-max offset span
-        // instead of one lock per row -- Indices is sorted ascending (the
-        // whole batch was sorted by timestamp above), so front()/back() give
-        // the span directly; offset is monotonic in timestamp so this is the
-        // same "over-lock the gaps between scattered rows" trick RangeInsert
-        // uses too, hence the shared helper.
-        WriteRowGroupToFile(target_file, fd, this_ts.first_epoch, cfg_struct.rowlength(), indices,
-            [&](unsigned long long int idx) -> const XStore_Proto::BatchInsert_DATA& { return proto_from_client->batchinsert_data(idx); });
-
-        if (durability_mode == XStore_Proto::SYNC) {
-            if (fdatasync(fd) != 0) {
-                spdlog::error("[BATCH INSERT] [DB: {}] - fdatasync failed for {}.XSTORE", db_name, year_key);
-                any_sync_failed = true;
-            }
-        } else if (durability_mode == XStore_Proto::ASYNC) {
-            XStore::ScheduleAsyncDataFsync(fd_handle);
+        // BYPASS applies straight to the data file on this thread, same as
+        // UnaryInsert's BYPASS path -- no WAL record ever written for it.
+        // Everything else (SYNC/ASYNC) hands off to the WAL: EnqueueWalRecord
+        // blocks until durable+applied for SYNC, returns immediately after
+        // the lock-free enqueue for ASYNC.
+        bool ok = (durability_mode == XStore_Proto::BYPASS)
+            ? ApplyWalRecord(record)
+            : EnqueueWalRecord(std::move(record));
+        if (!ok) {
+            any_sync_failed = true;
+            spdlog::error("[BATCH INSERT] [DB: {}] - WAL write failed for {}.XSTORE", db_name, year_key);
         }
-        // BYPASS: neither -- relies on OS writeback, same as before this
-        // durability mode existed.
     }
 
-    // Return insert status. A SYNC fsync failure means the rows are on disk
-    // but not provably durable yet -- surfaced instead of letting the
+    // Return insert status. A SYNC/BYPASS write failure means the rows are
+    // not provably durable/applied -- surfaced instead of letting the
     // unconditional success message below paper over it.
-    if (durability_mode == XStore_Proto::SYNC && any_sync_failed) {
-        std::string err_msg = fmt::format("[BATCH INSERT] [DB: {}] - Inserted {} elements, but SYNC fdatasync failed for at least one file",
+    if ((durability_mode == XStore_Proto::SYNC || durability_mode == XStore_Proto::BYPASS) && any_sync_failed) {
+        std::string err_msg = fmt::format("[BATCH INSERT] [DB: {}] - Inserted {} elements, but the write failed for at least one group",
                                            db_name, proto_from_client->batchinsert_data_size());
         SetTaggedStatus(return_data->mutable_insertstatus(), "[ERROR] ", err_msg);
         spdlog::error(err_msg);
