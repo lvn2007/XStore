@@ -365,6 +365,7 @@ TEST_F(XStoreZmqNetworkTest, RangeInsertThenRangeQueryOverWireIncludesHoleAsEmpt
 
     // Sparse range insert: endpoints only, leaving a hole at TS_2028_MID + 1.
     XStore_Proto::RangeInsert_REQ insert_req;
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     insert_req.set_rtype(XStore_Proto::RANGEINSERT);
     insert_req.set_dbname("ZMQ_RANGE_DB");
     XStore_Proto::RangeInsert_DATA *first = insert_req.add_rangeinsert_data();

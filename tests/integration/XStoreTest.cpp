@@ -1591,6 +1591,7 @@ TEST_F(XStoreTest, RangeInsertThenRangeQueryContiguousRangeAllPresent) {
     CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::RangeInsert_REQ insert_req;
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     insert_req.set_dbname("TESTDB");
     for (int i = 0; i < 10; i++) {
         XStore_Proto::RangeInsert_DATA *entry = insert_req.add_rangeinsert_data();
@@ -1622,6 +1623,7 @@ TEST_F(XStoreTest, RangeInsertThenRangeQueryMultiColumnRowsRoundTrip) {
     CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 1024);
 
     XStore_Proto::RangeInsert_REQ insert_req;
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     insert_req.set_dbname("TESTDB");
     for (int i = 0; i < K_WIDE_ROW_COUNT; i++) {
         XStore_Proto::RangeInsert_DATA *entry = insert_req.add_rangeinsert_data();
@@ -1653,6 +1655,7 @@ TEST_F(XStoreTest, RangeQueryUninsertedTimestampsReturnEmptyEntriesNotOmitted) {
     // Sparse insert: only the two endpoints of a 5-wide window. Positions
     // +1, +2, +3 are holes (unallocated -- never written).
     XStore_Proto::RangeInsert_REQ insert_req;
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     insert_req.set_dbname("TESTDB");
     XStore_Proto::RangeInsert_DATA *first = insert_req.add_rangeinsert_data();
     first->set_timestamp(TS_2009_MID);
@@ -1701,6 +1704,7 @@ TEST_F(XStoreTest, RangeQuerySpanningTwoYearBoundary) {
 TEST_F(XStoreTest, RangeInsertToNonexistentDBReturnsError) {
     XStore store;
     XStore_Proto::RangeInsert_REQ insert_req;
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     insert_req.set_dbname("NOPE");
     XStore_Proto::RangeInsert_DATA *entry = insert_req.add_rangeinsert_data();
     entry->set_timestamp(TS_2003_MID);
@@ -1735,6 +1739,7 @@ TEST_F(XStoreTest, RangeDeleteReclaimsDiskSpaceAndMmapCacheReflectsTheHole) {
     // measurable and not noise from filesystem allocation granularity.
     constexpr int k_row_count = 5000;
     XStore_Proto::RangeInsert_REQ insert_req;
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     insert_req.set_dbname("TESTDB");
     for (int i = 0; i < k_row_count; i++) {
         XStore_Proto::RangeInsert_DATA *entry = insert_req.add_rangeinsert_data();
@@ -1812,6 +1817,7 @@ TEST_F(XStoreTest, RangeInsertOverwriteWithSmallerRowLeavesNoStaleTrailingBytes)
 
     // Same stale-trailing-bytes concern as BatchInsert, but through RangeInsert's fwrite() path.
     XStore_Proto::RangeInsert_REQ insert_req;
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     insert_req.set_dbname("TESTDB");
     XStore_Proto::RangeInsert_DATA *entry = insert_req.add_rangeinsert_data();
     entry->set_timestamp(TS_2009_MID);
@@ -1844,6 +1850,7 @@ TEST_F(XStoreTest, RangeInsertWithNonContiguousTimestampsLocksFullSpanAgainstCon
         XStore rw_store;
         for (int i = 0; i < k_iterations; i++) {
             XStore_Proto::RangeInsert_REQ req;
+            req.set_durabilitymode(XStore_Proto::SYNC);
             req.set_dbname("TESTDB");
             XStore_Proto::RangeInsert_DATA *e0 = req.add_rangeinsert_data();
             e0->set_timestamp(near);
@@ -2270,6 +2277,7 @@ TEST_F(XStoreTest, UnaryBatchAndRangeInsertQueryShareSameCachedMappingWithinAYea
     store.BatchInsert(&batch_req, &batch_rep);
 
     XStore_Proto::RangeInsert_REQ range_req;
+    range_req.set_durabilitymode(XStore_Proto::SYNC);
     range_req.set_dbname("TESTDB");
     XStore_Proto::RangeInsert_DATA *range_entry = range_req.add_rangeinsert_data();
     range_entry->set_timestamp(TS_2009_MID + 2);
@@ -2372,6 +2380,7 @@ TEST_F(XStoreTest, AggregatesOverContiguousNumericColumn) {
 
     const std::vector<double> values = {10.0, 3.0, 7.0, 20.0, 1.0};
     XStore_Proto::RangeInsert_REQ insert_req;
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     insert_req.set_dbname("TESTDB");
     for (size_t i = 0; i < values.size(); i++) {
         XStore_Proto::RangeInsert_DATA *entry = insert_req.add_rangeinsert_data();
@@ -2485,6 +2494,7 @@ TEST_F(XStoreTest, SumAndAvgAggregateWithRemainderDivisor) {
 
     const std::vector<double> values = {2.0, 3.0, 5.0};  // sum=10, avg=3.333...
     XStore_Proto::RangeInsert_REQ insert_req;
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     insert_req.set_dbname("TESTDB");
     for (size_t i = 0; i < values.size(); i++) {
         XStore_Proto::RangeInsert_DATA *entry = insert_req.add_rangeinsert_data();
@@ -2660,6 +2670,7 @@ TEST_F(XStoreTest, MinMaxAggregateTieBreakReturnsFirstEncounteredRow) {
     CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::RangeInsert_REQ insert_req;
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     insert_req.set_dbname("TESTDB");
     auto add_row = [&](int i, double val, const std::string &marker) {
         XStore_Proto::RangeInsert_DATA *entry = insert_req.add_rangeinsert_data();
@@ -2693,6 +2704,7 @@ TEST_F(XStoreTest, AggregateSkipsUnsetFieldData) {
     CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     XStore_Proto::RangeInsert_REQ insert_req;
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     insert_req.set_dbname("TESTDB");
     auto add_row = [&](int i, const XStore_Proto::FData &f) {
         XStore_Proto::RangeInsert_DATA *entry = insert_req.add_rangeinsert_data();
@@ -2745,6 +2757,7 @@ TEST_F(XStoreTest, AggregateSkipsNonNumericColumnValues) {
     // -- only the numeric rows may contribute to the aggregate (the kernels
     // only accept oneOfData_case() in (0, 12], i.e. the 12 numeric branches).
     XStore_Proto::RangeInsert_REQ insert_req;
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     insert_req.set_dbname("TESTDB");
     auto add_row = [&](int i, const XStore_Proto::FData &f) {
         XStore_Proto::RangeInsert_DATA *entry = insert_req.add_rangeinsert_data();
@@ -2794,6 +2807,7 @@ TEST_F(XStoreTest, AggregateOnSpecificColumnAmongMixedTypeColumnsIgnoresOtherCol
     constexpr unsigned short target_column = 2;
 
     XStore_Proto::RangeInsert_REQ insert_req;
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     insert_req.set_dbname("TESTDB");
     for (int i = 0; i < K_WIDE_ROW_COUNT; i++) {
         XStore_Proto::RangeInsert_DATA *entry = insert_req.add_rangeinsert_data();
@@ -2842,6 +2856,7 @@ TEST_F(XStoreTest, AggregateTargetingNonNumericColumnAmongMixedTypeRowReturnsNoV
     CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 1024);
 
     XStore_Proto::RangeInsert_REQ insert_req;
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     insert_req.set_dbname("TESTDB");
     for (int i = 0; i < K_WIDE_ROW_COUNT; i++) {
         XStore_Proto::RangeInsert_DATA *entry = insert_req.add_rangeinsert_data();

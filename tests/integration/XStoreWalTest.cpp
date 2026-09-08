@@ -246,6 +246,14 @@ TEST_F(XStoreWalTest, BatchInsertMultiRowSingleYearGroupAppliesAllRows) {
     }
 }
 
+// RangeInsert now routes through the same WAL EnqueueWalRecord/ApplyWalRecord
+// path UnaryInsert/BatchInsert use (Task 4 of the WAL-safety-net plan) --
+// SYNC/BYPASS apply before returning (immediately queryable, same as
+// before), but ASYNC now defers the actual data-file write itself (not just
+// its fsync) to the WAL writer thread's gather window, matching
+// UnaryInsert/BatchInsert's own ASYNC behavior exactly. Poll for ASYNC
+// instead of asserting immediate visibility -- same structure as
+// XStoreWalTest.BatchInsertDurabilityModesAllApplyCorrectly.
 TEST_F(XStoreWalTest, RangeInsertDurabilityModesAllApplyCorrectly) {
     XStore store;
     CreateTestDb(store, "WALRANGEDUR", XStore_Proto::SECOND, 64);
@@ -280,18 +288,29 @@ TEST_F(XStoreWalTest, RangeInsertDurabilityModesAllApplyCorrectly) {
     store.RangeInsert(&bypass_req, &bypass_rep);
     EXPECT_NE(bypass_rep.insertstatus().find("[INFO]"), std::string::npos) << bypass_rep.insertstatus();
 
-    XStore_Proto::UnaryQuery_REP q1, q2, q3;
-    store.UnaryQuery(1700700000ULL, "WALRANGEDUR", &q1);
+    // SYNC and BYPASS apply before returning -- immediately queryable.
+    XStore_Proto::UnaryQuery_REP q2, q3;
     store.UnaryQuery(1700700001ULL, "WALRANGEDUR", &q2);
     store.UnaryQuery(1700700002ULL, "WALRANGEDUR", &q3);
-    ASSERT_TRUE(q1.has_data());
     ASSERT_TRUE(q2.has_data());
     ASSERT_TRUE(q3.has_data());
-    EXPECT_DOUBLE_EQ(q1.data().fielddata(0).doubledata(), 4.0);
     EXPECT_DOUBLE_EQ(q2.data().fielddata(0).doubledata(), 5.0);
     EXPECT_DOUBLE_EQ(q3.data().fielddata(0).doubledata(), 6.0);
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    // ASYNC: poll with a bounded timeout, same pattern as
+    // XStoreWalTest.AsyncEventuallyApplies for UnaryInsert.
+    bool became_visible = false;
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        XStore_Proto::UnaryQuery_REP q1;
+        store.UnaryQuery(1700700000ULL, "WALRANGEDUR", &q1);
+        if (q1.has_data() && q1.data().fielddata_size() == 1) {
+            EXPECT_DOUBLE_EQ(q1.data().fielddata(0).doubledata(), 4.0);
+            became_visible = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    EXPECT_TRUE(became_visible);
 }
 
 // Crash-recovery replay: writes directly into a shard's WAL file the same
@@ -623,4 +642,35 @@ TEST_F(XStoreWalTest, BatchInsertLargeContiguousBatchAllRowsPersist) {
     store.UnaryQuery(base_ts + kRowCount - 1, "WALBATCHBIG", &last_q);
     ASSERT_TRUE(last_q.has_data()) << "last row";
     EXPECT_DOUBLE_EQ(last_q.data().fielddata(0).doubledata(), static_cast<double>(kRowCount - 1));
+}
+
+// Mirrors BatchInsertLargeContiguousBatchAllRowsPersist, using RangeInsert
+// instead of BatchInsert -- locks in correctness once RangeInsert is wired
+// through the WAL (Task 4) and Task 3's pwritev chunking below it: a
+// 2000-row single-year group must not silently drop rows past the iovec
+// chunk boundary.
+TEST_F(XStoreWalTest, RangeInsertLargeContiguousBatchAllRowsPersist) {
+    XStore store;
+    CreateTestDb(store, "WALRANGEBIG", XStore_Proto::SECOND, 64);
+
+    constexpr int kRowCount = 2000;
+    XStore_Proto::RangeInsert_REQ req;
+    req.set_dbname("WALRANGEBIG");
+    req.set_durabilitymode(XStore_Proto::SYNC);
+    const unsigned long long base_ts = 1700710000ULL;
+    for (int i = 0; i < kRowCount; ++i) {
+        XStore_Proto::RangeInsert_DATA *entry = req.add_rangeinsert_data();
+        entry->set_timestamp(base_ts + static_cast<unsigned long long>(i));
+        *entry->mutable_data() = MakeRow(static_cast<double>(i));
+    }
+    XStore_Proto::RangeInsert_REP rep;
+    store.RangeInsert(&req, &rep);
+    ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+
+    for (int i = 0; i < kRowCount; i += 137) {
+        XStore_Proto::UnaryQuery_REP q;
+        store.UnaryQuery(base_ts + static_cast<unsigned long long>(i), "WALRANGEBIG", &q);
+        ASSERT_TRUE(q.has_data()) << "row " << i;
+        EXPECT_DOUBLE_EQ(q.data().fielddata(0).doubledata(), static_cast<double>(i)) << "row " << i;
+    }
 }

@@ -80,59 +80,42 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client,
     for (const std::pair<unsigned short int, std::vector<unsigned long long int>> &pair : data_map) {
         unsigned short int year_key = pair.first;
         const std::vector<unsigned long long int> &indices = pair.second;
-        const std::string &target_file = CachedYearFilePath(db_base_path_str, year_key);
 
-        // Grab first inserting element for TimeStruct purposes
-        //  Get length of time to truncate
-        TimeStruct this_ts{static_cast<time_t>(proto_from_client->rangeinsert_data(indices.front()).timestamp()), cfg_struct.timeresolution()};
+        WalRecord record;
+        record.db_name = db_name;
+        record.db_base_path = db_base_path_str;
+        record.time_resolution = cfg_struct.timeresolution();
+        record.row_length = cfg_struct.rowlength();
+        record.durability_mode = durability_mode;
+        record.rows.reserve(indices.size());
 
-        // Cached fd for this (dbName, year) file -- same fd cache UnaryInsert
-        // uses (see GetOrOpenFile). Creates+ftruncates on first use, so the
-        // separate open/ftruncate branch this used to have is gone.
-        // Timestamps in this year aren't guaranteed contiguous (see
-        // RegionLength below), so this still writes row by row rather than
-        // as one flat span -- but each row is now a pwrite() rather than a
-        // memcpy into a PROT_WRITE mapping -- see WriteRowGroupToFile for why.
-        // Held through WriteRowGroupToFile below so a concurrent eviction on
-        // another thread can't close this fd mid-write -- see FdShard's
-        // comment in XStore.h. Also held through the SYNC/ASYNC fsync
-        // dispatch below it, for the same reason.
-        std::shared_ptr<int> fd_handle = GetOrOpenFile(target_file, cfg_struct.rowlength(), this_ts.last_epoch - this_ts.first_epoch);
-        if (!fd_handle) {
-            std::string err_msg = fmt::format("[RANGE INSERT] [DB: {}] - Unable to open {}.XSTORE", db_name, year_key);
-            SetTaggedStatus(return_data->mutable_insertstatus(), "[ERROR] ", err_msg);
-            spdlog::error(err_msg);
+        for (unsigned long long int idx : indices) {
+            const XStore_Proto::RangeInsert_DATA &entry = proto_from_client->rangeinsert_data(idx);
+            size_t serialized_size = entry.data().ByteSizeLong();
+            if (serialized_size > static_cast<size_t>(cfg_struct.rowlength())) {
+                continue;
+            }
+            std::string row_bytes(cfg_struct.rowlength(), '\0');
+            [[maybe_unused]] bool serialize_ok = entry.data().SerializeToArray(row_bytes.data(), static_cast<int>(cfg_struct.rowlength()));
+            std::memset(row_bytes.data() + serialized_size, 0, cfg_struct.rowlength() - serialized_size);
+            record.rows.push_back(WalRow{entry.timestamp(), std::move(row_bytes)});
+        }
+
+        if (record.rows.empty()) {
             continue;
         }
-        int fd = *fd_handle;
 
-        // RegionLength (computed inside the shared helper below) must cover
-        // the actual byte span of the writes, not just count*rowLength --
-        // that undersizes the lock (and races unprotected writes past its
-        // end) whenever the timestamps in this year aren't contiguous.
-        // Relies on the same "incoming data is sorted" precondition the rest
-        // of this function already assumes, so the last entry in the group
-        // carries the highest offset.
-        WriteRowGroupToFile(target_file, fd, this_ts.first_epoch, cfg_struct.rowlength(), indices,
-            [&](unsigned long long int idx) -> const XStore_Proto::RangeInsert_DATA& { return proto_from_client->rangeinsert_data(idx); });
-
-        if (durability_mode == XStore_Proto::SYNC) {
-            if (fdatasync(fd) != 0) {
-                spdlog::error("[RANGE INSERT] [DB: {}] - fdatasync failed for {}.XSTORE", db_name, year_key);
-                any_sync_failed = true;
-            }
-        } else if (durability_mode == XStore_Proto::ASYNC) {
-            XStore::ScheduleAsyncDataFsync(fd_handle);
+        bool ok = (durability_mode == XStore_Proto::BYPASS)
+            ? ApplyWalRecord(record)
+            : EnqueueWalRecord(std::move(record));
+        if (!ok) {
+            any_sync_failed = true;
+            spdlog::error("[RANGE INSERT] [DB: {}] - WAL write failed for {}.XSTORE", db_name, year_key);
         }
-        // BYPASS: neither -- relies on OS writeback, same as before this
-        // durability mode existed.
     }
 
-    // Return insert status. A SYNC fsync failure means the rows are on disk
-    // but not provably durable yet -- surfaced instead of letting the
-    // unconditional success message below paper over it.
-    if (durability_mode == XStore_Proto::SYNC && any_sync_failed) {
-        std::string err_msg = fmt::format("[RANGE INSERT] [DB: {}] - Inserted {} elements, but SYNC fdatasync failed for at least one file",
+    if ((durability_mode == XStore_Proto::SYNC || durability_mode == XStore_Proto::BYPASS) && any_sync_failed) {
+        std::string err_msg = fmt::format("[RANGE INSERT] [DB: {}] - Inserted {} elements, but the write failed for at least one group",
                                            db_name, proto_from_client->rangeinsert_data_size());
         SetTaggedStatus(return_data->mutable_insertstatus(), "[ERROR] ", err_msg);
         spdlog::error(err_msg);
