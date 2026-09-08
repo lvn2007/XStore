@@ -674,3 +674,79 @@ TEST_F(XStoreWalTest, RangeInsertLargeContiguousBatchAllRowsPersist) {
         EXPECT_DOUBLE_EQ(q.data().fielddata(0).doubledata(), static_cast<double>(i)) << "row " << i;
     }
 }
+
+// Crash-recovery replay for a MULTI-row record -- the actual capability
+// this plan adds for Batch/Range Insert. ParseWalRecord/ReplayWal already
+// handled row_count > 1 generically (the wire format always carried it),
+// but no real producer had ever emitted one before Tasks 1/4 wired
+// Batch/Range through the WAL -- this test proves the multi-row path
+// actually round-trips, standing in for "the process crashed after the WAL
+// fsync'd a 3-row Batch/Range record but before any of the 3 rows were
+// applied to the data file".
+TEST_F(XStoreWalTest, ReplayRecoversMultiRowUnappliedRecord) {
+    {
+        XStore store;
+        CreateTestDb(store, "WALCRASHMULTI", XStore_Proto::SECOND, 64);
+    }
+
+    std::filesystem::path db_base_path = scratch->test_root / "DataStore" / "WALCRASHMULTI";
+    size_t shard_idx = std::hash<std::string>{}(db_base_path.string()) % XStoreTunables::WAL_SHARD_COUNT;
+    std::filesystem::path wal_dir = scratch->test_root / "DataStore" / "WAL";
+    std::filesystem::create_directories(wal_dir);
+    std::filesystem::path wal_file = wal_dir / ("shard_" + std::to_string(shard_idx) + ".WAL");
+
+    struct RowFixture { uint64_t epoch_time; double value; };
+    const std::vector<RowFixture> rows = {
+        {1700000010ULL, 11.0},
+        {1700000011ULL, 22.0},
+        {1700000012ULL, 33.0},
+    };
+
+    std::string db_name = "WALCRASHMULTI";
+    std::string payload;
+    auto append_pod = [&](auto value) {
+        payload.append(reinterpret_cast<const char *>(&value), sizeof(value));
+    };
+    uint16_t db_name_len = static_cast<uint16_t>(db_name.size());
+    uint16_t row_length = 64;
+    int32_t time_res = static_cast<int32_t>(XStore_Proto::SECOND);
+    uint32_t row_count = static_cast<uint32_t>(rows.size());
+    append_pod(db_name_len);
+    append_pod(row_length);
+    append_pod(time_res);
+    append_pod(row_count);
+    payload.append(db_name);
+    for (const RowFixture &r : rows) {
+        XStore_Proto::RowData row_data = MakeRow(r.value);
+        std::string row_bytes(row_length, '\0');
+        row_data.SerializeToArray(row_bytes.data(), static_cast<int>(row_data.ByteSizeLong()));
+        uint64_t epoch_time = r.epoch_time;
+        append_pod(epoch_time);
+        payload.append(row_bytes);
+    }
+
+    uint32_t crc = Crc32c(payload.data(), payload.size());
+
+    std::string record;
+    auto append_pod_record = [&](auto value) {
+        record.append(reinterpret_cast<const char *>(&value), sizeof(value));
+    };
+    uint32_t record_len = static_cast<uint32_t>(4 + payload.size());
+    append_pod_record(record_len);
+    append_pod_record(crc);
+    record.append(payload);
+
+    std::ofstream out(wal_file, std::ios::binary | std::ios::trunc);
+    out.write(record.data(), static_cast<std::streamsize>(record.size()));
+    out.close();
+
+    XStore store2;
+    store2.InitDB();
+    for (const RowFixture &r : rows) {
+        XStore_Proto::UnaryQuery_REP query_rep;
+        store2.UnaryQuery(r.epoch_time, "WALCRASHMULTI", &query_rep);
+        ASSERT_TRUE(query_rep.has_data()) << "epoch_time " << r.epoch_time;
+        ASSERT_EQ(query_rep.data().fielddata_size(), 1) << "epoch_time " << r.epoch_time;
+        EXPECT_DOUBLE_EQ(query_rep.data().fielddata(0).doubledata(), r.value) << "epoch_time " << r.epoch_time;
+    }
+}
