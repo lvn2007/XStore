@@ -586,3 +586,41 @@ TEST_F(XStoreWalTest, ReplayOfOrphanedRecordIsNotRetriedForever) {
     in2.close();
     EXPECT_EQ(header_after_second_replay, 0u);
 }
+
+// Before Task 3's fix, a single WalRecord with enough rows blows past
+// pwritev's IOV_MAX (2 iovecs/row: an epoch-time buffer + the row bytes) in
+// ONE syscall and fails with EINVAL, silently losing the whole batch (the
+// WalWriterLoop's per-file write step treated any pwritev failure as
+// "not durable" and moved on, so this manifested as every row in the batch
+// staying invisible forever, not a crash). 2000 contiguous rows in one
+// year-group needs ~4000 iovecs, well past the previously-assumed
+// 512-iovec ceiling.
+TEST_F(XStoreWalTest, BatchInsertLargeContiguousBatchAllRowsPersist) {
+    XStore store;
+    CreateTestDb(store, "WALBATCHBIG", XStore_Proto::SECOND, 64);
+
+    constexpr int kRowCount = 2000;
+    XStore_Proto::BatchInsert_REQ req;
+    req.set_dbname("WALBATCHBIG");
+    req.set_durabilitymode(XStore_Proto::SYNC);
+    const unsigned long long base_ts = 1700630000ULL;
+    for (int i = 0; i < kRowCount; ++i) {
+        XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
+        entry->set_timestamp(base_ts + static_cast<unsigned long long>(i));
+        *entry->mutable_data() = MakeRow(static_cast<double>(i));
+    }
+    XStore_Proto::BatchInsert_REP rep;
+    store.BatchInsert(&req, &rep);
+    ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+
+    for (int i = 0; i < kRowCount; i += 137) {  // sample, not every row -- keeps the test fast
+        XStore_Proto::UnaryQuery_REP q;
+        store.UnaryQuery(base_ts + static_cast<unsigned long long>(i), "WALBATCHBIG", &q);
+        ASSERT_TRUE(q.has_data()) << "row " << i;
+        EXPECT_DOUBLE_EQ(q.data().fielddata(0).doubledata(), static_cast<double>(i)) << "row " << i;
+    }
+    XStore_Proto::UnaryQuery_REP last_q;
+    store.UnaryQuery(base_ts + kRowCount - 1, "WALBATCHBIG", &last_q);
+    ASSERT_TRUE(last_q.has_data()) << "last row";
+    EXPECT_DOUBLE_EQ(last_q.data().fielddata(0).doubledata(), static_cast<double>(kRowCount - 1));
+}

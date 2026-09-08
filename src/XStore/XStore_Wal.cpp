@@ -503,16 +503,14 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
     // computed values, not already-owned memory); everything else is a
     // reference into memory the batch already owns.
     //
-    // iovec count per file is bounded by 2 * (rows in this batch for that
-    // file), since today's only WAL producer (UnaryInsert) always builds
-    // exactly 1 row/record: worst case WAL_BATCH_MAX_RECORDS(256) * 2 = 512
-    // iovecs if an entire batch lands in one file (the common case, one
-    // shard/file per batch in production) -- comfortably under Linux's
-    // IOV_MAX/UIO_MAXIOV of 1024 (confirmed via getconf IOV_MAX on the
-    // deployment target), which pwritev fails past with EINVAL rather than
-    // silently truncating. Revisit this bound if a future multi-row
-    // WalRecord producer (Batch/Range wiring) is added -- N rows/record
-    // pushes the worst case up by (N-1) extra iovecs per record.
+    // iovec count per file is no longer assumed to fit in one pwritev call
+    // -- BatchInsert/RangeInsert can hand a single WalRecord hundreds of
+    // thousands of rows (2 iovecs/row: an epoch-time buffer + the row bytes
+    // for every row past the first), which routinely exceeds Linux's
+    // IOV_MAX/UIO_MAXIOV of 1024. The write loop below chunks into multiple
+    // pwritev calls per file (advancing the file offset between chunks)
+    // instead of relying on a single-call bound -- see
+    // XStoreTunables::WAL_PWRITEV_MAX_IOVECS.
     std::unordered_map<std::string, std::vector<struct iovec>> iovecs_by_file;
     // Deques, not vectors: push_back on a deque never invalidates
     // references to earlier elements (only vector's does, on reallocation)
@@ -752,22 +750,33 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
                     fd = it->second;
                 }
 
-                size_t total_size = 0;
-                for (const struct iovec &iov : iov_list) total_size += iov.iov_len;
+                // Chunk this file's iovecs into groups of at most
+                // WAL_PWRITEV_MAX_IOVECS -- the common case (few
+                // records/rows) is exactly one chunk, unchanged from
+                // before; only a large multi-row Batch/Range record (or
+                // enough concurrent records landing on the same file in one
+                // gather window) ever needs more than one pwritev call.
+                // Offset advances across chunks within THIS batch pass only
+                // -- the WAL file itself is still overwritten from offset 0
+                // on every writer-loop pass (see WalWriterLoop's own
+                // comment on this), unrelated to chunking.
+                bool file_write_ok = true;
+                off_t chunk_offset = 0;
+                for (size_t iov_start = 0; iov_start < iov_list.size(); ) {
+                    size_t iov_count = std::min(iov_list.size() - iov_start, XStoreTunables::WAL_PWRITEV_MAX_IOVECS);
+                    size_t chunk_bytes = 0;
+                    for (size_t i = iov_start; i < iov_start + iov_count; ++i) chunk_bytes += iov_list[i].iov_len;
 
-                // fdatasync, not fsync: WAL_FILE_PREALLOC_BYTES is sized (see
-                // its comment in XStore_Tunables.h, enforced by a
-                // static_assert there) to make this write structurally
-                // unable to grow the file past its preallocated region, so
-                // there's no metadata (st_size) change to durably persist --
-                // only the written bytes matter. pwritev, not pwrite: writes
-                // straight from every piece's own memory (record headers
-                // above, row bytes still owned by `batch`) in one syscall,
-                // without first concatenating them into one contiguous
-                // buffer -- same on-disk byte layout either way, no format
-                // change, just no extra copy of every row's payload bytes.
-                ssize_t written = pwritev(fd, iov_list.data(), static_cast<int>(iov_list.size()), 0);
-                if (written != static_cast<ssize_t>(total_size) || fdatasync(fd) != 0) {
+                    ssize_t written = pwritev(fd, iov_list.data() + iov_start, static_cast<int>(iov_count), chunk_offset);
+                    if (written != static_cast<ssize_t>(chunk_bytes)) {
+                        file_write_ok = false;
+                        break;
+                    }
+                    chunk_offset += static_cast<off_t>(chunk_bytes);
+                    iov_start += iov_count;
+                }
+
+                if (!file_write_ok || fdatasync(fd) != 0) {
                     spdlog::error("[WAL] - Failed to durably write/fdatasync {}", wal_path);
                     continue;
                 }

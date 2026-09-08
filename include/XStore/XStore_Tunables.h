@@ -55,6 +55,14 @@ inline constexpr size_t      WAL_SHARD_COUNT            = 8;
 // normal run-to-run noise for a process-spawn-heavy suite.
 inline constexpr unsigned    WAL_GROUP_COMMIT_WINDOW_US  = 10000;
 inline constexpr size_t      WAL_BATCH_MAX_RECORDS       = 256;
+// Linux's IOV_MAX/UIO_MAXIOV (confirmed via getconf IOV_MAX on the
+// deployment target) -- pwritev fails with EINVAL past this many iovecs in
+// one call. WalWriterLoop's per-file write step chunks into multiple
+// pwritev calls (same file, advancing offset) rather than assuming a
+// single call always fits, now that Batch/Range Insert can hand a single
+// WalRecord hundreds of thousands of rows (2 iovecs/row: an epoch-time
+// buffer + the row bytes for every row past the first).
+inline constexpr size_t      WAL_PWRITEV_MAX_IOVECS      = 1024;
 inline constexpr const char* WAL_DIR_NAME                = "WAL";
 
 // WAL_SHARD_COUNT above is the compile-time ceiling (array size); the
