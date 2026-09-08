@@ -327,6 +327,30 @@ bool XStore::EnqueueWalRecord(WalRecord record) {
 }
 
 void XStore::StartWalWriters(const std::string &data_store_dir) {
+    // Force spdlog's default-logger registry to exist BEFORE the
+    // std::atexit callback below is registered. spdlog::details::registry
+    // is a function-local static (Meyer's) singleton -- constructed lazily
+    // on whichever spdlog:: call happens first, ANYWHERE in the process,
+    // not eagerly at static-init time. Per [basic.start.term], termination
+    // functions (atexit callbacks and static-object destructors) run in
+    // reverse order of "completion", where a static object's construction
+    // and an atexit registration are ordered against each other by which
+    // one completed first: if this atexit() call below is registered
+    // BEFORE the registry singleton is constructed, the registry's
+    // destructor is sequenced to run BEFORE this callback executes -- the
+    // exact opposite of what the callback's join()s below assume, and
+    // exploitable by a still-running WAL/fsync-coalescer thread calling
+    // spdlog::error/warn after the logger it's using has already been
+    // destroyed (this is the shutdown segfault this comment guards
+    // against). Production (src/main.cpp) constructs a Logger before any
+    // XStore, so its first spdlog:: call already precedes this one; the
+    // test binary never constructs one, so without this line the registry
+    // is instead first (and lazily) constructed by a WAL writer thread's
+    // OWN first error log call, sometimes well after this point. Calling
+    // it here, unconditionally, before spawning any thread or registering
+    // the atexit callback, makes the safe ordering hold on every path.
+    static_cast<void>(spdlog::default_logger());
+
     // Writer threads are almost entirely I/O-bound (blocked in fsync() or
     // on the queue's semaphore -- near-zero idle CPU, see the
     // WAL_GROUP_COMMIT_WINDOW_US tunable comment), so the real ceiling on
