@@ -165,41 +165,68 @@ int OpenAndPreallocateWalFile(const std::string &wal_path) {
 } // namespace
 
 bool XStore::ApplyWalRecord(const WalRecord &record_to_apply) {
-    // One row at a time for v1 -- each row gets its own offset/lock, same
-    // shape as UnaryInsert's pre-WAL inline path. Coalescing same-year rows
-    // into fewer pwrites (the way WriteRowGroupToFile already does for
-    // Batch/Range's direct-write path, XStore_Internal.h) is a natural
-    // follow-up once a real multi-row caller exists to benchmark against.
-    //
-    // Returns true only if every row applied cleanly -- the writer loop's
-    // caller uses this (combined with the WAL fsync's own success) to
-    // decide whether this record was actually durable, instead of always
-    // reporting success regardless of what happened here.
+    // Precondition: every row in one WalRecord belongs to the same (db,
+    // year) file, and rows are ordered ascending by epoch_time. True for
+    // every current producer -- UnaryInsert's 1-row records trivially
+    // satisfy this; BatchInsert/RangeInsert build one WalRecord per
+    // year-bucket group (see XStore_BatchOps.cpp/XStore_RangeOps.cpp),
+    // which is sorted ascending the same way WriteRowGroupToFile's own
+    // (undocumented-enforcement, same style) precondition already assumed
+    // for the pre-WAL direct-write path this replaces.
+    if (record_to_apply.rows.empty()) return true;
+
+    TimeStruct first_ts(record_to_apply.rows.front().epoch_time, record_to_apply.time_resolution);
+    const std::string &target_file = CachedYearFilePath(record_to_apply.db_base_path, first_ts.year);
+
+    std::shared_ptr<int> fd_handle = GetOrOpenFile(target_file, record_to_apply.row_length,
+                                                    first_ts.last_epoch - first_ts.first_epoch);
+    if (!fd_handle) {
+        spdlog::error("[WAL APPLY] [DB: {}] - Unable to open {}.XSTORE", record_to_apply.db_name, first_ts.year);
+        return false;
+    }
+    int fd = *fd_handle;
+
+    std::vector<unsigned long long> offsets(record_to_apply.rows.size());
+    for (size_t i = 0; i < record_to_apply.rows.size(); ++i) {
+        offsets[i] = (record_to_apply.rows[i].epoch_time - first_ts.first_epoch) * record_to_apply.row_length;
+    }
+
+    // One lock spanning the whole record's min-to-max offset span (same
+    // shape as WriteRowGroupToFile) -- cheaper than one lock per run, and
+    // correct regardless of how many runs the offsets below turn out to
+    // have.
+    unsigned long long region_length = (offsets.back() + record_to_apply.row_length) - offsets.front();
+    FileRangeLockGuard guard(target_file, offsets.front(), region_length, FileRangeLock::LockType::WRITE);
+
+    // Thread-local scratch buffer, grown to fit the largest run applied so
+    // far and reused across calls -- same pattern as WriteRowGroupToFile's
+    // run_buf, avoiding a heap allocation per run.
+    thread_local std::vector<char> run_buf;
     bool all_rows_ok = true;
-    for (const WalRow &row : record_to_apply.rows) {
-        TimeStruct curr_ts(row.epoch_time, record_to_apply.time_resolution);
-        const std::string &target_file = CachedYearFilePath(record_to_apply.db_base_path, curr_ts.year);
 
-        std::shared_ptr<int> fd_handle = GetOrOpenFile(target_file, record_to_apply.row_length,
-                                                        curr_ts.last_epoch - curr_ts.first_epoch);
-        if (!fd_handle) {
-            spdlog::error("[WAL APPLY] [DB: {}] - Unable to open {}.XSTORE", record_to_apply.db_name, curr_ts.year);
-            all_rows_ok = false;
-            continue;
+    for (size_t run_start = 0; run_start < offsets.size(); ) {
+        size_t run_end = run_start + 1;
+        while (run_end < offsets.size() && offsets[run_end] == offsets[run_end - 1] + record_to_apply.row_length) {
+            ++run_end;
         }
-        int fd = *fd_handle;
 
-        unsigned long long offset = (row.epoch_time - curr_ts.first_epoch) * record_to_apply.row_length;
-        ssize_t written;
-        {
-            FileRangeLockGuard guard(target_file, offset, record_to_apply.row_length, FileRangeLock::LockType::WRITE);
-            written = pwrite(fd, row.row_bytes.data(), record_to_apply.row_length, static_cast<off_t>(offset));
+        size_t run_rows = run_end - run_start;
+        size_t run_bytes = run_rows * static_cast<size_t>(record_to_apply.row_length);
+        if (run_buf.size() < run_bytes) {
+            run_buf.resize(run_bytes);
         }
-        if (written != static_cast<ssize_t>(record_to_apply.row_length)) {
-            spdlog::error("[WAL APPLY] [DB: {}] - Short/failed write to {}.XSTORE", record_to_apply.db_name, curr_ts.year);
+
+        for (size_t i = run_start; i < run_end; ++i) {
+            const std::string &row_bytes = record_to_apply.rows[i].row_bytes;
+            std::memcpy(run_buf.data() + (i - run_start) * record_to_apply.row_length, row_bytes.data(), record_to_apply.row_length);
+        }
+
+        ssize_t written = pwrite(fd, run_buf.data(), run_bytes, static_cast<off_t>(offsets[run_start]));
+        if (written != static_cast<ssize_t>(run_bytes)) {
+            spdlog::error("[WAL APPLY] [DB: {}] - Short/failed write to {}.XSTORE", record_to_apply.db_name, first_ts.year);
             all_rows_ok = false;
-            continue;
         }
+        run_start = run_end;
     }
     return all_rows_ok;
 }

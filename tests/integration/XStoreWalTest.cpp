@@ -449,6 +449,46 @@ TEST_F(XStoreWalTest, WalStatsCountersReflectRealBatching) {
 }
 #endif
 
+// Exercises ApplyWalRecord's run-coalescing rewrite (Task 2): a batch with
+// two contiguous runs separated by a gap (a timestamp never inserted) must
+// still land every row at its correct offset -- a run-detection off-by-one
+// would misalign the second run onto the first run's tail.
+TEST_F(XStoreWalTest, BatchInsertGappedRunsLandAtCorrectOffsets) {
+    XStore store;
+    CreateTestDb(store, "WALBATCHGAP", XStore_Proto::SECOND, 64);
+
+    XStore_Proto::BatchInsert_REQ req;
+    req.set_dbname("WALBATCHGAP");
+    req.set_durabilitymode(XStore_Proto::SYNC);
+    // Run 1: timestamps 1700620000..1700620002 (3 contiguous rows)
+    // Gap: 1700620003 never inserted
+    // Run 2: timestamps 1700620004..1700620005 (2 contiguous rows)
+    const std::vector<unsigned long long> timestamps = {
+        1700620000ULL, 1700620001ULL, 1700620002ULL, 1700620004ULL, 1700620005ULL
+    };
+    for (size_t i = 0; i < timestamps.size(); ++i) {
+        XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
+        entry->set_timestamp(timestamps[i]);
+        *entry->mutable_data() = MakeRow(100.0 + static_cast<double>(i));
+    }
+    XStore_Proto::BatchInsert_REP rep;
+    store.BatchInsert(&req, &rep);
+    ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+
+    for (size_t i = 0; i < timestamps.size(); ++i) {
+        XStore_Proto::UnaryQuery_REP q;
+        store.UnaryQuery(timestamps[i], "WALBATCHGAP", &q);
+        ASSERT_TRUE(q.has_data()) << "timestamp " << timestamps[i];
+        EXPECT_DOUBLE_EQ(q.data().fielddata(0).doubledata(), 100.0 + static_cast<double>(i)) << "timestamp " << timestamps[i];
+    }
+
+    // The gap itself must read back empty (never written), not leaked data
+    // from a misaligned run.
+    XStore_Proto::UnaryQuery_REP gap_q;
+    store.UnaryQuery(1700620003ULL, "WALBATCHGAP", &gap_q);
+    EXPECT_FALSE(gap_q.has_data() && gap_q.data().fielddata_size() > 0 && gap_q.data().fielddata(0).has_doubledata());
+}
+
 // A prior version of this file had a regression guard here
 // (SyncPerCommitLatencyUnaffectedByConcurrentGroupCommit) asserting that a
 // SYNC_PER_COMMIT insert didn't inherit GROUP_COMMIT's gather-window linger
