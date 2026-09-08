@@ -69,10 +69,8 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client,
         AppendToYearBucket(data_map, curr_year, static_cast<unsigned long long int>(i));
     }
 
-    // durabilityMode here does NOT route through the WAL -- see the field's
-    // comment on RangeInsert_REQ in XStore.proto. Same rationale as
-    // BatchInsert: ASYNC/SYNC control whether/when the touched data file(s)
-    // get fdatasync()'d directly, no WAL detour for already-sequential rows.
+    // durabilityMode now routes through the WAL -- see the field's comment
+    // on RangeInsert_REQ in XStore.proto.
     const XStore_Proto::WalDurabilityMode durability_mode = proto_from_client->durabilitymode();
     bool any_sync_failed = false;
 

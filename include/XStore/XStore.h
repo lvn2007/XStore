@@ -181,11 +181,10 @@ class XStore {
         // for the durability/group-commit mechanics.
         //
         // A WalRecord represents one WRITE REQUEST, not one row: UnaryInsert
-        // builds a 1-row WalRecord; a future BatchInsert/RangeInsert wiring
-        // (deferred -- see the plan's "Out of Scope" section, revisit after
-        // UnaryInsert's own perf test) would build an N-row WalRecord the
-        // same way, reusing this exact type and EnqueueWalRecord/
-        // ApplyWalRecord rather than needing a parallel WAL path. Durability
+        // builds a 1-row WalRecord; BatchInsert/RangeInsert build one
+        // N-row WalRecord per year-bucket group the same way, reusing this
+        // exact type and EnqueueWalRecord/ApplyWalRecord rather than a
+        // parallel WAL path. Durability
         // is per-REQUEST: one completion future covers every row in the
         // record, so a batch's caller waits once for the whole batch, not
         // once per row.

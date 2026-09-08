@@ -165,14 +165,13 @@ message BatchInsert_DATA {
 }
 
 // --- BATCH INSERT
-// durabilityMode here does NOT route through the WAL the way UnaryInsert's
-// does -- Batch/Range rows are already written sequentially (year-bucketed,
-// run-coalesced pwrite), so there's no random-write pattern for a WAL's
-// log-then-apply double-write to amortize away. ASYNC/SYNC instead control
-// whether/when the touched data file(s) get fdatasync()'d directly: SYNC
-// fsyncs inline before returning, ASYNC hands the touched fd off to a
-// background coalescer (bounded staleness, caller doesn't wait), BYPASS
-// does neither (relies on OS writeback, same as today's only behavior).
+// durabilityMode now routes through the same WAL EnqueueWalRecord/
+// ApplyWalRecord path UnaryInsert uses (one WalRecord per year-bucket
+// group) -- SYNC blocks until durably fsync'd and applied, ASYNC enqueues
+// and returns immediately (both the fsync AND the data-file write itself
+// are deferred to the WAL writer thread, unlike the old direct-write
+// path), BYPASS applies straight to the data file on this thread with no
+// WAL record at all, same as UnaryInsert's BYPASS.
 message BatchInsert_REQ {
   RequestType RType = 1;
   string dbName = 2;
@@ -202,9 +201,8 @@ message RangeInsert_DATA {
 }
 
 // --- RANGE INSERT
-// durabilityMode: same direct-fsync semantics as BatchInsert_REQ's field
-// above (see its comment) -- no WAL involvement, RangeInsert's rows are
-// already sequential.
+// durabilityMode: same WAL-routed semantics as BatchInsert_REQ's field
+// above (see its comment).
 message RangeInsert_REQ {
   RequestType RType = 1;
   string dbName = 2;

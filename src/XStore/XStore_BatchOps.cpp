@@ -101,12 +101,8 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStor
         AppendToYearBucket(data_map, curr_year, static_cast<unsigned long long int>(i));
     }
 
-    // BatchInsert now routes through the same WAL EnqueueWalRecord/
-    // ApplyWalRecord path UnaryInsert uses -- one WalRecord per year-bucket
-    // group instead of one per row (see WalRecord's comment in XStore.h).
-    // SYNC/BYPASS apply before returning (immediately queryable); ASYNC
-    // enqueues and returns immediately, deferring the actual data-file write
-    // (not just its fsync) to the WAL writer thread's gather window.
+    // durabilityMode now routes through the WAL -- see the field's comment
+    // on BatchInsert_REQ in XStore.proto.
     const XStore_Proto::WalDurabilityMode durability_mode = proto_from_client->durabilitymode();
     bool any_sync_failed = false;
 
