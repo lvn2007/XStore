@@ -54,9 +54,77 @@ FetchContent_MakeAvailable(moodycamel_concurrentqueue)
 add_library(moodycamel INTERFACE)
 target_include_directories(moodycamel INTERFACE ${moodycamel_concurrentqueue_SOURCE_DIR})
 
-# Protobuf
-find_package(absl REQUIRED)
-find_package(Protobuf REQUIRED)
+# ------------------------------------------------------------------
+# Dependencies (protobuf, libzmq) -- self-contained by default
+# ------------------------------------------------------------------
+# Both are fetched & built from source (pinned) so a fresh machine needs only
+# a C/C++ toolchain, cmake and git -- no `apt install libprotobuf-dev
+# libzmq3-dev`, no hand-built protobuf. Flip the switch OFF to use a
+# preinstalled copy instead (protobuf must install protobuf-config.cmake so
+# the protobuf::libprotobuf / protobuf::protoc imported targets exist; zmq
+# just needs libzmq + <zmq.h>).
+
+# --- Protobuf (pinned to the v35.1 release tag == commit 35cd01f) ---
+option(XSTORE_FETCH_PROTOBUF "Fetch & build protobuf from source instead of a system install" ON)
+
+if(TARGET protobuf::libprotobuf)
+    message(STATUS "Protobuf: using pre-existing protobuf target")
+elseif(XSTORE_FETCH_PROTOBUF)
+    set(protobuf_BUILD_TESTS       OFF CACHE BOOL "" FORCE)
+    set(protobuf_BUILD_EXAMPLES    OFF CACHE BOOL "" FORCE)
+    set(protobuf_BUILD_CONTRIB     OFF CACHE BOOL "" FORCE)
+    set(protobuf_BUILD_SHARED_LIBS ON  CACHE BOOL "" FORCE)
+    # Force protobuf to fetch & build its own pinned abseil/zlib/upb instead of
+    # picking up a possibly-older system copy (an old system absl lacks newer
+    # targets like absl::absl_check and breaks the link).
+    set(protobuf_FORCE_FETCH_DEPENDENCIES ON CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+            protobuf
+            GIT_REPOSITORY https://github.com/protocolbuffers/protobuf.git
+            GIT_TAG v35.1
+            GIT_SHALLOW ON
+    )
+    FetchContent_MakeAvailable(protobuf)
+    message(STATUS "Protobuf: fetched & building from source (v35.1)")
+else()
+    find_package(Protobuf CONFIG REQUIRED)
+    message(STATUS "Protobuf: using system install ${Protobuf_VERSION}")
+endif()
+
+# --- libzmq (C library; the cppzmq C++ headers are vendored in third_party) ---
+option(XSTORE_FETCH_ZMQ "Fetch & build libzmq from source instead of a system install" ON)
+
+if(TARGET zmq)
+    message(STATUS "ZMQ: using pre-existing zmq target")
+elseif(XSTORE_FETCH_ZMQ)
+    set(BUILD_SHARED   ON  CACHE BOOL "" FORCE)
+    set(ENABLE_CURVE   OFF CACHE BOOL "" FORCE)
+    set(WITH_TLS       OFF CACHE BOOL "" FORCE)
+    set(BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+    set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+            zmq
+            GIT_REPOSITORY https://github.com/zeromq/libzmq.git
+            GIT_TAG v4.3.5
+            GIT_SHALLOW ON
+    )
+    FetchContent_MakeAvailable(zmq)
+    add_library(zmq ALIAS libzmq)
+    message(STATUS "ZMQ: fetched & building libzmq from source (4.3.5)")
+else()
+    find_path(ZMQ_INCLUDE_DIR NAMES zmq.h)
+    find_library(ZMQ_LIBRARY NAMES zmq)
+    if(NOT ZMQ_LIBRARY OR NOT ZMQ_INCLUDE_DIR)
+        message(FATAL_ERROR
+            "libzmq not found (looked for libzmq + zmq.h). "
+            "Install libzmq3-dev, or reconfigure with -DXSTORE_FETCH_ZMQ=ON.")
+    endif()
+    add_library(zmq SHARED IMPORTED)
+    set_target_properties(zmq PROPERTIES
+            IMPORTED_LOCATION "${ZMQ_LIBRARY}"
+            INTERFACE_INCLUDE_DIRECTORIES "${ZMQ_INCLUDE_DIR}")
+    message(STATUS "ZMQ: using system libzmq ${ZMQ_LIBRARY}")
+endif()
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
@@ -64,9 +132,8 @@ find_package(Threads REQUIRED)
 # Vendored third-party headers (spdlog, cppzmq)
 include_directories(third_party)
 
-# Protobuf-compiler
+# Protobuf-compiler (imported target from the protobuf build above)
 set(_PROTOBUF_PROTOC $<TARGET_FILE:protobuf::protoc>)
-message(STATUS "Using Protobuf ${Protobuf_VERSION}")
 
 # Proto file
 get_filename_component(XStore_proto "proto/XStore.proto" ABSOLUTE)
@@ -82,8 +149,56 @@ add_custom_command(
         -I "${XStore_proto_path}" "${XStore_proto}"
         DEPENDS "${XStore_proto}")
 
-# Include generated *.pb.h files
-include_directories(${Protobuf_INCLUDE_DIRS})
+# ------------------------------------------------------------------
+# Extra protobuf language bindings (opt-in, for out-of-tree ZMQ clients)
+# ------------------------------------------------------------------
+# C++ is always generated above and compiled into XStore. The rest are
+# written to <build>/generated/<lang>/ so client code in other languages can
+# consume the same wire protocol. Built-in generators (python, java, ...)
+# need no extra tooling; plugin-based ones (c, go, rust, ...) need the
+# matching protoc-gen-<lang> on PATH -- if it isn't installed we skip that
+# language with a note rather than failing. Node.js/JS has no standard protoc
+# generator: ship proto/XStore.proto and parse it with protobuf.js in the
+# Node project.
+# Generate with: cmake --build build --target gen_proto
+set(XSTORE_PROTO_LANGS "cpp" CACHE STRING
+    "Comma-separated protobuf languages to generate: cpp,c,python,java,php,ruby,csharp,objc,go,rust (cpp is always compiled into XStore)")
+
+string(REPLACE "," ";" _xstore_proto_langs "${XSTORE_PROTO_LANGS}")
+# Built-in generators in the pinned protoc (v35.1); every other language name
+# is treated as plugin-based and resolved via protoc-gen-<lang> on PATH.
+set(_xstore_proto_builtin cpp java kotlin python php ruby csharp objc)
+set(_xstore_proto_gen_targets "")
+foreach(_xstore_lang IN LISTS _xstore_proto_langs)
+    if(_xstore_lang STREQUAL "cpp")
+        continue()   # already generated + compiled into XStore above
+    endif()
+    list(FIND _xstore_proto_builtin ${_xstore_lang} _xstore_builtin_idx)
+    if(_xstore_builtin_idx EQUAL -1)
+        string(TOUPPER "${_xstore_lang}" _xstore_lang_upper)
+        find_program(_xstore_protoc_gen_${_xstore_lang_upper} NAMES protoc-gen-${_xstore_lang})
+        if(NOT _xstore_protoc_gen_${_xstore_lang_upper})
+            message(STATUS "gen_proto: protoc-gen-${_xstore_lang} not found on PATH -- skipping ${_xstore_lang} bindings")
+            continue()
+        endif()
+    endif()
+    set(_xstore_lang_out "${CMAKE_BINARY_DIR}/generated/${_xstore_lang}")
+    file(MAKE_DIRECTORY "${_xstore_lang_out}")
+    add_custom_target(gen_proto_${_xstore_lang}
+            COMMAND ${_PROTOBUF_PROTOC} --experimental_allow_proto3_optional
+                    --${_xstore_lang}_out ${_xstore_lang_out}
+                    -I "${XStore_proto_path}" "${XStore_proto}"
+            COMMENT "Generating ${_xstore_lang} protobuf bindings -> ${_xstore_lang_out}"
+            VERBATIM)
+    list(APPEND _xstore_proto_gen_targets gen_proto_${_xstore_lang})
+endforeach()
+if(_xstore_proto_gen_targets)
+    add_custom_target(gen_proto DEPENDS ${_xstore_proto_gen_targets})
+    message(STATUS "gen_proto: will generate bindings for: ${XSTORE_PROTO_LANGS}")
+endif()
+
+# Include generated *.pb.h files (protobuf's own headers come via the
+# protobuf::libprotobuf target's INTERFACE include dirs, not a global include)
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
 include_directories(.)

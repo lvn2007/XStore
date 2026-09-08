@@ -2,6 +2,14 @@ syntax = "proto3";
 option optimize_for = SPEED;
 package XStore_Proto;
 
+// Language-specific options, consumed only by their respective generators
+// (ignored by the C++/C/Python bindings). java_package + java_multiple_files
+// keep the Java bindings in a named package instead of the illegal default
+// package; go_package gives the Go bindings a stable import path.
+option java_package = "org.it.xstore.proto";
+option java_multiple_files = true;
+option go_package = "xstore/proto";
+
 // ======== COMMAND directives section ========
 enum RequestType {
   INFO = 0;
