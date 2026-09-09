@@ -63,8 +63,8 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStor
     // SLOWER: RepeatedPtrField::sort() only swaps pointers, not the
     // underlying BatchInsert_DATA objects, so the physical sort was never
     // the expensive part; the index-array version instead made every
-    // downstream getEntry(idx) lookup in WriteRowGroupToFile -- called
-    // multiple times per row -- a random-order access into the
+    // downstream per-row lookup below -- called multiple times per row --
+    // a random-order access into the
     // ~1.6MB/200k-row pointer array instead of a sequential scan, losing
     // hardware prefetch. Reverted after measuring).
     SortBatch(proto_from_client->mutable_batchinsert_data()->begin(), proto_from_client->mutable_batchinsert_data()->end(),
@@ -127,9 +127,9 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStor
         for (unsigned long long int idx : indices) {
             const XStore_Proto::BatchInsert_DATA &entry = proto_from_client->batchinsert_data(idx);
             size_t serialized_size = entry.data().ByteSizeLong();
-            // Reject-not-truncate, same guarantee as UnaryInsert/
-            // WriteRowGroupToFile: a row that doesn't fit its slot is
-            // dropped rather than silently corrupting whatever follows it.
+            // Reject-not-truncate, same guarantee as UnaryInsert: a row
+            // that doesn't fit its slot is dropped rather than silently
+            // corrupting whatever follows it.
             if (serialized_size > static_cast<size_t>(cfg_struct.rowlength())) {
                 continue;
             }
@@ -159,10 +159,13 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStor
         }
     }
 
-    // Return insert status. A SYNC/BYPASS write failure means the rows are
-    // not provably durable/applied -- surfaced instead of letting the
-    // unconditional success message below paper over it.
-    if ((durability_mode == XStore_Proto::SYNC || durability_mode == XStore_Proto::BYPASS) && any_sync_failed) {
+    // Return insert status. any_sync_failed is only ever set on a genuine
+    // ApplyWalRecord/EnqueueWalRecord failure above -- true durability
+    // failures for SYNC/BYPASS, but also a real enqueue failure for ASYNC
+    // (queue-full/backpressure timeout, allocation failure, etc.), which is
+    // just as real a failure as the other modes' and must not be masked by
+    // the unconditional success message below -- no mode condition here.
+    if (any_sync_failed) {
         std::string err_msg = fmt::format("[BATCH INSERT] [DB: {}] - Inserted {} elements, but the write failed for at least one group",
                                            db_name, proto_from_client->batchinsert_data_size());
         SetTaggedStatus(return_data->mutable_insertstatus(), "[ERROR] ", err_msg);

@@ -3272,8 +3272,9 @@ TEST_F(XStoreTest, ConcurrentXStoreInstancesShareCfgMapWithoutCorruption) {
 // affect a write path and its usual read path identically would still pass.
 // These three instead decode the raw .XSTORE bytes directly (see
 // ReadRowDirectlyFromDisk above), one per distinct write/read code path:
-// UnaryInsert's pwrite, Batch/RangeInsert's shared WriteRowGroupToFile, and
-// SumAggregate's separate mmap-based accumulate kernel.
+// UnaryInsert's pwrite, Batch/RangeInsert's shared WAL ApplyWalRecord
+// run-coalescing path, and SumAggregate's separate mmap-based accumulate
+// kernel.
 // ---------------------------------------------------------------------
 
 TEST_F(XStoreTest, UnaryInsertWritesExactBytesIndependentlyReadableFromDisk) {
@@ -3295,9 +3296,9 @@ TEST_F(XStoreTest, UnaryInsertWritesExactBytesIndependentlyReadableFromDisk) {
 }
 
 TEST_F(XStoreTest, BatchInsertWritesExactBytesIndependentlyReadableFromDisk) {
-    // RangeInsert shares this exact write helper (WriteRowGroupToFile, see
-    // include/XStore/XStore_Internal.h), so this test's coverage extends to
-    // it too -- a near-duplicate RangeInsert version would just repeat it.
+    // RangeInsert shares this exact write path (WAL's ApplyWalRecord, see
+    // src/XStore/XStore_Wal.cpp), so this test's coverage extends to it
+    // too -- a near-duplicate RangeInsert version would just repeat it.
     XStore store;
     CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 64);
 

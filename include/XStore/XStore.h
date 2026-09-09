@@ -176,9 +176,10 @@ class XStore {
         // ---- Write-Ahead Log --------------------------------------------
         // One append-only WAL file per shard (hash(dbBasePath) %
         // WAL_SHARD_COUNT), each drained by its own dedicated, process-
-        // lifetime writer thread. UnaryInsert enqueues here instead of
-        // writing the data file directly -- see src/XStore/XStore_Wal.cpp
-        // for the durability/group-commit mechanics.
+        // lifetime writer thread. UnaryInsert/BatchInsert/RangeInsert all
+        // enqueue here instead of writing the data file directly -- see
+        // src/XStore/XStore_Wal.cpp for the durability/group-commit
+        // mechanics.
         //
         // A WalRecord represents one WRITE REQUEST, not one row: UnaryInsert
         // builds a 1-row WalRecord; BatchInsert/RangeInsert build one
@@ -234,7 +235,7 @@ class XStore {
             std::string db_base_path;          // full path -- locates this DB's WAL subdir and, at apply time, its .XSTORE file
             XStore_Proto::TimeUnit time_resolution = XStore_Proto::SECOND;
             unsigned short row_length = 0;
-            std::vector<WalRow> rows;          // 1 entry for UnaryInsert; N for a future Batch/Range request
+            std::vector<WalRow> rows;          // 1 entry for UnaryInsert; N for a BatchInsert/RangeInsert year-bucket group
             XStore_Proto::WalDurabilityMode durability_mode = XStore_Proto::SYNC;
             // One per REQUEST, not per row -- null for ASYNC (nobody
             // waits). Carries whether this record was actually durably
@@ -544,12 +545,12 @@ class XStore {
         // (both call this with a fully self-contained WalRecord, no cfg
         // lookup needed). Returns true only if every row was durably
         // written -- a caller that discards this return value silently
-        // loses the failure signal. One row at a time for v1 -- coalescing
-        // same-year rows into fewer pwrites, the way WriteRowGroupToFile
-        // already does for Batch/Range's direct-write path
-        // (XStore_Internal.h), is a natural follow-up once a real
-        // multi-row caller exists to benchmark against; premature before
-        // then.
+        // loses the failure signal. Coalesces same-year contiguous runs of
+        // rows into one pwrite() per run rather than one per row (see the
+        // run-detection loop in the .cpp) -- BatchInsert/RangeInsert can
+        // hand this a record with hundreds of thousands of rows, so this
+        // isn't optional the way it might have been for UnaryInsert's
+        // always-1-row records.
         [[nodiscard]] static bool ApplyWalRecord(const WalRecord &record_to_apply);
 
         // Checkpoint step for a preallocated WAL file, called only from
@@ -598,38 +599,6 @@ class XStore {
         // on first use instead) -- true for shard indices beyond the
         // constructor's data_store_dir in multi-directory test scenarios.
         static void WalWriterLoop(size_t shard_idx, std::string preopened_path, int preopened_fd);
-
-        // ---- Data-file fsync coalescer (Batch/Range durability) ---------
-        // NOT the WAL above -- Batch/Range rows are already written
-        // sequentially (year-bucketed, run-coalesced pwrite via
-        // WriteRowGroupToFile), so there's no scattered-write pattern for a
-        // WAL's log-then-apply double-write to amortize away (see the
-        // durabilityMode comment on BatchInsert_REQ/RangeInsert_REQ in
-        // XStore.proto). This is just a deferred, coalesced fdatasync() on
-        // whichever fds Batch/Range already wrote to -- no queue of
-        // records, no CRC, no replay format.
-        //
-        // Holds the fd-cache handle (shared_ptr<int>), not a bare int: a
-        // bare fd could be evicted from GetOrOpenFile's cache and closed --
-        // then reused by the OS for an unrelated file -- before this
-        // background thread gets to it, which would fdatasync() the WRONG
-        // file. Keeping the handle alive here pins the cache entry (same
-        // "held for the scope a concurrent eviction can't close this out
-        // from under us" contract FdShard already documents) until this
-        // thread has actually synced it.
-        static void ScheduleAsyncDataFsync(std::shared_ptr<int> fd_handle);
-
-        // Started once from StartWalWriters (same call_once gate, no
-        // separate startup wiring needed) and stopped via the same
-        // atexit-registered shutdown. A single thread/flat poll interval is
-        // enough here -- Batch/Range calls are coarse-grained and far less
-        // frequent than Unary's per-row hot path, unlike the WAL writer
-        // this doesn't need per-shard/adaptive-window machinery.
-        static void DataFsyncCoalescerLoop();
-        static std::mutex data_fsync_pending_mutex;
-        static std::unordered_map<int, std::shared_ptr<int>> data_fsync_pending;
-        static std::atomic<bool> data_fsync_stop_flag;
-        static std::thread data_fsync_coalescer_thread;
 
 #ifdef XSTORE_WAL_STATS_ENABLED
         // Debug/benchmark-only (XSTORE_WAL_STATS): periodically logs each

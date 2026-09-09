@@ -348,11 +348,14 @@ class XStoreClient {
   }
 
   // ==== Batch (arbitrary timestamp set) ====
-  // durability_mode defaults to ASYNC, same semantics as UnaryInsert's --
-  // though for Batch/Range this does NOT route through the WAL: see
-  // BatchInsert_REQ's durabilityMode comment in XStore.proto. SYNC
-  // fdatasync()'s the touched data file(s) before returning; ASYNC defers
-  // that fsync to a background coalescer without blocking the caller.
+  // durability_mode defaults to ASYNC, same WAL-routed semantics as
+  // UnaryInsert's: see BatchInsert_REQ's durabilityMode comment in
+  // XStore.proto. SYNC blocks until the write is durably fsync'd and
+  // applied; ASYNC enqueues and returns immediately -- note that for the
+  // default ASYNC mode, both the fsync AND the data-file write itself are
+  // deferred to the server's WAL writer thread, so (unlike this client's
+  // pre-WAL behavior) a read immediately after an ASYNC BatchInsert is not
+  // guaranteed to see it yet.
   [[nodiscard]] std::string BatchInsert(std::string_view db_name, const std::vector<std::pair<uint64_t, XStore_Proto::RowData>> &rows,
                                          XStore_Proto::WalDurabilityMode durability_mode = XStore_Proto::ASYNC) {
       XStore_Proto::Request to_server;
@@ -402,8 +405,9 @@ class XStoreClient {
   }
 
   // ==== Range (contiguous timestamp span) ====
-  // durability_mode: same semantics as BatchInsert's overload above (no WAL
-  // detour -- see RangeInsert_REQ's durabilityMode comment in XStore.proto).
+  // durability_mode: same WAL-routed semantics as BatchInsert's overload
+  // above -- see RangeInsert_REQ's durabilityMode comment in XStore.proto,
+  // including the ASYNC default-mode note there.
   [[nodiscard]] std::string RangeInsert(std::string_view db_name, const std::vector<std::pair<uint64_t, XStore_Proto::RowData>> &rows,
                                          XStore_Proto::WalDurabilityMode durability_mode = XStore_Proto::ASYNC) {
       XStore_Proto::Request to_server;

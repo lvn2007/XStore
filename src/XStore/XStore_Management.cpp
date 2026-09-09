@@ -423,6 +423,30 @@ void XStore::ReplayWal() {
             continue;
         }
 
+        // Sanity ceiling before the single-shot read below: a shard file is
+        // normally exactly WAL_FILE_PREALLOC_BYTES, but WalWriterLoop's
+        // oversized_write fallback (XStore_Wal.cpp -- see the NOTE on
+        // WAL_FILE_PREALLOC_BYTES in XStore_Tunables.h) now lets a single
+        // huge Batch/Range record legitimately grow it past that. Stat
+        // first and skip this shard's replay (logged) rather than risking
+        // an unbounded allocation on a corrupted or maliciously huge file --
+        // see WAL_REPLAY_MAX_FILE_BYTES's own comment for the tradeoff this
+        // accepts.
+        std::error_code file_size_ec;
+        uintmax_t on_disk_bytes = std::filesystem::file_size(wal_path, file_size_ec);
+        if (file_size_ec) {
+            spdlog::error("[WAL REPLAY] - Unable to stat {}: {}", wal_path.string(), file_size_ec.message());
+            continue;
+        }
+        if (on_disk_bytes > XStoreTunables::WAL_REPLAY_MAX_FILE_BYTES) {
+            spdlog::error("[WAL REPLAY] - {} is {} bytes, exceeding the {}-byte replay sanity ceiling -- "
+                          "skipping this shard's replay rather than risking an unbounded allocation; "
+                          "check for corruption or an unexpectedly oversized WAL record.",
+                          wal_path.string(), static_cast<uintmax_t>(on_disk_bytes),
+                          XStoreTunables::WAL_REPLAY_MAX_FILE_BYTES);
+            continue;
+        }
+
         std::ifstream in(wal_path, std::ios::binary);
         std::string contents((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         in.close();

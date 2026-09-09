@@ -112,7 +112,12 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client,
         }
     }
 
-    if ((durability_mode == XStore_Proto::SYNC || durability_mode == XStore_Proto::BYPASS) && any_sync_failed) {
+    // any_sync_failed is only ever set on a genuine ApplyWalRecord/
+    // EnqueueWalRecord failure above -- true durability failures for
+    // SYNC/BYPASS, but also a real enqueue failure for ASYNC, which is
+    // just as real a failure and must not be masked by the unconditional
+    // success message below -- no mode condition here.
+    if (any_sync_failed) {
         std::string err_msg = fmt::format("[RANGE INSERT] [DB: {}] - Inserted {} elements, but the write failed for at least one group",
                                            db_name, proto_from_client->rangeinsert_data_size());
         SetTaggedStatus(return_data->mutable_insertstatus(), "[ERROR] ", err_msg);

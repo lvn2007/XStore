@@ -20,10 +20,6 @@
 std::array<XStore::WalShard, XStoreTunables::WAL_SHARD_COUNT> XStore::wal_shards;
 std::atomic<size_t> XStore::active_wal_shard_count{XStoreTunables::WAL_SHARD_COUNT};
 moodycamel::ConcurrentQueue<XStore::WalCompletion*> XStore::completion_pool;
-std::mutex XStore::data_fsync_pending_mutex;
-std::unordered_map<int, std::shared_ptr<int>> XStore::data_fsync_pending;
-std::atomic<bool> XStore::data_fsync_stop_flag{false};
-std::thread XStore::data_fsync_coalescer_thread;
 #ifdef XSTORE_WAL_STATS_ENABLED
 std::atomic<bool> XStore::wal_stats_stop_flag{false};
 std::thread XStore::wal_stats_reporter_thread;
@@ -41,8 +37,8 @@ void AppendPod(std::string &out, T value) {
 // Wire format (native-endian -- WAL files aren't portable across
 // architectures, same assumption XStore's .XSTORE data files already
 // make). One record = one write REQUEST, carrying 1..N rows (1 for
-// UnaryInsert; a future Batch/Range wiring reuses this same framing with
-// N rows instead of a separate format):
+// UnaryInsert; BatchInsert/RangeInsert reuse this same framing with N rows
+// per year-bucket group instead of a separate format):
 //   [u32 recordLen][u32 crc32c][u16 dbNameLen][u16 rowLength]
 //   [i32 timeResolution][u32 rowCount][dbName bytes]
 //   repeated rowCount times: [u64 epochTime][row bytes]
@@ -170,9 +166,8 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply) {
     // every current producer -- UnaryInsert's 1-row records trivially
     // satisfy this; BatchInsert/RangeInsert build one WalRecord per
     // year-bucket group (see XStore_BatchOps.cpp/XStore_RangeOps.cpp),
-    // which is sorted ascending the same way WriteRowGroupToFile's own
-    // (undocumented-enforcement, same style) precondition already assumed
-    // for the pre-WAL direct-write path this replaces.
+    // sorted ascending before being handed off here (undocumented-
+    // enforcement, same style as the rest of this precondition).
     if (record_to_apply.rows.empty()) return true;
 
     TimeStruct first_ts(record_to_apply.rows.front().epoch_time, record_to_apply.time_resolution);
@@ -191,16 +186,14 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply) {
         offsets[i] = (record_to_apply.rows[i].epoch_time - first_ts.first_epoch) * record_to_apply.row_length;
     }
 
-    // One lock spanning the whole record's min-to-max offset span (same
-    // shape as WriteRowGroupToFile) -- cheaper than one lock per run, and
-    // correct regardless of how many runs the offsets below turn out to
-    // have.
+    // One lock spanning the whole record's min-to-max offset span --
+    // cheaper than one lock per run, and correct regardless of how many
+    // runs the offsets below turn out to have.
     unsigned long long region_length = (offsets.back() + record_to_apply.row_length) - offsets.front();
     FileRangeLockGuard guard(target_file, offsets.front(), region_length, FileRangeLock::LockType::WRITE);
 
     // Thread-local scratch buffer, grown to fit the largest run applied so
-    // far and reused across calls -- same pattern as WriteRowGroupToFile's
-    // run_buf, avoiding a heap allocation per run.
+    // far and reused across calls -- avoids a heap allocation per run.
     thread_local std::vector<char> run_buf;
     bool all_rows_ok = true;
 
@@ -261,8 +254,10 @@ bool XStore::EnqueueWalRecord(WalRecord record) {
     // before either version of this code existed. WAL_SHARDS_PER_DB (see
     // its comment in XStore_Tunables.h) is the escape hatch for actually
     // testing that "device can't fsync N streams in parallel anyway"
-    // assumption instead of just asserting it -- default 1 keeps this
-    // function's behavior bit-for-bit identical to the paragraph above.
+    // assumption instead of just asserting it -- now set to 4 (see that
+    // tunable's own comment for the benchmarked regression this fixed),
+    // so this function no longer behaves bit-for-bit identically to the
+    // paragraph above; set it back to 1 to restore that.
     size_t active = active_wal_shard_count.load(std::memory_order_relaxed);
     size_t base_shard_idx = std::hash<std::string>{}(record.db_base_path) % active;
     size_t shard_idx = base_shard_idx;
@@ -379,13 +374,6 @@ void XStore::StartWalWriters(const std::string &data_store_dir) {
     wal_stats_reporter_thread = std::thread(&XStore::WalStatsReporterLoop);
 #endif
 
-    // Started here (same call_once gate as the writer threads above, see
-    // XStore_Management.cpp) rather than its own separate startup call --
-    // Batch/Range's fsync coalescer is durability infrastructure the same
-    // way the WAL writers are, just not the WAL itself (see its own comment
-    // in XStore.h).
-    data_fsync_coalescer_thread = std::thread(&XStore::DataFsyncCoalescerLoop);
-
     // Writer threads must be stopped and joined before other static-storage
     // objects they touch (the moodycamel queue, spdlog's default logger)
     // begin their own destruction at process exit -- a still-running thread
@@ -409,63 +397,7 @@ void XStore::StartWalWriters(const std::string &data_store_dir) {
             wal_stats_reporter_thread.join();
         }
 #endif
-        data_fsync_stop_flag.store(true, std::memory_order_relaxed);
-        if (data_fsync_coalescer_thread.joinable()) {
-            data_fsync_coalescer_thread.join();
-        }
     });
-}
-
-// See the ScheduleAsyncDataFsync/DataFsyncCoalescerLoop declarations in
-// XStore.h for why this exists instead of reusing the WAL above.
-void XStore::ScheduleAsyncDataFsync(std::shared_ptr<int> fd_handle) {
-    int fd = *fd_handle;
-    std::lock_guard<std::mutex> lock(data_fsync_pending_mutex);
-    // insert_or_assign, not emplace: a second ASYNC write to the same fd
-    // before the coalescer has swept the first one through should still
-    // only cost one fdatasync() covering both -- overwriting the handle is
-    // harmless (same fd, same underlying file) and keeps the pending set
-    // sized by distinct fd, not by write count.
-    data_fsync_pending.insert_or_assign(fd, std::move(fd_handle));
-}
-
-void XStore::DataFsyncCoalescerLoop() {
-    while (!data_fsync_stop_flag.load(std::memory_order_relaxed)) {
-        std::this_thread::sleep_for(std::chrono::microseconds(XStoreTunables::DATA_FSYNC_COALESCE_WINDOW_US));
-
-        // Swap the pending set out under the lock, then fsync without
-        // holding it -- so a Batch/Range call scheduling a NEW fsync while
-        // this sweep is in flight isn't blocked behind however long
-        // fdatasync() itself takes.
-        std::unordered_map<int, std::shared_ptr<int>> to_sync;
-        {
-            std::lock_guard<std::mutex> lock(data_fsync_pending_mutex);
-            if (data_fsync_pending.empty()) continue;
-            to_sync.swap(data_fsync_pending);
-        }
-
-        for (const auto &[fd, handle] : to_sync) {
-            if (fdatasync(fd) != 0) {
-                spdlog::error("[DATA FSYNC] - fdatasync failed for fd {}", fd);
-            }
-        }
-        // to_sync's handles drop here, releasing these fds back to
-        // GetOrOpenFile's normal eviction eligibility now that they're
-        // durably synced.
-    }
-
-    // Final drain on shutdown -- best-effort, matches every other shutdown
-    // path in this file (a process exit right after an ASYNC Batch/Range
-    // write is the same crash-loss window ASYNC already documents, not a
-    // new gap).
-    std::unordered_map<int, std::shared_ptr<int>> to_sync;
-    {
-        std::lock_guard<std::mutex> lock(data_fsync_pending_mutex);
-        to_sync.swap(data_fsync_pending);
-    }
-    for (const auto &[fd, handle] : to_sync) {
-        fdatasync(fd);
-    }
 }
 
 #ifdef XSTORE_WAL_STATS_ENABLED
@@ -784,6 +716,32 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
                 // -- the WAL file itself is still overwritten from offset 0
                 // on every writer-loop pass (see WalWriterLoop's own
                 // comment on this), unrelated to chunking.
+                //
+                // Runtime size check (see the NOTE on WAL_FILE_PREALLOC_BYTES
+                // in XStore_Tunables.h): that bound was sized assuming 1 row
+                // per WalRecord, true only for UnaryInsert. BatchInsert/
+                // RangeInsert can hand this loop a single year-bucket group
+                // with hundreds of thousands of rows, whose total on-wire
+                // bytes for one file can legitimately exceed the
+                // preallocated region. fdatasync() alone is only correct
+                // when a write never changes the file's size/metadata --
+                // true as long as every byte lands inside the preallocated
+                // region, false the instant total_file_bytes below crosses
+                // it. Detected up front (before writing) rather than
+                // reacting to a surprising post-write file size, so the
+                // fallback to a real fsync() -- which DOES flush the
+                // size-changing metadata-journal update -- is decided once,
+                // not per chunk.
+                size_t total_file_bytes = 0;
+                for (const struct iovec &iov : iov_list) total_file_bytes += iov.iov_len;
+                bool oversized_write = total_file_bytes > XStoreTunables::WAL_FILE_PREALLOC_BYTES;
+                if (oversized_write) {
+                    spdlog::warn("[WAL] - Batch for {} totals {} bytes, exceeding WAL_FILE_PREALLOC_BYTES ({}) -- "
+                                 "this write grows the file past its preallocated region; falling back to a real "
+                                 "fsync() for this commit (one-time metadata-journal cost) instead of fdatasync().",
+                                 wal_path, total_file_bytes, XStoreTunables::WAL_FILE_PREALLOC_BYTES);
+                }
+
                 bool file_write_ok = true;
                 off_t chunk_offset = 0;
                 for (size_t iov_start = 0; iov_start < iov_list.size(); ) {
@@ -800,8 +758,9 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
                     iov_start += iov_count;
                 }
 
-                if (!file_write_ok || fdatasync(fd) != 0) {
-                    spdlog::error("[WAL] - Failed to durably write/fdatasync {}", wal_path);
+                bool sync_ok = oversized_write ? (fsync(fd) == 0) : (fdatasync(fd) == 0);
+                if (!file_write_ok || !sync_ok) {
+                    spdlog::error("[WAL] - Failed to durably write/{} {}", oversized_write ? "fsync" : "fdatasync", wal_path);
                     continue;
                 }
                 file_durable[wal_path] = true;

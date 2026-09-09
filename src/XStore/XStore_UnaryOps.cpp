@@ -54,11 +54,11 @@ void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::R
     // Hand off to the WAL instead of writing the data file directly here --
     // EnqueueWalRecord's shard writer thread fsyncs (for SYNC) and applies
     // this exact row before returning control (ASYNC returns immediately
-    // after the lock-free enqueue). A
-    // WalRecord represents one write REQUEST (1..N rows, one completion
-    // future per request) -- UnaryInsert's request is always exactly 1 row;
-    // a future Batch/Range wiring builds the same type with N rows instead
-    // of needing a separate WAL path.
+    // after the lock-free enqueue). A WalRecord represents one write
+    // REQUEST (1..N rows, one completion future per request) --
+    // UnaryInsert's request is always exactly 1 row; BatchInsert/
+    // RangeInsert build the same type with N rows per year-bucket group
+    // instead of needing a separate WAL path.
     WalRecord record;
     record.db_name = db_name;
     record.db_base_path = db_base_path_str;

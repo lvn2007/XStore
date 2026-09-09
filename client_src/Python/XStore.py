@@ -192,10 +192,13 @@ class XStoreClient:
         """
         :param dataList:
         :param targetDBName:
-        :param durabilityMode: no WAL detour for Range/Batch -- see
-            RangeInsert_REQ's durabilityMode comment in XStore.proto. SYNC
-            fdatasync()'s the touched data file(s) before returning; ASYNC
-            defers that to a background coalescer without blocking.
+        :param durabilityMode: same WAL-routed semantics as UnaryInsert's --
+            see RangeInsert_REQ's durabilityMode comment in XStore.proto.
+            SYNC blocks until the write is durably fsync'd and applied;
+            ASYNC (the default) enqueues and returns immediately, deferring
+            both the fsync AND the data-file write itself to the server's
+            WAL writer thread -- a read immediately after an ASYNC
+            rangeInsert is not guaranteed to see it yet.
         :return:
         """
         envelope = XStore_Proto.Request()
@@ -231,10 +234,13 @@ class XStoreClient:
         """
         :param dataList:
         :param targetDBName:
-        :param durabilityMode: no WAL detour for Range/Batch -- see
-            BatchInsert_REQ's durabilityMode comment in XStore.proto. SYNC
-            fdatasync()'s the touched data file(s) before returning; ASYNC
-            defers that to a background coalescer without blocking.
+        :param durabilityMode: same WAL-routed semantics as UnaryInsert's --
+            see BatchInsert_REQ's durabilityMode comment in XStore.proto.
+            SYNC blocks until the write is durably fsync'd and applied;
+            ASYNC (the default) enqueues and returns immediately, deferring
+            both the fsync AND the data-file write itself to the server's
+            WAL writer thread -- a read immediately after an ASYNC
+            batchInsert is not guaranteed to see it yet.
         :return:
         """
         envelope = XStore_Proto.Request()

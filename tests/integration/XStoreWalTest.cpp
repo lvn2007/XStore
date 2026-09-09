@@ -750,3 +750,90 @@ TEST_F(XStoreWalTest, ReplayRecoversMultiRowUnappliedRecord) {
         EXPECT_DOUBLE_EQ(query_rep.data().fielddata(0).doubledata(), r.value) << "epoch_time " << r.epoch_time;
     }
 }
+
+// Task 11 fix 1 regression test: WAL_FILE_PREALLOC_BYTES (40MB) was sized
+// assuming exactly 1 row per WalRecord (true only for UnaryInsert -- see
+// the NOTE on WAL_FILE_PREALLOC_BYTES in XStore_Tunables.h). BatchInsert
+// builds one WalRecord per year-bucket group, so a single call with enough
+// rows in one year can legitimately exceed that bound. This drives a
+// single-year batch past WAL_FILE_PREALLOC_BYTES and confirms: (1) the
+// write still durably lands and every row reads back correctly
+// (WalWriterLoop's oversized_write fallback to a real fsync() instead of
+// fdatasync()), (2) the corresponding shard file's on-disk size actually
+// grew to cover it (proof the fallback engaged, not that the insert
+// happened to succeed some other way) and stayed within an explainable
+// bound rather than growing unboundedly, and (3) a subsequent ReplayWal
+// pass over that larger-than-normal file doesn't crash and stays under
+// WAL_REPLAY_MAX_FILE_BYTES's sanity ceiling.
+TEST_F(XStoreWalTest, BatchInsertRecordExceedingWalPreallocBoundPersistsAndReplays) {
+    XStore store;
+    CreateTestDb(store, "WALOVERSIZEBATCH", XStore_Proto::SECOND, 1024);
+
+    // 45000 rows * (1024-byte row + 8-byte epoch, minus 8 since the first
+    // row's epoch lives in the record header, not a per-row buffer) plus a
+    // small fixed header comes out to ~46.4MB -- comfortably past the 40MB
+    // WAL_FILE_PREALLOC_BYTES bound and comfortably under the 320MB
+    // WAL_REPLAY_MAX_FILE_BYTES sanity ceiling.
+    constexpr int kRowCount = 45000;
+    XStore_Proto::BatchInsert_REQ req;
+    req.set_dbname("WALOVERSIZEBATCH");
+    req.set_durabilitymode(XStore_Proto::SYNC);
+    const unsigned long long base_ts = 1700800000ULL;
+    for (int i = 0; i < kRowCount; ++i) {
+        XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
+        entry->set_timestamp(base_ts + static_cast<unsigned long long>(i));
+        *entry->mutable_data() = MakeRow(static_cast<double>(i));
+    }
+    XStore_Proto::BatchInsert_REP rep;
+    store.BatchInsert(&req, &rep);
+    ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+
+    // Confirm the write is real and durable, not silently dropped or
+    // truncated -- sample across the whole range, plus the very last row
+    // (most likely to be lost if the oversized-write fallback mishandled
+    // the tail of the record).
+    for (int i = 0; i < kRowCount; i += 3001) {
+        XStore_Proto::UnaryQuery_REP q;
+        store.UnaryQuery(base_ts + static_cast<unsigned long long>(i), "WALOVERSIZEBATCH", &q);
+        ASSERT_TRUE(q.has_data()) << "row " << i;
+        EXPECT_DOUBLE_EQ(q.data().fielddata(0).doubledata(), static_cast<double>(i)) << "row " << i;
+    }
+    XStore_Proto::UnaryQuery_REP last_q;
+    store.UnaryQuery(base_ts + kRowCount - 1, "WALOVERSIZEBATCH", &last_q);
+    ASSERT_TRUE(last_q.has_data()) << "last row";
+    EXPECT_DOUBLE_EQ(last_q.data().fielddata(0).doubledata(), static_cast<double>(kRowCount - 1));
+
+    // At least one shard file must have grown past WAL_FILE_PREALLOC_BYTES
+    // -- proof the oversized_write fallback actually engaged -- and that
+    // growth must stay within an explainable bound (this record's own
+    // size plus a generous margin), not unbounded.
+    std::filesystem::path wal_dir = scratch->test_root / "DataStore" / "WAL";
+    uintmax_t max_shard_bytes = 0;
+    for (size_t shard_idx = 0; shard_idx < XStoreTunables::WAL_SHARD_COUNT; ++shard_idx) {
+        std::filesystem::path shard_file = wal_dir / ("shard_" + std::to_string(shard_idx) + ".WAL");
+        if (!std::filesystem::exists(shard_file)) continue;
+        max_shard_bytes = std::max(max_shard_bytes, static_cast<uintmax_t>(std::filesystem::file_size(shard_file)));
+    }
+    EXPECT_GT(max_shard_bytes, XStoreTunables::WAL_FILE_PREALLOC_BYTES)
+        << "expected at least one shard file to have grown past the preallocated bound";
+    EXPECT_LT(max_shard_bytes, XStoreTunables::WAL_FILE_PREALLOC_BYTES + 10ull * 1024 * 1024)
+        << "growth should be explainable by this one oversized record, not unbounded";
+    EXPECT_LE(max_shard_bytes, XStoreTunables::WAL_REPLAY_MAX_FILE_BYTES)
+        << "must stay under ReplayWal's own sanity ceiling or the next restart would lose this batch's WAL evidence";
+
+    // Re-running InitDB (same trick ReplayRecoversMultiRowUnappliedRecord
+    // above uses to simulate a restart within one test process) forces
+    // ReplayWal to parse this now-larger-than-40MB file again. The record
+    // was already durably applied above, so this is a redundant, idempotent
+    // re-apply (see WalWriterLoop's "no per-commit checkpoint" comment) --
+    // what this actually proves is that ReplayWal's new file-size sanity
+    // check doesn't wrongly skip or crash on a file this size (well under
+    // WAL_REPLAY_MAX_FILE_BYTES), and that ParseWalRecord/ApplyWalRecord
+    // round-trip a record this large correctly on replay too, not just on
+    // the live-commit path.
+    store.InitDB();
+    XStore_Proto::UnaryQuery_REP replay_q;
+    store.UnaryQuery(base_ts, "WALOVERSIZEBATCH", &replay_q);
+    ASSERT_TRUE(replay_q.has_data());
+    EXPECT_DOUBLE_EQ(replay_q.data().fielddata(0).doubledata(), 0.0);
+}

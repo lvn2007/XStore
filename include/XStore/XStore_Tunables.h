@@ -264,15 +264,28 @@ inline constexpr unsigned    WAL_GATHER_POLL_US          = 50;
 // enforces that invariant so it can't silently break if WAL_BATCH_MAX_
 // RECORDS is ever raised.
 //
-// NOTE: this bound assumes every WalRecord carries exactly 1 row (true for
-// UnaryInsert, the only WAL producer -- see EnqueueWalRecord call sites).
-// Batch/Range durability deliberately does NOT reuse this WAL path (see the
-// durabilityMode comment on BatchInsert_REQ/RangeInsert_REQ in XStore.proto):
-// their rows are already sequential, so a WAL's log-then-apply double-write
-// buys nothing a direct fdatasync() on the touched data file doesn't already
-// give for free. If that decision is ever revisited, a multi-row WAL record
-// would need to either bound row count per record too, or bring back a
-// runtime size check before the live-commit fsync/fdatasync call.
+// NOTE: this bound was originally sized assuming every WalRecord carries
+// exactly 1 row -- true only for UnaryInsert. BatchInsert/RangeInsert now
+// route through this same WAL path too (one WalRecord per year-bucket
+// group, see XStore_BatchOps.cpp/XStore_RangeOps.cpp) and can legitimately
+// hand WalWriterLoop a single record with hundreds of thousands of rows,
+// so WAL_MAX_BATCH_BYTES below is NOT a real structural ceiling on a
+// batch's total wire bytes for multi-row producers -- the static_assert
+// below only guarantees the single-row-per-record case stays inside the
+// preallocated region. Rather than bound row count per record (would need
+// threading a cap through both BatchInsert's and RangeInsert's grouping
+// logic), WalWriterLoop carries a runtime size check instead: it sums each
+// file's total bytes for the current batch pass before writing, and if
+// that would grow the file past WAL_FILE_PREALLOC_BYTES, it falls back to
+// a real fsync() (not just fdatasync()) for that one write -- correct
+// either way, since fsync() also flushes the size-changing metadata-journal
+// update fdatasync() alone would miss -- and logs a warning so an
+// oversized batch remains diagnosable instead of silently defeating the
+// preallocation's whole point. See the WalWriterLoop per-file write block
+// (XStore_Wal.cpp) for the actual check. ReplayWal (XStore_Management.cpp)
+// carries a matching sanity bound (WAL_REPLAY_MAX_FILE_BYTES below) so a
+// shard file grown past this bound can't turn crash-recovery startup into
+// an unbounded single-shot allocation.
 inline constexpr size_t WAL_RECORD_HEADER_BYTES = 20; // recordLen(4)+crc32c(4)+dbNameLen(2)+rowLength(2)+timeResolution(4)+rowCount(4) -- see SerializeWalRecord
 inline constexpr size_t WAL_MAX_DB_NAME_BYTES   = 65535; // dbNameLen wire field is a u16
 inline constexpr size_t WAL_MAX_ROW_BYTES       = 65535; // rowLength wire field is a u16
@@ -281,10 +294,30 @@ inline constexpr size_t WAL_MAX_RECORD_BYTES    =
 inline constexpr size_t WAL_MAX_BATCH_BYTES     = WAL_BATCH_MAX_RECORDS * WAL_MAX_RECORD_BYTES;
 
 inline constexpr size_t      WAL_FILE_PREALLOC_BYTES     = 40u * 1024 * 1024;
+// Guarantees the single-row-per-record case (UnaryInsert, WAL_BATCH_MAX_
+// RECORDS records each carrying its own single row) always stays inside
+// the preallocated region -- fdatasync() alone is provably correct for
+// that producer, no runtime check needed. Does NOT bound a multi-row
+// record (BatchInsert/RangeInsert, unlimited rows per record) -- see the
+// NOTE above and WalWriterLoop's runtime oversized_write check, which is
+// what makes the multi-row case correct now that this assert alone can't.
 static_assert(WAL_FILE_PREALLOC_BYTES >= WAL_MAX_BATCH_BYTES,
-              "WAL_FILE_PREALLOC_BYTES must cover the worst-case batch so the live-commit "
-              "fdatasync() (not fsync()) stays correct -- a batch write must never be able "
-              "to grow the file past its preallocated region.");
+              "WAL_FILE_PREALLOC_BYTES must cover the worst-case single-row-per-record batch "
+              "(see WalWriterLoop's runtime oversized_write check for the multi-row case).");
+
+// Sanity ceiling for ReplayWal's single-shot std::string read
+// (XStore_Management.cpp): a shard file is normally exactly
+// WAL_FILE_PREALLOC_BYTES, but the oversized_write fallback above now lets
+// a single huge Batch/Range record legitimately grow it past that. This
+// multiple gives generous headroom for a real oversized batch while still
+// bounding the crash-recovery-path allocation against a corrupted or
+// maliciously huge WAL file turning into an unbounded-memory startup
+// crash. A shard file over this bound is logged and skipped (its replay
+// is lost) rather than read into memory -- a deliberate, narrow tradeoff:
+// only a single batch whose own on-wire size exceeds this bound is at
+// risk, and only if the process also crashes before that batch's rows
+// were applied to the real data file.
+inline constexpr size_t      WAL_REPLAY_MAX_FILE_BYTES   = 8 * WAL_FILE_PREALLOC_BYTES;
 
 // Enqueue-side backpressure: once a shard's queue depth reaches this many
 // pending records, EnqueueWalRecord blocks the calling (client-handling)
@@ -296,19 +329,6 @@ static_assert(WAL_FILE_PREALLOC_BYTES >= WAL_MAX_BATCH_BYTES,
 // rather than rejecting the write.
 inline constexpr size_t      WAL_QUEUE_HIGH_WATERMARK    = WAL_BATCH_MAX_RECORDS * 4;
 inline constexpr unsigned    WAL_BACKPRESSURE_POLL_US    = 200;
-
-// Data-file fsync coalescer (XStore_Wal.cpp's DataFsyncCoalescerLoop): the
-// background sweep interval for Batch/Range's ASYNC durability mode. Not a
-// WAL -- no queue of records, just a set of already-touched fds waiting on a
-// deferred fdatasync(). Batch/Range calls are coarse-grained and far less
-// frequent than Unary's per-row hot path, so one thread and one flat
-// polling interval is enough (no per-shard/adaptive-window machinery like
-// the WAL writer's, unlike that path this isn't sized against a torusnode15
-// benchmark yet -- revisit once Batch/Range durability gets its own Mystic
-// run). Bounds ASYNC's crash-loss window for Batch/Range the same way the
-// WAL bounds it for Unary: "soon", not "whenever the OS's own dirty-page
-// writeback gets around to it" (BYPASS's much weaker ~30s bound).
-inline constexpr unsigned    DATA_FSYNC_COALESCE_WINDOW_US = 1000;
 
 // RangeQuery and BatchQuery (XStore_RangeOps.cpp,
 // XStore_BatchOps.cpp): target size of each emitted wire-format chunk. A

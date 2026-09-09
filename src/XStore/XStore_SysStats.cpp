@@ -250,6 +250,20 @@ std::atomic<bool> SysStatsCollector::stop_flag{false};
 std::thread SysStatsCollector::collector_thread;
 
 void SysStatsCollector::Start(const std::string &host, int port) {
+    // Force spdlog's default-logger registry to exist BEFORE the thread
+    // below is spawned and the atexit callback that joins it is registered
+    // -- mirrors the identical fix in XStore_Wal.cpp's StartWalWriters (see
+    // its comment for the full [basic.start.term] reasoning). Without this,
+    // the registry singleton would instead be lazily constructed by this
+    // collector thread's own first spdlog:: call, sometimes after the
+    // atexit callback below is already registered, which sequences the
+    // registry's destructor to run BEFORE this callback's join() --
+    // exploitable by CollectorLoop still calling spdlog::warn/error/info at
+    // shutdown. Currently safe only by the same production accident Task 9
+    // documented (src/main.cpp constructs a Logger before any of this
+    // runs); this line makes the safe ordering hold unconditionally.
+    static_cast<void>(spdlog::default_logger());
+
     collector_thread = std::thread(&SysStatsCollector::CollectorLoop, host, port);
     // See stop_flag's declaration comment (XStore_SysStats.h) -- registered
     // here, at the moment the thread is actually started, so std::atexit's

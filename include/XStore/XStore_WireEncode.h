@@ -24,8 +24,9 @@ using google::protobuf::io::CodedInputStream;
 using google::protobuf::io::CodedOutputStream;
 
 // A row's on-disk slot is a real serialized RowData followed by zero
-// padding out to rowLength (see WriteRowGroupToFile: SerializeToArray then
-// memset the remainder). Field number 0 is reserved/invalid in protobuf, so
+// padding out to rowLength (SerializeToArray then memset the remainder --
+// see UnaryInsert/ApplyWalRecord's own row-write steps). Field number 0 is
+// reserved/invalid in protobuf, so
 // CodedInputStream::ReadTag() returns exactly 0 both at true end-of-buffer
 // AND the instant it hits the first zero-padding byte -- either way, that's
 // the boundary between real content and padding. WireFormatLite::SkipField
