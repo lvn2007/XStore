@@ -125,26 +125,41 @@ TEST_F(XStoreWalTest, BypassWritesNoWalRecord) {
     store.UnaryInsert(1700000004ULL, MakeRow(5.0), "WALBYPASSNOWAL", &priming_rep, XStore_Proto::SYNC);
     ASSERT_NE(priming_rep.insertstatus().find("[INFO]"), std::string::npos);
 
-    // active_wal_shard_count, not the WAL_SHARD_COUNT compile-time ceiling:
-    // matches EnqueueWalRecord's own modulo for which shard file this DB
-    // actually landed on.
-    std::filesystem::path db_base_path = scratch->test_root / "DataStore" / "WALBYPASSNOWAL";
-    size_t active = XStore::active_wal_shard_count.load();
-    size_t shard_idx = std::hash<std::string>{}(db_base_path.string()) % active;
-    std::filesystem::path wal_file = scratch->test_root / "DataStore" / "WAL" / ("shard_" + std::to_string(shard_idx) + ".WAL");
-
-    auto read_file = [&]() {
-        std::ifstream in(wal_file, std::ios::binary);
+    // Which shard the priming record actually landed on can't be predicted
+    // by hash(db_base_path) % active alone anymore: EnqueueWalRecord salts
+    // by calling-thread-id whenever WAL_SHARDS_PER_DB > 1 (see its own
+    // comment), so the same DB can land on any of up to WAL_SHARDS_PER_DB
+    // shards depending on which thread happens to call it -- this test's
+    // calling thread's salt isn't known ahead of time. Discover the real
+    // shard by scanning every active shard's file for the one that's
+    // non-empty after the priming write, rather than recomputing (and
+    // duplicating) EnqueueWalRecord's own salting formula here. Both calls
+    // below are on this same test thread, so they're guaranteed to land on
+    // the same shard as each other regardless of which one that is.
+    auto read_file = [](const std::filesystem::path &path) {
+        std::ifstream in(path, std::ios::binary);
         return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
     };
-    std::string wal_bytes_before = read_file();
-    ASSERT_FALSE(wal_bytes_before.empty());
+    size_t active = XStore::active_wal_shard_count.load();
+    std::filesystem::path wal_dir = scratch->test_root / "DataStore" / "WAL";
+    std::filesystem::path wal_file;
+    std::string wal_bytes_before;
+    for (size_t i = 0; i < active; ++i) {
+        std::filesystem::path candidate = wal_dir / ("shard_" + std::to_string(i) + ".WAL");
+        std::string contents = read_file(candidate);
+        if (!contents.empty()) {
+            wal_file = candidate;
+            wal_bytes_before = std::move(contents);
+            break;
+        }
+    }
+    ASSERT_FALSE(wal_bytes_before.empty()) << "no active shard's WAL file received the priming record";
 
     XStore_Proto::UnaryInsert_REP insert_rep;
     store.UnaryInsert(1700000005ULL, MakeRow(21.0), "WALBYPASSNOWAL", &insert_rep, XStore_Proto::BYPASS);
     ASSERT_NE(insert_rep.insertstatus().find("[INFO]"), std::string::npos);
 
-    std::string wal_bytes_after = read_file();
+    std::string wal_bytes_after = read_file(wal_file);
     EXPECT_EQ(wal_bytes_after, wal_bytes_before) << "BYPASS must never write a WAL record";
 
     XStore_Proto::UnaryQuery_REP query_rep;
