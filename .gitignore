@@ -12,3 +12,4 @@ AGENTS.md
 CLAUDE.md
 tests/local_bench/results/*
 .kilo/kilo.jsonc
+.worktrees/
