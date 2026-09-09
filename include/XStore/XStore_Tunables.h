@@ -110,6 +110,11 @@ inline constexpr size_t      WAL_MIN_ACTIVE_SHARDS       = 2;
 // writes concentrated on a handful of shards, preserving most of the
 // fsync-amortization benefit described above. See async-batch-range-wal
 // task-10 report for the benchmarked comparison across shard counts.
+//
+// NOTE: This value applies only to the current single-node system. When
+// the distributed design (docs/XStore_Distributed_Architecture.md) is
+// implemented, this MUST revert to 1 -- per-slot LSN ordering depends on
+// all records for a slot passing through a single WAL writer thread.
 inline constexpr size_t      WAL_SHARDS_PER_DB           = 4;
 
 // Adaptive WAL writer polling. After a batch is dequeued, the writer stays
