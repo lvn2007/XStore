@@ -79,18 +79,18 @@ inline constexpr const char* WAL_DIR_NAME                = "WAL";
 inline constexpr size_t      WAL_ACTIVE_SHARDS_CORE_DIVISOR = 4;
 inline constexpr size_t      WAL_MIN_ACTIVE_SHARDS       = 2;
 
-// Experiment knob, default 1 (= today's exact per-DB-hash behavior,
+// Experiment knob, default was 1 (= today's exact per-DB-hash behavior,
 // unchanged): how many of the active shards ONE DB's writes are allowed to
 // spread across (see EnqueueWalRecord). Raising this does NOT create new
 // writer-thread capacity -- active shard count is fixed by hardware
 // (above), independent of DB count or this value; `min(active, this)` is
 // the real cap. Helps only when there are few hot DBs relative to active
-// shard count (today's default funnels each DB onto exactly 1 of possibly
+// shard count (a value of 1 funnels each DB onto exactly 1 of possibly
 // many idle shards). Actively HURTS when DB count already meets/exceeds
 // active shard count: those DBs already share shards by pigeonhole even
-// at the default, and spreading each one across MORE of that same small
-// pool just makes assignment less sticky -- more batches end up mixing
-// records from different DBs, which pays a separate pwrite+fdatasync per
+// at 1, and spreading each one across MORE of that same small pool just
+// makes assignment less sticky -- more batches end up mixing records
+// from different DBs, which pays a separate pwrite+fdatasync per
 // distinct file within one batch anyway, not a shared one, for no
 // benefit. Whether raising this helps AT ALL is also storage-device-
 // dependent (deep-queue NVMe vs. a device that can't actually flush
@@ -99,7 +99,18 @@ inline constexpr size_t      WAL_MIN_ACTIVE_SHARDS       = 2;
 // mid-run change would need to reconcile with the process-wide-static
 // wal_shards array and any in-flight records already hashed under the
 // old span.
-inline constexpr size_t      WAL_SHARDS_PER_DB           = 1;
+//
+// Set to 4 (from 1) to address a measured INSERT_BATCH_RAND regression at
+// high client concurrency (+8.3% at 32 clients, +25.4% at 64 clients vs.
+// main): BatchInsert's per-call-thread salting means many concurrent
+// client threads funneling one hot DB's writes onto a single shard was
+// the contention point, not per-record imbalance within a call. 4 (not
+// WAL_SHARD_COUNT=8) is a deliberate middle ground -- spreads enough to
+// relieve that single-shard contention while still keeping each DB's
+// writes concentrated on a handful of shards, preserving most of the
+// fsync-amortization benefit described above. See async-batch-range-wal
+// task-10 report for the benchmarked comparison across shard counts.
+inline constexpr size_t      WAL_SHARDS_PER_DB           = 4;
 
 // Adaptive WAL writer polling. After a batch is dequeued, the writer stays
 // in a tight try_dequeue_bulk spin (bypasses wait_dequeue_bulk_timed's
