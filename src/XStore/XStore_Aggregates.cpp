@@ -1,13 +1,13 @@
 #include "include/XStore/XStore_Internal.h"
 #include "include/DataStructs/TimeStruct.h"
 #include "include/DataStructs/FileRangeLock.h"
+#include "include/XStore/XStore_PreadPool.h"
 #include <spdlog/fmt/fmt.h>
 #include "include/Logger/Logger.h"
 #include <algorithm>
 #include <filesystem>
 #include <functional>
 #include <sys/mman.h>
-#include <thread>
 #include <unistd.h>
 
 // Shared by Min/Max/Sum/AvgAggregate: walks [startEpochT, endEpochT] one
@@ -109,40 +109,32 @@ PartialState XStore::WalkYearSpanParallel(const std::string &db_base_path, const
         return result;
     }
 
-    // Wide span -- bound THIS request's own thread count to hardware
-    // concurrency, so it alone never spawns more threads than there are
-    // cores. This cap has no visibility into other concurrent requests,
-    // though: if several wide-span requests land at once (e.g. several ZMQ
-    // workers each handling one), total threads in flight can still exceed
-    // hardware_concurrency -- benchmarked under 4-concurrent load on this
-    // 16-core box and didn't show a clear regression (see the session notes
-    // that added this), but that's one data point on one machine shape, not
-    // a guarantee against oversubscription in general. Segments are striped
-    // across workers (t, t+num_threads, t+2*num_threads, ...) rather than
-    // chunked, so a handful of unusually large years don't all land on the
-    // same thread.
-    size_t num_threads = std::min(segments.size(), static_cast<size_t>(std::max(1u, std::thread::hardware_concurrency())));
-    std::vector<PartialState> partial_results(num_threads, initial_state);
-    std::vector<std::thread> workers;
-    workers.reserve(num_threads);
-
-    for (size_t t = 0; t < num_threads; t++) {
-        workers.emplace_back([&, t]() {
-            for (size_t s = t; s < segments.size(); s += num_threads) {
-                const Segment &seg = segments[s];
-                // Each Segment already falls entirely within one year (built
-                // that way above), so this WalkYearSpan call's internal loop
-                // runs exactly once -- reuses the exact same GetOrMapFile/
-                // lock/madvise/kernel-call logic the sequential path uses,
-                // just invoked per-segment instead of once for the whole span.
-                WalkYearSpan(db_base_path, cfg_struct, seg.start, seg.end,
-                    [&](const char *rows_base, unsigned long long rows_to_process) {
-                        segment_kernel(partial_results[t], rows_base, rows_to_process);
-                    });
-            }
-        });
-    }
-    for (std::thread &w : workers) w.join();
+    // Wide span -- fan segments out across the shared XStorePreadPool
+    // instead of spawning raw std::threads. Same pool BatchQuery already
+    // uses (XStore_BatchOps.cpp) -- a process-wide, fixed-size worker set
+    // sized as "cores left over after the ZMQ server's own worker threads"
+    // (XStorePreadPool::Init, called once from main.cpp). Routing through
+    // it means this request's threads are capped by the SAME budget every
+    // other concurrent request (aggregate or BatchQuery) draws from, so
+    // total threads in flight across the whole process can't exceed the
+    // pool's fixed size -- unlike the old per-request hardware_concurrency()
+    // cap, which had no visibility into other concurrent requests and could
+    // multiply past hardware_concurrency() when several landed at once. One
+    // partial-state slot per segment (not per worker thread) since
+    // ParallelFor doesn't expose which pool worker runs which index.
+    std::vector<PartialState> partial_results(segments.size(), initial_state);
+    XStorePreadPool::ParallelFor(segments.size(), [&](size_t s) {
+        const Segment &seg = segments[s];
+        // Each Segment already falls entirely within one year (built that
+        // way above), so this WalkYearSpan call's internal loop runs
+        // exactly once -- reuses the exact same GetOrMapFile/lock/madvise/
+        // kernel-call logic the sequential path uses, just invoked
+        // per-segment instead of once for the whole span.
+        WalkYearSpan(db_base_path, cfg_struct, seg.start, seg.end,
+            [&](const char *rows_base, unsigned long long rows_to_process) {
+                segment_kernel(partial_results[s], rows_base, rows_to_process);
+            });
+    });
 
     PartialState result = initial_state;
     for (PartialState &partial : partial_results) {
