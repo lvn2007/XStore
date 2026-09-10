@@ -111,3 +111,81 @@ TEST(FilesystemKeyStoreTest, MalformedFileIsSkippedWithoutBreakingOtherEntries) 
     EXPECT_TRUE(store.IsAllowed(Z85Decode(good_kp.public_key_z85), &name));
     EXPECT_EQ(name, "good");
 }
+
+#include <zmq.hpp>
+#include <zmq_addon.hpp>
+
+namespace {
+// Minimal CURVE-enabled ROUTER<->DEALER pair, no ZmqServer/XStore involved
+// -- isolates ZAP correctness from the full server integration (Task 5).
+struct CurvePair {
+    zmq::context_t ctx{1};
+    zmq::socket_t router{ctx, zmq::socket_type::router};
+    XStoreCurveKeyPair server_kp = XStoreCurveKeyPair::Generate();
+
+    explicit CurvePair(std::shared_ptr<KeyStore> store) : zap_(ctx, std::move(store)) {
+        router.set(zmq::sockopt::curve_server, true);
+        router.set(zmq::sockopt::curve_secretkey, server_kp.secret_key_z85);
+        router.set(zmq::sockopt::zap_domain, "xstore-test");
+        router.set(zmq::sockopt::rcvtimeo, 500);
+        router.set(zmq::sockopt::linger, 0);
+        zap_.Start();
+        // A fixed-but-spread port (same pattern XStoreZmqNetworkTest and the
+        // later ZmqServerCurveTest fixture use), not bind-to-port-0 --
+        // avoids depending on an unverified ephemeral-port/last_endpoint
+        // query API in this vendored cppzmq version.
+        int port = 25900 + static_cast<int>(getpid() % 500);
+        endpoint_ = "tcp://127.0.0.1:" + std::to_string(port);
+        router.bind(endpoint_);
+    }
+
+    zmq::socket_t MakeClient(const XStoreCurveKeyPair &client_kp) {
+        zmq::socket_t dealer(ctx, zmq::socket_type::dealer);
+        dealer.set(zmq::sockopt::curve_serverkey, server_kp.public_key_z85);
+        dealer.set(zmq::sockopt::curve_publickey, client_kp.public_key_z85);
+        dealer.set(zmq::sockopt::curve_secretkey, client_kp.secret_key_z85);
+        dealer.set(zmq::sockopt::rcvtimeo, 500);
+        dealer.set(zmq::sockopt::linger, 0);
+        dealer.connect(endpoint_);
+        return dealer;
+    }
+
+    std::string endpoint_;
+    XStoreZapHandler zap_;
+};
+}  // namespace
+
+TEST(XStoreZapHandlerTest, AllowedClientHandshakeSucceeds) {
+    ScratchDir scratch("zap_allow_test");
+    auto allowed_dir = scratch.test_root / "allowed";
+    std::filesystem::create_directories(allowed_dir);
+    auto client_kp = XStoreCurveKeyPair::Generate();
+    Z85WriteFile(allowed_dir / "alice.pub", client_kp.public_key_z85, false);
+
+    auto store = std::make_shared<FilesystemKeyStore>(allowed_dir, std::chrono::milliseconds(0));
+    CurvePair pair(store);
+    auto client = pair.MakeClient(client_kp);
+
+    client.send(zmq::str_buffer("ping"), zmq::send_flags::none);
+    std::vector<zmq::message_t> frames;
+    ASSERT_TRUE(zmq::recv_multipart(pair.router, std::back_inserter(frames)));
+    ASSERT_GE(frames.size(), 2u);
+    EXPECT_EQ(frames.back().to_string(), "ping");
+}
+
+TEST(XStoreZapHandlerTest, UnlistedClientHandshakeIsDenied) {
+    ScratchDir scratch("zap_deny_test");
+    auto allowed_dir = scratch.test_root / "allowed";
+    std::filesystem::create_directories(allowed_dir);  // empty -- nobody allowed
+
+    auto store = std::make_shared<FilesystemKeyStore>(allowed_dir, std::chrono::milliseconds(0));
+    CurvePair pair(store);
+    auto stranger_kp = XStoreCurveKeyPair::Generate();
+    auto client = pair.MakeClient(stranger_kp);
+
+    client.send(zmq::str_buffer("ping"), zmq::send_flags::none);
+    std::vector<zmq::message_t> frames;
+    // Handshake never completes -- ZAP-denied, so the ROUTER never sees a
+    // message from this peer within the timeout.
+    EXPECT_FALSE(zmq::recv_multipart(pair.router, std::back_inserter(frames)));
+}

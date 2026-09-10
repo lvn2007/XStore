@@ -8,7 +8,9 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <thread>
 #include <unordered_map>
+#include <zmq.hpp>
 
 // CURVE transport auth: keypair generation/persistence, Z85 encode/decode,
 // and (in this same library, added by later tasks) the KeyStore/
@@ -124,6 +126,36 @@ private:
     // debounce check together is harmless and already tolerated by design.
     mutable std::atomic<std::chrono::steady_clock::time_point> last_check_{};
     mutable std::shared_ptr<const SnapshotMap> snapshot_;
+};
+
+// Reusable ZAP (RFC 27) responder. One instance per zmq::context_t --
+// inproc://zeromq.zap.01 is a per-context endpoint, and ZmqServer/
+// SysStatsCollector deliberately run on separate contexts already, so each
+// gets its own XStoreZapHandler sharing the same KeyStore instance.
+class XStoreZapHandler {
+public:
+    XStoreZapHandler(zmq::context_t &ctx, std::shared_ptr<KeyStore> store);
+    ~XStoreZapHandler();
+
+    // Binds inproc://zeromq.zap.01 on ctx and starts the responder thread.
+    // Blocks briefly after spawning so the handler is guaranteed bound
+    // before returning -- callers must call this BEFORE binding/connecting
+    // any CURVE-enabled socket on the same context, or an early handshake
+    // could race an as-yet-unbound ZAP endpoint.
+    void Start();
+
+    // Signals the loop to stop and joins it. Called automatically by the
+    // destructor; safe to call explicitly first if a caller needs a
+    // deterministic stop point before ctx is torn down.
+    void Stop();
+
+private:
+    void Loop();
+
+    zmq::context_t &ctx_;
+    std::shared_ptr<KeyStore> store_;
+    std::thread thread_;
+    std::atomic<bool> stop_flag_{false};
 };
 
 #endif  // XSTORE_CURVE_H

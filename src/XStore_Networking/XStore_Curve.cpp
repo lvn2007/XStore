@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <fcntl.h>
 #include <unistd.h>
+#include <zmq_addon.hpp>
 
 #include "include/Logger/Logger.h"
 #include "include/XStore/XStore_Tunables.h"
@@ -158,4 +159,78 @@ void FilesystemKeyStore::MaybeRescan() const {
         }
     }
     std::atomic_store(&snapshot_, std::shared_ptr<const SnapshotMap>(fresh));
+}
+
+XStoreZapHandler::XStoreZapHandler(zmq::context_t &ctx, std::shared_ptr<KeyStore> store)
+    : ctx_(ctx), store_(std::move(store)) {}
+
+XStoreZapHandler::~XStoreZapHandler() { Stop(); }
+
+void XStoreZapHandler::Start() {
+    stop_flag_.store(false, std::memory_order_relaxed);
+    thread_ = std::thread(&XStoreZapHandler::Loop, this);
+    // Give the handler socket a moment to bind before returning -- Start()
+    // is documented as a hard ordering requirement (see header), not just a
+    // latency nicety.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+}
+
+void XStoreZapHandler::Stop() {
+    stop_flag_.store(true, std::memory_order_relaxed);
+    if (thread_.joinable()) thread_.join();
+}
+
+void XStoreZapHandler::Loop() {
+    zmq::socket_t zap(ctx_, zmq::socket_type::rep);
+    zap.set(zmq::sockopt::rcvtimeo, 200);  // periodic wake to observe stop_flag_
+    zap.set(zmq::sockopt::linger, 0);
+    try {
+        zap.bind("inproc://zeromq.zap.01");
+    } catch (const zmq::error_t &e) {
+        spdlog::error("[CURVE] - ZAP handler failed to bind inproc://zeromq.zap.01: {}", e.what());
+        return;
+    }
+
+    while (!stop_flag_.load(std::memory_order_relaxed)) {
+        std::vector<zmq::message_t> request;
+        if (!zmq::recv_multipart(zap, std::back_inserter(request))) continue;  // timeout
+        if (request.size() < 7) {
+            spdlog::warn("[CURVE] - Malformed ZAP request ({} frames), dropping", request.size());
+            continue;
+        }
+
+        std::string version = request[0].to_string();
+        std::string sequence = request[1].to_string();
+        std::string mechanism = request[5].to_string();
+
+        std::string status_code = "400";
+        std::string status_text = "Denied";
+        std::string user_id;
+
+        if (mechanism == "CURVE" && request[6].size() == 32) {
+            std::array<uint8_t, 32> pubkey_raw{};
+            std::memcpy(pubkey_raw.data(), request[6].data(), 32);
+            std::string name;
+            if (store_->IsAllowed(pubkey_raw, &name)) {
+                status_code = "200";
+                status_text = "OK";
+                user_id = name;
+                spdlog::info("[CURVE] - ZAP allowed '{}'", name);
+            } else {
+                spdlog::warn("[CURVE] - ZAP denied unknown CURVE key (fingerprint {}...{})",
+                             Z85Encode(pubkey_raw).substr(0, 6), Z85Encode(pubkey_raw).substr(34));
+            }
+        } else {
+            spdlog::warn("[CURVE] - ZAP request with unexpected mechanism '{}', denying", mechanism);
+        }
+
+        zmq::multipart_t reply;
+        reply.addstr(version);
+        reply.addstr(sequence);
+        reply.addstr(status_code);
+        reply.addstr(status_text);
+        reply.addstr(user_id);
+        reply.addstr("");  // metadata, unused
+        reply.send(zap);
+    }
 }
