@@ -2,11 +2,14 @@
 #define XSTORE_ZMQ_SERVER_H
 
 #include <include/XStore/XStore.h>
+#include <memory>
+#include <optional>
 #include <thread>
 #include <zmq.hpp>
 #include "XStore.pb.h"
 #include <zmq_addon.hpp>
 #include "include/Logger/Logger.h"
+#include "include/Networking/XStore_Curve.h"
 
 class ZmqServer {
     private:
@@ -21,7 +24,17 @@ class ZmqServer {
 
     public:
         ZmqServer(int num_threads);
-        void StartServer(std::string listen_addr, std::string listen_port);
+
+        // curve_identity/curve_keystore both absent (default): identical to
+        // today's behavior, NULL mechanism, no ZAP handler spawned. Both
+        // present: CURVE_SERVER mode on the external ROUTER socket, ZAP
+        // domain "xstore" set so ZAP is actually invoked, and an
+        // XStoreZapHandler is started (bound to this instance's ctx) before
+        // the socket binds. Passing only one of the two is a caller error
+        // (asserted, not silently half-applied).
+        void StartServer(std::string listen_addr, std::string listen_port,
+                          std::optional<XStoreCurveKeyPair> curve_identity = std::nullopt,
+                          std::shared_ptr<KeyStore> curve_keystore = nullptr);
 
         // Physical (not logical/SMT) CPU core count on this host, with a
         // graceful fallback -- see the .cpp definition for why this, not

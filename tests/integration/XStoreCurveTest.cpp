@@ -241,3 +241,118 @@ TEST(XStoreZapHandlerTest, MalformedRequestGetsReplyAndDoesNotDesyncSocket) {
     EXPECT_EQ(reply2[1].to_string(), "2");
     EXPECT_EQ(reply2[2].to_string(), "400");  // NULL mechanism denied, not crashed
 }
+
+#include "include/Networking/ZMQ_Server.h"
+
+namespace {
+struct CurveServerFixture {
+    ScratchDir scratch{"curve_zmq_server_test"};
+    XStoreCurveKeyPair server_kp = XStoreCurveKeyPair::Generate();
+    std::filesystem::path allowed_dir = scratch.test_root / "allowed";
+    std::shared_ptr<FilesystemKeyStore> store;
+    std::string server_addr;
+
+    CurveServerFixture() {
+        std::filesystem::create_directories(allowed_dir);
+        store = std::make_shared<FilesystemKeyStore>(allowed_dir, std::chrono::milliseconds(0));
+
+        // Each fixture leaves its server socket bound forever (ZmqServer has
+        // no shutdown API -- StartServer() blocks in zmq::proxy(), same
+        // pattern documented at the top of XStoreZmqNetworkTest.cpp), and
+        // all 3 ZmqServerCurveTest cases below share one process when run
+        // via --gtest_filter (unlike plain `ctest`, which forks one process
+        // per test). A port keyed only on getpid() is therefore identical
+        // across all 3 fixture instances in that process, so the 2nd/3rd
+        // bind() hits EADDRINUSE -- uncaught out of the detached server
+        // thread, so it's a std::terminate() crash, not a test failure. A
+        // static per-process counter gives every instance a distinct port;
+        // the base is chosen clear of this suite's other fixed ranges
+        // (CurvePair: 25900-26399, XStoreZmqNetworkTest: 25500-29499,
+        // XStoreZmqConcurrentTest: 26500-30499).
+        static std::atomic<int> instance_counter{0};
+        int port = 31000 + static_cast<int>(getpid() % 1000) * 4 + instance_counter.fetch_add(1);
+        server_addr = "tcp://127.0.0.1:" + std::to_string(port);
+
+        auto *server = new ZmqServer(1);
+        std::thread server_thread([server, port, this]() {
+            server->StartServer("127.0.0.1", std::to_string(port), server_kp, store);
+        });
+        server_thread.detach();
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+
+    zmq::socket_t MakeClient(zmq::context_t &ctx, const XStoreCurveKeyPair &client_kp) {
+        zmq::socket_t sock(ctx, zmq::socket_type::req);
+        sock.set(zmq::sockopt::curve_serverkey, server_kp.public_key_z85);
+        sock.set(zmq::sockopt::curve_publickey, client_kp.public_key_z85);
+        sock.set(zmq::sockopt::curve_secretkey, client_kp.secret_key_z85);
+        sock.set(zmq::sockopt::rcvtimeo, 2000);
+        sock.set(zmq::sockopt::linger, 0);
+        sock.connect(server_addr);
+        return sock;
+    }
+};
+}  // namespace
+
+TEST(ZmqServerCurveTest, AllowedClientGetsPingReply) {
+    CurveServerFixture fx;
+    auto client_kp = XStoreCurveKeyPair::Generate();
+    Z85WriteFile(fx.allowed_dir / "alice.pub", client_kp.public_key_z85, false);
+
+    zmq::context_t ctx(1);
+    auto sock = fx.MakeClient(ctx, client_kp);
+
+    XStore_Proto::Request ping_req;
+    ping_req.mutable_ping()->set_rtype(XStore_Proto::PING);
+    std::string payload = ping_req.SerializeAsString();
+    ASSERT_TRUE(sock.send(zmq::buffer(payload), zmq::send_flags::none));
+
+    zmq::message_t reply;
+    ASSERT_TRUE(sock.recv(reply, zmq::recv_flags::none));
+}
+
+TEST(ZmqServerCurveTest, UnlistedClientTimesOut) {
+    CurveServerFixture fx;  // nobody allowed
+    auto stranger_kp = XStoreCurveKeyPair::Generate();
+
+    zmq::context_t ctx(1);
+    auto sock = fx.MakeClient(ctx, stranger_kp);
+
+    XStore_Proto::Request ping_req;
+    ping_req.mutable_ping()->set_rtype(XStore_Proto::PING);
+    std::string payload = ping_req.SerializeAsString();
+    ASSERT_TRUE(sock.send(zmq::buffer(payload), zmq::send_flags::none));
+
+    zmq::message_t reply;
+    EXPECT_FALSE(sock.recv(reply, zmq::recv_flags::none));
+}
+
+TEST(ZmqServerCurveTest, RevokedClientDeniedOnNextConnection) {
+    CurveServerFixture fx;
+    auto client_kp = XStoreCurveKeyPair::Generate();
+    auto pub_path = fx.allowed_dir / "bob.pub";
+    Z85WriteFile(pub_path, client_kp.public_key_z85, false);
+
+    {
+        zmq::context_t ctx(1);
+        auto sock = fx.MakeClient(ctx, client_kp);
+        XStore_Proto::Request ping_req;
+        ping_req.mutable_ping()->set_rtype(XStore_Proto::PING);
+        std::string payload = ping_req.SerializeAsString();
+        ASSERT_TRUE(sock.send(zmq::buffer(payload), zmq::send_flags::none));
+        zmq::message_t reply;
+        ASSERT_TRUE(sock.recv(reply, zmq::recv_flags::none));
+    }
+
+    std::filesystem::remove(pub_path);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+
+    zmq::context_t ctx2(1);
+    auto sock2 = fx.MakeClient(ctx2, client_kp);  // fresh connection, same identity
+    XStore_Proto::Request ping_req2;
+    ping_req2.mutable_ping()->set_rtype(XStore_Proto::PING);
+    std::string payload2 = ping_req2.SerializeAsString();
+    ASSERT_TRUE(sock2.send(zmq::buffer(payload2), zmq::send_flags::none));
+    zmq::message_t reply2;
+    EXPECT_FALSE(sock2.recv(reply2, zmq::recv_flags::none));
+}

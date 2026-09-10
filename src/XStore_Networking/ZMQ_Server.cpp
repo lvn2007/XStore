@@ -1,7 +1,9 @@
 #include "include/Networking/ZMQ_Server.h"
 #include <google/protobuf/arena.h>
+#include <cassert>
 #include <chrono>
 #include <fstream>
+#include <memory>
 #include <set>
 #include <string>
 #include <utility>
@@ -96,7 +98,12 @@ ZmqServer::ZmqServer(int num_threads) {
     this->num_threads = num_threads;
 }
 
-void ZmqServer::StartServer(std::string listen_addr, std::string listen_port) {
+void ZmqServer::StartServer(std::string listen_addr, std::string listen_port,
+                             std::optional<XStoreCurveKeyPair> curve_identity,
+                             std::shared_ptr<KeyStore> curve_keystore) {
+    assert(curve_identity.has_value() == (curve_keystore != nullptr) &&
+           "StartServer: curve_identity and curve_keystore must both be set, or both absent");
+
     //  Socket to talk to CLIENTS
     zmq::socket_t client_socket(ctx, zmq::socket_type::router);
     std::string server_addr = "tcp://" + listen_addr + ":" + listen_port;
@@ -108,6 +115,23 @@ void ZmqServer::StartServer(std::string listen_addr, std::string listen_port) {
     // pool, this queues in RAM instead of blocking/dropping at the socket.
     client_socket.set(zmq::sockopt::sndhwm, 0);
     client_socket.set(zmq::sockopt::rcvhwm, 0);
+
+    std::unique_ptr<XStoreZapHandler> zap_handler;
+    if (curve_identity && curve_keystore) {
+        // ZAP must be bound before this socket binds/accepts any handshake --
+        // Start() blocks briefly to guarantee that ordering (see its header).
+        zap_handler = std::make_unique<XStoreZapHandler>(ctx, curve_keystore);
+        zap_handler->Start();
+
+        client_socket.set(zmq::sockopt::curve_server, true);
+        client_socket.set(zmq::sockopt::curve_secretkey, curve_identity->secret_key_z85);
+        // Non-empty ZAP domain is what actually makes libzmq invoke ZAP at
+        // all for this socket (RFC 27) -- without it, CURVE still encrypts
+        // but any client holding a valid keypair would connect regardless
+        // of the allowlist.
+        client_socket.set(zmq::sockopt::zap_domain, "xstore");
+        spdlog::info("[NETWORKING] - CURVE enabled on client-facing socket");
+    }
 
     // Set listenAddr & port internally
     this->server_addr = server_addr;
