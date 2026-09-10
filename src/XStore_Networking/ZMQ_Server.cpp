@@ -1,10 +1,10 @@
 #include "include/Networking/ZMQ_Server.h"
 #include <google/protobuf/arena.h>
-#include <cassert>
 #include <chrono>
 #include <fstream>
 #include <memory>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -101,8 +101,19 @@ ZmqServer::ZmqServer(int num_threads) {
 void ZmqServer::StartServer(std::string listen_addr, std::string listen_port,
                              std::optional<XStoreCurveKeyPair> curve_identity,
                              std::shared_ptr<KeyStore> curve_keystore) {
-    assert(curve_identity.has_value() == (curve_keystore != nullptr) &&
-           "StartServer: curve_identity and curve_keystore must both be set, or both absent");
+    // Deliberately a runtime throw, not assert(): this project's Release
+    // build happens not to define NDEBUG today (see CMakeLists.txt), but
+    // relying on that staying true would make the failure mode for a caller
+    // bug a silent one -- passing only one of the two params would fall
+    // through to the plain NULL-mechanism bind below with no CURVE, no ZAP,
+    // and nothing logged about it, i.e. an unauthenticated/unencrypted
+    // socket where an authenticated/encrypted one was expected. Throwing
+    // unconditionally, before any socket setup, fails loudly regardless of
+    // build config instead of risking that silent security downgrade.
+    if (curve_identity.has_value() != (curve_keystore != nullptr)) {
+        throw std::invalid_argument(
+            "ZmqServer::StartServer: curve_identity and curve_keystore must both be set, or both absent");
+    }
 
     //  Socket to talk to CLIENTS
     zmq::socket_t client_socket(ctx, zmq::socket_type::router);
