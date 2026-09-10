@@ -2,8 +2,12 @@
 #define XSTORE_SYSSTATS_H
 
 #include <atomic>
+#include <memory>
+#include <optional>
 #include <string>
 #include <thread>
+
+#include "include/Networking/XStore_Curve.h"
 
 // Background host-metrics broadcaster: its own thread, its own ZMQ PUB
 // socket, its own zmq::context_t -- deliberately decoupled from ZmqServer
@@ -21,10 +25,25 @@ class SysStatsCollector {
         // registers an atexit callback to stop and join it. Call once from
         // main(), before the RPC server starts accepting connections, so
         // the feed is already live by the time any client connects.
-        static void Start(const std::string &host, int port);
+        //
+        // curve_identity/curve_keystore both absent (default): identical to
+        // today's behavior. Both present: CURVE_SERVER mode + ZAP domain
+        // "xstore" on the PUB socket, gated by its own XStoreZapHandler
+        // (this collector runs on its own zmq::context_t, so it needs its
+        // own ZAP handler instance -- see ZmqServer::StartServer for the
+        // analogous wiring). Typically shares the same KeyStore instance
+        // (and the same node identity) as ZmqServer -- one allowlist governs
+        // both sockets. Passing only one of the two is a caller error
+        // (thrown, not silently half-applied -- same reasoning as
+        // ZmqServer::StartServer's identical check).
+        static void Start(const std::string &host, int port,
+                           std::optional<XStoreCurveKeyPair> curve_identity = std::nullopt,
+                           std::shared_ptr<KeyStore> curve_keystore = nullptr);
 
     private:
-        static void CollectorLoop(std::string host, int port);
+        static void CollectorLoop(std::string host, int port,
+                                   std::optional<XStoreCurveKeyPair> curve_identity,
+                                   std::shared_ptr<KeyStore> curve_keystore);
 
         // Same shutdown convention as XStore::wal_stats_stop_flag /
         // StartWalWriters' atexit callback (XStore_Wal.cpp) -- joined

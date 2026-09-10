@@ -249,7 +249,19 @@ void ReadDiskSpace(uint64_t &free_bytes, uint64_t &total_bytes) {
 std::atomic<bool> SysStatsCollector::stop_flag{false};
 std::thread SysStatsCollector::collector_thread;
 
-void SysStatsCollector::Start(const std::string &host, int port) {
+void SysStatsCollector::Start(const std::string &host, int port,
+                               std::optional<XStoreCurveKeyPair> curve_identity,
+                               std::shared_ptr<KeyStore> curve_keystore) {
+    // Same reasoning as ZmqServer::StartServer's identical check (see its
+    // comment, ZMQ_Server.cpp): a deliberate runtime throw, not assert(), so
+    // a caller passing only one of the two params fails loudly instead of
+    // silently falling through to an unauthenticated/unencrypted PUB socket
+    // where an authenticated/encrypted one was expected.
+    if (curve_identity.has_value() != (curve_keystore != nullptr)) {
+        throw std::invalid_argument(
+            "SysStatsCollector::Start: curve_identity and curve_keystore must both be set, or both absent");
+    }
+
     // Force spdlog's default-logger registry to exist BEFORE the thread
     // below is spawned and the atexit callback that joins it is registered
     // -- mirrors the identical fix in XStore_Wal.cpp's StartWalWriters (see
@@ -264,7 +276,26 @@ void SysStatsCollector::Start(const std::string &host, int port) {
     // runs); this line makes the safe ordering hold unconditionally.
     static_cast<void>(spdlog::default_logger());
 
-    collector_thread = std::thread(&SysStatsCollector::CollectorLoop, host, port);
+    // SysStatsCollector is a process-lifetime singleton by design -- one
+    // atexit-joined static thread (collector_thread's declaration comment)
+    // -- and production code (main.cpp) calls Start() exactly once. Tests
+    // are the first callers to invoke Start() more than once within the
+    // same process (SysStatsCurveTest, XStoreCurveTest.cpp, both hit by one
+    // `--gtest_filter=SysStatsCurveTest.*` invocation): naively
+    // move-assigning a new std::thread over a still-joinable
+    // collector_thread is undefined behavior and reliably crashes via
+    // std::terminate() per [thread.thread.assign] (reproduced during Task 6
+    // verification). Stopping and joining any already-running collector
+    // first makes repeated Start() calls safe without changing the
+    // single-call production path at all -- collector_thread starts
+    // non-joinable there, so this branch is always a no-op in that case.
+    if (collector_thread.joinable()) {
+        stop_flag.store(true, std::memory_order_relaxed);
+        collector_thread.join();
+        stop_flag.store(false, std::memory_order_relaxed);
+    }
+
+    collector_thread = std::thread(&SysStatsCollector::CollectorLoop, host, port, curve_identity, curve_keystore);
     // See stop_flag's declaration comment (XStore_SysStats.h) -- registered
     // here, at the moment the thread is actually started, so std::atexit's
     // reverse-registration-order guarantee runs this before any
@@ -278,7 +309,9 @@ void SysStatsCollector::Start(const std::string &host, int port) {
     });
 }
 
-void SysStatsCollector::CollectorLoop(std::string host, int port) {
+void SysStatsCollector::CollectorLoop(std::string host, int port,
+                                       std::optional<XStoreCurveKeyPair> curve_identity,
+                                       std::shared_ptr<KeyStore> curve_keystore) {
     // Best-effort: SCHED_IDLE needs no special privilege (unlike SCHED_FIFO/
     // RR) and guarantees this thread only runs when nothing else on the
     // host wants the core, so a busy WAL/ZMQ worker never loses a timeslice
@@ -296,6 +329,20 @@ void SysStatsCollector::CollectorLoop(std::string host, int port) {
     // at all) must never make this socket buffer up a backlog of stale
     // snapshots; the next tick's frame always supersedes the last anyway.
     pub_sock.set(zmq::sockopt::conflate, 1);
+
+    std::unique_ptr<XStoreZapHandler> zap_handler;
+    if (curve_identity && curve_keystore) {
+        // ZAP must be bound before this socket binds/accepts any handshake --
+        // Start() blocks briefly to guarantee that ordering (see its header).
+        zap_handler = std::make_unique<XStoreZapHandler>(ctx, curve_keystore);
+        zap_handler->Start();
+
+        pub_sock.set(zmq::sockopt::curve_server, true);
+        pub_sock.set(zmq::sockopt::curve_secretkey, curve_identity->secret_key_z85);
+        pub_sock.set(zmq::sockopt::zap_domain, "xstore");
+        spdlog::info("[SYSSTATS] - CURVE enabled on stats PUB socket");
+    }
+
     std::string bind_addr = "tcp://" + host + ":" + std::to_string(port);
     try {
         pub_sock.bind(bind_addr);

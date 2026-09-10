@@ -356,3 +356,67 @@ TEST(ZmqServerCurveTest, RevokedClientDeniedOnNextConnection) {
     zmq::message_t reply2;
     EXPECT_FALSE(sock2.recv(reply2, zmq::recv_flags::none));
 }
+
+#include "include/XStore/XStore_SysStats.h"
+
+TEST(SysStatsCurveTest, AllowedSubscriberReceivesAFrame) {
+    ScratchDir scratch("sysstats_curve_allow_test");
+    auto allowed_dir = scratch.test_root / "allowed";
+    std::filesystem::create_directories(allowed_dir);
+    auto server_kp = XStoreCurveKeyPair::Generate();
+    auto client_kp = XStoreCurveKeyPair::Generate();
+    Z85WriteFile(allowed_dir / "viewer.pub", client_kp.public_key_z85, false);
+    auto store = std::make_shared<FilesystemKeyStore>(allowed_dir, std::chrono::milliseconds(0));
+
+    // Port ranges already claimed elsewhere in this binary (process-lifetime
+    // servers, never unbound, so a collision is a real EADDRINUSE, not
+    // theoretical -- reproduced during Task 6 verification when this test's
+    // original 27500+pid%2000 range landed exactly on
+    // XStoreZmqNetworkTest's 25500+pid%4000 range for some pids):
+    // CurvePair 25900-26399, XStoreZmqNetworkTest 25500-29499,
+    // XStoreZmqConcurrentTest 26500-30499, ZmqServerCurveTest ~31000-34998.
+    // 35500-36499 is clear of all of those.
+    int port = 35500 + static_cast<int>(getpid() % 1000);
+    SysStatsCollector::Start("127.0.0.1", port, server_kp, store);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    zmq::context_t ctx(1);
+    zmq::socket_t sub(ctx, zmq::socket_type::sub);
+    sub.set(zmq::sockopt::curve_serverkey, server_kp.public_key_z85);
+    sub.set(zmq::sockopt::curve_publickey, client_kp.public_key_z85);
+    sub.set(zmq::sockopt::curve_secretkey, client_kp.secret_key_z85);
+    sub.set(zmq::sockopt::subscribe, "");
+    sub.set(zmq::sockopt::rcvtimeo, 3000);
+    sub.connect("tcp://127.0.0.1:" + std::to_string(port));
+
+    zmq::message_t frame;
+    EXPECT_TRUE(sub.recv(frame, zmq::recv_flags::none));
+}
+
+TEST(SysStatsCurveTest, UnlistedSubscriberReceivesNothing) {
+    ScratchDir scratch("sysstats_curve_deny_test");
+    auto allowed_dir = scratch.test_root / "allowed";
+    std::filesystem::create_directories(allowed_dir);  // empty
+    auto server_kp = XStoreCurveKeyPair::Generate();
+    auto stranger_kp = XStoreCurveKeyPair::Generate();
+    auto store = std::make_shared<FilesystemKeyStore>(allowed_dir, std::chrono::milliseconds(0));
+
+    // See the port-range comment in AllowedSubscriberReceivesAFrame above --
+    // 36500-37499 is a distinct, equally clear range so these two tests
+    // never collide with each other either.
+    int port = 36500 + static_cast<int>(getpid() % 1000);
+    SysStatsCollector::Start("127.0.0.1", port, server_kp, store);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    zmq::context_t ctx(1);
+    zmq::socket_t sub(ctx, zmq::socket_type::sub);
+    sub.set(zmq::sockopt::curve_serverkey, server_kp.public_key_z85);
+    sub.set(zmq::sockopt::curve_publickey, stranger_kp.public_key_z85);
+    sub.set(zmq::sockopt::curve_secretkey, stranger_kp.secret_key_z85);
+    sub.set(zmq::sockopt::subscribe, "");
+    sub.set(zmq::sockopt::rcvtimeo, 1500);
+    sub.connect("tcp://127.0.0.1:" + std::to_string(port));
+
+    zmq::message_t frame;
+    EXPECT_FALSE(sub.recv(frame, zmq::recv_flags::none));
+}

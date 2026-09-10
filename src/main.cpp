@@ -2,7 +2,9 @@
 #include "include/XStore/XStore.h"
 #include "include/XStore/XStore_PreadPool.h"
 #include "include/XStore/XStore_SysStats.h"
+#include "include/Networking/XStore_Curve.h"
 #include <argparse/argparse.hpp>
+#include <filesystem>
 
 int main(int argc, char *argv[]) {
     spdlog::level::level_enum console_level = spdlog::level::warn;
@@ -32,6 +34,19 @@ int main(int argc, char *argv[]) {
         .default_value(0)
         .scan<'i', int>()
         .help("port for the host-stats PUB broadcast (<=0 or omitted defaults to --port minus 1)");
+
+    program.add_argument("--curve")
+        .default_value(false)
+        .implicit_value(true)
+        .help("enable ZMQ CURVE transport encryption + ZAP-based client authentication (opt-in, off by default)");
+
+    program.add_argument("--curve-secret-key")
+        .default_value(std::string("keys/server/server.key"))
+        .help("path to this server's CURVE secret key file (see xstore-keys gen server); its sibling .pub file must exist alongside it");
+
+    program.add_argument("--curve-allowed-dir")
+        .default_value(std::string("keys/allowed"))
+        .help("directory of allowed clients' .pub files (see xstore-keys allow); hot-reloaded, no restart needed to pick up changes");
 
     try {
         program.parse_args(argc, argv);
@@ -74,6 +89,34 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    bool curve_enabled = program.get<bool>("--curve");
+    std::optional<XStoreCurveKeyPair> curve_identity;
+    std::shared_ptr<KeyStore> curve_keystore;
+    if (curve_enabled) {
+        if (!zmq_has("curve")) {
+            spdlog::error("[BOOT] - --curve was requested but this build's libzmq was not compiled with CURVE support. "
+                           "Rebuild with libsodium-dev installed, or reconfigure without -DXSTORE_FETCH_ZMQ=OFF pointed "
+                           "at a CURVE-less system libzmq.");
+            exit(1);
+        }
+        std::string secret_key_path = program.get<std::string>("--curve-secret-key");
+        std::string allowed_dir = program.get<std::string>("--curve-allowed-dir");
+        try {
+            curve_identity = XStoreCurveKeyPair::LoadFromSecretKeyFile(secret_key_path);
+        } catch (const std::exception &e) {
+            spdlog::error("[BOOT] - Failed to load CURVE server identity from {}: {}", secret_key_path, e.what());
+            exit(1);
+        }
+        if (!std::filesystem::exists(allowed_dir)) {
+            spdlog::error("[BOOT] - --curve-allowed-dir {} does not exist. Create it (xstore-keys allow writes into "
+                           "it automatically) before starting with --curve.", allowed_dir);
+            exit(1);
+        }
+        curve_keystore = std::make_shared<FilesystemKeyStore>(
+            allowed_dir, std::chrono::milliseconds(XStoreTunables::CURVE_ALLOWLIST_MIN_CHECK_INTERVAL_MS));
+        spdlog::info("[BOOT] - CURVE enabled: identity={}, allowed-dir={}", secret_key_path, allowed_dir);
+    }
+
     // Tells XStorePreadPool how many threads the ZMQ server is about to
     // claim, so its own worker count sizes off whatever's left over on
     // this box instead of independently sizing off hardware_concurrency()
@@ -88,9 +131,9 @@ int main(int argc, char *argv[]) {
     // socket, started before the ZMQ server so it's already publishing by
     // the time any client (desktop viewer or otherwise) connects. Never
     // touches ZmqServer/XStore state -- see XStore_SysStats.h.
-    SysStatsCollector::Start(host, stats_port);
+    SysStatsCollector::Start(host, stats_port, curve_identity, curve_keystore);
 
     // Spin ZMQ Server
     ZmqServer x_store_zmq_server(thread_count);
-    x_store_zmq_server.StartServer(host, port);
+    x_store_zmq_server.StartServer(host, port, curve_identity, curve_keystore);
 }

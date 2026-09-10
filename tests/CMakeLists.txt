@@ -58,6 +58,8 @@ add_executable(xstore_network_tests
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Aggregates.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore_Networking/ZMQ_Server.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore_Networking/XStore_Curve.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_SysStats.cpp
+        ${CMAKE_SOURCE_DIR}/include/XStore/XStore_SysStats.h
         integration/XStoreCurveTest.cpp
         ${CMAKE_SOURCE_DIR}/src/DataStructs/TimeStruct.cpp
         ${CMAKE_SOURCE_DIR}/src/DataStructs/FileRangeLock.cpp
