@@ -416,6 +416,17 @@ template <typename T> void SendProto(zmq::socket_t &socket, const T &msg) {
 - **Cons:** this only bounds server memory. It does not lift protobuf's ~2GB message ceiling, since the client still reassembles everything into one buffer before parsing — a request whose *total* result would exceed 2GB is rejected up front, before any chunk is built (§11).
 - **What's novel:** skip-copying raw, already-serialized row bytes straight into the outbound wire format — reusing the same wire-tag-walk technique the aggregate kernels use for skip-parse (§6.2), just applied to encoding instead of decoding — avoids the allocate-decode-then-reallocate-reencode round trip a naive streaming implementation would still pay per row.
 
+### 7.5 Optional transport encryption/auth — ZMQ CURVE
+
+Both sockets above — the RPC ROUTER socket (§7.1) and the SysStats PUB socket — default to ZMTP's `NULL` mechanism: no encryption, no authentication, unchanged from before this feature existed. Passing `--curve` at boot (plus `--curve-secret-key`/`--curve-allowed-dir`, both defaulted per `xstore-keys`' directory convention when omitted) switches both sockets to libzmq's built-in CURVE mechanism (Curve25519, backed by `libsodium`):
+
+- **Key management:** `FilesystemKeyStore` (`include/Networking/XStore_Curve.h`) is a directory-backed allowlist — one Z85-encoded `.pub` file per authorized client identity under `--curve-allowed-dir`. It re-scans on a debounced `stat()` check (`CURVE_ALLOWLIST_MIN_CHECK_INTERVAL_MS`, default 1000ms), so revoking a client takes effect on its *next* connection attempt with no server restart required. The `xstore-keys` CLI (`tools/xstore-keys/`) generates keypairs and manages the allowlist directory directly on disk (`gen`/`allow`/`revoke`/`list`) — it talks only to the filesystem, never to a running server.
+- **Authentication:** one `XStoreZapHandler` (an RFC 27 ZAP responder thread, bound to `inproc://zeromq.zap.01` on a given `zmq::context_t`) answers each incoming handshake by checking the connecting peer's public key against the shared `FilesystemKeyStore`. `ZmqServer::StartServer`'s ROUTER socket and `SysStatsCollector::Start`'s PUB socket each run their own handler on their own context (the two already ran on separate contexts before this feature), sharing one server keypair and one allowlist.
+- **Scope:** CURVE is applied only to the external-facing sockets. The ROUTER's `inproc://` DEALER/REP legs behind it (§7.1) have no ZMTP handshake and no wire-security concept, so enabling CURVE there would be a no-op at best.
+- **Opt-in guarantee:** omitting `--curve` server-side, or the equivalent client-side curve parameters (`XStoreClient`'s optional `curve_auth`, `XStore.py`'s `curve_*_file` kwargs), leaves every socket on `NULL` — byte-for-byte unchanged from pre-CURVE behavior.
+
+Full rationale, threat model, and the explicitly-deferred items (a universal CLI config file, mid-session forced disconnect on revocation, a real etcd-backed `KeyStore`) are in `docs/superpowers/specs/2026-09-09-zmq-curve-auth-design.md`.
+
 ---
 
 ## 8. Client Libraries
