@@ -95,8 +95,8 @@ int main(int argc, char *argv[]) {
     if (curve_enabled) {
         if (!zmq_has("curve")) {
             spdlog::error("[BOOT] - --curve was requested but this build's libzmq was not compiled with CURVE support. "
-                           "Rebuild with libsodium-dev installed, or reconfigure without -DXSTORE_FETCH_ZMQ=OFF pointed "
-                           "at a CURVE-less system libzmq.");
+                           "Rebuild with libsodium-dev installed, or reconfigure with -DXSTORE_FETCH_ZMQ=OFF against a "
+                           "system libzmq that does have CURVE support.");
             exit(1);
         }
         std::string secret_key_path = program.get<std::string>("--curve-secret-key");

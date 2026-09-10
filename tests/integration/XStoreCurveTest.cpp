@@ -7,8 +7,12 @@
 #include <gtest/gtest.h>
 #include <filesystem>
 #include <fstream>
+#include <zmq.hpp>
+#include <zmq_addon.hpp>
 
 #include "include/Networking/XStore_Curve.h"
+#include "include/Networking/ZMQ_Server.h"
+#include "include/XStore/XStore_SysStats.h"
 #include "XStoreTestSupport.h"
 
 using namespace xstore_test;
@@ -48,8 +52,6 @@ TEST(XStoreCurveKeyPairTest, LoadFromSecretKeyFileThrowsWhenSiblingPubMissing) {
     { std::ofstream f(sec_path); f << std::string(40, 'a'); }
     EXPECT_THROW(XStoreCurveKeyPair::LoadFromSecretKeyFile(sec_path), std::runtime_error);
 }
-
-#include "include/XStore/XStore_Tunables.h"
 
 TEST(FilesystemKeyStoreTest, UnknownKeyIsNotAllowed) {
     ScratchDir scratch("fks_unknown_test");
@@ -111,9 +113,6 @@ TEST(FilesystemKeyStoreTest, MalformedFileIsSkippedWithoutBreakingOtherEntries) 
     EXPECT_TRUE(store.IsAllowed(Z85Decode(good_kp.public_key_z85), &name));
     EXPECT_EQ(name, "good");
 }
-
-#include <zmq.hpp>
-#include <zmq_addon.hpp>
 
 namespace {
 // Minimal CURVE-enabled ROUTER<->DEALER pair, no ZmqServer/XStore involved
@@ -242,8 +241,6 @@ TEST(XStoreZapHandlerTest, MalformedRequestGetsReplyAndDoesNotDesyncSocket) {
     EXPECT_EQ(reply2[2].to_string(), "400");  // NULL mechanism denied, not crashed
 }
 
-#include "include/Networking/ZMQ_Server.h"
-
 namespace {
 struct CurveServerFixture {
     ScratchDir scratch{"curve_zmq_server_test"};
@@ -356,8 +353,6 @@ TEST(ZmqServerCurveTest, RevokedClientDeniedOnNextConnection) {
     zmq::message_t reply2;
     EXPECT_FALSE(sock2.recv(reply2, zmq::recv_flags::none));
 }
-
-#include "include/XStore/XStore_SysStats.h"
 
 TEST(SysStatsCurveTest, AllowedSubscriberReceivesAFrame) {
     ScratchDir scratch("sysstats_curve_allow_test");

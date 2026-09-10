@@ -38,6 +38,7 @@ int RunAllow(const std::string &name, const std::string &pubkey_file, const std:
     std::string z85;
     try {
         z85 = Z85ReadFile(pubkey_file);
+        Z85Decode(z85);  // validates the content is actually valid Z85, not just the right length
     } catch (const std::exception &e) {
         std::cerr << "xstore-keys: " << e.what() << "\n";
         return 1;

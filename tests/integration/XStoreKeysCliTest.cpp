@@ -77,6 +77,20 @@ TEST(XStoreKeysCliTest, AllowThenRevokeRoundTrips) {
     EXPECT_EQ(RunKeysTool("revoke carol --allowed-dir " + allowed_dir), 0);
 }
 
+TEST(XStoreKeysCliTest, AllowRejectsInvalidZ85Content) {
+    ScratchDir scratch("xstore_keys_allow_invalid_z85_test");
+    std::string allowed_dir = (scratch.test_root / "allowed").string();
+
+    // 40 characters, right length for a Z85-encoded 32-byte key, but '_' is
+    // not in the Z85 alphabet, so this must fail decoding rather than being
+    // silently accepted into the allowlist.
+    std::filesystem::path bad_pubkey = scratch.test_root / "bad.pub";
+    std::ofstream(bad_pubkey) << std::string(40, '_');
+
+    EXPECT_NE(RunKeysTool("allow eve --pubkey-file " + bad_pubkey.string() + " --allowed-dir " + allowed_dir), 0);
+    EXPECT_FALSE(std::filesystem::exists(std::filesystem::path(allowed_dir) / "eve.pub"));
+}
+
 TEST(XStoreKeysCliTest, ListShowsAllowedIdentities) {
     ScratchDir scratch("xstore_keys_list_test");
     std::string out_dir = (scratch.test_root / "gen").string();
