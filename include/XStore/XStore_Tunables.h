@@ -367,6 +367,14 @@ inline constexpr size_t      STREAMED_QUERY_CHUNK_SIZE_BYTES = 64ull * 1024 * 10
 // hot path, so this knob has zero effect on insert/query latency either way.
 inline constexpr unsigned    SYS_STATS_COLLECT_INTERVAL_MS = 2000;
 
+// FilesystemKeyStore (XStore_Curve.*): minimum gap between two mtime checks
+// on the CURVE allowlist directory. Refresh() is invoked synchronously on
+// every ZAP request (not on a background timer -- the ZAP handler thread
+// already blocks on recv(), so there's no independent timer to run one
+// against) -- this is a debounce so a burst of concurrent connection
+// attempts pays one stat() call, not one per request.
+inline constexpr unsigned CURVE_ALLOWLIST_MIN_CHECK_INTERVAL_MS = 1000;
+
 // BatchQuery (XStore_BatchOps.cpp) + XStorePreadPool
 // (XStore_PreadPool.*): pread() is a syscall -- on BatchQuery's scattered
 // access pattern (the whole reason it uses pread-per-row instead of mmap,

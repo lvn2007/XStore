@@ -57,6 +57,8 @@ add_executable(xstore_network_tests
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_RangeOps.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Aggregates.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore_Networking/ZMQ_Server.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore_Networking/XStore_Curve.cpp
+        integration/XStoreCurveTest.cpp
         ${CMAKE_SOURCE_DIR}/src/DataStructs/TimeStruct.cpp
         ${CMAKE_SOURCE_DIR}/src/DataStructs/FileRangeLock.cpp
         ${PROTO_SRCS} ${PROTO_HDRS}
@@ -70,7 +72,7 @@ endif()
 gtest_discover_tests(xstore_network_tests)
 
 add_custom_command(TARGET xstore_network_tests POST_BUILD
-        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "^XStoreZmqNetworkTest\\.\\|^XStoreZmqConcurrentTest\\."
+        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "^XStoreZmqNetworkTest\\.\\|^XStoreZmqConcurrentTest\\.\\|^XStoreCurve"
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         COMMENT "Running xstore_network_tests via ctest"
 )

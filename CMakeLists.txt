@@ -98,7 +98,11 @@ if(TARGET zmq)
     message(STATUS "ZMQ: using pre-existing zmq target")
 elseif(XSTORE_FETCH_ZMQ)
     set(BUILD_SHARED   ON  CACHE BOOL "" FORCE)
-    set(ENABLE_CURVE   OFF CACHE BOOL "" FORCE)
+    # libzmq 4.3.5's CMake build requires both WITH_LIBSODIUM and ENABLE_CURVE
+    # to be ON for ZMQ_HAVE_CURVE to be defined. libsodium (1.0.18) is already
+    # present as an apt dependency. Without both, CURVE support is not compiled in.
+    set(WITH_LIBSODIUM ON  CACHE BOOL "" FORCE)
+    set(ENABLE_CURVE   ON  CACHE BOOL "" FORCE)
     set(WITH_TLS       OFF CACHE BOOL "" FORCE)
     set(BUILD_TESTS    OFF CACHE BOOL "" FORCE)
     set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -223,6 +227,7 @@ add_executable(XStore src/main.cpp
         include/DataStructs/ValueStruct.h ${PROTO_SRCS} ${PROTO_HDRS}
         third_party/zmq.hpp third_party/zmq_addon.hpp
         include/Networking/ZMQ_Server.h src/XStore_Networking/ZMQ_Server.cpp
+        include/Networking/XStore_Curve.h src/XStore_Networking/XStore_Curve.cpp
         third_party/zhelpers.hpp
         third_party/argparse/argparse.hpp
         include/DataStructs/TimeStruct.h src/DataStructs/TimeStruct.cpp
