@@ -103,6 +103,26 @@ if(TARGET XStoreClient)
     )
 endif()
 
+# xstore_keys_cli_tests: black-box smoke tests for the xstore-keys binary
+# (tools/xstore-keys) -- invokes the real built binary via std::system(),
+# not a unit test of its internals (those are covered by
+# XStoreCurveKeyPairTest in xstore_network_tests).
+add_executable(xstore_keys_cli_tests integration/XStoreKeysCliTest.cpp
+        ${CMAKE_SOURCE_DIR}/src/XStore_Networking/XStore_Curve.cpp)
+target_include_directories(xstore_keys_cli_tests PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(xstore_keys_cli_tests PRIVATE GTest::gtest_main "zmq" "stdc++fs" moodycamel protobuf::libprotobuf)
+target_compile_definitions(xstore_keys_cli_tests PRIVATE XSTORE_KEYS_BIN="$<TARGET_FILE:xstore-keys>")
+add_dependencies(xstore_keys_cli_tests xstore-keys)
+
+include(GoogleTest)
+gtest_discover_tests(xstore_keys_cli_tests)
+
+add_custom_command(TARGET xstore_keys_cli_tests POST_BUILD
+        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "^XStoreKeysCliTest\\."
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMENT "Running xstore_keys_cli_tests via ctest"
+)
+
 # xstore_perf_tests: throughput/latency micro-benchmarks for Unary/Batch
 # Insert+Query (see tests/perf/XStorePerfTest.cpp for why these report
 # numbers instead of asserting hard thresholds). Deliberately NOT wired into

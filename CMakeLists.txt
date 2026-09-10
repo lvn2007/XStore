@@ -239,6 +239,8 @@ if(TARGET absl::log_internal_check_op)
     target_link_libraries(XStore PUBLIC absl::log_internal_check_op)
 endif()
 
+add_subdirectory(tools/xstore-keys)
+
 # ------------------------------------------------------------------
 # Tests
 # ------------------------------------------------------------------
