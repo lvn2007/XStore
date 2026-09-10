@@ -2,9 +2,12 @@
 #define XSTORE_CURVE_H
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
+#include <unordered_map>
 
 // CURVE transport auth: keypair generation/persistence, Z85 encode/decode,
 // and (in this same library, added by later tasks) the KeyStore/
@@ -55,6 +58,65 @@ struct XStoreCurveKeyPair {
     // is written mode 0600; public_key_file is left at the process's default umask.
     void SaveToFiles(const std::filesystem::path &public_key_file,
                       const std::filesystem::path &secret_key_file) const;
+};
+
+class KeyStore {
+public:
+    virtual ~KeyStore() = default;
+
+    // pubkey_raw: the 32 raw bytes ZAP hands the caller for a connecting
+    // peer's CURVE public key. Returns true and fills *name_out (if
+    // non-null) with the identity's name when pubkey_raw is currently
+    // allowed.
+    virtual bool IsAllowed(const std::array<uint8_t, 32> &pubkey_raw, std::string *name_out) const = 0;
+
+    // Forces an immediate re-scan/re-fetch of the backing store, bypassing
+    // any internal debounce. Implementations do not spawn their own
+    // threads -- callers (XStoreZapHandler, or a test) decide when to call
+    // this; IsAllowed() itself also keeps its snapshot reasonably fresh on
+    // its own (see FilesystemKeyStore).
+    virtual void Refresh() = 0;
+};
+
+// Backed by one Z85-encoded ".pub" file per identity under allowed_dir
+// (e.g. keys/allowed/alice.pub) -- see the design spec's Approach A for why
+// per-identity files were chosen over a single serialized allowlist file.
+class FilesystemKeyStore : public KeyStore {
+public:
+    FilesystemKeyStore(std::filesystem::path allowed_dir, std::chrono::milliseconds min_check_interval);
+
+    bool IsAllowed(const std::array<uint8_t, 32> &pubkey_raw, std::string *name_out) const override;
+    void Refresh() override;
+
+private:
+    struct RawKeyHash {
+        size_t operator()(const std::array<uint8_t, 32> &k) const noexcept;
+    };
+    using SnapshotMap = std::unordered_map<std::array<uint8_t, 32>, std::string, RawKeyHash>;
+
+    // Re-scans allowed_dir_ if last_check_ is due; otherwise a cheap no-op
+    // (a duration comparison, no filesystem access at all). Called from both
+    // IsAllowed() (const) and Refresh() (non-const, after resetting
+    // last_check_ to force an immediate scan) -- hence all touched state is
+    // mutable, the standard const-correctness idiom for an internally-cached
+    // const method.
+    //
+    // Earlier revisions additionally skipped the directory listing when
+    // std::filesystem::last_write_time(allowed_dir_) hadn't advanced since
+    // the last scan. That mtime check was dropped: on this host, creating
+    // and then removing a file in quick succession can produce identical
+    // directory mtimes (a kernel timestamp-granularity artifact, reproduced
+    // with both std::filesystem::last_write_time and raw POSIX stat()), so
+    // a revocation could be silently missed. Rescanning unconditionally
+    // once per debounce interval is cheap enough (a directory listing over
+    // the dozens/hundreds of identities this is sized for) and removes the
+    // false-negative risk entirely.
+    void MaybeRescan() const;
+
+    std::filesystem::path allowed_dir_;
+    std::chrono::milliseconds min_check_interval_;
+    mutable std::chrono::steady_clock::time_point last_check_{};
+    mutable std::shared_ptr<const SnapshotMap> snapshot_;
 };
 
 #endif  // XSTORE_CURVE_H

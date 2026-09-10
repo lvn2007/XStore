@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include "include/Logger/Logger.h"
+#include "include/XStore/XStore_Tunables.h"
 
 std::string Z85ReadFile(const std::filesystem::path &path) {
     std::ifstream f(path);
@@ -87,4 +88,69 @@ void XStoreCurveKeyPair::SaveToFiles(const std::filesystem::path &public_key_fil
                                       const std::filesystem::path &secret_key_file) const {
     Z85WriteFile(public_key_file, public_key_z85, /*is_secret=*/false);
     Z85WriteFile(secret_key_file, secret_key_z85, /*is_secret=*/true);
+}
+
+size_t FilesystemKeyStore::RawKeyHash::operator()(const std::array<uint8_t, 32> &k) const noexcept {
+    // FNV-1a over the 32 bytes -- a lookup table sized in the dozens/
+    // hundreds of identities needs no cryptographic hash property, just a
+    // decent distribution.
+    size_t h = 14695981039346656037ULL;
+    for (uint8_t b : k) {
+        h ^= b;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+FilesystemKeyStore::FilesystemKeyStore(std::filesystem::path allowed_dir, std::chrono::milliseconds min_check_interval)
+    : allowed_dir_(std::move(allowed_dir)), min_check_interval_(min_check_interval) {
+    snapshot_ = std::make_shared<const SnapshotMap>();
+    MaybeRescan();
+}
+
+bool FilesystemKeyStore::IsAllowed(const std::array<uint8_t, 32> &pubkey_raw, std::string *name_out) const {
+    MaybeRescan();
+    auto snap = std::atomic_load(&snapshot_);
+    auto it = snap->find(pubkey_raw);
+    if (it == snap->end()) return false;
+    if (name_out) *name_out = it->second;
+    return true;
+}
+
+void FilesystemKeyStore::Refresh() {
+    last_check_ = std::chrono::steady_clock::time_point{};  // forces MaybeRescan to treat it as due
+    MaybeRescan();
+}
+
+void FilesystemKeyStore::MaybeRescan() const {
+    auto now = std::chrono::steady_clock::now();
+    if (now - last_check_ < min_check_interval_) return;
+    last_check_ = now;
+
+    std::error_code ec;
+    auto fresh = std::make_shared<SnapshotMap>();
+    for (const auto &entry : std::filesystem::directory_iterator(allowed_dir_, ec)) {
+        if (ec) break;
+        if (entry.path().extension() != ".pub") continue;
+        std::string z85;
+        try {
+            z85 = Z85ReadFile(entry.path());
+        } catch (const std::exception &e) {
+            spdlog::warn("[CURVE] - Skipping malformed allowlist entry {}: {}", entry.path().string(), e.what());
+            continue;
+        }
+        std::array<uint8_t, 32> raw{};
+        try {
+            raw = Z85Decode(z85);
+        } catch (const std::exception &e) {
+            spdlog::warn("[CURVE] - Skipping malformed allowlist entry {}: {}", entry.path().string(), e.what());
+            continue;
+        }
+        (*fresh)[raw] = entry.path().stem().string();
+    }
+    if (ec) {
+        spdlog::warn("[CURVE] - Cannot list allowed-dir {}: {}", allowed_dir_.string(), ec.message());
+        return;  // keep the previous good snapshot rather than replacing it with an empty/partial one
+    }
+    std::atomic_store(&snapshot_, std::shared_ptr<const SnapshotMap>(fresh));
 }

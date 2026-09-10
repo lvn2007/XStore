@@ -48,3 +48,67 @@ TEST(XStoreCurveKeyPairTest, LoadFromSecretKeyFileThrowsWhenSiblingPubMissing) {
     { std::ofstream f(sec_path); f << std::string(40, 'a'); }
     EXPECT_THROW(XStoreCurveKeyPair::LoadFromSecretKeyFile(sec_path), std::runtime_error);
 }
+
+#include <thread>
+#include "include/XStore/XStore_Tunables.h"
+
+TEST(FilesystemKeyStoreTest, UnknownKeyIsNotAllowed) {
+    ScratchDir scratch("fks_unknown_test");
+    std::filesystem::create_directories(scratch.test_root / "allowed");
+    FilesystemKeyStore store(scratch.test_root / "allowed", std::chrono::milliseconds(0));
+
+    auto kp = XStoreCurveKeyPair::Generate();
+    std::string name;
+    EXPECT_FALSE(store.IsAllowed(Z85Decode(kp.public_key_z85), &name));
+}
+
+TEST(FilesystemKeyStoreTest, AllowedKeyIsFoundWithCorrectName) {
+    ScratchDir scratch("fks_allowed_test");
+    auto allowed_dir = scratch.test_root / "allowed";
+    std::filesystem::create_directories(allowed_dir);
+
+    auto kp = XStoreCurveKeyPair::Generate();
+    Z85WriteFile(allowed_dir / "alice.pub", kp.public_key_z85, /*is_secret=*/false);
+
+    FilesystemKeyStore store(allowed_dir, std::chrono::milliseconds(0));
+    std::string name;
+    ASSERT_TRUE(store.IsAllowed(Z85Decode(kp.public_key_z85), &name));
+    EXPECT_EQ(name, "alice");
+}
+
+TEST(FilesystemKeyStoreTest, RevokeThenRefreshDeniesSubsequentLookup) {
+    ScratchDir scratch("fks_revoke_test");
+    auto allowed_dir = scratch.test_root / "allowed";
+    std::filesystem::create_directories(allowed_dir);
+
+    auto kp = XStoreCurveKeyPair::Generate();
+    auto pub_path = allowed_dir / "bob.pub";
+    Z85WriteFile(pub_path, kp.public_key_z85, /*is_secret=*/false);
+
+    FilesystemKeyStore store(allowed_dir, std::chrono::milliseconds(0));
+    std::string name;
+    ASSERT_TRUE(store.IsAllowed(Z85Decode(kp.public_key_z85), &name));
+
+    std::filesystem::remove(pub_path);
+    // Directory mtime granularity on some filesystems is 1s -- sleep past it
+    // so Refresh()'s mtime check reliably observes the change.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    store.Refresh();
+
+    EXPECT_FALSE(store.IsAllowed(Z85Decode(kp.public_key_z85), &name));
+}
+
+TEST(FilesystemKeyStoreTest, MalformedFileIsSkippedWithoutBreakingOtherEntries) {
+    ScratchDir scratch("fks_malformed_test");
+    auto allowed_dir = scratch.test_root / "allowed";
+    std::filesystem::create_directories(allowed_dir);
+
+    auto good_kp = XStoreCurveKeyPair::Generate();
+    Z85WriteFile(allowed_dir / "good.pub", good_kp.public_key_z85, /*is_secret=*/false);
+    { std::ofstream bad(allowed_dir / "bad.pub"); bad << "not-a-valid-z85-key"; }
+
+    FilesystemKeyStore store(allowed_dir, std::chrono::milliseconds(0));
+    std::string name;
+    EXPECT_TRUE(store.IsAllowed(Z85Decode(good_kp.public_key_z85), &name));
+    EXPECT_EQ(name, "good");
+}
