@@ -118,39 +118,44 @@ bool FilesystemKeyStore::IsAllowed(const std::array<uint8_t, 32> &pubkey_raw, st
 }
 
 void FilesystemKeyStore::Refresh() {
-    last_check_ = std::chrono::steady_clock::time_point{};  // forces MaybeRescan to treat it as due
+    // forces MaybeRescan to treat it as due
+    last_check_.store(std::chrono::steady_clock::time_point{}, std::memory_order_relaxed);
     MaybeRescan();
 }
 
 void FilesystemKeyStore::MaybeRescan() const {
     auto now = std::chrono::steady_clock::now();
-    if (now - last_check_ < min_check_interval_) return;
-    last_check_ = now;
+    auto prev = last_check_.load(std::memory_order_relaxed);
+    if (now - prev < min_check_interval_) return;
+    last_check_.store(now, std::memory_order_relaxed);
 
     std::error_code ec;
-    auto fresh = std::make_shared<SnapshotMap>();
-    for (const auto &entry : std::filesystem::directory_iterator(allowed_dir_, ec)) {
-        if (ec) break;
-        if (entry.path().extension() != ".pub") continue;
-        std::string z85;
-        try {
-            z85 = Z85ReadFile(entry.path());
-        } catch (const std::exception &e) {
-            spdlog::warn("[CURVE] - Skipping malformed allowlist entry {}: {}", entry.path().string(), e.what());
-            continue;
-        }
-        std::array<uint8_t, 32> raw{};
-        try {
-            raw = Z85Decode(z85);
-        } catch (const std::exception &e) {
-            spdlog::warn("[CURVE] - Skipping malformed allowlist entry {}: {}", entry.path().string(), e.what());
-            continue;
-        }
-        (*fresh)[raw] = entry.path().stem().string();
-    }
+    auto it = std::filesystem::directory_iterator(allowed_dir_, ec);
     if (ec) {
         spdlog::warn("[CURVE] - Cannot list allowed-dir {}: {}", allowed_dir_.string(), ec.message());
-        return;  // keep the previous good snapshot rather than replacing it with an empty/partial one
+        return;  // keep the previous good snapshot
+    }
+
+    // Manual iteration via increment(ec) rather than a range-based for: the
+    // latter calls directory_iterator::operator++(), which throws
+    // filesystem_error on a mid-scan failure (dir removed/unmounted/perm
+    // change). This runs on every IsAllowed() call including ZAP auth
+    // requests, so an uncaught exception here must not be possible.
+    auto fresh = std::make_shared<SnapshotMap>();
+    for (; it != std::filesystem::directory_iterator(); it.increment(ec)) {
+        if (ec) {
+            spdlog::warn("[CURVE] - Error while scanning allowed-dir {}: {}", allowed_dir_.string(), ec.message());
+            return;  // keep the previous good snapshot rather than replacing it with a partial one
+        }
+        const auto &entry = *it;
+        if (entry.path().extension() != ".pub") continue;
+        try {
+            auto z85 = Z85ReadFile(entry.path());
+            (*fresh)[Z85Decode(z85)] = entry.path().stem().string();
+        } catch (const std::exception &e) {
+            spdlog::warn("[CURVE] - Skipping malformed allowlist entry {}: {}", entry.path().string(), e.what());
+            continue;
+        }
     }
     std::atomic_store(&snapshot_, std::shared_ptr<const SnapshotMap>(fresh));
 }

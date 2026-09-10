@@ -2,6 +2,7 @@
 #define XSTORE_CURVE_H
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -115,7 +116,13 @@ private:
 
     std::filesystem::path allowed_dir_;
     std::chrono::milliseconds min_check_interval_;
-    mutable std::chrono::steady_clock::time_point last_check_{};
+    // atomic: IsAllowed() is called concurrently from independent ZAP
+    // handler threads (XStoreZapHandler instances for ZmqServer and
+    // SysStatsCollector can share one FilesystemKeyStore) -- plain
+    // read-compare-then-write here would be a data race. Relaxed ordering
+    // is enough: a benign double-rescan if two threads race past the
+    // debounce check together is harmless and already tolerated by design.
+    mutable std::atomic<std::chrono::steady_clock::time_point> last_check_{};
     mutable std::shared_ptr<const SnapshotMap> snapshot_;
 };
 

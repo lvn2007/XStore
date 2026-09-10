@@ -49,7 +49,6 @@ TEST(XStoreCurveKeyPairTest, LoadFromSecretKeyFileThrowsWhenSiblingPubMissing) {
     EXPECT_THROW(XStoreCurveKeyPair::LoadFromSecretKeyFile(sec_path), std::runtime_error);
 }
 
-#include <thread>
 #include "include/XStore/XStore_Tunables.h"
 
 TEST(FilesystemKeyStoreTest, UnknownKeyIsNotAllowed) {
@@ -90,9 +89,9 @@ TEST(FilesystemKeyStoreTest, RevokeThenRefreshDeniesSubsequentLookup) {
     ASSERT_TRUE(store.IsAllowed(Z85Decode(kp.public_key_z85), &name));
 
     std::filesystem::remove(pub_path);
-    // Directory mtime granularity on some filesystems is 1s -- sleep past it
-    // so Refresh()'s mtime check reliably observes the change.
-    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    // No sleep needed: MaybeRescan() no longer gates on directory mtime (see
+    // XStore_Curve.h/.cpp), so Refresh() unconditionally re-lists allowed_dir
+    // and picks up the removal immediately.
     store.Refresh();
 
     EXPECT_FALSE(store.IsAllowed(Z85Decode(kp.public_key_z85), &name));
