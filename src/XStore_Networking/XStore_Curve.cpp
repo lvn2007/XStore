@@ -194,8 +194,20 @@ void XStoreZapHandler::Loop() {
     while (!stop_flag_.load(std::memory_order_relaxed)) {
         std::vector<zmq::message_t> request;
         if (!zmq::recv_multipart(zap, std::back_inserter(request))) continue;  // timeout
-        if (request.size() < 7) {
-            spdlog::warn("[CURVE] - Malformed ZAP request ({} frames), dropping", request.size());
+        if (request.size() < 6) {
+            // Pathological -- should never happen from a real libzmq ZAP client, but
+            // this REP socket's recv/send state machine must stay in sync regardless,
+            // or the NEXT (unrelated) ZAP request throws EFSM and crashes the process.
+            spdlog::warn("[CURVE] - Malformed ZAP request ({} frames), denying with best-effort reply",
+                         request.size());
+            zmq::multipart_t reply;
+            reply.addstr(request.size() > 0 ? request[0].to_string() : "1.0");
+            reply.addstr(request.size() > 1 ? request[1].to_string() : "");
+            reply.addstr("500");
+            reply.addstr("Malformed request");
+            reply.addstr("");
+            reply.addstr("");
+            reply.send(zap);
             continue;
         }
 
@@ -207,7 +219,7 @@ void XStoreZapHandler::Loop() {
         std::string status_text = "Denied";
         std::string user_id;
 
-        if (mechanism == "CURVE" && request[6].size() == 32) {
+        if (mechanism == "CURVE" && request.size() >= 7 && request[6].size() == 32) {
             std::array<uint8_t, 32> pubkey_raw{};
             std::memcpy(pubkey_raw.data(), request[6].data(), 32);
             std::string name;
@@ -217,11 +229,12 @@ void XStoreZapHandler::Loop() {
                 user_id = name;
                 spdlog::info("[CURVE] - ZAP allowed '{}'", name);
             } else {
+                std::string fingerprint = Z85Encode(pubkey_raw);
                 spdlog::warn("[CURVE] - ZAP denied unknown CURVE key (fingerprint {}...{})",
-                             Z85Encode(pubkey_raw).substr(0, 6), Z85Encode(pubkey_raw).substr(34));
+                             fingerprint.substr(0, 6), fingerprint.substr(34));
             }
         } else {
-            spdlog::warn("[CURVE] - ZAP request with unexpected mechanism '{}', denying", mechanism);
+            spdlog::warn("[CURVE] - ZAP request denied (mechanism={}, frames={})", mechanism, request.size());
         }
 
         zmq::multipart_t reply;

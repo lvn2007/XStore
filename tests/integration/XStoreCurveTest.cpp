@@ -189,3 +189,55 @@ TEST(XStoreZapHandlerTest, UnlistedClientHandshakeIsDenied) {
     // message from this peer within the timeout.
     EXPECT_FALSE(zmq::recv_multipart(pair.router, std::back_inserter(frames)));
 }
+
+TEST(XStoreZapHandlerTest, MalformedRequestGetsReplyAndDoesNotDesyncSocket) {
+    // Talks to the ZAP responder directly (REQ <-> its REP socket) rather
+    // than through a full CURVE handshake, so a too-short request can be
+    // crafted by hand. Before the fix, request.size() < 7 dropped the
+    // request without replying, which desyncs a REP socket's recv/send
+    // state machine -- the NEXT recv_multipart() call (for any future ZAP
+    // request, from any client) throws zmq::error_t(EFSM) uncaught out of
+    // the handler thread, calling std::terminate() and crashing the whole
+    // process. This test would hang/crash on the second recv below if that
+    // regressed.
+    ScratchDir scratch("zap_malformed_test");
+    auto allowed_dir = scratch.test_root / "allowed";
+    std::filesystem::create_directories(allowed_dir);
+    auto store = std::make_shared<FilesystemKeyStore>(allowed_dir, std::chrono::milliseconds(0));
+    zmq::context_t ctx{1};
+    XStoreZapHandler zap(ctx, store);
+    zap.Start();
+
+    zmq::socket_t req(ctx, zmq::socket_type::req);
+    req.set(zmq::sockopt::rcvtimeo, 500);
+    req.set(zmq::sockopt::linger, 0);
+    req.connect("inproc://zeromq.zap.01");
+
+    // Pathologically short (1-frame) request -- fewer than the 6 frames
+    // RFC 27 requires to extract version/sequence/mechanism.
+    zmq::multipart_t bad;
+    bad.addstr("1.0");
+    bad.send(req);
+
+    std::vector<zmq::message_t> reply1;
+    ASSERT_TRUE(zmq::recv_multipart(req, std::back_inserter(reply1)));
+    ASSERT_GE(reply1.size(), 3u);
+    EXPECT_EQ(reply1[2].to_string(), "500");
+
+    // Socket must still be healthy: a well-formed 6-frame NULL-mechanism
+    // request (the true RFC 27 minimum) gets a proper reply, not a hang.
+    zmq::multipart_t good;
+    good.addstr("1.0");
+    good.addstr("2");
+    good.addstr("domain");
+    good.addstr("127.0.0.1");
+    good.addstr("identity");
+    good.addstr("NULL");
+    good.send(req);
+
+    std::vector<zmq::message_t> reply2;
+    ASSERT_TRUE(zmq::recv_multipart(req, std::back_inserter(reply2)));
+    ASSERT_GE(reply2.size(), 3u);
+    EXPECT_EQ(reply2[1].to_string(), "2");
+    EXPECT_EQ(reply2[2].to_string(), "400");  // NULL mechanism denied, not crashed
+}
