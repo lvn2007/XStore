@@ -2,9 +2,12 @@
 
 #include <zmq.h>
 
+#include <cerrno>
 #include <cstring>
 #include <fstream>
 #include <stdexcept>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "include/Logger/Logger.h"
 
@@ -27,17 +30,15 @@ void Z85WriteFile(const std::filesystem::path &path, const std::string &z85, boo
     if (path.has_parent_path()) {
         std::filesystem::create_directories(path.parent_path());
     }
-    {
-        std::ofstream f(path, std::ios::trunc);
-        if (!f.is_open()) {
-            throw std::runtime_error("Z85WriteFile: cannot open " + path.string() + " for writing");
-        }
-        f << z85;
+    mode_t mode = is_secret ? 0600 : 0644;
+    int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, mode);
+    if (fd < 0) {
+        throw std::runtime_error("Z85WriteFile: cannot open " + path.string() + " for writing: " + std::strerror(errno));
     }
-    if (is_secret) {
-        std::filesystem::permissions(path,
-            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-            std::filesystem::perm_options::replace);
+    ssize_t written = ::write(fd, z85.data(), z85.size());
+    int close_result = ::close(fd);
+    if (written != static_cast<ssize_t>(z85.size()) || close_result != 0) {
+        throw std::runtime_error("Z85WriteFile: failed writing to " + path.string());
     }
 }
 
