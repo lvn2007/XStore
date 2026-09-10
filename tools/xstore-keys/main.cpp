@@ -51,6 +51,10 @@ int RunRevoke(const std::string &name, const std::string &allowed_dir_arg) {
     fs::path dest = fs::path(allowed_dir_arg) / (name + ".pub");
     std::error_code ec;
     bool removed = fs::remove(dest, ec);
+    if (ec) {
+        std::cerr << "xstore-keys: failed to revoke '" << name << "': " << ec.message() << "\n";
+        return 1;
+    }
     if (removed) {
         std::cout << "Revoked '" << name << "'\n";
     } else {
