@@ -1,6 +1,8 @@
+import os
 from typing import List
 import XStore_pb2 as XStore_Proto
 import zmq
+from zmq.utils import z85
 import dataclasses
 
 
@@ -28,12 +30,42 @@ class SysInfo:
 
 
 class XStoreClient:
-    def __init__(self, SERVER_ADDR, SERVER_PORT, verbose=False):
+    def __init__(self, SERVER_ADDR, SERVER_PORT, verbose=False,
+                 curve_client_secret_key_file=None, curve_server_public_key_file=None):
         if verbose:
             print(f'Connecting to tcp://{SERVER_ADDR}:{SERVER_PORT}')
         self.zmqContext = zmq.Context()
         self.socket = self.zmqContext.socket(zmq.REQ)
+
+        have_client_key = curve_client_secret_key_file is not None
+        have_server_key = curve_server_public_key_file is not None
+        if have_client_key != have_server_key:
+            raise ValueError(
+                "XStoreClient: curve_client_secret_key_file and curve_server_public_key_file "
+                "must be given together, or not at all")
+        if have_client_key:
+            client_secret_z85 = self._read_z85_file(curve_client_secret_key_file)
+            client_public_path = os.path.splitext(curve_client_secret_key_file)[0] + ".pub"
+            client_public_z85 = self._read_z85_file(client_public_path)
+            server_public_z85 = self._read_z85_file(curve_server_public_key_file)
+
+            # pyzmq's curve_* socket attributes take raw 32-byte keys, unlike
+            # cppzmq's sockopt wrappers which accept Z85 text directly -- decode
+            # here since this on-disk format is always 40-char Z85 (see the
+            # design doc's Global Constraints).
+            self.socket.curve_secretkey = z85.decode(client_secret_z85.encode("ascii"))
+            self.socket.curve_publickey = z85.decode(client_public_z85.encode("ascii"))
+            self.socket.curve_serverkey = z85.decode(server_public_z85.encode("ascii"))
+
         self.socket.connect(f'tcp://{SERVER_ADDR}:{SERVER_PORT}')
+
+    @staticmethod
+    def _read_z85_file(path):
+        with open(path, "r") as f:
+            key = f.read().strip()
+        if len(key) != 40:
+            raise ValueError(f"XStoreClient: {path} does not contain a 40-character Z85 key")
+        return key
 
     def _sendRecv(self, envelope, repClass):
         # Every RPC is: serialize the Request envelope, send, recv, parse
