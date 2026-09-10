@@ -4,7 +4,10 @@
 #include <chrono>
 #include <cstdint>
 #include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -20,6 +23,47 @@
 #include <zmq.hpp>
 #include <zmq_addon.hpp>
 #include "XStore.pb.h"
+
+// Client-side CURVE identity: this client's own keypair plus the server's
+// public key (which the client must already know out-of-band -- see the
+// design doc). Deliberately duplicates the tiny amount of Z85-file-reading
+// logic XStore_Curve.h has server-side rather than including that header,
+// so this file keeps compiling standalone if client_src/Cpp is copied out
+// on its own without the rest of the repo.
+struct XStoreCurveClientAuth {
+  std::string client_public_key_z85;
+  std::string client_secret_key_z85;
+  std::string server_public_key_z85;
+
+  // client_secret_key_file's sibling ".pub" (same directory/stem) supplies
+  // the client's own public key -- the same xstore-keys gen convention
+  // used server-side.
+  static XStoreCurveClientAuth LoadFromFiles(std::string_view client_secret_key_file,
+                                              std::string_view server_public_key_file) {
+      auto read_z85 = [](const std::filesystem::path &p) {
+          std::ifstream f(p);
+          if (!f.is_open()) {
+              throw std::runtime_error("XStoreCurveClientAuth: cannot open " + p.string());
+          }
+          std::string key;
+          f >> key;
+          if (key.size() != 40) {
+              throw std::runtime_error("XStoreCurveClientAuth: " + p.string() +
+                                        " does not contain a 40-character Z85 key");
+          }
+          return key;
+      };
+      std::filesystem::path secret_path(client_secret_key_file);
+      std::filesystem::path public_path = secret_path;
+      public_path.replace_extension(".pub");
+
+      XStoreCurveClientAuth auth;
+      auth.client_secret_key_z85 = read_z85(secret_path);
+      auth.client_public_key_z85 = read_z85(public_path);
+      auth.server_public_key_z85 = read_z85(std::filesystem::path(server_public_key_file));
+      return auth;
+  }
+};
 
 struct FileInfo {
   std::string file_name;
@@ -135,10 +179,16 @@ class XStoreClient {
   // hanging this REQ socket indefinitely. warmupOnInit lets callers who
   // don't care about paying the handshake cost upfront (e.g. short-lived
   // clients that may never send a request) skip it.
-  XStoreClient(std::string_view server_addr, std::string_view server_port, int timeout_ms = -1, bool warmup_on_init = true) {
+  XStoreClient(std::string_view server_addr, std::string_view server_port, int timeout_ms = -1,
+               bool warmup_on_init = true, std::optional<XStoreCurveClientAuth> curve_auth = std::nullopt) {
       sock.set(zmq::sockopt::rcvtimeo, timeout_ms);
       sock.set(zmq::sockopt::sndtimeo, timeout_ms);
       sock.set(zmq::sockopt::linger, 0);
+      if (curve_auth) {
+          sock.set(zmq::sockopt::curve_serverkey, curve_auth->server_public_key_z85);
+          sock.set(zmq::sockopt::curve_publickey, curve_auth->client_public_key_z85);
+          sock.set(zmq::sockopt::curve_secretkey, curve_auth->client_secret_key_z85);
+      }
       std::string full_addr = fmt::format("tcp://{}:{}", server_addr, server_port);
       sock.connect(full_addr);
       if (warmup_on_init) {
@@ -161,11 +211,17 @@ class XStoreClient {
   // send-then-recv state machine left in an undefined spot per ZMQ's own
   // docs -- the fix is a fresh socket, not another send. Call this after
   // catching a timeout exception from any RPC below before retrying.
-  void Reconnect(std::string_view server_addr, std::string_view server_port, int timeout_ms = -1, bool warmup_on_init = true) {
+  void Reconnect(std::string_view server_addr, std::string_view server_port, int timeout_ms = -1,
+                 bool warmup_on_init = true, std::optional<XStoreCurveClientAuth> curve_auth = std::nullopt) {
       sock = zmq::socket_t(ctx, zmq::socket_type::req);
       sock.set(zmq::sockopt::rcvtimeo, timeout_ms);
       sock.set(zmq::sockopt::sndtimeo, timeout_ms);
       sock.set(zmq::sockopt::linger, 0);
+      if (curve_auth) {
+          sock.set(zmq::sockopt::curve_serverkey, curve_auth->server_public_key_z85);
+          sock.set(zmq::sockopt::curve_publickey, curve_auth->client_public_key_z85);
+          sock.set(zmq::sockopt::curve_secretkey, curve_auth->client_secret_key_z85);
+      }
       std::string full_addr = fmt::format("tcp://{}:{}", server_addr, server_port);
       sock.connect(full_addr);
       if (warmup_on_init) {

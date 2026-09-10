@@ -92,6 +92,7 @@ if(TARGET XStoreClient)
     add_executable(xstore_client_tests
             integration/XStoreClientTest.cpp
             integration/XStoreClientLiveTest.cpp
+            integration/XStoreClientCurveLiveTest.cpp
     )
     target_link_libraries(xstore_client_tests PRIVATE GTest::gtest_main XStoreClient)
 
