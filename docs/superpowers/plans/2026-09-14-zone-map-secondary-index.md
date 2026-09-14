@@ -1016,7 +1016,13 @@ git commit -m "feat(zonemap): prune blocks in MinAggregate/MaxAggregate via zone
 
 ## Task 7: `SumAggregate`/`AvgAggregate` fully-covered-block pushdown
 
-**Status: NOT STARTED.**
+**Status: DONE.**
+
+**Adapted from this task's original sketch, same shape as Task 6's deviation:** a new shared private member function, `XStore::AccumulateSegmentWithZoneMapPushdown` (`XStore.h`/`XStore_Aggregates.cpp`, next to Task 6's `ScanSegmentWithZoneMapPruning`), does the per-block split/pushdown/fallback-scan loop; `SumAggregate` and `AvgAggregate` both just call it (no separate `AvgAggregate` change needed, exactly as the plan predicted -- it already divides `SumAggregate`'s own `sum_out`/`valid_count_out`).
+
+**Real bug caught in the plan's own Step 3 pseudocode, fixed before implementing:** the plan's `block_fully_in_range` check compared the already-query-clipped `block_first_row`/`block_last_row` against the query range (`first_row`/`last_row`) -- but those are clipped BY CONSTRUCTION to always fall inside `[first_row, last_row]` (`block_first_row = max(first_row, ...)`, `block_last_row = min(last_row, ...)`), making the condition trivially true for every block, including genuinely partial ones. That would have pushed down a block's full zone-map sum even when the query only touched part of it -- silently wrong, over-counting. Fixed by comparing the block's OWN full row span (`block_own_first_row = block * rows_per_block`, `block_own_last_row = block_own_first_row + rows_per_block - 1`) against the query range instead, which is the actual "is this whole block inside the query" question. Verified against `SumAggregateMixesPushdownAndScanForPartialBoundaryBlocks` (the plan's own Step 4 test), which specifically exercises a partial trailing block.
+
+**Test fixes:** same `sum_rep.data()`/`avg_rep.data()` field-name bug as Task 6 (no `data` field on `Sum_REP`/`Avg_REP`; real field is `opResult`/`opresult()`) -- fixed in the tests actually added. Also: the plan's given tests use `row_length=64` like every other zone-map test, but these three insert one row per slot to build a REAL full block (`RowsPerBlock(64)` = 32768 rows) -- 32768 individual SYNC `UnaryInsert`s (one fsync round-trip each) measured at ~100-200s PER TEST, ~7 minutes added to the suite. Fixed by using a much wider `row_length` (16384, `RowsPerBlock` == 128) for just these three tests -- same real production formula, a deliberately small block. (32768 itself doesn't work either: `CreateTestDb`'s `row_length` parameter is a signed `short`, and 32768 silently wraps negative.) Full suite now 150/150 in ~83s, same order as before this task.
 
 **Files:**
 - Modify: `src/XStore/XStore_Aggregates.cpp` — `SumAggregate`/`AvgAggregate`
@@ -1026,7 +1032,7 @@ git commit -m "feat(zonemap): prune blocks in MinAggregate/MaxAggregate via zone
 - Consumes: `ZoneMapFile::TryGetBlockStats` (Task 2), `ProcessFileRangeAccumulate` (`XStore.h:404-406`, unchanged for partially-covered blocks).
 - Produces: nothing new — this is the last aggregate integration point in this plan.
 
-- [ ] **Step 1: Write the failing (by-luck-passing, correctness-pinning) test**
+- [x] **Step 1: Write the failing (by-luck-passing, correctness-pinning) test**
 
 ```cpp
 namespace {
@@ -1056,12 +1062,12 @@ TEST_F(XStoreZoneMapTest, SumAggregateUsesPrecomputedSumForFullyCoveredBlocks) {
 } // namespace
 ```
 
-- [ ] **Step 2: Run, confirm it already passes (pinning correctness before the optimization)**
+- [x] **Step 2: Run, confirm it already passes (pinning correctness before the optimization)**
 
 Run: `./build/tests/xstore_tests --gtest_filter=XStoreZoneMapTest.SumAggregate*`
 Expected: PASS (unoptimized path is already correct).
 
-- [ ] **Step 3: Add the pushdown — a block fully inside `[start_epoch_t, end_epoch_t)` contributes its precomputed sum/count with zero row scan**
+- [x] **Step 3: Add the pushdown — a block fully inside `[start_epoch_t, end_epoch_t)` contributes its precomputed sum/count with zero row scan**
 
 ```cpp
 // src/XStore/XStore_Aggregates.cpp -- inside SumAggregate's per-block loop
@@ -1080,7 +1086,7 @@ if (block_fully_in_range && stats.has_value() && column_idx < stats->size()) {
 
 `AvgAggregate` needs no separate change beyond this — it already divides `SumAggregate`'s `sum_out`/`valid_count_out` (per the existing "AVG divides after" comment at `XStore.h:405`).
 
-- [ ] **Step 4: Add a test proving the pushdown is actually exercised (partial + full block mix)**
+- [x] **Step 4: Add a test proving the pushdown is actually exercised (partial + full block mix)**
 
 ```cpp
 namespace {
@@ -1112,12 +1118,12 @@ TEST_F(XStoreZoneMapTest, SumAggregateMixesPushdownAndScanForPartialBoundaryBloc
 } // namespace
 ```
 
-- [ ] **Step 5: Run tests, confirm pass, then full suite**
+- [x] **Step 5: Run tests, confirm pass, then full suite**
 
 Run: `./build/tests/xstore_tests --gtest_filter=XStoreZoneMapTest.*` then `./build/tests/xstore_tests`
 Expected: all PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/XStore/XStore_Aggregates.cpp tests/integration/XStoreZoneMapTest.cpp

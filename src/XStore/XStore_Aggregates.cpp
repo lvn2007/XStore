@@ -197,6 +197,46 @@ void XStore::ScanSegmentWithZoneMapPruning(const std::string &db_base_path, unsi
     }
 }
 
+void XStore::AccumulateSegmentWithZoneMapPushdown(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                                   const char *rows_base, unsigned long long rows_to_process,
+                                                   unsigned long long first_row_index, unsigned short column_idx,
+                                                   double &sum_out, unsigned long long &valid_count_out) {
+    if (rows_to_process == 0) return;
+
+    ZoneMapFile &zmap = GetOrOpenZoneMap(db_base_path, year, row_length);
+    uint64_t rows_per_block = zmap.RowsPerBlockValue();
+    uint64_t first_row = first_row_index;
+    uint64_t last_row = first_row_index + rows_to_process - 1;
+
+    for (uint64_t block = BlockIndexForRow(first_row, rows_per_block);
+         block <= BlockIndexForRow(last_row, rows_per_block);
+         ++block) {
+        uint64_t block_own_first_row = block * rows_per_block;
+        uint64_t block_own_last_row = block_own_first_row + rows_per_block - 1;
+
+        // Fully covered means the block's OWN full extent lies inside the
+        // query range, not just the already-query-clipped sub-range this
+        // segment happens to hand us -- a block only partially inside the
+        // query still needs a real scan, since its zone-map sum covers the
+        // whole block including rows outside what was actually asked for.
+        bool block_fully_in_range = (block_own_first_row >= first_row && block_own_last_row <= last_row);
+
+        auto stats = zmap.TryGetBlockStats(block);
+        if (block_fully_in_range && stats.has_value() && column_idx < stats->size()) {
+            const ZoneMapEntry &e = (*stats)[column_idx];
+            sum_out += e.sum_value;
+            valid_count_out += e.valid_count;
+            continue; // zero-scan pushdown
+        }
+
+        uint64_t block_first_row = std::max(first_row, block_own_first_row);
+        uint64_t block_last_row = std::min(last_row, block_own_last_row);
+        uint64_t block_row_count = block_last_row - block_first_row + 1;
+        const char *block_rows_base = rows_base + (block_first_row - first_row) * row_length;
+        ProcessFileRangeAccumulate(block_rows_base, block_row_count, row_length, column_idx, sum_out, valid_count_out);
+    }
+}
+
 void XStore::MinAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
                             std::string_view db_name_view, unsigned short int column_idx, XStore_Proto::Min_REP *return_data) {
 
@@ -339,10 +379,9 @@ void XStore::SumAggregate(unsigned long long int start_epoch_t, unsigned long lo
     SumPartial final = WalkYearSpanParallel<SumPartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
         SumPartial{},
         [&](SumPartial &partial, const char *rows_base, unsigned long long rows_to_process,
-            [[maybe_unused]] unsigned short year, [[maybe_unused]] unsigned long long first_row_index) {
-            // Zone-map fully-covered-block pushdown lands in Task 7 --
-            // year/first_row_index are unused until then.
-            ProcessFileRangeAccumulate(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.sum, partial.count);
+            unsigned short year, unsigned long long first_row_index) {
+            AccumulateSegmentWithZoneMapPushdown(db_base_path_str, year, cfg_struct.rowlength(),
+                rows_base, rows_to_process, first_row_index, column_idx, partial.sum, partial.count);
         },
         [](SumPartial &final_state, SumPartial &partial) {
             final_state.sum += partial.sum;
@@ -385,10 +424,9 @@ void XStore::AvgAggregate(unsigned long long int start_epoch_t, unsigned long lo
     SumPartial final = WalkYearSpanParallel<SumPartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
         SumPartial{},
         [&](SumPartial &partial, const char *rows_base, unsigned long long rows_to_process,
-            [[maybe_unused]] unsigned short year, [[maybe_unused]] unsigned long long first_row_index) {
-            // Zone-map fully-covered-block pushdown lands in Task 7 --
-            // year/first_row_index are unused until then.
-            ProcessFileRangeAccumulate(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.sum, partial.count);
+            unsigned short year, unsigned long long first_row_index) {
+            AccumulateSegmentWithZoneMapPushdown(db_base_path_str, year, cfg_struct.rowlength(),
+                rows_base, rows_to_process, first_row_index, column_idx, partial.sum, partial.count);
         },
         [](SumPartial &final_state, SumPartial &partial) {
             final_state.sum += partial.sum;

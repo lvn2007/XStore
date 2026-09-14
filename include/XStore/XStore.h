@@ -442,6 +442,20 @@ class XStore {
                                             ValueStruct &best_value, XStore_Proto::FData &best_data,
                                             PruneCheck &&should_skip_block);
 
+        // Shared by SumAggregate/AvgAggregate (Task 7): same per-segment
+        // block split as ScanSegmentWithZoneMapPruning above, but for
+        // accumulation instead of a single winner. A block contributes its
+        // precomputed sum_value/valid_count with zero row scan only when
+        // the block's OWN full row span (not the query-clipped sub-range)
+        // lies entirely inside [firstRowIndex, firstRowIndex+rowsToProcess)
+        // -- a block only partially covered by the query still needs a
+        // real ProcessFileRangeAccumulate scan, since the zone map's sum
+        // covers the whole block, not just the queried slice of it.
+        void AccumulateSegmentWithZoneMapPushdown(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                                   const char *rows_base, unsigned long long rows_to_process,
+                                                   unsigned long long first_row_index, unsigned short column_idx,
+                                                   double &sum_out, unsigned long long &valid_count_out);
+
         // MIN - AGGREGATE
         void MinAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Min_REP *return_data);
 

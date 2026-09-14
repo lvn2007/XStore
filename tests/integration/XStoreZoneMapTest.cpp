@@ -285,3 +285,85 @@ TEST_F(XStoreZoneMapTest, MaxAggregatePrunesBlocksButStillFindsCorrectAnswer) {
 }
 
 } // namespace
+
+namespace {
+
+using xstore_test::CreateTestDb;
+
+// row_length=64 (RowsPerBlock == 32768) is what every other zone-map test
+// uses, but these three tests insert one row PER SLOT in a full block to
+// actually exercise "fully covered" pushdown -- 32768 individual SYNC
+// UnaryInserts (one fsync round-trip each) took ~100s per test. A much
+// wider row_length keeps the exact same production RowsPerBlock formula
+// (ZONE_MAP_TARGET_BLOCK_BYTES / row_length) but yields a small, still
+// real, block size -- not a test-only shortcut. Capped well under 32768:
+// CreateTestDb's row_length is a signed short (CreateDB_REQ's wire type),
+// so 32768 itself silently wraps negative and CreateDB fails.
+constexpr uint16_t kWideRowLength = 16384; // -> RowsPerBlock == 128
+
+TEST_F(XStoreZoneMapTest, SumAggregateUsesPrecomputedSumForFullyCoveredBlocks) {
+    XStore store;
+    CreateTestDb(store, "ZMAPSUM", XStore_Proto::SECOND, kWideRowLength);
+    uint64_t rows_per_block = RowsPerBlock(kWideRowLength);
+    unsigned long long base = 1700000000ULL;
+    double expected_sum = 0.0;
+    for (uint64_t i = 0; i < rows_per_block; ++i) {
+        XStore_Proto::UnaryInsert_REP rep;
+        XStore_Proto::RowData row;
+        row.add_fielddata()->set_doubledata(static_cast<double>(i));
+        store.UnaryInsert(base + i, row, "ZMAPSUM", &rep, XStore_Proto::SYNC);
+        expected_sum += static_cast<double>(i);
+    }
+    // No explicit flush needed -- UpdateRow (Task 2) already made this durable.
+
+    XStore_Proto::Sum_REP sum_rep;
+    store.SumAggregate(base, base + rows_per_block, "ZMAPSUM", 0, &sum_rep);
+    EXPECT_DOUBLE_EQ(sum_rep.opresult(), expected_sum);
+}
+
+TEST_F(XStoreZoneMapTest, SumAggregateMixesPushdownAndScanForPartialBoundaryBlocks) {
+    XStore store;
+    CreateTestDb(store, "ZMAPSUMMIX", XStore_Proto::SECOND, kWideRowLength);
+    uint64_t rows_per_block = RowsPerBlock(kWideRowLength);
+    unsigned long long base = 1700000000ULL;
+    double expected_sum = 0.0;
+    // Fill 2 full blocks plus 3 extra rows into a third (partial) block.
+    uint64_t total_rows = rows_per_block * 2 + 3;
+    for (uint64_t i = 0; i < total_rows; ++i) {
+        XStore_Proto::UnaryInsert_REP rep;
+        XStore_Proto::RowData row;
+        row.add_fielddata()->set_doubledata(1.0);
+        store.UnaryInsert(base + i, row, "ZMAPSUMMIX", &rep, XStore_Proto::SYNC);
+        expected_sum += 1.0;
+    }
+    // No explicit flush needed -- UpdateRow (Task 2) already made this durable.
+
+    XStore_Proto::Sum_REP sum_rep;
+    store.SumAggregate(base, base + total_rows, "ZMAPSUMMIX", 0, &sum_rep);
+    EXPECT_DOUBLE_EQ(sum_rep.opresult(), expected_sum);
+}
+
+TEST_F(XStoreZoneMapTest, AvgAggregateUsesPushdownSumAndCountForFullyCoveredBlocks) {
+    // AvgAggregate needs no separate pushdown code (it already divides
+    // SumAggregate's own sum/count), so this exercises that the shared
+    // AccumulateSegmentWithZoneMapPushdown path also produces the right
+    // divisor, not just the right numerator.
+    XStore store;
+    CreateTestDb(store, "ZMAPAVG", XStore_Proto::SECOND, kWideRowLength);
+    uint64_t rows_per_block = RowsPerBlock(kWideRowLength);
+    unsigned long long base = 1700000000ULL;
+    double expected_sum = 0.0;
+    for (uint64_t i = 0; i < rows_per_block; ++i) {
+        XStore_Proto::UnaryInsert_REP rep;
+        XStore_Proto::RowData row;
+        row.add_fielddata()->set_doubledata(static_cast<double>(i));
+        store.UnaryInsert(base + i, row, "ZMAPAVG", &rep, XStore_Proto::SYNC);
+        expected_sum += static_cast<double>(i);
+    }
+
+    XStore_Proto::Avg_REP avg_rep;
+    store.AvgAggregate(base, base + rows_per_block, "ZMAPAVG", 0, &avg_rep);
+    EXPECT_DOUBLE_EQ(avg_rep.opresult(), expected_sum / static_cast<double>(rows_per_block));
+}
+
+} // namespace
