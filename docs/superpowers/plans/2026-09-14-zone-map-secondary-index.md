@@ -681,7 +681,11 @@ git commit -m "feat(zonemap): add per-(db,year) ZoneMapFile registry"
 
 ## Task 4: Wire `UnaryInsert` into the zone map
 
-**Status: NOT STARTED.**
+**Status: DONE (folded together with Task 5 below — see that task's status note for why).**
+
+**Architecture deviation from this task's original sketch, decided with the user before implementing:** the hook point below (`ApplyWalRecord`) is NOT where this task originally said to hook (`XStore_UnaryOps.cpp`'s write sites). Reason: `ApplyWalRecord` (`XStore_Wal.cpp`) is the actual single write choke-point for every row across Unary/Batch/Range and every durability mode — for SYNC/BYPASS it runs inline before the insert call returns (matches this task's original assumption), but for **ASYNC (the default mode Batch/Range already use)** the real `pwrite` happens later, on a WAL writer thread, after `EnqueueWalRecord` has already returned. Hooking at the original call site would have written the zone map *before* the row was actually durable — a crash in that window leaves the zone map claiming a row exists that a restart proves was never written, corrupting a later `SumAggregate`/`MinAggregate`/`MaxAggregate` result (Tasks 6-7), not just a pruning inefficiency. Hooking at `ApplyWalRecord` instead is correct under every mode, at the cost of: `WalRow` now carries precomputed `ZoneMapObservation`s (`ApplyWalRecord` only has serialized `row_bytes`, not the original `RowData`, so observations must be built at enqueue time and carried through); and the zone-map registry (`zone_map_registry_`/`GetOrOpenZoneMap`, Task 3) became `static`/process-global instead of a per-`XStore`-instance member — `ApplyWalRecord` has no instance to call through, and this also fixes a latent inconsistency Task 3 shipped with: `ZmqServer` runs one `XStore` instance per worker thread, so the per-instance registry as originally committed was silently fragmenting into one independent registry+LRU-cap per worker, unlike every other cache in this codebase (`fd_shards`, `wal_shards`), which is already process-wide static.
+
+Given the actual code, Tasks 4 and 5 turned out to be the exact same hook (one call site in `ApplyWalRecord`, not two separate per-insert-path call sites) — implemented and committed together rather than as two commits that would have touched the same lines twice.
 
 **Files:**
 - Modify: `src/XStore/XStore_UnaryOps.cpp:13-...` (after the successful row write, both write sites at `:161` and `:237` per the SYNC/ASYNC-apply split)
@@ -691,7 +695,7 @@ git commit -m "feat(zonemap): add per-(db,year) ZoneMapFile registry"
 - Consumes: `GetOrOpenZoneMap` (Task 3), `ZoneMapFile::UpdateRow` (Task 2), `XStore::GetFDataValue(const FData*, ValueStruct*)` (`XStore.h:676`, already exists) for coercing each `RowData.fielddata(i)` to a numeric value the same way aggregate kernels already do.
 - Produces: nothing new for later tasks — Task 5 mirrors this exact pattern for Batch/Range.
 
-- [ ] **Step 1: Write the failing test — inserting through `UnaryInsert` populates the zone map immediately**
+- [x] **Step 1: Write the failing test — inserting through `UnaryInsert` populates the zone map immediately**
 
 `DbPath`/`XStoreZoneMapTest` are the fixture from Task 3, already in the repo. `RowsPerBlock`/`BlockIndexForRow` are from Task 1.
 
@@ -750,12 +754,12 @@ TEST_F(XStoreZoneMapTest, UnaryInsertTreatsHoleAsNullNotZero) {
 } // namespace
 ```
 
-- [ ] **Step 2: Run, confirm failure**
+- [x] **Step 2: Run, confirm failure**
 
 Run: `cmake --build build -j$(nproc) && ./build/tests/xstore_tests --gtest_filter=XStoreZoneMapTest.UnaryInsert*`
 Expected: FAIL — zone map has no stats (feature not wired yet).
 
-- [ ] **Step 3: Add a shared observation-building helper and call it from both `UnaryInsert` write sites**
+- [x] **Step 3: Add a shared observation-building helper and call it from both `UnaryInsert` write sites**
 
 ```cpp
 // include/XStore/XStore_Internal.h -- shared by Unary/Batch/Range (Task 5 reuses this)
@@ -786,17 +790,17 @@ inline std::vector<ZoneMapObservation> BuildZoneMapObservations(XStore &store, c
 }
 ```
 
-- [ ] **Step 4: Run tests, confirm pass**
+- [x] **Step 4: Run tests, confirm pass**
 
 Run: `cmake --build build -j$(nproc) && ./build/tests/xstore_tests --gtest_filter=XStoreZoneMapTest.UnaryInsert*`
 Expected: 2/2 PASS.
 
-- [ ] **Step 5: Run full suite to confirm zero regressions**
+- [x] **Step 5: Run full suite to confirm zero regressions**
 
 Run: `./build/tests/xstore_tests`
 Expected: all existing tests still pass, count increased by the new zone-map tests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add include/XStore/XStore_Internal.h src/XStore/XStore_UnaryOps.cpp tests/integration/XStoreZoneMapTest.cpp
@@ -807,7 +811,7 @@ git commit -m "feat(zonemap): update zone map on every UnaryInsert"
 
 ## Task 5: Wire `BatchInsert`/`RangeInsert` into the zone map
 
-**Status: NOT STARTED.**
+**Status: DONE, folded into Task 4's commit — see Task 4's status note for the architecture deviation and why one hook covers both tasks.** `BuildZoneMapObservations` (built once per row, at `WalRow` construction time in `XStore_UnaryOps.cpp`/`XStore_BatchOps.cpp`/`XStore_RangeOps.cpp`) plus one shared loop in `ApplyWalRecord` (`XStore_Wal.cpp`) covers all three insert paths identically — there was no separate "same three-line hook" left to add here once Task 4 was done correctly.
 
 **Files:**
 - Modify: `src/XStore/XStore_BatchOps.cpp` — per-row, inside the existing year-bucket loop (`YearBucketMap`-driven, same loop `WalRecord` construction already iterates per `TODO.md`'s async-batch-range-wal plan)
@@ -818,7 +822,7 @@ git commit -m "feat(zonemap): update zone map on every UnaryInsert"
 - Consumes: `BuildZoneMapObservations` (Task 4), `GetOrOpenZoneMap` (Task 3).
 - Produces: nothing new — this is the last insert-path integration point.
 
-- [ ] **Step 1: Write the failing test — a multi-row batch spanning one block updates it once per row**
+- [x] **Step 1: Write the failing test — a multi-row batch spanning one block updates it once per row**
 
 `DbPath`/`XStoreZoneMapTest` are the fixture from Task 3; `BlockIndexForRow` is from Task 1.
 
@@ -858,12 +862,12 @@ TEST_F(XStoreZoneMapTest, BatchInsertUpdatesZoneMapForEveryRow) {
 } // namespace
 ```
 
-- [ ] **Step 2: Run, confirm failure**
+- [x] **Step 2: Run, confirm failure**
 
 Run: `./build/tests/xstore_tests --gtest_filter=XStoreZoneMapTest.BatchInsert*`
 Expected: FAIL.
 
-- [ ] **Step 3: Add the same three-line hook to `BatchInsert`'s and `RangeInsert`'s per-row loop**
+- [x] **Step 3: Add the same three-line hook to `BatchInsert`'s and `RangeInsert`'s per-row loop**
 
 ```cpp
 // src/XStore/XStore_BatchOps.cpp -- inside the per-row loop that already
@@ -876,12 +880,12 @@ Expected: FAIL.
 
 Apply the identical block to `src/XStore/XStore_RangeOps.cpp`'s equivalent loop.
 
-- [ ] **Step 4: Run tests, confirm pass, then full suite**
+- [x] **Step 4: Run tests, confirm pass, then full suite**
 
 Run: `./build/tests/xstore_tests --gtest_filter=XStoreZoneMapTest.*` then `./build/tests/xstore_tests`
 Expected: all PASS, zero regressions.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/XStore/XStore_BatchOps.cpp src/XStore/XStore_RangeOps.cpp tests/integration/XStoreZoneMapTest.cpp

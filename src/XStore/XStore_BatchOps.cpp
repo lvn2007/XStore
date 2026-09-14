@@ -136,7 +136,8 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStor
             std::string row_bytes(cfg_struct.rowlength(), '\0');
             [[maybe_unused]] bool serialize_ok = entry.data().SerializeToArray(row_bytes.data(), static_cast<int>(cfg_struct.rowlength()));
             std::memset(row_bytes.data() + serialized_size, 0, cfg_struct.rowlength() - serialized_size);
-            record.rows.push_back(WalRow{entry.timestamp(), std::move(row_bytes)});
+            record.rows.push_back(WalRow{entry.timestamp(), std::move(row_bytes),
+                                          BuildZoneMapObservations(*this, entry.data())});
         }
 
         if (record.rows.empty()) {

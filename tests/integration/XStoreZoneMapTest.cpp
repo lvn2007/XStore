@@ -164,3 +164,56 @@ TEST_F(XStoreZoneMapTest, GetOrOpenZoneMapEvictsOldestPastRegistryCap) {
 }
 
 } // namespace
+
+namespace {
+
+using xstore_test::CreateTestDb;
+
+// 2023-01-01T00:00:00Z, SECOND resolution -- the start-of-year epoch XStore's
+// own TimeStruct year-bucketing computes internally for any 2023 timestamp
+// (docs/XStore_Technical_Reference.md §4.3). Used here so the test computes
+// `diff`/block index the exact same way production code does, rather than
+// guessing or hardcoding block 0 (wrong: 1700600000 is ~28 million seconds
+// into 2023, nowhere near its first block).
+constexpr unsigned long long kYear2023StartEpoch = 1672531200ULL;
+
+TEST_F(XStoreZoneMapTest, UnaryInsertUpdatesZoneMapForNumericColumns) {
+    XStore store;
+    CreateTestDb(store, "ZMAPUNARY", XStore_Proto::SECOND, 64);
+
+    unsigned long long timestamp = 1700600000ULL; // 2023-11-21 -- within year 2023
+    XStore_Proto::RowData row;
+    row.add_fielddata()->set_doubledata(7.5);
+    XStore_Proto::UnaryInsert_REP rep;
+    store.UnaryInsert(timestamp, row, "ZMAPUNARY", &rep, XStore_Proto::SYNC);
+
+    // No explicit flush call -- UpdateRow is write-through (Task 2), so this
+    // is already durable.
+    ZoneMapFile &zmap = store.GetOrOpenZoneMap(DbPath("ZMAPUNARY"), 2023, 64);
+    uint64_t diff = timestamp - kYear2023StartEpoch;
+    uint64_t block = BlockIndexForRow(diff, zmap.RowsPerBlockValue());
+    auto stats = zmap.TryGetBlockStats(block);
+    ASSERT_TRUE(stats.has_value());
+    EXPECT_DOUBLE_EQ((*stats)[0].min_value, 7.5);
+    EXPECT_EQ((*stats)[0].valid_count, 1u);
+}
+
+TEST_F(XStoreZoneMapTest, UnaryInsertTreatsHoleAsNullNotZero) {
+    XStore store;
+    CreateTestDb(store, "ZMAPHOLE", XStore_Proto::SECOND, 64);
+
+    unsigned long long timestamp = 1700600000ULL;
+    XStore_Proto::RowData row; // fielddata left empty -- a hole at column 0
+    XStore_Proto::UnaryInsert_REP rep;
+    store.UnaryInsert(timestamp, row, "ZMAPHOLE", &rep, XStore_Proto::SYNC);
+
+    ZoneMapFile &zmap = store.GetOrOpenZoneMap(DbPath("ZMAPHOLE"), 2023, 64);
+    uint64_t diff = timestamp - kYear2023StartEpoch;
+    uint64_t block = BlockIndexForRow(diff, zmap.RowsPerBlockValue());
+    auto stats = zmap.TryGetBlockStats(block);
+    ASSERT_TRUE(stats.has_value());
+    EXPECT_EQ((*stats)[0].valid_count, 0u);
+    EXPECT_EQ((*stats)[0].null_count, 1u);
+}
+
+} // namespace

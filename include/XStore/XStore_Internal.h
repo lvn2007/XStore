@@ -62,4 +62,37 @@ inline void AppendToYearBucket(YearBucketMap &buckets, unsigned short int year, 
     buckets.emplace_back(year, std::vector<unsigned long long int>{idx});
 }
 
+// Definition of XStore::BuildZoneMapObservations (declared in XStore.h,
+// private static). Built once at WAL enqueue time (row_bytes --
+// already-serialized wire bytes -- is all ApplyWalRecord has later, not the
+// original RowData, so this can't be deferred to apply time). Always emits
+// exactly ZONE_MAP_MAX_TRACKED_COLUMNS observations, one per tracked
+// column, never fewer: a column past the row's own fielddata_size() is
+// exactly as much a hole as an explicitly unset field at a present index
+// (XStoreZoneMapTest.UnaryInsertTreatsHoleAsNullNotZero -- an entirely
+// empty row still records a hole at column 0), so this does NOT stop at
+// row.fielddata_size(). Numeric-case check mirrors
+// ProcessFileRangeSelect/ProcessFileRangeAccumulate's own oneOfData_case()
+// guard (XStore_IO.cpp) -- same "1..12 is numeric" rule the aggregate
+// kernels already use, so a bool/string/bytes column is a hole here too,
+// not a crash or a silently-wrong 0.
+inline std::vector<ZoneMapObservation> XStore::BuildZoneMapObservations(XStore &store, const XStore_Proto::RowData &row) {
+    const int tracked = static_cast<int>(XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS);
+    std::vector<ZoneMapObservation> observations;
+    observations.reserve(static_cast<size_t>(tracked));
+    for (int col = 0; col < tracked; ++col) {
+        bool is_numeric = false;
+        ValueStruct vs{};
+        if (col < row.fielddata_size()) {
+            const XStore_Proto::FData &f_data = row.fielddata(col);
+            is_numeric = f_data.oneOfData_case() > 0 && f_data.oneOfData_case() <= 12;
+            if (is_numeric) {
+                store.GetFDataValue(&f_data, &vs);
+            }
+        }
+        observations.push_back({static_cast<uint32_t>(col), static_cast<double>(vs.value), is_numeric});
+    }
+    return observations;
+}
+
 #endif //XSTORE_XSTORE_INTERNAL_H

@@ -65,7 +65,8 @@ void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::R
     record.time_resolution = cfg_struct.timeresolution();
     record.row_length = cfg_struct.rowlength();
     record.durability_mode = durability_mode;
-    record.rows.push_back(WalRow{unix_time, std::string(row_buf.data(), cfg_struct.rowlength())});
+    record.rows.push_back(WalRow{unix_time, std::string(row_buf.data(), cfg_struct.rowlength()),
+                                  BuildZoneMapObservations(*this, data)});
 
     if (durability_mode == XStore_Proto::BYPASS) {
         // Skip WAL entirely -- no queue, no CRC32, no second write. Applies

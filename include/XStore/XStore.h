@@ -193,6 +193,17 @@ class XStore {
         struct WalRow {
             unsigned long long epoch_time = 0;
             std::string row_bytes;   // already-serialized, zero-padded, exactly row_length bytes
+            // Precomputed at enqueue time (BuildZoneMapObservations, before
+            // row_bytes is even serialized) since ApplyWalRecord only has
+            // row_bytes -- already-serialized wire bytes, not the original
+            // RowData -- to re-derive column values from. Applied to the
+            // zone map by ApplyWalRecord itself, at the same moment (and
+            // under the same success/failure check) as this row's real
+            // pwrite -- not eagerly at enqueue time -- so the zone map is
+            // never ahead of what's actually durable, including under
+            // ASYNC durability mode where the real write happens later on
+            // the WAL writer thread, not before this call returns.
+            std::vector<ZoneMapObservation> zone_map_observations;
         };
 
         // Cross-thread completion signal for one WalRecord -- replaces
@@ -429,12 +440,23 @@ class XStore {
         // year) pair's .zmap file; see ZoneMapFile::Open. Bounded at
         // ZONE_MAP_REGISTRY_CAP with LRU eviction -- see zone_map_registry_
         // below for why eviction here is always safe.
-        ZoneMapFile& GetOrOpenZoneMap(std::string_view db_base_path, unsigned short year, uint16_t row_length);
+        //
+        // static, like fd_shards/wal_shards below: ApplyWalRecord (the
+        // actual write site every insert path funnels through, on
+        // whichever WAL writer thread ends up applying a given record) has
+        // no XStore instance to call through -- a per-instance registry
+        // (as originally shipped in Task 3) would be unreachable from
+        // there. One process-wide registry also matches how ZmqServer
+        // actually runs: one XStore instance per worker thread (see
+        // ZMQ_Server.cpp), so a per-instance cache would have silently
+        // fragmented into one independent registry (and LRU cap) per
+        // worker anyway.
+        static ZoneMapFile& GetOrOpenZoneMap(std::string_view db_base_path, unsigned short year, uint16_t row_length);
 
         // Test-only introspection -- not part of the public API surface any
         // real caller needs, same as this codebase's other test-only
         // accessors.
-        size_t ZoneMapRegistrySize() const { return zone_map_registry_.size(); }
+        static size_t ZoneMapRegistrySize() { return zone_map_registry_.size(); }
 
     private:
         // Get current base directory
@@ -484,10 +506,19 @@ class XStore {
         // block it needs. A plain unordered_map behind one mutex, not
         // sharded -- CreateDB/first-insert-of-a-year frequency is nowhere
         // near hot-path enough to need striping the way the WAL/mmap caches
-        // do.
-        std::mutex zone_map_registry_mutex_;
-        std::unordered_map<std::string, std::unique_ptr<ZoneMapFile>> zone_map_registry_;
-        std::vector<std::string> zone_map_registry_lru_; // most-recently-touched at the back
+        // do. static -- see GetOrOpenZoneMap's comment for why (reachable
+        // from ApplyWalRecord, which has no XStore instance).
+        static std::mutex zone_map_registry_mutex_;
+        static std::unordered_map<std::string, std::unique_ptr<ZoneMapFile>> zone_map_registry_;
+        static std::vector<std::string> zone_map_registry_lru_; // most-recently-touched at the back
+
+        // Turns one row's proto fields into the zone map's per-column
+        // observations -- shared by Unary/Batch/RangeInsert (all three
+        // build a WalRow, see XStore_Internal.h for the definition and full
+        // rationale). Takes an XStore& purely to reach the private
+        // GetFDataValue overload below; touches no instance state of its
+        // own.
+        static std::vector<ZoneMapObservation> BuildZoneMapObservations(XStore &store, const XStore_Proto::RowData &row);
 
         // Fetch dbName's ConfigStruct from CfgMap, loading it from dbBasePath's
         // .CFG file into the cache on first use. Returns false if the .CFG file

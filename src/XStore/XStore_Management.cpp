@@ -126,6 +126,10 @@ const std::string& XStore::CachedYearFilePath(const std::string &db_base_path, u
     return year_map.emplace(year, fmt::format("{}/{}.XSTORE", db_base_path, year)).first->second;
 }
 
+std::mutex XStore::zone_map_registry_mutex_;
+std::unordered_map<std::string, std::unique_ptr<ZoneMapFile>> XStore::zone_map_registry_;
+std::vector<std::string> XStore::zone_map_registry_lru_;
+
 ZoneMapFile& XStore::GetOrOpenZoneMap(std::string_view db_base_path, unsigned short year, uint16_t row_length) {
     std::string key = fmt::format("{}/{}", db_base_path, year);
     std::lock_guard<std::mutex> lock(zone_map_registry_mutex_);
