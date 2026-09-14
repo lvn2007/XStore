@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <stdexcept>
 #include <unordered_set>
 
 std::array<XStore::CfgShard, XStore::CFG_SHARD_COUNT> XStore::cfg_shards;
@@ -146,7 +147,10 @@ ZoneMapFile& XStore::GetOrOpenZoneMap(std::string_view db_base_path, unsigned sh
 
     auto zmap = std::make_unique<ZoneMapFile>();
     std::string path = fmt::format("{}/{}.zmap", db_base_path, year);
-    zmap->Open(path, row_length);
+    if (!zmap->Open(path, row_length)) {
+        spdlog::error("[ZONEMAP] - Unable to open {}", path);
+        throw std::runtime_error(fmt::format("ZoneMapFile::Open failed for {}", path));
+    }
     ZoneMapFile &ref = *zmap;
     zone_map_registry_.emplace(key, std::move(zmap));
     zone_map_registry_lru_.push_back(key);

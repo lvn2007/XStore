@@ -64,7 +64,7 @@ public:
     // otherwise. row_length is used only to derive rows_per_block on first
     // creation -- ignored on reopen (rows_per_block is read from the header,
     // so it can never drift from what earlier blocks were written against).
-    bool Open(const std::string &path, uint16_t row_length);
+    [[nodiscard]] bool Open(const std::string &path, uint16_t row_length);
 
     // Folds each observation into the block containing row_index and
     // pwrite()s that block back to disk before returning -- write-through,
