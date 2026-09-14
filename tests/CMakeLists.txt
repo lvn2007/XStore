@@ -7,6 +7,7 @@
 add_executable(xstore_tests
         integration/XStoreTest.cpp
         integration/XStoreWalTest.cpp
+        integration/XStoreZoneMapTest.cpp
         integration/XStoreCrc32cTest.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Internal.cpp
         ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Management.cpp
