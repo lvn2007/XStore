@@ -91,6 +91,73 @@ else()
     message(STATUS "Protobuf: using system install ${Protobuf_VERSION}")
 endif()
 
+# --- libsodium (pinned to the 1.0.18 release) ---
+# Needed only by libzmq's CURVE support (WITH_LIBSODIUM, below). libsodium
+# ships no CMake build in its releases (autotools only), so it is configured
+# & built out-of-band at configure time -- a one-time, ~minute step cached by
+# the presence of the built library (same pattern XBench uses for OpenSSL).
+# The SODIUM_* variables are pre-set so libzmq's Findsodium.cmake
+# (find_path/find_library) skips its search and uses these instead of
+# requiring a system libsodium-dev.
+option(XSTORE_FETCH_SODIUM "Fetch & build libsodium from source instead of a system install" ON)
+
+if(TARGET libsodium)
+    message(STATUS "libsodium: using pre-existing libsodium target")
+elseif(XSTORE_FETCH_SODIUM)
+    FetchContent_Declare(
+            libsodium
+            URL https://github.com/jedisct1/libsodium/releases/download/1.0.18-RELEASE/libsodium-1.0.18.tar.gz
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_GetProperties(libsodium)
+    if(NOT libsodium_POPULATED)
+        FetchContent_Populate(libsodium)
+    endif()
+    set(_xs_sodium_prefix ${CMAKE_BINARY_DIR}/_deps/libsodium-install)
+    if(NOT EXISTS "${_xs_sodium_prefix}/lib/libsodium.a")
+        message(STATUS "libsodium: building from source (1.0.18, static) -- one-time step")
+        # --with-pic is required: libzmq is built as a shared library and
+        # links this static archive into libzmq.so. Without it libtool puts
+        # non-PIC objects in libsodium.a and the link fails with
+        # "relocation R_X86_64_PC32 ... can not be used when making a shared
+        # object".
+        execute_process(
+                COMMAND ${libsodium_SOURCE_DIR}/configure --prefix=${_xs_sodium_prefix}
+                        --enable-shared=no --enable-static=yes --with-pic
+                WORKING_DIRECTORY ${libsodium_SOURCE_DIR}
+                RESULT_VARIABLE _xs_sodium_result)
+        if(NOT _xs_sodium_result EQUAL 0)
+            message(FATAL_ERROR
+                "libsodium configure step failed. "
+                "Delete ${CMAKE_BINARY_DIR}/_deps/libsodium-* and reconfigure.")
+        endif()
+        execute_process(
+                COMMAND make -j4
+                WORKING_DIRECTORY ${libsodium_SOURCE_DIR}
+                RESULT_VARIABLE _xs_sodium_result)
+        if(NOT _xs_sodium_result EQUAL 0)
+            message(FATAL_ERROR
+                "libsodium build step failed. "
+                "Delete ${CMAKE_BINARY_DIR}/_deps/libsodium-* and reconfigure.")
+        endif()
+        execute_process(
+                COMMAND make install
+                WORKING_DIRECTORY ${libsodium_SOURCE_DIR}
+                RESULT_VARIABLE _xs_sodium_result)
+        if(NOT _xs_sodium_result EQUAL 0)
+            message(FATAL_ERROR
+                "libsodium install step failed. "
+                "Delete ${CMAKE_BINARY_DIR}/_deps/libsodium-* and reconfigure.")
+        endif()
+    endif()
+    set(SODIUM_INCLUDE_DIRS "${_xs_sodium_prefix}/include" CACHE PATH "" FORCE)
+    set(SODIUM_LIBRARIES "${_xs_sodium_prefix}/lib/libsodium.a" CACHE FILEPATH "" FORCE)
+    message(STATUS "libsodium: built from source (1.0.18, static)")
+else()
+    # libzmq's Findsodium.cmake then resolves the system libsodium via
+    # pkg-config (i.e. libsodium-dev must be installed).
+endif()
+
 # --- libzmq (C library; the cppzmq C++ headers are vendored in third_party) ---
 option(XSTORE_FETCH_ZMQ "Fetch & build libzmq from source instead of a system install" ON)
 
@@ -99,8 +166,10 @@ if(TARGET zmq)
 elseif(XSTORE_FETCH_ZMQ)
     set(BUILD_SHARED   ON  CACHE BOOL "" FORCE)
     # libzmq 4.3.5's CMake build requires both WITH_LIBSODIUM and ENABLE_CURVE
-    # to be ON for ZMQ_HAVE_CURVE to be defined. libsodium (1.0.18) is already
-    # present as an apt dependency. Without both, CURVE support is not compiled in.
+    # to be ON for ZMQ_HAVE_CURVE to be defined; its Findsodium.cmake then
+    # resolves the in-tree libsodium via the SODIUM_* variables pre-set above
+    # (or a system libsodium-dev when XSTORE_FETCH_SODIUM=OFF). Without both,
+    # CURVE support is not compiled in.
     set(WITH_LIBSODIUM ON  CACHE BOOL "" FORCE)
     set(ENABLE_CURVE   ON  CACHE BOOL "" FORCE)
     set(WITH_TLS       OFF CACHE BOOL "" FORCE)

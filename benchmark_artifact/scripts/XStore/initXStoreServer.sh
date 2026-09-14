@@ -2,9 +2,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
 WORKING_DIR="$1"
 
-# Install dependencies of XStore -- protobuf + libzmq are no longer apt deps;
-# they're fetched & built by CMake (FetchContent) during the compile step below.
-sudo apt install build-essential cmake g++ git sysstat -y
+# Install dependencies of XStore -- protobuf, libzmq and libsodium are no
+# longer apt deps; they're fetched & built by CMake (FetchContent) during the
+# compile step below. pkg-config is still required: libzmq's sodium detection
+# calls find_package(PkgConfig REQUIRED) even when libsodium is in-tree.
+sudo apt install build-essential cmake g++ git pkg-config sysstat -y
 
 # Go to proper working dir
 cd ${WORKING_DIR}

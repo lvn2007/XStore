@@ -27,23 +27,47 @@ IEEE/ACM Supercomputing/SC 2023
 
 # System Requirements
 * Operating systems: Linux Ubuntu 24.04 LTS
-* Build tools: build-essential, cmake, g++ 11.4.0 (C++ 17 standard), git
+* Build tools: build-essential, cmake, g++ 11.4.0 (C++ 17 standard), git, pkg-config
 * Google Protocol Buffer — built from source, pinned to [commit `35cd01f`](https://github.com/protocolbuffers/protobuf/commit/35cd01f9fe9afbeea38cc7b979a3b6bfcde82c03) (v35.1)
-* ZeroMQ — `libzmq3-dev` (C library) plus bundled cppzmq header ([client_src/Cpp/zmq.hpp](client_src/Cpp/zmq.hpp))
+* ZeroMQ — built from source (libzmq 4.3.5, pinned, with libsodium 1.0.18 for CURVE support) plus bundled cppzmq header ([client_src/Cpp/zmq.hpp](client_src/Cpp/zmq.hpp)); `libzmq3-dev` only needed when building with `-DXSTORE_FETCH_ZMQ=OFF`
 * sysstat, tmux — used by the server deployment scripts (see below)
 
 # How to Install
-* [Installation Wiki](https://gitlab.com/lvn2007/XStore/-/wikis/installation)
+
+### Prerequisites
+```bash
+sudo apt update
+sudo apt install -y build-essential cmake g++ git pkg-config
+```
 
 ### Quick Build
 ```bash
 ./build.sh
 ```
-Builds XStore via CMake and stages a runnable server directory at `../XStore_Server`.
+Builds XStore via CMake — all dependencies (protobuf, libzmq, libsodium) are fetched & built from source, so only the build tools above are needed — and stages a runnable server directory at `../XStore_Server`.
+
+### Running the Server
+
+From the staged directory (`../XStore_Server/build`):
+
+| Mode | Command |
+|---|---|
+| Unsecured (default) | `./XStore --host 0.0.0.0 --port 9497` |
+| Secured (CURVE) | `./XStore --host 0.0.0.0 --port 9497 --curve` |
+
+Secured mode encrypts the ZMQ transport and authenticates clients against an allowlist. One-time key setup (`xstore-keys` binary builds at `build/tools/xstore-keys/`):
+
+```bash
+./tools/xstore-keys/xstore-keys gen server                                   # server keypair -> keys/server/
+./tools/xstore-keys/xstore-keys gen client1                                  # client keypair -> keys/clients/client1/
+./tools/xstore-keys/xstore-keys allow client1 --pubkey-file keys/clients/client1/client1.pub  # -> keys/allowed/
+```
+
+`--curve` defaults to `keys/server/server.key` + `keys/allowed/` (override with `--curve-secret-key` / `--curve-allowed-dir`); the allowlist is hot-reloaded, so `allow`/`revoke` take effect without a restart. Details: [Technical Reference](docs/XStore_Technical_Reference.md).
 
 ### Server Deployment Scripts
 [benchmark_artifact/scripts/XStore/](benchmark_artifact/scripts/XStore/) has scripts to provision and run an XStore server end-to-end:
-* `initXStoreServer.sh <working_dir>` — installs dependencies, clones XStore, builds/installs pinned protobuf, compiles XStore, opens firewall port 9497.
+* `initXStoreServer.sh <working_dir>` — installs bootstrap dependencies, clones XStore, compiles XStore (CMake fetches & builds protobuf, libzmq and libsodium from source), opens firewall port 9497.
 * `runXStoreServer.sh <isPurge=true|false> <working_dir>` — starts the server in tmux session `XStore`; `isPurge=true` wipes the existing DataStore first, `false` keeps it.
 
 # How to Use

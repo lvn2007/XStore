@@ -2,6 +2,11 @@
 #
 # XStore -- build + deploy script (see README.md "Quick Build").
 #
+# Every dependency (protobuf v35.1, libzmq 4.3.5, libsodium 1.0.18) is
+# fetched & built from source by CMake -- the build is self-contained and
+# does not use preinstalled system libraries. A fresh machine only needs a
+# C/C++ toolchain, cmake, git and pkg-config.
+#
 # Gates only on the XStore server target (XSTORE_BUILD_TESTS=OFF skips
 # compiling the test suite here entirely): a previous version built the
 # whole `all` target via plain `make -j`, which runs ctest as a side effect
