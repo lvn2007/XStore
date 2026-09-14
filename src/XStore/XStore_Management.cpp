@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <stdexcept>
 #include <unordered_set>
 
 std::array<XStore::CfgShard, XStore::CFG_SHARD_COUNT> XStore::cfg_shards;
@@ -123,6 +124,41 @@ const std::string& XStore::CachedYearFilePath(const std::string &db_base_path, u
         return it->second;
     }
     return year_map.emplace(year, fmt::format("{}/{}.XSTORE", db_base_path, year)).first->second;
+}
+
+std::mutex XStore::zone_map_registry_mutex_;
+std::unordered_map<std::string, std::unique_ptr<ZoneMapFile>> XStore::zone_map_registry_;
+std::vector<std::string> XStore::zone_map_registry_lru_;
+
+ZoneMapFile& XStore::GetOrOpenZoneMap(std::string_view db_base_path, unsigned short year, uint16_t row_length) {
+    std::string key = fmt::format("{}/{}", db_base_path, year);
+    std::lock_guard<std::mutex> lock(zone_map_registry_mutex_);
+
+    auto it = zone_map_registry_.find(key);
+    if (it != zone_map_registry_.end()) {
+        zone_map_registry_lru_.erase(
+            std::remove(zone_map_registry_lru_.begin(), zone_map_registry_lru_.end(), key),
+            zone_map_registry_lru_.end());
+        zone_map_registry_lru_.push_back(key);
+        return *it->second;
+    }
+
+    if (zone_map_registry_.size() >= XStoreTunables::ZONE_MAP_REGISTRY_CAP && !zone_map_registry_lru_.empty()) {
+        std::string victim = zone_map_registry_lru_.front();
+        zone_map_registry_lru_.erase(zone_map_registry_lru_.begin());
+        zone_map_registry_.erase(victim); // ~ZoneMapFile() closes the fd -- no flush needed, already durable
+    }
+
+    auto zmap = std::make_unique<ZoneMapFile>();
+    std::string path = fmt::format("{}/{}.zmap", db_base_path, year);
+    if (!zmap->Open(path, row_length)) {
+        spdlog::error("[ZONEMAP] - Unable to open {}", path);
+        throw std::runtime_error(fmt::format("ZoneMapFile::Open failed for {}", path));
+    }
+    ZoneMapFile &ref = *zmap;
+    zone_map_registry_.emplace(key, std::move(zmap));
+    zone_map_registry_lru_.push_back(key);
+    return ref;
 }
 
 XStore_Proto::SysInfo_REP XStore::InfoQuery(std::string_view server_addr, int thread_count) {

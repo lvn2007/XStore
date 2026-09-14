@@ -60,7 +60,8 @@ void XStore::WalkYearSpan(const std::string &db_base_path, const XStore_Proto::C
                         madvise(reinterpret_cast<void*>(aligned_addr), region_length + align_slop, MADV_WILLNEED);
                     }
 
-                    kernel(static_cast<const char*>(mapped_base) + first_offset, rows_to_process);
+                    kernel(static_cast<const char*>(mapped_base) + first_offset, rows_to_process,
+                           curr_ts.year, iter_epoch - curr_ts.first_epoch);
                 }
             }
         }
@@ -103,8 +104,8 @@ PartialState XStore::WalkYearSpanParallel(const std::string &db_base_path, const
         // function used before parallelism existed.
         PartialState result = initial_state;
         WalkYearSpan(db_base_path, cfg_struct, start_epoch_t, end_epoch_t,
-            [&](const char *rows_base, unsigned long long rows_to_process) {
-                segment_kernel(result, rows_base, rows_to_process);
+            [&](const char *rows_base, unsigned long long rows_to_process, unsigned short year, unsigned long long first_row_index) {
+                segment_kernel(result, rows_base, rows_to_process, year, first_row_index);
             });
         return result;
     }
@@ -131,8 +132,8 @@ PartialState XStore::WalkYearSpanParallel(const std::string &db_base_path, const
         // kernel-call logic the sequential path uses, just invoked
         // per-segment instead of once for the whole span.
         WalkYearSpan(db_base_path, cfg_struct, seg.start, seg.end,
-            [&](const char *rows_base, unsigned long long rows_to_process) {
-                segment_kernel(partial_results[s], rows_base, rows_to_process);
+            [&](const char *rows_base, unsigned long long rows_to_process, unsigned short year, unsigned long long first_row_index) {
+                segment_kernel(partial_results[s], rows_base, rows_to_process, year, first_row_index);
             });
     });
 
@@ -161,6 +162,80 @@ struct SumPartial {
     unsigned long long count = 0;
 };
 }  // namespace
+
+template <typename Cmp, typename PruneCheck>
+void XStore::ScanSegmentWithZoneMapPruning(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                            const char *rows_base, unsigned long long rows_to_process,
+                                            unsigned long long first_row_index, unsigned short column_idx,
+                                            ValueStruct &best_value, XStore_Proto::FData &best_data,
+                                            PruneCheck &&should_skip_block) {
+    if (rows_to_process == 0) return;
+
+    ZoneMapFile &zmap = GetOrOpenZoneMap(db_base_path, year, row_length);
+    uint64_t rows_per_block = zmap.RowsPerBlockValue();
+    uint64_t first_row = first_row_index;
+    uint64_t last_row = first_row_index + rows_to_process - 1;
+
+    for (uint64_t block = BlockIndexForRow(first_row, rows_per_block);
+         block <= BlockIndexForRow(last_row, rows_per_block);
+         ++block) {
+        uint64_t block_first_row = std::max(first_row, block * rows_per_block);
+        uint64_t block_last_row = std::min(last_row, block * rows_per_block + rows_per_block - 1);
+        uint64_t block_row_count = block_last_row - block_first_row + 1;
+        const char *block_rows_base = rows_base + (block_first_row - first_row) * row_length;
+
+        auto stats = zmap.TryGetBlockStats(block);
+        if (stats.has_value() && column_idx < stats->size()) {
+            const ZoneMapEntry &e = (*stats)[column_idx];
+            if (e.valid_count == 0) continue; // block has no numeric values for this column at all -- skip
+            if (should_skip_block(e)) continue; // zone map proves this block can't improve on best_value
+        }
+        // Not prunable (no zone-map coverage yet, column past the tracked
+        // cap, or the zone map says this block could improve the answer)
+        // -- scan it for real.
+        ProcessFileRangeSelect<Cmp>(block_rows_base, block_row_count, row_length, column_idx, best_value, best_data);
+    }
+}
+
+void XStore::AccumulateSegmentWithZoneMapPushdown(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                                   const char *rows_base, unsigned long long rows_to_process,
+                                                   unsigned long long first_row_index, unsigned short column_idx,
+                                                   double &sum_out, unsigned long long &valid_count_out) {
+    if (rows_to_process == 0) return;
+
+    ZoneMapFile &zmap = GetOrOpenZoneMap(db_base_path, year, row_length);
+    uint64_t rows_per_block = zmap.RowsPerBlockValue();
+    uint64_t first_row = first_row_index;
+    uint64_t last_row = first_row_index + rows_to_process - 1;
+
+    for (uint64_t block = BlockIndexForRow(first_row, rows_per_block);
+         block <= BlockIndexForRow(last_row, rows_per_block);
+         ++block) {
+        uint64_t block_own_first_row = block * rows_per_block;
+        uint64_t block_own_last_row = block_own_first_row + rows_per_block - 1;
+
+        // Fully covered means the block's OWN full extent lies inside the
+        // query range, not just the already-query-clipped sub-range this
+        // segment happens to hand us -- a block only partially inside the
+        // query still needs a real scan, since its zone-map sum covers the
+        // whole block including rows outside what was actually asked for.
+        bool block_fully_in_range = (block_own_first_row >= first_row && block_own_last_row <= last_row);
+
+        auto stats = zmap.TryGetBlockStats(block);
+        if (block_fully_in_range && stats.has_value() && column_idx < stats->size()) {
+            const ZoneMapEntry &e = (*stats)[column_idx];
+            sum_out += e.sum_value;
+            valid_count_out += e.valid_count;
+            continue; // zero-scan pushdown
+        }
+
+        uint64_t block_first_row = std::max(first_row, block_own_first_row);
+        uint64_t block_last_row = std::min(last_row, block_own_last_row);
+        uint64_t block_row_count = block_last_row - block_first_row + 1;
+        const char *block_rows_base = rows_base + (block_first_row - first_row) * row_length;
+        ProcessFileRangeAccumulate(block_rows_base, block_row_count, row_length, column_idx, sum_out, valid_count_out);
+    }
+}
 
 void XStore::MinAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
                             std::string_view db_name_view, unsigned short int column_idx, XStore_Proto::Min_REP *return_data) {
@@ -196,8 +271,14 @@ void XStore::MinAggregate(unsigned long long int start_epoch_t, unsigned long lo
     // cross-year tie on an aggregate extremum.
     MinMaxPartial final = WalkYearSpanParallel<MinMaxPartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
         MinMaxPartial{},
-        [&](MinMaxPartial &partial, const char *rows_base, unsigned long long rows_to_process) {
-            ProcessFileRangeSelect<std::less<long double>>(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.value, partial.data);
+        [&](MinMaxPartial &partial, const char *rows_base, unsigned long long rows_to_process, unsigned short year, unsigned long long first_row_index) {
+            ScanSegmentWithZoneMapPruning<std::less<long double>>(db_base_path_str, year, cfg_struct.rowlength(),
+                rows_base, rows_to_process, first_row_index, column_idx, partial.value, partial.data,
+                [&](const ZoneMapEntry &e) {
+                    // MIN: a block whose smallest value is already >= our
+                    // current best can't improve it -- skip.
+                    return partial.value.is_initialized && e.min_value >= partial.value.value;
+                });
         },
         [](MinMaxPartial &final_state, MinMaxPartial &partial) {
             if (partial.value.is_initialized && (!final_state.value.is_initialized || partial.value.value < final_state.value.value)) {
@@ -238,8 +319,14 @@ void XStore::MaxAggregate(unsigned long long int start_epoch_t, unsigned long lo
 
     MinMaxPartial final = WalkYearSpanParallel<MinMaxPartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
         MinMaxPartial{},
-        [&](MinMaxPartial &partial, const char *rows_base, unsigned long long rows_to_process) {
-            ProcessFileRangeSelect<std::greater<long double>>(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.value, partial.data);
+        [&](MinMaxPartial &partial, const char *rows_base, unsigned long long rows_to_process, unsigned short year, unsigned long long first_row_index) {
+            ScanSegmentWithZoneMapPruning<std::greater<long double>>(db_base_path_str, year, cfg_struct.rowlength(),
+                rows_base, rows_to_process, first_row_index, column_idx, partial.value, partial.data,
+                [&](const ZoneMapEntry &e) {
+                    // MAX: a block whose largest value is already <= our
+                    // current best can't improve it -- skip.
+                    return partial.value.is_initialized && e.max_value <= partial.value.value;
+                });
         },
         [](MinMaxPartial &final_state, MinMaxPartial &partial) {
             if (partial.value.is_initialized && (!final_state.value.is_initialized || partial.value.value > final_state.value.value)) {
@@ -291,8 +378,10 @@ void XStore::SumAggregate(unsigned long long int start_epoch_t, unsigned long lo
     // exact-value check, which stays on the sequential path (single-year span).
     SumPartial final = WalkYearSpanParallel<SumPartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
         SumPartial{},
-        [&](SumPartial &partial, const char *rows_base, unsigned long long rows_to_process) {
-            ProcessFileRangeAccumulate(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.sum, partial.count);
+        [&](SumPartial &partial, const char *rows_base, unsigned long long rows_to_process,
+            unsigned short year, unsigned long long first_row_index) {
+            AccumulateSegmentWithZoneMapPushdown(db_base_path_str, year, cfg_struct.rowlength(),
+                rows_base, rows_to_process, first_row_index, column_idx, partial.sum, partial.count);
         },
         [](SumPartial &final_state, SumPartial &partial) {
             final_state.sum += partial.sum;
@@ -334,8 +423,10 @@ void XStore::AvgAggregate(unsigned long long int start_epoch_t, unsigned long lo
     // divide after.
     SumPartial final = WalkYearSpanParallel<SumPartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
         SumPartial{},
-        [&](SumPartial &partial, const char *rows_base, unsigned long long rows_to_process) {
-            ProcessFileRangeAccumulate(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.sum, partial.count);
+        [&](SumPartial &partial, const char *rows_base, unsigned long long rows_to_process,
+            unsigned short year, unsigned long long first_row_index) {
+            AccumulateSegmentWithZoneMapPushdown(db_base_path_str, year, cfg_struct.rowlength(),
+                rows_base, rows_to_process, first_row_index, column_idx, partial.sum, partial.count);
         },
         [](SumPartial &final_state, SumPartial &partial) {
             final_state.sum += partial.sum;

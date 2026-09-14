@@ -330,6 +330,52 @@ inline constexpr size_t      WAL_REPLAY_MAX_FILE_BYTES   = 8 * WAL_FILE_PREALLOC
 inline constexpr size_t      WAL_QUEUE_HIGH_WATERMARK    = WAL_BATCH_MAX_RECORDS * 4;
 inline constexpr unsigned    WAL_BACKPRESSURE_POLL_US    = 200;
 
+// Zone-map secondary index (see docs/superpowers/plans/2026-09-14-zone-map-
+// secondary-index.md). Target BYTE size per block, not a fixed row count --
+// XStore's fixed-width rowLength varies 10-100x across differently-shaped
+// DBs, so a constant row count (e.g. ClickHouse's index_granularity=8192)
+// would produce wildly different block byte sizes per DB. 2MB lands near a
+// single efficient NVMe read chunk; re-sweep on Mystic before trusting this
+// default in production (see Task 8's benchmark gate).
+inline constexpr uint64_t ZONE_MAP_TARGET_BLOCK_BYTES = 2ull * 1024 * 1024;
+
+// XStore has no declared column schema (CreateDB takes only rowLength, a
+// byte budget -- see proto/XStore.proto's CreateDB_REQ). Tracking "one zone-
+// map entry per column that could possibly fit in rowLength" was checked
+// and rejected: it inflates zone-map file size past the feature's own
+// near-zero-memory premise for wide-row DBs (a 1536-byte row would derive
+// ~768 phantom tracked columns). This cap bounds tracked columns to a small,
+// realistic count; column indices >= this cap always fall back to a full
+// scan for that column -- correct, just not accelerated.
+inline constexpr uint32_t ZONE_MAP_MAX_TRACKED_COLUMNS = 64;
+
+// How many blocks' stats a ZoneMapFile keeps resident at once, per (db,
+// year) file, purely to avoid a repeat pread() when consecutive updates hit
+// the same block (the common sequential-append case) -- every entry here is
+// always disk-coherent (write-through, see ZoneMapFile::UpdateRow), so this
+// is a pure performance cache, not a durability buffer. 4 blocks * 64
+// tracked columns * 40 bytes/entry (ZoneMapEntry) = 10,240 bytes resident
+// per (db, year) file with this default -- negligible on its own; see
+// ZONE_MAP_REGISTRY_CAP below for the bound on how many (db, year) files can
+// be resident at once, which is what actually keeps total memory bounded.
+inline constexpr size_t ZONE_MAP_HOT_CACHE_BLOCKS = 4;
+
+// How many ZoneMapFile instances (one per (db, year) pair ever touched) the
+// registry keeps resident at once (see XStore::GetOrOpenZoneMap). Same
+// discipline as MMAP_CACHE_CAP/FD_CACHE_CAP above: every other per-key cache
+// in this codebase is capped, and a zone-map registry with no cap would grow
+// for the lifetime of a long-running server across every distinct (db,
+// year) combination it ever sees -- slow, but genuinely unbounded, which
+// directly conflicts with XStore's minimal-memory-footprint goal. Eviction
+// here is trivially safe and cheap (unlike the mmap/fd caches): every
+// ZoneMapFile update is already write-through, so dropping an instance
+// loses nothing -- the next touch just reopens the file and pays one fresh
+// pread() for whatever block it needs. 256 instances * ~10KB each (default
+// ZONE_MAP_HOT_CACHE_BLOCKS) = ~2.5MB worst-case resident for this cache --
+// re-sweep alongside the Task 8 benchmark gate before trusting this default,
+// same rule as every other capacity constant in this file.
+inline constexpr size_t ZONE_MAP_REGISTRY_CAP = 256;
+
 // RangeQuery and BatchQuery (XStore_RangeOps.cpp,
 // XStore_BatchOps.cpp): target size of each emitted wire-format chunk. A
 // query whose total output stays under this is sent as a single ZMQ frame

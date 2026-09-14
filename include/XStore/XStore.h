@@ -23,6 +23,7 @@
 #include "XStore.pb.h"
 #include "include/DataStructs/ValueStruct.h"
 #include "include/XStore/XStore_Tunables.h"
+#include "include/XStore/XStore_ZoneMap.h"
 
 // Length of msg header
 #define TRACE_LEN 8
@@ -192,6 +193,17 @@ class XStore {
         struct WalRow {
             unsigned long long epoch_time = 0;
             std::string row_bytes;   // already-serialized, zero-padded, exactly row_length bytes
+            // Precomputed at enqueue time (BuildZoneMapObservations, before
+            // row_bytes is even serialized) since ApplyWalRecord only has
+            // row_bytes -- already-serialized wire bytes, not the original
+            // RowData -- to re-derive column values from. Applied to the
+            // zone map by ApplyWalRecord itself, at the same moment (and
+            // under the same success/failure check) as this row's real
+            // pwrite -- not eagerly at enqueue time -- so the zone map is
+            // never ahead of what's actually durable, including under
+            // ASYNC durability mode where the real write happens later on
+            // the WAL writer thread, not before this call returns.
+            std::vector<ZoneMapObservation> zone_map_observations;
         };
 
         // Cross-thread completion signal for one WalRecord -- replaces
@@ -351,9 +363,14 @@ class XStore {
 
         // Walks [startEpochT, endEpochT] one year-file at a time for
         // Min/Max/Sum/AvgAggregate, read-locking each existing segment and
-        // handing kernel(rowsBase, rowsToProcess) a pointer straight into
-        // GetOrMapFile's cached mapping -- a member function (not a free
-        // one) purely so it can call GetOrMapFile, which is private.
+        // handing kernel(rowsBase, rowsToProcess, year, firstRowIndex) a
+        // pointer straight into GetOrMapFile's cached mapping -- a member
+        // function (not a free one) purely so it can call GetOrMapFile,
+        // which is private. year/firstRowIndex (the row-within-year index
+        // of rowsBase's first row, i.e. the same "diff" every insert path
+        // computes) let a zone-map-aware kernel open the right (db, year)
+        // ZoneMapFile and resolve which blocks this segment covers -- added
+        // for Tasks 6-7; a kernel that doesn't need them just ignores them.
         template <typename Kernel>
         void WalkYearSpan(const std::string &db_base_path, const XStore_Proto::ConfigStruct &cfg_struct,
                           unsigned long long start_epoch_t, unsigned long long end_epoch_t, Kernel &&kernel);
@@ -362,14 +379,15 @@ class XStore {
         // across a bounded thread pool when the span covers enough distinct
         // years to be worth it -- narrow spans (the common case) fall back
         // to calling WalkYearSpan directly, no thread spawned at all.
-        // segmentKernel(PartialState&, rowsBase, rowsToProcess) accumulates
-        // into a PER-THREAD-LOCAL PartialState, never a value shared across
-        // threads -- protobuf/ValueStruct objects aren't safe for
-        // concurrent mutation from multiple threads even on logically-
-        // disjoint fields (see protobuf's own thread-safety docs). mergeFn
-        // (finalState&, partialState) combines each thread's partial result
-        // into the running total sequentially after all threads join --
-        // cheap, O(#threads) not O(#rows). Returns the fully-merged state.
+        // segmentKernel(PartialState&, rowsBase, rowsToProcess, year,
+        // firstRowIndex) accumulates into a PER-THREAD-LOCAL PartialState,
+        // never a value shared across threads -- protobuf/ValueStruct
+        // objects aren't safe for concurrent mutation from multiple
+        // threads even on logically-disjoint fields (see protobuf's own
+        // thread-safety docs). mergeFn (finalState&, partialState) combines
+        // each thread's partial result into the running total sequentially
+        // after all threads join -- cheap, O(#threads) not O(#rows).
+        // Returns the fully-merged state.
         template <typename PartialState, typename SegmentKernel, typename MergeFn>
         PartialState WalkYearSpanParallel(const std::string &db_base_path, const XStore_Proto::ConfigStruct &cfg_struct,
                                             unsigned long long start_epoch_t, unsigned long long end_epoch_t,
@@ -405,6 +423,39 @@ class XStore {
                                          size_t row_len, unsigned short column_idx,
                                          double& sum_out, unsigned long long& valid_count_out);
 
+        // Shared by MinAggregate/MaxAggregate (Task 6): splits one
+        // WalkYearSpan segment into its zone-map blocks and, for each,
+        // either skips it (should_skip_block(entry) says this block's
+        // column stats prove it can't hold anything better than what
+        // best_value already has) or falls through to a real
+        // ProcessFileRangeSelect<Cmp> scan over just that block's row
+        // sub-range. A block with no on-disk zone-map coverage yet, or
+        // whose column is past ZONE_MAP_MAX_TRACKED_COLUMNS, is always
+        // scanned for real -- pruning only ever skips a block the zone map
+        // can positively rule out, never guesses. should_skip_block is
+        // Cmp-specific (MIN checks entry.min_value, MAX checks
+        // entry.max_value) so it's passed in rather than hardcoded here.
+        template <typename Cmp, typename PruneCheck>
+        void ScanSegmentWithZoneMapPruning(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                            const char *rows_base, unsigned long long rows_to_process,
+                                            unsigned long long first_row_index, unsigned short column_idx,
+                                            ValueStruct &best_value, XStore_Proto::FData &best_data,
+                                            PruneCheck &&should_skip_block);
+
+        // Shared by SumAggregate/AvgAggregate (Task 7): same per-segment
+        // block split as ScanSegmentWithZoneMapPruning above, but for
+        // accumulation instead of a single winner. A block contributes its
+        // precomputed sum_value/valid_count with zero row scan only when
+        // the block's OWN full row span (not the query-clipped sub-range)
+        // lies entirely inside [firstRowIndex, firstRowIndex+rowsToProcess)
+        // -- a block only partially covered by the query still needs a
+        // real ProcessFileRangeAccumulate scan, since the zone map's sum
+        // covers the whole block, not just the queried slice of it.
+        void AccumulateSegmentWithZoneMapPushdown(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                                   const char *rows_base, unsigned long long rows_to_process,
+                                                   unsigned long long first_row_index, unsigned short column_idx,
+                                                   double &sum_out, unsigned long long &valid_count_out);
+
         // MIN - AGGREGATE
         void MinAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Min_REP *return_data);
 
@@ -419,6 +470,32 @@ class XStore {
 
         // Initialize DB
         void InitDB();
+
+        // Fetch (creating if needed) the ZoneMapFile for (dbBasePath, year),
+        // opening its "<dbBasePath>/<year>.zmap" sidecar on first touch and
+        // reusing the same in-registry instance on every later call --
+        // consumed by every zone-map-aware insert/aggregate path (Tasks
+        // 4-7). row_length is only used on first creation of that (db,
+        // year) pair's .zmap file; see ZoneMapFile::Open. Bounded at
+        // ZONE_MAP_REGISTRY_CAP with LRU eviction -- see zone_map_registry_
+        // below for why eviction here is always safe.
+        //
+        // static, like fd_shards/wal_shards below: ApplyWalRecord (the
+        // actual write site every insert path funnels through, on
+        // whichever WAL writer thread ends up applying a given record) has
+        // no XStore instance to call through -- a per-instance registry
+        // (as originally shipped in Task 3) would be unreachable from
+        // there. One process-wide registry also matches how ZmqServer
+        // actually runs: one XStore instance per worker thread (see
+        // ZMQ_Server.cpp), so a per-instance cache would have silently
+        // fragmented into one independent registry (and LRU cap) per
+        // worker anyway.
+        static ZoneMapFile& GetOrOpenZoneMap(std::string_view db_base_path, unsigned short year, uint16_t row_length);
+
+        // Test-only introspection -- not part of the public API surface any
+        // real caller needs, same as this codebase's other test-only
+        // accessors.
+        static size_t ZoneMapRegistrySize() { return zone_map_registry_.size(); }
 
     private:
         // Get current base directory
@@ -456,6 +533,31 @@ class XStore {
         // note above base_dir). Assumes dbName is already upper-cased (call
         // ToUpperCase first, as every public method does).
         std::string DbBasePath(const std::string &db_name) const;
+
+        // Zone-map secondary index registry: one ZoneMapFile per (db, year)
+        // pair ever touched, keyed by "<db_base_path>/<year>". Capped at
+        // ZONE_MAP_REGISTRY_CAP (see its comment in XStore_Tunables.h for the
+        // memory-footprint reasoning) with plain LRU eviction -- unlike the
+        // mmap/fd caches above, eviction here is always safe and cheap:
+        // every ZoneMapFile update is write-through (see XStore_ZoneMap.h),
+        // so an evicted instance has lost nothing, and the next touch just
+        // reopens its .zmap file and pays one fresh pread() for whatever
+        // block it needs. A plain unordered_map behind one mutex, not
+        // sharded -- CreateDB/first-insert-of-a-year frequency is nowhere
+        // near hot-path enough to need striping the way the WAL/mmap caches
+        // do. static -- see GetOrOpenZoneMap's comment for why (reachable
+        // from ApplyWalRecord, which has no XStore instance).
+        static std::mutex zone_map_registry_mutex_;
+        static std::unordered_map<std::string, std::unique_ptr<ZoneMapFile>> zone_map_registry_;
+        static std::vector<std::string> zone_map_registry_lru_; // most-recently-touched at the back
+
+        // Turns one row's proto fields into the zone map's per-column
+        // observations -- shared by Unary/Batch/RangeInsert (all three
+        // build a WalRow, see XStore_Internal.h for the definition and full
+        // rationale). Takes an XStore& purely to reach the private
+        // GetFDataValue overload below; touches no instance state of its
+        // own.
+        static std::vector<ZoneMapObservation> BuildZoneMapObservations(XStore &store, const XStore_Proto::RowData &row);
 
         // Fetch dbName's ConfigStruct from CfgMap, loading it from dbBasePath's
         // .CFG file into the cache on first use. Returns false if the .CFG file

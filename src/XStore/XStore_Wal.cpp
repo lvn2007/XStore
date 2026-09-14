@@ -181,6 +181,20 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply) {
     }
     int fd = *fd_handle;
 
+    // Fetched once per record (every row shares the same (db, year), see
+    // this function's precondition comment above) rather than once per
+    // row/run -- this is the actual, only place a row's zone-map update
+    // happens: at the same moment as its real pwrite below, under the same
+    // success/failure check, regardless of which thread or how much later
+    // that turns out to be for ASYNC durability mode. Updating eagerly at
+    // enqueue time instead (UnaryInsert/BatchInsert/RangeInsert) would let
+    // the zone map claim a row that a crash between enqueue and this apply
+    // step later proves was never actually written -- exactly the
+    // zone-map-disagrees-with-real-data failure mode Task 2's write-through
+    // design exists to prevent, just moved to the wrong side of the WAL
+    // instead of eliminated.
+    ZoneMapFile &zmap = GetOrOpenZoneMap(record_to_apply.db_base_path, first_ts.year, record_to_apply.row_length);
+
     std::vector<unsigned long long> offsets(record_to_apply.rows.size());
     for (size_t i = 0; i < record_to_apply.rows.size(); ++i) {
         offsets[i] = (record_to_apply.rows[i].epoch_time - first_ts.first_epoch) * record_to_apply.row_length;
@@ -218,6 +232,14 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply) {
         if (written != static_cast<ssize_t>(run_bytes)) {
             spdlog::error("[WAL APPLY] [DB: {}] - Short/failed write to {}.XSTORE", record_to_apply.db_name, first_ts.year);
             all_rows_ok = false;
+        } else {
+            // Only reached when this run's rows are confirmed durably
+            // written above -- never update the zone map for a row whose
+            // real write just failed.
+            for (size_t i = run_start; i < run_end; ++i) {
+                uint64_t diff = record_to_apply.rows[i].epoch_time - first_ts.first_epoch;
+                zmap.UpdateRow(diff, record_to_apply.rows[i].zone_map_observations);
+            }
         }
         run_start = run_end;
     }
