@@ -1134,7 +1134,7 @@ git commit -m "feat(zonemap): push SumAggregate/AvgAggregate down to zone map fo
 
 ## Task 8: Benchmark gate, documentation, TODO.md update
 
-**Status: NOT STARTED.**
+**Status: DONE, with one open item.** Steps 3-4 (file-size measurement, technical-reference docs, TODO.md update) are complete. Steps 1-2 (real Mystic benchmark runs) could NOT be run from this development session: `ssh dubuntu` fails with "No route to host" -- this environment has no network path to the `dubuntu` benchmark driver or the Mystic cluster it orchestrates over (`docs/Cross_Machine_Access_And_Benchmarking.md`). This is not a skip or a fabricated number -- it's an infrastructure-access gap specific to this session. Left as an explicit, tracked open item in `TODO.md` (same "correctness-verified, not yet performance-verified" convention already used there for the `WalkYearSpanParallel` entry), to be run from a session with `dubuntu`/Mystic access before this feature is called performance-verified. Step 3's numbers ARE real, computed by compiling against the actual `ZoneMapEntry`/`ZoneMapFileHeader` structs and running the block-count arithmetic, not estimated.
 
 **Files:**
 - Modify: `docs/XStore_Technical_Reference.md` — new subsection under §4 (Storage Engine)
@@ -1149,15 +1149,15 @@ Per `docs/Cross_Machine_Access_And_Benchmarking.md` methodology: scope to `INSER
 
 No existing Mystic workload tag exercises a non-timestamp-column predicate/aggregate specifically (confirm via `grep -rn AGGREGATE benchmark_artifact/` and check whether existing `MIN`/`MAX`/`SUM`/`AVG` tags vary column selectivity) — if none does, this needs a new targeted local benchmark (not necessarily a full Mystic gate) comparing `MinAggregate`/`SumAggregate` wall-clock over a wide multi-block range before vs. after Task 6/7, with a synthetic dataset shaped so most blocks are prunable (matching the realistic case zone maps target: a needle-in-haystack range predicate).
 
-- [ ] **Step 3: Document actual zone-map file size for a couple of realistic shapes**
+- [x] **Step 3: Document actual zone-map file size for a couple of realistic shapes**
 
 Compute and record (don't estimate) `tracked_columns(64) * 40 bytes * block_count` for at least: a narrow row (64 bytes, SECOND resolution) and a wide row (1536 bytes, SECOND resolution) — replaces the original brainstorm's now-corrected "single-digit MB" claim with real numbers for this design.
 
-- [ ] **Step 4: Write the technical reference subsection and update TODO.md**
+- [x] **Step 4: Write the technical reference subsection and update TODO.md**
 
 Document: block-size derivation, the tracked-column cap and why, the crash-safety argument (dirty-block-never-trusted), and the benchmark numbers from Steps 1-3. Mark the TODO.md item done, following the same "what was verified" style every other completed item in that file already uses.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add docs/XStore_Technical_Reference.md TODO.md
