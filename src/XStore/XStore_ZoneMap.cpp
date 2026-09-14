@@ -1,0 +1,108 @@
+#include "include/XStore/XStore_ZoneMap.h"
+#include <algorithm>
+#include <cstring>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+bool ZoneMapFile::Open(const std::string &path, uint16_t row_length) {
+    fd_ = open(path.c_str(), O_RDWR | O_CREAT, 0644);
+    if (fd_ < 0) return false;
+
+    struct stat st{};
+    if (fstat(fd_, &st) == 0 && st.st_size >= static_cast<off_t>(sizeof(ZoneMapFileHeader))) {
+        ssize_t read_bytes = pread(fd_, &header_, sizeof(header_), 0);
+        if (read_bytes != static_cast<ssize_t>(sizeof(header_)) || header_.magic != ZoneMapFileHeader{}.magic) {
+            return false; // corrupt/foreign file -- caller falls back to no acceleration
+        }
+    } else {
+        header_ = ZoneMapFileHeader{};
+        header_.tracked_column_count = XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS;
+        header_.rows_per_block = RowsPerBlock(row_length);
+        [[maybe_unused]] ssize_t written = pwrite(fd_, &header_, sizeof(header_), 0);
+    }
+    return true;
+}
+
+off_t ZoneMapFile::BlockFileOffset(uint64_t block_index) const {
+    return static_cast<off_t>(sizeof(ZoneMapFileHeader)) +
+           static_cast<off_t>(block_index) * header_.tracked_column_count * sizeof(ZoneMapEntry);
+}
+
+void ZoneMapFile::EnsureBlockLoaded(uint64_t block_index) {
+    if (cache_.count(block_index)) return;
+
+    std::vector<ZoneMapEntry> entries(header_.tracked_column_count, ZoneMapEntry{0, 0, 0, 0, 0});
+
+    off_t offset = BlockFileOffset(block_index);
+    struct stat st{};
+    if (fstat(fd_, &st) == 0 && st.st_size >= offset + static_cast<off_t>(header_.tracked_column_count * sizeof(ZoneMapEntry))) {
+        // Existing on-disk block -- load its current (always-durable) stats.
+        [[maybe_unused]] ssize_t read_bytes =
+            pread(fd_, entries.data(), header_.tracked_column_count * sizeof(ZoneMapEntry), offset);
+    }
+    // Otherwise: never-touched block, zero-initialized entries above are correct.
+
+    cache_.emplace(block_index, std::move(entries));
+    lru_order_.push_back(block_index);
+    EvictIfOverCapacity();
+}
+
+void ZoneMapFile::EvictIfOverCapacity() {
+    // Pure memory-bound eviction -- nothing to flush, every cached copy is
+    // already disk-coherent by the time UpdateRow returns.
+    while (cache_.size() > XStoreTunables::ZONE_MAP_HOT_CACHE_BLOCKS) {
+        uint64_t victim = lru_order_.front();
+        lru_order_.erase(lru_order_.begin());
+        cache_.erase(victim);
+    }
+}
+
+void ZoneMapFile::UpdateRow(uint64_t row_index, const std::vector<ZoneMapObservation> &observations) {
+    uint64_t block_index = BlockIndexForRow(row_index, header_.rows_per_block);
+    EnsureBlockLoaded(block_index);
+
+    lru_order_.erase(std::remove(lru_order_.begin(), lru_order_.end(), block_index), lru_order_.end());
+    lru_order_.push_back(block_index);
+
+    std::vector<ZoneMapEntry> &entries = cache_.at(block_index);
+    for (const auto &obs : observations) {
+        if (obs.column_idx >= header_.tracked_column_count) continue; // beyond cap -- not tracked, always safe
+        ZoneMapEntry &e = entries[obs.column_idx];
+        if (obs.is_numeric) {
+            e.min_value = (e.valid_count == 0) ? obs.value : std::min(e.min_value, obs.value);
+            e.max_value = (e.valid_count == 0) ? obs.value : std::max(e.max_value, obs.value);
+            e.sum_value += obs.value;
+            e.valid_count++;
+        } else {
+            e.null_count++;
+        }
+    }
+
+    // Write-through: durable before this call returns, no dirty state left
+    // behind for a crash to lose. See the Task 2 design note for why.
+    off_t offset = BlockFileOffset(block_index);
+    [[maybe_unused]] ssize_t written =
+        pwrite(fd_, entries.data(), entries.size() * sizeof(ZoneMapEntry), offset);
+}
+
+std::optional<std::vector<ZoneMapEntry>> ZoneMapFile::TryGetBlockStats(uint64_t block_index) {
+    auto cached = cache_.find(block_index);
+    if (cached != cache_.end()) return cached->second; // always disk-coherent, safe to serve directly
+
+    off_t offset = BlockFileOffset(block_index);
+    struct stat st{};
+    if (fstat(fd_, &st) != 0) return std::nullopt; // real I/O failure
+    if (st.st_size < offset + static_cast<off_t>(header_.tracked_column_count * sizeof(ZoneMapEntry))) {
+        // Never-touched block -- a real, safe zero'd answer, not an error.
+        return std::vector<ZoneMapEntry>(header_.tracked_column_count, ZoneMapEntry{0, 0, 0, 0, 0});
+    }
+    std::vector<ZoneMapEntry> entries(header_.tracked_column_count);
+    ssize_t read_bytes = pread(fd_, entries.data(), header_.tracked_column_count * sizeof(ZoneMapEntry), offset);
+    if (read_bytes != static_cast<ssize_t>(header_.tracked_column_count * sizeof(ZoneMapEntry))) return std::nullopt;
+    return entries;
+}
+
+ZoneMapFile::~ZoneMapFile() {
+    if (fd_ >= 0) close(fd_);
+}

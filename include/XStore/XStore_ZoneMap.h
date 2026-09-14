@@ -40,3 +40,56 @@ struct ZoneMapFileHeader {
     uint32_t tracked_column_count = 0;
     uint64_t rows_per_block = 0;
 };
+
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+// One numeric observation to fold into a block's running stats for one
+// column. `is_numeric=false` (a hole, or a non-numeric FData branch such as
+// stringData/bytesData) increments null_count instead of touching min/max/
+// sum -- mirrors AggregateSkipsNonNumericColumnValues' existing semantics
+// (XStoreTest.cpp) so a zone map never disagrees with what a real scan
+// would have concluded.
+struct ZoneMapObservation {
+    uint32_t column_idx;
+    double   value;
+    bool     is_numeric;
+};
+
+class ZoneMapFile {
+public:
+    // Creates the file (header only) if it doesn't exist; opens it
+    // otherwise. row_length is used only to derive rows_per_block on first
+    // creation -- ignored on reopen (rows_per_block is read from the header,
+    // so it can never drift from what earlier blocks were written against).
+    bool Open(const std::string &path, uint16_t row_length);
+
+    // Folds each observation into the block containing row_index and
+    // pwrite()s that block back to disk before returning -- write-through,
+    // no buffered state a crash can lose (see the Task 2 design note in the
+    // plan for why this isn't a write-back cache). The in-memory cache below
+    // only saves a repeat pread() when consecutive calls hit the same block.
+    void UpdateRow(uint64_t row_index, const std::vector<ZoneMapObservation> &observations);
+
+    // Always returns real, safe stats for block_index -- a never-touched
+    // block simply has valid_count==0 everywhere, which is the true and
+    // correct answer for "no rows landed here yet," not a placeholder for
+    // "unknown." nullopt is reserved for an actual I/O failure on the read.
+    std::optional<std::vector<ZoneMapEntry>> TryGetBlockStats(uint64_t block_index);
+
+    ~ZoneMapFile();
+
+    uint64_t RowsPerBlockValue() const { return header_.rows_per_block; }
+
+private:
+    void EnsureBlockLoaded(uint64_t block_index);
+    void EvictIfOverCapacity();
+    off_t BlockFileOffset(uint64_t block_index) const;
+
+    int fd_ = -1;
+    ZoneMapFileHeader header_;
+    std::unordered_map<uint64_t, std::vector<ZoneMapEntry>> cache_; // pure read-cache, always disk-coherent
+    std::vector<uint64_t> lru_order_; // most-recently-touched at the back
+};
