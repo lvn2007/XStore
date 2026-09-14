@@ -1,4 +1,5 @@
 #include "include/XStore/XStore_ZoneMap.h"
+#include "include/Logger/Logger.h"
 #include <algorithm>
 #include <cstring>
 #include <fcntl.h>
@@ -19,7 +20,17 @@ bool ZoneMapFile::Open(const std::string &path, uint16_t row_length) {
         header_ = ZoneMapFileHeader{};
         header_.tracked_column_count = XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS;
         header_.rows_per_block = RowsPerBlock(row_length);
-        [[maybe_unused]] ssize_t written = pwrite(fd_, &header_, sizeof(header_), 0);
+        ssize_t written = pwrite(fd_, &header_, sizeof(header_), 0);
+        if (written != static_cast<ssize_t>(sizeof(header_))) {
+            // Short/failed header write -- the file can't be trusted as a
+            // valid zone map (a future reopen could misread rows_per_block
+            // or tracked_column_count from a partially-written header, then
+            // silently mis-index every block against it). Fail Open() so the
+            // caller falls back to no acceleration rather than proceeding on
+            // a header that isn't durably correct.
+            spdlog::error("[ZONE MAP] - Failed to write header to {}", path);
+            return false;
+        }
     }
     return true;
 }
@@ -82,8 +93,20 @@ void ZoneMapFile::UpdateRow(uint64_t row_index, const std::vector<ZoneMapObserva
     // Write-through: durable before this call returns, no dirty state left
     // behind for a crash to lose. See the Task 2 design note for why.
     off_t offset = BlockFileOffset(block_index);
-    [[maybe_unused]] ssize_t written =
-        pwrite(fd_, entries.data(), entries.size() * sizeof(ZoneMapEntry), offset);
+    ssize_t written = pwrite(fd_, entries.data(), entries.size() * sizeof(ZoneMapEntry), offset);
+    if (written != static_cast<ssize_t>(entries.size() * sizeof(ZoneMapEntry))) {
+        // Short/failed write -- the in-memory cache_ entry above is now
+        // AHEAD of what's actually durable on disk for this block, which is
+        // exactly the false-negative-pruning risk the write-through design
+        // exists to prevent (see the Task 2 design note): a crash right
+        // after this would leave a corrupted/incomplete on-disk baseline
+        // that a later reopen would treat as trustworthy. UpdateRow's
+        // signature is fire-and-forget (no failure-reaction path in this
+        // plan), so this is a log-and-continue, matching how
+        // XStore_Wal.cpp treats an equivalent short/failed durability
+        // write it also can't propagate synchronously.
+        spdlog::error("[ZONE MAP] - Short/failed write to block {}", block_index);
+    }
 }
 
 std::optional<std::vector<ZoneMapEntry>> ZoneMapFile::TryGetBlockStats(uint64_t block_index) {
