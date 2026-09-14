@@ -95,3 +95,72 @@ TEST(ZoneMapFileTest, ColumnIndexAtOrPastCapIsSilentlyIgnored) {
 }
 
 } // namespace
+
+// Shared fixture for every zone-map test in this file (Tasks 3-7 all use
+// TEST_F(XStoreZoneMapTest, ...)). Same ScratchDir-per-test pattern as
+// XStoreWalTest.cpp -- a fresh temp directory per test avoids collisions
+// between tests that reuse gtest's heap-allocated fixture address.
+namespace {
+
+using xstore_test::ScratchDir;
+using xstore_test::CreateTestDb;
+
+class XStoreZoneMapTest : public ::testing::Test {
+protected:
+    std::unique_ptr<ScratchDir> scratch;
+
+    void SetUp() override {
+        scratch = std::make_unique<ScratchDir>("xstore_zone_map_test");
+        for (auto &shard : XStore::cfg_shards) shard.map.clear();
+    }
+
+    void TearDown() override {
+        scratch.reset();
+    }
+
+    // db_name must already be upper-case.
+    std::string DbPath(std::string_view db_name) const {
+        return (scratch->test_root / "DataStore" / std::string(db_name)).string();
+    }
+};
+
+TEST_F(XStoreZoneMapTest, GetOrOpenZoneMapReturnsSameInstanceForSameDbAndYear) {
+    XStore store;
+    CreateTestDb(store, "ZMAPREG", XStore_Proto::SECOND, 64);
+    ZoneMapFile &a = store.GetOrOpenZoneMap(DbPath("ZMAPREG"), 2024, 64);
+    ZoneMapFile &b = store.GetOrOpenZoneMap(DbPath("ZMAPREG"), 2024, 64);
+    EXPECT_EQ(&a, &b);
+
+    ZoneMapFile &different_year = store.GetOrOpenZoneMap(DbPath("ZMAPREG"), 2025, 64);
+    EXPECT_NE(&a, &different_year);
+}
+
+} // namespace
+
+namespace {
+
+using xstore_test::CreateTestDb;
+
+TEST_F(XStoreZoneMapTest, GetOrOpenZoneMapEvictsOldestPastRegistryCap) {
+    XStore store;
+    CreateTestDb(store, "ZMAPCAP", XStore_Proto::SECOND, 64);
+
+    // Touch more distinct (db, year) combinations than the cap allows.
+    for (unsigned short year = 2000; year < 2000 + XStoreTunables::ZONE_MAP_REGISTRY_CAP + 10; ++year) {
+        store.GetOrOpenZoneMap(DbPath("ZMAPCAP"), year, 64);
+    }
+    EXPECT_LE(store.ZoneMapRegistrySize(), XStoreTunables::ZONE_MAP_REGISTRY_CAP);
+
+    // Evicting one instance must not lose durably-written data -- write-
+    // through (Task 2) means eviction is just closing a file handle.
+    store.GetOrOpenZoneMap(DbPath("ZMAPCAP"), 2000, 64)
+        .UpdateRow(0, {{0, 5.0, true}});
+    for (unsigned short year = 2001; year < 2000 + XStoreTunables::ZONE_MAP_REGISTRY_CAP + 20; ++year) {
+        store.GetOrOpenZoneMap(DbPath("ZMAPCAP"), year, 64); // evicts year 2000 out
+    }
+    auto stats = store.GetOrOpenZoneMap(DbPath("ZMAPCAP"), 2000, 64).TryGetBlockStats(0);
+    ASSERT_TRUE(stats.has_value());
+    EXPECT_DOUBLE_EQ((*stats)[0].min_value, 5.0); // survived eviction + reopen
+}
+
+} // namespace

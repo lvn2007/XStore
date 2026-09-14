@@ -23,6 +23,7 @@
 #include "XStore.pb.h"
 #include "include/DataStructs/ValueStruct.h"
 #include "include/XStore/XStore_Tunables.h"
+#include "include/XStore/XStore_ZoneMap.h"
 
 // Length of msg header
 #define TRACE_LEN 8
@@ -420,6 +421,21 @@ class XStore {
         // Initialize DB
         void InitDB();
 
+        // Fetch (creating if needed) the ZoneMapFile for (dbBasePath, year),
+        // opening its "<dbBasePath>/<year>.zmap" sidecar on first touch and
+        // reusing the same in-registry instance on every later call --
+        // consumed by every zone-map-aware insert/aggregate path (Tasks
+        // 4-7). row_length is only used on first creation of that (db,
+        // year) pair's .zmap file; see ZoneMapFile::Open. Bounded at
+        // ZONE_MAP_REGISTRY_CAP with LRU eviction -- see zone_map_registry_
+        // below for why eviction here is always safe.
+        ZoneMapFile& GetOrOpenZoneMap(std::string_view db_base_path, unsigned short year, uint16_t row_length);
+
+        // Test-only introspection -- not part of the public API surface any
+        // real caller needs, same as this codebase's other test-only
+        // accessors.
+        size_t ZoneMapRegistrySize() const { return zone_map_registry_.size(); }
+
     private:
         // Get current base directory
         std::string GetBaseDir();
@@ -456,6 +472,22 @@ class XStore {
         // note above base_dir). Assumes dbName is already upper-cased (call
         // ToUpperCase first, as every public method does).
         std::string DbBasePath(const std::string &db_name) const;
+
+        // Zone-map secondary index registry: one ZoneMapFile per (db, year)
+        // pair ever touched, keyed by "<db_base_path>/<year>". Capped at
+        // ZONE_MAP_REGISTRY_CAP (see its comment in XStore_Tunables.h for the
+        // memory-footprint reasoning) with plain LRU eviction -- unlike the
+        // mmap/fd caches above, eviction here is always safe and cheap:
+        // every ZoneMapFile update is write-through (see XStore_ZoneMap.h),
+        // so an evicted instance has lost nothing, and the next touch just
+        // reopens its .zmap file and pays one fresh pread() for whatever
+        // block it needs. A plain unordered_map behind one mutex, not
+        // sharded -- CreateDB/first-insert-of-a-year frequency is nowhere
+        // near hot-path enough to need striping the way the WAL/mmap caches
+        // do.
+        std::mutex zone_map_registry_mutex_;
+        std::unordered_map<std::string, std::unique_ptr<ZoneMapFile>> zone_map_registry_;
+        std::vector<std::string> zone_map_registry_lru_; // most-recently-touched at the back
 
         // Fetch dbName's ConfigStruct from CfgMap, loading it from dbBasePath's
         // .CFG file into the cache on first use. Returns false if the .CFG file
