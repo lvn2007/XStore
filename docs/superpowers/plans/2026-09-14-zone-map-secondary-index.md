@@ -896,7 +896,11 @@ git commit -m "feat(zonemap): update zone map on BatchInsert/RangeInsert"
 
 ## Task 6: `MinAggregate`/`MaxAggregate` block-skip pruning
 
-**Status: NOT STARTED.**
+**Status: DONE.**
+
+**Adapted from this task's original sketch to the real code shape.** `MinAggregate`/`MaxAggregate` don't walk rows or blocks directly -- they hand a per-segment kernel lambda to `WalkYearSpanParallel`/`WalkYearSpan` (`XStore_Aggregates.cpp`), which calls that lambda once per year-segment with `(rowsBase, rowsToProcess)`, no year or row-index info. Zone-map pruning needs both (to open the right `ZoneMapFile` and resolve block indices), so `WalkYearSpan`'s kernel signature grew two params -- `(rowsBase, rowsToProcess, year, firstRowIndex)` -- threaded through `WalkYearSpanParallel` and all four existing call sites (Min/Max/Sum/Avg); Sum/Avg ignore the two new params until Task 7 wires them up for real. The actual per-block skip/scan loop lives in a new shared private member template, `XStore::ScanSegmentWithZoneMapPruning<Cmp, PruneCheck>` (declared `XStore.h`, defined `XStore_Aggregates.cpp` next to `WalkYearSpan`) -- Min and Max both call it, passing only their own `should_skip_block` predicate (`e.min_value >= best`/`e.max_value <= best`) so the block-splitting/pruning/fallback-scan logic itself isn't duplicated between them.
+
+**Test fix from the plan's own sketch:** the plan's given test code read `min_rep.data().doubledata()` -- checked against `proto/XStore.proto`, `Min_REP`/`Max_REP` have no `data` field, the real field is `opResult` (`opresult()` in generated C++). Fixed in the tests actually added; also added a mirrored `MaxAggregatePrunesBlocksButStillFindsCorrectAnswer` test (the plan only spelled out Min's version and said "wire the analogous guard into MaxAggregate" for the implementation, not a matching test) -- both Min's and Max's guard direction get real coverage this way, not just Min's.
 
 **Files:**
 - Modify: `src/XStore/XStore_Aggregates.cpp` — `MinAggregate`/`MaxAggregate`, wrapping the existing call into `ProcessFileRangeSelect`
@@ -906,7 +910,7 @@ git commit -m "feat(zonemap): update zone map on BatchInsert/RangeInsert"
 - Consumes: `ZoneMapFile::TryGetBlockStats` (Task 2), `ProcessFileRangeSelect<Cmp>` (`XStore.h:398-400`, unchanged).
 - Produces: nothing new for later tasks — Task 7 follows the same shape for Sum/Avg.
 
-- [ ] **Step 1: Write the failing test — a huge unmatched range still finds the right min despite most blocks being prunable**
+- [x] **Step 1: Write the failing test — a huge unmatched range still finds the right min despite most blocks being prunable**
 
 `XStoreZoneMapTest`/`RowsPerBlock` are from Tasks 1/3, already in the repo.
 
@@ -962,12 +966,12 @@ TEST_F(XStoreZoneMapTest, MinAggregateCorrectWhenRangeBoundaryFallsMidBlock) {
 } // namespace
 ```
 
-- [ ] **Step 2: Run, confirm the first test currently passes by luck (no pruning yet) and note the second already passes — pruning is additive, not required for correctness today**
+- [x] **Step 2: Run, confirm the first test currently passes by luck (no pruning yet) and note the second already passes — pruning is additive, not required for correctness today**
 
 Run: `./build/tests/xstore_tests --gtest_filter=XStoreZoneMapTest.MinAggregate*`
 Expected: both PASS already (pruning is a perf optimization, not a correctness fix — these tests exist to pin correctness before AND after Step 3 changes the code path).
 
-- [ ] **Step 3: Add pruning to the per-block walk inside `MinAggregate`/`MaxAggregate`**
+- [x] **Step 3: Add pruning to the per-block walk inside `MinAggregate`/`MaxAggregate`**
 
 ```cpp
 // src/XStore/XStore_Aggregates.cpp -- inside MinAggregate, before calling
@@ -996,12 +1000,12 @@ for (uint64_t block = BlockIndexForRow(first_row, rows_per_block);
 
 Wire the analogous `e.max_value <= best_value.value` guard into `MaxAggregate`.
 
-- [ ] **Step 4: Run tests, confirm still pass, then full suite**
+- [x] **Step 4: Run tests, confirm still pass, then full suite**
 
 Run: `./build/tests/xstore_tests --gtest_filter=XStoreZoneMapTest.*` then `./build/tests/xstore_tests`
 Expected: all PASS, zero regressions — pruning must never change an answer, only which bytes get touched to reach it.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/XStore/XStore_Aggregates.cpp tests/integration/XStoreZoneMapTest.cpp

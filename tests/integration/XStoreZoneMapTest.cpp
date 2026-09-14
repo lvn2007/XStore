@@ -217,3 +217,71 @@ TEST_F(XStoreZoneMapTest, UnaryInsertTreatsHoleAsNullNotZero) {
 }
 
 } // namespace
+
+namespace {
+
+using xstore_test::CreateTestDb;
+
+TEST_F(XStoreZoneMapTest, MinAggregatePrunesBlocksButStillFindsCorrectAnswer) {
+    XStore store;
+    CreateTestDb(store, "ZMAPMINPRUNE", XStore_Proto::SECOND, 64);
+
+    // Populate enough rows to span several blocks (RowsPerBlock(64) rows/block);
+    // plant the true minimum in the LAST block only, everything else higher.
+    uint64_t rows_per_block = RowsPerBlock(64);
+    unsigned long long base = 1700000000ULL;
+    for (uint64_t block = 0; block < 3; ++block) {
+        XStore_Proto::UnaryInsert_REP rep;
+        XStore_Proto::RowData row;
+        row.add_fielddata()->set_doubledata(block == 2 ? -100.0 : 100.0 + static_cast<double>(block));
+        store.UnaryInsert(base + block * rows_per_block, row, "ZMAPMINPRUNE", &rep, XStore_Proto::SYNC);
+    }
+    // No explicit flush needed -- UpdateRow (Task 2) already made this durable.
+
+    XStore_Proto::Min_REP min_rep;
+    store.MinAggregate(base, base + 3 * rows_per_block, "ZMAPMINPRUNE", 0, &min_rep);
+    EXPECT_DOUBLE_EQ(min_rep.opresult().doubledata(), -100.0);
+}
+
+TEST_F(XStoreZoneMapTest, MinAggregateCorrectWhenRangeBoundaryFallsMidBlock) {
+    // The queried range covers only part of a block -- that block can never
+    // be a fully-prunable or fully-pushdownable candidate, so this exercises
+    // the real per-row scan fallback path and must still find the true min.
+    XStore store;
+    CreateTestDb(store, "ZMAPMINBOUNDARY", XStore_Proto::SECOND, 64);
+    unsigned long long base = 1700000000ULL;
+
+    XStore_Proto::UnaryInsert_REP rep1, rep2;
+    XStore_Proto::RowData row1, row2;
+    row1.add_fielddata()->set_doubledata(42.0);
+    row2.add_fielddata()->set_doubledata(-7.0); // the true min, one second later
+    store.UnaryInsert(base, row1, "ZMAPMINBOUNDARY", &rep1, XStore_Proto::SYNC);
+    store.UnaryInsert(base + 1, row2, "ZMAPMINBOUNDARY", &rep2, XStore_Proto::SYNC);
+
+    // Range ends right after the second row -- both rows are in the same
+    // block, so this block is neither fully before nor fully after the
+    // range boundary in a way that would let a naive implementation skip it.
+    XStore_Proto::Min_REP min_rep;
+    store.MinAggregate(base, base + 2, "ZMAPMINBOUNDARY", 0, &min_rep);
+    EXPECT_DOUBLE_EQ(min_rep.opresult().doubledata(), -7.0);
+}
+
+TEST_F(XStoreZoneMapTest, MaxAggregatePrunesBlocksButStillFindsCorrectAnswer) {
+    XStore store;
+    CreateTestDb(store, "ZMAPMAXPRUNE", XStore_Proto::SECOND, 64);
+
+    uint64_t rows_per_block = RowsPerBlock(64);
+    unsigned long long base = 1700000000ULL;
+    for (uint64_t block = 0; block < 3; ++block) {
+        XStore_Proto::UnaryInsert_REP rep;
+        XStore_Proto::RowData row;
+        row.add_fielddata()->set_doubledata(block == 2 ? 500.0 : 1.0 + static_cast<double>(block));
+        store.UnaryInsert(base + block * rows_per_block, row, "ZMAPMAXPRUNE", &rep, XStore_Proto::SYNC);
+    }
+
+    XStore_Proto::Max_REP max_rep;
+    store.MaxAggregate(base, base + 3 * rows_per_block, "ZMAPMAXPRUNE", 0, &max_rep);
+    EXPECT_DOUBLE_EQ(max_rep.opresult().doubledata(), 500.0);
+}
+
+} // namespace

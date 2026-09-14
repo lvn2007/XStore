@@ -363,9 +363,14 @@ class XStore {
 
         // Walks [startEpochT, endEpochT] one year-file at a time for
         // Min/Max/Sum/AvgAggregate, read-locking each existing segment and
-        // handing kernel(rowsBase, rowsToProcess) a pointer straight into
-        // GetOrMapFile's cached mapping -- a member function (not a free
-        // one) purely so it can call GetOrMapFile, which is private.
+        // handing kernel(rowsBase, rowsToProcess, year, firstRowIndex) a
+        // pointer straight into GetOrMapFile's cached mapping -- a member
+        // function (not a free one) purely so it can call GetOrMapFile,
+        // which is private. year/firstRowIndex (the row-within-year index
+        // of rowsBase's first row, i.e. the same "diff" every insert path
+        // computes) let a zone-map-aware kernel open the right (db, year)
+        // ZoneMapFile and resolve which blocks this segment covers -- added
+        // for Tasks 6-7; a kernel that doesn't need them just ignores them.
         template <typename Kernel>
         void WalkYearSpan(const std::string &db_base_path, const XStore_Proto::ConfigStruct &cfg_struct,
                           unsigned long long start_epoch_t, unsigned long long end_epoch_t, Kernel &&kernel);
@@ -374,14 +379,15 @@ class XStore {
         // across a bounded thread pool when the span covers enough distinct
         // years to be worth it -- narrow spans (the common case) fall back
         // to calling WalkYearSpan directly, no thread spawned at all.
-        // segmentKernel(PartialState&, rowsBase, rowsToProcess) accumulates
-        // into a PER-THREAD-LOCAL PartialState, never a value shared across
-        // threads -- protobuf/ValueStruct objects aren't safe for
-        // concurrent mutation from multiple threads even on logically-
-        // disjoint fields (see protobuf's own thread-safety docs). mergeFn
-        // (finalState&, partialState) combines each thread's partial result
-        // into the running total sequentially after all threads join --
-        // cheap, O(#threads) not O(#rows). Returns the fully-merged state.
+        // segmentKernel(PartialState&, rowsBase, rowsToProcess, year,
+        // firstRowIndex) accumulates into a PER-THREAD-LOCAL PartialState,
+        // never a value shared across threads -- protobuf/ValueStruct
+        // objects aren't safe for concurrent mutation from multiple
+        // threads even on logically-disjoint fields (see protobuf's own
+        // thread-safety docs). mergeFn (finalState&, partialState) combines
+        // each thread's partial result into the running total sequentially
+        // after all threads join -- cheap, O(#threads) not O(#rows).
+        // Returns the fully-merged state.
         template <typename PartialState, typename SegmentKernel, typename MergeFn>
         PartialState WalkYearSpanParallel(const std::string &db_base_path, const XStore_Proto::ConfigStruct &cfg_struct,
                                             unsigned long long start_epoch_t, unsigned long long end_epoch_t,
@@ -416,6 +422,25 @@ class XStore {
         void ProcessFileRangeAccumulate(const char* rows_base, unsigned long long total_rows,
                                          size_t row_len, unsigned short column_idx,
                                          double& sum_out, unsigned long long& valid_count_out);
+
+        // Shared by MinAggregate/MaxAggregate (Task 6): splits one
+        // WalkYearSpan segment into its zone-map blocks and, for each,
+        // either skips it (should_skip_block(entry) says this block's
+        // column stats prove it can't hold anything better than what
+        // best_value already has) or falls through to a real
+        // ProcessFileRangeSelect<Cmp> scan over just that block's row
+        // sub-range. A block with no on-disk zone-map coverage yet, or
+        // whose column is past ZONE_MAP_MAX_TRACKED_COLUMNS, is always
+        // scanned for real -- pruning only ever skips a block the zone map
+        // can positively rule out, never guesses. should_skip_block is
+        // Cmp-specific (MIN checks entry.min_value, MAX checks
+        // entry.max_value) so it's passed in rather than hardcoded here.
+        template <typename Cmp, typename PruneCheck>
+        void ScanSegmentWithZoneMapPruning(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                            const char *rows_base, unsigned long long rows_to_process,
+                                            unsigned long long first_row_index, unsigned short column_idx,
+                                            ValueStruct &best_value, XStore_Proto::FData &best_data,
+                                            PruneCheck &&should_skip_block);
 
         // MIN - AGGREGATE
         void MinAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Min_REP *return_data);
