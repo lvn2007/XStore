@@ -220,7 +220,29 @@ add_custom_command(
         COMMAND ${_PROTOBUF_PROTOC} "--experimental_allow_proto3_optional"
         ARGS --cpp_out "${CMAKE_CURRENT_BINARY_DIR}"
         -I "${XStore_proto_path}" "${XStore_proto}"
-        DEPENDS "${XStore_proto}")
+        DEPENDS "${XStore_proto}" protobuf::protoc)
+
+# A bare add_custom_command's OUTPUT has no target of its own to order
+# against -- every executable that lists PROTO_SRCS/PROTO_HDRS among its own
+# sources (XStore here, xstore_tests/xstore_network_tests/xstore_perf_tests
+# in tests/CMakeLists.txt) previously got its own independent copy of this
+# rule generated in its own directory's Makefile, since CMake had no shared
+# target to point them at. Under a parallel build that touches more than one
+# of those executables at once, multiple protoc invocations raced to write
+# the same two output files, and a compile job could see a missing/
+# half-written XStore.pb.h depending on timing (reproduced: `cmake --build
+# build -j$(nproc)` intermittently fails with "XStore.pb.h: No such file or
+# directory" even though the .proto and protoc are both fine -- a -j1 build
+# never hits it). Wrapping the command in one real target and having every
+# consumer add_dependencies on that target instead gives them a single,
+# properly ordered build-graph edge -- the codegen step runs exactly once,
+# no matter how many executables need its output or how parallel the build
+# is. Also added protobuf::protoc to DEPENDS above: this command's OUTPUT
+# previously depended only on the .proto file, not on protoc itself being
+# built yet -- with protoc now coming from FetchContent (built as part of
+# this same configure, not a preinstalled system binary), that was a second,
+# independent way to run before its own prerequisite existed.
+add_custom_target(xstore_proto_cpp DEPENDS "${PROTO_SRCS}" "${PROTO_HDRS}")
 
 # ------------------------------------------------------------------
 # Extra protobuf language bindings (opt-in, for out-of-tree ZMQ clients)
@@ -304,6 +326,7 @@ add_executable(XStore src/main.cpp
         include/DataStructs/FileRangeLock.h src/DataStructs/FileRangeLock.cpp
         include/Logger/Logger.h)
 
+add_dependencies(XStore xstore_proto_cpp)
 target_link_libraries(XStore PUBLIC "stdc++fs" protobuf::libprotobuf "zmq" Threads::Threads moodycamel)
 if(TARGET absl::log_internal_check_op)
     target_link_libraries(XStore PUBLIC absl::log_internal_check_op)

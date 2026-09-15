@@ -25,6 +25,7 @@ add_executable(xstore_tests
         ${PROTO_SRCS} ${PROTO_HDRS}
 )
 
+add_dependencies(xstore_tests xstore_proto_cpp)
 target_link_libraries(xstore_tests PRIVATE GTest::gtest_main protobuf::libprotobuf Threads::Threads "stdc++fs" moodycamel)
 if(TARGET absl::log_internal_check_op)
     target_link_libraries(xstore_tests PRIVATE absl::log_internal_check_op)
@@ -69,6 +70,7 @@ add_executable(xstore_network_tests
         ${PROTO_SRCS} ${PROTO_HDRS}
 )
 
+add_dependencies(xstore_network_tests xstore_proto_cpp)
 target_link_libraries(xstore_network_tests PRIVATE GTest::gtest_main protobuf::libprotobuf Threads::Threads "stdc++fs" "zmq" moodycamel)
 if(TARGET absl::log_internal_check_op)
     target_link_libraries(xstore_network_tests PRIVATE absl::log_internal_check_op)
@@ -118,7 +120,7 @@ add_executable(xstore_keys_cli_tests integration/XStoreKeysCliTest.cpp
 target_include_directories(xstore_keys_cli_tests PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(xstore_keys_cli_tests PRIVATE GTest::gtest_main "zmq" "stdc++fs" moodycamel protobuf::libprotobuf)
 target_compile_definitions(xstore_keys_cli_tests PRIVATE XSTORE_KEYS_BIN="$<TARGET_FILE:xstore-keys>")
-add_dependencies(xstore_keys_cli_tests xstore-keys)
+add_dependencies(xstore_keys_cli_tests xstore-keys xstore_proto_cpp)
 
 include(GoogleTest)
 gtest_discover_tests(xstore_keys_cli_tests)
@@ -154,6 +156,7 @@ add_executable(xstore_perf_tests
         ${PROTO_SRCS} ${PROTO_HDRS}
 )
 
+add_dependencies(xstore_perf_tests xstore_proto_cpp)
 target_link_libraries(xstore_perf_tests PRIVATE GTest::gtest_main protobuf::libprotobuf Threads::Threads "stdc++fs" moodycamel)
 if(TARGET absl::log_internal_check_op)
     target_link_libraries(xstore_perf_tests PRIVATE absl::log_internal_check_op)
@@ -162,7 +165,7 @@ endif()
 gtest_discover_tests(xstore_perf_tests)
 
 # tests/local_bench: opt-in, single-machine benchmark harness (pure Python
-# driver around the real XStore server + XBench's benchmarkClient -- see
+# driver around the real XStore server + the XBench binary -- see
 # tests/local_bench/README.md). Same "not part of the default build" stance
 # as xstore_perf_tests above, one level further: these are plain custom
 # targets, never added to ALL, so `cmake --build .` / `make -j` alone never
@@ -171,13 +174,13 @@ find_package(Python3 COMPONENTS Interpreter)
 if(Python3_FOUND)
     set(XSTORE_LOCAL_BENCH_DIR ${CMAKE_SOURCE_DIR}/tests/local_bench)
 
-    set(XSTORE_LOCAL_BENCH_CLIENT_BIN "/home/ubuntu/XBench/build/benchmarkClient" CACHE FILEPATH
-        "Path to XBench's benchmarkClient binary, used by bench_local_run/bench_local_seed")
+    set(XSTORE_LOCAL_BENCH_CLIENT_BIN "/home/ubuntu/XBench/build/XBench" CACHE FILEPATH
+        "Path to the XBench binary, used by bench_local_run/bench_local_seed")
     set(XSTORE_LOCAL_BENCH_TAG "default" CACHE STRING
         "Label for this bench_local_run invocation (e.g. 'baseline', 'my-change') -- rerun with a different value and bench_local_summarize compares tags")
     # Empty = let the Python scripts derive a sane default from this
     # machine's core count (see bench_common.DEFAULT_TIERS / seed_fixture's
-    # --pool-size default) -- benchmarkClient itself refuses -t above its own
+    # --pool-size default) -- XBench itself refuses -t above its own
     # hardware_concurrency(), so there's no point requesting more.
     set(XSTORE_LOCAL_BENCH_TIERS "" CACHE STRING "Comma list of client tiers to benchmark (empty = auto, e.g. 1,8,16 on a 16-core box)")
     set(XSTORE_LOCAL_BENCH_WORKLOADS "" CACHE STRING "Comma list of workload names, or 'all' for all 12 (empty = auto, the script's own default: 4 INSERT + 4 QUERY + AGG_MIN)")
