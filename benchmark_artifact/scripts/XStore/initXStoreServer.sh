@@ -6,7 +6,10 @@ WORKING_DIR="$1"
 # longer apt deps; they're fetched & built by CMake (FetchContent) during the
 # compile step below. pkg-config is still required: libzmq's sodium detection
 # calls find_package(PkgConfig REQUIRED) even when libsodium is in-tree.
-sudo apt install build-essential cmake g++ git pkg-config sysstat -y
+# ccache is an optional compile cache CMake auto-detects (content-addressed,
+# so cached builds always reflect the latest code); installing it here keeps
+# the compile step below fast.
+sudo apt install build-essential cmake g++ git pkg-config sysstat ccache -y
 
 # Go to proper working dir
 cd ${WORKING_DIR}

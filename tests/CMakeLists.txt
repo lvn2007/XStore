@@ -4,32 +4,17 @@
 # bypassing the ZMQ networking layer entirely -- that layer is a thin proto
 # (de)serialization wrapper around these same methods, tested separately in
 # xstore_network_tests below via the real wire protocol.
+# Core sources come from the xstore_core static lib (top-level CMakeLists)
+# -- never list them (or PROTO_SRCS/PROTO_HDRS) here: that reintroduces
+# duplicate per-target compiles and the cross-directory protoc codegen race
+# described there.
 add_executable(xstore_tests
         integration/XStoreTest.cpp
         integration/XStoreWalTest.cpp
         integration/XStoreZoneMapTest.cpp
         integration/XStoreCrc32cTest.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Internal.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Management.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_IO.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Wal.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_ZoneMap.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Crc32c.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_UnaryOps.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_PreadPool.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_BatchOps.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_RangeOps.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Aggregates.cpp
-        ${CMAKE_SOURCE_DIR}/src/DataStructs/TimeStruct.cpp
-        ${CMAKE_SOURCE_DIR}/src/DataStructs/FileRangeLock.cpp
-        ${PROTO_SRCS} ${PROTO_HDRS}
 )
-
-add_dependencies(xstore_tests xstore_proto_cpp)
-target_link_libraries(xstore_tests PRIVATE GTest::gtest_main protobuf::libprotobuf Threads::Threads "stdc++fs" moodycamel)
-if(TARGET absl::log_internal_check_op)
-    target_link_libraries(xstore_tests PRIVATE absl::log_internal_check_op)
-endif()
+target_link_libraries(xstore_tests PRIVATE GTest::gtest_main xstore_core)
 
 include(GoogleTest)
 gtest_discover_tests(xstore_tests)
@@ -49,32 +34,11 @@ add_custom_command(TARGET xstore_tests POST_BUILD
 # into the XStore class directly.
 add_executable(xstore_network_tests
         integration/XStoreZmqNetworkTest.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Internal.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Management.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_IO.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Wal.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_ZoneMap.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Crc32c.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_UnaryOps.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_PreadPool.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_BatchOps.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_RangeOps.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Aggregates.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore_Networking/ZMQ_Server.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore_Networking/XStore_Curve.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_SysStats.cpp
-        ${CMAKE_SOURCE_DIR}/include/XStore/XStore_SysStats.h
         integration/XStoreCurveTest.cpp
-        ${CMAKE_SOURCE_DIR}/src/DataStructs/TimeStruct.cpp
-        ${CMAKE_SOURCE_DIR}/src/DataStructs/FileRangeLock.cpp
-        ${PROTO_SRCS} ${PROTO_HDRS}
 )
-
-add_dependencies(xstore_network_tests xstore_proto_cpp)
-target_link_libraries(xstore_network_tests PRIVATE GTest::gtest_main protobuf::libprotobuf Threads::Threads "stdc++fs" "zmq" moodycamel)
-if(TARGET absl::log_internal_check_op)
-    target_link_libraries(xstore_network_tests PRIVATE absl::log_internal_check_op)
-endif()
+# xstore_network brings the core (xstore_core) and curve-key handling
+# (xstore_curve) with it.
+target_link_libraries(xstore_network_tests PRIVATE GTest::gtest_main xstore_network)
 
 gtest_discover_tests(xstore_network_tests)
 
@@ -115,12 +79,13 @@ endif()
 # (tools/xstore-keys) -- invokes the real built binary via std::system(),
 # not a unit test of its internals (those are covered by
 # XStoreCurveKeyPairTest in xstore_network_tests).
-add_executable(xstore_keys_cli_tests integration/XStoreKeysCliTest.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore_Networking/XStore_Curve.cpp)
+add_executable(xstore_keys_cli_tests integration/XStoreKeysCliTest.cpp)
 target_include_directories(xstore_keys_cli_tests PRIVATE ${CMAKE_SOURCE_DIR})
-target_link_libraries(xstore_keys_cli_tests PRIVATE GTest::gtest_main "zmq" "stdc++fs" moodycamel protobuf::libprotobuf)
+# moodycamel: XStoreTestSupport.h (shared with the other suites) pulls in
+# XStore.h, which includes <blockingconcurrentqueue.h>.
+target_link_libraries(xstore_keys_cli_tests PRIVATE GTest::gtest_main xstore_curve moodycamel)
 target_compile_definitions(xstore_keys_cli_tests PRIVATE XSTORE_KEYS_BIN="$<TARGET_FILE:xstore-keys>")
-add_dependencies(xstore_keys_cli_tests xstore-keys xstore_proto_cpp)
+add_dependencies(xstore_keys_cli_tests xstore-keys)
 
 include(GoogleTest)
 gtest_discover_tests(xstore_keys_cli_tests)
@@ -140,27 +105,8 @@ add_custom_command(TARGET xstore_keys_cli_tests POST_BUILD
 # perf work.
 add_executable(xstore_perf_tests
         perf/XStorePerfTest.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Internal.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Management.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_IO.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Wal.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_ZoneMap.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Crc32c.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_UnaryOps.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_PreadPool.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_BatchOps.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_RangeOps.cpp
-        ${CMAKE_SOURCE_DIR}/src/XStore/XStore_Aggregates.cpp
-        ${CMAKE_SOURCE_DIR}/src/DataStructs/TimeStruct.cpp
-        ${CMAKE_SOURCE_DIR}/src/DataStructs/FileRangeLock.cpp
-        ${PROTO_SRCS} ${PROTO_HDRS}
 )
-
-add_dependencies(xstore_perf_tests xstore_proto_cpp)
-target_link_libraries(xstore_perf_tests PRIVATE GTest::gtest_main protobuf::libprotobuf Threads::Threads "stdc++fs" moodycamel)
-if(TARGET absl::log_internal_check_op)
-    target_link_libraries(xstore_perf_tests PRIVATE absl::log_internal_check_op)
-endif()
+target_link_libraries(xstore_perf_tests PRIVATE GTest::gtest_main xstore_core)
 
 gtest_discover_tests(xstore_perf_tests)
 

@@ -19,6 +19,32 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 add_compile_options(-Wall -Wextra)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# ccache: content-addressed compile cache, shared across build dirs, git
+# worktrees, and CI runners (default ~/.cache/ccache). Cache keys hash the
+# full TU source + all flags + compiler version + relevant header state, so
+# any change to code or flags is a guaranteed cache miss -- cached builds
+# always reflect the latest code. For a truly cold build: CCACHE_DISABLE=1
+# (ccache's own switch) or `ccache -C`.
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+    set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    message(STATUS "ccache: ${CCACHE_PROGRAM} (compile caching enabled)")
+else()
+    message(STATUS "ccache: not found -- compiling without cache (apt install ccache)")
+endif()
+
+# Build-tree binaries get $ORIGIN-relative RPATH entries instead of absolute
+# build-dir paths, so a copied binary + its shared libs (see build.sh's
+# staging step) run self-contained without the original build dir existing.
+set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
+
+include(ProcessorCount)
+ProcessorCount(_xs_nproc)
+if(NOT _xs_nproc)
+    set(_xs_nproc 4)
+endif()
+
 # Sanitizers for debugging (uncomment when you need to find the bug)
 # set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -fsanitize=address -fsanitize=undefined")
 # set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address -fsanitize=undefined")
@@ -132,7 +158,7 @@ elseif(XSTORE_FETCH_SODIUM)
                 "Delete ${CMAKE_BINARY_DIR}/_deps/libsodium-* and reconfigure.")
         endif()
         execute_process(
-                COMMAND make -j4
+                COMMAND make -j${_xs_nproc}
                 WORKING_DIRECTORY ${libsodium_SOURCE_DIR}
                 RESULT_VARIABLE _xs_sodium_result)
         if(NOT _xs_sodium_result EQUAL 0)
@@ -222,26 +248,25 @@ add_custom_command(
         -I "${XStore_proto_path}" "${XStore_proto}"
         DEPENDS "${XStore_proto}" protobuf::protoc)
 
-# A bare add_custom_command's OUTPUT has no target of its own to order
-# against -- every executable that lists PROTO_SRCS/PROTO_HDRS among its own
-# sources (XStore here, xstore_tests/xstore_network_tests/xstore_perf_tests
-# in tests/CMakeLists.txt) previously got its own independent copy of this
-# rule generated in its own directory's Makefile, since CMake had no shared
-# target to point them at. Under a parallel build that touches more than one
-# of those executables at once, multiple protoc invocations raced to write
-# the same two output files, and a compile job could see a missing/
-# half-written XStore.pb.h depending on timing (reproduced: `cmake --build
-# build -j$(nproc)` intermittently fails with "XStore.pb.h: No such file or
-# directory" even though the .proto and protoc are both fine -- a -j1 build
-# never hits it). Wrapping the command in one real target and having every
-# consumer add_dependencies on that target instead gives them a single,
-# properly ordered build-graph edge -- the codegen step runs exactly once,
-# no matter how many executables need its output or how parallel the build
-# is. Also added protobuf::protoc to DEPENDS above: this command's OUTPUT
-# previously depended only on the .proto file, not on protoc itself being
-# built yet -- with protoc now coming from FetchContent (built as part of
-# this same configure, not a preinstalled system binary), that was a second,
-# independent way to run before its own prerequisite existed.
+# The generated files are consumed only by xstore_core (defined below, in
+# this same directory), so CMake orders this codegen step before their
+# compile automatically and runs it exactly once. The xstore_proto_cpp
+# target below is kept as a shared ordering point for anything that needs
+# the generated files without linking xstore_core.
+#
+# History, kept because the failure mode is easy to reintroduce: the four
+# executables previously each listed PROTO_SRCS/PROTO_HDRS among their own
+# sources from the tests/ subdirectory and each got an independent copy of
+# this rule in its own directory's Makefile; under a parallel build several
+# protoc invocations raced to write the same two output files and a compile
+# job could see a missing/half-written XStore.pb.h (reproduced with
+# `cmake --build build -j$(nproc)`, never with -j1). Wrapping the rule in
+# one real target fixed that. If a future target outside this directory
+# needs the generated files, make it depend on xstore_proto_cpp (or on
+# xstore_core) -- never list PROTO_SRCS/PROTO_HDRS as its own sources.
+# Also note protobuf::protoc in DEPENDS above: protoc comes from the
+# protobuf build (fetched or installed), so codegen must not run before it
+# exists.
 add_custom_target(xstore_proto_cpp DEPENDS "${PROTO_SRCS}" "${PROTO_HDRS}")
 
 # ------------------------------------------------------------------
@@ -300,7 +325,19 @@ include_directories(.)
 include_directories(include)
 include_directories(src)
 
-add_executable(XStore src/main.cpp
+# ------------------------------------------------------------------
+# Libraries
+# ------------------------------------------------------------------
+# The core is one static lib, not the same ~15 sources pasted into every
+# executable: before this refactor each consumer (XStore, xstore_tests,
+# xstore_network_tests, xstore_perf_tests) compiled its own copy of the
+# core -- one header edit meant ~55 recompiles + 4 relinks. Now the core
+# compiles once and every consumer links it. The generated XStore.pb.cc is
+# a source of this lib, defined in the same directory as its
+# add_custom_command, so CMake orders the codegen before its compile and
+# runs it exactly once. (Links are PUBLIC: this is a static lib, so
+# consumers need these at final link too.)
+add_library(xstore_core STATIC
         include/XStore/XStore_Internal.h src/XStore/XStore_Internal.cpp
         src/XStore/XStore_Management.cpp
         src/XStore/XStore_IO.cpp
@@ -316,21 +353,33 @@ add_executable(XStore src/main.cpp
         src/XStore/XStore_RangeOps.cpp
         src/XStore/XStore_Aggregates.cpp
         include/XStore/XStore.h
-        include/DataStructs/ValueStruct.h ${PROTO_SRCS} ${PROTO_HDRS}
-        third_party/zmq.hpp third_party/zmq_addon.hpp
-        include/Networking/ZMQ_Server.h src/XStore_Networking/ZMQ_Server.cpp
-        include/Networking/XStore_Curve.h src/XStore_Networking/XStore_Curve.cpp
-        third_party/zhelpers.hpp
-        third_party/argparse/argparse.hpp
-        include/DataStructs/TimeStruct.h src/DataStructs/TimeStruct.cpp
-        include/DataStructs/FileRangeLock.h src/DataStructs/FileRangeLock.cpp
-        include/Logger/Logger.h)
-
-add_dependencies(XStore xstore_proto_cpp)
-target_link_libraries(XStore PUBLIC "stdc++fs" protobuf::libprotobuf "zmq" Threads::Threads moodycamel)
+        include/DataStructs/ValueStruct.h
+        src/DataStructs/TimeStruct.cpp
+        include/DataStructs/TimeStruct.h
+        src/DataStructs/FileRangeLock.cpp
+        include/DataStructs/FileRangeLock.h
+        include/Logger/Logger.h
+        ${PROTO_SRCS} ${PROTO_HDRS})
+target_link_libraries(xstore_core PUBLIC protobuf::libprotobuf moodycamel Threads::Threads "stdc++fs")
 if(TARGET absl::log_internal_check_op)
-    target_link_libraries(XStore PUBLIC absl::log_internal_check_op)
+    target_link_libraries(xstore_core PUBLIC absl::log_internal_check_op)
 endif()
+
+# CURVE key handling -- pure zmq + std, no protobuf, no core. Shared by the
+# server, the xstore-keys CLI, and their tests.
+add_library(xstore_curve STATIC
+        include/Networking/XStore_Curve.h src/XStore_Networking/XStore_Curve.cpp
+        third_party/zmq_addon.hpp)
+target_link_libraries(xstore_curve PUBLIC zmq "stdc++fs")
+
+# The ZMQ wire-protocol server. Needs the core (XStore class) + curve keys.
+add_library(xstore_network STATIC
+        include/Networking/ZMQ_Server.h src/XStore_Networking/ZMQ_Server.cpp
+        third_party/zmq.hpp third_party/zhelpers.hpp)
+target_link_libraries(xstore_network PUBLIC xstore_core xstore_curve zmq)
+
+add_executable(XStore src/main.cpp third_party/argparse/argparse.hpp)
+target_link_libraries(XStore PRIVATE xstore_network)
 
 add_subdirectory(tools/xstore-keys)
 
