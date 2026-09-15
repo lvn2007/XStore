@@ -41,6 +41,7 @@ struct ZoneMapFileHeader {
     uint64_t rows_per_block = 0;
 };
 
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -92,4 +93,9 @@ private:
     ZoneMapFileHeader header_;
     std::unordered_map<uint64_t, std::vector<ZoneMapEntry>> cache_; // pure read-cache, always disk-coherent
     std::vector<uint64_t> lru_order_; // most-recently-touched at the back
+    // GetOrOpenZoneMap hands out a ZoneMapFile& to one shared, process-wide
+    // instance per (db,year) -- every server worker thread touching the
+    // same DB/year concurrently calls UpdateRow/TryGetBlockStats on this
+    // SAME object. Guards cache_/lru_order_/fd_ against exactly that.
+    std::mutex mutex_;
 };

@@ -70,6 +70,7 @@ void ZoneMapFile::EvictIfOverCapacity() {
 }
 
 void ZoneMapFile::UpdateRow(uint64_t row_index, const std::vector<ZoneMapObservation> &observations) {
+    std::lock_guard<std::mutex> lock(mutex_);
     uint64_t block_index = BlockIndexForRow(row_index, header_.rows_per_block);
     EnsureBlockLoaded(block_index);
 
@@ -110,6 +111,7 @@ void ZoneMapFile::UpdateRow(uint64_t row_index, const std::vector<ZoneMapObserva
 }
 
 std::optional<std::vector<ZoneMapEntry>> ZoneMapFile::TryGetBlockStats(uint64_t block_index) {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto cached = cache_.find(block_index);
     if (cached != cache_.end()) return cached->second; // always disk-coherent, safe to serve directly
 

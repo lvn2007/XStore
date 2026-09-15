@@ -71,6 +71,42 @@ TEST(ZoneMapFileTest, StatsSurviveReopenFromDiskWithNoCachedState) {
     EXPECT_DOUBLE_EQ((*stats)[0].min_value, 10.0);
 }
 
+TEST(ZoneMapFileTest, ConcurrentUpdateRowFromMultipleThreadsDoesNotLoseUpdates) {
+    // Reproduces the real production crash: XStore::GetOrOpenZoneMap hands
+    // out a ZoneMapFile& to one shared, process-wide instance per (db,year)
+    // -- every server worker thread touching the same DB/year gets the SAME
+    // ZoneMapFile object. UpdateRow mutates cache_ (a plain unordered_map)
+    // and does non-atomic read-modify-write on a cached ZoneMapEntry's
+    // valid_count/sum_value with zero internal locking. Confirmed live on
+    // Mystic: 8 concurrent client machines hammering one XStore server
+    // segfaulted ~51s in (dmesg: "segfault at 8"), while 1/2/4-way
+    // concurrency had not yet hit it -- a classic timing-dependent race, not
+    // a deterministic bug. All threads here hit the same block/column (row 0
+    // only) specifically to maximize contention on that one entry.
+    ScratchDir scratch("zone_map_file_test_concurrent");
+    std::filesystem::path path = scratch.test_root / "2024.zmap";
+    ZoneMapFile zmap;
+    ASSERT_TRUE(zmap.Open(path.string(), /*row_length=*/64));
+
+    constexpr int kThreads = 8;
+    constexpr int kItersPerThread = 5000;
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&zmap]() {
+            for (int i = 0; i < kItersPerThread; ++i) {
+                zmap.UpdateRow(0, {{0, 1.0, true}});
+            }
+        });
+    }
+    for (auto &th : threads) th.join();
+
+    auto stats = zmap.TryGetBlockStats(0);
+    ASSERT_TRUE(stats.has_value());
+    EXPECT_EQ((*stats)[0].valid_count, static_cast<uint64_t>(kThreads * kItersPerThread))
+        << "lost update(s) under concurrent UpdateRow -- unsynchronized read-modify-write on cache_";
+    EXPECT_DOUBLE_EQ((*stats)[0].sum_value, static_cast<double>(kThreads * kItersPerThread));
+}
+
 TEST(ZoneMapFileTest, UntouchedBlockReportsZeroValidCountNotMissingData) {
     ScratchDir scratch("zone_map_file_test_untouched");
     std::filesystem::path path = scratch.test_root / "2024.zmap";
