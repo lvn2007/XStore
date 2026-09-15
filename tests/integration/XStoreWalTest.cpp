@@ -41,6 +41,43 @@ XStore_Proto::RowData MakeRow(double value) {
     return row;
 }
 
+// Hand-builds one raw WAL record's on-wire bytes (recordLen+crc32c header
+// followed by the same payload SerializeWalRecord/ParseWalRecord use --
+// dbNameLen+rowLength+timeResolution+rowCount, dbName, epoch_time, row
+// bytes), matching XStore_Wal.cpp's framing. Factored out of
+// ReplayRecoversUnappliedRecord (which keeps its own inline copy
+// untouched) so the two size-reclaim tests below don't each duplicate it.
+std::string BuildRawWalRecord(const std::string &db_name, XStore_Proto::TimeUnit time_res,
+                               uint64_t epoch_time, const std::string &row_bytes) {
+    std::string payload;
+    auto append_pod = [&](auto value) {
+        payload.append(reinterpret_cast<const char *>(&value), sizeof(value));
+    };
+    uint16_t db_name_len = static_cast<uint16_t>(db_name.size());
+    uint16_t row_length = static_cast<uint16_t>(row_bytes.size());
+    int32_t time_res_val = static_cast<int32_t>(time_res);
+    uint32_t row_count = 1;
+    append_pod(db_name_len);
+    append_pod(row_length);
+    append_pod(time_res_val);
+    append_pod(row_count);
+    payload.append(db_name);
+    append_pod(epoch_time);
+    payload.append(row_bytes);
+
+    uint32_t crc = Crc32c(payload.data(), payload.size());
+
+    std::string record;
+    auto append_pod_record = [&](auto value) {
+        record.append(reinterpret_cast<const char *>(&value), sizeof(value));
+    };
+    uint32_t record_len = static_cast<uint32_t>(4 + payload.size());
+    append_pod_record(record_len);
+    append_pod_record(crc);
+    record.append(payload);
+    return record;
+}
+
 } // namespace
 
 // SYNC (the default) must return only after the row is durable AND applied
@@ -407,6 +444,154 @@ TEST_F(XStoreWalTest, ReplayRecoversUnappliedRecord) {
     ASSERT_TRUE(query_rep.has_data());
     ASSERT_EQ(query_rep.data().fielddata_size(), 1);
     EXPECT_DOUBLE_EQ(query_rep.data().fielddata(0).doubledata(), 99.25);
+}
+
+// A shard WAL file that's grown past WAL_FILE_PREALLOC_BYTES (a prior
+// oversized BatchInsert/RangeInsert pass, see WAL_FILE_PREALLOC_BYTES's own
+// comment) must: (1) still have its real record correctly replayed --
+// ReplayWal's streaming parser no longer gates on the file's overall size at
+// all, only on each individual record's own declared length, see
+// WAL_REPLAY_MAX_RECORD_BYTES -- and (2) get shrunk back down to default
+// afterward by ReclaimWalFileSize, so it doesn't stay oversized forever
+// across every future restart. Grows the file via a cheap sparse
+// resize_file rather than writing that much real data -- ReplayWal reads in
+// bounded chunks regardless of the file's reported size, so this exercises
+// the exact same code path a real oversized write would, without the test
+// itself needing to write hundreds of MB.
+TEST_F(XStoreWalTest, ReplayReclaimsOversizedFileAfterRecoveringRecord) {
+    {
+        XStore store;
+        CreateTestDb(store, "WALSHRINK", XStore_Proto::SECOND, 64);
+    }
+
+    std::filesystem::path db_base_path = scratch->test_root / "DataStore" / "WALSHRINK";
+    size_t shard_idx = std::hash<std::string>{}(db_base_path.string()) % XStoreTunables::WAL_SHARD_COUNT;
+    std::filesystem::path wal_dir = scratch->test_root / "DataStore" / "WAL";
+    std::filesystem::create_directories(wal_dir);
+    std::filesystem::path wal_file = wal_dir / ("shard_" + std::to_string(shard_idx) + ".WAL");
+
+    XStore_Proto::RowData row = MakeRow(7.5);
+    std::string row_bytes(64, '\0');
+    row.SerializeToArray(row_bytes.data(), static_cast<int>(row.ByteSizeLong()));
+    std::string record = BuildRawWalRecord("WALSHRINK", XStore_Proto::SECOND, 1700000005ULL, row_bytes);
+
+    std::ofstream out(wal_file, std::ios::binary | std::ios::trunc);
+    out.write(record.data(), static_cast<std::streamsize>(record.size()));
+    out.close();
+
+    std::error_code resize_ec;
+    std::filesystem::resize_file(wal_file, XStoreTunables::WAL_FILE_PREALLOC_BYTES + 4096, resize_ec);
+    ASSERT_FALSE(resize_ec) << resize_ec.message();
+    ASSERT_GT(std::filesystem::file_size(wal_file), XStoreTunables::WAL_FILE_PREALLOC_BYTES);
+
+    XStore store2;
+    store2.InitDB();
+
+    // Replay still recovered the record even though the file was oversized.
+    XStore_Proto::UnaryQuery_REP query_rep;
+    store2.UnaryQuery(1700000005ULL, "WALSHRINK", &query_rep);
+    ASSERT_TRUE(query_rep.has_data());
+    EXPECT_DOUBLE_EQ(query_rep.data().fielddata(0).doubledata(), 7.5);
+
+    // And the file was shrunk back to default afterward.
+    EXPECT_EQ(std::filesystem::file_size(wal_file), XStoreTunables::WAL_FILE_PREALLOC_BYTES);
+}
+
+// A shard WAL file whose reported size is enormous -- far past even the old
+// (now-removed) per-file WAL_REPLAY_MAX_FILE_BYTES ceiling -- must still
+// have its real, valid record correctly replayed. This is the direct fix
+// for the data-loss gap the old per-file ceiling had: a file's on-disk
+// *size* alone is no longer a reason to skip its content; ReplayWal streams
+// it in bounded chunks and only stops at a record it genuinely can't parse
+// (or one declaring an implausible length, see the sibling test below).
+// Grows the file via a cheap sparse resize_file (not real writes) purely so
+// the test doesn't need to allocate real disk for a multi-GiB file.
+TEST_F(XStoreWalTest, ReplayRecoversRecordEvenWhenFileFarExceedsOldFileCeiling) {
+    {
+        XStore store;
+        CreateTestDb(store, "WALHUGEFILE", XStore_Proto::SECOND, 64);
+    }
+
+    std::filesystem::path db_base_path = scratch->test_root / "DataStore" / "WALHUGEFILE";
+    size_t shard_idx = std::hash<std::string>{}(db_base_path.string()) % XStoreTunables::WAL_SHARD_COUNT;
+    std::filesystem::path wal_dir = scratch->test_root / "DataStore" / "WAL";
+    std::filesystem::create_directories(wal_dir);
+    std::filesystem::path wal_file = wal_dir / ("shard_" + std::to_string(shard_idx) + ".WAL");
+
+    XStore_Proto::RowData row = MakeRow(3.25);
+    std::string row_bytes(64, '\0');
+    row.SerializeToArray(row_bytes.data(), static_cast<int>(row.ByteSizeLong()));
+    std::string record = BuildRawWalRecord("WALHUGEFILE", XStore_Proto::SECOND, 1700000006ULL, row_bytes);
+
+    std::ofstream out(wal_file, std::ios::binary | std::ios::trunc);
+    out.write(record.data(), static_cast<std::streamsize>(record.size()));
+    out.close();
+
+    // Sized well past what the old file-level ceiling (8x default) would
+    // have allowed, to prove size alone no longer matters.
+    uintmax_t huge_size = 2 * (8 * XStoreTunables::WAL_FILE_PREALLOC_BYTES);
+    std::error_code resize_ec;
+    std::filesystem::resize_file(wal_file, huge_size, resize_ec);
+    ASSERT_FALSE(resize_ec) << resize_ec.message();
+    ASSERT_GT(std::filesystem::file_size(wal_file), 8 * XStoreTunables::WAL_FILE_PREALLOC_BYTES);
+
+    XStore store2;
+    store2.InitDB();
+
+    // Recovered, even though the file's reported size was enormous.
+    XStore_Proto::UnaryQuery_REP query_rep;
+    store2.UnaryQuery(1700000006ULL, "WALHUGEFILE", &query_rep);
+    ASSERT_TRUE(query_rep.has_data());
+    EXPECT_DOUBLE_EQ(query_rep.data().fielddata(0).doubledata(), 3.25);
+
+    // And reclaimed back to default afterward, same as any oversized file.
+    EXPECT_EQ(std::filesystem::file_size(wal_file), XStoreTunables::WAL_FILE_PREALLOC_BYTES);
+}
+
+// The one thing that must still stop replay of a record: the record itself
+// declaring an implausible length in its own header, past
+// WAL_REPLAY_MAX_RECORD_BYTES -- this is what actually guards against a
+// corrupted or malicious record_len field forcing a huge allocation, now
+// that file size alone no longer gates anything (see the sibling test
+// above). Hand-writes just a bogus 4-byte record_len header (no real
+// payload needed -- ReplayWal must reject it before ever trying to read
+// that many more bytes) followed by one real, otherwise-valid record, to
+// also confirm the bad header stops replay before reaching it.
+TEST_F(XStoreWalTest, ReplayStopsOnRecordDeclaringLengthOverSanityCeiling) {
+    {
+        XStore store;
+        CreateTestDb(store, "WALBADLEN", XStore_Proto::SECOND, 64);
+    }
+
+    std::filesystem::path db_base_path = scratch->test_root / "DataStore" / "WALBADLEN";
+    size_t shard_idx = std::hash<std::string>{}(db_base_path.string()) % XStoreTunables::WAL_SHARD_COUNT;
+    std::filesystem::path wal_dir = scratch->test_root / "DataStore" / "WAL";
+    std::filesystem::create_directories(wal_dir);
+    std::filesystem::path wal_file = wal_dir / ("shard_" + std::to_string(shard_idx) + ".WAL");
+
+    uint32_t bogus_record_len = static_cast<uint32_t>(XStoreTunables::WAL_REPLAY_MAX_RECORD_BYTES) + 1;
+    std::string bogus_header;
+    bogus_header.append(reinterpret_cast<const char *>(&bogus_record_len), sizeof(bogus_record_len));
+    bogus_header.append(4, '\0'); // fake crc32c field -- never reached, length check rejects first
+
+    XStore_Proto::RowData row = MakeRow(6.5);
+    std::string row_bytes(64, '\0');
+    row.SerializeToArray(row_bytes.data(), static_cast<int>(row.ByteSizeLong()));
+    std::string real_record = BuildRawWalRecord("WALBADLEN", XStore_Proto::SECOND, 1700000007ULL, row_bytes);
+
+    std::ofstream out(wal_file, std::ios::binary | std::ios::trunc);
+    out.write(bogus_header.data(), static_cast<std::streamsize>(bogus_header.size()));
+    out.write(real_record.data(), static_cast<std::streamsize>(real_record.size()));
+    out.close();
+
+    XStore store2;
+    store2.InitDB();
+
+    // Never applied -- replay stopped at the bogus header before it ever
+    // reached the real record sitting right after it.
+    XStore_Proto::UnaryQuery_REP query_rep;
+    store2.UnaryQuery(1700000007ULL, "WALBADLEN", &query_rep);
+    EXPECT_FALSE(query_rep.has_data());
 }
 
 // Many threads inserting distinct keys through the WAL concurrently -- all
@@ -778,18 +963,25 @@ TEST_F(XStoreWalTest, ReplayRecoversMultiRowUnappliedRecord) {
 // grew to cover it (proof the fallback engaged, not that the insert
 // happened to succeed some other way) and stayed within an explainable
 // bound rather than growing unboundedly, and (3) a subsequent ReplayWal
-// pass over that larger-than-normal file doesn't crash and stays under
-// WAL_REPLAY_MAX_FILE_BYTES's sanity ceiling.
+// pass over that larger-than-normal file doesn't crash, and every row still
+// replays correctly (ReplayWal's streaming reader now bounds a single
+// allocation by WAL_REPLAY_MAX_RECORD_BYTES per record, not by the file's
+// overall size -- see that constant's comment).
 TEST_F(XStoreWalTest, BatchInsertRecordExceedingWalPreallocBoundPersistsAndReplays) {
     XStore store;
     CreateTestDb(store, "WALOVERSIZEBATCH", XStore_Proto::SECOND, 1024);
 
-    // 45000 rows * (1024-byte row + 8-byte epoch, minus 8 since the first
-    // row's epoch lives in the record header, not a per-row buffer) plus a
-    // small fixed header comes out to ~46.4MB -- comfortably past the 40MB
-    // WAL_FILE_PREALLOC_BYTES bound and comfortably under the 320MB
-    // WAL_REPLAY_MAX_FILE_BYTES sanity ceiling.
-    constexpr int kRowCount = 45000;
+    // Row count is derived from the current WAL_FILE_PREALLOC_BYTES rather
+    // than a fixed literal, so this test keeps proving what it claims to
+    // (the batch genuinely exceeds the preallocated bound) regardless of
+    // how that tunable gets retuned later -- a hardcoded row count here
+    // already went stale once (a prior default of 40 MiB vs. today's much
+    // larger one) without the test itself failing to compile or obviously
+    // signal it had quietly stopped exercising the oversized_write path.
+    // kRowWireBytes mirrors the per-row wire cost every row actually pays
+    // (epoch_time(8) + row_length), see SerializeWalRecord/ParseWalRecord.
+    constexpr size_t kRowWireBytes = 8 + 1024;
+    const int kRowCount = static_cast<int>(XStoreTunables::WAL_FILE_PREALLOC_BYTES / kRowWireBytes) + 5000;
     XStore_Proto::BatchInsert_REQ req;
     req.set_dbname("WALOVERSIZEBATCH");
     req.set_durabilitymode(XStore_Proto::SYNC);
@@ -833,19 +1025,16 @@ TEST_F(XStoreWalTest, BatchInsertRecordExceedingWalPreallocBoundPersistsAndRepla
         << "expected at least one shard file to have grown past the preallocated bound";
     EXPECT_LT(max_shard_bytes, XStoreTunables::WAL_FILE_PREALLOC_BYTES + 10ull * 1024 * 1024)
         << "growth should be explainable by this one oversized record, not unbounded";
-    EXPECT_LE(max_shard_bytes, XStoreTunables::WAL_REPLAY_MAX_FILE_BYTES)
-        << "must stay under ReplayWal's own sanity ceiling or the next restart would lose this batch's WAL evidence";
 
     // Re-running InitDB (same trick ReplayRecoversMultiRowUnappliedRecord
     // above uses to simulate a restart within one test process) forces
-    // ReplayWal to parse this now-larger-than-40MB file again. The record
-    // was already durably applied above, so this is a redundant, idempotent
-    // re-apply (see WalWriterLoop's "no per-commit checkpoint" comment) --
-    // what this actually proves is that ReplayWal's new file-size sanity
-    // check doesn't wrongly skip or crash on a file this size (well under
-    // WAL_REPLAY_MAX_FILE_BYTES), and that ParseWalRecord/ApplyWalRecord
-    // round-trip a record this large correctly on replay too, not just on
-    // the live-commit path.
+    // ReplayWal to stream-parse this now-larger-than-default file again. The
+    // record was already durably applied above, so this is a redundant,
+    // idempotent re-apply (see WalWriterLoop's "no per-commit checkpoint"
+    // comment) -- what this actually proves is that ReplayWal's streaming
+    // reader correctly walks a real record this large (well under
+    // WAL_REPLAY_MAX_RECORD_BYTES) across however many WAL_REPLAY_READ_
+    // CHUNK_BYTES-sized reads it takes, not just that a small record works.
     store.InitDB();
     XStore_Proto::UnaryQuery_REP replay_q;
     store.UnaryQuery(base_ts, "WALOVERSIZEBATCH", &replay_q);

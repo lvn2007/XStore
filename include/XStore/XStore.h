@@ -659,24 +659,52 @@ class XStore {
         // ReplayWal (not from every live commit -- see WalWriterLoop):
         // zeroes just the 4-byte record_len header at offset 0 and fsyncs
         // that (tiny, in-place, already-allocated) write -- never
-        // ftruncate/resize. record_len=0 fails ParseWalRecord's own length
-        // check immediately, so a zeroed file replays as "nothing
-        // pending". Durability matters here: a DB can be deleted and
-        // recreated (RemoveDB, or an external wipe) between a record's
-        // apply and the next process restart -- if the invalidation itself
-        // weren't fsync'd before a crash, the still-valid-looking old
-        // bytes would resurface at the *next* ReplayWal too and get
-        // reapplied against whatever now lives at that path, not the DB
-        // they actually belonged to. Calling this once per shard file per
-        // restart (regardless of what was or wasn't found to replay) is
-        // enough to guarantee that -- a live commit's own record doesn't
-        // additionally need it: the shard's next real write naturally
-        // overwrites it (offset-0 overwrite, same mechanism), and if no
-        // next write ever comes, the only cost is one redundant, harmless,
-        // idempotent re-apply attempt at the next restart, not a
-        // repeat-forever failure -- not worth a second fsync on every
-        // single commit to avoid.
+        // ftruncate/resize itself (see ReclaimWalFileSize below for the
+        // sibling step that does, called right after this one). record_len=0
+        // fails ParseWalRecord's own length check immediately, so a zeroed
+        // file replays as "nothing pending". Durability matters here: a DB
+        // can be deleted and recreated (RemoveDB, or an external wipe)
+        // between a record's apply and the next process restart -- if the
+        // invalidation itself weren't fsync'd before a crash, the
+        // still-valid-looking old bytes would resurface at the *next*
+        // ReplayWal too and get reapplied against whatever now lives at
+        // that path, not the DB they actually belonged to. Calling this
+        // once per shard file per restart (regardless of what was or
+        // wasn't found to replay) is enough to guarantee that -- a live
+        // commit's own record doesn't additionally need it: the shard's
+        // next real write naturally overwrites it (offset-0 overwrite,
+        // same mechanism), and if no next write ever comes, the only cost
+        // is one redundant, harmless, idempotent re-apply attempt at the
+        // next restart, not a repeat-forever failure -- not worth a second
+        // fsync on every single commit to avoid.
         static void InvalidateWalFileHeader(int fd, const std::string &wal_path);
+
+        // Shrinks a shard WAL file back down to WAL_FILE_PREALLOC_BYTES via
+        // ftruncate, called only from ReplayWal, right after this file's WAL
+        // evidence has already been fully consulted -- ReplayWal's streaming
+        // reader always attempts every record (see WAL_REPLAY_MAX_RECORD_
+        // BYTES), stopping early only at a genuinely unparseable or
+        // implausibly-huge one, same as any torn/corrupt record; either way
+        // nothing valid is left unconsulted by the time this runs, so
+        // nothing valid is lost by shrinking. No-op if on_disk_bytes is
+        // already <= the default. WalWriterLoop
+        // itself deliberately never ftruncates (see InvalidateWalFileHeader
+        // above / WalWriterLoop's own comment) to avoid a second fsync on
+        // every live commit -- but that means a file which ever grows past
+        // default (a legitimately oversized BatchInsert/RangeInsert pass,
+        // see WAL_FILE_PREALLOC_BYTES) stays that size forever, across every
+        // future restart, with no other reclaim point. ReplayWal is the one
+        // safe place to pay that ftruncate+fsync cost: startup-only
+        // (regardless of the current known_size), an fsync() not
+        // fdatasync() since shrinking changes file size same as the
+        // oversized_write growth case, and safe from racing WalWriterLoop's
+        // already-running writer threads (StartWalWriters starts them in
+        // the XStore constructor, before InitDB/ReplayWal) only because
+        // ReplayWal is guaranteed to finish before any client can reach
+        // CreateDB/EnqueueWalRecord -- see ReplayWal's own comment -- so
+        // this shard's writer thread is guaranteed idle (blocked on an
+        // empty queue) for the whole window this runs in.
+        static void ReclaimWalFileSize(int fd, const std::string &wal_path, uintmax_t on_disk_bytes);
 
         // Body of one shard's dedicated writer thread: waits (bounded by
         // WAL_GROUP_COMMIT_WINDOW_US) for the first record, then actively

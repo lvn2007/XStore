@@ -262,6 +262,27 @@ void XStore::InvalidateWalFileHeader(int fd, const std::string &wal_path) {
     }
 }
 
+void XStore::ReclaimWalFileSize(int fd, const std::string &wal_path, uintmax_t on_disk_bytes) {
+    if (on_disk_bytes <= XStoreTunables::WAL_FILE_PREALLOC_BYTES) {
+        return;
+    }
+    // fsync, not fdatasync: shrinking IS a file-size change, the exact
+    // class of metadata WalWriterLoop's own oversized_write fallback exists
+    // to durably flush -- see the comment on this function in XStore.h.
+    if (ftruncate(fd, static_cast<off_t>(XStoreTunables::WAL_FILE_PREALLOC_BYTES)) != 0 || fsync(fd) != 0) {
+        // Not fatal: the file just stays at its current (larger) size,
+        // same as before this reclaim step existed -- correctness is
+        // unaffected, only the disk-space cleanup is deferred to the next
+        // restart's attempt.
+        spdlog::error("[WAL] - Failed to reclaim {} back to its default preallocated size ({} bytes); "
+                      "leaving it at {} bytes.",
+                      wal_path, XStoreTunables::WAL_FILE_PREALLOC_BYTES, on_disk_bytes);
+        return;
+    }
+    spdlog::info("[WAL] - Reclaimed {} from {} bytes back down to its default preallocated size ({} bytes).",
+                 wal_path, on_disk_bytes, XStoreTunables::WAL_FILE_PREALLOC_BYTES);
+}
+
 bool XStore::EnqueueWalRecord(WalRecord record) {
     // Per-DB hash, not round-robin: tried round-robin first (spreads a
     // single hot DB across every active shard), but on a single physical
@@ -466,8 +487,24 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
     // (via .clear()/reset each iteration, or sized once and indexed) rather
     // than re-declared per batch, to avoid a fresh heap allocation on the
     // writer's per-batch hot path.
+    //
+    // known_size tracks each file's actual on-disk size so the
+    // oversized_write check below can compare against reality instead of
+    // always against the static WAL_FILE_PREALLOC_BYTES constant. A file
+    // only ever grows (fallocate never truncates, and every pass writes
+    // from offset 0, never shrinking it -- see WalWriterLoop's own comment
+    // on that below), so once a file has organically grown past the
+    // constant, a later smaller pass that fits inside its already-grown
+    // size needs no metadata-changing write and can safely use
+    // fdatasync() again. No fstat() needed to seed this: every file this
+    // loop opens (preopened or lazily via OpenAndPreallocateWalFile) is
+    // fallocated to at least WAL_FILE_PREALLOC_BYTES before its fd is
+    // handed back, so that constant is exactly the correct known starting
+    // size.
+    std::unordered_map<std::string, size_t> wal_fds_known_size;
     std::unordered_map<std::string, int> wal_fds;
     if (preopened_fd >= 0) {
+        wal_fds_known_size.emplace(preopened_path, XStoreTunables::WAL_FILE_PREALLOC_BYTES);
         wal_fds.emplace(std::move(preopened_path), preopened_fd);
     }
     // Per-file list of {pointer, length} pieces for one pwritev() call,
@@ -724,9 +761,11 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
                         continue;
                     }
                     wal_fds.emplace(wal_path, fd);
+                    wal_fds_known_size.emplace(wal_path, XStoreTunables::WAL_FILE_PREALLOC_BYTES);
                 } else {
                     fd = it->second;
                 }
+                size_t &known_size = wal_fds_known_size.at(wal_path);
 
                 // Chunk this file's iovecs into groups of at most
                 // WAL_PWRITEV_MAX_IOVECS -- the common case (few
@@ -747,21 +786,35 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
                 // bytes for one file can legitimately exceed the
                 // preallocated region. fdatasync() alone is only correct
                 // when a write never changes the file's size/metadata --
-                // true as long as every byte lands inside the preallocated
-                // region, false the instant total_file_bytes below crosses
-                // it. Detected up front (before writing) rather than
+                // true as long as every byte lands inside the file's actual
+                // current on-disk size (known_size), false the instant
+                // total_file_bytes below crosses it. Compared against
+                // known_size rather than the static WAL_FILE_PREALLOC_BYTES
+                // constant so that once a file has organically grown past
+                // the constant (fallocate never truncates, and every pass
+                // writes from offset 0 -- see the chunking comment above --
+                // so a file's real size is monotonically non-decreasing for
+                // its whole lifetime), a later smaller pass that fits inside
+                // that already-grown size doesn't keep needlessly paying for
+                // fsync(). Detected up front (before writing) rather than
                 // reacting to a surprising post-write file size, so the
                 // fallback to a real fsync() -- which DOES flush the
                 // size-changing metadata-journal update -- is decided once,
                 // not per chunk.
                 size_t total_file_bytes = 0;
                 for (const struct iovec &iov : iov_list) total_file_bytes += iov.iov_len;
-                bool oversized_write = total_file_bytes > XStoreTunables::WAL_FILE_PREALLOC_BYTES;
+                bool oversized_write = total_file_bytes > known_size;
                 if (oversized_write) {
-                    spdlog::warn("[WAL] - Batch for {} totals {} bytes, exceeding WAL_FILE_PREALLOC_BYTES ({}) -- "
-                                 "this write grows the file past its preallocated region; falling back to a real "
-                                 "fsync() for this commit (one-time metadata-journal cost) instead of fdatasync().",
-                                 wal_path, total_file_bytes, XStoreTunables::WAL_FILE_PREALLOC_BYTES);
+                    spdlog::warn("[WAL] - Batch for {} totals {} bytes, exceeding its current on-disk size ({}) -- "
+                                 "this write grows the file further; falling back to a real fsync() for this "
+                                 "commit (one-time metadata-journal cost) instead of fdatasync().",
+                                 wal_path, total_file_bytes, known_size);
+                    // known_size is only bumped once the write+sync below
+                    // actually succeed -- bumping it here, before the write
+                    // is even attempted, would let a later smaller pass
+                    // wrongly assume the file already covers it (and use
+                    // fdatasync()) even though this write never durably
+                    // grew it.
                 }
 
                 bool file_write_ok = true;
@@ -785,6 +838,7 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
                     spdlog::error("[WAL] - Failed to durably write/{} {}", oversized_write ? "fsync" : "fdatasync", wal_path);
                     continue;
                 }
+                if (oversized_write) known_size = total_file_bytes;
                 file_durable[wal_path] = true;
             }
 

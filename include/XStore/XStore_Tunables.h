@@ -283,9 +283,11 @@ inline constexpr unsigned    WAL_GATHER_POLL_US          = 50;
 // oversized batch remains diagnosable instead of silently defeating the
 // preallocation's whole point. See the WalWriterLoop per-file write block
 // (XStore_Wal.cpp) for the actual check. ReplayWal (XStore_Management.cpp)
-// carries a matching sanity bound (WAL_REPLAY_MAX_FILE_BYTES below) so a
-// shard file grown past this bound can't turn crash-recovery startup into
-// an unbounded single-shot allocation.
+// carries its own sanity bound (WAL_REPLAY_MAX_RECORD_BYTES below) so a
+// record grown past this bound can't turn crash-recovery startup into an
+// unbounded single-shot allocation -- applied per record, not per file, so
+// a shard file's on-disk size (which can exceed this constant, same reason
+// it might) doesn't by itself stop replay of everything in it.
 inline constexpr size_t WAL_RECORD_HEADER_BYTES = 20; // recordLen(4)+crc32c(4)+dbNameLen(2)+rowLength(2)+timeResolution(4)+rowCount(4) -- see SerializeWalRecord
 inline constexpr size_t WAL_MAX_DB_NAME_BYTES   = 65535; // dbNameLen wire field is a u16
 inline constexpr size_t WAL_MAX_ROW_BYTES       = 65535; // rowLength wire field is a u16
@@ -293,7 +295,7 @@ inline constexpr size_t WAL_MAX_RECORD_BYTES    =
     WAL_RECORD_HEADER_BYTES + WAL_MAX_DB_NAME_BYTES + sizeof(uint64_t) /* epoch_time */ + WAL_MAX_ROW_BYTES;
 inline constexpr size_t WAL_MAX_BATCH_BYTES     = WAL_BATCH_MAX_RECORDS * WAL_MAX_RECORD_BYTES;
 
-inline constexpr size_t      WAL_FILE_PREALLOC_BYTES     = 40u * 1024 * 1024;
+inline constexpr size_t      WAL_FILE_PREALLOC_BYTES     = 512u * 1024 * 1024;
 // Guarantees the single-row-per-record case (UnaryInsert, WAL_BATCH_MAX_
 // RECORDS records each carrying its own single row) always stays inside
 // the preallocated region -- fdatasync() alone is provably correct for
@@ -301,23 +303,65 @@ inline constexpr size_t      WAL_FILE_PREALLOC_BYTES     = 40u * 1024 * 1024;
 // record (BatchInsert/RangeInsert, unlimited rows per record) -- see the
 // NOTE above and WalWriterLoop's runtime oversized_write check, which is
 // what makes the multi-row case correct now that this assert alone can't.
+//
+// Sized well above the 40 MiB original default: that value only covered
+// the theoretical single-row worst case and left zero headroom for real
+// BatchInsert/RangeInsert traffic, whose per-pass bytes are unbounded (up
+// to WAL_BATCH_MAX_RECORDS multi-row records draining together, see
+// WalWriterLoop). Under a wide-row (128-col), high-concurrency (32-64
+// thread) batch-insert benchmark this routinely pushed a single
+// writer-loop pass past 40 MiB (observed up to ~346 MiB), tripping the
+// oversized_write fsync() fallback on nearly every pass instead of the
+// rare, genuinely-exceptional event it's meant to be. 512 MiB gives that
+// workload real margin (~1.5x the largest pass observed so far); it does
+// not remove the fallback path (still the correct behavior whenever a
+// single pass legitimately exceeds this, however large), just makes it
+// rare again. Re-tune upward if a workload's real per-pass batch bytes
+// approach this bound. WalWriterLoop tracks each file's actual grown size
+// separately (not just this constant) so a file that has already grown
+// past this bound doesn't keep re-tripping the fallback on every
+// subsequent smaller pass -- see the known_size comment in XStore_Wal.cpp.
 static_assert(WAL_FILE_PREALLOC_BYTES >= WAL_MAX_BATCH_BYTES,
               "WAL_FILE_PREALLOC_BYTES must cover the worst-case single-row-per-record batch "
               "(see WalWriterLoop's runtime oversized_write check for the multi-row case).");
 
-// Sanity ceiling for ReplayWal's single-shot std::string read
-// (XStore_Management.cpp): a shard file is normally exactly
-// WAL_FILE_PREALLOC_BYTES, but the oversized_write fallback above now lets
-// a single huge Batch/Range record legitimately grow it past that. This
-// multiple gives generous headroom for a real oversized batch while still
-// bounding the crash-recovery-path allocation against a corrupted or
-// maliciously huge WAL file turning into an unbounded-memory startup
-// crash. A shard file over this bound is logged and skipped (its replay
-// is lost) rather than read into memory -- a deliberate, narrow tradeoff:
-// only a single batch whose own on-wire size exceeds this bound is at
-// risk, and only if the process also crashes before that batch's rows
-// were applied to the real data file.
-inline constexpr size_t      WAL_REPLAY_MAX_FILE_BYTES   = 8 * WAL_FILE_PREALLOC_BYTES;
+// Sanity ceiling for ReplayWal's streaming read (XStore_Management.cpp).
+// Used PER RECORD, not per file: ReplayWal reads a shard file in bounded
+// WAL_REPLAY_READ_CHUNK_BYTES-sized chunks, growing its buffer only as far
+// as one record's own declared length actually needs, checked against this
+// bound *before* ever trying to satisfy it -- so neither a shard file's
+// on-disk size (which can be far larger than its real content, or -- for a
+// corrupted length field -- claim to be, since fallocate/growth make that
+// size untrustworthy as a bound on its own, see WAL_FILE_PREALLOC_BYTES)
+// nor a single bogus record_len can force an allocation anywhere near that
+// size. A record declaring more than this is treated the same as any other
+// unparseable/torn record: replay stops there for this shard, same
+// CRC/structure-failure semantics ParseWalRecord already has, just applied
+// before attempting to grow the buffer to read it. This is strictly better
+// than the old per-file version of this ceiling it replaces: previously,
+// a file's *size* alone (even mostly stale padding from a since-overwritten
+// larger pass, see WAL_FILE_PREALLOC_BYTES/ReclaimWalFileSize) could get
+// its entire content skipped, valid records included; now only a record
+// that itself is implausibly large (or corrupt) stops replay, and every
+// valid record before it in the same file still gets applied.
+//
+// Deliberately well under 4 GiB (UINT32_MAX), not just "generous": the
+// on-wire record_len field this is compared against is itself a uint32_t
+// (see WAL_RECORD_HEADER_BYTES's field list above), so any value at or
+// above 2^32 would make the `declared_record_len > WAL_REPLAY_MAX_RECORD_
+// BYTES` check in ReplayWal impossible to ever trigger -- record_len simply
+// can't represent a value that large, so the check would be silently dead.
+// 2 GiB stays comfortably below that ceiling while still far exceeding any
+// real observed single-record size (the largest full multi-record *pass*
+// seen so far was ~346 MiB, see WAL_FILE_PREALLOC_BYTES's own history).
+inline constexpr size_t      WAL_REPLAY_MAX_RECORD_BYTES  = 2u * 1024 * 1024 * 1024;
+
+// Read granularity for ReplayWal's streaming parse above -- how many more
+// bytes to pull from disk at a time when the current record isn't fully
+// buffered yet. Purely a throughput/memory-footprint tradeoff (more
+// syscalls vs. more resident memory per shard during startup replay only);
+// correctness doesn't depend on this value.
+inline constexpr size_t      WAL_REPLAY_READ_CHUNK_BYTES  = 1u * 1024 * 1024;
 
 // Enqueue-side backpressure: once a shard's queue depth reaches this many
 // pending records, EnqueueWalRecord blocks the calling (client-handling)

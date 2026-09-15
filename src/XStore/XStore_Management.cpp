@@ -3,6 +3,7 @@
 #include <spdlog/fmt/fmt.h>
 #include "include/Logger/Logger.h"
 #include <algorithm>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <fcntl.h>
@@ -459,43 +460,76 @@ void XStore::ReplayWal() {
             continue;
         }
 
-        // Sanity ceiling before the single-shot read below: a shard file is
-        // normally exactly WAL_FILE_PREALLOC_BYTES, but WalWriterLoop's
-        // oversized_write fallback (XStore_Wal.cpp -- see the NOTE on
-        // WAL_FILE_PREALLOC_BYTES in XStore_Tunables.h) now lets a single
-        // huge Batch/Range record legitimately grow it past that. Stat
-        // first and skip this shard's replay (logged) rather than risking
-        // an unbounded allocation on a corrupted or maliciously huge file --
-        // see WAL_REPLAY_MAX_FILE_BYTES's own comment for the tradeoff this
-        // accepts.
+        // Stat purely to hand to ReclaimWalFileSize afterward (it needs to
+        // know whether this file grew past default) -- no longer used to
+        // gate whether replay happens at all, see the streaming read below.
         std::error_code file_size_ec;
         uintmax_t on_disk_bytes = std::filesystem::file_size(wal_path, file_size_ec);
         if (file_size_ec) {
             spdlog::error("[WAL REPLAY] - Unable to stat {}: {}", wal_path.string(), file_size_ec.message());
             continue;
         }
-        if (on_disk_bytes > XStoreTunables::WAL_REPLAY_MAX_FILE_BYTES) {
-            spdlog::error("[WAL REPLAY] - {} is {} bytes, exceeding the {}-byte replay sanity ceiling -- "
-                          "skipping this shard's replay rather than risking an unbounded allocation; "
-                          "check for corruption or an unexpectedly oversized WAL record.",
-                          wal_path.string(), static_cast<uintmax_t>(on_disk_bytes),
-                          XStoreTunables::WAL_REPLAY_MAX_FILE_BYTES);
+
+        std::ifstream in(wal_path, std::ios::binary);
+        if (!in) {
+            spdlog::error("[WAL REPLAY] - Unable to open {}", wal_path.string());
             continue;
         }
 
-        std::ifstream in(wal_path, std::ios::binary);
-        std::string contents((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        in.close();
+        // Streams this file's records in bounded WAL_REPLAY_READ_CHUNK_BYTES
+        // chunks rather than loading the whole file into one std::string --
+        // a shard file's on-disk size is no longer a trustworthy bound for a
+        // single allocation (see WAL_REPLAY_MAX_RECORD_BYTES's comment in
+        // XStore_Tunables.h for why). buffer only ever holds "a chunk or two
+        // plus one in-flight record's worth of bytes", grown on demand and
+        // shrunk (erase) as each record is consumed, never proportional to
+        // on_disk_bytes.
+        std::string buffer;
+        auto ensure_available = [&](size_t needed) -> bool {
+            while (buffer.size() < needed) {
+                size_t old_size = buffer.size();
+                buffer.resize(old_size + XStoreTunables::WAL_REPLAY_READ_CHUNK_BYTES);
+                in.read(buffer.data() + old_size, static_cast<std::streamsize>(XStoreTunables::WAL_REPLAY_READ_CHUNK_BYTES));
+                std::streamsize got = in.gcount();
+                buffer.resize(old_size + static_cast<size_t>(got));
+                if (got <= 0) return false; // true EOF -- can't satisfy `needed`
+            }
+            return true;
+        };
 
-        size_t offset = 0;
         unsigned replayed_count = 0;
-        while (offset < contents.size()) {
+        while (true) {
+            if (!ensure_available(8)) {
+                // Fewer than 8 bytes left anywhere in the file -- clean end
+                // or torn tail, same as before.
+                break;
+            }
+            uint32_t declared_record_len;
+            std::memcpy(&declared_record_len, buffer.data(), 4);
+            if (declared_record_len > XStoreTunables::WAL_REPLAY_MAX_RECORD_BYTES) {
+                // Checked BEFORE trying to satisfy it -- a corrupt/bogus
+                // record_len can't force ensure_available to keep growing
+                // the buffer chasing it. Same "stop here" outcome as a torn
+                // or CRC-invalid record below, just caught earlier.
+                spdlog::error("[WAL REPLAY] - {} has a record declaring {} bytes, exceeding the "
+                              "{}-byte single-record replay sanity ceiling -- stopping replay of "
+                              "this shard here; check for corruption.",
+                              wal_path.string(), declared_record_len,
+                              XStoreTunables::WAL_REPLAY_MAX_RECORD_BYTES);
+                break;
+            }
+            if (!ensure_available(4 + static_cast<size_t>(declared_record_len))) {
+                // Torn tail: file ends before this record's declared length
+                // is satisfied.
+                break;
+            }
+
             XStore::WalRecord record;
             size_t consumed = 0;
-            if (!ParseWalRecord(contents.data() + offset, contents.size() - offset, consumed, record)) {
-                // Torn tail record (crash mid-write) or corruption -- stop
-                // here; every record before this point already passed its
-                // own CRC check.
+            if (!ParseWalRecord(buffer.data(), buffer.size(), consumed, record)) {
+                // CRC/structure failure -- genuine corruption/torn record;
+                // every record before this point already passed its own CRC
+                // check, and already-applied.
                 break;
             }
             record.db_base_path = DbBasePath(record.db_name);
@@ -503,8 +537,9 @@ void XStore::ReplayWal() {
                 spdlog::error("[WAL REPLAY] [DB: {}] - One or more rows failed to apply", record.db_name);
             }
             replayed_count += static_cast<unsigned>(record.rows.size());
-            offset += consumed;
+            buffer.erase(0, consumed);
         }
+        in.close();
 
         if (replayed_count > 0) {
             spdlog::info("[WAL REPLAY] - Replayed {} record(s) from {}", replayed_count, wal_path.string());
@@ -524,6 +559,11 @@ void XStore::ReplayWal() {
         int fd = open(wal_path.c_str(), O_WRONLY);
         if (fd >= 0) {
             InvalidateWalFileHeader(fd, wal_path.string());
+            // Now that this file's WAL evidence is fully consulted, shrink
+            // it back to default if a prior oversized BatchInsert/RangeInsert
+            // pass grew it -- see ReclaimWalFileSize's comment in XStore.h
+            // for why this is the one safe place to pay that ftruncate cost.
+            ReclaimWalFileSize(fd, wal_path.string(), on_disk_bytes);
             close(fd);
         }
     }
