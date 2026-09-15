@@ -8,7 +8,7 @@ compare the printed summaries to tell whether a code change to XStore or
 XStore_Client helped or hurt.
 
 Client tiers default to `{1, cores/2, cores}` (e.g. `1,8,16` on a 16-core
-box), not a fine-grained `1,2,4,8,...` sweep -- `benchmarkClient` refuses `-t`
+box), not a fine-grained `1,2,4,8,...` sweep -- `XBench` refuses `-t`
 above its own `hardware_concurrency()` (hard client-side error), so the max
 useful tier already *is* this machine's core count, and a single-node
 harness has nothing new to show between the floor and the ceiling.
@@ -34,10 +34,10 @@ directly.
 The notebook only fanned a tier out across real machines once client count
 reached 8 (`useSingleMachine = numClient < 8` in the original `runWorkload()`
 in `benchmark_artifact/scripts/utilities.py`). Below that, and always as the
-actual unit of concurrency, it was one `benchmarkClient` process given `-t N`
+actual unit of concurrency, it was one `XBench` process given `-t N`
 threads. This harness always uses that path, for every tier -- real
 concurrency, same per-tier discipline as the reference `runXStoreServer.sh`:
-**cache clear -> server restart -> wait 5s -> benchmarkClient dispatch**
+**cache clear -> server restart -> wait 5s -> XBench dispatch**
 (scheduled via `-ia`, 10s from the moment it's launched), for every single
 (workload, tier) pair. The server restart isn't just for fairness -- it's
 load-bearing: the server caches open file mappings (mmap/fd) by path for its
@@ -78,11 +78,11 @@ files get pooled for a given tier.
   below). Console output is a progress bar (`tqdm` if installed, else a
   plain fallback -- `pip install tqdm` for the nicer one, entirely optional)
   plus one summary table at the end (tier columns x workload rows).
-  Everything verbose -- server boot, benchmarkClient's own per-op logging,
+  Everything verbose -- server boot, XBench's own per-op logging,
   seed progress, per-tier housekeeping -- goes to `--log-dir` (default
   `logs/<tag>/` next to this script) instead, one file per actual measured
   run rather than one giant blob: `<WORKLOAD>_<tier>-Clients.log` combines
-  that tier's XStore server output *and* benchmarkClient output together
+  that tier's XStore server output *and* XBench output together
   (both write to the same fd, so lines interleave in real time -- e.g.
   `UNARY_INSERT_SEQ_1-Clients.log`). Setup/teardown (initial server boot,
   fixture stash/restore, seeding) goes to `logs/<tag>/setup.log`. Re-running
@@ -194,7 +194,7 @@ Cache variables (`cmake -D<VAR>=<value> ..` or `ccmake .`):
 | `XSTORE_LOCAL_BENCH_TIERS` | *(empty = auto)* | client tiers to run, e.g. `1,8,16`; empty defers to the Python script's own `{1, cores/2, cores}` default |
 | `XSTORE_LOCAL_BENCH_WORKLOADS` | *(empty = auto)* | comma list of workload names, or `all` for all 12; empty defers to the script's own default (see below) |
 | `XSTORE_LOCAL_BENCH_POOL_SIZE` | *(empty = auto)* | max tier `bench_local_seed` prepares a fixture for; empty defers to this machine's core count |
-| `XSTORE_LOCAL_BENCH_CLIENT_BIN` | `/home/ubuntu/XBench/build/benchmarkClient` | path to `benchmarkClient` |
+| `XSTORE_LOCAL_BENCH_CLIENT_BIN` | `/home/ubuntu/XBench/build/XBench` | path to `XBench` |
 
 Targets: `bench_local_seed`, `bench_local_run`, `bench_local_summarize`
 (re-prints the current tag's summary on its own), and `bench_local` (run +
@@ -207,13 +207,13 @@ summarize in one command).
 cmake --build build-baseline -j$(nproc)
 python3 run_local_bench.py --tag baseline \
     --server-build-dir /path/to/build-baseline \
-    --client-bin /path/to/XBench/build/benchmarkClient
+    --client-bin /path/to/XBench/build/XBench
 
 # 2. Build your change, same dataset/fixture, different tag
 cmake --build build-changed -j$(nproc)
 python3 run_local_bench.py --tag changed \
     --server-build-dir /path/to/build-changed \
-    --client-bin /path/to/XBench/build/benchmarkClient
+    --client-bin /path/to/XBench/build/XBench
 
 # 3. Compare
 python3 summarize_local_bench.py --tags baseline,changed
@@ -230,13 +230,13 @@ same server build for both tags and only swap `--client-bin`.
 - Passwordless `sudo` for the cache-drop step (`--skip-cache-drop` to run
   without it, at the cost of comparability with runs that do drop caches).
 - `-t`/`--tiers` values must be `<=` this machine's core count --
-  `benchmarkClient` refuses a thread count above its own
+  `XBench` refuses a thread count above its own
   `hardware_concurrency()` (hard client-side error), so `run_local_bench.py`
   validates this itself upfront and refuses to start rather than fail
   partway through a run.
 - `BENCH_DB` (the logical DB name hardcoded inside every `XStore_Adapter.cpp`
   function -- `-d/--db_name XSTORE` only selects *which adapter*
-  benchmarkClient dispatches through, it isn't the DB name on the wire) gets
+  XBench dispatches through, it isn't the DB name on the wire) gets
   seeded automatically; you don't need to run `seed_fixture.py` yourself.
 - INSERT and QUERY/AGG both target that same hardcoded `BENCH_DB` name, and
   INSERT purges+recreates it every tier -- left alone, that would destroy

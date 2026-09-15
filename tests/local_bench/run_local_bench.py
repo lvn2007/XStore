@@ -6,7 +6,7 @@ local read on whether a code change to XStore or XStore_Client helped.
 
 Same 9 workload families (unary/batch insert+query x SEQ/RAND, plus the 4
 aggregates) and the same client tiers, but no SSH/Fabric/tmux and no second
-machine: one local XStore server + one benchmarkClient process per tier,
+machine: one local XStore server + one XBench process per tier,
 using -t <tier> threads in that one process as the concurrency unit (this is
 exactly what the notebook did anyway for every tier below 8; see
 runWorkload()'s useSingleMachine branch in benchmark_artifact/scripts/
@@ -20,7 +20,7 @@ latency for UNARY_* workloads, throughput for BATCH_*/AGG_* ones).
 Everything verbose goes to --log-dir (default logs/<tag>/ next to this
 script) instead, split one file per actual measured run rather than one
 giant blob: logs/<tag>/<WORKLOAD>_<tier>-Clients.log combines that tier's
-XStore server output AND benchmarkClient output together (both target the
+XStore server output AND XBench output together (both target the
 same file's fd, so their lines interleave in real time, not concatenated
 after the fact) -- e.g. UNARY_INSERT_SEQ_1-Clients.log. Setup/teardown
 (server boot before the first tier, fixture stash/restore, seeding) goes to
@@ -42,10 +42,10 @@ after the first run against a given (--dataset-dir, tiers) combination, so a
 single `bench_local` covers insert+seed+query/agg+summarize end to end.
 
 Per-tier sequence (matches the reference runXStoreServer.sh): cache clear ->
-server restart -> wait 5s (let the fresh server settle) -> benchmarkClient
+server restart -> wait 5s (let the fresh server settle) -> XBench
 dispatch, scheduled via -ia 10s from the moment it's launched.
 
--t is capped at this machine's core count: benchmarkClient itself refuses a
+-t is capped at this machine's core count: XBench itself refuses a
 thread count above its own hardware_concurrency() (hard exit(1) on the
 client side), so requesting a tier above that fails fast here instead of
 partway through a run.
@@ -121,7 +121,7 @@ def run_tier(client_bin, host, port, workload_name, tier, pool, scratch_dir, log
 
     invoke_at = int(time.time()) + 10
     cmd = [
-        client_bin, subcmd,
+        client_bin, *subcmd,
         "-i", host, "-p", str(port), "-d", "XSTORE",
         "-t", str(tier), "-e", exp_type,
         "-n", str(n), "-b", str(b if b is not None else 10),
@@ -165,7 +165,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--tag", required=True, help="label for this build/binary, e.g. 'baseline' or 'cache-v2'")
     ap.add_argument("--server-build-dir", default="/home/ubuntu/XStore/build")
-    ap.add_argument("--client-bin", default="/home/ubuntu/XBench/build/benchmarkClient")
+    ap.add_argument("--client-bin", default="/home/ubuntu/XBench/build/XBench")
     ap.add_argument("--dataset-dir", default="/home/ubuntu/XStore/10Y_128-Cols_Experiments")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=19497)
@@ -176,7 +176,7 @@ def main():
     ap.add_argument("--scratch-dir", default=os.path.join(os.path.dirname(__file__), "scratch"))
     ap.add_argument("--log-dir", default=os.path.join(os.path.dirname(__file__), "logs"),
                      help="verbose per-run logs land under <log-dir>/<tag>/ -- one <WORKLOAD>_<tier>-Clients.log "
-                          "per (workload, tier), combining that run's server + benchmarkClient output, plus setup.log")
+                          "per (workload, tier), combining that run's server + XBench output, plus setup.log")
     ap.add_argument("--skip-cache-drop", action="store_true", help="for environments without passwordless sudo")
     ap.add_argument("--seed-cache-dir", default=os.path.join(os.path.dirname(__file__), "cache"))
     ap.add_argument("--seed-workers", type=int, default=os.cpu_count(),
@@ -189,7 +189,7 @@ def main():
     if over_cap:
         raise SystemExit(
             f"--tiers {over_cap} exceed this machine's core count ({bc.CPU_COUNT}) -- "
-            f"benchmarkClient refuses -t above its own hardware_concurrency(), it would "
+            f"XBench refuses -t above its own hardware_concurrency(), it would "
             f"fail partway through the run. Pass --tiers within 1..{bc.CPU_COUNT}."
         )
     names = list(bc.WORKLOADS.keys()) if args.workloads == "all" else args.workloads.split(",")

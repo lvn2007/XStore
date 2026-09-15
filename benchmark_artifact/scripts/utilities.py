@@ -133,7 +133,7 @@ def rebootGroup(target):
 
 
 def estimateWorkloadTimeout(nIter, batchIter, secPerOp=0.1, bufferMultiplier=5, minTimeout=600, maxTimeout=10800):
-    """Upper bound on how long a benchmarkClient run should take, used only to catch
+    """Upper bound on how long an XBench run should take, used only to catch
     a genuinely stuck job (tmux session never closes) -- not a tight SLA. batchIter==0
     (unary workloads) is treated as a multiplier of 1. secPerOp/bufferMultiplier are
     placeholders -- tune from real observed run durations on Mystic. Runtime varies by
@@ -283,7 +283,7 @@ def fetchResults(basePath, fileExt, selectedClients, serverGroup, user, serverWo
 def _dispatchWorkloadToClient(idx, ip, user, keepalive, WORKLOAD_TYPE, EXPERIMENT_TYPE, serverNode, serverPort,
                                dbName, threadsPerMachine, nIter, batchIter, epochTime, chunkSize, skipSize,
                                dataFile, totalClients, printLock):
-    """Dispatch one client's benchmarkClient invocation. Each call opens its own
+    """Dispatch one client's XBench invocation. Each call opens its own
     Connection (no state shared with other clients), so runWorkload can run these
     concurrently via ThreadPoolExecutor instead of one machine at a time -- with N
     machines dispatched sequentially, total dispatch time is sum(per-client time);

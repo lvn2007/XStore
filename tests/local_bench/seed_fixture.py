@@ -180,7 +180,7 @@ def main():
     ap.add_argument("--port", type=int, default=19497)
     ap.add_argument("--pool-size", type=int, default=bc.CPU_COUNT,
                      help="max tier this fixture supports (files pooled per workload); defaults to this "
-                          "machine's core count since benchmarkClient can't run a tier above that anyway")
+                          "machine's core count since XBench can't run a tier above that anyway")
     ap.add_argument("--cache-dir", default=os.path.join(os.path.dirname(__file__), "cache"))
     ap.add_argument("--force", action="store_true", help="reseed even if the marker matches")
     ap.add_argument("--workers", type=int, default=os.cpu_count(),

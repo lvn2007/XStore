@@ -28,4 +28,4 @@ cp -r 10Y_128-Cols_Experiments/$WORKLOAD\_QUERY_$PATTERN/$WORKLOAD\_QUERY_$PATTE
 tmux new-session -d -s XStore -n Client
 
 # Dispatch workload  
-tmux send-keys -t "Client" "./benchmarkClient queryBench -i $SERVER_ADDR -p $SERVER_PORT -d $DB_NAME -t $THREAD_COUNT -e $EXPERIMENT_TYPE -n $N_ITER -b $BATCH_ITER -ia $INVOKE_AT && tmux kill-server" C-m
+tmux send-keys -t "Client" "./XBench bench query -i $SERVER_ADDR -p $SERVER_PORT -d $DB_NAME -t $THREAD_COUNT -e $EXPERIMENT_TYPE -n $N_ITER -b $BATCH_ITER -ia $INVOKE_AT && tmux kill-server" C-m

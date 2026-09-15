@@ -2,10 +2,10 @@
 
 Mirrors the 12-workload matrix XBench's notebook drives on Mystic
 (benchmark_artifact/XStore/XStore_NVMe_Mystic.ipynb), but runs everything on
-one box: one XStore server process + one benchmarkClient process per tier,
+one box: one XStore server process + one XBench process per tier,
 with thread-count standing in for client-count (the notebook only fanned
 workloads out across real machines once tier >= 8; the underlying unit of
-concurrency was always "-t N threads in one benchmarkClient process").
+concurrency was always "-t N threads in one XBench process").
 """
 import glob
 import os
@@ -15,21 +15,21 @@ import subprocess
 import time
 
 # name -> (dataset subdir under 10Y_128-Cols_Experiments, on-disk file prefix
-# benchmarkClient's DataManager matches by, CLI subcommand, -e experiment_type,
-# "kind" bucket -- also the CSV kind-word benchmarkClient's WriteCSV uses)
+# XBench's DataManager matches by, CLI subcommand, -e experiment_type,
+# "kind" bucket -- also the CSV kind-word XBench's WriteCSV uses)
 WORKLOADS = {
-    "UNARY_INSERT_SEQ":  ("UNARY_INSERT_SEQ",  "BASIC-INSERT-UNARY-SEQ_Client-",  "insertBench", "UNARY_SEQ",  "INSERT"),
-    "UNARY_INSERT_RAND": ("UNARY_INSERT_RAND", "BASIC-INSERT-UNARY-RAND_Client-", "insertBench", "UNARY_RAND", "INSERT"),
-    "BATCH_INSERT_SEQ":  ("BATCH_INSERT_SEQ",  "BASIC-INSERT-BATCH-SEQ_Client-",  "insertBench", "BATCH_SEQ",  "INSERT"),
-    "BATCH_INSERT_RAND": ("BATCH_INSERT_RAND", "BASIC-INSERT-BATCH-RAND_Client-", "insertBench", "BATCH_RAND", "INSERT"),
-    "UNARY_QUERY_SEQ":   ("UNARY_QUERY_SEQ",   "BASIC-QUERY-UNARY-SEQ_Client-",   "queryBench",  "UNARY_SEQ",  "QUERY"),
-    "UNARY_QUERY_RAND":  ("UNARY_QUERY_RAND",  "BASIC-QUERY-UNARY-RAND_Client-",  "queryBench",  "UNARY_RAND", "QUERY"),
-    "BATCH_QUERY_SEQ":   ("BATCH_QUERY_SEQ",   "BASIC-QUERY-BATCH-SEQ_Client-",   "queryBench",  "BATCH_SEQ",  "QUERY"),
-    "BATCH_QUERY_RAND":  ("BATCH_QUERY_RAND",  "BASIC-QUERY-BATCH-RAND_Client-",  "queryBench",  "BATCH_RAND", "QUERY"),
-    "AGG_MIN":           ("AGG_MIN_QUERY",     "AGG-MIN-QUERY_Client-",           "aggBench",    "MIN",        "AGG"),
-    "AGG_MAX":           ("AGG_MAX_QUERY",     "AGG-MAX-QUERY_Client-",           "aggBench",    "MAX",        "AGG"),
-    "AGG_AVG":           ("AGG_AVG_QUERY",     "AGG-AVG-QUERY_Client-",           "aggBench",    "AVG",        "AGG"),
-    "AGG_SUM":           ("AGG_SUM_QUERY",     "AGG-SUM-QUERY_Client-",           "aggBench",    "SUM",        "AGG"),
+    "UNARY_INSERT_SEQ":  ("UNARY_INSERT_SEQ",  "BASIC-INSERT-UNARY-SEQ_Client-",  ("bench", "insert"), "UNARY_SEQ",  "INSERT"),
+    "UNARY_INSERT_RAND": ("UNARY_INSERT_RAND", "BASIC-INSERT-UNARY-RAND_Client-", ("bench", "insert"), "UNARY_RAND", "INSERT"),
+    "BATCH_INSERT_SEQ":  ("BATCH_INSERT_SEQ",  "BASIC-INSERT-BATCH-SEQ_Client-",  ("bench", "insert"), "BATCH_SEQ",  "INSERT"),
+    "BATCH_INSERT_RAND": ("BATCH_INSERT_RAND", "BASIC-INSERT-BATCH-RAND_Client-", ("bench", "insert"), "BATCH_RAND", "INSERT"),
+    "UNARY_QUERY_SEQ":   ("UNARY_QUERY_SEQ",   "BASIC-QUERY-UNARY-SEQ_Client-",   ("bench", "query"),  "UNARY_SEQ",  "QUERY"),
+    "UNARY_QUERY_RAND":  ("UNARY_QUERY_RAND",  "BASIC-QUERY-UNARY-RAND_Client-",  ("bench", "query"),  "UNARY_RAND", "QUERY"),
+    "BATCH_QUERY_SEQ":   ("BATCH_QUERY_SEQ",   "BASIC-QUERY-BATCH-SEQ_Client-",   ("bench", "query"),  "BATCH_SEQ",  "QUERY"),
+    "BATCH_QUERY_RAND":  ("BATCH_QUERY_RAND",  "BASIC-QUERY-BATCH-RAND_Client-",  ("bench", "query"),  "BATCH_RAND", "QUERY"),
+    "AGG_MIN":           ("AGG_MIN_QUERY",     "AGG-MIN-QUERY_Client-",           ("bench", "agg"),    "MIN",        "AGG"),
+    "AGG_MAX":           ("AGG_MAX_QUERY",     "AGG-MAX-QUERY_Client-",           ("bench", "agg"),    "MAX",        "AGG"),
+    "AGG_AVG":           ("AGG_AVG_QUERY",     "AGG-AVG-QUERY_Client-",           ("bench", "agg"),    "AVG",        "AGG"),
+    "AGG_SUM":           ("AGG_SUM_QUERY",     "AGG-SUM-QUERY_Client-",           ("bench", "agg"),    "SUM",        "AGG"),
 }
 
 # Workloads whose "kind" purges/recreates its DB each tier (destructive) vs.
@@ -58,7 +58,7 @@ DEFAULT_WORKLOADS = [
     "AGG_MIN",
 ]
 
-# benchmarkClient itself refuses -t above its own hardware_concurrency() (a
+# XBench itself refuses -t above its own hardware_concurrency() (a
 # hard exit(1) on the client side, observed in practice at tier=32 on a
 # 16-core box) -- so the max useful tier IS this machine's core count, and
 # fine-grained steps in between (2,4,8...) tell you little that 1 vs.
@@ -72,7 +72,7 @@ POOL_NODE_GLOB = "*_Node-*"
 def dataset_pool(dataset_dir, workload_name, limit=None):
     """All parquet files for one workload, pooled across every Node-* dir
     (flattened -- these were only split by machine for the original
-    distributed run; a single local benchmarkClient process can use any of
+    distributed run; a single local XBench process can use any of
     them as one of its -t threads), sorted for reproducible selection."""
     subdir, prefix, *_ = WORKLOADS[workload_name]
     pattern = os.path.join(dataset_dir, subdir, f"{subdir}{POOL_NODE_GLOB}", f"{prefix}*.parquet")
@@ -83,7 +83,7 @@ def dataset_pool(dataset_dir, workload_name, limit=None):
 
 
 def parse_n_b(path):
-    """Pull the -n/-b values benchmarkClient's DataManager validates against
+    """Pull the -n/-b values XBench's DataManager validates against
     out of a staged file's own name, instead of hand-tracking what the
     original notebook happened to pass. The embedded token is the 3rd
     underscore-delimited segment; DataManager reads a bare digit run as
@@ -127,7 +127,7 @@ def stage_files(pool, tier, scratch_dir):
 
 
 def clear_scratch(scratch_dir):
-    # benchmarkClient also drops its own logs/ dir (spdlog file sink) into cwd
+    # XBench also drops its own logs/ dir (spdlog file sink) into cwd
     # alongside the staged parquet symlinks and its per-thread CSVs.
     if not os.path.isdir(scratch_dir):
         return

@@ -16,8 +16,10 @@ git clone https://github.com/offa/influxdb-cxx; cd influxdb-cxx && mkdir -p buil
 sed -i 's/{10}/{300}/' ../src/HTTP.cxx
 cmake .. -DINFLUXCXX_TESTING:BOOL=OFF -DINFLUXCXX_WITH_BOOST:BOOL=ON && sudo make install; cd ~
 
-# Clone XStore repo (Which includes client code as well)
-sudo rm -rf XBench; git clone https://gitlab.com/lvn2007/XBench.git
+# Clone XBench repo (Which includes client code as well) -- cloned to
+# XBench_repo, not XBench, so the compiled XBench binary can be copied to
+# ~/XBench below without colliding with the repo directory of the same name.
+sudo rm -rf XBench_repo; git clone https://gitlab.com/lvn2007/XBench.git XBench_repo
 
-# Compile benchmarkClient
-cd XBench && git submodule update --init && git submodule update --remote external/XStore && mkdir -p build && cd build && cmake .. && make -j && cp benchmarkClient ~
+# Compile XBench
+cd XBench_repo && git submodule update --init && git submodule update --remote external/XStore && mkdir -p build && cd build && cmake .. && make -j && cp XBench ~
