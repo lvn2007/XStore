@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <spdlog/fmt/fmt.h>
 
 // Same anonymous-namespace + using-declaration convention as
 // XStoreWalTest.cpp -- keeps this file's helpers/fixture from colliding
@@ -503,6 +504,115 @@ TEST_F(ZoneMapFileVersionTest, OpenDiscardsStaleVersionFileInsteadOfMisreadingIt
     ASSERT_TRUE(stats2.has_value());
     EXPECT_DOUBLE_EQ((*stats2)[0].sum_value, 5.0);
     EXPECT_DOUBLE_EQ((*stats2)[0].sum_sq_value, 25.0);
+}
+
+} // namespace
+
+namespace {
+
+using xstore_test::CreateTestDb;
+
+// TimeStruct(1000, XStore_Proto::SECOND).year == 1970 -- confirmed by
+// reading TimeStruct.cpp's closed-form UTC calendar extraction directly
+// rather than guessing: at SECOND resolution, ExtractTimeComponents computes
+// days_since_epoch = FloorDiv(1000, 86400) == 0, and CivilFromDays(0, ...)
+// is 1970-01-01 (day 0 of the Unix epoch by construction). The task brief's
+// own placeholder ("2000.zmap") was flagged as an unverified guess; 1970 is
+// the real value for this codebase's epoch semantics. first_epoch for that
+// year is likewise 0 (DaysFromCivil(1970,1,1) == 0), so row_index ==
+// epoch_time for every row this test writes -- the same addressing
+// ApplyWalRecord uses ((epochTime - firstEpoch) * rowLength).
+constexpr unsigned short kEpoch1000Year = 1970;
+constexpr uint16_t kPreexistRowLength = 64;
+
+TEST_F(XStoreZoneMapTest, InitDbRebuildsZoneMapForPreExistingDataWithNoSidecar) {
+    // This fixture's SetUp() already chdir'd into a brand-new ScratchDir for
+    // this test (see the ScratchDir constructor XStore_Management.cpp's
+    // CachedDbBasePath comment calls "chdir()s into a fresh scratch
+    // directory per test case"), so this test's InitDB() run can't collide
+    // with any other test's XStore instance.
+    XStore store;
+    std::string db_name = "PREEXISTREBUILD";
+    CreateTestDb(store, db_name, XStore_Proto::SECOND, kPreexistRowLength);
+
+    // Deviation from the task brief's literal Step-1 code, documented in
+    // the Task 5 report: that snippet inserts via UnaryInsert (which goes
+    // through UpdateRow/GetOrOpenZoneMap, populating XStore's static,
+    // process-wide zone_map_registry_ for this exact (db_base_path, year)
+    // key -- see GetOrOpenZoneMap's comment in XStore.h) and then
+    // overwrites the .zmap's on-disk header in place to simulate
+    // staleness. Because that registry is a process-wide cache that
+    // survives a direct InitDB() re-call within the SAME test process --
+    // unlike a real server restart, which always starts with an empty
+    // registry -- that ordering would make the rebuild's own
+    // GetOrOpenZoneMap call a cache HIT against the still-warm, already-
+    // correct in-memory object instead of a genuine cold reopen from disk,
+    // double-folding the same 5 rows on top of stats that already
+    // reflected them. This test instead follows the brief's own PROSE
+    // description above its Step 1 -- and this test's own name -- more
+    // literally: write raw row bytes directly to the "<year>.XSTORE" file,
+    // bypassing UnaryInsert/UpdateRow (and therefore zone_map_registry_)
+    // entirely, and never create any .zmap sidecar at all. This is a
+    // closer simulation of "historical data written before zone maps
+    // existed" and the only version of this scenario that cannot pass by
+    // accident via a warm in-process cache.
+    std::string db_base_path = DbPath(db_name);
+    std::string data_path = fmt::format("{}/{}.XSTORE", db_base_path, kEpoch1000Year);
+
+    std::vector<double> values = {1.0, 2.0, 3.0, 4.0, 5.0};
+    uint64_t first_row_index = 1000; // == epoch_time, since first_epoch(1970) == 0
+    uint64_t last_row_index = first_row_index + values.size() - 1;
+    {
+        int fd = open(data_path.c_str(), O_WRONLY | O_CREAT, 0644);
+        ASSERT_GE(fd, 0);
+        ASSERT_EQ(ftruncate(fd, static_cast<off_t>((last_row_index + 1) * kPreexistRowLength)), 0);
+        for (size_t i = 0; i < values.size(); ++i) {
+            XStore_Proto::RowData row;
+            row.add_fielddata()->set_doubledata(values[i]);
+            size_t serialized_size = row.ByteSizeLong();
+            ASSERT_LE(serialized_size, kPreexistRowLength);
+            std::vector<char> row_buf(kPreexistRowLength, 0);
+            row.SerializeToArray(row_buf.data(), static_cast<int>(kPreexistRowLength));
+            uint64_t row_index = first_row_index + i;
+            ASSERT_EQ(pwrite(fd, row_buf.data(), kPreexistRowLength, static_cast<off_t>(row_index * kPreexistRowLength)),
+                      static_cast<ssize_t>(kPreexistRowLength));
+        }
+        close(fd);
+    }
+
+    std::string zmap_path = fmt::format("{}/{}.zmap", db_base_path, kEpoch1000Year);
+    ASSERT_FALSE(std::filesystem::exists(zmap_path)) << "test setup error: no sidecar should exist yet";
+
+    // Re-run InitDB() the same way a fresh server process would -- XStore's
+    // constructor only runs it once per data_store_dir via a static guard
+    // (see XStore::XStore()'s initialized_dirs set), so this test calls
+    // InitDB() directly instead of constructing a second XStore against the
+    // same directory (which that guard would silently no-op).
+    store.InitDB();
+
+    // Discriminating assertion (the task brief's own Step 2 warning):
+    // VarianceAggregate's non-pushdown full-scan fallback is correct
+    // regardless of zone-map state, so a numeric check on its result alone
+    // can't tell "InitDB() rebuilt the zone map" apart from "InitDB() did
+    // nothing and the query happened to still get the right answer via a
+    // full scan." Checked here, BEFORE any aggregate call: AccumulateSegment
+    // WithZoneMapPushdown unconditionally calls GetOrOpenZoneMap (which
+    // creates-on-open), so calling VarianceAggregate first would create this
+    // exact .zmap file as a side effect regardless of Task 5, silently
+    // defeating this check. Since no .zmap ever existed for this file before
+    // InitDB() ran (asserted above), its existence now -- checked strictly
+    // before any aggregate touches it -- is real proof the startup rebuild
+    // executed.
+    EXPECT_TRUE(std::filesystem::exists(zmap_path)) << "InitDB() should have rebuilt the missing zone map";
+
+    double sum = 0.0, sum_sq = 0.0;
+    for (double v : values) { sum += v; sum_sq += v * v; }
+
+    XStore_Proto::Variance_REP rep;
+    store.VarianceAggregate(first_row_index, last_row_index, db_name, 0, &rep);
+    ASSERT_EQ(rep.opstatus(), "SUCCESS");
+    double n = static_cast<double>(values.size());
+    EXPECT_NEAR(rep.opresult(), (sum_sq - sum * sum / n) / (n - 1.0), 1e-9);
 }
 
 } // namespace

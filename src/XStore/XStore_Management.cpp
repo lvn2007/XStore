@@ -1,5 +1,7 @@
 #include "include/XStore/XStore_Internal.h"
 #include "include/DataStructs/FileRangeLock.h"
+#include "include/XStore/XStore_PreadPool.h"
+#include "include/XStore/XStore_WireEncode.h"
 #include <spdlog/fmt/fmt.h>
 #include "include/Logger/Logger.h"
 #include <algorithm>
@@ -495,7 +497,111 @@ void XStore::InitDB() {
         cfg_struct.ParseFromFileDescriptor(fileno(c_file));
         std::fclose(c_file);
         PutCfg(curr_db_name, cfg_struct);
+
+        // Task 5: rebuild any stale/missing zone map for this DB before
+        // InitDB() returns -- i.e. before any worker thread sharing this
+        // data_store_dir can serve a request against it. Deliberately
+        // inside this loop (not deferred/backgrounded past InitDB()'s
+        // return) -- see RebuildStaleZoneMapsForDb's declaration comment
+        // in XStore.h for why this must never run on the request path
+        // instead.
+        RebuildStaleZoneMapsForDb(curr_db_name, p.path().string(), cfg_struct);
     }
+}
+
+bool XStore::ZoneMapNeedsRebuild(const std::string &zmap_path, uint32_t desired_tracked_columns) {
+    if (!std::filesystem::exists(zmap_path)) return true;
+
+    int fd = open(zmap_path.c_str(), O_RDONLY);
+    if (fd < 0) return true; // can't even read it -- treat as needing rebuild, Open() will recreate it
+
+    ZoneMapFileHeader header{};
+    ssize_t read_bytes = pread(fd, &header, sizeof(header), 0);
+    close(fd);
+
+    if (read_bytes != static_cast<ssize_t>(sizeof(header))) return true; // truncated/corrupt
+    if (header.magic != ZoneMapFileHeader{}.magic) return true;
+    if (header.version != ZONE_MAP_VERSION) return true;
+    if (header.tracked_column_count != desired_tracked_columns) return true;
+    return false;
+}
+
+void XStore::RebuildOneYearZoneMap(const std::string &db_base_path, unsigned short year, uint16_t row_length, uint32_t tracked_column_count) {
+    std::string data_path = fmt::format("{}/{}.XSTORE", db_base_path, year);
+    if (!std::filesystem::exists(data_path)) return;
+
+    // GetOrOpenZoneMap -> ZoneMapFile::Open() -- if a stale-version file
+    // is sitting here, Open() (Task 1) truncates and reinitializes it to
+    // a fresh, empty v2 header before this function ever calls UpdateRow,
+    // so every row folded below starts from a genuinely clean baseline.
+    // This is only true for a genuine cache miss -- if some earlier caller
+    // in this same process already touched this exact (db_base_path, year)
+    // pair, GetOrOpenZoneMap hands back that already-open, already-fresh
+    // instance instead (see zone_map_registry_'s comment in XStore.h); a
+    // real server restart always starts with an empty registry, so that
+    // case never arises there.
+    ZoneMapFile &zmap = GetOrOpenZoneMap(db_base_path, year, row_length);
+
+    uintmax_t file_size = std::filesystem::file_size(data_path);
+    uint64_t total_rows = file_size / row_length; // exact by construction -- data files are preallocated to whole-row multiples
+
+    int fd = open(data_path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        spdlog::error("[ZONE MAP REBUILD] [{}/{}.XSTORE] - Unable to open for rebuild scan", db_base_path, year);
+        return;
+    }
+
+    std::vector<char> row_buf(row_length);
+    for (uint64_t row_index = 0; row_index < total_rows; ++row_index) {
+        ssize_t read_bytes = pread(fd, row_buf.data(), row_length, static_cast<off_t>(row_index) * row_length);
+        if (read_bytes != static_cast<ssize_t>(row_length)) {
+            spdlog::error("[ZONE MAP REBUILD] [{}/{}.XSTORE] - Short read at row {}", db_base_path, year, row_index);
+            continue;
+        }
+        if (row_buf[0] == 0) continue; // never-written sparse hole -- same fast skip ProcessFileRangeAccumulate uses
+
+        size_t real_len = XStoreWireEncode::RealRowDataLength(row_buf.data(), row_length);
+        XStore_Proto::RowData row;
+        if (real_len > 0) {
+            row.ParseFromArray(row_buf.data(), static_cast<int>(real_len));
+        }
+        std::vector<ZoneMapObservation> observations = BuildZoneMapObservations(*this, row, tracked_column_count);
+        zmap.UpdateRow(row_index, observations);
+    }
+    close(fd);
+
+    spdlog::info("[ZONE MAP REBUILD] [{}/{}.XSTORE] - Rebuilt {} rows", db_base_path, year, total_rows);
+}
+
+void XStore::RebuildStaleZoneMapsForDb(const std::string &db_name, const std::string &db_base_path, const XStore_Proto::ConfigStruct &cfg_struct) {
+    uint32_t desired_tracked_columns = EffectiveTrackedColumnCount(cfg_struct);
+    uint16_t row_length = static_cast<uint16_t>(cfg_struct.rowlength());
+
+    std::vector<unsigned short> years_needing_rebuild;
+    for (auto &f : std::filesystem::directory_iterator(db_base_path)) {
+        std::string filename = f.path().filename().string();
+        if (filename.size() < 7 || filename.substr(filename.size() - 7) != ".XSTORE") continue;
+
+        std::string year_str = filename.substr(0, filename.size() - 7);
+        unsigned short year;
+        try {
+            year = static_cast<unsigned short>(std::stoi(year_str));
+        } catch (...) {
+            continue; // not a <YEAR>.XSTORE-shaped filename -- skip
+        }
+
+        std::string zmap_path = fmt::format("{}/{}.zmap", db_base_path, year);
+        if (ZoneMapNeedsRebuild(zmap_path, desired_tracked_columns)) {
+            years_needing_rebuild.push_back(year);
+        }
+    }
+
+    if (years_needing_rebuild.empty()) return;
+
+    spdlog::info("[ZONE MAP REBUILD] [DB: {}] - {} year file(s) need rebuild", db_name, years_needing_rebuild.size());
+    XStorePreadPool::ParallelFor(years_needing_rebuild.size(), [&](size_t i) {
+        RebuildOneYearZoneMap(db_base_path, years_needing_rebuild[i], row_length, desired_tracked_columns);
+    });
 }
 
 void XStore::ReplayWal() {

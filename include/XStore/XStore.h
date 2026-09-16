@@ -498,7 +498,14 @@ class XStore {
         // STDDEV - AGGREGATE (sqrt of sample variance)
         void StddevAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Stddev_REP *return_data);
 
-        // Initialize DB
+        // Initialize DB. Loads every DB's ConfigStruct into the shared CfgMap,
+        // then (Task 5) rebuilds any stale/missing zone map for that DB
+        // before returning -- see RebuildStaleZoneMapsForDb below. Guarded
+        // (at the single call site inside XStore::XStore()) by a function-
+        // local std::once-per-directory mechanism so concurrent worker
+        // threads' first XStore construction against the same
+        // data_store_dir block on this finishing; calling InitDB() again
+        // directly (as tests do) always re-runs it, guard or not.
         void InitDB();
 
         // Fetch (creating if needed) the ZoneMapFile for (dbBasePath, year),
@@ -786,6 +793,30 @@ class XStore {
         // which point "idempotent re-apply" no longer holds (see
         // InvalidateWalFileHeader).
         void ReplayWal();
+
+        // Called once from InitDB(), after that DB's ConfigStruct is
+        // loaded -- rescans every <YEAR>.XSTORE file under db_base_path
+        // whose .zmap sidecar is missing, stale-version, or sized for a
+        // different tracked-column count than EffectiveTrackedColumnCount
+        // now reports, and rebuilds each one from raw data. Runs before
+        // InitDB() returns, i.e. before any worker thread sharing this
+        // data_store_dir can serve a request -- see design doc
+        // "Startup-time zone-map rebuild" for why this must never run on
+        // the request path.
+        void RebuildStaleZoneMapsForDb(const std::string &db_name, const std::string &db_base_path, const XStore_Proto::ConfigStruct &cfg_struct);
+
+        // Cheap header-only peek at path's .zmap sidecar (no full
+        // ZoneMapFile::Open, no registry involvement) -- true if the file
+        // is missing, wrong version, or tracked for a different column
+        // count than desired_tracked_columns.
+        static bool ZoneMapNeedsRebuild(const std::string &zmap_path, uint32_t desired_tracked_columns);
+
+        // Rescans one <YEAR>.XSTORE file row-by-row and folds every row
+        // into a freshly-reinitialized zone map via the same UpdateRow
+        // path a live insert uses -- see Task 5 of the implementation
+        // plan for why reusing UpdateRow here (instead of a bespoke bulk
+        // writer) is the deliberate, simplicity-first choice.
+        void RebuildOneYearZoneMap(const std::string &db_base_path, unsigned short year, uint16_t row_length, uint32_t tracked_column_count);
 
         // Fetch targetFile's cached fd, creating (and ftruncate'ing to
         // totalRows*rowLength if new) the file on first use. Returns -1 on
