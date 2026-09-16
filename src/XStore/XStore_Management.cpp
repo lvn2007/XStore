@@ -559,12 +559,56 @@ void XStore::RebuildOneYearZoneMap(const std::string &db_base_path, unsigned sho
             zone_map_registry_lru_.end());
     }
 
-    // GetOrOpenZoneMap -> ZoneMapFile::Open() -- guaranteed a genuine cache
-    // miss by the eviction above, so a stale-version OR too-narrow existing
-    // file (Task 1 / Task 6) is truncated and reinitialized to a fresh v2
-    // header sized at tracked_column_count before this function ever calls
-    // UpdateRow, so every row folded below starts from a genuinely clean,
-    // correctly-sized baseline.
+    // Force a genuine cold start on disk too, regardless of which direction
+    // any existing header's tracked_column_count mismatches
+    // tracked_column_count (the caller here always passes the current,
+    // authoritative desired_tracked_columns -- freshly read from the .CFG
+    // this same InitDB() pass just loaded). ZoneMapFile::Open()'s own
+    // width-mismatch guard (`tracked_column_count > header_.
+    // tracked_column_count`) is deliberately asymmetric FOR THE ORDINARY
+    // INSERT PATH (XStore_UnaryOps.cpp et al.), which always opens with the
+    // global default width and must never truncate a file some earlier
+    // rebuild already widened past that default (Task 6) -- but that
+    // asymmetry is wrong for THIS caller. A too-WIDE existing file here is
+    // reachable with zero concurrency at all, not just under a racing
+    // insert: every insert path builds this row's ZoneMapObservations and
+    // calls GetOrOpenZoneMap/UpdateRow BEFORE calling MaybeGrowColumnCount
+    // (see the call order in XStore_UnaryOps.cpp/XStore_BatchOps.cpp/
+    // XStore_RangeOps.cpp) -- so a DB created without a column_count_seed
+    // has its very first insert's zone map created at the (wide) global
+    // default, and only AFTER that same insert does MaybeGrowColumnCount
+    // persist the DB's real, narrower columnCount. A plain restart right
+    // after that single insert then reaches this function with
+    // header.tracked_column_count > desired tracked_column_count, which
+    // Open()'s `>` check alone reads as "wide enough, keep it" and leaves
+    // the existing (already-correct) stats in place -- so the raw scan
+    // below would silently DOUBLE every row's stats by folding them again
+    // on top of what's already durably there, corrupting future pushdown-
+    // eligible queries against this exact block (a real-scan-fallback query
+    // would still read correct raw bytes and mask this, which is how this
+    // was found: via a zone-map-stats check, not an aggregate-result one).
+    // Truncating unconditionally here is always safe for this caller
+    // specifically -- RebuildOneYearZoneMap is already committed to a full
+    // raw-data rescan below regardless of what Open() would have done, so
+    // it never needs to preserve whatever was on disk before it runs.
+    {
+        std::string zmap_path_to_reset = fmt::format("{}/{}.zmap", db_base_path, year);
+        int reset_fd = open(zmap_path_to_reset.c_str(), O_WRONLY);
+        if (reset_fd >= 0) {
+            if (ftruncate(reset_fd, 0) != 0) {
+                spdlog::error("[ZONE MAP REBUILD] [{}] - Failed to truncate before rebuild", zmap_path_to_reset);
+            }
+            close(reset_fd);
+        }
+        // else: no pre-existing file to reset -- GetOrOpenZoneMap below
+        // creates it fresh, same as ever.
+    }
+
+    // GetOrOpenZoneMap -> ZoneMapFile::Open() -- guaranteed both a genuine
+    // cache miss (eviction above) AND a genuine empty-file cold start
+    // (truncate above), so every row folded below starts from a genuinely
+    // clean, correctly-sized baseline no matter which direction the old
+    // header's width was wrong in.
     ZoneMapFile &zmap = GetOrOpenZoneMap(db_base_path, year, row_length, tracked_column_count);
 
     uintmax_t file_size = std::filesystem::file_size(data_path);

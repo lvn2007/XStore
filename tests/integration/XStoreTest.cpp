@@ -2991,6 +2991,55 @@ TEST_F(XStoreTest, ConcurrentSumAggregateDuringConcurrentInsertsDoesNotCrashOrTe
     a.join();
 }
 
+// VarianceAggregate goes through the same AccumulateSegmentWithZoneMapPushdown
+// / ProcessFileRangeAccumulate machinery as Sum/Avg above, but folds an
+// additional sum_sq_value accumulator per row/block -- exercised here on its
+// own so a race narrowly scoped to that extra accumulator (rather than the
+// sum/valid_count fields the test above already covers) can't hide. Same
+// fixture setup/thread-count/duration constants as
+// ConcurrentSumAggregateDuringConcurrentInsertsDoesNotCrashOrTear above,
+// substituting VarianceAggregate for SumAggregate.
+TEST_F(XStoreTest, ConcurrentVarianceAggregateDuringConcurrentInsertsDoesNotCrashOrTear) {
+    XStore seed_store;
+    CreateTestDb(seed_store, "TESTDB", XStore_Proto::SECOND, 128);
+    XStore_Proto::UnaryInsert_REP seed_rep;
+    seed_store.UnaryInsert(TS_2024_MID, MakeRow({FDouble(1.0)}), "TESTDB", &seed_rep);  // pre-allocate the year file
+
+    constexpr int k_iterations = 200;
+    constexpr int k_width = 50;
+
+    auto writer = [&]() {
+        XStore store;
+        for (int i = 0; i < k_iterations; i++) {
+            for (int j = 0; j < k_width; j++) {
+                XStore_Proto::UnaryInsert_REP rep;
+                store.UnaryInsert(TS_2024_MID + j, MakeRow({FDouble((double)(i + j))}), "TESTDB", &rep);
+            }
+        }
+    };
+    auto aggregator = [&]() {
+        XStore store;
+        for (int i = 0; i < k_iterations; i++) {
+            XStore_Proto::Variance_REP rep;
+            store.VarianceAggregate(TS_2024_MID, TS_2024_MID + k_width - 1, "TESTDB", 0, &rep);
+            // No crash/hang is the primary assertion; if data is present at
+            // all it must have parsed as a real numeric variance, never
+            // garbage (a torn sum_sq_value read could otherwise produce a
+            // negative variance or NaN without crashing).
+            EXPECT_TRUE(rep.opstatus() == "SUCCESS" || rep.opstatus() == "ERROR: No valid data found");
+            if (rep.opstatus() == "SUCCESS") {
+                EXPECT_GE(rep.opresult(), 0.0) << "variance must never be negative -- sign of a torn sum_sq_value";
+                EXPECT_FALSE(std::isnan(rep.opresult()));
+            }
+        }
+    };
+
+    std::thread w(writer);
+    std::thread a(aggregator);
+    w.join();
+    a.join();
+}
+
 // Sum/Avg go through ProcessFileRangeAccumulate (covered under concurrent
 // writes above); Min/Max go through the separate ProcessFileRangeSelect
 // template instead -- that path's concurrent-read safety was never
