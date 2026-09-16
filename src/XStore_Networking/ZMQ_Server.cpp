@@ -440,6 +440,24 @@ void ZmqServer::WorkerRoutine(std::string server_addr) {
                 break;
             }
 
+            // VARIANCE AGGREGATE
+            case XStore_Proto::Request::kVariance: {
+                const auto &req = client_request->variance();
+                XStore_Proto::Variance_REP rep;
+                my_store.VarianceAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
+                SendProto(socket, rep);
+                break;
+            }
+
+            // STDDEV AGGREGATE
+            case XStore_Proto::Request::kStddev: {
+                const auto &req = client_request->stddev();
+                XStore_Proto::Stddev_REP rep;
+                my_store.StddevAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
+                SendProto(socket, rep);
+                break;
+            }
+
             // No payload set (malformed/unrecognized request) -- reply so
             // the client's REQ socket never hangs waiting for a response
             // that will never come.

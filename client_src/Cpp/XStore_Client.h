@@ -550,5 +550,27 @@ class XStoreClient {
       payload->set_columnidx(column_idx);
       return SendRecv<XStore_Proto::Avg_REP>(to_server);
   }
+
+  [[nodiscard]] XStore_Proto::Variance_REP Variance(uint64_t start_time, uint64_t end_time, std::string_view db_name, int32_t column_idx) {
+      XStore_Proto::Request to_server;
+      auto *payload = to_server.mutable_variance();
+      payload->set_rtype(XStore_Proto::VARIANCE);
+      payload->set_starttime(start_time);
+      payload->set_endtime(end_time);
+      payload->set_dbname(std::string(db_name));
+      payload->set_columnidx(column_idx);
+      return SendRecv<XStore_Proto::Variance_REP>(to_server);
+  }
+
+  [[nodiscard]] XStore_Proto::Stddev_REP Stddev(uint64_t start_time, uint64_t end_time, std::string_view db_name, int32_t column_idx) {
+      XStore_Proto::Request to_server;
+      auto *payload = to_server.mutable_stddev();
+      payload->set_rtype(XStore_Proto::STDDEV);
+      payload->set_starttime(start_time);
+      payload->set_endtime(end_time);
+      payload->set_dbname(std::string(db_name));
+      payload->set_columnidx(column_idx);
+      return SendRecv<XStore_Proto::Stddev_REP>(to_server);
+  }
 };
 #endif //XSTORE_CLIENTSRC_XSTORE_CLIENT_H_

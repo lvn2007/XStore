@@ -446,3 +446,17 @@ class XStoreClient:
         """
         return self._aggregate(XStore_Proto.AVG, "avg", XStore_Proto.Avg_REP,
                                 startUnixTime, endUnixTime, targetDBName, columnIdx)
+
+    def variance(self, startUnixTime, endUnixTime, targetDBName, columnIdx):
+        """
+        :return: Variance_REP (opResult double, opStatus)
+        """
+        return self._aggregate(XStore_Proto.VARIANCE, "variance", XStore_Proto.Variance_REP,
+                                startUnixTime, endUnixTime, targetDBName, columnIdx)
+
+    def stddev(self, startUnixTime, endUnixTime, targetDBName, columnIdx):
+        """
+        :return: Stddev_REP (opResult double, opStatus)
+        """
+        return self._aggregate(XStore_Proto.STDDEV, "stddev", XStore_Proto.Stddev_REP,
+                                startUnixTime, endUnixTime, targetDBName, columnIdx)

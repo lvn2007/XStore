@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <thread>
 #include <unistd.h>
@@ -88,6 +89,16 @@ XStore_Proto::Request Wrap(const XStore_Proto::RangeInsert_REQ &req) {
 XStore_Proto::Request Wrap(const XStore_Proto::RangeQuery_REQ &req) {
     XStore_Proto::Request w;
     *w.mutable_rangequery() = req;
+    return w;
+}
+XStore_Proto::Request Wrap(const XStore_Proto::Variance_REQ &req) {
+    XStore_Proto::Request w;
+    *w.mutable_variance() = req;
+    return w;
+}
+XStore_Proto::Request Wrap(const XStore_Proto::Stddev_REQ &req) {
+    XStore_Proto::Request w;
+    *w.mutable_stddev() = req;
     return w;
 }
 
@@ -426,6 +437,52 @@ TEST_F(XStoreZmqNetworkTest, RemoveDBFilesThenRemoveDBOverWire) {
     remove_db_req.set_dbname("ZMQ_REMOVE_DB");
     auto remove_db_rep = SendRequest<XStore_Proto::RemoveDB_REP>(Wrap(remove_db_req));
     EXPECT_EQ(remove_db_rep.removestatus(), "[INFO] [REMOVE DB] [DB: ZMQ_REMOVE_DB] - Removed DB with name: ZMQ_REMOVE_DB");
+}
+
+// ---------------------------------------------------------------------
+// VARIANCE / STDDEV AGGREGATES -- over the wire
+// ---------------------------------------------------------------------
+
+TEST_F(XStoreZmqNetworkTest, VarianceAndStddevRoundTripOverNetwork) {
+    XStore_Proto::CreateDB_REQ create_req;
+    create_req.set_rtype(XStore_Proto::CREATEDB);
+    create_req.set_dbname("ZMQ_VARSTDDEV_DB");
+    create_req.set_timeresolution(XStore_Proto::SECOND);
+    create_req.set_rowlength(128);
+    SendRequest<XStore_Proto::CreateDB_REP>(Wrap(create_req));
+
+    const std::vector<double> values = {2, 4, 4, 4, 5, 5, 7, 9};
+    for (size_t i = 0; i < values.size(); i++) {
+        XStore_Proto::UnaryInsert_REQ insert_req;
+        insert_req.set_rtype(XStore_Proto::UNARYINSERT);
+        insert_req.set_dbname("ZMQ_VARSTDDEV_DB");
+        insert_req.set_timestamp(TS_2020_MID + i);
+        // SYNC: the aggregate queries below need every row actually applied
+        // first, same reasoning as the other round-trip tests in this file.
+        insert_req.set_durabilitymode(XStore_Proto::SYNC);
+        *insert_req.mutable_data() = MakeRow({FDouble(values[i])});
+        SendRequest<XStore_Proto::UnaryInsert_REP>(Wrap(insert_req));
+    }
+
+    XStore_Proto::Variance_REQ variance_req;
+    variance_req.set_rtype(XStore_Proto::VARIANCE);
+    variance_req.set_dbname("ZMQ_VARSTDDEV_DB");
+    variance_req.set_starttime(TS_2020_MID);
+    variance_req.set_endtime(TS_2020_MID + values.size() - 1);
+    variance_req.set_columnidx(0);
+    auto variance_rep = SendRequest<XStore_Proto::Variance_REP>(Wrap(variance_req));
+    EXPECT_EQ(variance_rep.opstatus(), "SUCCESS");
+    EXPECT_NEAR(variance_rep.opresult(), 32.0 / 7.0, 1e-6);
+
+    XStore_Proto::Stddev_REQ stddev_req;
+    stddev_req.set_rtype(XStore_Proto::STDDEV);
+    stddev_req.set_dbname("ZMQ_VARSTDDEV_DB");
+    stddev_req.set_starttime(TS_2020_MID);
+    stddev_req.set_endtime(TS_2020_MID + values.size() - 1);
+    stddev_req.set_columnidx(0);
+    auto stddev_rep = SendRequest<XStore_Proto::Stddev_REP>(Wrap(stddev_req));
+    EXPECT_EQ(stddev_rep.opstatus(), "SUCCESS");
+    EXPECT_NEAR(stddev_rep.opresult(), std::sqrt(32.0 / 7.0), 1e-6);
 }
 
 // ---------------------------------------------------------------------
