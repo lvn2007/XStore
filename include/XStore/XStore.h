@@ -419,9 +419,13 @@ class XStore {
                                      ValueStruct& best_value, XStore_Proto::FData& best_data);
 
         // Accumulate kernel: running sum + valid-row count. Backs SUM directly, AVG divides after.
+        // sum_sq_out is an optional running sum-of-squares fold for VARIANCE/STDDEV
+        // (Task 2) -- nullptr (the default) skips it entirely, so SUM/AVG's call
+        // sites are untouched.
         void ProcessFileRangeAccumulate(const char* rows_base, unsigned long long total_rows,
                                          size_t row_len, unsigned short column_idx,
-                                         double& sum_out, unsigned long long& valid_count_out);
+                                         double& sum_out, unsigned long long& valid_count_out,
+                                         double *sum_sq_out = nullptr);
 
         // Shared by MinAggregate/MaxAggregate (Task 6): splits one
         // WalkYearSpan segment into its zone-map blocks and, for each,
@@ -451,10 +455,16 @@ class XStore {
         // -- a block only partially covered by the query still needs a
         // real ProcessFileRangeAccumulate scan, since the zone map's sum
         // covers the whole block, not just the queried slice of it.
+        // sum_sq_out (Task 2, VARIANCE/STDDEV): optional running sum-of-squares
+        // fold, mirrored alongside sum_out/valid_count_out -- a block that takes
+        // the zero-scan pushdown branch adds e.sum_sq_value, a block that falls
+        // back to a real scan forwards the pointer into ProcessFileRangeAccumulate.
+        // nullptr (the default) preserves SUM/AVG's call sites byte-for-byte.
         void AccumulateSegmentWithZoneMapPushdown(const std::string &db_base_path, unsigned short year, uint16_t row_length,
                                                    const char *rows_base, unsigned long long rows_to_process,
                                                    unsigned long long first_row_index, unsigned short column_idx,
-                                                   double &sum_out, unsigned long long &valid_count_out);
+                                                   double &sum_out, unsigned long long &valid_count_out,
+                                                   double *sum_sq_out = nullptr);
 
         // MIN - AGGREGATE
         void MinAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Min_REP *return_data);
@@ -467,6 +477,12 @@ class XStore {
 
         // AVG - AGGREGATE
         void AvgAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Avg_REP *return_data);
+
+        // VARIANCE - AGGREGATE (sample variance, divisor N-1)
+        void VarianceAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Variance_REP *return_data);
+
+        // STDDEV - AGGREGATE (sqrt of sample variance)
+        void StddevAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Stddev_REP *return_data);
 
         // Initialize DB
         void InitDB();

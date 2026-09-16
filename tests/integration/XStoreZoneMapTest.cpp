@@ -405,6 +405,34 @@ TEST_F(XStoreZoneMapTest, AvgAggregateUsesPushdownSumAndCountForFullyCoveredBloc
     EXPECT_DOUBLE_EQ(avg_rep.opresult(), expected_sum / static_cast<double>(rows_per_block));
 }
 
+TEST_F(XStoreZoneMapTest, VarianceAggregatePushesDownThroughFullyCoveredBlock) {
+    // Same fully-covered-block technique as SumAggregateUsesPrecomputedSumForFullyCoveredBlocks
+    // above -- one row per slot in a full block, so AccumulateSegmentWithZoneMapPushdown
+    // takes the zero-scan pushdown branch (using ZoneMapEntry.sum_sq_value) rather
+    // than falling back to a real ProcessFileRangeAccumulate scan.
+    XStore store;
+    CreateTestDb(store, "ZMAPVAR", XStore_Proto::SECOND, kWideRowLength);
+    uint64_t rows_per_block = RowsPerBlock(kWideRowLength);
+    unsigned long long base = 1700000000ULL;
+    double sum = 0.0, sum_sq = 0.0;
+    for (uint64_t i = 0; i < rows_per_block; ++i) {
+        XStore_Proto::UnaryInsert_REP rep;
+        XStore_Proto::RowData row;
+        double v = static_cast<double>(i);
+        row.add_fielddata()->set_doubledata(v);
+        store.UnaryInsert(base + i, row, "ZMAPVAR", &rep, XStore_Proto::SYNC);
+        sum += v;
+        sum_sq += v * v;
+    }
+    double n = static_cast<double>(rows_per_block);
+    double expected_variance = (sum_sq - sum * sum / n) / (n - 1.0);
+
+    XStore_Proto::Variance_REP var_rep;
+    store.VarianceAggregate(base, base + rows_per_block, "ZMAPVAR", 0, &var_rep);
+    ASSERT_EQ(var_rep.opstatus(), "SUCCESS");
+    EXPECT_NEAR(var_rep.opresult(), expected_variance, 1e-6);
+}
+
 } // namespace
 
 namespace {

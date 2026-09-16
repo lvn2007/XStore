@@ -5,6 +5,7 @@
 #include <spdlog/fmt/fmt.h>
 #include "include/Logger/Logger.h"
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <functional>
 #include <sys/mman.h>
@@ -161,6 +162,15 @@ struct SumPartial {
     double sum = 0.0;
     unsigned long long count = 0;
 };
+
+// Per-thread partial state for Variance/Stddev's parallel merge -- a
+// sibling of SumPartial rather than widening it, since Sum/Avg never need
+// sum_sq and a shared struct would carry dead weight into their hot path.
+struct VariancePartial {
+    double sum = 0.0;
+    double sum_sq = 0.0;
+    unsigned long long count = 0;
+};
 }  // namespace
 
 template <typename Cmp, typename PruneCheck>
@@ -200,7 +210,8 @@ void XStore::ScanSegmentWithZoneMapPruning(const std::string &db_base_path, unsi
 void XStore::AccumulateSegmentWithZoneMapPushdown(const std::string &db_base_path, unsigned short year, uint16_t row_length,
                                                    const char *rows_base, unsigned long long rows_to_process,
                                                    unsigned long long first_row_index, unsigned short column_idx,
-                                                   double &sum_out, unsigned long long &valid_count_out) {
+                                                   double &sum_out, unsigned long long &valid_count_out,
+                                                   double *sum_sq_out) {
     if (rows_to_process == 0) return;
 
     ZoneMapFile &zmap = GetOrOpenZoneMap(db_base_path, year, row_length);
@@ -226,6 +237,7 @@ void XStore::AccumulateSegmentWithZoneMapPushdown(const std::string &db_base_pat
             const ZoneMapEntry &e = (*stats)[column_idx];
             sum_out += e.sum_value;
             valid_count_out += e.valid_count;
+            if (sum_sq_out) *sum_sq_out += e.sum_sq_value;
             continue; // zero-scan pushdown
         }
 
@@ -233,7 +245,7 @@ void XStore::AccumulateSegmentWithZoneMapPushdown(const std::string &db_base_pat
         uint64_t block_last_row = std::min(last_row, block_own_last_row);
         uint64_t block_row_count = block_last_row - block_first_row + 1;
         const char *block_rows_base = rows_base + (block_first_row - first_row) * row_length;
-        ProcessFileRangeAccumulate(block_rows_base, block_row_count, row_length, column_idx, sum_out, valid_count_out);
+        ProcessFileRangeAccumulate(block_rows_base, block_row_count, row_length, column_idx, sum_out, valid_count_out, sum_sq_out);
     }
 }
 
@@ -441,5 +453,102 @@ void XStore::AvgAggregate(unsigned long long int start_epoch_t, unsigned long lo
     } else {
         return_data->set_opstatus("ERROR: No valid data found");
         spdlog::warn("[AVG AGGREGATE] [DB: {}] - No valid data for column {} over [{}, {}]", db_name, column_idx, start_epoch_t, end_epoch_t);
+    }
+}
+
+void XStore::VarianceAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
+                                std::string_view db_name_view, unsigned short int column_idx, XStore_Proto::Variance_REP *return_data) {
+
+    const std::string &db_name = UpperCaseInto(db_name_view);
+    const std::string &db_base_path_str = CachedDbBasePath(db_name);
+
+    XStore_Proto::ConfigStruct cfg_struct;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+        std::string err_msg = fmt::format("[VARIANCE AGGREGATE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return;
+    }
+
+    if (start_epoch_t > end_epoch_t) {
+        std::string err_msg = fmt::format("[VARIANCE AGGREGATE] [DB: {}] - Target end time must be after start time", db_name);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return;
+    }
+
+    // Sample variance (N-1), naive sum/sum-of-squares -- never Welford's/
+    // Chan's algorithm (plan requirement). See AccumulateSegmentWithZoneMapPushdown
+    // for how sum_sq folds through both the pushdown and real-scan paths.
+    VariancePartial final = WalkYearSpanParallel<VariancePartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
+        VariancePartial{},
+        [&](VariancePartial &partial, const char *rows_base, unsigned long long rows_to_process,
+            unsigned short year, unsigned long long first_row_index) {
+            AccumulateSegmentWithZoneMapPushdown(db_base_path_str, year, cfg_struct.rowlength(),
+                rows_base, rows_to_process, first_row_index, column_idx, partial.sum, partial.count, &partial.sum_sq);
+        },
+        [](VariancePartial &final_state, VariancePartial &partial) {
+            final_state.sum += partial.sum;
+            final_state.sum_sq += partial.sum_sq;
+            final_state.count += partial.count;
+        });
+
+    if (final.count > 1) {
+        double n = static_cast<double>(final.count);
+        double variance = (final.sum_sq - (final.sum * final.sum) / n) / (n - 1.0);
+        if (variance < 0.0) variance = 0.0; // floating-point cancellation guard
+        return_data->set_opstatus("SUCCESS");
+        return_data->set_opresult(variance);
+    } else {
+        return_data->set_opstatus("ERROR: No valid data found");
+        spdlog::warn("[VARIANCE AGGREGATE] [DB: {}] - No valid data for column {} over [{}, {}]", db_name, column_idx, start_epoch_t, end_epoch_t);
+    }
+}
+
+void XStore::StddevAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
+                              std::string_view db_name_view, unsigned short int column_idx, XStore_Proto::Stddev_REP *return_data) {
+
+    const std::string &db_name = UpperCaseInto(db_name_view);
+    const std::string &db_base_path_str = CachedDbBasePath(db_name);
+
+    XStore_Proto::ConfigStruct cfg_struct;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+        std::string err_msg = fmt::format("[STDDEV AGGREGATE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return;
+    }
+
+    if (start_epoch_t > end_epoch_t) {
+        std::string err_msg = fmt::format("[STDDEV AGGREGATE] [DB: {}] - Target end time must be after start time", db_name);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return;
+    }
+
+    // Same naive sum/sum-of-squares sample-variance computation as
+    // VarianceAggregate -- Stddev is just its sqrt.
+    VariancePartial final = WalkYearSpanParallel<VariancePartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
+        VariancePartial{},
+        [&](VariancePartial &partial, const char *rows_base, unsigned long long rows_to_process,
+            unsigned short year, unsigned long long first_row_index) {
+            AccumulateSegmentWithZoneMapPushdown(db_base_path_str, year, cfg_struct.rowlength(),
+                rows_base, rows_to_process, first_row_index, column_idx, partial.sum, partial.count, &partial.sum_sq);
+        },
+        [](VariancePartial &final_state, VariancePartial &partial) {
+            final_state.sum += partial.sum;
+            final_state.sum_sq += partial.sum_sq;
+            final_state.count += partial.count;
+        });
+
+    if (final.count > 1) {
+        double n = static_cast<double>(final.count);
+        double variance = (final.sum_sq - (final.sum * final.sum) / n) / (n - 1.0);
+        if (variance < 0.0) variance = 0.0; // floating-point cancellation guard
+        return_data->set_opstatus("SUCCESS");
+        return_data->set_opresult(std::sqrt(variance));
+    } else {
+        return_data->set_opstatus("ERROR: No valid data found");
+        spdlog::warn("[STDDEV AGGREGATE] [DB: {}] - No valid data for column {} over [{}, {}]", db_name, column_idx, start_epoch_t, end_epoch_t);
     }
 }

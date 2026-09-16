@@ -30,6 +30,8 @@ enum RequestType {
   SUM = 15;
   AVG = 16;
   PING = 17;
+  VARIANCE = 18;
+  STDDEV = 19;
 }
 
 enum TimeUnit {
@@ -262,6 +264,24 @@ message Avg_REQ {
   sint32 columnIdx = 5;
 }
 
+// --- VARIANCE
+message Variance_REQ {
+  RequestType RType = 1;
+  uint64 startTime = 2;
+  uint64 endTime = 3;
+  string dbName = 4;
+  sint32 columnIdx = 5;
+}
+
+// --- STDDEV
+message Stddev_REQ {
+  RequestType RType = 1;
+  uint64 startTime = 2;
+  uint64 endTime = 3;
+  string dbName = 4;
+  sint32 columnIdx = 5;
+}
+
 // --- Envelope: one wire message carries exactly one of these. The oneof
 // case (payload_case()) replaces RType as the dispatch tag, so a request
 // only needs to be parsed once server-side.
@@ -285,6 +305,8 @@ message Request {
     Sum_REQ sum = 16;
     Avg_REQ avg = 17;
     ReqCMD ping = 18;
+    Variance_REQ variance = 19;
+    Stddev_REQ stddev = 20;
   }
 }
 
@@ -435,6 +457,18 @@ message Sum_REP {
 
 // --- AVG
 message Avg_REP {
+  double opResult = 1;
+  string opStatus = 2;
+}
+
+// --- VARIANCE
+message Variance_REP {
+  double opResult = 1;
+  string opStatus = 2;
+}
+
+// --- STDDEV
+message Stddev_REP {
   double opResult = 1;
   string opStatus = 2;
 }

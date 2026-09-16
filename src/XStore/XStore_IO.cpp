@@ -378,7 +378,8 @@ template void XStore::ProcessFileRangeSelect<std::greater<long double>>(
 
 void XStore::ProcessFileRangeAccumulate(const char* rows_base, unsigned long long total_rows,
                                          size_t row_len, unsigned short column_idx,
-                                         double& sum_out, unsigned long long& valid_count_out) {
+                                         double& sum_out, unsigned long long& valid_count_out,
+                                         double *sum_sq_out) {
 
     if (total_rows == 0) return;
 
@@ -395,8 +396,10 @@ void XStore::ProcessFileRangeAccumulate(const char* rows_base, unsigned long lon
 
         if (curr_data.oneOfData_case() > 0 && curr_data.oneOfData_case() <= 12) {
             XStore::GetFDataValue(&curr_data, &temp_value);
-            sum_out += (double)temp_value.value;
+            double v = (double)temp_value.value;
+            sum_out += v;
             valid_count_out++;
+            if (sum_sq_out) *sum_sq_out += v * v;
         }
     }
 }

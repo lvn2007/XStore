@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -2978,6 +2979,90 @@ TEST_F(XStoreTest, ConcurrentMinAggregateDuringConcurrentInsertsDoesNotCrashOrTe
     std::thread a(aggregator);
     w.join();
     a.join();
+}
+
+// ---------------------------------------------------------------------
+// Variance / Stddev
+// ---------------------------------------------------------------------
+
+TEST_F(XStoreTest, VarianceAggregateMatchesHandComputedSampleVariance) {
+    XStore store;
+    CreateTestDb(store, "VARTEST", XStore_Proto::SECOND, 64);
+
+    // Values: 2, 4, 4, 4, 5, 5, 7, 9 -- textbook sample-variance example,
+    // mean=5, sample variance (N-1) = 32/7 ~= 4.571428571428571.
+    const std::vector<double> values = {2, 4, 4, 4, 5, 5, 7, 9};
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    for (size_t i = 0; i < values.size(); ++i) {
+        store.UnaryInsert(1000 + i, MakeRow({FDouble(values[i])}), "VARTEST", &insert_rep);
+    }
+
+    XStore_Proto::Variance_REP var_rep;
+    store.VarianceAggregate(1000, 1000 + values.size() - 1, "VARTEST", 0, &var_rep);
+
+    ASSERT_EQ(var_rep.opstatus(), "SUCCESS");
+    EXPECT_NEAR(var_rep.opresult(), 32.0 / 7.0, 1e-9);
+}
+
+TEST_F(XStoreTest, StddevAggregateMatchesSqrtOfVariance) {
+    XStore store;
+    CreateTestDb(store, "STDDEVTEST", XStore_Proto::SECOND, 64);
+
+    const std::vector<double> values = {2, 4, 4, 4, 5, 5, 7, 9};
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    for (size_t i = 0; i < values.size(); ++i) {
+        store.UnaryInsert(1000 + i, MakeRow({FDouble(values[i])}), "STDDEVTEST", &insert_rep);
+    }
+
+    XStore_Proto::Stddev_REP stddev_rep;
+    store.StddevAggregate(1000, 1000 + values.size() - 1, "STDDEVTEST", 0, &stddev_rep);
+
+    ASSERT_EQ(stddev_rep.opstatus(), "SUCCESS");
+    EXPECT_NEAR(stddev_rep.opresult(), std::sqrt(32.0 / 7.0), 1e-9);
+}
+
+TEST_F(XStoreTest, VarianceAggregatePartialBlockForcesRealScanFallback) {
+    // Small row_length (128) -> RowsPerBlock == 2MB / 128 == 16384, so 200
+    // rows sit entirely inside block 0's much larger extent. Querying only
+    // half of the inserted range therefore lands inside a block that is
+    // NOT fully covered by the query -- AccumulateSegmentWithZoneMapPushdown
+    // must take the ProcessFileRangeAccumulate fallback branch for it, not
+    // the zero-scan pushdown branch, since block_fully_in_range is false.
+    XStore store;
+    CreateTestDb(store, "VARPARTIAL", XStore_Proto::SECOND, 128);
+
+    std::vector<double> values;
+    for (int i = 0; i < 200; ++i) values.push_back(static_cast<double>(i) * 1.5);
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    for (size_t i = 0; i < values.size(); ++i) {
+        store.UnaryInsert(1000 + i, MakeRow({FDouble(values[i])}), "VARPARTIAL", &insert_rep);
+    }
+
+    // Query only the first half of the inserted range.
+    size_t half = values.size() / 2;
+    double sum = 0.0, sum_sq = 0.0;
+    for (size_t i = 0; i < half; ++i) { sum += values[i]; sum_sq += values[i] * values[i]; }
+    double n = static_cast<double>(half);
+    double expected_variance = (sum_sq - sum * sum / n) / (n - 1.0);
+
+    XStore_Proto::Variance_REP var_rep;
+    store.VarianceAggregate(1000, 1000 + half - 1, "VARPARTIAL", 0, &var_rep);
+
+    ASSERT_EQ(var_rep.opstatus(), "SUCCESS");
+    EXPECT_NEAR(var_rep.opresult(), expected_variance, 1e-6);
+}
+
+TEST_F(XStoreTest, VarianceAggregateWithSingleRowReturnsNoValidData) {
+    XStore store;
+    CreateTestDb(store, "VARSINGLE", XStore_Proto::SECOND, 64);
+
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    store.UnaryInsert(1000, MakeRow({FDouble(42.0)}), "VARSINGLE", &insert_rep);
+
+    XStore_Proto::Variance_REP var_rep;
+    store.VarianceAggregate(1000, 1000, "VARSINGLE", 0, &var_rep);
+
+    EXPECT_EQ(var_rep.opstatus(), "ERROR: No valid data found");
 }
 
 // ---------------------------------------------------------------------
