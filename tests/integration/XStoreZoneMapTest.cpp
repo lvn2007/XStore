@@ -4,6 +4,9 @@
 #include "XStoreTestSupport.h"
 #include <filesystem>
 #include <type_traits>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
 
 // Same anonymous-namespace + using-declaration convention as
 // XStoreWalTest.cpp -- keeps this file's helpers/fixture from colliding
@@ -33,7 +36,7 @@ TEST(ZoneMapMathTest, BlockIndexForRowIsIntegerDivision) {
 TEST(ZoneMapEntryLayoutTest, EntryIsFixedWidthPodForRawFileIo) {
     static_assert(std::is_trivially_copyable<ZoneMapEntry>::value,
                   "ZoneMapEntry must be trivially copyable for raw pread/pwrite");
-    EXPECT_EQ(sizeof(ZoneMapEntry), 40u);
+    EXPECT_EQ(sizeof(ZoneMapEntry), 48u);
 }
 
 TEST(ZoneMapFileTest, SequentialUpdatesToSameBlockAreVisibleImmediately) {
@@ -400,6 +403,78 @@ TEST_F(XStoreZoneMapTest, AvgAggregateUsesPushdownSumAndCountForFullyCoveredBloc
     XStore_Proto::Avg_REP avg_rep;
     store.AvgAggregate(base, base + rows_per_block, "ZMAPAVG", 0, &avg_rep);
     EXPECT_DOUBLE_EQ(avg_rep.opresult(), expected_sum / static_cast<double>(rows_per_block));
+}
+
+} // namespace
+
+namespace {
+
+using xstore_test::ScratchDir;
+
+class ZoneMapFileVersionTest : public ::testing::Test {
+protected:
+    std::unique_ptr<ScratchDir> scratch;
+
+    void SetUp() override {
+        scratch = std::make_unique<ScratchDir>("zone_map_file_test_fixture");
+    }
+
+    void TearDown() override {
+        scratch.reset();
+    }
+
+    std::string TestFilePath(const std::string &filename) {
+        return (scratch->test_root / filename).string();
+    }
+};
+
+TEST_F(ZoneMapFileVersionTest, UpdateRowFoldsSumOfSquaresIntoEntry) {
+    ZoneMapFile zmap;
+    std::string path = TestFilePath("sumsq.zmap");
+    ASSERT_TRUE(zmap.Open(path, /*row_length=*/64));
+
+    zmap.UpdateRow(0, {{/*column_idx=*/0, /*value=*/3.0, /*is_numeric=*/true}});
+    zmap.UpdateRow(1, {{/*column_idx=*/0, /*value=*/4.0, /*is_numeric=*/true}});
+
+    auto stats = zmap.TryGetBlockStats(0);
+    ASSERT_TRUE(stats.has_value());
+    const ZoneMapEntry &e = (*stats)[0];
+    EXPECT_DOUBLE_EQ(e.sum_value, 7.0);
+    EXPECT_DOUBLE_EQ(e.sum_sq_value, 25.0); // 3*3 + 4*4
+    EXPECT_EQ(e.valid_count, 2u);
+}
+
+TEST_F(ZoneMapFileVersionTest, OpenDiscardsStaleVersionFileInsteadOfMisreadingIt) {
+    std::string path = TestFilePath("stale_version.zmap");
+
+    // Hand-write a v1-shaped header directly (bypassing ZoneMapFile
+    // entirely) to simulate a file written before sum_sq_value existed.
+    {
+        ZoneMapFileHeader old_header;
+        old_header.version = 1; // stale -- current ZONE_MAP_VERSION is 2
+        old_header.tracked_column_count = 64;
+        old_header.rows_per_block = 100;
+        int fd = open(path.c_str(), O_RDWR | O_CREAT, 0644);
+        ASSERT_GE(fd, 0);
+        ASSERT_EQ(pwrite(fd, &old_header, sizeof(old_header), 0), static_cast<ssize_t>(sizeof(old_header)));
+        close(fd);
+    }
+
+    ZoneMapFile zmap;
+    ASSERT_TRUE(zmap.Open(path, /*row_length=*/64));
+
+    // File must now behave as a fresh, empty, correctly-sized v2 zone map --
+    // not crash, not return garbage read through the old 40-byte layout.
+    auto stats = zmap.TryGetBlockStats(0);
+    ASSERT_TRUE(stats.has_value());
+    EXPECT_EQ((*stats)[0].valid_count, 0u);
+
+    // And it must be fully usable afterward -- a real update roundtrips.
+    zmap.UpdateRow(0, {{0, 5.0, true}});
+    auto stats2 = zmap.TryGetBlockStats(0);
+    ASSERT_TRUE(stats2.has_value());
+    EXPECT_DOUBLE_EQ((*stats2)[0].sum_value, 5.0);
+    EXPECT_DOUBLE_EQ((*stats2)[0].sum_sq_value, 25.0);
 }
 
 } // namespace

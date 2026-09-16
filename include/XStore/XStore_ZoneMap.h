@@ -18,25 +18,33 @@ inline uint64_t BlockIndexForRow(uint64_t row_index, uint64_t rows_per_block) {
     return row_index / rows_per_block;
 }
 
-// One (block, column) summary. min_value/max_value are only meaningful when
-// valid_count > 0 -- a never-observed column in a block has valid_count==0
-// and min_value/max_value left at their sentinel (see ZoneMapFile::
-// ZeroedEntry). Persisted as raw bytes (pread/pwrite), never protobuf --
-// this file never crosses the wire.
+// One (block, column) summary. min_value/max_value/sum_sq_value are only
+// meaningful when valid_count > 0 -- a never-observed column in a block has
+// valid_count==0 and min_value/max_value left at their sentinel (see
+// ZoneMapFile::ZeroedEntry). Persisted as raw bytes (pread/pwrite), never
+// protobuf -- this file never crosses the wire.
 struct ZoneMapEntry {
     double   min_value;
     double   max_value;
     double   sum_value;
+    double   sum_sq_value;   // sum of squares, for VARIANCE/STDDEV pushdown -- see 2026-09-15 design doc
     uint64_t valid_count;   // rows in this block where the column was numeric and set
     uint64_t null_count;    // rows in this block where the column was a hole or non-numeric
 };
 static_assert(std::is_trivially_copyable<ZoneMapEntry>::value,
               "ZoneMapEntry must be trivially copyable for raw pread/pwrite");
-static_assert(sizeof(ZoneMapEntry) == 40, "update size-dependent capacity-planning docs if this changes");
+static_assert(sizeof(ZoneMapEntry) == 48, "update size-dependent capacity-planning docs (docs/XStore_Technical_Reference.md §4.14) if this changes");
+
+// Bumped 1 -> 2 when ZoneMapEntry grew sum_sq_value (40 -> 48 bytes). A file
+// written under an older version is never migrated in place -- ZoneMapFile::
+// Open() truncates and reinitializes it instead (see Open's comment). Named
+// out so a future format change is a one-line bump + rebuild, not a magic-
+// number hunt across the codebase.
+inline constexpr uint32_t ZONE_MAP_VERSION = 2;
 
 struct ZoneMapFileHeader {
     uint32_t magic   = 0x5A4D4150; // 'ZMAP'
-    uint32_t version = 1;
+    uint32_t version = ZONE_MAP_VERSION;
     uint32_t tracked_column_count = 0;
     uint64_t rows_per_block = 0;
 };
@@ -88,6 +96,11 @@ private:
     void EnsureBlockLoaded(uint64_t block_index);
     void EvictIfOverCapacity();
     off_t BlockFileOffset(uint64_t block_index) const;
+    // Resets header_ to a fresh, empty v2 header and writes it to offset 0
+    // -- shared by first-time file creation and by Open()'s stale-version
+    // discard path, so there's exactly one place that constructs a valid
+    // fresh header.
+    bool WriteFreshHeader(uint16_t row_length);
 
     int fd_ = -1;
     ZoneMapFileHeader header_;

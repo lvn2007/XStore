@@ -16,21 +16,36 @@ bool ZoneMapFile::Open(const std::string &path, uint16_t row_length) {
         if (read_bytes != static_cast<ssize_t>(sizeof(header_)) || header_.magic != ZoneMapFileHeader{}.magic) {
             return false; // corrupt/foreign file -- caller falls back to no acceleration
         }
-    } else {
-        header_ = ZoneMapFileHeader{};
-        header_.tracked_column_count = XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS;
-        header_.rows_per_block = RowsPerBlock(row_length);
-        ssize_t written = pwrite(fd_, &header_, sizeof(header_), 0);
-        if (written != static_cast<ssize_t>(sizeof(header_))) {
-            // Short/failed header write -- the file can't be trusted as a
-            // valid zone map (a future reopen could misread rows_per_block
-            // or tracked_column_count from a partially-written header, then
-            // silently mis-index every block against it). Fail Open() so the
-            // caller falls back to no acceleration rather than proceeding on
-            // a header that isn't durably correct.
-            spdlog::error("[ZONE MAP] - Failed to write header to {}", path);
-            return false;
+        if (header_.version != ZONE_MAP_VERSION) {
+            // A zone map is always a derived, rebuildable index, never a
+            // source of truth (TryGetBlockStats already treats "no
+            // coverage" as a valid answer, not an error) -- discarding
+            // old-format bytes is always safe: the only effect is losing
+            // pushdown acceleration for this file until XStore::InitDB's
+            // startup rebuild (see Task 5) repopulates it from raw data.
+            // Truncating and rewriting a fresh header is simpler and just
+            // as safe as trying to migrate old 40-byte entries into the
+            // new 48-byte layout in place.
+            if (ftruncate(fd_, 0) != 0) {
+                spdlog::error("[ZONE MAP] - Failed to truncate stale {}", path);
+                return false;
+            }
+            return WriteFreshHeader(row_length);
         }
+    } else {
+        return WriteFreshHeader(row_length);
+    }
+    return true;
+}
+
+bool ZoneMapFile::WriteFreshHeader(uint16_t row_length) {
+    header_ = ZoneMapFileHeader{};
+    header_.tracked_column_count = XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS;
+    header_.rows_per_block = RowsPerBlock(row_length);
+    ssize_t written = pwrite(fd_, &header_, sizeof(header_), 0);
+    if (written != static_cast<ssize_t>(sizeof(header_))) {
+        spdlog::error("[ZONE MAP] - Failed to write header to zone map file");
+        return false;
     }
     return true;
 }
@@ -43,7 +58,7 @@ off_t ZoneMapFile::BlockFileOffset(uint64_t block_index) const {
 void ZoneMapFile::EnsureBlockLoaded(uint64_t block_index) {
     if (cache_.count(block_index)) return;
 
-    std::vector<ZoneMapEntry> entries(header_.tracked_column_count, ZoneMapEntry{0, 0, 0, 0, 0});
+    std::vector<ZoneMapEntry> entries(header_.tracked_column_count, ZoneMapEntry{0, 0, 0, 0, 0, 0});
 
     off_t offset = BlockFileOffset(block_index);
     struct stat st{};
@@ -85,6 +100,7 @@ void ZoneMapFile::UpdateRow(uint64_t row_index, const std::vector<ZoneMapObserva
             e.min_value = (e.valid_count == 0) ? obs.value : std::min(e.min_value, obs.value);
             e.max_value = (e.valid_count == 0) ? obs.value : std::max(e.max_value, obs.value);
             e.sum_value += obs.value;
+            e.sum_sq_value += obs.value * obs.value;
             e.valid_count++;
         } else {
             e.null_count++;
@@ -120,7 +136,7 @@ std::optional<std::vector<ZoneMapEntry>> ZoneMapFile::TryGetBlockStats(uint64_t 
     if (fstat(fd_, &st) != 0) return std::nullopt; // real I/O failure
     if (st.st_size < offset + static_cast<off_t>(header_.tracked_column_count * sizeof(ZoneMapEntry))) {
         // Never-touched block -- a real, safe zero'd answer, not an error.
-        return std::vector<ZoneMapEntry>(header_.tracked_column_count, ZoneMapEntry{0, 0, 0, 0, 0});
+        return std::vector<ZoneMapEntry>(header_.tracked_column_count, ZoneMapEntry{0, 0, 0, 0, 0, 0});
     }
     std::vector<ZoneMapEntry> entries(header_.tracked_column_count);
     ssize_t read_bytes = pread(fd_, entries.data(), header_.tracked_column_count * sizeof(ZoneMapEntry), offset);
