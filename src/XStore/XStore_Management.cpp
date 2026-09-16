@@ -232,7 +232,43 @@ XStore_Proto::SysInfo_REP XStore::InfoQuery(std::string_view server_addr, int th
     return to_return;
 }
 
-XStore_Proto::CreateDB_REP XStore::CreateDB(std::string_view db_name_view, XStore_Proto::TimeUnit time_resolution, short int row_length) {
+uint32_t XStore::EffectiveTrackedColumnCount(const XStore_Proto::ConfigStruct &cfg_struct) {
+    uint32_t seeded = cfg_struct.columncount();
+    return seeded > 0 ? seeded : XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS;
+}
+
+void XStore::MaybeGrowColumnCount(const std::string &db_name, const std::string &db_base_path, int observed_column_count) {
+    if (observed_column_count <= 0) return;
+
+    XStore_Proto::ConfigStruct cfg_struct;
+    if (!GetOrLoadCfg(db_name, db_base_path, cfg_struct)) return; // CFG missing is handled elsewhere; nothing to grow
+
+    if (static_cast<uint32_t>(observed_column_count) <= cfg_struct.columncount()) return; // fast path: no growth, no I/O
+
+    // Rare path: this row is wider than anything seen before for this DB.
+    // Re-check under the cache's own write path (PutCfg takes the shard's
+    // exclusive lock internally) rather than a separate lock here -- a
+    // lost race just means two threads both persist the same (correct)
+    // grown value, never a torn/incorrect one.
+    cfg_struct.set_columncount(static_cast<uint32_t>(observed_column_count));
+
+    std::string cfg_path = JoinPath(db_base_path, db_name + ".CFG");
+    FILE *b_file = std::fopen(cfg_path.c_str(), "wb+");
+    if (b_file == nullptr) {
+        spdlog::error("[COLUMN COUNT GROWTH] [DB: {}] - Unable to open {} for rewrite", db_name, cfg_path);
+        return;
+    }
+    {
+        FileRangeLockGuard guard(cfg_path, 0, cfg_struct.ByteSizeLong(), FileRangeLock::LockType::WRITE);
+        cfg_struct.SerializeToFileDescriptor(fileno(b_file));
+    }
+    std::fclose(b_file);
+
+    PutCfg(db_name, cfg_struct);
+    spdlog::info("[COLUMN COUNT GROWTH] [DB: {}] - columnCount grew to {}", db_name, observed_column_count);
+}
+
+XStore_Proto::CreateDB_REP XStore::CreateDB(std::string_view db_name_view, XStore_Proto::TimeUnit time_resolution, short int row_length, uint32_t column_count_seed) {
     // Protobuf obj to be returned
     XStore_Proto::CreateDB_REP to_return;
     std::string create_db_status;
@@ -276,6 +312,7 @@ XStore_Proto::CreateDB_REP XStore::CreateDB(std::string_view db_name_view, XStor
             cfg_struct.set_dbname(db_name);
             cfg_struct.set_timeresolution(time_resolution);
             cfg_struct.set_rowlength(row_length);
+            cfg_struct.set_columncount(column_count_seed);
 
             // Writing cfgStruct to file
             FILE *b_file;

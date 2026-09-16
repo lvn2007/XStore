@@ -66,18 +66,21 @@ inline void AppendToYearBucket(YearBucketMap &buckets, unsigned short int year, 
 // private static). Built once at WAL enqueue time (row_bytes --
 // already-serialized wire bytes -- is all ApplyWalRecord has later, not the
 // original RowData, so this can't be deferred to apply time). Always emits
-// exactly ZONE_MAP_MAX_TRACKED_COLUMNS observations, one per tracked
-// column, never fewer: a column past the row's own fielddata_size() is
-// exactly as much a hole as an explicitly unset field at a present index
+// exactly tracked_column_count observations, one per tracked column, never
+// fewer: a column past the row's own fielddata_size() is exactly as much a
+// hole as an explicitly unset field at a present index
 // (XStoreZoneMapTest.UnaryInsertTreatsHoleAsNullNotZero -- an entirely
 // empty row still records a hole at column 0), so this does NOT stop at
-// row.fielddata_size(). Numeric-case check mirrors
-// ProcessFileRangeSelect/ProcessFileRangeAccumulate's own oneOfData_case()
-// guard (XStore_IO.cpp) -- same "1..12 is numeric" rule the aggregate
-// kernels already use, so a bool/string/bytes column is a hole here too,
-// not a crash or a silently-wrong 0.
-inline std::vector<ZoneMapObservation> XStore::BuildZoneMapObservations(XStore &store, const XStore_Proto::RowData &row) {
-    const int tracked = static_cast<int>(XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS);
+// row.fielddata_size(). tracked_column_count comes from
+// XStore::EffectiveTrackedColumnCount(cfg_struct) at every call site --
+// the per-DB columnCount high-water mark when it's been seeded/grown past
+// 0, otherwise the global ZONE_MAP_MAX_TRACKED_COLUMNS default. Numeric-case
+// check mirrors ProcessFileRangeSelect/ProcessFileRangeAccumulate's own
+// oneOfData_case() guard (XStore_IO.cpp) -- same "1..12 is numeric" rule the
+// aggregate kernels already use, so a bool/string/bytes column is a hole
+// here too, not a crash or a silently-wrong 0.
+inline std::vector<ZoneMapObservation> XStore::BuildZoneMapObservations(XStore &store, const XStore_Proto::RowData &row, uint32_t tracked_column_count) {
+    const int tracked = static_cast<int>(tracked_column_count);
     std::vector<ZoneMapObservation> observations;
     observations.reserve(static_cast<size_t>(tracked));
     for (int col = 0; col < tracked; ++col) {

@@ -81,6 +81,12 @@ message ConfigStruct {
   string dbName = 1;
   TimeUnit timeResolution = 2;
   sfixed32 rowLength = 3;
+  // Persisted current high-water mark of "highest populated column index +
+  // 1" ever observed for this DB, auto-updated on insert (never enforced).
+  // Sizes the zone map's tracked-column cap for this DB, replacing the
+  // single global ZONE_MAP_MAX_TRACKED_COLUMNS default. 0 = never grown
+  // past the global default.
+  uint32 columnCount = 4;
 }
 
 message FData {
@@ -122,6 +128,11 @@ message CreateDB_REQ {
   string dbName = 2;
   TimeUnit timeResolution = 3;
   uint32 rowLength = 4;
+  // Optional seed for the zone-map tracked-column high-water mark (see
+  // ConfigStruct.columnCount below). 0 = unseeded, purely auto-tracked from
+  // observed inserts. Never enforced against insert width -- see the
+  // 2026-09-15 design doc's "Per-DB column count" section.
+  uint32 columnCount = 5;
 }
 
 // --- REMOVE DB request

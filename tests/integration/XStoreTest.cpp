@@ -227,6 +227,55 @@ TEST_F(XStoreTest, CreateDBRejectsNanosecondResolution) {
 }
 
 // ---------------------------------------------------------------------
+// columnCount high-water mark (per-DB, auto-tracked, never enforced --
+// see docs/superpowers/specs/2026-09-15-variance-stddev-aggregate-design.md
+// "Per-DB column count"). Reaches into XStore::cfg_shards directly rather
+// than through a public accessor, matching this file's own established
+// pattern for inspecting the persisted/cached ConfigStruct from a test
+// (see CfgCachedByOneXStoreInstanceIsVisibleToAnotherInstance above) --
+// GetOrLoadCfg/DbBasePath are private XStore members, not part of the
+// public API surface a test should reach for.
+// ---------------------------------------------------------------------
+
+TEST_F(XStoreTest, CreateDBWithColumnCountSeedPersistsItInConfig) {
+    XStore store;
+    XStore_Proto::CreateDB_REP rep = store.CreateDB("SEEDEDCOLDB", XStore_Proto::SECOND, 1536, /*column_count_seed=*/128);
+    ASSERT_EQ(rep.createdbstatus(), "[INFO] [CREATE DB] [DB: SEEDEDCOLDB] - Created DB") << rep.createdbstatus();
+
+    auto &shard = XStore::cfg_shards[std::hash<std::string>{}("SEEDEDCOLDB") % XStore::CFG_SHARD_COUNT];
+    ASSERT_TRUE(shard.map.count("SEEDEDCOLDB"));
+    EXPECT_EQ(shard.map.at("SEEDEDCOLDB").columncount(), 128u);
+}
+
+TEST_F(XStoreTest, InsertingRowWiderThanColumnCountGrowsTheHighWaterMark) {
+    XStore store;
+    CreateTestDb(store, "GROWCOLDB", XStore_Proto::SECOND, 1536); // no seed -- starts at 0
+
+    std::vector<XStore_Proto::FData> fields;
+    for (int i = 0; i < 80; ++i) fields.push_back(FDouble(static_cast<double>(i)));
+
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    store.UnaryInsert(1000, MakeRow(fields), "GROWCOLDB", &insert_rep);
+
+    auto &shard = XStore::cfg_shards[std::hash<std::string>{}("GROWCOLDB") % XStore::CFG_SHARD_COUNT];
+    ASSERT_TRUE(shard.map.count("GROWCOLDB"));
+    EXPECT_GE(shard.map.at("GROWCOLDB").columncount(), 80u);
+}
+
+TEST_F(XStoreTest, InsertingRowNarrowerThanColumnCountNeverShrinksIt) {
+    XStore store;
+    XStore_Proto::CreateDB_REP rep = store.CreateDB("NOSHRINKCOLDB", XStore_Proto::SECOND, 1536, /*column_count_seed=*/100);
+    ASSERT_EQ(rep.createdbstatus(), "[INFO] [CREATE DB] [DB: NOSHRINKCOLDB] - Created DB") << rep.createdbstatus();
+
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    store.UnaryInsert(1000, MakeRow({FDouble(1.0)}), "NOSHRINKCOLDB", &insert_rep);
+
+    auto &shard = XStore::cfg_shards[std::hash<std::string>{}("NOSHRINKCOLDB") % XStore::CFG_SHARD_COUNT];
+    ASSERT_TRUE(shard.map.count("NOSHRINKCOLDB"));
+    EXPECT_EQ(shard.map.at("NOSHRINKCOLDB").columncount(), 100u); // unchanged, never shrinks
+}
+
+// ---------------------------------------------------------------------
 // RemoveDB
 // ---------------------------------------------------------------------
 

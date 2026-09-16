@@ -296,7 +296,21 @@ class XStore {
         XStore_Proto::SysInfo_REP InfoQuery(std::string_view server_addr, int thread_count);
 
         // CREATING new DB instance with row length
-        [[nodiscard]] XStore_Proto::CreateDB_REP CreateDB(std::string_view db_name, XStore_Proto::TimeUnit time_resolution, short int row_length);
+        [[nodiscard]] XStore_Proto::CreateDB_REP CreateDB(std::string_view db_name, XStore_Proto::TimeUnit time_resolution, short int row_length, uint32_t column_count_seed = 0);
+
+        // Returns cfg.columncount() if it's been seeded/grown past 0,
+        // otherwise the global ZONE_MAP_MAX_TRACKED_COLUMNS default -- the
+        // single place that decides "how many columns does this DB's zone
+        // map track," consumed by BuildZoneMapObservations, ZoneMapFile
+        // sizing (Task 5), and the startup rebuild scan (Task 5).
+        static uint32_t EffectiveTrackedColumnCount(const XStore_Proto::ConfigStruct &cfg_struct);
+
+        // Cheap on every insert (one integer comparison against the
+        // already-cached cfg); only touches disk (a .CFG rewrite) on the
+        // rare row that's wider than anything seen before for this DB --
+        // see design doc "Column-count growth". Never rejects a wide row;
+        // only ever grows the tracked mark.
+        void MaybeGrowColumnCount(const std::string &db_name, const std::string &db_base_path, int observed_column_count);
 
         // REMOVE DB -- Removing an entire DB and its data files
         [[nodiscard]] XStore_Proto::RemoveDB_REP RemoveDB(std::string_view db_name);
@@ -573,7 +587,7 @@ class XStore {
         // rationale). Takes an XStore& purely to reach the private
         // GetFDataValue overload below; touches no instance state of its
         // own.
-        static std::vector<ZoneMapObservation> BuildZoneMapObservations(XStore &store, const XStore_Proto::RowData &row);
+        static std::vector<ZoneMapObservation> BuildZoneMapObservations(XStore &store, const XStore_Proto::RowData &row, uint32_t tracked_column_count);
 
         // Fetch dbName's ConfigStruct from CfgMap, loading it from dbBasePath's
         // .CFG file into the cache on first use. Returns false if the .CFG file

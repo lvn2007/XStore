@@ -264,7 +264,7 @@ void ZmqServer::WorkerRoutine(std::string server_addr) {
             // CREATE DB
             case XStore_Proto::Request::kCreatedb: {
                 const auto &req = client_request->createdb();
-                XStore_Proto::CreateDB_REP rep = my_store.CreateDB(req.dbname(), req.timeresolution(), req.rowlength());
+                XStore_Proto::CreateDB_REP rep = my_store.CreateDB(req.dbname(), req.timeresolution(), req.rowlength(), req.columncount());
                 SendProto(socket, rep);
                 break;
             }
