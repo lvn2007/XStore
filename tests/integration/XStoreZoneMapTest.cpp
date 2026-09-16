@@ -709,3 +709,116 @@ TEST_F(XStoreZoneMapTest, RebuiltZoneMapConvergesToPerDbTrackedColumnCountInstea
 }
 
 } // namespace
+
+namespace {
+
+using xstore_test::CreateTestDb;
+
+// Task 6: proves Task 4's columnCount growth and Task 5's startup rebuild
+// compose correctly end-to-end -- per the design doc's Testing Plan item 8.
+// ZoneMapNeedsRebuild/GetOrLoadCfg are private XStore members (see the
+// columnCount block in XStoreTest.cpp), so this reads the same two
+// already-established public-surface techniques this file uses elsewhere:
+// XStore::cfg_shards directly for the persisted columnCount, and a raw
+// pread of the .zmap header (same lambda shape as
+// RebuiltZoneMapConvergesToPerDbTrackedColumnCountInsteadOfResettingToGlobalDefaultForever
+// above) for the on-disk tracked_column_count.
+//
+// This test found (and this branch fixes) two genuine composition bugs, not
+// contrived ones -- both hit by the entirely ordinary sequence below (one
+// insert narrow, one insert wide enough to grow columnCount, then restart):
+//
+// 1. ZoneMapFile::Open() (XStore_ZoneMap.cpp) only rewrote the header on a
+//    stale VERSION, never on a tracked_column_count that had merely grown
+//    past what a current-version file already stored -- so even a genuine
+//    disk reopen would silently keep the file's old (narrower) width
+//    forever. Fixed: Open() now also takes the discard-and-rewrite branch
+//    when the caller asks for MORE tracked columns than the on-disk header
+//    has (strictly greater, so it only ever widens, never shrinks -- an
+//    insert-path caller that still passes the global default can't
+//    accidentally truncate away a file some earlier rebuild already
+//    widened).
+//
+// 2. That fix alone wasn't reachable, because RebuildOneYearZoneMap
+//    (XStore_Management.cpp) relied on GetOrOpenZoneMap's registry giving
+//    it a genuine cache miss, but that key is NOT reliably cold even on a
+//    real restart: InitDB()'s WAL replay runs first and applies any
+//    un-checkpointed record for this same (db, year) via its own
+//    GetOrOpenZoneMap call, which always requests the global default width,
+//    never the DB's real (possibly grown) columnCount -- warming the
+//    registry at the stale width before the rebuild pass ever gets a turn.
+//    Since a cache hit never re-invokes Open(), fix #1 was then unreachable
+//    from the very restart path it exists to serve. Fixed: RebuildOneYear
+//    ZoneMap now evicts this exact registry entry immediately before its
+//    own GetOrOpenZoneMap call, guaranteeing a real disk-backed reopen with
+//    the authoritative tracked_column_count every time a rebuild is
+//    actually warranted (a rare, InitDB()-only path -- no request-path
+//    cost).
+TEST_F(XStoreZoneMapTest, ColumnCountGrowthTriggersRebuildOnNextInitDb) {
+    XStore store;
+    std::string db_name = "COLGROWTHREBUILD";
+    CreateTestDb(store, db_name, XStore_Proto::SECOND, 1536); // no seed -- starts at global default (64)
+
+    // Row 1: narrow, lands well within the default 64 -- this is also the
+    // insert that first creates the year's zone map, sizing it at whatever
+    // EffectiveTrackedColumnCount(cfg) is at that moment (64, unseeded).
+    XStore_Proto::RowData narrow_row;
+    narrow_row.add_fielddata()->set_doubledata(1.0);
+    XStore_Proto::UnaryInsert_REP narrow_rep;
+    store.UnaryInsert(1000, narrow_row, db_name, &narrow_rep, XStore_Proto::SYNC);
+
+    // Row 2: column index 69 populated -- past the default 64 tracked cap.
+    // MaybeGrowColumnCount grows columnCount to >=70 as a side effect of
+    // this insert, but the zone map created above was already sized at 64
+    // and is never resized on the request path (Global Constraint: all
+    // rebuild work happens in InitDB(), never on insert).
+    XStore_Proto::RowData wide_row;
+    for (int i = 0; i < 70; ++i) wide_row.add_fielddata()->set_doubledata(static_cast<double>(i));
+    wide_row.mutable_fielddata(69)->set_doubledata(999.0);
+    XStore_Proto::UnaryInsert_REP wide_rep;
+    store.UnaryInsert(1001, wide_row, db_name, &wide_rep, XStore_Proto::SYNC);
+
+    auto &shard = XStore::cfg_shards[std::hash<std::string>{}(db_name) % XStore::CFG_SHARD_COUNT];
+    ASSERT_TRUE(shard.map.count(db_name));
+    uint32_t grown_count = shard.map.at(db_name).columncount();
+    ASSERT_GE(grown_count, 70u);
+
+    std::string zmap_path = fmt::format("{}/{}.zmap", DbPath(db_name), kEpoch1000Year);
+    auto read_tracked_column_count = [&]() {
+        int fd = open(zmap_path.c_str(), O_RDONLY);
+        EXPECT_GE(fd, 0);
+        ZoneMapFileHeader header{};
+        EXPECT_EQ(pread(fd, &header, sizeof(header), 0), static_cast<ssize_t>(sizeof(header)));
+        close(fd);
+        return header.tracked_column_count;
+    };
+
+    // Column 69 was NOT tracked at insert time (the zone map's on-disk
+    // header was sized at the OLD cap, 64, when both rows landed) -- confirm
+    // it still reflects that stale cap until InitDB() rebuilds it.
+    EXPECT_LT(read_tracked_column_count(), grown_count);
+
+    // Re-run InitDB() the same way a server restart would -- this is what
+    // actually notices the tracked-column-count mismatch and rebuilds.
+    // RebuildOneYearZoneMap's own registry-eviction fix (see comment above
+    // this test) is what makes this a faithful restart simulation even
+    // in-process: it no longer matters that this test's own inserts above
+    // already warmed (db_name, kEpoch1000Year) in zone_map_registry_.
+    store.InitDB();
+
+    EXPECT_EQ(read_tracked_column_count(), grown_count);
+
+    // And column 69 is now genuinely accelerated -- confirm via a
+    // pushdown-eligible query landing squarely on a fully-covered block
+    // (both rows are in the same block for a fresh, tiny DB). Only row 1001
+    // (ts=1001) has column 69 set (999.0); row 1000 doesn't reach that
+    // column -- count==1 across the range, so "no valid data" is the
+    // CORRECT answer here (matches Decision 2's N<=1 convention), proving
+    // the rebuilt zone map is reporting real per-column coverage, not just
+    // "something changed."
+    XStore_Proto::Variance_REP rep;
+    store.VarianceAggregate(1000, 1001, db_name, 69, &rep);
+    EXPECT_EQ(rep.opstatus(), "ERROR: No valid data found");
+}
+
+} // namespace

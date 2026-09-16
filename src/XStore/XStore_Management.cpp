@@ -530,16 +530,41 @@ void XStore::RebuildOneYearZoneMap(const std::string &db_base_path, unsigned sho
     std::string data_path = fmt::format("{}/{}.XSTORE", db_base_path, year);
     if (!std::filesystem::exists(data_path)) return;
 
-    // GetOrOpenZoneMap -> ZoneMapFile::Open() -- if a stale-version file
-    // is sitting here, Open() (Task 1) truncates and reinitializes it to
-    // a fresh, empty v2 header before this function ever calls UpdateRow,
-    // so every row folded below starts from a genuinely clean baseline.
-    // This is only true for a genuine cache miss -- if some earlier caller
-    // in this same process already touched this exact (db_base_path, year)
-    // pair, GetOrOpenZoneMap hands back that already-open, already-fresh
-    // instance instead (see zone_map_registry_'s comment in XStore.h); a
-    // real server restart always starts with an empty registry, so that
-    // case never arises there.
+    // Force a genuine cache miss for this (db_base_path, year) key before
+    // reopening -- Task 6 fix. GetOrOpenZoneMap's registry never re-Opens()
+    // an already-warm entry no matter what tracked_column_count is passed
+    // (see its comment in XStore.h), and this key is NOT guaranteed cold
+    // here even on a genuine server restart: InitDB()'s WAL replay (which
+    // runs before RebuildStaleZoneMapsForDb, per the loop above) applies
+    // any un-checkpointed record for this exact (db, year) first, via
+    // ApplyWalRecord's own GetOrOpenZoneMap call -- and that call always
+    // requests the global default, never this DB's real
+    // EffectiveTrackedColumnCount. Left alone, that first touch would warm
+    // the registry at the stale width, and this function's own (correctly
+    // wide) GetOrOpenZoneMap call below would then just hand back that
+    // stale cached instance without ever reaching ZoneMapFile::Open() --
+    // silently defeating Task 6's whole fix to Open() (widening only
+    // happens there) and leaving ZoneMapNeedsRebuild re-flagging this file
+    // as stale on every subsequent InitDB() run, forever. Erasing here
+    // guarantees GetOrOpenZoneMap below always does a real disk-backed
+    // Open() with the authoritative tracked_column_count, regardless of
+    // what touched this key first. Only closes an fd (write-through,
+    // Task 2) -- never loses durable data.
+    {
+        std::string registry_key = fmt::format("{}/{}", db_base_path, year);
+        std::lock_guard<std::mutex> registry_lock(zone_map_registry_mutex_);
+        zone_map_registry_.erase(registry_key);
+        zone_map_registry_lru_.erase(
+            std::remove(zone_map_registry_lru_.begin(), zone_map_registry_lru_.end(), registry_key),
+            zone_map_registry_lru_.end());
+    }
+
+    // GetOrOpenZoneMap -> ZoneMapFile::Open() -- guaranteed a genuine cache
+    // miss by the eviction above, so a stale-version OR too-narrow existing
+    // file (Task 1 / Task 6) is truncated and reinitialized to a fresh v2
+    // header sized at tracked_column_count before this function ever calls
+    // UpdateRow, so every row folded below starts from a genuinely clean,
+    // correctly-sized baseline.
     ZoneMapFile &zmap = GetOrOpenZoneMap(db_base_path, year, row_length, tracked_column_count);
 
     uintmax_t file_size = std::filesystem::file_size(data_path);

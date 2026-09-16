@@ -16,7 +16,7 @@ bool ZoneMapFile::Open(const std::string &path, uint16_t row_length, uint32_t tr
         if (read_bytes != static_cast<ssize_t>(sizeof(header_)) || header_.magic != ZoneMapFileHeader{}.magic) {
             return false; // corrupt/foreign file -- caller falls back to no acceleration
         }
-        if (header_.version != ZONE_MAP_VERSION) {
+        if (header_.version != ZONE_MAP_VERSION || tracked_column_count > header_.tracked_column_count) {
             // A zone map is always a derived, rebuildable index, never a
             // source of truth (TryGetBlockStats already treats "no
             // coverage" as a valid answer, not an error) -- discarding
@@ -26,6 +26,21 @@ bool ZoneMapFile::Open(const std::string &path, uint16_t row_length, uint32_t tr
             // Truncating and rewriting a fresh header is simpler and just
             // as safe as trying to migrate old 40-byte entries into the
             // new 48-byte layout in place.
+            //
+            // The tracked_column_count > header_.tracked_column_count arm
+            // is the Task 6 fix: RebuildOneYearZoneMap (Task 5) passes the
+            // real, possibly-grown per-DB EffectiveTrackedColumnCount, but
+            // an existing file already at the current ZONE_MAP_VERSION used
+            // to short-circuit past this whole branch, silently keeping its
+            // old (narrower) on-disk tracked_column_count forever -- so
+            // ZoneMapNeedsRebuild's mismatch check would never converge,
+            // and every InitDB() would re-scan and re-fold the same rows
+            // into a too-narrow header without ever tracking the newly-wide
+            // columns. Strictly-greater (never `!=`) matters: it guarantees
+            // this can only ever widen, never shrink -- an insert-path
+            // caller that (today) still passes the global default has no
+            // way to accidentally truncate away a file some earlier rebuild
+            // already widened.
             if (ftruncate(fd_, 0) != 0) {
                 spdlog::error("[ZONE MAP] - Failed to truncate stale {}", path);
                 return false;
