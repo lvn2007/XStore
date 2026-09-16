@@ -133,7 +133,7 @@ std::mutex XStore::zone_map_registry_mutex_;
 std::unordered_map<std::string, std::unique_ptr<ZoneMapFile>> XStore::zone_map_registry_;
 std::vector<std::string> XStore::zone_map_registry_lru_;
 
-ZoneMapFile& XStore::GetOrOpenZoneMap(std::string_view db_base_path, unsigned short year, uint16_t row_length) {
+ZoneMapFile& XStore::GetOrOpenZoneMap(std::string_view db_base_path, unsigned short year, uint16_t row_length, uint32_t tracked_column_count) {
     std::string key = fmt::format("{}/{}", db_base_path, year);
     std::lock_guard<std::mutex> lock(zone_map_registry_mutex_);
 
@@ -154,7 +154,7 @@ ZoneMapFile& XStore::GetOrOpenZoneMap(std::string_view db_base_path, unsigned sh
 
     auto zmap = std::make_unique<ZoneMapFile>();
     std::string path = fmt::format("{}/{}.zmap", db_base_path, year);
-    if (!zmap->Open(path, row_length)) {
+    if (!zmap->Open(path, row_length, tracked_column_count)) {
         spdlog::error("[ZONEMAP] - Unable to open {}", path);
         throw std::runtime_error(fmt::format("ZoneMapFile::Open failed for {}", path));
     }
@@ -540,7 +540,7 @@ void XStore::RebuildOneYearZoneMap(const std::string &db_base_path, unsigned sho
     // instance instead (see zone_map_registry_'s comment in XStore.h); a
     // real server restart always starts with an empty registry, so that
     // case never arises there.
-    ZoneMapFile &zmap = GetOrOpenZoneMap(db_base_path, year, row_length);
+    ZoneMapFile &zmap = GetOrOpenZoneMap(db_base_path, year, row_length, tracked_column_count);
 
     uintmax_t file_size = std::filesystem::file_size(data_path);
     uint64_t total_rows = file_size / row_length; // exact by construction -- data files are preallocated to whole-row multiples

@@ -517,6 +517,14 @@ class XStore {
         // ZONE_MAP_REGISTRY_CAP with LRU eviction -- see zone_map_registry_
         // below for why eviction here is always safe.
         //
+        // tracked_column_count is forwarded to ZoneMapFile::Open (only used
+        // on first creation/stale-version reinit, same as row_length) and
+        // defaulted to the global ZONE_MAP_MAX_TRACKED_COLUMNS so every
+        // existing call site (live insert/query paths, which don't thread a
+        // per-DB columnCount this far) keeps its prior behavior unchanged.
+        // XStore::RebuildOneYearZoneMap (Task 5) is currently the one caller
+        // that passes the real per-DB EffectiveTrackedColumnCount value.
+        //
         // static, like fd_shards/wal_shards below: ApplyWalRecord (the
         // actual write site every insert path funnels through, on
         // whichever WAL writer thread ends up applying a given record) has
@@ -527,7 +535,7 @@ class XStore {
         // ZMQ_Server.cpp), so a per-instance cache would have silently
         // fragmented into one independent registry (and LRU cap) per
         // worker anyway.
-        static ZoneMapFile& GetOrOpenZoneMap(std::string_view db_base_path, unsigned short year, uint16_t row_length);
+        static ZoneMapFile& GetOrOpenZoneMap(std::string_view db_base_path, unsigned short year, uint16_t row_length, uint32_t tracked_column_count = XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS);
 
         // Test-only introspection -- not part of the public API surface any
         // real caller needs, same as this codebase's other test-only

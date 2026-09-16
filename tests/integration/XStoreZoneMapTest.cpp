@@ -616,3 +616,96 @@ TEST_F(XStoreZoneMapTest, InitDbRebuildsZoneMapForPreExistingDataWithNoSidecar) 
 }
 
 } // namespace
+
+namespace {
+
+using xstore_test::CreateTestDb;
+
+TEST_F(XStoreZoneMapTest, RebuiltZoneMapConvergesToPerDbTrackedColumnCountInsteadOfResettingToGlobalDefaultForever) {
+    // Fix-round-1 regression test: ZoneMapFile::WriteFreshHeader used to
+    // hardcode header_.tracked_column_count to the global
+    // ZONE_MAP_MAX_TRACKED_COLUMNS, ignoring the real per-DB
+    // desired_tracked_columns RebuildOneYearZoneMap actually wants. For a
+    // DB whose Task-4 columnCount high-water mark grew past that global
+    // default, every rebuild's Open()->WriteFreshHeader() reset the header
+    // back to the default, so ZoneMapNeedsRebuild's tracked_column_count
+    // comparison would report "stale" again on the very next InitDB() --
+    // forever. Never a data-correctness bug (rebuilding is always safe),
+    // but it defeats this whole task's point of doing the expensive raw-row
+    // scan once and then converging.
+    XStore store;
+    std::string db_name = "WIDECOLREBUILD";
+    uint32_t wide_column_count = XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS + 36; // past the 64 default
+    XStore_Proto::CreateDB_REP create_rep = store.CreateDB(db_name, XStore_Proto::SECOND, 64, wide_column_count);
+    ASSERT_EQ(create_rep.createdbstatus(), "[INFO] [CREATE DB] [DB: " + db_name + "] - Created DB") << create_rep.createdbstatus();
+
+    // Same raw-write, bypass-UnaryInsert technique as
+    // InitDbRebuildsZoneMapForPreExistingDataWithNoSidecar above, for the
+    // same reason: touching zone_map_registry_ via UnaryInsert before the
+    // rebuild would make RebuildOneYearZoneMap's own GetOrOpenZoneMap call
+    // a cache hit instead of a genuine disk reopen, muddying exactly what
+    // this test needs to isolate (the on-disk header this fix writes).
+    std::string db_base_path = DbPath(db_name);
+    std::string data_path = fmt::format("{}/{}.XSTORE", db_base_path, kEpoch1000Year);
+    uint64_t row_index = 1000; // == epoch_time, since first_epoch(1970) == 0
+    {
+        int fd = open(data_path.c_str(), O_WRONLY | O_CREAT, 0644);
+        ASSERT_GE(fd, 0);
+        ASSERT_EQ(ftruncate(fd, static_cast<off_t>((row_index + 1) * kPreexistRowLength)), 0);
+        XStore_Proto::RowData row;
+        row.add_fielddata()->set_doubledata(42.0);
+        std::vector<char> row_buf(kPreexistRowLength, 0);
+        row.SerializeToArray(row_buf.data(), static_cast<int>(kPreexistRowLength));
+        ASSERT_EQ(pwrite(fd, row_buf.data(), kPreexistRowLength, static_cast<off_t>(row_index * kPreexistRowLength)),
+                  static_cast<ssize_t>(kPreexistRowLength));
+        close(fd);
+    }
+
+    std::string zmap_path = fmt::format("{}/{}.zmap", db_base_path, kEpoch1000Year);
+    ASSERT_FALSE(std::filesystem::exists(zmap_path));
+
+    // Reads the on-disk header + block-0/column-0 entry directly via raw
+    // pread, bypassing zone_map_registry_ entirely (ZoneMapNeedsRebuild is
+    // private, so this is the same observable-on-disk-state technique this
+    // file's ZoneMapFileVersionTest fixture and the test above already use)
+    // -- this observes exactly what's durable, independent of any
+    // process-wide in-memory cache.
+    auto read_header_and_entry = [&]() {
+        int fd = open(zmap_path.c_str(), O_RDONLY);
+        EXPECT_GE(fd, 0);
+        ZoneMapFileHeader header{};
+        EXPECT_EQ(pread(fd, &header, sizeof(header), 0), static_cast<ssize_t>(sizeof(header)));
+        ZoneMapEntry entry{};
+        EXPECT_EQ(pread(fd, &entry, sizeof(entry), sizeof(header)), static_cast<ssize_t>(sizeof(entry)));
+        close(fd);
+        return std::make_pair(header, entry);
+    };
+
+    // First InitDB(): a genuinely cold registry for this (db, year) key
+    // (never touched above) rebuilds from scratch using the real per-DB
+    // tracked_column_count.
+    store.InitDB();
+    auto first = read_header_and_entry();
+    // The core fix: pre-fix, this would read back
+    // XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS (64) regardless of the
+    // DB's actual (wider) columnCount.
+    EXPECT_EQ(first.first.tracked_column_count, wide_column_count);
+    EXPECT_EQ(first.second.valid_count, 1u);
+    EXPECT_DOUBLE_EQ(first.second.sum_value, 42.0);
+
+    // Second InitDB(): with the fix, ZoneMapNeedsRebuild's on-disk peek now
+    // sees tracked_column_count already matching the desired count, so this
+    // DB's zone map is no longer considered stale, and RebuildOneYearZoneMap
+    // must NOT run again for it. Observable via the entry's stats staying
+    // exactly what one rebuild pass produced -- UpdateRow accumulates
+    // rather than replaces, so an erroneous second rebuild pass would
+    // double valid_count/sum_value here.
+    store.InitDB();
+    auto second = read_header_and_entry();
+    EXPECT_EQ(second.first.tracked_column_count, wide_column_count);
+    EXPECT_EQ(second.second.valid_count, 1u)
+        << "InitDB() rebuilt an already-current zone map a second time instead of converging";
+    EXPECT_DOUBLE_EQ(second.second.sum_value, 42.0);
+}
+
+} // namespace

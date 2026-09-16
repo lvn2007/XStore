@@ -6,7 +6,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-bool ZoneMapFile::Open(const std::string &path, uint16_t row_length) {
+bool ZoneMapFile::Open(const std::string &path, uint16_t row_length, uint32_t tracked_column_count) {
     fd_ = open(path.c_str(), O_RDWR | O_CREAT, 0644);
     if (fd_ < 0) return false;
 
@@ -30,17 +30,17 @@ bool ZoneMapFile::Open(const std::string &path, uint16_t row_length) {
                 spdlog::error("[ZONE MAP] - Failed to truncate stale {}", path);
                 return false;
             }
-            return WriteFreshHeader(row_length);
+            return WriteFreshHeader(row_length, tracked_column_count);
         }
     } else {
-        return WriteFreshHeader(row_length);
+        return WriteFreshHeader(row_length, tracked_column_count);
     }
     return true;
 }
 
-bool ZoneMapFile::WriteFreshHeader(uint16_t row_length) {
+bool ZoneMapFile::WriteFreshHeader(uint16_t row_length, uint32_t tracked_column_count) {
     header_ = ZoneMapFileHeader{};
-    header_.tracked_column_count = XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS;
+    header_.tracked_column_count = tracked_column_count;
     header_.rows_per_block = RowsPerBlock(row_length);
     ssize_t written = pwrite(fd_, &header_, sizeof(header_), 0);
     if (written != static_cast<ssize_t>(sizeof(header_))) {

@@ -73,7 +73,16 @@ public:
     // otherwise. row_length is used only to derive rows_per_block on first
     // creation -- ignored on reopen (rows_per_block is read from the header,
     // so it can never drift from what earlier blocks were written against).
-    [[nodiscard]] bool Open(const std::string &path, uint16_t row_length);
+    // tracked_column_count is likewise only used on first creation (or when
+    // reinitializing a stale-version file) -- defaulted to the global
+    // ZONE_MAP_MAX_TRACKED_COLUMNS so every pre-existing call site (live
+    // insert/query paths, which don't yet thread a per-DB columnCount this
+    // far) keeps its old behavior unchanged; XStore::RebuildOneYearZoneMap
+    // (Task 5) is the one caller that passes the real per-DB
+    // EffectiveTrackedColumnCount value, so a rebuilt header converges on
+    // that count instead of being reset back to the global default and
+    // re-triggering ZoneMapNeedsRebuild on every subsequent InitDB() run.
+    [[nodiscard]] bool Open(const std::string &path, uint16_t row_length, uint32_t tracked_column_count = XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS);
 
     // Folds each observation into the block containing row_index and
     // pwrite()s that block back to disk before returning -- write-through,
@@ -100,7 +109,7 @@ private:
     // -- shared by first-time file creation and by Open()'s stale-version
     // discard path, so there's exactly one place that constructs a valid
     // fresh header.
-    bool WriteFreshHeader(uint16_t row_length);
+    bool WriteFreshHeader(uint16_t row_length, uint32_t tracked_column_count);
 
     int fd_ = -1;
     ZoneMapFileHeader header_;
