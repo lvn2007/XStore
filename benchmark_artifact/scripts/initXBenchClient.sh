@@ -1,5 +1,8 @@
 # Install necessary libs for benchmark
-sudo apt install -y ca-certificates lsb-release wget python3-pip && wget https://apache.jfrog.io/artifactory/arrow/$(lsb_release --id --short | tr "A-Z" "a-z")/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb && sudo apt install -y ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb && sudo apt update && sudo apt install -y libparquet-dev && sudo apt install -y cmake g++ protobuf-compiler libprotobuf-dev libzmq3-dev && sudo apt-get install libboost-all-dev -y && pip3 install pandas fastparquet && rm apache-arrow-apt-source-latest-*
+# ccache is an optional compile cache CMake auto-detects (content-addressed,
+# so cached builds always reflect the latest code); installing it here keeps
+# the compile step below fast.
+sudo apt install -y ca-certificates lsb-release wget python3-pip && wget https://apache.jfrog.io/artifactory/arrow/$(lsb_release --id --short | tr "A-Z" "a-z")/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb && sudo apt install -y ./apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb && sudo apt update && sudo apt install -y libparquet-dev && sudo apt install -y cmake g++ protobuf-compiler libprotobuf-dev libzmq3-dev ccache && sudo apt-get install libboost-all-dev -y && pip3 install pandas fastparquet && rm apache-arrow-apt-source-latest-*
 
 # MongoDB C++ client library
 sudo apt-get install libmongoc-dev -y 
