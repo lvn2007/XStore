@@ -240,17 +240,36 @@ uint32_t XStore::EffectiveTrackedColumnCount(const XStore_Proto::ConfigStruct &c
 void XStore::MaybeGrowColumnCount(const std::string &db_name, const std::string &db_base_path, int observed_column_count) {
     if (observed_column_count <= 0) return;
 
-    XStore_Proto::ConfigStruct cfg_struct;
-    if (!GetOrLoadCfg(db_name, db_base_path, cfg_struct)) return; // CFG missing is handled elsewhere; nothing to grow
+    CfgShard &shard = cfg_shards[std::hash<std::string>{}(db_name) % CFG_SHARD_COUNT];
 
-    if (static_cast<uint32_t>(observed_column_count) <= cfg_struct.columncount()) return; // fast path: no growth, no I/O
+    // Fast path: shared lock, one map lookup + one integer comparison. The
+    // common case once a DB's tracked width has stabilized -- no exclusive
+    // lock, no I/O.
+    {
+        std::shared_lock read_lock(shard.mutex);
+        auto it = shard.map.find(db_name);
+        if (it == shard.map.end()) return; // cfg not cached yet; nothing to grow here
+        if (static_cast<uint32_t>(observed_column_count) <= it->second.columncount()) return;
+    }
 
     // Rare path: this row is wider than anything seen before for this DB.
-    // Re-check under the cache's own write path (PutCfg takes the shard's
-    // exclusive lock internally) rather than a separate lock here -- a
-    // lost race just means two threads both persist the same (correct)
-    // grown value, never a torn/incorrect one.
-    cfg_struct.set_columncount(static_cast<uint32_t>(observed_column_count));
+    // The compare-and-set AND the persist happen inside one exclusive lock
+    // so two threads racing with *different* observed widths can never
+    // regress the persisted value -- whichever wins the lock first raises
+    // the floor the other thread's compare then runs against, and the
+    // on-disk write is ordered the same way as the in-memory update
+    // (doing the rare disk write while holding the lock, rather than
+    // after releasing it, is what actually closes the race -- releasing
+    // first would let a second grower's file write land out of order
+    // relative to a first grower's, corrupting the durable value even if
+    // the in-memory map stayed correct).
+    std::unique_lock write_lock(shard.mutex);
+    auto it = shard.map.find(db_name);
+    if (it == shard.map.end()) return;
+    if (static_cast<uint32_t>(observed_column_count) <= it->second.columncount()) return; // lost the race to a larger grower
+
+    it->second.set_columncount(static_cast<uint32_t>(observed_column_count));
+    XStore_Proto::ConfigStruct cfg_copy = it->second;
 
     std::string cfg_path = JoinPath(db_base_path, db_name + ".CFG");
     FILE *b_file = std::fopen(cfg_path.c_str(), "wb+");
@@ -259,12 +278,11 @@ void XStore::MaybeGrowColumnCount(const std::string &db_name, const std::string 
         return;
     }
     {
-        FileRangeLockGuard guard(cfg_path, 0, cfg_struct.ByteSizeLong(), FileRangeLock::LockType::WRITE);
-        cfg_struct.SerializeToFileDescriptor(fileno(b_file));
+        FileRangeLockGuard guard(cfg_path, 0, cfg_copy.ByteSizeLong(), FileRangeLock::LockType::WRITE);
+        cfg_copy.SerializeToFileDescriptor(fileno(b_file));
     }
     std::fclose(b_file);
 
-    PutCfg(db_name, cfg_struct);
     spdlog::info("[COLUMN COUNT GROWTH] [DB: {}] - columnCount grew to {}", db_name, observed_column_count);
 }
 
