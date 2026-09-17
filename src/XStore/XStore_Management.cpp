@@ -154,6 +154,47 @@ ZoneMapFile& XStore::GetOrOpenZoneMap(std::string_view db_base_path, unsigned sh
 
     auto zmap = std::make_unique<ZoneMapFile>();
     std::string path = fmt::format("{}/{}.zmap", db_base_path, year);
+
+    // Non-destructive guard for ordinary (non-rebuild) callers. Every call
+    // site now passes the DB's real EffectiveTrackedColumnCount so a
+    // FRESHLY created zone map is born at the right width (which is what
+    // stops a brand-new year file from being flagged stale on the very next
+    // restart). But ZoneMapFile::Open()'s widen branch DISCARDS the file
+    // (ftruncate + fresh header) whenever the requested width exceeds what's
+    // on disk -- correct for a rebuild, which immediately re-folds every row
+    // from raw data, and catastrophic for anyone else: the discarded stats
+    // would never come back (ZoneMapNeedsRebuild would then see a header
+    // already matching the desired width and skip it forever), turning every
+    // pushdown-eligible query on that file into a silent zero/skip.
+    //
+    // So: if a current-version file already exists here, clamp the request
+    // down to its width. Open() then takes its "keep it" path and the file
+    // simply stays narrower than this caller's observations -- always safe
+    // (UpdateRow drops observations past the cap; TryGetBlockStats returns
+    // exactly tracked_column_count entries, so a column past it is never
+    // trusted and always falls back to a real scan). Widening stays the
+    // exclusive business of RebuildOneYearZoneMap, which is unaffected by
+    // this clamp because it ftruncate()s the .zmap to 0 bytes immediately
+    // before calling in here -- an empty/absent file has no header to clamp
+    // against.
+    {
+        int peek_fd = open(path.c_str(), O_RDONLY);
+        if (peek_fd >= 0) {
+            struct stat peek_st{};
+            ZoneMapFileHeader on_disk{};
+            if (fstat(peek_fd, &peek_st) == 0 &&
+                peek_st.st_size >= static_cast<off_t>(sizeof(ZoneMapFileHeader)) &&
+                pread(peek_fd, &on_disk, sizeof(on_disk), 0) == static_cast<ssize_t>(sizeof(on_disk)) &&
+                on_disk.magic == ZoneMapFileHeader{}.magic &&
+                on_disk.version == ZONE_MAP_VERSION &&
+                on_disk.tracked_column_count > 0 &&
+                on_disk.tracked_column_count < tracked_column_count) {
+                tracked_column_count = on_disk.tracked_column_count;
+            }
+            close(peek_fd);
+        }
+    }
+
     if (!zmap->Open(path, row_length, tracked_column_count)) {
         spdlog::error("[ZONEMAP] - Unable to open {}", path);
         throw std::runtime_error(fmt::format("ZoneMapFile::Open failed for {}", path));
@@ -235,12 +276,31 @@ XStore_Proto::SysInfo_REP XStore::InfoQuery(std::string_view server_addr, int th
 }
 
 uint32_t XStore::EffectiveTrackedColumnCount(const XStore_Proto::ConfigStruct &cfg_struct) {
-    uint32_t seeded = cfg_struct.columncount();
-    return seeded > 0 ? seeded : XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS;
+    // max(), not `seeded > 0 ? seeded : default` -- see the long rationale
+    // on the declaration in XStore.h: the global default is a FLOOR because
+    // a narrowing effective width silently breaks every aggregate on this
+    // DB (tracked-but-never-folded columns read back valid_count==0).
+    return std::max(cfg_struct.columncount(), XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS);
 }
 
 void XStore::MaybeGrowColumnCount(const std::string &db_name, const std::string &db_base_path, int observed_column_count) {
     if (observed_column_count <= 0) return;
+
+    // Defensive upper bound, matching CreateDB's own seed check. In
+    // practice observed_column_count is RowData::fielddata_size(), already
+    // bounded by the row's serialized size (which UnaryInsert/BatchInsert/
+    // RangeInsert reject above cfg.rowLength, itself a uint16-ish byte
+    // budget), so this is not currently reachable with a huge value -- but
+    // this is the OTHER writer of the same persisted field that sizes every
+    // later ZoneMapEntry allocation, and a growth path that can outrun the
+    // bound CreateDB enforces would just reopen that hole from the insert
+    // side. Clamp rather than reject: growth is explicitly never allowed to
+    // fail an insert (design doc, "Per-DB column count" -- a wide row
+    // always inserts normally), so the row still lands, it just stops
+    // driving the tracked mark past what the zone map will honor.
+    if (observed_column_count > static_cast<int>(XStoreTunables::MAX_TRACKED_COLUMN_COUNT)) {
+        observed_column_count = static_cast<int>(XStoreTunables::MAX_TRACKED_COLUMN_COUNT);
+    }
 
     CfgShard &shard = cfg_shards[std::hash<std::string>{}(db_name) % CFG_SHARD_COUNT];
 
@@ -302,6 +362,22 @@ XStore_Proto::CreateDB_REP XStore::CreateDB(std::string_view db_name_view, XStor
 
     if (row_length < 4) {
         create_db_status = fmt::format("[CREATE DB] [DB: {}] - Row length must be >= 4", db_name);
+        SetTaggedStatus(to_return.mutable_createdbstatus(), "[WARNING] ", create_db_status);
+        spdlog::warn(create_db_status);
+        return to_return;
+    }
+
+    // column_count_seed arrives straight off the wire (CreateDB_REQ
+    // .columnCount, see ZMQ_Server.cpp) and is persisted to .CFG, from where
+    // it sizes std::vector<ZoneMapEntry> allocations on every later insert
+    // and read. An absurd value is therefore a DURABLE remote crash, not a
+    // one-shot bad request: 0xFFFFFFFF would make the first insert on this
+    // DB throw std::length_error, and the poisoned .CFG would reproduce it
+    // on every retry. Rejected, not silently clamped, so a caller finds out
+    // immediately instead of quietly getting a different DB than it asked
+    // for -- same posture as the row_length guard directly above.
+    if (column_count_seed > XStoreTunables::MAX_TRACKED_COLUMN_COUNT) {
+        create_db_status = fmt::format("[CREATE DB] [DB: {}] - Column count must be <= {}", db_name, XStoreTunables::MAX_TRACKED_COLUMN_COUNT);
         SetTaggedStatus(to_return.mutable_createdbstatus(), "[WARNING] ", create_db_status);
         spdlog::warn(create_db_status);
         return to_return;

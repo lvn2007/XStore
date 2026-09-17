@@ -388,17 +388,42 @@ inline constexpr uint64_t ZONE_MAP_TARGET_BLOCK_BYTES = 2ull * 1024 * 1024;
 // map entry per column that could possibly fit in rowLength" was checked
 // and rejected: it inflates zone-map file size past the feature's own
 // near-zero-memory premise for wide-row DBs (a 1536-byte row would derive
-// ~768 phantom tracked columns). This cap bounds tracked columns to a small,
-// realistic count; column indices >= this cap always fall back to a full
-// scan for that column -- correct, just not accelerated.
+// ~768 phantom tracked columns). This keeps tracked columns at a small,
+// realistic count; column indices >= the width actually in force always
+// fall back to a full scan for that column -- correct, just not accelerated.
+//
+// This is a DEFAULT AND A FLOOR, not a hard cap -- it stopped being a cap
+// when ConfigStruct.columnCount landed. XStore::EffectiveTrackedColumnCount
+// returns max(cfg.columncount(), this), so a DB whose rows are genuinely
+// wider tracks more than this, and a DB that has only ever seen narrow rows
+// still tracks exactly this many (the floor is load-bearing for
+// correctness, not just for acceleration -- see that function's comment in
+// XStore.h). The real upper bound on tracked columns is
+// MAX_TRACKED_COLUMN_COUNT below, which is what bounds the allocations this
+// number used to bound.
 inline constexpr uint32_t ZONE_MAP_MAX_TRACKED_COLUMNS = 64;
+
+// Hard upper bound on a DB's ConfigStruct.columnCount -- both the seed a
+// client may pass to CreateDB and the high-water mark MaybeGrowColumnCount
+// will grow to from observed rows. columnCount directly sizes
+// std::vector<ZoneMapEntry> allocations (ZoneMapFile::EnsureBlockLoaded /
+// TryGetBlockStats) and BuildZoneMapObservations' reserve(), and it is
+// persisted to .CFG, so an unvalidated value straight off the wire is a
+// durable remote denial of service: CreateDB(columnCount=0xFFFFFFFF) makes
+// every later insert on that DB throw std::length_error out of a ZMQ worker
+// thread, and the poisoned value survives on disk to do it again on every
+// retry. 4096 is far past any realistic row (a 65535-byte row cannot hold
+// 4096 meaningfully-populated protobuf fields) while capping one block's
+// entry vector at 4096 * 48 = 192KB.
+inline constexpr uint32_t MAX_TRACKED_COLUMN_COUNT = 4096;
 
 // How many blocks' stats a ZoneMapFile keeps resident at once, per (db,
 // year) file, purely to avoid a repeat pread() when consecutive updates hit
 // the same block (the common sequential-append case) -- every entry here is
 // always disk-coherent (write-through, see ZoneMapFile::UpdateRow), so this
 // is a pure performance cache, not a durability buffer. 4 blocks * 64
-// tracked columns * 40 bytes/entry (ZoneMapEntry) = 10,240 bytes resident
+// tracked columns * 48 bytes/entry (ZoneMapEntry, v2 -- it grew from 40 to
+// 48 bytes when sum_sq_value was added for VARIANCE/STDDEV) = 12,288 bytes resident
 // per (db, year) file with this default -- negligible on its own; see
 // ZONE_MAP_REGISTRY_CAP below for the bound on how many (db, year) files can
 // be resident at once, which is what actually keeps total memory bounded.
@@ -414,8 +439,8 @@ inline constexpr size_t ZONE_MAP_HOT_CACHE_BLOCKS = 4;
 // here is trivially safe and cheap (unlike the mmap/fd caches): every
 // ZoneMapFile update is already write-through, so dropping an instance
 // loses nothing -- the next touch just reopens the file and pays one fresh
-// pread() for whatever block it needs. 256 instances * ~10KB each (default
-// ZONE_MAP_HOT_CACHE_BLOCKS) = ~2.5MB worst-case resident for this cache --
+// pread() for whatever block it needs. 256 instances * ~12KB each (default
+// ZONE_MAP_HOT_CACHE_BLOCKS) = ~3MB worst-case resident for this cache --
 // re-sweep alongside the Task 8 benchmark gate before trusting this default,
 // same rule as every other capacity constant in this file.
 inline constexpr size_t ZONE_MAP_REGISTRY_CAP = 256;

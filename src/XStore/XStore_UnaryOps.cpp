@@ -65,8 +65,11 @@ void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::R
     record.time_resolution = cfg_struct.timeresolution();
     record.row_length = cfg_struct.rowlength();
     record.durability_mode = durability_mode;
+    // One width for both the observations and the zone map ApplyWalRecord
+    // will open/create for them -- see WalRecord::tracked_column_count.
+    record.tracked_column_count = EffectiveTrackedColumnCount(cfg_struct);
     record.rows.push_back(WalRow{unix_time, std::string(row_buf.data(), cfg_struct.rowlength()),
-                                  BuildZoneMapObservations(*this, data, EffectiveTrackedColumnCount(cfg_struct))});
+                                  BuildZoneMapObservations(*this, data, record.tracked_column_count)});
     MaybeGrowColumnCount(db_name, db_base_path_str, data.fielddata_size());
 
     if (durability_mode == XStore_Proto::BYPASS) {

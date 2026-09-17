@@ -175,13 +175,14 @@ struct VariancePartial {
 
 template <typename Cmp, typename PruneCheck>
 void XStore::ScanSegmentWithZoneMapPruning(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                            uint32_t tracked_column_count,
                                             const char *rows_base, unsigned long long rows_to_process,
                                             unsigned long long first_row_index, unsigned short column_idx,
                                             ValueStruct &best_value, XStore_Proto::FData &best_data,
                                             PruneCheck &&should_skip_block) {
     if (rows_to_process == 0) return;
 
-    ZoneMapFile &zmap = GetOrOpenZoneMap(db_base_path, year, row_length);
+    ZoneMapFile &zmap = GetOrOpenZoneMap(db_base_path, year, row_length, tracked_column_count);
     uint64_t rows_per_block = zmap.RowsPerBlockValue();
     uint64_t first_row = first_row_index;
     uint64_t last_row = first_row_index + rows_to_process - 1;
@@ -208,13 +209,14 @@ void XStore::ScanSegmentWithZoneMapPruning(const std::string &db_base_path, unsi
 }
 
 void XStore::AccumulateSegmentWithZoneMapPushdown(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                                   uint32_t tracked_column_count,
                                                    const char *rows_base, unsigned long long rows_to_process,
                                                    unsigned long long first_row_index, unsigned short column_idx,
                                                    double &sum_out, unsigned long long &valid_count_out,
                                                    double *sum_sq_out) {
     if (rows_to_process == 0) return;
 
-    ZoneMapFile &zmap = GetOrOpenZoneMap(db_base_path, year, row_length);
+    ZoneMapFile &zmap = GetOrOpenZoneMap(db_base_path, year, row_length, tracked_column_count);
     uint64_t rows_per_block = zmap.RowsPerBlockValue();
     uint64_t first_row = first_row_index;
     uint64_t last_row = first_row_index + rows_to_process - 1;
@@ -284,7 +286,7 @@ void XStore::MinAggregate(unsigned long long int start_epoch_t, unsigned long lo
     MinMaxPartial final = WalkYearSpanParallel<MinMaxPartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
         MinMaxPartial{},
         [&](MinMaxPartial &partial, const char *rows_base, unsigned long long rows_to_process, unsigned short year, unsigned long long first_row_index) {
-            ScanSegmentWithZoneMapPruning<std::less<long double>>(db_base_path_str, year, cfg_struct.rowlength(),
+            ScanSegmentWithZoneMapPruning<std::less<long double>>(db_base_path_str, year, cfg_struct.rowlength(), EffectiveTrackedColumnCount(cfg_struct),
                 rows_base, rows_to_process, first_row_index, column_idx, partial.value, partial.data,
                 [&](const ZoneMapEntry &e) {
                     // MIN: a block whose smallest value is already >= our
@@ -332,7 +334,7 @@ void XStore::MaxAggregate(unsigned long long int start_epoch_t, unsigned long lo
     MinMaxPartial final = WalkYearSpanParallel<MinMaxPartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
         MinMaxPartial{},
         [&](MinMaxPartial &partial, const char *rows_base, unsigned long long rows_to_process, unsigned short year, unsigned long long first_row_index) {
-            ScanSegmentWithZoneMapPruning<std::greater<long double>>(db_base_path_str, year, cfg_struct.rowlength(),
+            ScanSegmentWithZoneMapPruning<std::greater<long double>>(db_base_path_str, year, cfg_struct.rowlength(), EffectiveTrackedColumnCount(cfg_struct),
                 rows_base, rows_to_process, first_row_index, column_idx, partial.value, partial.data,
                 [&](const ZoneMapEntry &e) {
                     // MAX: a block whose largest value is already <= our
@@ -392,7 +394,7 @@ void XStore::SumAggregate(unsigned long long int start_epoch_t, unsigned long lo
         SumPartial{},
         [&](SumPartial &partial, const char *rows_base, unsigned long long rows_to_process,
             unsigned short year, unsigned long long first_row_index) {
-            AccumulateSegmentWithZoneMapPushdown(db_base_path_str, year, cfg_struct.rowlength(),
+            AccumulateSegmentWithZoneMapPushdown(db_base_path_str, year, cfg_struct.rowlength(), EffectiveTrackedColumnCount(cfg_struct),
                 rows_base, rows_to_process, first_row_index, column_idx, partial.sum, partial.count);
         },
         [](SumPartial &final_state, SumPartial &partial) {
@@ -437,7 +439,7 @@ void XStore::AvgAggregate(unsigned long long int start_epoch_t, unsigned long lo
         SumPartial{},
         [&](SumPartial &partial, const char *rows_base, unsigned long long rows_to_process,
             unsigned short year, unsigned long long first_row_index) {
-            AccumulateSegmentWithZoneMapPushdown(db_base_path_str, year, cfg_struct.rowlength(),
+            AccumulateSegmentWithZoneMapPushdown(db_base_path_str, year, cfg_struct.rowlength(), EffectiveTrackedColumnCount(cfg_struct),
                 rows_base, rows_to_process, first_row_index, column_idx, partial.sum, partial.count);
         },
         [](SumPartial &final_state, SumPartial &partial) {
@@ -484,7 +486,7 @@ void XStore::VarianceAggregate(unsigned long long int start_epoch_t, unsigned lo
         VariancePartial{},
         [&](VariancePartial &partial, const char *rows_base, unsigned long long rows_to_process,
             unsigned short year, unsigned long long first_row_index) {
-            AccumulateSegmentWithZoneMapPushdown(db_base_path_str, year, cfg_struct.rowlength(),
+            AccumulateSegmentWithZoneMapPushdown(db_base_path_str, year, cfg_struct.rowlength(), EffectiveTrackedColumnCount(cfg_struct),
                 rows_base, rows_to_process, first_row_index, column_idx, partial.sum, partial.count, &partial.sum_sq);
         },
         [](VariancePartial &final_state, VariancePartial &partial) {
@@ -532,7 +534,7 @@ void XStore::StddevAggregate(unsigned long long int start_epoch_t, unsigned long
         VariancePartial{},
         [&](VariancePartial &partial, const char *rows_base, unsigned long long rows_to_process,
             unsigned short year, unsigned long long first_row_index) {
-            AccumulateSegmentWithZoneMapPushdown(db_base_path_str, year, cfg_struct.rowlength(),
+            AccumulateSegmentWithZoneMapPushdown(db_base_path_str, year, cfg_struct.rowlength(), EffectiveTrackedColumnCount(cfg_struct),
                 rows_base, rows_to_process, first_row_index, column_idx, partial.sum, partial.count, &partial.sum_sq);
         },
         [](VariancePartial &final_state, VariancePartial &partial) {

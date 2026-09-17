@@ -247,6 +247,18 @@ class XStore {
             std::string db_base_path;          // full path -- locates this DB's WAL subdir and, at apply time, its .XSTORE file
             XStore_Proto::TimeUnit time_resolution = XStore_Proto::SECOND;
             unsigned short row_length = 0;
+            // The DB's EffectiveTrackedColumnCount as of the moment this
+            // record's rows were turned into ZoneMapObservations -- carried
+            // here (per RECORD, not per row: every row in a record shares
+            // one (db, year) and one cfg snapshot) so ApplyWalRecord opens
+            // this DB's zone map at exactly the width its observations were
+            // built at. A header wider than the observations is the C1
+            // wrong-answer bug: columns in the gap exist in the header but
+            // are never folded, so they read back valid_count==0 over real
+            // data. Defaults to the global floor so any producer that
+            // forgets to set it still gets the pre-columnCount behavior
+            // rather than a zero-width zone map.
+            uint32_t tracked_column_count = XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS;
             std::vector<WalRow> rows;          // 1 entry for UnaryInsert; N for a BatchInsert/RangeInsert year-bucket group
             XStore_Proto::WalDurabilityMode durability_mode = XStore_Proto::SYNC;
             // One per REQUEST, not per row -- null for ASYNC (nobody
@@ -298,11 +310,32 @@ class XStore {
         // CREATING new DB instance with row length
         [[nodiscard]] XStore_Proto::CreateDB_REP CreateDB(std::string_view db_name, XStore_Proto::TimeUnit time_resolution, short int row_length, uint32_t column_count_seed = 0);
 
-        // Returns cfg.columncount() if it's been seeded/grown past 0,
-        // otherwise the global ZONE_MAP_MAX_TRACKED_COLUMNS default -- the
-        // single place that decides "how many columns does this DB's zone
-        // map track," consumed by BuildZoneMapObservations, ZoneMapFile
-        // sizing (Task 5), and the startup rebuild scan (Task 5).
+        // The single place that decides "how many columns does this DB's
+        // zone map track," consumed by BuildZoneMapObservations, every
+        // GetOrOpenZoneMap call site (insert/WAL-apply/aggregate-read) and
+        // the startup rebuild scan. Returns
+        // max(cfg.columncount(), ZONE_MAP_MAX_TRACKED_COLUMNS).
+        //
+        // ZONE_MAP_MAX_TRACKED_COLUMNS is a FLOOR here, not merely a
+        // fallback for an unset columncount -- that distinction is a
+        // correctness requirement, not a tuning choice. columncount is a
+        // high-water mark that starts at 0 and is first written by the
+        // insert AFTER that same insert already created the year's zone map
+        // (see the call order in XStore_UnaryOps/BatchOps/RangeOps), so a
+        // plain `columncount > 0 ? columncount : default` would NARROW the
+        // effective width from 64 to, say, 1 the moment a DB's first
+        // one-column row landed. The zone map's header can only ever widen
+        // (ZoneMapFile::Open's deliberately asymmetric `>` guard), so a
+        // narrowing observation width leaves every column between the new
+        // width and the header's width permanently tracked-but-never-folded
+        // -- valid_count==0 on a block that really does hold data, which
+        // AccumulateSegmentWithZoneMapPushdown reads as "nothing here" and
+        // ScanSegmentWithZoneMapPruning skips outright: a silent wrong
+        // answer for MIN/MAX/SUM/AVG/VARIANCE/STDDEV. Flooring at the
+        // global default makes this value monotonically non-decreasing for
+        // a given DB, which is exactly the invariant that keeps the on-disk
+        // header's tracked_column_count from ever exceeding the width the
+        // observations were actually built at.
         static uint32_t EffectiveTrackedColumnCount(const XStore_Proto::ConfigStruct &cfg_struct);
 
         // Cheap on every insert (one integer comparison against the
@@ -453,8 +486,16 @@ class XStore {
         // can positively rule out, never guesses. should_skip_block is
         // Cmp-specific (MIN checks entry.min_value, MAX checks
         // entry.max_value) so it's passed in rather than hardcoded here.
+        //
+        // tracked_column_count is this DB's EffectiveTrackedColumnCount,
+        // forwarded to GetOrOpenZoneMap so a read that happens to be the
+        // first toucher of a (db, year) creates the sidecar at the DB's own
+        // width instead of the global default -- the same width every
+        // insert/WAL-apply for this DB uses, so no caller can leave a header
+        // claiming columns that were never folded.
         template <typename Cmp, typename PruneCheck>
         void ScanSegmentWithZoneMapPruning(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                            uint32_t tracked_column_count,
                                             const char *rows_base, unsigned long long rows_to_process,
                                             unsigned long long first_row_index, unsigned short column_idx,
                                             ValueStruct &best_value, XStore_Proto::FData &best_data,
@@ -474,7 +515,11 @@ class XStore {
         // the zero-scan pushdown branch adds e.sum_sq_value, a block that falls
         // back to a real scan forwards the pointer into ProcessFileRangeAccumulate.
         // nullptr (the default) preserves SUM/AVG's call sites byte-for-byte.
+        // tracked_column_count: same role as in ScanSegmentWithZoneMapPruning
+        // above -- this DB's EffectiveTrackedColumnCount, forwarded to
+        // GetOrOpenZoneMap.
         void AccumulateSegmentWithZoneMapPushdown(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                                   uint32_t tracked_column_count,
                                                    const char *rows_base, unsigned long long rows_to_process,
                                                    unsigned long long first_row_index, unsigned short column_idx,
                                                    double &sum_out, unsigned long long &valid_count_out,
@@ -519,11 +564,20 @@ class XStore {
         //
         // tracked_column_count is forwarded to ZoneMapFile::Open (only used
         // on first creation/stale-version reinit, same as row_length) and
-        // defaulted to the global ZONE_MAP_MAX_TRACKED_COLUMNS so every
-        // existing call site (live insert/query paths, which don't thread a
-        // per-DB columnCount this far) keeps its prior behavior unchanged.
-        // XStore::RebuildOneYearZoneMap (Task 5) is currently the one caller
-        // that passes the real per-DB EffectiveTrackedColumnCount value.
+        // defaulted to the global ZONE_MAP_MAX_TRACKED_COLUMNS for test
+        // call sites that don't care. EVERY production call site --
+        // ApplyWalRecord (the one place an insert's rows are actually
+        // written), both aggregate-read segment helpers, and
+        // RebuildOneYearZoneMap -- passes the DB's real
+        // EffectiveTrackedColumnCount, so no two callers can disagree about
+        // how wide a given DB's zone map is.
+        //
+        // This function additionally clamps the request down to a
+        // current-version file's existing on-disk width, so only
+        // RebuildOneYearZoneMap (which truncates the file to 0 bytes first,
+        // then re-folds every row from raw data) can ever widen one -- see
+        // the guard's own comment in XStore_Management.cpp for why a
+        // request-path widen would be a silent data-loss bug.
         //
         // static, like fd_shards/wal_shards below: ApplyWalRecord (the
         // actual write site every insert path funnels through, on

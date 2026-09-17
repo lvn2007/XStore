@@ -275,6 +275,41 @@ TEST_F(XStoreTest, InsertingRowNarrowerThanColumnCountNeverShrinksIt) {
     EXPECT_EQ(shard.map.at("NOSHRINKCOLDB").columncount(), 100u); // unchanged, never shrinks
 }
 
+// Final whole-branch review, finding C2. column_count_seed arrives straight
+// off the wire (CreateDB_REQ.columnCount -> ZMQ_Server.cpp -> here) and used
+// to be persisted to .CFG with no validation at all, from where it sizes
+// std::vector<ZoneMapEntry> allocations on every subsequent insert and read.
+// The reviewer executed CreateDB(columnCount=0xFFFFFFFF) and the next
+// UnaryInsert threw std::length_error out of a ZMQ worker thread with no
+// handler above it -> std::terminate -> the whole server process died; and
+// because the value was already durable in .CFG, every retry re-crashed it.
+// Rejected rather than silently clamped so the caller learns immediately,
+// matching CreateDB's existing row_length guard.
+TEST_F(XStoreTest, CreateDBWithAbsurdColumnCountSeedIsRejected) {
+    XStore store;
+    XStore_Proto::CreateDB_REP rep = store.CreateDB("POISONCOLDB", XStore_Proto::SECOND, 1536,
+                                                     /*column_count_seed=*/0xFFFFFFFFu);
+    EXPECT_EQ(rep.createdbstatus(),
+              fmt::format("[WARNING] [CREATE DB] [DB: POISONCOLDB] - Column count must be <= {}",
+                          XStoreTunables::MAX_TRACKED_COLUMN_COUNT));
+
+    // Nothing durable was created, so there is no poisoned .CFG to re-crash
+    // on the next request -- the dangerous half of this bug.
+    auto &shard = XStore::cfg_shards[std::hash<std::string>{}("POISONCOLDB") % XStore::CFG_SHARD_COUNT];
+    EXPECT_EQ(shard.map.count("POISONCOLDB"), 0u);
+
+    // And an insert against it is an ordinary "DB does not exist" miss --
+    // not an allocation throw. (Pre-fix, with the seed persisted, this line
+    // is what actually terminated the process.)
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    EXPECT_NO_THROW(store.UnaryInsert(1000, MakeRow({FDouble(1.0)}), "POISONCOLDB", &insert_rep));
+
+    // The bound itself is still usable for any realistic schema.
+    XStore_Proto::CreateDB_REP ok_rep = store.CreateDB("ATLIMITCOLDB", XStore_Proto::SECOND, 1536,
+                                                       /*column_count_seed=*/XStoreTunables::MAX_TRACKED_COLUMN_COUNT);
+    EXPECT_EQ(ok_rep.createdbstatus(), "[INFO] [CREATE DB] [DB: ATLIMITCOLDB] - Created DB") << ok_rep.createdbstatus();
+}
+
 // ---------------------------------------------------------------------
 // RemoveDB
 // ---------------------------------------------------------------------

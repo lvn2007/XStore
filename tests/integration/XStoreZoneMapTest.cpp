@@ -1044,3 +1044,174 @@ TEST_F(XStoreZoneMapTest, RebuildOneYearZoneMapConcurrentAcrossYearsDoesNotCrash
 }
 
 } // namespace
+
+namespace {
+
+using xstore_test::CreateTestDb;
+
+// Final whole-branch review, finding C1 -- a SILENT WRONG ANSWER on the
+// pre-existing MIN/MAX/SUM/AVG ops (not just this branch's new
+// VARIANCE/STDDEV), reproducible with two plain inserts, no concurrency and
+// no restart.
+//
+// Mechanism: every insert path builds its ZoneMapObservations at
+// EffectiveTrackedColumnCount(cfg) AS OF THAT INSERT, but the .zmap header
+// is written once (at creation) and can only ever WIDEN afterwards
+// (ZoneMapFile::Open's deliberately asymmetric `>` guard, Task 6). Before
+// this fix, EffectiveTrackedColumnCount was
+// `columncount > 0 ? columncount : ZONE_MAP_MAX_TRACKED_COLUMNS`, and
+// columncount is a high-water mark that starts at 0 and is first persisted
+// by MaybeGrowColumnCount AFTER that same insert's observations were already
+// built. So an unseeded DB whose first row is narrow went
+// 64 (unseeded default) -> 1 (grown), NARROWING the observation width below
+// the 64 its own zone map header had just been created at. Every column in
+// the gap [new width, 64) was then "tracked" by the header but never folded
+// by UpdateRow again -- it sat at valid_count == 0 over real data, which
+// ScanSegmentWithZoneMapPruning reads as "no numeric values in this block,
+// skip it" and AccumulateSegmentWithZoneMapPushdown reads as "contributes
+// nothing". MIN/MAX returned "ERROR: No valid data found" for a column that
+// demonstrably holds data; SUM/AVG/VARIANCE/STDDEV dropped it from the
+// aggregate. It healed only after the next InitDB() rebuilt the sidecar,
+// which is why no existing test caught it: every zone-map test either used
+// column 0 (always inside any width) or asserted after an InitDB().
+//
+// Fix: ZONE_MAP_MAX_TRACKED_COLUMNS is now a FLOOR inside
+// EffectiveTrackedColumnCount (max(), not a fallback-for-0), so the width a
+// DB's observations are built at is monotonically non-decreasing and can
+// never drop below what its header already claims.
+TEST_F(XStoreZoneMapTest, AggregateOnColumnAboveGrownColumnCountReadsRealDataWithoutInitDb) {
+    XStore store;
+    std::string db_name = "HETEROWIDTHNOINIT";
+    CreateTestDb(store, db_name, XStore_Proto::SECOND, kPreexistRowLength); // UNSEEDED -- columnCount starts at 0
+
+    // Row 1: one populated column. This is the insert that creates the
+    // year's .zmap, and the one whose MaybeGrowColumnCount call drives
+    // columnCount from 0 up to 1 -- i.e. to a value BELOW the global
+    // default, which is what used to narrow every later insert's
+    // observation width.
+    XStore_Proto::RowData narrow_row;
+    narrow_row.add_fielddata()->set_doubledata(1.0);
+    XStore_Proto::UnaryInsert_REP narrow_rep;
+    store.UnaryInsert(kYear2023StartEpoch + 10, narrow_row, db_name, &narrow_rep, XStore_Proto::SYNC);
+
+    auto &shard = XStore::cfg_shards[std::hash<std::string>{}(db_name) % XStore::CFG_SHARD_COUNT];
+    ASSERT_TRUE(shard.map.count(db_name));
+    ASSERT_EQ(shard.map.at(db_name).columncount(), 1u)
+        << "test setup error: expected columnCount to have grown to 1 (below the global default)";
+
+    // Row 2: populates column index 1 -- at/above the DB's persisted
+    // columnCount (1), but still far below the zone map header's width, so
+    // the header claims to track it.
+    XStore_Proto::RowData wider_row;
+    wider_row.add_fielddata()->set_doubledata(2.0);
+    wider_row.add_fielddata()->set_doubledata(5.0);
+    XStore_Proto::UnaryInsert_REP wider_rep;
+    store.UnaryInsert(kYear2023StartEpoch + 11, wider_row, db_name, &wider_rep, XStore_Proto::SYNC);
+
+    // Setup guard: column 1 really is inside the on-disk header's tracked
+    // width, so the pruning/pushdown paths below genuinely consult the zone
+    // map for it rather than trivially falling back to a real scan (which
+    // would make this test prove nothing).
+    std::string zmap_path = fmt::format("{}/{}.zmap", DbPath(db_name), 2023);
+    {
+        int fd = open(zmap_path.c_str(), O_RDONLY);
+        ASSERT_GE(fd, 0);
+        ZoneMapFileHeader header{};
+        ASSERT_EQ(pread(fd, &header, sizeof(header), 0), static_cast<ssize_t>(sizeof(header)));
+        close(fd);
+        ASSERT_GT(header.tracked_column_count, 1u)
+            << "test setup error: column 1 must be inside the header's tracked width for this to be discriminating";
+    }
+
+    // NO InitDB() here -- deliberately. This is the request path answering
+    // from the zone map exactly as a live server would between restarts.
+    unsigned long long start = kYear2023StartEpoch + 10;
+    unsigned long long end = kYear2023StartEpoch + 11;
+
+    XStore_Proto::Min_REP min_rep;
+    store.MinAggregate(start, end, db_name, 1, &min_rep);
+    EXPECT_EQ(min_rep.opstatus(), "SUCCESS")
+        << "zone map skipped a block that really holds data for column 1";
+    EXPECT_DOUBLE_EQ(min_rep.opresult().doubledata(), 5.0);
+
+    XStore_Proto::Max_REP max_rep;
+    store.MaxAggregate(start, end, db_name, 1, &max_rep);
+    EXPECT_EQ(max_rep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(max_rep.opresult().doubledata(), 5.0);
+
+    // And the observation really was folded, not merely rescued by a
+    // fallback scan -- read the durable per-column entry directly.
+    ZoneMapFile &zmap = store.GetOrOpenZoneMap(DbPath(db_name), 2023, kPreexistRowLength);
+    uint64_t block = BlockIndexForRow(11, zmap.RowsPerBlockValue());
+    auto stats = zmap.TryGetBlockStats(block);
+    ASSERT_TRUE(stats.has_value());
+    ASSERT_GT(stats->size(), 1u);
+    EXPECT_EQ((*stats)[1].valid_count, 1u)
+        << "column 1 is inside the header's tracked width but was never folded by UpdateRow";
+    EXPECT_DOUBLE_EQ((*stats)[1].sum_value, 5.0);
+
+    // Final-review finding I3, verified here rather than by a benchmark: a
+    // zone map created by the ordinary insert path is now already at the
+    // width InitDB() will ask for, so a restart must NOT re-scan it purely
+    // because of a width mismatch. RebuildOneYearZoneMap truncates and
+    // re-folds from raw data, and UpdateRow accumulates rather than
+    // replaces -- so an unnecessary rebuild here would be directly visible
+    // as changed stats (and would cost a full scan of this year file's
+    // whole preallocated 31.5M-row extent, which is exactly I3's measured
+    // cost).
+    store.InitDB();
+    ZoneMapFile &zmap_after_init = store.GetOrOpenZoneMap(DbPath(db_name), 2023, kPreexistRowLength);
+    auto stats_after_init = zmap_after_init.TryGetBlockStats(block);
+    ASSERT_TRUE(stats_after_init.has_value());
+    EXPECT_EQ(stats_after_init->size(), stats->size())
+        << "InitDB() resized a zone map the insert path had already created at the right width";
+    EXPECT_EQ((*stats_after_init)[1].valid_count, 1u);
+    EXPECT_DOUBLE_EQ((*stats_after_init)[1].sum_value, 5.0);
+}
+
+// Same C1 root cause, exercised through the SUM/AVG/VARIANCE/STDDEV
+// pushdown branch instead of the MIN/MAX pruning branch. Kept separate so a
+// future regression tells you immediately which of the two zone-map
+// consumers broke.
+TEST_F(XStoreZoneMapTest, SumAndVarianceOnColumnAboveGrownColumnCountReadRealDataWithoutInitDb) {
+    XStore store;
+    std::string db_name = "HETEROWIDTHSUM";
+    CreateTestDb(store, db_name, XStore_Proto::SECOND, kPreexistRowLength); // UNSEEDED
+
+    XStore_Proto::RowData narrow_row;
+    narrow_row.add_fielddata()->set_doubledata(1.0);
+    XStore_Proto::UnaryInsert_REP narrow_rep;
+    store.UnaryInsert(kYear2023StartEpoch + 10, narrow_row, db_name, &narrow_rep, XStore_Proto::SYNC);
+
+    // Two more rows populating column 1, so VARIANCE's count > 1 gate is
+    // satisfied and a zero/dropped contribution can't masquerade as the
+    // "No valid data found" convention.
+    for (int i = 0; i < 2; ++i) {
+        XStore_Proto::RowData wider_row;
+        wider_row.add_fielddata()->set_doubledata(2.0);
+        wider_row.add_fielddata()->set_doubledata(i == 0 ? 4.0 : 6.0);
+        XStore_Proto::UnaryInsert_REP wider_rep;
+        store.UnaryInsert(kYear2023StartEpoch + 11 + i, wider_row, db_name, &wider_rep, XStore_Proto::SYNC);
+    }
+
+    // Query the whole of block 0 (not just the three inserted timestamps):
+    // AccumulateSegmentWithZoneMapPushdown only takes its zero-scan
+    // pushdown branch for a block whose OWN full row span lies inside the
+    // query range, so a narrow range around the inserted rows would fall
+    // back to a real scan and mask the bug entirely. Rows the query covers
+    // but nothing ever wrote are sparse holes, skipped for free.
+    unsigned long long start = kYear2023StartEpoch;
+    unsigned long long end = kYear2023StartEpoch + RowsPerBlock(kPreexistRowLength) - 1;
+
+    XStore_Proto::Sum_REP sum_rep;
+    store.SumAggregate(start, end, db_name, 1, &sum_rep);
+    EXPECT_EQ(sum_rep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(sum_rep.opresult(), 10.0); // 4 + 6
+
+    XStore_Proto::Variance_REP var_rep;
+    store.VarianceAggregate(start, end, db_name, 1, &var_rep);
+    EXPECT_EQ(var_rep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(var_rep.opresult(), 2.0); // sample variance of {4, 6}
+}
+
+} // namespace

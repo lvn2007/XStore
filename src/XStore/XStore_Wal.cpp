@@ -193,7 +193,14 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply) {
     // zone-map-disagrees-with-real-data failure mode Task 2's write-through
     // design exists to prevent, just moved to the wrong side of the WAL
     // instead of eliminated.
-    ZoneMapFile &zmap = GetOrOpenZoneMap(record_to_apply.db_base_path, first_ts.year, record_to_apply.row_length);
+    //
+    // tracked_column_count comes off the RECORD, not the global default:
+    // it is the exact width this record's zone_map_observations were built
+    // at (captured alongside them at enqueue time, before the .CFG's
+    // columnCount could move underneath), so the file this creates can
+    // never claim to track more columns than were actually folded into it.
+    ZoneMapFile &zmap = GetOrOpenZoneMap(record_to_apply.db_base_path, first_ts.year, record_to_apply.row_length,
+                                          record_to_apply.tracked_column_count);
 
     std::vector<unsigned long long> offsets(record_to_apply.rows.size());
     for (size_t i = 0; i < record_to_apply.rows.size(); ++i) {

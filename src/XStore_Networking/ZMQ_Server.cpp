@@ -246,227 +246,256 @@ void ZmqServer::WorkerRoutine(std::string server_addr) {
             continue;
         }
 
-        switch (client_request->payload_case()) {
-            // INFO
-            case XStore_Proto::Request::kInfo: {
-                XStore_Proto::SysInfo_REP rep = my_store.InfoQuery(server_addr, num_threads);
-                SendProto(socket, rep);
-                break;
-            }
+        // Safety net around the whole dispatch switch. Any handler below
+        // that throws would otherwise unwind straight out of this worker
+        // thread -- nothing above it catches, so the C++ runtime calls
+        // std::terminate and the ENTIRE server process dies, taking every
+        // other worker's in-flight request with it. That is not
+        // hypothetical: XStore::GetOrOpenZoneMap throws std::runtime_error
+        // when ZoneMapFile::Open fails, and a .CFG carrying an implausible
+        // columnCount reached std::vector<ZoneMapEntry>'s std::length_error
+        // on every insert (final whole-branch review, finding C2 -- that
+        // particular input is now bounded in XStore::CreateDB/
+        // MaybeGrowColumnCount, but bounding one known input is not the
+        // same as surviving an unknown one).
+        //
+        // Deliberately just a net, not an error-handling redesign: reply
+        // the same way this loop's other two "can't produce a real answer"
+        // paths already do -- a single empty frame, which unblocks the
+        // client's REQ socket instead of leaving it waiting forever -- log,
+        // and keep serving. The inner catch around the send covers the one
+        // case where the throw happened AFTER a reply was already sent, in
+        // which case this second send is an EFSM error on the REP socket
+        // and there is nothing further to do about it.
+        try {
+            switch (client_request->payload_case()) {
+                // INFO
+                case XStore_Proto::Request::kInfo: {
+                    XStore_Proto::SysInfo_REP rep = my_store.InfoQuery(server_addr, num_threads);
+                    SendProto(socket, rep);
+                    break;
+                }
 
-            // PING -- warmup/liveness probe, no XStore work, just the round trip
-            case XStore_Proto::Request::kPing: {
-                XStore_Proto::Ping_REP rep;
-                SendProto(socket, rep);
-                break;
-            }
+                // PING -- warmup/liveness probe, no XStore work, just the round trip
+                case XStore_Proto::Request::kPing: {
+                    XStore_Proto::Ping_REP rep;
+                    SendProto(socket, rep);
+                    break;
+                }
 
-            // CREATE DB
-            case XStore_Proto::Request::kCreatedb: {
-                const auto &req = client_request->createdb();
-                XStore_Proto::CreateDB_REP rep = my_store.CreateDB(req.dbname(), req.timeresolution(), req.rowlength(), req.columncount());
-                SendProto(socket, rep);
-                break;
-            }
+                // CREATE DB
+                case XStore_Proto::Request::kCreatedb: {
+                    const auto &req = client_request->createdb();
+                    XStore_Proto::CreateDB_REP rep = my_store.CreateDB(req.dbname(), req.timeresolution(), req.rowlength(), req.columncount());
+                    SendProto(socket, rep);
+                    break;
+                }
 
-            // REMOVE DB
-            case XStore_Proto::Request::kRemovedb: {
-                const auto &req = client_request->removedb();
-                XStore_Proto::RemoveDB_REP rep = my_store.RemoveDB(req.dbname());
-                SendProto(socket, rep);
-                break;
-            }
+                // REMOVE DB
+                case XStore_Proto::Request::kRemovedb: {
+                    const auto &req = client_request->removedb();
+                    XStore_Proto::RemoveDB_REP rep = my_store.RemoveDB(req.dbname());
+                    SendProto(socket, rep);
+                    break;
+                }
 
-            // REMOVE DB FILES
-            case XStore_Proto::Request::kRemovedbfiles: {
-                auto *req = client_request->mutable_removedbfiles();
-                XStore_Proto::RemoveDBFiles_REP rep = my_store.RemoveDBFiles(req, req->dbname());
-                SendProto(socket, rep);
-                break;
-            }
+                // REMOVE DB FILES
+                case XStore_Proto::Request::kRemovedbfiles: {
+                    auto *req = client_request->mutable_removedbfiles();
+                    XStore_Proto::RemoveDBFiles_REP rep = my_store.RemoveDBFiles(req, req->dbname());
+                    SendProto(socket, rep);
+                    break;
+                }
 
-            // UNARY INSERT
-            case XStore_Proto::Request::kUnaryinsert: {
-                const auto &req = client_request->unaryinsert();
-                XStore_Proto::UnaryInsert_REP rep;
-                my_store.UnaryInsert(req.timestamp(), req.data(), req.dbname(), &rep, req.durabilitymode());
-                SendProto(socket, rep);
-                break;
-            }
+                // UNARY INSERT
+                case XStore_Proto::Request::kUnaryinsert: {
+                    const auto &req = client_request->unaryinsert();
+                    XStore_Proto::UnaryInsert_REP rep;
+                    my_store.UnaryInsert(req.timestamp(), req.data(), req.dbname(), &rep, req.durabilitymode());
+                    SendProto(socket, rep);
+                    break;
+                }
 
-            // UNARY QUERY
-            case XStore_Proto::Request::kUnaryquery: {
-                const auto &req = client_request->unaryquery();
-                // Arena-allocated: same RowData -> repeated FData nesting as
-                // Range/BatchQuery (up to one alloc per column), and this is
-                // likely the highest-QPS RPC of all of them -- single-row
-                // point queries. Not scaled by span like RangeQuery, but
-                // paid on every call with no reuse across calls.
-                auto *rep = google::protobuf::Arena::Create<XStore_Proto::UnaryQuery_REP>(&arena);
-                my_store.UnaryQuery(req.timestamp(), req.dbname(), rep);
-                SendProto(socket, *rep);
-                break;
-            }
+                // UNARY QUERY
+                case XStore_Proto::Request::kUnaryquery: {
+                    const auto &req = client_request->unaryquery();
+                    // Arena-allocated: same RowData -> repeated FData nesting as
+                    // Range/BatchQuery (up to one alloc per column), and this is
+                    // likely the highest-QPS RPC of all of them -- single-row
+                    // point queries. Not scaled by span like RangeQuery, but
+                    // paid on every call with no reuse across calls.
+                    auto *rep = google::protobuf::Arena::Create<XStore_Proto::UnaryQuery_REP>(&arena);
+                    my_store.UnaryQuery(req.timestamp(), req.dbname(), rep);
+                    SendProto(socket, *rep);
+                    break;
+                }
 
-            // UNARY DELETE
-            case XStore_Proto::Request::kUnarydelete: {
-                const auto &req = client_request->unarydelete();
-                XStore_Proto::UnaryDelete_REP rep = my_store.UnaryDelete(req.timestamp(), req.dbname());
-                SendProto(socket, rep);
-                break;
-            }
+                // UNARY DELETE
+                case XStore_Proto::Request::kUnarydelete: {
+                    const auto &req = client_request->unarydelete();
+                    XStore_Proto::UnaryDelete_REP rep = my_store.UnaryDelete(req.timestamp(), req.dbname());
+                    SendProto(socket, rep);
+                    break;
+                }
 
-            // BATCH INSERT
-            case XStore_Proto::Request::kBatchinsert: {
-                // Req itself is already arena-allocated (it's a field inside
-                // ClientRequest, which lives on Arena) -- BatchInsert_REQ's
-                // repeated BatchInsert_DATA, each with its own RowData ->
-                // repeated FData, was parsed straight into arena memory
-                // above with no extra work needed here.
-                auto *req = client_request->mutable_batchinsert();
-                XStore_Proto::BatchInsert_REP rep;
-                my_store.BatchInsert(req, &rep);
-                SendProto(socket, rep);
-                break;
-            }
+                // BATCH INSERT
+                case XStore_Proto::Request::kBatchinsert: {
+                    // Req itself is already arena-allocated (it's a field inside
+                    // ClientRequest, which lives on Arena) -- BatchInsert_REQ's
+                    // repeated BatchInsert_DATA, each with its own RowData ->
+                    // repeated FData, was parsed straight into arena memory
+                    // above with no extra work needed here.
+                    auto *req = client_request->mutable_batchinsert();
+                    XStore_Proto::BatchInsert_REP rep;
+                    my_store.BatchInsert(req, &rep);
+                    SendProto(socket, rep);
+                    break;
+                }
 
-            // BATCH QUERY
-            case XStore_Proto::Request::kBatchquery: {
-                // No Arena/BatchQuery_REP here -- BatchQuery shares
-                // RangeQuery's zero-object-tree encoder (same wire
-                // shape, see XStore_WireEncode.h), for the same reason: no
-                // UnaryQuery_REP/RowData/FData tree ever gets built, so
-                // there's nothing for Reset() to leave stranded as a
-                // permanent per-worker RSS floor. Multi-frame reply,
-                // reassembled transparently by the client library.
-                auto *req = client_request->mutable_batchquery();
-                my_store.BatchQuery(req, /*sort_time=*/true, XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
-                    [&](std::string &&chunk, bool is_last) {
-                        socket.send(zmq::buffer(chunk),
-                                    is_last ? zmq::send_flags::dontwait
-                                            : (zmq::send_flags::dontwait | zmq::send_flags::sndmore));
-                    });
-                break;
-            }
+                // BATCH QUERY
+                case XStore_Proto::Request::kBatchquery: {
+                    // No Arena/BatchQuery_REP here -- BatchQuery shares
+                    // RangeQuery's zero-object-tree encoder (same wire
+                    // shape, see XStore_WireEncode.h), for the same reason: no
+                    // UnaryQuery_REP/RowData/FData tree ever gets built, so
+                    // there's nothing for Reset() to leave stranded as a
+                    // permanent per-worker RSS floor. Multi-frame reply,
+                    // reassembled transparently by the client library.
+                    auto *req = client_request->mutable_batchquery();
+                    my_store.BatchQuery(req, /*sort_time=*/true, XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                        [&](std::string &&chunk, bool is_last) {
+                            socket.send(zmq::buffer(chunk),
+                                        is_last ? zmq::send_flags::dontwait
+                                                : (zmq::send_flags::dontwait | zmq::send_flags::sndmore));
+                        });
+                    break;
+                }
 
-            // BATCH DELETE
-            case XStore_Proto::Request::kBatchdelete: {
-                auto *req = client_request->mutable_batchdelete();
-                XStore_Proto::BatchDelete_REP rep = my_store.BatchDelete(req);
-                SendProto(socket, rep);
-                break;
-            }
+                // BATCH DELETE
+                case XStore_Proto::Request::kBatchdelete: {
+                    auto *req = client_request->mutable_batchdelete();
+                    XStore_Proto::BatchDelete_REP rep = my_store.BatchDelete(req);
+                    SendProto(socket, rep);
+                    break;
+                }
 
-            // RANGE INSERT
-            case XStore_Proto::Request::kRangeinsert: {
-                // Same as BatchInsert above: RangeInsert_REQ's repeated
-                // RangeInsert_DATA -> RowData -> repeated FData tree is
-                // already arena-allocated from the ParseFromArray above --
-                // this is the actual benefit for RangeInsert, since its own
-                // response (RangeInsert_REP) is just a status string with
-                // nothing to arena.
-                const auto &req = client_request->rangeinsert();
-                XStore_Proto::RangeInsert_REP rep;
-                my_store.RangeInsert(&req, &rep);
-                SendProto(socket, rep);
-                break;
-            }
+                // RANGE INSERT
+                case XStore_Proto::Request::kRangeinsert: {
+                    // Same as BatchInsert above: RangeInsert_REQ's repeated
+                    // RangeInsert_DATA -> RowData -> repeated FData tree is
+                    // already arena-allocated from the ParseFromArray above --
+                    // this is the actual benefit for RangeInsert, since its own
+                    // response (RangeInsert_REP) is just a status string with
+                    // nothing to arena.
+                    const auto &req = client_request->rangeinsert();
+                    XStore_Proto::RangeInsert_REP rep;
+                    my_store.RangeInsert(&req, &rep);
+                    SendProto(socket, rep);
+                    break;
+                }
 
-            // RANGE QUERY
-            case XStore_Proto::Request::kRangequery: {
-                // No Arena/RangeQuery_REP here -- RangeQuery never
-                // builds a UnaryQuery_REP/RowData/FData tree for this
-                // response (see its declaration comment in XStore.h and the
-                // wire-encode helpers in XStore_RangeOps.cpp), which is the
-                // fix for the OOM a big single-shot range used to cause: the
-                // old path's arena tree, once built, was never freed
-                // (Reset() keeps blocks) and became this worker's permanent
-                // RSS floor. Each chunk here is sent as its own ZMQ frame
-                // (SNDMORE on all but the last), reassembled by the client
-                // library into one logical RangeQuery_REP -- transparent to
-                // whatever called RangeQuery at the API level.
-                const auto &req = client_request->rangequery();
-                my_store.RangeQuery(req.starttime(), req.endtime(), req.dbname(),
-                    XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
-                    [&](std::string &&chunk, bool is_last) {
-                        socket.send(zmq::buffer(chunk),
-                                    is_last ? zmq::send_flags::dontwait
-                                            : (zmq::send_flags::dontwait | zmq::send_flags::sndmore));
-                    });
-                break;
-            }
+                // RANGE QUERY
+                case XStore_Proto::Request::kRangequery: {
+                    // No Arena/RangeQuery_REP here -- RangeQuery never
+                    // builds a UnaryQuery_REP/RowData/FData tree for this
+                    // response (see its declaration comment in XStore.h and the
+                    // wire-encode helpers in XStore_RangeOps.cpp), which is the
+                    // fix for the OOM a big single-shot range used to cause: the
+                    // old path's arena tree, once built, was never freed
+                    // (Reset() keeps blocks) and became this worker's permanent
+                    // RSS floor. Each chunk here is sent as its own ZMQ frame
+                    // (SNDMORE on all but the last), reassembled by the client
+                    // library into one logical RangeQuery_REP -- transparent to
+                    // whatever called RangeQuery at the API level.
+                    const auto &req = client_request->rangequery();
+                    my_store.RangeQuery(req.starttime(), req.endtime(), req.dbname(),
+                        XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                        [&](std::string &&chunk, bool is_last) {
+                            socket.send(zmq::buffer(chunk),
+                                        is_last ? zmq::send_flags::dontwait
+                                                : (zmq::send_flags::dontwait | zmq::send_flags::sndmore));
+                        });
+                    break;
+                }
 
-            // RANGE DELETE
-            case XStore_Proto::Request::kRangedelete: {
-                const auto &req = client_request->rangedelete();
-                XStore_Proto::RangeDelete_REP rep = my_store.RangeDelete(req.starttime(), req.endtime(), req.dbname());
-                SendProto(socket, rep);
-                break;
-            }
+                // RANGE DELETE
+                case XStore_Proto::Request::kRangedelete: {
+                    const auto &req = client_request->rangedelete();
+                    XStore_Proto::RangeDelete_REP rep = my_store.RangeDelete(req.starttime(), req.endtime(), req.dbname());
+                    SendProto(socket, rep);
+                    break;
+                }
 
-            // MIN AGGREGATE
-            case XStore_Proto::Request::kMin: {
-                const auto &req = client_request->min();
-                XStore_Proto::Min_REP rep;
-                my_store.MinAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
-                SendProto(socket, rep);
-                break;
-            }
+                // MIN AGGREGATE
+                case XStore_Proto::Request::kMin: {
+                    const auto &req = client_request->min();
+                    XStore_Proto::Min_REP rep;
+                    my_store.MinAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
+                    SendProto(socket, rep);
+                    break;
+                }
 
-            // MAX AGGREGATE
-            case XStore_Proto::Request::kMax: {
-                const auto &req = client_request->max();
-                XStore_Proto::Max_REP rep;
-                my_store.MaxAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
-                SendProto(socket, rep);
-                break;
-            }
+                // MAX AGGREGATE
+                case XStore_Proto::Request::kMax: {
+                    const auto &req = client_request->max();
+                    XStore_Proto::Max_REP rep;
+                    my_store.MaxAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
+                    SendProto(socket, rep);
+                    break;
+                }
 
-            // SUM AGGREGATE
-            case XStore_Proto::Request::kSum: {
-                const auto &req = client_request->sum();
-                XStore_Proto::Sum_REP rep;
-                my_store.SumAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
-                SendProto(socket, rep);
-                break;
-            }
+                // SUM AGGREGATE
+                case XStore_Proto::Request::kSum: {
+                    const auto &req = client_request->sum();
+                    XStore_Proto::Sum_REP rep;
+                    my_store.SumAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
+                    SendProto(socket, rep);
+                    break;
+                }
 
-            // AVG AGGREGATE
-            case XStore_Proto::Request::kAvg: {
-                const auto &req = client_request->avg();
-                XStore_Proto::Avg_REP rep;
-                my_store.AvgAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
-                SendProto(socket, rep);
-                break;
-            }
+                // AVG AGGREGATE
+                case XStore_Proto::Request::kAvg: {
+                    const auto &req = client_request->avg();
+                    XStore_Proto::Avg_REP rep;
+                    my_store.AvgAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
+                    SendProto(socket, rep);
+                    break;
+                }
 
-            // VARIANCE AGGREGATE
-            case XStore_Proto::Request::kVariance: {
-                const auto &req = client_request->variance();
-                XStore_Proto::Variance_REP rep;
-                my_store.VarianceAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
-                SendProto(socket, rep);
-                break;
-            }
+                // VARIANCE AGGREGATE
+                case XStore_Proto::Request::kVariance: {
+                    const auto &req = client_request->variance();
+                    XStore_Proto::Variance_REP rep;
+                    my_store.VarianceAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
+                    SendProto(socket, rep);
+                    break;
+                }
 
-            // STDDEV AGGREGATE
-            case XStore_Proto::Request::kStddev: {
-                const auto &req = client_request->stddev();
-                XStore_Proto::Stddev_REP rep;
-                my_store.StddevAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
-                SendProto(socket, rep);
-                break;
-            }
+                // STDDEV AGGREGATE
+                case XStore_Proto::Request::kStddev: {
+                    const auto &req = client_request->stddev();
+                    XStore_Proto::Stddev_REP rep;
+                    my_store.StddevAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
+                    SendProto(socket, rep);
+                    break;
+                }
 
-            // No payload set (malformed/unrecognized request) -- reply so
-            // the client's REQ socket never hangs waiting for a response
-            // that will never come.
-            case XStore_Proto::Request::PAYLOAD_NOT_SET:
-            default: {
-                spdlog::warn("[NETWORKING] - Received request with no payload set, dropping");
-                socket.send(zmq::message_t(0), zmq::send_flags::dontwait);
-                break;
+                // No payload set (malformed/unrecognized request) -- reply so
+                // the client's REQ socket never hangs waiting for a response
+                // that will never come.
+                case XStore_Proto::Request::PAYLOAD_NOT_SET:
+                default: {
+                    spdlog::warn("[NETWORKING] - Received request with no payload set, dropping");
+                    socket.send(zmq::message_t(0), zmq::send_flags::dontwait);
+                    break;
+                }
             }
+        } catch (const std::exception &e) {
+            spdlog::error("[NETWORKING] - Request handler threw ({}), replying empty and continuing", e.what());
+            try { socket.send(zmq::message_t(0), zmq::send_flags::dontwait); } catch (...) {}
+        } catch (...) {
+            spdlog::error("[NETWORKING] - Request handler threw a non-std exception, replying empty and continuing");
+            try { socket.send(zmq::message_t(0), zmq::send_flags::dontwait); } catch (...) {}
         }
     }
 }

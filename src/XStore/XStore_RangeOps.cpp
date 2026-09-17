@@ -85,6 +85,12 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client,
         record.time_resolution = cfg_struct.timeresolution();
         record.row_length = cfg_struct.rowlength();
         record.durability_mode = durability_mode;
+        // One width for both the observations below and the zone map
+        // ApplyWalRecord will open/create for them -- see
+        // WalRecord::tracked_column_count. cfg_struct is this call's own
+        // local snapshot, so this stays constant across the whole loop even
+        // as MaybeGrowColumnCount moves the persisted value underneath.
+        record.tracked_column_count = EffectiveTrackedColumnCount(cfg_struct);
         record.rows.reserve(indices.size());
 
         for (unsigned long long int idx : indices) {
@@ -97,7 +103,7 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client,
             [[maybe_unused]] bool serialize_ok = entry.data().SerializeToArray(row_bytes.data(), static_cast<int>(cfg_struct.rowlength()));
             std::memset(row_bytes.data() + serialized_size, 0, cfg_struct.rowlength() - serialized_size);
             record.rows.push_back(WalRow{entry.timestamp(), std::move(row_bytes),
-                                          BuildZoneMapObservations(*this, entry.data(), EffectiveTrackedColumnCount(cfg_struct))});
+                                          BuildZoneMapObservations(*this, entry.data(), record.tracked_column_count)});
             MaybeGrowColumnCount(db_name, db_base_path_str, entry.data().fielddata_size());
         }
 
