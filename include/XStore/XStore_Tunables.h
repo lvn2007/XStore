@@ -415,6 +415,11 @@ inline constexpr uint32_t ZONE_MAP_MAX_TRACKED_COLUMNS = 64;
 // retry. 4096 is far past any realistic row (a 65535-byte row cannot hold
 // 4096 meaningfully-populated protobuf fields) while capping one block's
 // entry vector at 4096 * 48 = 192KB.
+//
+// Enforced on the READ side too, by XStore::ClampPersistedColumnCount --
+// guarding only the two write paths above leaves a .CFG written by an older
+// binary (or restored/corrupted) free to reintroduce the same allocation,
+// this time from InitDB(), i.e. at ZmqServer worker construction.
 inline constexpr uint32_t MAX_TRACKED_COLUMN_COUNT = 4096;
 
 // How many blocks' stats a ZoneMapFile keeps resident at once, per (db,

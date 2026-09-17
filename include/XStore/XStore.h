@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
@@ -596,6 +597,17 @@ class XStore {
         // accessors.
         static size_t ZoneMapRegistrySize() { return zone_map_registry_.size(); }
 
+        // Test-only: drop every warm ZoneMapFile instance, forcing the next
+        // GetOrOpenZoneMap for any (db, year) to do a real disk-backed
+        // Open(). Only closes fds -- UpdateRow is write-through (Task 2), so
+        // nothing durable is lost, exactly like the LRU eviction in
+        // GetOrOpenZoneMap itself. Exists so a test can simulate a genuine
+        // process restart (cold registry) within one test binary, which is
+        // the only way to reproduce the WAL-replay/zone-map gap the
+        // ReplayedYearMap plumbing fixes -- a warm registry hands back an
+        // instance still holding an fd to the unlinked sidecar and hides it.
+        static void ClearZoneMapRegistryForTests();
+
     private:
         // Get current base directory
         std::string GetBaseDir();
@@ -658,13 +670,39 @@ class XStore {
         // own.
         static std::vector<ZoneMapObservation> BuildZoneMapObservations(XStore &store, const XStore_Proto::RowData &row, uint32_t tracked_column_count);
 
+        // Clamps a ConfigStruct's columnCount to MAX_TRACKED_COLUMN_COUNT,
+        // logging once (spdlog::warn, same shape as CreateDB's own rejection
+        // of the identical bound) if it actually had to. Applied to every
+        // ConfigStruct that comes back OFF DISK -- CreateDB rejects an
+        // out-of-bound seed and MaybeGrowColumnCount clamps growth, but both
+        // of those only guard the WRITE side: a .CFG written by an older
+        // binary, a restored backup, or a hand-edited/corrupt file still
+        // feeds columnCount straight into EffectiveTrackedColumnCount ->
+        // RebuildOneYearZoneMap, where BuildZoneMapObservations' reserve()
+        // and ZoneMapFile::EnsureBlockLoaded's std::vector<ZoneMapEntry>(n)
+        // are both sized from it and an absurd n throws std::length_error.
+        // That throw escapes on an XStorePreadPool worker (see
+        // RebuildStaleZoneMapsForDb's ParallelFor) with no handler above it,
+        // so it is a std::terminate, not a catchable error -- and the whole
+        // chain hangs off InitDB(), which runs from the XStore constructor,
+        // i.e. at ZmqServer worker CONSTRUCTION, outside the dispatch-loop
+        // try/catch. Clamped rather than rejected: this is data that
+        // already exists on disk, there is no request to fail here, and a
+        // clamped width only costs zone-map acceleration for columns past
+        // the cap (they fall back to a real scan), never correctness.
+        static void ClampPersistedColumnCount(const std::string &db_name, XStore_Proto::ConfigStruct &cfg);
+
         // Fetch dbName's ConfigStruct from CfgMap, loading it from dbBasePath's
         // .CFG file into the cache on first use. Returns false if the .CFG file
         // does not exist. Thread-safe: shared lock on cache hit, exclusive lock
-        // (with re-check) only on cache miss.
+        // (with re-check) only on cache miss. A freshly-parsed .CFG passes
+        // through ClampPersistedColumnCount before it is cached or returned.
         bool GetOrLoadCfg(const std::string &db_name, const std::string &db_base_path, XStore_Proto::ConfigStruct &cfg_out);
 
-        // Insert/overwrite dbName's ConfigStruct in CfgMap under exclusive lock.
+        // Insert/overwrite dbName's ConfigStruct in CfgMap under exclusive
+        // lock, after ClampPersistedColumnCount (the second chokepoint --
+        // the cache must never hold an out-of-bound columnCount regardless
+        // of which path populated it).
         void PutCfg(const std::string &db_name, const XStore_Proto::ConfigStruct &cfg);
 
         // Remove dbName's ConfigStruct from CfgMap under exclusive lock.
@@ -840,6 +878,40 @@ class XStore {
         static std::thread wal_stats_reporter_thread;
 #endif
 
+        // "(db, year) pairs WAL replay actually touched during one
+        // InitDB() call", keyed by already-upper-cased dbName.
+        //
+        // Why this has to exist at all: ParseWalRecord rebuilds a WalRow
+        // from the WAL's own bytes, and the WAL format deliberately does
+        // NOT carry a row's ZoneMapObservations (they are derived state --
+        // see WalRow's comment), so every replayed row reaches
+        // ApplyWalRecord with an EMPTY observation vector and its
+        // zmap.UpdateRow call is a no-op. Replay therefore puts rows back
+        // into the data file while folding nothing into the zone map.
+        //
+        // That gap is older than the zone map's per-DB tracked-column work,
+        // but it used to be masked: before EffectiveTrackedColumnCount
+        // floored at the global default, essentially every unseeded DB's
+        // header width disagreed with its effective width, so
+        // ZoneMapNeedsRebuild fired on nearly every restart and the
+        // resulting full raw-data rescan repaired the missing rows as a side
+        // effect. With the width now monotone, header == effective width in
+        // the common case and that accidental repair is gone -- so a
+        // replayed (db, year) can be left permanently short, which reads
+        // back as valid_count == 0 over real data: MIN/MAX skip the block
+        // ("ERROR: No valid data found") and SUM/AVG/VARIANCE/STDDEV push
+        // down zeros. Nothing ever heals it.
+        //
+        // Fix: force RebuildOneYearZoneMap for exactly these pairs. That
+        // function truncates the sidecar and re-derives every block from
+        // raw data, so it is idempotent and safe to run on a (db, year)
+        // that was already correct -- which is why this is a forced
+        // *rebuild* rather than an attempt to re-fold the replayed rows
+        // inline. Re-folding inline would double-count any record that had
+        // already been applied (and folded) before the crash, since
+        // UpdateRow accumulates rather than replaces.
+        using ReplayedYearMap = std::unordered_map<std::string, std::set<unsigned short>>;
+
         // Called once from InitDB, before the server starts taking traffic:
         // replays every shard WAL file left over from an unclean shutdown
         // (WAL_SHARD_COUNT of them, regardless of how many were actually
@@ -854,7 +926,15 @@ class XStore {
         // be deleted and recreated by the time of a *later* restart, at
         // which point "idempotent re-apply" no longer holds (see
         // InvalidateWalFileHeader).
-        void ReplayWal();
+        //
+        // Returns the set of years it actually applied a record into, per
+        // (already upper-cased) dbName -- keyed by dbName rather than
+        // db_base_path so it can't be defeated by two spellings of the same
+        // directory. InitDB() feeds this straight into
+        // RebuildStaleZoneMapsForDb as a FORCED rebuild list; see
+        // ReplayedYearMap above for why that is a correctness requirement
+        // and not an optimization.
+        [[nodiscard]] ReplayedYearMap ReplayWal();
 
         // Called once from InitDB(), after that DB's ConfigStruct is
         // loaded -- rescans every <YEAR>.XSTORE file under db_base_path
@@ -865,7 +945,13 @@ class XStore {
         // data_store_dir can serve a request -- see design doc
         // "Startup-time zone-map rebuild" for why this must never run on
         // the request path.
-        void RebuildStaleZoneMapsForDb(const std::string &db_name, const std::string &db_base_path, const XStore_Proto::ConfigStruct &cfg_struct);
+        //
+        // force_rebuild_years is this DB's entry from ReplayWal's
+        // ReplayedYearMap: those years are rebuilt UNCONDITIONALLY, i.e.
+        // whatever ZoneMapNeedsRebuild's version/width check says about
+        // them. See ReplayedYearMap for the bug that requires this.
+        void RebuildStaleZoneMapsForDb(const std::string &db_name, const std::string &db_base_path, const XStore_Proto::ConfigStruct &cfg_struct,
+                                        const std::set<unsigned short> &force_rebuild_years);
 
         // Cheap header-only peek at path's .zmap sidecar (no full
         // ZoneMapFile::Open, no registry involvement) -- true if the file

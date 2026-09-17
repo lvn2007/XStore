@@ -310,6 +310,91 @@ TEST_F(XStoreTest, CreateDBWithAbsurdColumnCountSeedIsRejected) {
     EXPECT_EQ(ok_rep.createdbstatus(), "[INFO] [CREATE DB] [DB: ATLIMITCOLDB] - Created DB") << ok_rep.createdbstatus();
 }
 
+// Scoped re-review of the C1/C2 fix wave, finding (b): columnCount was
+// validated on the WRITE side only. CreateDB rejects an out-of-bound seed
+// and MaybeGrowColumnCount clamps growth, but a .CFG that ALREADY holds one
+// -- written by a binary older than that check, restored from a backup, or
+// corrupted -- is parsed straight back into a ConfigStruct with no bound at
+// all, and flows into EffectiveTrackedColumnCount ->
+// RebuildOneYearZoneMap/BuildZoneMapObservations, where it sizes a
+// std::vector<ZoneMapEntry>/reserve and throws.
+//
+// The throw's landing site is what makes this worse than a bad request:
+// InitDB() runs from the XStore constructor, and ZmqServer::WorkerRoutine
+// constructs its `XStore my_store;` OUTSIDE the dispatch-loop try/catch the
+// previous fix wave added -- so the process dies at worker startup, before
+// any request is served, on every restart. (This test drives InitDB()
+// directly rather than via a constructor only because the constructor's
+// once-per-data_store_dir guard has already fired for this scratch
+// directory; it is the same call.)
+//
+// Fix: ClampPersistedColumnCount at every point a ConfigStruct comes off
+// disk -- InitDB's .CFG parse, GetOrLoadCfg's .CFG parse, and PutCfg as the
+// cache's own chokepoint.
+TEST_F(XStoreTest, PersistedColumnCountAboveBoundIsClampedOnLoadInsteadOfCrashing) {
+    const std::string db_name = "POISONEDCFGDB";
+    constexpr short kRowLength = 64;
+    constexpr unsigned long long kYear2023StartEpoch = 1672531200ULL;
+
+    XStore store;
+    XStore_Proto::CreateDB_REP create_rep = store.CreateDB(db_name, XStore_Proto::SECOND, kRowLength);
+    ASSERT_EQ(create_rep.createdbstatus(),
+              fmt::format("[INFO] [CREATE DB] [DB: {}] - Created DB", db_name)) << create_rep.createdbstatus();
+
+    fs::path db_dir = scratch->test_root / "DataStore" / db_name;
+
+    // Overwrite the .CFG with what a pre-fix binary would happily have
+    // persisted -- deliberately bypassing CreateDB, which now rejects this.
+    {
+        XStore_Proto::ConfigStruct poisoned;
+        poisoned.set_dbname(db_name);
+        poisoned.set_timeresolution(XStore_Proto::SECOND);
+        poisoned.set_rowlength(kRowLength);
+        poisoned.set_columncount(0xFFFFFFFFu);
+        std::ofstream cfg_out(db_dir / (db_name + ".CFG"), std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(poisoned.SerializeToOstream(&cfg_out));
+    }
+
+    // One real (non-hole) row in a year file, so the startup rebuild below
+    // actually reaches the per-row fold that does the sizing -- an empty
+    // year file would never allocate and the test would prove nothing.
+    {
+        XStore_Proto::RowData row;
+        row.add_fielddata()->set_doubledata(7.0);
+        std::vector<char> row_buf(kRowLength, 0);
+        ASSERT_TRUE(row.SerializeToArray(row_buf.data(), kRowLength));
+        std::ofstream data_out(db_dir / "2023.XSTORE", std::ios::binary | std::ios::trunc);
+        data_out.write(row_buf.data(), kRowLength);
+        ASSERT_TRUE(data_out.good());
+    }
+
+    // Cold caches, i.e. a genuine restart against this on-disk state.
+    for (auto &shard : XStore::cfg_shards) shard.map.clear();
+    XStore::ClearZoneMapRegistryForTests();
+
+    // Pre-fix this doesn't even reach EXPECT_NO_THROW's handler: the
+    // std::length_error escapes on an XStorePreadPool worker thread (see
+    // RebuildStaleZoneMapsForDb's ParallelFor), so the whole process
+    // terminates -- which is exactly the production failure mode.
+    EXPECT_NO_THROW(store.InitDB());
+
+    auto &shard = XStore::cfg_shards[std::hash<std::string>{}(db_name) % XStore::CFG_SHARD_COUNT];
+    ASSERT_EQ(shard.map.count(db_name), 1u);
+    EXPECT_EQ(shard.map.at(db_name).columncount(), XStoreTunables::MAX_TRACKED_COLUMN_COUNT)
+        << "InitDB cached an out-of-bound columnCount straight off disk";
+
+    // GetOrLoadCfg's own parse is a second, independent way back in (the
+    // .CFG on disk is still poisoned -- the clamp is in-memory, it never
+    // rewrites the operator's file), so drop the cache and come in through
+    // the request path instead.
+    for (auto &shard_to_clear : XStore::cfg_shards) shard_to_clear.map.clear();
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    EXPECT_NO_THROW(store.UnaryInsert(kYear2023StartEpoch + 5, MakeRow({FDouble(1.0)}), db_name, &insert_rep));
+    ASSERT_EQ(shard.map.count(db_name), 1u);
+    EXPECT_EQ(shard.map.at(db_name).columncount(), XStoreTunables::MAX_TRACKED_COLUMN_COUNT)
+        << "GetOrLoadCfg cached an out-of-bound columnCount straight off disk";
+}
+
 // ---------------------------------------------------------------------
 // RemoveDB
 // ---------------------------------------------------------------------

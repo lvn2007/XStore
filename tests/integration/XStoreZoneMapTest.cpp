@@ -1150,15 +1150,22 @@ TEST_F(XStoreZoneMapTest, AggregateOnColumnAboveGrownColumnCountReadsRealDataWit
         << "column 1 is inside the header's tracked width but was never folded by UpdateRow";
     EXPECT_DOUBLE_EQ((*stats)[1].sum_value, 5.0);
 
-    // Final-review finding I3, verified here rather than by a benchmark: a
-    // zone map created by the ordinary insert path is now already at the
-    // width InitDB() will ask for, so a restart must NOT re-scan it purely
-    // because of a width mismatch. RebuildOneYearZoneMap truncates and
-    // re-folds from raw data, and UpdateRow accumulates rather than
-    // replaces -- so an unnecessary rebuild here would be directly visible
-    // as changed stats (and would cost a full scan of this year file's
-    // whole preallocated 31.5M-row extent, which is exactly I3's measured
-    // cost).
+    // Final-review finding I3: a zone map created by the ordinary insert
+    // path is now already at the width InitDB() will ask for, so a restart
+    // must never re-scan it purely because of a WIDTH MISMATCH.
+    //
+    // That is still what's asserted below, but it is no longer observable
+    // as "no rebuild ran at all": the two SYNC inserts above leave live
+    // records in the WAL (WalWriterLoop deliberately does no per-commit
+    // checkpoint), so this InitDB() replays them and then force-rebuilds
+    // (HETEROWIDTHNOINIT, 2023) for that reason instead -- see
+    // InitDbFoldsWalReplayedRowsWhenSidecarIsMissing below, and
+    // ReplayedYearMap in XStore.h. What the assertions actually pin down is
+    // that whatever InitDB() does here, the stats and the width come back
+    // IDENTICAL: RebuildOneYearZoneMap truncates and re-folds from raw
+    // data, and UpdateRow accumulates rather than replaces, so a rebuild
+    // that resized the file or double-counted a row would be directly
+    // visible here.
     store.InitDB();
     ZoneMapFile &zmap_after_init = store.GetOrOpenZoneMap(DbPath(db_name), 2023, kPreexistRowLength);
     auto stats_after_init = zmap_after_init.TryGetBlockStats(block);
@@ -1212,6 +1219,144 @@ TEST_F(XStoreZoneMapTest, SumAndVarianceOnColumnAboveGrownColumnCountReadRealDat
     store.VarianceAggregate(start, end, db_name, 1, &var_rep);
     EXPECT_EQ(var_rep.opstatus(), "SUCCESS");
     EXPECT_DOUBLE_EQ(var_rep.opresult(), 2.0); // sample variance of {4, 6}
+}
+
+// Scoped re-review of the C1/C2 fix wave, finding (a) -- a SILENT,
+// PERMANENT wrong answer on the normal restart path, with no self-healing.
+//
+// Mechanism: ParseWalRecord rebuilds a WalRow out of the WAL's own bytes,
+// and the WAL format deliberately doesn't carry a row's
+// ZoneMapObservations (derived state -- see WalRow in XStore.h). So every
+// WAL-replayed row reaches ApplyWalRecord with an EMPTY observation vector,
+// and its zmap.UpdateRow call is a no-op: replay puts the row back in the
+// DATA file and folds nothing into the zone map.
+//
+// That gap predates the zone-map work entirely, but used to be masked:
+// before EffectiveTrackedColumnCount floored at the global default, an
+// unseeded DB's header width (64) disagreed with its narrowed effective
+// width, so ZoneMapNeedsRebuild fired on nearly every restart and the
+// resulting full rescan repaired the missing rows by accident. With the
+// width now monotone, header == effective width, the structural check
+// correctly says "fine", and nothing repairs it -- ever.
+//
+// WalWriterLoop deliberately does no per-commit checkpoint, so the WAL
+// genuinely still holds the most recent record for some (db, year) at
+// essentially every restart. This test takes the sharper of the two
+// reachable shapes: the .zmap sidecar is absent (upgrade, restored backup,
+// operator deletion) while the WAL holds a record for that (db, year), so
+// replay recreates an EMPTY sidecar at exactly the width the missing-sidecar
+// rebuild would have asked for -- and the rebuild is then skipped, making
+// the year's real data invisible to every zone-map-accelerated aggregate.
+//
+// Fix: ReplayWal returns the (db, year) pairs it touched and InitDB forces
+// RebuildOneYearZoneMap for each, independent of ZoneMapNeedsRebuild.
+TEST_F(XStoreZoneMapTest, InitDbFoldsWalReplayedRowsWhenSidecarIsMissing) {
+    XStore store;
+    std::string db_name = "WALREPLAYZMAP";
+    CreateTestDb(store, db_name, XStore_Proto::SECOND, kPreexistRowLength);
+
+    // Ordinary insert path -- this is what puts a record in the WAL (SYNC,
+    // so it is durably written AND applied before this returns).
+    constexpr uint64_t kRowIndex = 10;
+    XStore_Proto::RowData row;
+    row.add_fielddata()->set_doubledata(42.0);
+    XStore_Proto::UnaryInsert_REP rep;
+    store.UnaryInsert(kYear2023StartEpoch + kRowIndex, row, db_name, &rep, XStore_Proto::SYNC);
+
+    std::string db_base_path = DbPath(db_name);
+    std::string data_path = fmt::format("{}/{}.XSTORE", db_base_path, 2023);
+    std::string zmap_path = fmt::format("{}/{}.zmap", db_base_path, 2023);
+    ASSERT_TRUE(std::filesystem::exists(data_path));
+    ASSERT_TRUE(std::filesystem::exists(zmap_path));
+
+    // Setup guard: the WAL must genuinely still hold this insert's record,
+    // or "replay" below replays nothing and the test proves nothing. A live
+    // record is a shard file whose leading u32 recordLen is non-zero
+    // (InvalidateWalFileHeader zeroes exactly those 4 bytes to checkpoint).
+    {
+        bool found_live_record = false;
+        std::filesystem::path wal_dir = std::filesystem::path(db_base_path).parent_path() / XStoreTunables::WAL_DIR_NAME;
+        ASSERT_TRUE(std::filesystem::is_directory(wal_dir));
+        for (auto &f : std::filesystem::directory_iterator(wal_dir)) {
+            int fd = open(f.path().c_str(), O_RDONLY);
+            if (fd < 0) continue;
+            uint32_t record_len = 0;
+            if (pread(fd, &record_len, sizeof(record_len), 0) == static_cast<ssize_t>(sizeof(record_len)) && record_len != 0) {
+                found_live_record = true;
+            }
+            close(fd);
+            if (found_live_record) break;
+        }
+        ASSERT_TRUE(found_live_record)
+            << "test setup error: no un-checkpointed WAL record left to replay";
+    }
+
+    // Shrink the year file down to just the rows actually written. Purely a
+    // runtime concession: UnaryInsert preallocates the whole calendar year
+    // (31.5M rows at SECOND resolution) and the forced rebuild scans every
+    // one of them, which is ~27s of pread for a file holding a single row.
+    // Replay re-opens this path through the process-wide fd cache the insert
+    // already warmed, so it does not re-grow underneath us.
+    {
+        int fd = open(data_path.c_str(), O_WRONLY);
+        ASSERT_GE(fd, 0);
+        ASSERT_EQ(ftruncate(fd, static_cast<off_t>((kRowIndex + 1) * kPreexistRowLength)), 0);
+        close(fd);
+    }
+
+    // The restart. Sidecar gone, registry genuinely cold (a warm registry
+    // would hand replay an instance still holding an fd to the unlinked
+    // inode -- correct stats, wrong reason, test proves nothing).
+    ASSERT_TRUE(std::filesystem::remove(zmap_path));
+    XStore::ClearZoneMapRegistryForTests();
+
+    store.InitDB();
+
+    // Discriminating guard: the recreated sidecar is at exactly the width
+    // ZoneMapNeedsRebuild wants, i.e. its structural check is satisfied and
+    // a width/version mismatch is NOT what got this year rebuilt. Only the
+    // forced-rebuild plumbing can have done it.
+    ASSERT_TRUE(std::filesystem::exists(zmap_path));
+    {
+        int fd = open(zmap_path.c_str(), O_RDONLY);
+        ASSERT_GE(fd, 0);
+        ZoneMapFileHeader header{};
+        ASSERT_EQ(pread(fd, &header, sizeof(header), 0), static_cast<ssize_t>(sizeof(header)));
+        close(fd);
+        EXPECT_EQ(header.version, ZONE_MAP_VERSION);
+        EXPECT_EQ(header.tracked_column_count, XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS)
+            << "sidecar width differs from what InitDB asks for -- this test would then be "
+               "passing via the ordinary stale-width rebuild, not the WAL-replay one";
+    }
+
+    // The durable entry itself, read straight out of the sidecar -- not just
+    // an aggregate result, which a real-scan fallback could rescue.
+    {
+        ZoneMapFile &zmap = store.GetOrOpenZoneMap(db_base_path, 2023, kPreexistRowLength);
+        uint64_t block = BlockIndexForRow(kRowIndex, zmap.RowsPerBlockValue());
+        auto stats = zmap.TryGetBlockStats(block);
+        ASSERT_TRUE(stats.has_value());
+        ASSERT_GT(stats->size(), 0u);
+        EXPECT_EQ((*stats)[0].valid_count, 1u)
+            << "WAL-replayed row was written to the data file but never folded into the zone map";
+        EXPECT_DOUBLE_EQ((*stats)[0].sum_value, 42.0);
+        EXPECT_DOUBLE_EQ((*stats)[0].min_value, 42.0);
+    }
+
+    // And end to end, through both zone-map consumers.
+    unsigned long long start = kYear2023StartEpoch + kRowIndex;
+    unsigned long long end = kYear2023StartEpoch + kRowIndex;
+
+    XStore_Proto::Min_REP min_rep;
+    store.MinAggregate(start, end, db_name, 0, &min_rep);
+    EXPECT_EQ(min_rep.opstatus(), "SUCCESS")
+        << "zone map skipped a block that really holds WAL-replayed data";
+    EXPECT_DOUBLE_EQ(min_rep.opresult().doubledata(), 42.0);
+
+    XStore_Proto::Sum_REP sum_rep;
+    store.SumAggregate(start, end, db_name, 0, &sum_rep);
+    EXPECT_EQ(sum_rep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(sum_rep.opresult(), 42.0);
 }
 
 } // namespace

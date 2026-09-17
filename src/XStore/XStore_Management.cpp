@@ -1,5 +1,6 @@
 #include "include/XStore/XStore_Internal.h"
 #include "include/DataStructs/FileRangeLock.h"
+#include "include/DataStructs/TimeStruct.h"
 #include "include/XStore/XStore_PreadPool.h"
 #include "include/XStore/XStore_WireEncode.h"
 #include <spdlog/fmt/fmt.h>
@@ -78,14 +79,38 @@ bool XStore::GetOrLoadCfg(const std::string &db_name, const std::string &db_base
     cfg_out.ParseFromFileDescriptor(fileno(c_file));
     std::fclose(c_file);
 
+    // Sanitize BEFORE this value is cached or handed back -- everything
+    // downstream (EffectiveTrackedColumnCount, BuildZoneMapObservations,
+    // every GetOrOpenZoneMap call site) treats a cached cfg as already
+    // trustworthy. See ClampPersistedColumnCount's comment in XStore.h.
+    ClampPersistedColumnCount(db_name, cfg_out);
+
     shard.map[db_name] = cfg_out;
     return true;
 }
 
+void XStore::ClampPersistedColumnCount(const std::string &db_name, XStore_Proto::ConfigStruct &cfg) {
+    if (cfg.columncount() <= XStoreTunables::MAX_TRACKED_COLUMN_COUNT) return;
+
+    // Warn, don't silently correct: an out-of-bound value can only get onto
+    // disk via a binary older than CreateDB's seed check, a restored/foreign
+    // .CFG, or genuine corruption -- all of which an operator wants to see
+    // named once at load time rather than inferred later from a DB that
+    // quietly stopped tracking the columns it was configured for. Same
+    // spdlog::warn + "[TAG] [DB: x] - msg" shape as CreateDB's rejection of
+    // the identical bound.
+    spdlog::warn("[CONFIG LOAD] [DB: {}] - Persisted column count {} exceeds the {} maximum; clamping",
+                 db_name, cfg.columncount(), XStoreTunables::MAX_TRACKED_COLUMN_COUNT);
+    cfg.set_columncount(XStoreTunables::MAX_TRACKED_COLUMN_COUNT);
+}
+
 void XStore::PutCfg(const std::string &db_name, const XStore_Proto::ConfigStruct &cfg) {
+    XStore_Proto::ConfigStruct sanitized = cfg;
+    ClampPersistedColumnCount(db_name, sanitized);
+
     CfgShard &shard = cfg_shards[std::hash<std::string>{}(db_name) % CFG_SHARD_COUNT];
     std::unique_lock write_lock(shard.mutex);
-    shard.map[db_name] = cfg;
+    shard.map[db_name] = std::move(sanitized);
 }
 
 void XStore::EraseCfg(const std::string &db_name) {
@@ -203,6 +228,12 @@ ZoneMapFile& XStore::GetOrOpenZoneMap(std::string_view db_base_path, unsigned sh
     zone_map_registry_.emplace(key, std::move(zmap));
     zone_map_registry_lru_.push_back(key);
     return ref;
+}
+
+void XStore::ClearZoneMapRegistryForTests() {
+    std::lock_guard<std::mutex> lock(zone_map_registry_mutex_);
+    zone_map_registry_.clear();
+    zone_map_registry_lru_.clear();
 }
 
 XStore_Proto::SysInfo_REP XStore::InfoQuery(std::string_view server_addr, int thread_count) {
@@ -543,7 +574,15 @@ void XStore::InitDB() {
     // this DB's data files are trusted -- see ReplayWal for why this is
     // safe to run unconditionally (idempotent re-apply, and a no-op when
     // no WAL/ directory exists yet, e.g. a brand-new data_store_dir).
-    ReplayWal();
+    //
+    // Whatever it replayed landed in the DATA file only -- a replayed row
+    // carries no ZoneMapObservations, so its zone-map update is a no-op (see
+    // ReplayedYearMap in XStore.h). Those (db, year) pairs therefore have to
+    // be rebuilt unconditionally below, independent of ZoneMapNeedsRebuild's
+    // verdict, or the replayed rows stay invisible to every zone-map-
+    // accelerated aggregate forever.
+    const ReplayedYearMap replayed_years = ReplayWal();
+    static const std::set<unsigned short> kNoForcedYears;
 
     // Loop through each dbName
     for (auto& p : std::filesystem::directory_iterator(data_store_dir))
@@ -572,6 +611,15 @@ void XStore::InitDB() {
         }
         cfg_struct.ParseFromFileDescriptor(fileno(c_file));
         std::fclose(c_file);
+
+        // Clamp on THIS local too, not just inside PutCfg's own copy: the
+        // local is what flows into RebuildStaleZoneMapsForDb ->
+        // EffectiveTrackedColumnCount -> RebuildOneYearZoneMap a few lines
+        // below, where BuildZoneMapObservations' reserve() and
+        // EnsureBlockLoaded's std::vector<ZoneMapEntry> are sized from it --
+        // the allocations an out-of-bound on-disk value actually throws on.
+        // See ClampPersistedColumnCount in XStore.h.
+        ClampPersistedColumnCount(curr_db_name, cfg_struct);
         PutCfg(curr_db_name, cfg_struct);
 
         // Task 5: rebuild any stale/missing zone map for this DB before
@@ -581,7 +629,9 @@ void XStore::InitDB() {
         // return) -- see RebuildStaleZoneMapsForDb's declaration comment
         // in XStore.h for why this must never run on the request path
         // instead.
-        RebuildStaleZoneMapsForDb(curr_db_name, p.path().string(), cfg_struct);
+        auto replayed_it = replayed_years.find(curr_db_name);
+        RebuildStaleZoneMapsForDb(curr_db_name, p.path().string(), cfg_struct,
+                                   replayed_it == replayed_years.end() ? kNoForcedYears : replayed_it->second);
     }
 }
 
@@ -718,7 +768,8 @@ void XStore::RebuildOneYearZoneMap(const std::string &db_base_path, unsigned sho
     spdlog::info("[ZONE MAP REBUILD] [{}/{}.XSTORE] - Rebuilt {} rows", db_base_path, year, total_rows);
 }
 
-void XStore::RebuildStaleZoneMapsForDb(const std::string &db_name, const std::string &db_base_path, const XStore_Proto::ConfigStruct &cfg_struct) {
+void XStore::RebuildStaleZoneMapsForDb(const std::string &db_name, const std::string &db_base_path, const XStore_Proto::ConfigStruct &cfg_struct,
+                                        const std::set<unsigned short> &force_rebuild_years) {
     uint32_t desired_tracked_columns = EffectiveTrackedColumnCount(cfg_struct);
     uint16_t row_length = static_cast<uint16_t>(cfg_struct.rowlength());
 
@@ -735,8 +786,17 @@ void XStore::RebuildStaleZoneMapsForDb(const std::string &db_name, const std::st
             continue; // not a <YEAR>.XSTORE-shaped filename -- skip
         }
 
+        // force_rebuild_years short-circuits the header check entirely --
+        // a year WAL replay just wrote rows into has a zone map that is
+        // *structurally* fine (right version, right width, so
+        // ZoneMapNeedsRebuild says "no") and *semantically* short by
+        // exactly those rows, because a replayed row carries no
+        // observations. Only a full re-derivation from raw data can tell,
+        // and RebuildOneYearZoneMap is idempotent (truncate, then re-fold
+        // every row), so forcing it on an already-correct year costs time,
+        // never correctness. See ReplayedYearMap in XStore.h.
         std::string zmap_path = fmt::format("{}/{}.zmap", db_base_path, year);
-        if (ZoneMapNeedsRebuild(zmap_path, desired_tracked_columns)) {
+        if (force_rebuild_years.count(year) > 0 || ZoneMapNeedsRebuild(zmap_path, desired_tracked_columns)) {
             years_needing_rebuild.push_back(year);
         }
     }
@@ -749,10 +809,12 @@ void XStore::RebuildStaleZoneMapsForDb(const std::string &db_name, const std::st
     });
 }
 
-void XStore::ReplayWal() {
+XStore::ReplayedYearMap XStore::ReplayWal() {
+    ReplayedYearMap replayed_years;
+
     std::filesystem::path wal_dir = std::filesystem::path(data_store_dir) / XStoreTunables::WAL_DIR_NAME;
     if (!std::filesystem::is_directory(wal_dir)) {
-        return;
+        return replayed_years;
     }
 
     for (size_t shard_idx = 0; shard_idx < XStoreTunables::WAL_SHARD_COUNT; ++shard_idx) {
@@ -842,6 +904,21 @@ void XStore::ReplayWal() {
             if (!ApplyWalRecord(record)) {
                 spdlog::error("[WAL REPLAY] [DB: {}] - One or more rows failed to apply", record.db_name);
             }
+
+            // Recorded whether or not the apply above fully succeeded: a
+            // partial apply still put SOME rows into the data file with no
+            // matching zone-map fold, which is the same gap. Year is derived
+            // the exact same way ApplyWalRecord derives it (every row in a
+            // record shares one (db, year) -- that function's documented
+            // precondition), so the pair recorded here is precisely the pair
+            // it just wrote into. Keyed by db_name rather than
+            // record.db_base_path so InitDB's lookup can't be defeated by a
+            // second spelling of the same directory.
+            if (!record.rows.empty()) {
+                TimeStruct replayed_ts(static_cast<std::time_t>(record.rows.front().epoch_time), record.time_resolution);
+                replayed_years[record.db_name].insert(replayed_ts.year);
+            }
+
             replayed_count += static_cast<unsigned>(record.rows.size());
             buffer.erase(0, consumed);
         }
@@ -873,6 +950,8 @@ void XStore::ReplayWal() {
             close(fd);
         }
     }
+
+    return replayed_years;
 }
 
 std::string XStore::GetBaseDir() {
