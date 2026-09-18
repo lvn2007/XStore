@@ -286,7 +286,8 @@ void ZmqServer::WorkerRoutine(std::string server_addr) {
                 // CREATE DB
                 case XStore_Proto::Request::kCreatedb: {
                     const auto &req = client_request->createdb();
-                    XStore_Proto::CreateDB_REP rep = my_store.CreateDB(req.dbname(), req.timeresolution(), req.rowlength(), req.columncount());
+                    const std::vector<std::string> column_names(req.columnnames().begin(), req.columnnames().end());
+                    XStore_Proto::CreateDB_REP rep = my_store.CreateDB(req.dbname(), req.timeresolution(), req.rowlength(), req.columncount(), column_names);
                     SendProto(socket, rep);
                     break;
                 }
@@ -476,6 +477,15 @@ void ZmqServer::WorkerRoutine(std::string server_addr) {
                     const auto &req = client_request->stddev();
                     XStore_Proto::Stddev_REP rep;
                     my_store.StddevAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
+                    SendProto(socket, rep);
+                    break;
+                }
+
+                // EXISTS AGGREGATE
+                case XStore_Proto::Request::kExists: {
+                    const auto &req = client_request->exists();
+                    XStore_Proto::Exists_REP rep;
+                    my_store.ExistsAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
                     SendProto(socket, rep);
                     break;
                 }

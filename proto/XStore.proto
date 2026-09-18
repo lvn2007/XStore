@@ -32,6 +32,7 @@ enum RequestType {
   PING = 17;
   VARIANCE = 18;
   STDDEV = 19;
+  EXISTS = 20;
 }
 
 enum TimeUnit {
@@ -87,6 +88,14 @@ message ConfigStruct {
   // single global ZONE_MAP_MAX_TRACKED_COLUMNS default. 0 = never grown
   // past the global default.
   uint32 columnCount = 4;
+  // Optional per-index column names, purely an API-boundary convenience --
+  // never touches wire encoding, storage layout, or zone-map internals
+  // (column_idx stays the only thing those ever see). columnNames[i] names
+  // column index i; empty = today's pure-positional behavior. Persisted
+  // here so any client (including a fresh process after restart) can
+  // rediscover the mapping via InfoRequest's DbStats, which mirrors this
+  // field the same way it already mirrors rowLength.
+  repeated string columnNames = 5;
 }
 
 message FData {
@@ -133,6 +142,9 @@ message CreateDB_REQ {
   // observed inserts. Never enforced against insert width -- see the
   // 2026-09-15 design doc's "Per-DB column count" section.
   uint32 columnCount = 5;
+  // Client-supplied names for the columns it plans to use, forwarded
+  // as-is into ConfigStruct.columnNames -- see that field's comment.
+  repeated string columnNames = 6;
 }
 
 // --- REMOVE DB request
@@ -293,6 +305,19 @@ message Stddev_REQ {
   sint32 columnIdx = 5;
 }
 
+// --- EXISTS: does at least one row in [startTime, endTime] have a
+// non-null/numeric value for columnIdx? Short-circuits on the zone map's
+// existing valid_count field (no new persisted field, no version bump) --
+// a block with valid_count > 0 proves existence with zero row scan; a
+// block with valid_count == 0 is skipped outright.
+message Exists_REQ {
+  RequestType RType = 1;
+  uint64 startTime = 2;
+  uint64 endTime = 3;
+  string dbName = 4;
+  sint32 columnIdx = 5;
+}
+
 // --- Envelope: one wire message carries exactly one of these. The oneof
 // case (payload_case()) replaces RType as the dispatch tag, so a request
 // only needs to be parsed once server-side.
@@ -318,6 +343,7 @@ message Request {
     ReqCMD ping = 18;
     Variance_REQ variance = 19;
     Stddev_REQ stddev = 20;
+    Exists_REQ exists = 21;
   }
 }
 
@@ -349,6 +375,11 @@ message DbStats {
   // oversized row can never reach disk to be sampled by this diagnostic in
   // the first place.
   sfixed32 rowLength = 5;
+  // Mirrors ConfigStruct.columnNames -- lets any client (a different
+  // process, or the same one after restart) rediscover a DB's name->index
+  // mapping via InfoRequest instead of only at CreateDB time. Empty if the
+  // DB was created without names.
+  repeated string columnNames = 6;
 }
 
 // --- SYS INFO
@@ -482,4 +513,10 @@ message Variance_REP {
 message Stddev_REP {
   double opResult = 1;
   string opStatus = 2;
+}
+
+// --- EXISTS
+message Exists_REP {
+  string opStatus = 1;
+  bool exists = 2;
 }

@@ -88,6 +88,10 @@ struct DbInfo {
   // Compare against a real row's actual serialized size to tell whether
   // this was sized too large (wasted padding/row) or too small.
   int32_t row_length;
+  // Matches XStore_Proto::DbStats.columnNames -- optional per-index column
+  // names set at CreateDB time (see ResolveColumnIndex). Empty if the DB
+  // was created without names.
+  std::vector<std::string> column_names;
 };
 
 struct SysInfo {
@@ -263,6 +267,10 @@ class XStoreClient {
           curr_db.total_size_in_byte = from_server.dbinfo(i).totalsizeinbyte();
           curr_db.row_length = from_server.dbinfo(i).rowlength();
 
+          for (int j = 0; j < from_server.dbinfo(i).columnnames_size(); j++) {
+              curr_db.column_names.push_back(from_server.dbinfo(i).columnnames(j));
+          }
+
           for (int j = 0; j < from_server.dbinfo(i).files_size(); j++) {
               const XStore_Proto::FileStats &f = from_server.dbinfo(i).files(j);
               curr_db.files.push_back(FileInfo{f.filename(), f.actualsizebytes(), f.apparentsizebytes()});
@@ -274,14 +282,31 @@ class XStoreClient {
   }
 
   // ==== DB management ====
-  [[nodiscard]] std::string CreateDB(std::string_view db_name, XStore_Proto::TimeUnit time_resolution, short int row_length) {
+  [[nodiscard]] std::string CreateDB(std::string_view db_name, XStore_Proto::TimeUnit time_resolution, short int row_length,
+                                      const std::vector<std::string> &column_names = {}) {
       XStore_Proto::Request to_server;
       auto *payload = to_server.mutable_createdb();
       payload->set_rtype(XStore_Proto::CREATEDB);
       payload->set_dbname(std::string(db_name));
       payload->set_timeresolution(time_resolution);
       payload->set_rowlength(row_length);
+      for (const std::string &name : column_names) {
+          payload->add_columnnames(name);
+      }
       return SendRecv<XStore_Proto::CreateDB_REP>(to_server).createdbstatus();
+  }
+
+  // Pure name->index lookup, no network call -- callers fetch column_names
+  // once (InfoRequest()'s DbInfo.column_names, or the same list they just
+  // passed to CreateDB) and pass it in here before serializing a query/
+  // aggregate request with the resolved index. Throws rather than silently
+  // guessing on an empty list or an unknown name.
+  [[nodiscard]] static int ResolveColumnIndex(const std::vector<std::string> &column_names, std::string_view name) {
+      for (size_t i = 0; i < column_names.size(); i++) {
+          if (column_names[i] == name) return static_cast<int>(i);
+      }
+      throw std::invalid_argument(fmt::format("XStoreClient::ResolveColumnIndex: no column named '{}' (DB has {} named column(s))",
+                                                name, column_names.size()));
   }
 
   [[nodiscard]] std::string RemoveDB(std::string_view db_name) {
@@ -571,6 +596,17 @@ class XStoreClient {
       payload->set_dbname(std::string(db_name));
       payload->set_columnidx(column_idx);
       return SendRecv<XStore_Proto::Stddev_REP>(to_server);
+  }
+
+  [[nodiscard]] XStore_Proto::Exists_REP Exists(uint64_t start_time, uint64_t end_time, std::string_view db_name, int32_t column_idx) {
+      XStore_Proto::Request to_server;
+      auto *payload = to_server.mutable_exists();
+      payload->set_rtype(XStore_Proto::EXISTS);
+      payload->set_starttime(start_time);
+      payload->set_endtime(end_time);
+      payload->set_dbname(std::string(db_name));
+      payload->set_columnidx(column_idx);
+      return SendRecv<XStore_Proto::Exists_REP>(to_server);
   }
 };
 #endif //XSTORE_CLIENTSRC_XSTORE_CLIENT_H_

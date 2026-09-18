@@ -308,8 +308,12 @@ class XStore {
         // PROCESSING DbStats/info query
         XStore_Proto::SysInfo_REP InfoQuery(std::string_view server_addr, int thread_count);
 
-        // CREATING new DB instance with row length
-        [[nodiscard]] XStore_Proto::CreateDB_REP CreateDB(std::string_view db_name, XStore_Proto::TimeUnit time_resolution, short int row_length, uint32_t column_count_seed = 0);
+        // CREATING new DB instance with row length. column_names is purely
+        // persisted into ConfigStruct.columnNames (see that field's proto
+        // comment) -- never validated against row_length/column_count_seed,
+        // never touches storage layout or zone-map internals.
+        [[nodiscard]] XStore_Proto::CreateDB_REP CreateDB(std::string_view db_name, XStore_Proto::TimeUnit time_resolution, short int row_length, uint32_t column_count_seed = 0,
+                                                            const std::vector<std::string> &column_names = {});
 
         // The single place that decides "how many columns does this DB's
         // zone map track," consumed by BuildZoneMapObservations, every
@@ -543,6 +547,31 @@ class XStore {
 
         // STDDEV - AGGREGATE (sqrt of sample variance)
         void StddevAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Stddev_REP *return_data);
+
+        // Shared by ExistsAggregate: per-segment block walk that returns as
+        // soon as existence is proven, instead of accumulating a value like
+        // ScanSegmentWithZoneMapPruning/AccumulateSegmentWithZoneMapPushdown
+        // above. A block with zone-map coverage and valid_count > 0 proves
+        // existence with zero row scan (no new zone-map field needed --
+        // valid_count already means "at least one numeric value here"); a
+        // block with valid_count == 0 is skipped outright; a block with no
+        // zone-map coverage yet falls back to a real ProcessFileRangeSelect
+        // scan (same kernel MinAggregate uses) and checks whether it found
+        // anything. found_out is only ever set to true, never cleared --
+        // callers pass a fresh false per segment.
+        void ScanSegmentForExistence(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                      uint32_t tracked_column_count,
+                                      const char *rows_base, unsigned long long rows_to_process,
+                                      unsigned long long first_row_index, unsigned short column_idx,
+                                      bool &found_out);
+
+        // EXISTS - AGGREGATE: does at least one row in [startEpochT, endEpochT]
+        // have a non-null/numeric value for columnIdx? No cross-segment/
+        // thread short-circuit (same YAGNI precedent as Min/Max, which don't
+        // cancel other in-flight segments either) -- the win is per-segment
+        // zone-map block-skip plus stopping at the first hit within a
+        // segment, not global cancellation.
+        void ExistsAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Exists_REP *return_data);
 
         // Initialize DB. Loads every DB's ConfigStruct into the shared CfgMap,
         // then (Task 5) rebuilds any stale/missing zone map for that DB

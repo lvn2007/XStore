@@ -247,6 +247,43 @@ TEST_F(XStoreTest, CreateDBWithColumnCountSeedPersistsItInConfig) {
     EXPECT_EQ(shard.map.at("SEEDEDCOLDB").columncount(), 128u);
 }
 
+TEST_F(XStoreTest, CreateDBWithColumnNamesPersistsThemInConfig) {
+    XStore store;
+    XStore_Proto::CreateDB_REP rep = store.CreateDB("NAMEDCOLDB", XStore_Proto::SECOND, 128, /*column_count_seed=*/0,
+                                                     {"Open", "High", "Low", "Close"});
+    ASSERT_EQ(rep.createdbstatus(), "[INFO] [CREATE DB] [DB: NAMEDCOLDB] - Created DB") << rep.createdbstatus();
+
+    auto &shard = XStore::cfg_shards[std::hash<std::string>{}("NAMEDCOLDB") % XStore::CFG_SHARD_COUNT];
+    ASSERT_TRUE(shard.map.count("NAMEDCOLDB"));
+    const auto &cfg = shard.map.at("NAMEDCOLDB");
+    ASSERT_EQ(cfg.columnnames_size(), 4);
+    EXPECT_EQ(cfg.columnnames(0), "Open");
+    EXPECT_EQ(cfg.columnnames(1), "High");
+    EXPECT_EQ(cfg.columnnames(2), "Low");
+    EXPECT_EQ(cfg.columnnames(3), "Close");
+}
+
+TEST_F(XStoreTest, CreateDBWithoutColumnNamesLeavesConfigEmpty) {
+    XStore store;
+    CreateTestDb(store, "UNNAMEDCOLDB", XStore_Proto::SECOND, 128); // no names passed -- default empty
+
+    auto &shard = XStore::cfg_shards[std::hash<std::string>{}("UNNAMEDCOLDB") % XStore::CFG_SHARD_COUNT];
+    ASSERT_TRUE(shard.map.count("UNNAMEDCOLDB"));
+    EXPECT_EQ(shard.map.at("UNNAMEDCOLDB").columnnames_size(), 0);
+}
+
+TEST_F(XStoreTest, InfoQueryReflectsColumnNamesOfCreatedDatabase) {
+    XStore store;
+    store.CreateDB("NAMEDINFODB", XStore_Proto::SECOND, 128, /*column_count_seed=*/0, {"Sensor_1", "Sensor_2"});
+
+    XStore_Proto::SysInfo_REP info = store.InfoQuery("127.0.0.1", 1);
+
+    ASSERT_EQ(info.dbinfo_size(), 1);
+    ASSERT_EQ(info.dbinfo(0).columnnames_size(), 2);
+    EXPECT_EQ(info.dbinfo(0).columnnames(0), "Sensor_1");
+    EXPECT_EQ(info.dbinfo(0).columnnames(1), "Sensor_2");
+}
+
 TEST_F(XStoreTest, InsertingRowWiderThanColumnCountGrowsTheHighWaterMark) {
     XStore store;
     CreateTestDb(store, "GROWCOLDB", XStore_Proto::SECOND, 1536); // no seed -- starts at 0
@@ -2608,6 +2645,85 @@ TEST_F(XStoreTest, MaxAggregateOnMissingDBReturnsError) {
     XStore_Proto::Max_REP max_rep;
     store.MaxAggregate(TS_2016_MID, TS_2016_MID, "NOPE", 0, &max_rep);
     EXPECT_EQ(max_rep.opstatus(), "[WARNING] [MAX AGGREGATE] [DB: NOPE] - NOPE.CFG does not exist");
+}
+
+TEST_F(XStoreTest, ExistsAggregateOnMissingDBReturnsError) {
+    XStore store;
+    XStore_Proto::Exists_REP exists_rep;
+    store.ExistsAggregate(TS_2016_MID, TS_2016_MID, "NOPE", 0, &exists_rep);
+    EXPECT_EQ(exists_rep.opstatus(), "[WARNING] [EXISTS AGGREGATE] [DB: NOPE] - NOPE.CFG does not exist");
+}
+
+TEST_F(XStoreTest, ExistsAggregateRejectsStartAfterEnd) {
+    XStore store;
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
+    XStore_Proto::Exists_REP exists_rep;
+    store.ExistsAggregate(TS_2016_MID + 1, TS_2016_MID, "TESTDB", 0, &exists_rep);
+    EXPECT_EQ(exists_rep.opstatus(), "[WARNING] [EXISTS AGGREGATE] [DB: TESTDB] - Target end time must be after start time");
+}
+
+TEST_F(XStoreTest, ExistsAggregateReturnsTrueWhenValueInRange) {
+    XStore store;
+    CreateTestDb(store, "EXISTSDB", XStore_Proto::SECOND, 128);
+
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    store.UnaryInsert(TS_2031_MID, MakeRow({FDouble(42.0)}), "EXISTSDB", &insert_rep);
+
+    XStore_Proto::Exists_REP exists_rep;
+    store.ExistsAggregate(TS_2031_MID - 10, TS_2031_MID + 10, "EXISTSDB", 0, &exists_rep);
+    EXPECT_EQ(exists_rep.opstatus(), "SUCCESS");
+    EXPECT_TRUE(exists_rep.exists());
+}
+
+TEST_F(XStoreTest, ExistsAggregateReturnsFalseWhenNoRowsInRange) {
+    XStore store;
+    CreateTestDb(store, "EXISTSDB2", XStore_Proto::SECOND, 128);
+
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    store.UnaryInsert(TS_2031_MID, MakeRow({FDouble(42.0)}), "EXISTSDB2", &insert_rep);
+
+    // Query a disjoint range -- the year file exists but has no rows here.
+    XStore_Proto::Exists_REP exists_rep;
+    store.ExistsAggregate(TS_2016_MID, TS_2016_MID + 5, "EXISTSDB2", 0, &exists_rep);
+    EXPECT_EQ(exists_rep.opstatus(), "SUCCESS");
+    EXPECT_FALSE(exists_rep.exists());
+}
+
+TEST_F(XStoreTest, ExistsAggregateReturnsFalseWhenColumnIndexOutOfRange) {
+    XStore store;
+    CreateTestDb(store, "EXISTSDB3", XStore_Proto::SECOND, 128);
+
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    store.UnaryInsert(TS_2031_MID, MakeRow({FDouble(1.0)}), "EXISTSDB3", &insert_rep); // only column 0 exists
+
+    XStore_Proto::Exists_REP exists_rep;
+    store.ExistsAggregate(TS_2031_MID, TS_2031_MID, "EXISTSDB3", 5, &exists_rep);
+    EXPECT_EQ(exists_rep.opstatus(), "SUCCESS");
+    EXPECT_FALSE(exists_rep.exists());
+}
+
+TEST_F(XStoreTest, ExistsAggregateFindsValueAcrossManyZoneMapBlocks) {
+    // Needle-in-haystack shape mirroring the zone-map pruning tests: most
+    // rows are null for the target column, one row far into the range has a
+    // real value -- Exists must not stop scanning until it actually finds
+    // it (or legitimately exhausts the range).
+    XStore store;
+    CreateTestDb(store, "EXISTSNEEDLE", XStore_Proto::SECOND, 128);
+
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    // Column 1 is a hole (absent field) for every row except the last --
+    // so every block's zone map has valid_count==0 for column 1 until the
+    // final block, forcing Exists to actually walk forward instead of
+    // short-circuiting on the very first block.
+    for (int i = 0; i < 1999; i++) {
+        store.UnaryInsert(TS_2031_MID + i, MakeRow({FDouble(0.0)}), "EXISTSNEEDLE", &insert_rep);
+    }
+    store.UnaryInsert(TS_2031_MID + 1999, MakeRow({FDouble(0.0), FDouble(7.0)}), "EXISTSNEEDLE", &insert_rep);
+
+    XStore_Proto::Exists_REP exists_rep;
+    store.ExistsAggregate(TS_2031_MID, TS_2031_MID + 1999, "EXISTSNEEDLE", 1, &exists_rep);
+    EXPECT_EQ(exists_rep.opstatus(), "SUCCESS");
+    EXPECT_TRUE(exists_rep.exists());
 }
 
 TEST_F(XStoreTest, SumAggregateOnMissingDBReturnsError) {

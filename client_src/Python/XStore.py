@@ -20,6 +20,7 @@ class DBInfo:
     totalSizeInByte: int    # sum of every file's actualSizeBytes -- real disk usage of this DB
     files: List[FileInfo]
     rowLength: int          # configured per-row slot size (bytes); every row is zero-padded to this
+    columnNames: List[str]  # optional per-index column names set at createDB time; [] if none were given
 
 
 @dataclasses.dataclass
@@ -108,17 +109,21 @@ class XStoreClient:
         # Extract & Append each DB Info into list
         for i in recvObj.dbInfo:
             files = [FileInfo(f.fileName, f.actualSizeBytes, f.apparentSizeBytes) for f in i.files]
-            currDB = DBInfo(i.dbName, i.dbResolution, i.totalSizeInByte, files, i.rowLength)
+            currDB = DBInfo(i.dbName, i.dbResolution, i.totalSizeInByte, files, i.rowLength, list(i.columnNames))
             dbInfo.append(currDB)
 
         # SysInfo as returning object
         return SysInfo(recvObj.serverAddr, recvObj.threadCount, dbInfo)
 
-    def createDB(self, dbName, timeResolution, rowLength):
+    def createDB(self, dbName, timeResolution, rowLength, columnNames=None):
         """
         :param dbName:
         :param timeResolution:
         :param rowLength:
+        :param columnNames: optional list of per-index column names, purely
+            an API-boundary convenience -- persisted server-side and never
+            touching wire encoding/storage/zone-map internals. Resolve a
+            name back to an index with resolveColumnIndex().
         :return:
         """
         envelope = XStore_Proto.Request()
@@ -127,9 +132,26 @@ class XStoreClient:
         payload.dbName = dbName
         payload.timeResolution = timeResolution
         payload.rowLength = rowLength
+        if columnNames:
+            payload.columnNames.extend(columnNames)
 
         recvObj = self._sendRecv(envelope, XStore_Proto.CreateDB_REP)
         return recvObj.createDBStatus
+
+    @staticmethod
+    def resolveColumnIndex(columnNames, name):
+        """
+        Pure name->index lookup, no network call -- callers fetch
+        columnNames once (infoQuery()'s DBInfo.columnNames, or the same
+        list they just passed to createDB) and pass it in here before
+        calling a query/aggregate method with the resolved index. Raises
+        rather than silently guessing on an empty list or an unknown name.
+        """
+        try:
+            return columnNames.index(name)
+        except ValueError:
+            raise ValueError(f"resolveColumnIndex: no column named '{name}' "
+                              f"(DB has {len(columnNames)} named column(s))")
 
     @staticmethod
     def suggestRowLength(sampleRow, alignment: int = 8) -> int:
@@ -459,4 +481,12 @@ class XStoreClient:
         :return: Stddev_REP (opResult double, opStatus)
         """
         return self._aggregate(XStore_Proto.STDDEV, "stddev", XStore_Proto.Stddev_REP,
+                                startUnixTime, endUnixTime, targetDBName, columnIdx)
+
+    def exists(self, startUnixTime, endUnixTime, targetDBName, columnIdx):
+        """
+        :return: Exists_REP (opStatus, exists bool) -- does at least one row
+            in the range have a non-null value for columnIdx?
+        """
+        return self._aggregate(XStore_Proto.EXISTS, "exists", XStore_Proto.Exists_REP,
                                 startUnixTime, endUnixTime, targetDBName, columnIdx)

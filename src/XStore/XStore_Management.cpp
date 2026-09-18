@@ -273,6 +273,9 @@ XStore_Proto::SysInfo_REP XStore::InfoQuery(std::string_view server_addr, int th
             // Set DB Resolution
             curr_db->set_dbresolution(cfg_struct.timeresolution());
             curr_db->set_rowlength(cfg_struct.rowlength());
+            for (const std::string &name : cfg_struct.columnnames()) {
+                curr_db->add_columnnames(name);
+            }
         }
 
         // Size of all data files in current DB
@@ -379,7 +382,8 @@ void XStore::MaybeGrowColumnCount(const std::string &db_name, const std::string 
     spdlog::info("[COLUMN COUNT GROWTH] [DB: {}] - columnCount grew to {}", db_name, observed_column_count);
 }
 
-XStore_Proto::CreateDB_REP XStore::CreateDB(std::string_view db_name_view, XStore_Proto::TimeUnit time_resolution, short int row_length, uint32_t column_count_seed) {
+XStore_Proto::CreateDB_REP XStore::CreateDB(std::string_view db_name_view, XStore_Proto::TimeUnit time_resolution, short int row_length, uint32_t column_count_seed,
+                                             const std::vector<std::string> &column_names) {
     // Protobuf obj to be returned
     XStore_Proto::CreateDB_REP to_return;
     std::string create_db_status;
@@ -440,6 +444,9 @@ XStore_Proto::CreateDB_REP XStore::CreateDB(std::string_view db_name_view, XStor
             cfg_struct.set_timeresolution(time_resolution);
             cfg_struct.set_rowlength(row_length);
             cfg_struct.set_columncount(column_count_seed);
+            for (const std::string &name : column_names) {
+                cfg_struct.add_columnnames(name);
+            }
 
             // Writing cfgStruct to file
             FILE *b_file;

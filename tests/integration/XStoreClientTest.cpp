@@ -67,6 +67,25 @@ TEST(XStoreClientSuggestRowLengthTest, SingleFieldRowAlignsUp) {
     EXPECT_EQ(XStoreClient::SuggestRowLength(row), 8u);
 }
 
+// ResolveColumnIndex: pure name->index lookup, no server/socket needed --
+// same style as SuggestRowLength above. Callers fetch columnNames once
+// (e.g. from InfoRequest()'s DbInfo.column_names, or right after CreateDB)
+// and pass it in; this never touches the network itself.
+TEST(XStoreClientResolveColumnIndexTest, FindsExactNameMatch) {
+    std::vector<std::string> column_names = {"Open", "High", "Low", "Close"};
+    EXPECT_EQ(XStoreClient::ResolveColumnIndex(column_names, "Low"), 2);
+}
+
+TEST(XStoreClientResolveColumnIndexTest, ThrowsOnUnknownName) {
+    std::vector<std::string> column_names = {"Open", "High"};
+    EXPECT_THROW(XStoreClient::ResolveColumnIndex(column_names, "Volume"), std::invalid_argument);
+}
+
+TEST(XStoreClientResolveColumnIndexTest, ThrowsOnEmptyColumnNamesList) {
+    std::vector<std::string> column_names;
+    EXPECT_THROW(XStoreClient::ResolveColumnIndex(column_names, "Anything"), std::invalid_argument);
+}
+
 TEST(XStoreClientSuggestRowLengthTest, CustomAlignmentIsRespected) {
     // 3 int32 fields: (4 + 3) * 3 = 21 -- rounds up to 32 under Alignment=16.
     XStore_Proto::RowData row;

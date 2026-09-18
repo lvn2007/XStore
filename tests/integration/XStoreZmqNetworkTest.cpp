@@ -101,6 +101,11 @@ XStore_Proto::Request Wrap(const XStore_Proto::Stddev_REQ &req) {
     *w.mutable_stddev() = req;
     return w;
 }
+XStore_Proto::Request Wrap(const XStore_Proto::Exists_REQ &req) {
+    XStore_Proto::Request w;
+    *w.mutable_exists() = req;
+    return w;
+}
 
 }  // namespace
 
@@ -483,6 +488,47 @@ TEST_F(XStoreZmqNetworkTest, VarianceAndStddevRoundTripOverNetwork) {
     auto stddev_rep = SendRequest<XStore_Proto::Stddev_REP>(Wrap(stddev_req));
     EXPECT_EQ(stddev_rep.opstatus(), "SUCCESS");
     EXPECT_NEAR(stddev_rep.opresult(), std::sqrt(32.0 / 7.0), 1e-6);
+}
+
+// ---------------------------------------------------------------------
+// EXISTS AGGREGATE -- over the wire
+// ---------------------------------------------------------------------
+
+TEST_F(XStoreZmqNetworkTest, ExistsRoundTripOverNetwork) {
+    XStore_Proto::CreateDB_REQ create_req;
+    create_req.set_rtype(XStore_Proto::CREATEDB);
+    create_req.set_dbname("ZMQ_EXISTS_DB");
+    create_req.set_timeresolution(XStore_Proto::SECOND);
+    create_req.set_rowlength(128);
+    SendRequest<XStore_Proto::CreateDB_REP>(Wrap(create_req));
+
+    XStore_Proto::UnaryInsert_REQ insert_req;
+    insert_req.set_rtype(XStore_Proto::UNARYINSERT);
+    insert_req.set_dbname("ZMQ_EXISTS_DB");
+    insert_req.set_timestamp(TS_2020_MID);
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
+    *insert_req.mutable_data() = MakeRow({FDouble(1.0)});
+    SendRequest<XStore_Proto::UnaryInsert_REP>(Wrap(insert_req));
+
+    XStore_Proto::Exists_REQ exists_true_req;
+    exists_true_req.set_rtype(XStore_Proto::EXISTS);
+    exists_true_req.set_dbname("ZMQ_EXISTS_DB");
+    exists_true_req.set_starttime(TS_2020_MID);
+    exists_true_req.set_endtime(TS_2020_MID);
+    exists_true_req.set_columnidx(0);
+    auto exists_true_rep = SendRequest<XStore_Proto::Exists_REP>(Wrap(exists_true_req));
+    EXPECT_EQ(exists_true_rep.opstatus(), "SUCCESS");
+    EXPECT_TRUE(exists_true_rep.exists());
+
+    XStore_Proto::Exists_REQ exists_false_req;
+    exists_false_req.set_rtype(XStore_Proto::EXISTS);
+    exists_false_req.set_dbname("ZMQ_EXISTS_DB");
+    exists_false_req.set_starttime(TS_2020_MID + 100);
+    exists_false_req.set_endtime(TS_2020_MID + 200);
+    exists_false_req.set_columnidx(0);
+    auto exists_false_rep = SendRequest<XStore_Proto::Exists_REP>(Wrap(exists_false_req));
+    EXPECT_EQ(exists_false_rep.opstatus(), "SUCCESS");
+    EXPECT_FALSE(exists_false_rep.exists());
 }
 
 // ---------------------------------------------------------------------

@@ -163,6 +163,15 @@ struct SumPartial {
     unsigned long long count = 0;
 };
 
+// Per-thread partial state for Exists's parallel merge. Can't use a bare
+// bool for PartialState -- WalkYearSpanParallel stores one slot per segment
+// in a std::vector<PartialState>, and std::vector<bool> is the infamous
+// bitset specialization whose operator[] returns a proxy reference, not a
+// real bool&, which the segment_kernel's bool& parameter can't bind to.
+struct ExistsPartial {
+    bool found = false;
+};
+
 // Per-thread partial state for Variance/Stddev's parallel merge -- a
 // sibling of SumPartial rather than widening it, since Sum/Avg never need
 // sum_sq and a shared struct would carry dead weight into their hot path.
@@ -248,6 +257,69 @@ void XStore::AccumulateSegmentWithZoneMapPushdown(const std::string &db_base_pat
         uint64_t block_row_count = block_last_row - block_first_row + 1;
         const char *block_rows_base = rows_base + (block_first_row - first_row) * row_length;
         ProcessFileRangeAccumulate(block_rows_base, block_row_count, row_length, column_idx, sum_out, valid_count_out, sum_sq_out);
+    }
+}
+
+void XStore::ScanSegmentForExistence(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                      uint32_t tracked_column_count,
+                                      const char *rows_base, unsigned long long rows_to_process,
+                                      unsigned long long first_row_index, unsigned short column_idx,
+                                      bool &found_out) {
+    if (rows_to_process == 0 || found_out) return;
+
+    ZoneMapFile &zmap = GetOrOpenZoneMap(db_base_path, year, row_length, tracked_column_count);
+    uint64_t rows_per_block = zmap.RowsPerBlockValue();
+    uint64_t first_row = first_row_index;
+    uint64_t last_row = first_row_index + rows_to_process - 1;
+
+    for (uint64_t block = BlockIndexForRow(first_row, rows_per_block);
+         block <= BlockIndexForRow(last_row, rows_per_block);
+         ++block) {
+        uint64_t block_own_first_row = block * rows_per_block;
+        uint64_t block_own_last_row = block_own_first_row + rows_per_block - 1;
+        uint64_t block_first_row = std::max(first_row, block_own_first_row);
+        uint64_t block_last_row = std::min(last_row, block_own_last_row);
+        uint64_t block_row_count = block_last_row - block_first_row + 1;
+        const char *block_rows_base = rows_base + (block_first_row - first_row) * row_length;
+
+        auto stats = zmap.TryGetBlockStats(block);
+        if (stats.has_value() && column_idx < stats->size()) {
+            const ZoneMapEntry &e = (*stats)[column_idx];
+            if (e.valid_count == 0) {
+                // valid_count==0 covers the block's WHOLE extent, so it's
+                // safe to skip regardless of how much of the block the
+                // query actually covers -- every row in it (including any
+                // outside [firstRow,lastRow]) is null.
+                continue;
+            }
+            // valid_count > 0 only proves a non-null value exists SOMEWHERE
+            // in the block's full extent -- trustworthy as zero-scan proof
+            // of existence only when the query covers that whole extent.
+            // A block only partially covered by the query (this is the
+            // narrower, already-query-clipped sub-range) could have its one
+            // real value sitting outside [firstRow,lastRow] -- same
+            // "fully covered" requirement AccumulateSegmentWithZoneMapPushdown
+            // uses for Sum/Avg, caught here the same way by a test that
+            // queried a sub-range of a block containing an out-of-range value.
+            bool block_fully_in_range = (block_own_first_row >= first_row && block_own_last_row <= last_row);
+            if (block_fully_in_range) {
+                found_out = true;
+                return;
+            }
+            // Falls through to a real scan of just the queried sub-range below.
+        }
+
+        // Not prunable (no zone-map coverage yet, column past the
+        // tracked cap) -- fall back to a real scan of this block, same
+        // kernel MinAggregate uses. best_value/best_data are throwaway
+        // here: only whether a valid value was found at all matters.
+        ValueStruct best_value;
+        XStore_Proto::FData best_data;
+        ProcessFileRangeSelect<std::less<long double>>(block_rows_base, block_row_count, row_length, column_idx, best_value, best_data);
+        if (best_value.is_initialized) {
+            found_out = true;
+            return;
+        }
     }
 }
 
@@ -553,4 +625,42 @@ void XStore::StddevAggregate(unsigned long long int start_epoch_t, unsigned long
         return_data->set_opstatus("ERROR: No valid data found");
         spdlog::warn("[STDDEV AGGREGATE] [DB: {}] - No valid data for column {} over [{}, {}]", db_name, column_idx, start_epoch_t, end_epoch_t);
     }
+}
+
+void XStore::ExistsAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
+                              std::string_view db_name_view, unsigned short int column_idx, XStore_Proto::Exists_REP *return_data) {
+
+    const std::string &db_name = UpperCaseInto(db_name_view);
+    const std::string &db_base_path_str = CachedDbBasePath(db_name);
+
+    XStore_Proto::ConfigStruct cfg_struct;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+        std::string err_msg = fmt::format("[EXISTS AGGREGATE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return;
+    }
+
+    if (start_epoch_t > end_epoch_t) {
+        std::string err_msg = fmt::format("[EXISTS AGGREGATE] [DB: {}] - Target end time must be after start time", db_name);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return;
+    }
+
+    // false is a legitimate answer, not an error -- unlike Min/Max/Sum/Avg's
+    // "ERROR: No valid data found", a range with no matching value is a
+    // real, successful EXISTS=false result.
+    ExistsPartial final = WalkYearSpanParallel<ExistsPartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
+        ExistsPartial{},
+        [&](ExistsPartial &partial, const char *rows_base, unsigned long long rows_to_process, unsigned short year, unsigned long long first_row_index) {
+            ScanSegmentForExistence(db_base_path_str, year, cfg_struct.rowlength(), EffectiveTrackedColumnCount(cfg_struct),
+                rows_base, rows_to_process, first_row_index, column_idx, partial.found);
+        },
+        [](ExistsPartial &final_state, ExistsPartial &partial) {
+            final_state.found = final_state.found || partial.found;
+        });
+
+    return_data->set_opstatus("SUCCESS");
+    return_data->set_exists(final.found);
 }
