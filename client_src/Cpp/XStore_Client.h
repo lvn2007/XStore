@@ -608,5 +608,16 @@ class XStoreClient {
       payload->set_columnidx(column_idx);
       return SendRecv<XStore_Proto::Exists_REP>(to_server);
   }
+
+  [[nodiscard]] XStore_Proto::Ohlc_REP Ohlc(uint64_t start_time, uint64_t end_time, std::string_view db_name, int32_t column_idx) {
+      XStore_Proto::Request to_server;
+      auto *payload = to_server.mutable_ohlc();
+      payload->set_rtype(XStore_Proto::OHLC);
+      payload->set_starttime(start_time);
+      payload->set_endtime(end_time);
+      payload->set_dbname(std::string(db_name));
+      payload->set_columnidx(column_idx);
+      return SendRecv<XStore_Proto::Ohlc_REP>(to_server);
+  }
 };
 #endif //XSTORE_CLIENTSRC_XSTORE_CLIENT_H_

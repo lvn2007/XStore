@@ -33,6 +33,7 @@ enum RequestType {
   VARIANCE = 18;
   STDDEV = 19;
   EXISTS = 20;
+  OHLC = 21;
 }
 
 enum TimeUnit {
@@ -318,6 +319,20 @@ message Exists_REQ {
   sint32 columnIdx = 5;
 }
 
+// --- OHLC: open/high/low/close bar over [startTime, endTime] for columnIdx.
+// Open/Close are the chronologically first/last numeric values in range (not
+// value-extremes -- see ZoneMapEntry's first_value/last_value, new in v3);
+// High/Low are the existing value-extremes (ZoneMapEntry.max_value/min_value,
+// same fields MIN/MAX already use). All four returned together from one
+// block walk rather than as three separate ops.
+message Ohlc_REQ {
+  RequestType RType = 1;
+  uint64 startTime = 2;
+  uint64 endTime = 3;
+  string dbName = 4;
+  sint32 columnIdx = 5;
+}
+
 // --- Envelope: one wire message carries exactly one of these. The oneof
 // case (payload_case()) replaces RType as the dispatch tag, so a request
 // only needs to be parsed once server-side.
@@ -344,6 +359,7 @@ message Request {
     Variance_REQ variance = 19;
     Stddev_REQ stddev = 20;
     Exists_REQ exists = 21;
+    Ohlc_REQ ohlc = 22;
   }
 }
 
@@ -519,4 +535,13 @@ message Stddev_REP {
 message Exists_REP {
   string opStatus = 1;
   bool exists = 2;
+}
+
+// --- OHLC
+message Ohlc_REP {
+  string opStatus = 1;
+  double open = 2;
+  double high = 3;
+  double low = 4;
+  double close = 5;
 }

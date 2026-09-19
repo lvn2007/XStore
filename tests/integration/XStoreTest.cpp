@@ -3400,6 +3400,127 @@ TEST_F(XStoreTest, VarianceAggregateWithSingleRowReturnsNoValidData) {
 }
 
 // ---------------------------------------------------------------------
+// OHLC (open/high/low/close bar)
+// ---------------------------------------------------------------------
+
+TEST_F(XStoreTest, OhlcAggregateOnMissingDBReturnsError) {
+    XStore store;
+    XStore_Proto::Ohlc_REP ohlc_rep;
+    store.OhlcAggregate(TS_2016_MID, TS_2016_MID, "NOPE", 0, &ohlc_rep);
+    EXPECT_EQ(ohlc_rep.opstatus(), "[WARNING] [OHLC AGGREGATE] [DB: NOPE] - NOPE.CFG does not exist");
+}
+
+TEST_F(XStoreTest, OhlcAggregateRejectsStartAfterEnd) {
+    XStore store;
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
+    XStore_Proto::Ohlc_REP ohlc_rep;
+    store.OhlcAggregate(TS_2016_MID + 1, TS_2016_MID, "TESTDB", 0, &ohlc_rep);
+    EXPECT_EQ(ohlc_rep.opstatus(), "[WARNING] [OHLC AGGREGATE] [DB: TESTDB] - Target end time must be after start time");
+}
+
+TEST_F(XStoreTest, OhlcAggregateMatchesHandComputedBar) {
+    // Values: 2, 9, 4, 1, 5 -- open=2 (first), high=9, low=1, close=5 (last).
+    // Inserted starting at row_index ~1000, well past this DB's block 0
+    // (whose own extent starts at row_index 0) -- block_own_first_row(0) <
+    // first_row(1000), so block_fully_in_range is false and this exercises
+    // ProcessFileRangeOhlc's real-scan fallback, not the zone-map pushdown
+    // branch (covered separately in XStoreZoneMapTest.cpp, same technique
+    // VarianceAggregatePushesDownThroughFullyCoveredBlock there uses).
+    XStore store;
+    CreateTestDb(store, "OHLCTEST", XStore_Proto::SECOND, 128);
+
+    const std::vector<double> values = {2, 9, 4, 1, 5};
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    for (size_t i = 0; i < values.size(); ++i) {
+        store.UnaryInsert(1000 + i, MakeRow({FDouble(values[i])}), "OHLCTEST", &insert_rep);
+    }
+
+    XStore_Proto::Ohlc_REP ohlc_rep;
+    store.OhlcAggregate(1000, 1000 + values.size() - 1, "OHLCTEST", 0, &ohlc_rep);
+
+    ASSERT_EQ(ohlc_rep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(ohlc_rep.open(), 2.0);
+    EXPECT_DOUBLE_EQ(ohlc_rep.high(), 9.0);
+    EXPECT_DOUBLE_EQ(ohlc_rep.low(), 1.0);
+    EXPECT_DOUBLE_EQ(ohlc_rep.close(), 5.0);
+}
+
+TEST_F(XStoreTest, OhlcAggregateOutOfOrderBackfillInsertStillPicksChronologicalOpenAndClose) {
+    // Insert LATER timestamps first, then backfill an EARLIER one -- proves
+    // open/close track row_index (chronological time), not insertion order.
+    // If ZoneMapFile::UpdateRow used first-observed-wins instead of
+    // comparing row_index, this would wrongly report the first-INSERTED
+    // value (10.0 at t=1002) as open instead of the chronologically-first
+    // value (1.0 at t=1000).
+    XStore store;
+    CreateTestDb(store, "OHLCBACKFILL", XStore_Proto::SECOND, 64);
+
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    store.UnaryInsert(1002, MakeRow({FDouble(10.0)}), "OHLCBACKFILL", &insert_rep); // last chronologically -- inserted FIRST
+    store.UnaryInsert(1001, MakeRow({FDouble(20.0)}), "OHLCBACKFILL", &insert_rep); // middle -- inserted SECOND
+    store.UnaryInsert(1000, MakeRow({FDouble(1.0)}), "OHLCBACKFILL", &insert_rep);  // first chronologically -- inserted LAST (backfill)
+
+    XStore_Proto::Ohlc_REP ohlc_rep;
+    store.OhlcAggregate(1000, 1002, "OHLCBACKFILL", 0, &ohlc_rep);
+
+    ASSERT_EQ(ohlc_rep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(ohlc_rep.open(), 1.0);   // t=1000, chronologically first, inserted last
+    EXPECT_DOUBLE_EQ(ohlc_rep.close(), 10.0); // t=1002, chronologically last, inserted first
+    EXPECT_DOUBLE_EQ(ohlc_rep.high(), 20.0);
+    EXPECT_DOUBLE_EQ(ohlc_rep.low(), 1.0);
+}
+
+TEST_F(XStoreTest, OhlcAggregateWithNoValidDataReturnsError) {
+    XStore store;
+    CreateTestDb(store, "OHLCEMPTY", XStore_Proto::SECOND, 64);
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    store.UnaryInsert(TS_2031_MID, MakeRow({FDouble(1.0)}), "OHLCEMPTY", &insert_rep); // pre-allocate the year file
+
+    XStore_Proto::Ohlc_REP ohlc_rep;
+    store.OhlcAggregate(TS_2016_MID, TS_2016_MID + 5, "OHLCEMPTY", 0, &ohlc_rep); // disjoint range, no rows here
+
+    EXPECT_EQ(ohlc_rep.opstatus(), "ERROR: No valid data found");
+}
+
+TEST_F(XStoreTest, ConcurrentOhlcAggregateDuringConcurrentInsertsDoesNotCrashOrTear) {
+    XStore seed_store;
+    CreateTestDb(seed_store, "TESTDB", XStore_Proto::SECOND, 128);
+    XStore_Proto::UnaryInsert_REP seed_rep;
+    seed_store.UnaryInsert(TS_2024_MID, MakeRow({FDouble(1.0)}), "TESTDB", &seed_rep);  // pre-allocate the year file
+
+    constexpr int k_iterations = 200;
+    constexpr int k_width = 50;
+
+    auto writer = [&]() {
+        XStore store;
+        for (int i = 0; i < k_iterations; i++) {
+            for (int j = 0; j < k_width; j++) {
+                XStore_Proto::UnaryInsert_REP rep;
+                store.UnaryInsert(TS_2024_MID + j, MakeRow({FDouble((double)(i + j))}), "TESTDB", &rep);
+            }
+        }
+    };
+    auto aggregator = [&]() {
+        XStore store;
+        for (int i = 0; i < k_iterations; i++) {
+            XStore_Proto::Ohlc_REP rep;
+            store.OhlcAggregate(TS_2024_MID, TS_2024_MID + k_width - 1, "TESTDB", 0, &rep);
+            EXPECT_TRUE(rep.opstatus() == "SUCCESS" || rep.opstatus() == "ERROR: No valid data found");
+            if (rep.opstatus() == "SUCCESS") {
+                EXPECT_FALSE(std::isnan(rep.open()));
+                EXPECT_FALSE(std::isnan(rep.close()));
+                EXPECT_LE(rep.low(), rep.high()) << "torn min/max read would let low exceed high";
+            }
+        }
+    };
+
+    std::thread w(writer);
+    std::thread a(aggregator);
+    w.join();
+    a.join();
+}
+
+// ---------------------------------------------------------------------
 // Concurrency -- exercises FileRangeLock, the in-process byte-range lock
 // that replaced fcntl() record locks. fcntl() locks are scoped to the
 // process (not the thread or fd), so two worker threads in one process

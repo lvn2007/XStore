@@ -479,6 +479,24 @@ class XStore {
                                          double& sum_out, unsigned long long& valid_count_out,
                                          double *sum_sq_out = nullptr);
 
+        // OHLC real-scan fallback kernel: one pass over [0, total_rows) that
+        // finds the chronologically first (open) and last (close) numeric
+        // value plus the value-extremes (high/low), for a sub-range a zone
+        // map either doesn't fully cover or has no coverage for yet. Rows
+        // are walked in ascending order (i=0..total_rows-1, i.e. ascending
+        // time within this sub-range), so "first hit wins" gives open and
+        // "always overwrite on a hit" gives close -- no comparison against
+        // a row_index needed here, unlike ZoneMapFile::UpdateRow, because a
+        // single scan never sees an out-of-order row the way a live
+        // out-of-order insert can. The *_set_out flags distinguish "still
+        // zero because unset" from "genuinely zero" the same way
+        // ValueStruct::is_initialized does for ProcessFileRangeSelect.
+        void ProcessFileRangeOhlc(const char* rows_base, unsigned long long total_rows,
+                                   size_t row_len, unsigned short column_idx,
+                                   double &open_out, bool &open_set_out,
+                                   double &high_out, double &low_out, bool &high_low_set_out,
+                                   double &close_out, bool &close_set_out);
+
         // Shared by MinAggregate/MaxAggregate (Task 6): splits one
         // WalkYearSpan segment into its zone-map blocks and, for each,
         // either skips it (should_skip_block(entry) says this block's
@@ -565,6 +583,35 @@ class XStore {
                                       unsigned long long first_row_index, unsigned short column_idx,
                                       bool &found_out);
 
+        // Shared by OhlcAggregate: same per-segment block split as
+        // ScanSegmentWithZoneMapPruning/AccumulateSegmentWithZoneMapPushdown
+        // above, but merging four running values (open/high/low/close) into
+        // the caller's out-refs instead of one -- individual primitive refs,
+        // same convention AccumulateSegmentWithZoneMapPushdown uses (not the
+        // OhlcPartial struct itself, which stays local to XStore_Aggregates.cpp's
+        // anonymous namespace). A block fully covered by the query with
+        // zone-map coverage contributes its own first_value/last_value/
+        // min_value/max_value with zero row scan (open only if not already
+        // set -- first block wins; close always overwritten -- later block
+        // wins, safe because blocks within one segment, and segments across
+        // WalkYearSpanParallel's own chronologically-ordered vector, are
+        // always visited earliest-to-latest); a block without full zone-map
+        // coverage falls back to ProcessFileRangeOhlc over just its queried
+        // sub-range and merges that local result the same way. Calling this
+        // repeatedly on the SAME out-refs across multiple years
+        // (WalkYearSpanParallel's narrow-span sequential path) is exactly as
+        // correct as calling it once per segment then merging (its
+        // wide-span parallel path) -- both reduce to "first open wins, last
+        // close wins, running min/max" over a chronologically-ordered
+        // sequence of contributions.
+        void ScanSegmentForOhlc(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                 uint32_t tracked_column_count,
+                                 const char *rows_base, unsigned long long rows_to_process,
+                                 unsigned long long first_row_index, unsigned short column_idx,
+                                 double &open_out, bool &open_set_out,
+                                 double &high_out, double &low_out, bool &high_low_set_out,
+                                 double &close_out, bool &close_set_out);
+
         // EXISTS - AGGREGATE: does at least one row in [startEpochT, endEpochT]
         // have a non-null/numeric value for columnIdx? No cross-segment/
         // thread short-circuit (same YAGNI precedent as Min/Max, which don't
@@ -572,6 +619,15 @@ class XStore {
         // zone-map block-skip plus stopping at the first hit within a
         // segment, not global cancellation.
         void ExistsAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Exists_REP *return_data);
+
+        // OHLC - AGGREGATE (open/high/low/close bar over [startEpochT, endEpochT]):
+        // Open/Close are the chronologically first/last numeric values in
+        // range (ZoneMapEntry.first_value/last_value, new in v3, pushdown-
+        // accelerated the same way Sum/Avg's sum_value already is); High/Low
+        // are the existing value-extremes (ZoneMapEntry.max_value/min_value,
+        // same fields MIN/MAX already use). All four computed in one block
+        // walk rather than as separate ops.
+        void OhlcAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Ohlc_REP *return_data);
 
         // Initialize DB. Loads every DB's ConfigStruct into the shared CfgMap,
         // then (Task 5) rebuilds any stale/missing zone map for that DB

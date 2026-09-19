@@ -427,8 +427,9 @@ inline constexpr uint32_t MAX_TRACKED_COLUMN_COUNT = 4096;
 // the same block (the common sequential-append case) -- every entry here is
 // always disk-coherent (write-through, see ZoneMapFile::UpdateRow), so this
 // is a pure performance cache, not a durability buffer. 4 blocks * 64
-// tracked columns * 48 bytes/entry (ZoneMapEntry, v2 -- it grew from 40 to
-// 48 bytes when sum_sq_value was added for VARIANCE/STDDEV) = 12,288 bytes resident
+// tracked columns * 80 bytes/entry (ZoneMapEntry, v3 -- 40 bytes originally,
+// 48 after sum_sq_value for VARIANCE/STDDEV, 80 after first_value/last_value/
+// first_row_index/last_row_index for OHLC) = 20,480 bytes resident
 // per (db, year) file with this default -- negligible on its own; see
 // ZONE_MAP_REGISTRY_CAP below for the bound on how many (db, year) files can
 // be resident at once, which is what actually keeps total memory bounded.

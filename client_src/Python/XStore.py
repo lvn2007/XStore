@@ -490,3 +490,12 @@ class XStoreClient:
         """
         return self._aggregate(XStore_Proto.EXISTS, "exists", XStore_Proto.Exists_REP,
                                 startUnixTime, endUnixTime, targetDBName, columnIdx)
+
+    def ohlc(self, startUnixTime, endUnixTime, targetDBName, columnIdx):
+        """
+        :return: Ohlc_REP (opStatus, open/high/low/close doubles) -- open/
+            close are the chronologically first/last numeric values in
+            range, high/low are the value-extremes (same as max/min).
+        """
+        return self._aggregate(XStore_Proto.OHLC, "ohlc", XStore_Proto.Ohlc_REP,
+                                startUnixTime, endUnixTime, targetDBName, columnIdx)

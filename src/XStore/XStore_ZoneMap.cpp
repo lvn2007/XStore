@@ -73,7 +73,7 @@ off_t ZoneMapFile::BlockFileOffset(uint64_t block_index) const {
 void ZoneMapFile::EnsureBlockLoaded(uint64_t block_index) {
     if (cache_.count(block_index)) return;
 
-    std::vector<ZoneMapEntry> entries(header_.tracked_column_count, ZoneMapEntry{0, 0, 0, 0, 0, 0});
+    std::vector<ZoneMapEntry> entries(header_.tracked_column_count, ZoneMapEntry{});
 
     off_t offset = BlockFileOffset(block_index);
     struct stat st{};
@@ -116,6 +116,19 @@ void ZoneMapFile::UpdateRow(uint64_t row_index, const std::vector<ZoneMapObserva
             e.max_value = (e.valid_count == 0) ? obs.value : std::max(e.max_value, obs.value);
             e.sum_value += obs.value;
             e.sum_sq_value += obs.value * obs.value;
+            // Compared against the on-disk row_index, not first-observed-wins
+            // -- a backfilled (out-of-order) insert must still correctly
+            // displace an already-recorded first/last if it's chronologically
+            // more extreme, the same way min/max above compare against the
+            // running value rather than trusting insertion order.
+            if (e.valid_count == 0 || row_index < e.first_row_index) {
+                e.first_value = obs.value;
+                e.first_row_index = row_index;
+            }
+            if (e.valid_count == 0 || row_index > e.last_row_index) {
+                e.last_value = obs.value;
+                e.last_row_index = row_index;
+            }
             e.valid_count++;
         } else {
             e.null_count++;
@@ -151,7 +164,7 @@ std::optional<std::vector<ZoneMapEntry>> ZoneMapFile::TryGetBlockStats(uint64_t 
     if (fstat(fd_, &st) != 0) return std::nullopt; // real I/O failure
     if (st.st_size < offset + static_cast<off_t>(header_.tracked_column_count * sizeof(ZoneMapEntry))) {
         // Never-touched block -- a real, safe zero'd answer, not an error.
-        return std::vector<ZoneMapEntry>(header_.tracked_column_count, ZoneMapEntry{0, 0, 0, 0, 0, 0});
+        return std::vector<ZoneMapEntry>(header_.tracked_column_count, ZoneMapEntry{});
     }
     std::vector<ZoneMapEntry> entries(header_.tracked_column_count);
     ssize_t read_bytes = pread(fd_, entries.data(), header_.tracked_column_count * sizeof(ZoneMapEntry), offset);

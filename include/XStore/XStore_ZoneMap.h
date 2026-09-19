@@ -18,29 +18,34 @@ inline uint64_t BlockIndexForRow(uint64_t row_index, uint64_t rows_per_block) {
     return row_index / rows_per_block;
 }
 
-// One (block, column) summary. min_value/max_value/sum_sq_value are only
-// meaningful when valid_count > 0 -- a never-observed column in a block has
-// valid_count==0 and min_value/max_value left at their sentinel (see
+// One (block, column) summary. min_value/max_value/sum_sq_value/first_value/
+// last_value are only meaningful when valid_count > 0 -- a never-observed
+// column in a block has valid_count==0 and these left at their sentinel (see
 // ZoneMapFile::ZeroedEntry). Persisted as raw bytes (pread/pwrite), never
 // protobuf -- this file never crosses the wire.
 struct ZoneMapEntry {
     double   min_value;
     double   max_value;
     double   sum_value;
-    double   sum_sq_value;   // sum of squares, for VARIANCE/STDDEV pushdown -- see 2026-09-15 design doc
-    uint64_t valid_count;   // rows in this block where the column was numeric and set
-    uint64_t null_count;    // rows in this block where the column was a hole or non-numeric
+    double   sum_sq_value;    // sum of squares, for VARIANCE/STDDEV pushdown -- see 2026-09-15 design doc
+    double   first_value;     // chronologically-FIRST numeric value in this block, for OHLC's Open -- see 2026-09-19 design doc
+    double   last_value;      // chronologically-LAST numeric value in this block, for OHLC's Close
+    uint64_t valid_count;     // rows in this block where the column was numeric and set
+    uint64_t null_count;      // rows in this block where the column was a hole or non-numeric
+    uint64_t first_row_index; // row_index first_value was folded from -- lets an out-of-order (backfill) insert correctly tell whether it's earlier than what's already recorded, not just first-observed-wins
+    uint64_t last_row_index;  // row_index last_value was folded from -- same reasoning, for "later than what's recorded"
 };
 static_assert(std::is_trivially_copyable<ZoneMapEntry>::value,
               "ZoneMapEntry must be trivially copyable for raw pread/pwrite");
-static_assert(sizeof(ZoneMapEntry) == 48, "update size-dependent capacity-planning docs (docs/XStore_Technical_Reference.md §4.14) if this changes");
+static_assert(sizeof(ZoneMapEntry) == 80, "update size-dependent capacity-planning docs (docs/XStore_Technical_Reference.md §4.14) if this changes");
 
-// Bumped 1 -> 2 when ZoneMapEntry grew sum_sq_value (40 -> 48 bytes). A file
+// Bumped 2 -> 3 when ZoneMapEntry grew first_value/last_value/first_row_index/
+// last_row_index (48 -> 80 bytes) for OHLC's Open/Close pushdown. A file
 // written under an older version is never migrated in place -- ZoneMapFile::
 // Open() truncates and reinitializes it instead (see Open's comment). Named
 // out so a future format change is a one-line bump + rebuild, not a magic-
 // number hunt across the codebase.
-inline constexpr uint32_t ZONE_MAP_VERSION = 2;
+inline constexpr uint32_t ZONE_MAP_VERSION = 3;
 
 struct ZoneMapFileHeader {
     uint32_t magic   = 0x5A4D4150; // 'ZMAP'

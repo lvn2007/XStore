@@ -172,6 +172,19 @@ struct ExistsPartial {
     bool found = false;
 };
 
+// Per-thread partial state for Ohlc's parallel merge. open/close_set track
+// whether this segment saw any valid data at all (both flip true together --
+// see ScanSegmentForOhlc); high_low_set is folded into the same open/close
+// life-cycle since a valid open/close always implies a valid high/low from
+// the same rows, kept as its own bool only because ScanSegmentForOhlc's
+// per-block merge needs to distinguish "haven't seen a block yet" from
+// "seen one, running min/max are meaningful" independent of open (open, once
+// set, never changes within a segment, while high/low keep updating).
+struct OhlcPartial {
+    double open = 0.0, high = 0.0, low = 0.0, close = 0.0;
+    bool open_set = false, high_low_set = false, close_set = false;
+};
+
 // Per-thread partial state for Variance/Stddev's parallel merge -- a
 // sibling of SumPartial rather than widening it, since Sum/Avg never need
 // sum_sq and a shared struct would carry dead weight into their hot path.
@@ -320,6 +333,74 @@ void XStore::ScanSegmentForExistence(const std::string &db_base_path, unsigned s
             found_out = true;
             return;
         }
+    }
+}
+
+void XStore::ScanSegmentForOhlc(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                 uint32_t tracked_column_count,
+                                 const char *rows_base, unsigned long long rows_to_process,
+                                 unsigned long long first_row_index, unsigned short column_idx,
+                                 double &open_out, bool &open_set_out,
+                                 double &high_out, double &low_out, bool &high_low_set_out,
+                                 double &close_out, bool &close_set_out) {
+    if (rows_to_process == 0) return;
+
+    ZoneMapFile &zmap = GetOrOpenZoneMap(db_base_path, year, row_length, tracked_column_count);
+    uint64_t rows_per_block = zmap.RowsPerBlockValue();
+    uint64_t first_row = first_row_index;
+    uint64_t last_row = first_row_index + rows_to_process - 1;
+
+    for (uint64_t block = BlockIndexForRow(first_row, rows_per_block);
+         block <= BlockIndexForRow(last_row, rows_per_block);
+         ++block) {
+        uint64_t block_own_first_row = block * rows_per_block;
+        uint64_t block_own_last_row = block_own_first_row + rows_per_block - 1;
+
+        // Same "block's OWN full extent inside the query range" requirement
+        // AccumulateSegmentWithZoneMapPushdown/ScanSegmentForExistence use --
+        // a block's first_value/last_value describe its whole extent, so a
+        // block only partially covered by the query still needs a real scan
+        // of just the queried sub-range.
+        bool block_fully_in_range = (block_own_first_row >= first_row && block_own_last_row <= last_row);
+
+        auto stats = zmap.TryGetBlockStats(block);
+        if (block_fully_in_range && stats.has_value() && column_idx < stats->size()) {
+            const ZoneMapEntry &e = (*stats)[column_idx];
+            if (e.valid_count == 0) continue; // no numeric data anywhere in this block -- skip
+
+            if (!open_set_out) {
+                open_out = e.first_value;
+                open_set_out = true;
+            }
+            high_out = high_low_set_out ? std::max(high_out, e.max_value) : e.max_value;
+            low_out = high_low_set_out ? std::min(low_out, e.min_value) : e.min_value;
+            high_low_set_out = true;
+            close_out = e.last_value; // blocks visited in ascending chronological order -- always overwrite, last one wins
+            close_set_out = true;
+            continue; // zero-scan pushdown
+        }
+
+        uint64_t block_first_row = std::max(first_row, block_own_first_row);
+        uint64_t block_last_row = std::min(last_row, block_own_last_row);
+        uint64_t block_row_count = block_last_row - block_first_row + 1;
+        const char *block_rows_base = rows_base + (block_first_row - first_row) * row_length;
+
+        double local_open = 0.0, local_high = 0.0, local_low = 0.0, local_close = 0.0;
+        bool local_open_set = false, local_high_low_set = false, local_close_set = false;
+        ProcessFileRangeOhlc(block_rows_base, block_row_count, row_length, column_idx,
+                              local_open, local_open_set, local_high, local_low, local_high_low_set,
+                              local_close, local_close_set);
+        if (!local_close_set) continue; // nothing valid in this sub-range
+
+        if (!open_set_out) {
+            open_out = local_open;
+            open_set_out = true;
+        }
+        high_out = high_low_set_out ? std::max(high_out, local_high) : local_high;
+        low_out = high_low_set_out ? std::min(low_out, local_low) : local_low;
+        high_low_set_out = true;
+        close_out = local_close;
+        close_set_out = true;
     }
 }
 
@@ -663,4 +744,65 @@ void XStore::ExistsAggregate(unsigned long long int start_epoch_t, unsigned long
 
     return_data->set_opstatus("SUCCESS");
     return_data->set_exists(final.found);
+}
+
+void XStore::OhlcAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
+                            std::string_view db_name_view, unsigned short int column_idx, XStore_Proto::Ohlc_REP *return_data) {
+
+    const std::string &db_name = UpperCaseInto(db_name_view);
+    const std::string &db_base_path_str = CachedDbBasePath(db_name);
+
+    XStore_Proto::ConfigStruct cfg_struct;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+        std::string err_msg = fmt::format("[OHLC AGGREGATE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return;
+    }
+
+    if (start_epoch_t > end_epoch_t) {
+        std::string err_msg = fmt::format("[OHLC AGGREGATE] [DB: {}] - Target end time must be after start time", db_name);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return;
+    }
+
+    // Narrow-span sequential path calls ScanSegmentForOhlc repeatedly on the
+    // SAME partial across consecutive years -- correct by construction, see
+    // ScanSegmentForOhlc's own comment in XStore.h. Wide-span parallel path
+    // gives each segment its own fresh OhlcPartial then merges them in the
+    // vector's chronological order below -- same open-wins-first/close-wins-
+    // last/running-min-max reduction, just applied across segments instead
+    // of within one.
+    OhlcPartial final = WalkYearSpanParallel<OhlcPartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
+        OhlcPartial{},
+        [&](OhlcPartial &partial, const char *rows_base, unsigned long long rows_to_process, unsigned short year, unsigned long long first_row_index) {
+            ScanSegmentForOhlc(db_base_path_str, year, cfg_struct.rowlength(), EffectiveTrackedColumnCount(cfg_struct),
+                rows_base, rows_to_process, first_row_index, column_idx,
+                partial.open, partial.open_set, partial.high, partial.low, partial.high_low_set,
+                partial.close, partial.close_set);
+        },
+        [](OhlcPartial &final_state, OhlcPartial &partial) {
+            if (!partial.close_set) return; // this segment/year had no data at all
+            if (!final_state.open_set) {
+                final_state.open = partial.open;
+                final_state.open_set = true;
+            }
+            final_state.high = final_state.high_low_set ? std::max(final_state.high, partial.high) : partial.high;
+            final_state.low = final_state.high_low_set ? std::min(final_state.low, partial.low) : partial.low;
+            final_state.high_low_set = true;
+            final_state.close = partial.close; // segments merged in chronological (vector) order -- always overwrite, last one wins
+            final_state.close_set = true;
+        });
+
+    if (final.close_set) {
+        return_data->set_opstatus("SUCCESS");
+        return_data->set_open(final.open);
+        return_data->set_high(final.high);
+        return_data->set_low(final.low);
+        return_data->set_close(final.close);
+    } else {
+        return_data->set_opstatus("ERROR: No valid data found");
+        spdlog::warn("[OHLC AGGREGATE] [DB: {}] - No valid data for column {} over [{}, {}]", db_name, column_idx, start_epoch_t, end_epoch_t);
+    }
 }

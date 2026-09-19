@@ -3,6 +3,7 @@
 #include "include/XStore/XStore_ZoneMap.h"
 #include "include/DataStructs/TimeStruct.h"
 #include "XStoreTestSupport.h"
+#include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <thread>
@@ -41,7 +42,7 @@ TEST(ZoneMapMathTest, BlockIndexForRowIsIntegerDivision) {
 TEST(ZoneMapEntryLayoutTest, EntryIsFixedWidthPodForRawFileIo) {
     static_assert(std::is_trivially_copyable<ZoneMapEntry>::value,
                   "ZoneMapEntry must be trivially copyable for raw pread/pwrite");
-    EXPECT_EQ(sizeof(ZoneMapEntry), 48u);
+    EXPECT_EQ(sizeof(ZoneMapEntry), 80u);
 }
 
 TEST(ZoneMapFileTest, SequentialUpdatesToSameBlockAreVisibleImmediately) {
@@ -122,6 +123,50 @@ TEST(ZoneMapFileTest, ConcurrentUpdateRowFromMultipleThreadsDoesNotLoseUpdates) 
     // accumulates 1.0^2 per call, same expected total as valid_count/sum_value.
     EXPECT_DOUBLE_EQ((*stats)[0].sum_sq_value, static_cast<double>(kThreads * kItersPerThread))
         << "lost update(s) to sum_sq_value under concurrent UpdateRow";
+}
+
+TEST(ZoneMapFileTest, ConcurrentUpdateRowWithDistinctRowIndicesConvergesToCorrectFirstAndLast) {
+    // first_value/last_value (added for OHLC pushdown) are exposed to the
+    // same mutex-guarded read-modify-write every other field is -- UpdateRow's
+    // lock_guard makes each individual call atomic, but this test's real job
+    // is guarding the COMPARISON logic itself (row_index < e.first_row_index
+    // / row_index > e.last_row_index), not the locking: unlike the test
+    // above (every thread writes the identical row_index=0, so first/last
+    // are trivially 1.0 regardless of scheduling), each thread here writes a
+    // DISTINCT, disjoint range of row_indices concurrently -- if the
+    // comparison were accidentally first-observed-wins instead of a real
+    // row_index comparison, whichever thread happened to run first would
+    // "win" open/close nondeterministically instead of the true chronological
+    // extremes, and this test would flake across runs instead of passing
+    // deterministically every time.
+    ScratchDir scratch("zone_map_file_test_concurrent_first_last");
+    std::filesystem::path path = scratch.test_root / "2024.zmap";
+    ZoneMapFile zmap;
+    ASSERT_TRUE(zmap.Open(path.string(), /*row_length=*/64));
+
+    constexpr int kThreads = 8;
+    constexpr int kItersPerThread = 500; // stays well inside block 0's extent (RowsPerBlock(64) == 32768)
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&zmap, t]() {
+            for (int i = 0; i < kItersPerThread; ++i) {
+                uint64_t row_index = static_cast<uint64_t>(t * kItersPerThread + i);
+                zmap.UpdateRow(row_index, {{0, static_cast<double>(row_index), true}});
+            }
+        });
+    }
+    for (auto &th : threads) th.join();
+
+    auto stats = zmap.TryGetBlockStats(0);
+    ASSERT_TRUE(stats.has_value());
+    const uint64_t total_rows = static_cast<uint64_t>(kThreads * kItersPerThread);
+    EXPECT_EQ((*stats)[0].valid_count, total_rows);
+    EXPECT_DOUBLE_EQ((*stats)[0].first_value, 0.0)
+        << "wrong chronological open under concurrency -- comparison logic, not locking, is the suspect";
+    EXPECT_DOUBLE_EQ((*stats)[0].last_value, static_cast<double>(total_rows - 1))
+        << "wrong chronological close under concurrency -- comparison logic, not locking, is the suspect";
+    EXPECT_DOUBLE_EQ((*stats)[0].min_value, 0.0);
+    EXPECT_DOUBLE_EQ((*stats)[0].max_value, static_cast<double>(total_rows - 1));
 }
 
 TEST(ZoneMapFileTest, UntouchedBlockReportsZeroValidCountNotMissingData) {
@@ -447,6 +492,43 @@ TEST_F(XStoreZoneMapTest, VarianceAggregatePushesDownThroughFullyCoveredBlock) {
     EXPECT_NEAR(var_rep.opresult(), expected_variance, 1e-6);
 }
 
+TEST_F(XStoreZoneMapTest, OhlcAggregatePushesDownThroughFullyCoveredBlock) {
+    // Same fully-covered-block technique as VarianceAggregatePushesDownThroughFullyCoveredBlock
+    // above -- one row per slot in a full block, so ScanSegmentForOhlc takes
+    // the zero-scan pushdown branch (using ZoneMapEntry.first_value/
+    // last_value/min_value/max_value) rather than falling back to a real
+    // ProcessFileRangeOhlc scan. Values inserted in ASCENDING row order
+    // (i=0..rows_per_block-1) so the hand-computed open/close below are
+    // unambiguous: open == first inserted value, close == last.
+    XStore store;
+    CreateTestDb(store, "ZMAPOHLC", XStore_Proto::SECOND, kWideRowLength);
+    uint64_t rows_per_block = RowsPerBlock(kWideRowLength);
+    unsigned long long base = 1700000000ULL;
+    double first_v = 0.0, last_v = 0.0, min_v = 0.0, max_v = 0.0;
+    for (uint64_t i = 0; i < rows_per_block; ++i) {
+        XStore_Proto::UnaryInsert_REP rep;
+        XStore_Proto::RowData row;
+        // Non-monotonic values so high/low genuinely differ from open/close --
+        // proves the test isn't accidentally passing because open==low or
+        // close==high by construction.
+        double v = static_cast<double>((i * 37) % 101);
+        row.add_fielddata()->set_doubledata(v);
+        store.UnaryInsert(base + i, row, "ZMAPOHLC", &rep, XStore_Proto::SYNC);
+        if (i == 0) { first_v = v; min_v = v; max_v = v; }
+        last_v = v;
+        min_v = std::min(min_v, v);
+        max_v = std::max(max_v, v);
+    }
+
+    XStore_Proto::Ohlc_REP ohlc_rep;
+    store.OhlcAggregate(base, base + rows_per_block, "ZMAPOHLC", 0, &ohlc_rep);
+    ASSERT_EQ(ohlc_rep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(ohlc_rep.open(), first_v);
+    EXPECT_DOUBLE_EQ(ohlc_rep.close(), last_v);
+    EXPECT_DOUBLE_EQ(ohlc_rep.high(), max_v);
+    EXPECT_DOUBLE_EQ(ohlc_rep.low(), min_v);
+}
+
 } // namespace
 
 namespace {
@@ -517,6 +599,42 @@ TEST_F(ZoneMapFileVersionTest, OpenDiscardsStaleVersionFileInsteadOfMisreadingIt
     ASSERT_TRUE(stats2.has_value());
     EXPECT_DOUBLE_EQ((*stats2)[0].sum_value, 5.0);
     EXPECT_DOUBLE_EQ((*stats2)[0].sum_sq_value, 25.0);
+}
+
+TEST_F(ZoneMapFileVersionTest, OpenDiscardsV2FileInsteadOfMisreadingIntoV3Layout) {
+    // Same discard-not-migrate contract as the v1->v2 test above, exercised
+    // for the v2->v3 bump this OHLC feature made (ZoneMapEntry grew
+    // first_value/last_value/first_row_index/last_row_index, 48 -> 80
+    // bytes). A v2 file's raw bytes are a genuinely incompatible layout --
+    // reinterpreting them as v3 would misread arbitrary trailing bytes from
+    // the NEXT entry/block as first_value/first_row_index, not just miss the
+    // new fields.
+    std::string path = TestFilePath("v2_stale.zmap");
+
+    {
+        ZoneMapFileHeader old_header;
+        old_header.version = 2; // stale -- current ZONE_MAP_VERSION is 3
+        old_header.tracked_column_count = 64;
+        old_header.rows_per_block = 100;
+        int fd = open(path.c_str(), O_RDWR | O_CREAT, 0644);
+        ASSERT_GE(fd, 0);
+        ASSERT_EQ(pwrite(fd, &old_header, sizeof(old_header), 0), static_cast<ssize_t>(sizeof(old_header)));
+        close(fd);
+    }
+
+    ZoneMapFile zmap;
+    ASSERT_TRUE(zmap.Open(path, /*row_length=*/64));
+
+    auto stats = zmap.TryGetBlockStats(0);
+    ASSERT_TRUE(stats.has_value());
+    EXPECT_EQ((*stats)[0].valid_count, 0u);
+
+    zmap.UpdateRow(0, {{0, 5.0, true}});
+    zmap.UpdateRow(1, {{0, 9.0, true}});
+    auto stats2 = zmap.TryGetBlockStats(0);
+    ASSERT_TRUE(stats2.has_value());
+    EXPECT_DOUBLE_EQ((*stats2)[0].first_value, 5.0);
+    EXPECT_DOUBLE_EQ((*stats2)[0].last_value, 9.0);
 }
 
 } // namespace

@@ -490,6 +490,15 @@ void ZmqServer::WorkerRoutine(std::string server_addr) {
                     break;
                 }
 
+                // OHLC AGGREGATE
+                case XStore_Proto::Request::kOhlc: {
+                    const auto &req = client_request->ohlc();
+                    XStore_Proto::Ohlc_REP rep;
+                    my_store.OhlcAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
+                    SendProto(socket, rep);
+                    break;
+                }
+
                 // No payload set (malformed/unrecognized request) -- reply so
                 // the client's REQ socket never hangs waiting for a response
                 // that will never come.

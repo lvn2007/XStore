@@ -106,6 +106,11 @@ XStore_Proto::Request Wrap(const XStore_Proto::Exists_REQ &req) {
     *w.mutable_exists() = req;
     return w;
 }
+XStore_Proto::Request Wrap(const XStore_Proto::Ohlc_REQ &req) {
+    XStore_Proto::Request w;
+    *w.mutable_ohlc() = req;
+    return w;
+}
 
 }  // namespace
 
@@ -529,6 +534,43 @@ TEST_F(XStoreZmqNetworkTest, ExistsRoundTripOverNetwork) {
     auto exists_false_rep = SendRequest<XStore_Proto::Exists_REP>(Wrap(exists_false_req));
     EXPECT_EQ(exists_false_rep.opstatus(), "SUCCESS");
     EXPECT_FALSE(exists_false_rep.exists());
+}
+
+// ---------------------------------------------------------------------
+// OHLC AGGREGATE -- over the wire
+// ---------------------------------------------------------------------
+
+TEST_F(XStoreZmqNetworkTest, OhlcRoundTripOverNetwork) {
+    XStore_Proto::CreateDB_REQ create_req;
+    create_req.set_rtype(XStore_Proto::CREATEDB);
+    create_req.set_dbname("ZMQ_OHLC_DB");
+    create_req.set_timeresolution(XStore_Proto::SECOND);
+    create_req.set_rowlength(128);
+    SendRequest<XStore_Proto::CreateDB_REP>(Wrap(create_req));
+
+    const std::vector<double> values = {2, 9, 4, 1, 5};
+    for (size_t i = 0; i < values.size(); i++) {
+        XStore_Proto::UnaryInsert_REQ insert_req;
+        insert_req.set_rtype(XStore_Proto::UNARYINSERT);
+        insert_req.set_dbname("ZMQ_OHLC_DB");
+        insert_req.set_timestamp(TS_2020_MID + i);
+        insert_req.set_durabilitymode(XStore_Proto::SYNC);
+        *insert_req.mutable_data() = MakeRow({FDouble(values[i])});
+        SendRequest<XStore_Proto::UnaryInsert_REP>(Wrap(insert_req));
+    }
+
+    XStore_Proto::Ohlc_REQ ohlc_req;
+    ohlc_req.set_rtype(XStore_Proto::OHLC);
+    ohlc_req.set_dbname("ZMQ_OHLC_DB");
+    ohlc_req.set_starttime(TS_2020_MID);
+    ohlc_req.set_endtime(TS_2020_MID + values.size() - 1);
+    ohlc_req.set_columnidx(0);
+    auto ohlc_rep = SendRequest<XStore_Proto::Ohlc_REP>(Wrap(ohlc_req));
+    EXPECT_EQ(ohlc_rep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(ohlc_rep.open(), 2.0);
+    EXPECT_DOUBLE_EQ(ohlc_rep.high(), 9.0);
+    EXPECT_DOUBLE_EQ(ohlc_rep.low(), 1.0);
+    EXPECT_DOUBLE_EQ(ohlc_rep.close(), 5.0);
 }
 
 // ---------------------------------------------------------------------
