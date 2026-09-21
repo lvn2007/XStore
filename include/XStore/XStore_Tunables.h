@@ -451,6 +451,45 @@ inline constexpr size_t ZONE_MAP_HOT_CACHE_BLOCKS = 4;
 // same rule as every other capacity constant in this file.
 inline constexpr size_t ZONE_MAP_REGISTRY_CAP = 256;
 
+// ## CatIdx (categorical/high-cardinality equality-lookup acceleration)
+//
+// Separate sidecar file from .zmap (see docs/superpowers/specs/
+// 2026-09-21-categorical-high-cardinality-acceleration-design.md for why:
+// independent version churn, no cache-footprint regression to existing
+// zone-map-only queries, isolated corruption blast radius).
+inline constexpr uint32_t CATIDX_VERSION = 1;
+
+// k=7 hash functions, ~154 bytes/entry at n=128 (RowsPerBlock default),
+// 1% target false-positive rate -- rounded to 160B for 8-byte alignment.
+inline constexpr size_t   CATIDX_BLOOM_HASH_COUNT = 7;
+inline constexpr size_t   CATIDX_BLOOM_BYTES_PER_ENTRY = 160;
+
+// Same per-DB high-water-mark tracked-column-count concept zone-map uses
+// (ConfigStruct.columncount) -- reuse the existing cap rather than a second one.
+inline constexpr uint32_t CATIDX_MAX_TRACKED_COLUMNS = ZONE_MAP_MAX_TRACKED_COLUMNS;
+
+// Max resident CatIdxFile instances across all (db,year) pairs -- same
+// bound/reasoning as ZONE_MAP_REGISTRY_CAP.
+inline constexpr size_t   CATIDX_REGISTRY_CAP = 256;
+
+// Per-(db,year) bloom-block LRU cache size -- same reasoning as ZONE_MAP_HOT_CACHE_BLOCKS.
+inline constexpr size_t   CATIDX_HOT_CACHE_BLOCKS = 4;
+
+// Cardinality cap for the compaction-built bitmap section: a column whose
+// distinct-value count in a given year crosses this threshold never gets a
+// bitmap for that year (stays bloom+real-scan forever) -- this is what lets
+// "automatic for every column" coexist with continuous (near-unique-value)
+// columns without exploding disk usage. Chosen well above realistic
+// categorical cardinalities (symbol/venue/status IDs) and well below where
+// a per-value roaring bitmap directory stops paying for itself.
+inline constexpr uint64_t CATIDX_MAX_BITMAP_DISTINCT_VALUES = 10000;
+
+// How often the compaction background thread checks for newly-cold year
+// files (year rolled over from current calendar year). Compaction is a
+// rare, low-frequency background job -- no need for WAL-writer-loop-style
+// sub-millisecond polling.
+inline constexpr uint64_t CATIDX_COMPACTION_POLL_INTERVAL_SEC = 3600;
+
 // RangeQuery and BatchQuery (XStore_RangeOps.cpp,
 // XStore_BatchOps.cpp): target size of each emitted wire-format chunk. A
 // query whose total output stays under this is sent as a single ZMQ frame
