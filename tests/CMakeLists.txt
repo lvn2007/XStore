@@ -13,6 +13,7 @@ add_executable(xstore_tests
         integration/XStoreWalTest.cpp
         integration/XStoreZoneMapTest.cpp
         integration/XStoreCrc32cTest.cpp
+        integration/XStoreCatIdxTest.cpp
 )
 target_link_libraries(xstore_tests PRIVATE GTest::gtest_main xstore_core)
 
