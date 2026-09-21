@@ -37,6 +37,7 @@ enum RequestType {
   PERCENTILE = 22;
   DISTINCTCOUNT = 23;
   TOPK = 24;
+  FINDBYVALUE = 25;
 }
 
 enum TimeUnit {
@@ -322,6 +323,20 @@ message Exists_REQ {
   sint32 columnIdx = 5;
 }
 
+// --- FINDBYVALUE: equality lookup for columnIdx == value over
+// [startTime, endTime], accelerated by the .catidx sidecar (bloom filter +
+// roaring bitmap). Reply reuses UnaryQuery_REP's exact wire shape
+// ({timestamp, data} per matching row), field-numbered identically to
+// RangeQuery_REP.
+message FindByValue_REQ {
+  RequestType RType = 1;
+  uint64 startTime = 2;
+  uint64 endTime = 3;
+  string dbName = 4;
+  sint32 columnIdx = 5;
+  FData value = 6;
+}
+
 // --- OHLC: open/high/low/close bar over [startTime, endTime] for columnIdx.
 // Open/Close are the chronologically first/last numeric values in range (not
 // value-extremes -- see ZoneMapEntry's first_value/last_value, new in v3);
@@ -414,6 +429,7 @@ message Request {
     Percentile_REQ percentile = 23;
     DistinctCount_REQ distinctcount = 24;
     TopK_REQ topk = 25;
+    FindByValue_REQ findbyvalue = 26;
   }
 }
 
@@ -589,6 +605,12 @@ message Stddev_REP {
 message Exists_REP {
   string opStatus = 1;
   bool exists = 2;
+}
+
+// --- FINDBYVALUE
+message FindByValue_REP {
+  repeated UnaryQuery_REP queryResponse = 1;
+  optional string queryStatus = 3;
 }
 
 // --- OHLC
