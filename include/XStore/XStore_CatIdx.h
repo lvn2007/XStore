@@ -99,3 +99,75 @@ inline std::string EncodeFDataForCatIdx(const XStore_Proto::FData &f_data) {
     }
     return out;
 }
+
+#include <array>
+#include <mutex>
+#include <optional>
+#include <unordered_map>
+#include <vector>
+
+#include "XStore/XStore_Crc32c.h"
+#include "XStore/XStore_Tunables.h"
+#include "XStore/XStore_ZoneMap.h" // reuse RowsPerBlock/BlockIndexForRow -- same block geometry as .zmap
+
+// One tracked-column value observed for one row, ready to fold into that
+// row's block's bloom entry. is_present=false means a hole/unset field --
+// contributes nothing (mirrors ZoneMapObservation's is_numeric=false case).
+struct CatIdxObservation {
+    uint32_t    column_idx;
+    std::string encoded_value; // from EncodeFDataForCatIdx -- empty/ignored if !is_present
+    bool        is_present;
+};
+
+struct CatIdxFileHeader {
+    uint32_t magic                = 0x43415449; // 'CATI'
+    uint32_t version               = XStoreTunables::CATIDX_VERSION;
+    uint32_t tracked_column_count  = 0;
+    uint32_t block_count           = 0;
+    uint64_t bitmap_section_offset = 0; // 0 = not compacted yet
+};
+
+// FNV-1a 64-bit -- trivial, no external dependency, used as the second of
+// two hash functions for Kirsch-Mitzenmacher double-hashing
+// (g_i(x) = h1(x) + i*h2(x)), h1 being the existing hardware-accelerated
+// Crc32c(). Repurposing Crc32c outside its original WAL-framing-checksum
+// scope is fine functionally (it's just a fast, well-distributed hash here).
+inline uint64_t Fnv1a64(const void *data, size_t len) {
+    uint64_t hash = 0xcbf29ce484222325ULL;
+    const auto *bytes = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < len; ++i) {
+        hash ^= bytes[i];
+        hash *= 0x100000001b3ULL;
+    }
+    return hash;
+}
+
+class CatIdxFile {
+public:
+    [[nodiscard]] bool Open(const std::string &path, uint16_t row_length,
+                             uint32_t tracked_column_count = XStoreTunables::CATIDX_MAX_TRACKED_COLUMNS);
+
+    void UpdateRow(uint64_t row_index, const std::vector<CatIdxObservation> &observations);
+
+    bool MightContain(uint64_t block_index, uint32_t column_idx, const std::string &encoded_value);
+
+    ~CatIdxFile();
+
+    uint64_t RowsPerBlockValue() const { return rows_per_block_; }
+
+private:
+    using BloomEntry = std::array<unsigned char, XStoreTunables::CATIDX_BLOOM_BYTES_PER_ENTRY>;
+
+    void EnsureBlockLoaded(uint64_t block_index);
+    void EvictIfOverCapacity();
+    off_t BloomSectionFileOffset(uint64_t block_index) const;
+    bool WriteFreshHeader(uint16_t row_length, uint32_t tracked_column_count);
+    void FlushBlock(uint64_t block_index);
+
+    int fd_ = -1;
+    CatIdxFileHeader header_;
+    uint64_t rows_per_block_ = 0;
+    std::unordered_map<uint64_t, std::vector<BloomEntry>> cache_; // block_index -> per-column bloom bytes
+    std::vector<uint64_t> lru_order_;
+    std::mutex mutex_;
+};

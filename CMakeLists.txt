@@ -343,6 +343,7 @@ add_library(xstore_core STATIC
         src/XStore/XStore_IO.cpp
         src/XStore/XStore_Wal.cpp
         src/XStore/XStore_ZoneMap.cpp
+        src/XStore/XStore_CatIdx.cpp
         src/XStore/XStore_Crc32c.cpp
         src/XStore/XStore_SysStats.cpp
         include/XStore/XStore_SysStats.h
