@@ -497,6 +497,24 @@ class XStore {
                                    double &high_out, double &low_out, bool &high_low_set_out,
                                    double &close_out, bool &close_set_out);
 
+        // Collect kernel: appends every real numeric value of columnIdx in
+        // [0, total_rows) to values_out, in ascending-time order (order is
+        // not load-bearing for any of Percentile/DistinctCount/TopK -- all
+        // three reduce over the full collected set, not a running scalar --
+        // it's just a byproduct of the same forward scan every other kernel
+        // here uses). Shared by all three exact-mode aggregates below --
+        // deliberately one kernel, not three, since they only differ in
+        // what they compute FROM the collected values, not how those values
+        // are gathered. No zone-map pushdown exists or is planned for these:
+        // unlike min/max/sum/first/last, "the k most frequent values" or
+        // "the p-th percentile" cannot be reconstructed from any small
+        // per-block summary without becoming the approximate/sketch-based
+        // version this deliberately is not (see TODO.md's zone-map
+        // follow-on section) -- every call is a real, full scan.
+        void ProcessFileRangeCollectValues(const char* rows_base, unsigned long long total_rows,
+                                            size_t row_len, unsigned short column_idx,
+                                            std::vector<double> &values_out);
+
         // Shared by MinAggregate/MaxAggregate (Task 6): splits one
         // WalkYearSpan segment into its zone-map blocks and, for each,
         // either skips it (should_skip_block(entry) says this block's
@@ -628,6 +646,31 @@ class XStore {
         // same fields MIN/MAX already use). All four computed in one block
         // walk rather than as separate ops.
         void OhlcAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::Ohlc_REP *return_data);
+
+        // PERCENTILE - AGGREGATE (exact, PERCENTILE_CONT/linear-interpolation
+        // semantics; percentile in [0.0, 1.0], 0.5 = median). Real full scan
+        // via ProcessFileRangeCollectValues, no zone-map pushdown -- see that
+        // kernel's comment for why. No valid data in range is an ERROR (same
+        // precedent as Min/Max/Sum/Avg/Variance/Stddev -- a percentile of
+        // nothing is undefined, unlike Exists/DistinctCount below where
+        // "nothing found" is itself a legitimate answer).
+        void PercentileAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, double percentile, XStore_Proto::Percentile_REP *return_data);
+
+        // DISTINCTCOUNT - AGGREGATE (exact, real hash-set over every value in
+        // range -- same cost/memory tradeoff as SQL's COUNT(DISTINCT x)).
+        // An empty range is SUCCESS with count=0, not an error -- same
+        // "absence is a legitimate answer" precedent ExistsAggregate uses.
+        void DistinctCountAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::DistinctCount_REP *return_data);
+
+        // TOPK - AGGREGATE (exact, real frequency hash-map over every value
+        // in range; k=1 gives the mode -- one op, not a separate MODE op,
+        // same "don't split what's one computation" precedent OHLC used).
+        // Ties broken by ascending value for determinism. Fewer than k
+        // distinct values in range returns however many exist, same as SQL's
+        // GROUP BY ... ORDER BY COUNT(*) DESC LIMIT k; an empty range is
+        // SUCCESS with zero entries, not an error (same precedent as
+        // DistinctCountAggregate above).
+        void TopKAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, uint32_t k, XStore_Proto::TopK_REP *return_data);
 
         // Initialize DB. Loads every DB's ConfigStruct into the shared CfgMap,
         // then (Task 5) rebuilds any stale/missing zone map for that DB

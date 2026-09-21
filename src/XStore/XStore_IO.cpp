@@ -445,6 +445,33 @@ void XStore::ProcessFileRangeOhlc(const char* rows_base, unsigned long long tota
     }
 }
 
+// Collect kernel shared by Percentile/DistinctCount/TopKAggregate -- see the
+// declaration's comment in XStore.h for why this is one kernel, not three,
+// and why there's no zone-map pushdown for any of them.
+void XStore::ProcessFileRangeCollectValues(const char* rows_base, unsigned long long total_rows,
+                                            size_t row_len, unsigned short column_idx,
+                                            std::vector<double> &values_out) {
+
+    if (total_rows == 0) return;
+
+    XStore_Proto::FData curr_data;
+    ValueStruct temp_value;
+
+    for (unsigned long long i = 0; i < total_rows; ++i) {
+        const char* row_ptr = rows_base + (i * row_len);
+
+        if (row_ptr[0] == 0) continue;
+
+        curr_data.Clear();
+        if (!ExtractColumnByIndexSkipParse(row_ptr, row_len, column_idx, curr_data)) continue;
+
+        if (curr_data.oneOfData_case() > 0 && curr_data.oneOfData_case() <= 12) {
+            XStore::GetFDataValue(&curr_data, &temp_value);
+            values_out.push_back(static_cast<double>(temp_value.value));
+        }
+    }
+}
+
 // Extracts just columnIdx's FData from a row's wire bytes instead of parsing
 // the whole RowData -- ProcessFileRangeSelect/Accumulate above only ever
 // want ONE column, so full-parsing every column (and allocating an FData for

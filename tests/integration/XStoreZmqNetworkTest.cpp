@@ -111,6 +111,21 @@ XStore_Proto::Request Wrap(const XStore_Proto::Ohlc_REQ &req) {
     *w.mutable_ohlc() = req;
     return w;
 }
+XStore_Proto::Request Wrap(const XStore_Proto::Percentile_REQ &req) {
+    XStore_Proto::Request w;
+    *w.mutable_percentile() = req;
+    return w;
+}
+XStore_Proto::Request Wrap(const XStore_Proto::DistinctCount_REQ &req) {
+    XStore_Proto::Request w;
+    *w.mutable_distinctcount() = req;
+    return w;
+}
+XStore_Proto::Request Wrap(const XStore_Proto::TopK_REQ &req) {
+    XStore_Proto::Request w;
+    *w.mutable_topk() = req;
+    return w;
+}
 
 }  // namespace
 
@@ -571,6 +586,61 @@ TEST_F(XStoreZmqNetworkTest, OhlcRoundTripOverNetwork) {
     EXPECT_DOUBLE_EQ(ohlc_rep.high(), 9.0);
     EXPECT_DOUBLE_EQ(ohlc_rep.low(), 1.0);
     EXPECT_DOUBLE_EQ(ohlc_rep.close(), 5.0);
+}
+
+TEST_F(XStoreZmqNetworkTest, PercentileDistinctCountTopKRoundTripOverNetwork) {
+    XStore_Proto::CreateDB_REQ create_req;
+    create_req.set_rtype(XStore_Proto::CREATEDB);
+    create_req.set_dbname("ZMQ_EXACTMODE_DB");
+    create_req.set_timeresolution(XStore_Proto::SECOND);
+    create_req.set_rowlength(128);
+    SendRequest<XStore_Proto::CreateDB_REP>(Wrap(create_req));
+
+    // {1,2,2,3} -- distinct=3, mode=2 (count 2), median(0.5)=2.0.
+    const std::vector<double> values = {1, 2, 2, 3};
+    for (size_t i = 0; i < values.size(); i++) {
+        XStore_Proto::UnaryInsert_REQ insert_req;
+        insert_req.set_rtype(XStore_Proto::UNARYINSERT);
+        insert_req.set_dbname("ZMQ_EXACTMODE_DB");
+        insert_req.set_timestamp(TS_2020_MID + i);
+        insert_req.set_durabilitymode(XStore_Proto::SYNC);
+        *insert_req.mutable_data() = MakeRow({FDouble(values[i])});
+        SendRequest<XStore_Proto::UnaryInsert_REP>(Wrap(insert_req));
+    }
+
+    XStore_Proto::Percentile_REQ pct_req;
+    pct_req.set_rtype(XStore_Proto::PERCENTILE);
+    pct_req.set_dbname("ZMQ_EXACTMODE_DB");
+    pct_req.set_starttime(TS_2020_MID);
+    pct_req.set_endtime(TS_2020_MID + values.size() - 1);
+    pct_req.set_columnidx(0);
+    pct_req.set_percentile(0.5);
+    auto pct_rep = SendRequest<XStore_Proto::Percentile_REP>(Wrap(pct_req));
+    EXPECT_EQ(pct_rep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(pct_rep.value(), 2.0);
+
+    XStore_Proto::DistinctCount_REQ dc_req;
+    dc_req.set_rtype(XStore_Proto::DISTINCTCOUNT);
+    dc_req.set_dbname("ZMQ_EXACTMODE_DB");
+    dc_req.set_starttime(TS_2020_MID);
+    dc_req.set_endtime(TS_2020_MID + values.size() - 1);
+    dc_req.set_columnidx(0);
+    auto dc_rep = SendRequest<XStore_Proto::DistinctCount_REP>(Wrap(dc_req));
+    EXPECT_EQ(dc_rep.opstatus(), "SUCCESS");
+    EXPECT_EQ(dc_rep.count(), 3u);
+
+    XStore_Proto::TopK_REQ topk_req;
+    topk_req.set_rtype(XStore_Proto::TOPK);
+    topk_req.set_dbname("ZMQ_EXACTMODE_DB");
+    topk_req.set_starttime(TS_2020_MID);
+    topk_req.set_endtime(TS_2020_MID + values.size() - 1);
+    topk_req.set_columnidx(0);
+    topk_req.set_k(1);
+    auto topk_rep = SendRequest<XStore_Proto::TopK_REP>(Wrap(topk_req));
+    EXPECT_EQ(topk_rep.opstatus(), "SUCCESS");
+    ASSERT_EQ(topk_rep.entries_size(), 1);
+    EXPECT_DOUBLE_EQ(topk_rep.entries(0).value(), 2.0);
+    EXPECT_EQ(topk_rep.entries(0).count(), 2u);
 }
 
 // ---------------------------------------------------------------------

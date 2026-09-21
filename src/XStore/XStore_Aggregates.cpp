@@ -10,6 +10,7 @@
 #include <functional>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <unordered_set>
 
 // Shared by Min/Max/Sum/AvgAggregate: walks [startEpochT, endEpochT] one
 // year-file at a time, read-locking each existing segment and handing it to
@@ -192,6 +193,15 @@ struct VariancePartial {
     double sum = 0.0;
     double sum_sq = 0.0;
     unsigned long long count = 0;
+};
+
+// Shared per-segment partial for Percentile/DistinctCount/TopKAggregate --
+// one vector of every real value this segment saw. Merge is a plain
+// concatenation (order doesn't matter -- see ProcessFileRangeCollectValues's
+// comment); each of the three ops then reduces the fully-merged vector
+// differently (sort+interpolate / hash-set size / frequency-map top-k).
+struct CollectPartial {
+    std::vector<double> values;
 };
 }  // namespace
 
@@ -804,5 +814,158 @@ void XStore::OhlcAggregate(unsigned long long int start_epoch_t, unsigned long l
     } else {
         return_data->set_opstatus("ERROR: No valid data found");
         spdlog::warn("[OHLC AGGREGATE] [DB: {}] - No valid data for column {} over [{}, {}]", db_name, column_idx, start_epoch_t, end_epoch_t);
+    }
+}
+
+void XStore::PercentileAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
+                                  std::string_view db_name_view, unsigned short int column_idx, double percentile,
+                                  XStore_Proto::Percentile_REP *return_data) {
+
+    const std::string &db_name = UpperCaseInto(db_name_view);
+    const std::string &db_base_path_str = CachedDbBasePath(db_name);
+
+    XStore_Proto::ConfigStruct cfg_struct;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+        std::string err_msg = fmt::format("[PERCENTILE AGGREGATE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return;
+    }
+
+    if (start_epoch_t > end_epoch_t) {
+        std::string err_msg = fmt::format("[PERCENTILE AGGREGATE] [DB: {}] - Target end time must be after start time", db_name);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return;
+    }
+
+    if (percentile < 0.0 || percentile > 1.0) {
+        std::string err_msg = fmt::format("[PERCENTILE AGGREGATE] [DB: {}] - percentile must be in [0.0, 1.0]", db_name);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return;
+    }
+
+    CollectPartial final_state = WalkYearSpanParallel<CollectPartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
+        CollectPartial{},
+        [&](CollectPartial &partial, const char *rows_base, unsigned long long rows_to_process,
+            unsigned short /*year*/, unsigned long long /*first_row_index*/) {
+            ProcessFileRangeCollectValues(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.values);
+        },
+        [](CollectPartial &acc, CollectPartial &partial) {
+            acc.values.insert(acc.values.end(), partial.values.begin(), partial.values.end());
+        });
+    std::vector<double> all_values = std::move(final_state.values);
+
+    if (all_values.empty()) {
+        return_data->set_opstatus("ERROR: No valid data found");
+        spdlog::warn("[PERCENTILE AGGREGATE] [DB: {}] - No valid data for column {} over [{}, {}]", db_name, column_idx, start_epoch_t, end_epoch_t);
+        return;
+    }
+
+    // Exact, PERCENTILE_CONT (linear-interpolation) semantics -- same
+    // interpolation numpy.percentile/most SQL engines default to.
+    std::sort(all_values.begin(), all_values.end());
+    double rank = percentile * static_cast<double>(all_values.size() - 1);
+    size_t lower = static_cast<size_t>(std::floor(rank));
+    size_t upper = static_cast<size_t>(std::ceil(rank));
+    double frac = rank - static_cast<double>(lower);
+    double value = all_values[lower] + frac * (all_values[upper] - all_values[lower]);
+
+    return_data->set_opstatus("SUCCESS");
+    return_data->set_value(value);
+}
+
+void XStore::DistinctCountAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
+                                     std::string_view db_name_view, unsigned short int column_idx,
+                                     XStore_Proto::DistinctCount_REP *return_data) {
+
+    const std::string &db_name = UpperCaseInto(db_name_view);
+    const std::string &db_base_path_str = CachedDbBasePath(db_name);
+
+    XStore_Proto::ConfigStruct cfg_struct;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+        std::string err_msg = fmt::format("[DISTINCTCOUNT AGGREGATE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return;
+    }
+
+    if (start_epoch_t > end_epoch_t) {
+        std::string err_msg = fmt::format("[DISTINCTCOUNT AGGREGATE] [DB: {}] - Target end time must be after start time", db_name);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return;
+    }
+
+    CollectPartial final_state = WalkYearSpanParallel<CollectPartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
+        CollectPartial{},
+        [&](CollectPartial &partial, const char *rows_base, unsigned long long rows_to_process,
+            unsigned short /*year*/, unsigned long long /*first_row_index*/) {
+            ProcessFileRangeCollectValues(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.values);
+        },
+        [](CollectPartial &acc, CollectPartial &partial) {
+            acc.values.insert(acc.values.end(), partial.values.begin(), partial.values.end());
+        });
+    std::vector<double> all_values = std::move(final_state.values);
+
+    // An empty range is a legitimate count of zero, not an error -- same
+    // "absence is a real answer" precedent ExistsAggregate uses for false.
+    std::unordered_set<double> distinct(all_values.begin(), all_values.end());
+    return_data->set_opstatus("SUCCESS");
+    return_data->set_count(distinct.size());
+}
+
+void XStore::TopKAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
+                            std::string_view db_name_view, unsigned short int column_idx, uint32_t k,
+                            XStore_Proto::TopK_REP *return_data) {
+
+    const std::string &db_name = UpperCaseInto(db_name_view);
+    const std::string &db_base_path_str = CachedDbBasePath(db_name);
+
+    XStore_Proto::ConfigStruct cfg_struct;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+        std::string err_msg = fmt::format("[TOPK AGGREGATE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return;
+    }
+
+    if (start_epoch_t > end_epoch_t) {
+        std::string err_msg = fmt::format("[TOPK AGGREGATE] [DB: {}] - Target end time must be after start time", db_name);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return;
+    }
+
+    CollectPartial final_state = WalkYearSpanParallel<CollectPartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
+        CollectPartial{},
+        [&](CollectPartial &partial, const char *rows_base, unsigned long long rows_to_process,
+            unsigned short /*year*/, unsigned long long /*first_row_index*/) {
+            ProcessFileRangeCollectValues(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.values);
+        },
+        [](CollectPartial &acc, CollectPartial &partial) {
+            acc.values.insert(acc.values.end(), partial.values.begin(), partial.values.end());
+        });
+    std::vector<double> all_values = std::move(final_state.values);
+
+    std::unordered_map<double, uint64_t> freq;
+    for (double v : all_values) freq[v]++;
+
+    std::vector<std::pair<double, uint64_t>> ranked(freq.begin(), freq.end());
+    std::sort(ranked.begin(), ranked.end(), [](const auto &a, const auto &b) {
+        if (a.second != b.second) return a.second > b.second; // most-frequent first
+        return a.first < b.first; // tie-break: ascending value, for determinism
+    });
+
+    // Fewer than k distinct values in range returns however many exist --
+    // same as SQL's GROUP BY ... ORDER BY COUNT(*) DESC LIMIT k. An empty
+    // range is SUCCESS with zero entries, same precedent as DistinctCount.
+    size_t result_count = std::min(static_cast<size_t>(k), ranked.size());
+    return_data->set_opstatus("SUCCESS");
+    for (size_t i = 0; i < result_count; ++i) {
+        XStore_Proto::TopKEntry *entry = return_data->add_entries();
+        entry->set_value(ranked[i].first);
+        entry->set_count(ranked[i].second);
     }
 }

@@ -619,5 +619,47 @@ class XStoreClient {
       payload->set_columnidx(column_idx);
       return SendRecv<XStore_Proto::Ohlc_REP>(to_server);
   }
+
+  // Exact percentile (PERCENTILE_CONT/linear-interpolation semantics),
+  // percentile in [0.0, 1.0] (0.5 = median). Not zone-map-accelerated --
+  // see Percentile_REQ's comment in XStore.proto.
+  [[nodiscard]] XStore_Proto::Percentile_REP Percentile(uint64_t start_time, uint64_t end_time, std::string_view db_name, int32_t column_idx, double percentile) {
+      XStore_Proto::Request to_server;
+      auto *payload = to_server.mutable_percentile();
+      payload->set_rtype(XStore_Proto::PERCENTILE);
+      payload->set_starttime(start_time);
+      payload->set_endtime(end_time);
+      payload->set_dbname(std::string(db_name));
+      payload->set_columnidx(column_idx);
+      payload->set_percentile(percentile);
+      return SendRecv<XStore_Proto::Percentile_REP>(to_server);
+  }
+
+  // Exact distinct-value count. Not zone-map-accelerated -- see
+  // DistinctCount_REQ's comment in XStore.proto.
+  [[nodiscard]] XStore_Proto::DistinctCount_REP DistinctCount(uint64_t start_time, uint64_t end_time, std::string_view db_name, int32_t column_idx) {
+      XStore_Proto::Request to_server;
+      auto *payload = to_server.mutable_distinctcount();
+      payload->set_rtype(XStore_Proto::DISTINCTCOUNT);
+      payload->set_starttime(start_time);
+      payload->set_endtime(end_time);
+      payload->set_dbname(std::string(db_name));
+      payload->set_columnidx(column_idx);
+      return SendRecv<XStore_Proto::DistinctCount_REP>(to_server);
+  }
+
+  // Exact top-k most-frequent values (k=1 gives the mode). Not zone-map-
+  // accelerated -- see TopK_REQ's comment in XStore.proto.
+  [[nodiscard]] XStore_Proto::TopK_REP TopK(uint64_t start_time, uint64_t end_time, std::string_view db_name, int32_t column_idx, uint32_t k) {
+      XStore_Proto::Request to_server;
+      auto *payload = to_server.mutable_topk();
+      payload->set_rtype(XStore_Proto::TOPK);
+      payload->set_starttime(start_time);
+      payload->set_endtime(end_time);
+      payload->set_dbname(std::string(db_name));
+      payload->set_columnidx(column_idx);
+      payload->set_k(k);
+      return SendRecv<XStore_Proto::TopK_REP>(to_server);
+  }
 };
 #endif //XSTORE_CLIENTSRC_XSTORE_CLIENT_H_

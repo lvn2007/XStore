@@ -499,6 +499,33 @@ void ZmqServer::WorkerRoutine(std::string server_addr) {
                     break;
                 }
 
+                // PERCENTILE AGGREGATE (exact)
+                case XStore_Proto::Request::kPercentile: {
+                    const auto &req = client_request->percentile();
+                    XStore_Proto::Percentile_REP rep;
+                    my_store.PercentileAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), req.percentile(), &rep);
+                    SendProto(socket, rep);
+                    break;
+                }
+
+                // DISTINCTCOUNT AGGREGATE (exact)
+                case XStore_Proto::Request::kDistinctcount: {
+                    const auto &req = client_request->distinctcount();
+                    XStore_Proto::DistinctCount_REP rep;
+                    my_store.DistinctCountAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
+                    SendProto(socket, rep);
+                    break;
+                }
+
+                // TOPK AGGREGATE (exact; k=1 gives the mode)
+                case XStore_Proto::Request::kTopk: {
+                    const auto &req = client_request->topk();
+                    XStore_Proto::TopK_REP rep;
+                    my_store.TopKAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), req.k(), &rep);
+                    SendProto(socket, rep);
+                    break;
+                }
+
                 // No payload set (malformed/unrecognized request) -- reply so
                 // the client's REQ socket never hangs waiting for a response
                 // that will never come.

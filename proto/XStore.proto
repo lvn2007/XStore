@@ -34,6 +34,9 @@ enum RequestType {
   STDDEV = 19;
   EXISTS = 20;
   OHLC = 21;
+  PERCENTILE = 22;
+  DISTINCTCOUNT = 23;
+  TOPK = 24;
 }
 
 enum TimeUnit {
@@ -333,6 +336,54 @@ message Ohlc_REQ {
   sint32 columnIdx = 5;
 }
 
+// --- PERCENTILE: exact linear-interpolated percentile (PERCENTILE_CONT
+// semantics -- same interpolation numpy.percentile/most SQL engines default
+// to) of columnIdx's real values over [startTime, endTime]. percentile is
+// 0.0-1.0 (0.5 = median). Exact, not zone-map-accelerated: requires
+// collecting every real value in range and sorting, same cost/memory
+// tradeoff as any SQL engine's exact ordered-set aggregate (Postgres
+// PERCENTILE_CONT, etc.) -- deliberately not the approximate/sketch-based
+// (t-digest/KLL) version, which is separate future work (see TODO.md).
+message Percentile_REQ {
+  RequestType RType = 1;
+  uint64 startTime = 2;
+  uint64 endTime = 3;
+  string dbName = 4;
+  sint32 columnIdx = 5;
+  double percentile = 6;
+}
+
+// --- DISTINCTCOUNT: exact count of distinct real values of columnIdx over
+// [startTime, endTime]. Exact, not zone-map-accelerated: builds a real hash
+// set of every value in range, same cost/memory tradeoff as SQL's
+// COUNT(DISTINCT x) -- deliberately not the approximate (HyperLogLog)
+// version, which is separate future work (see TODO.md).
+message DistinctCount_REQ {
+  RequestType RType = 1;
+  uint64 startTime = 2;
+  uint64 endTime = 3;
+  string dbName = 4;
+  sint32 columnIdx = 5;
+}
+
+// --- TOPK: the k most-frequent real values of columnIdx over [startTime,
+// endTime], most-frequent first (ties broken by ascending value, for
+// determinism). Mode is TopK with k=1 -- one op, not a separate MODE op,
+// same "don't split what's one computation" precedent OHLC used for
+// open/high/low/close. Exact, not zone-map-accelerated: builds a real
+// frequency hash map over every value in range, same cost/memory tradeoff
+// as SQL's GROUP BY ... ORDER BY COUNT(*) DESC LIMIT k -- deliberately not
+// the approximate (Count-Min Sketch/Space-Saving) version, which is
+// separate future work (see TODO.md).
+message TopK_REQ {
+  RequestType RType = 1;
+  uint64 startTime = 2;
+  uint64 endTime = 3;
+  string dbName = 4;
+  sint32 columnIdx = 5;
+  uint32 k = 6;
+}
+
 // --- Envelope: one wire message carries exactly one of these. The oneof
 // case (payload_case()) replaces RType as the dispatch tag, so a request
 // only needs to be parsed once server-side.
@@ -360,6 +411,9 @@ message Request {
     Stddev_REQ stddev = 20;
     Exists_REQ exists = 21;
     Ohlc_REQ ohlc = 22;
+    Percentile_REQ percentile = 23;
+    DistinctCount_REQ distinctcount = 24;
+    TopK_REQ topk = 25;
   }
 }
 
@@ -544,4 +598,26 @@ message Ohlc_REP {
   double high = 3;
   double low = 4;
   double close = 5;
+}
+
+// --- PERCENTILE
+message Percentile_REP {
+  string opStatus = 1;
+  double value = 2;
+}
+
+// --- DISTINCTCOUNT
+message DistinctCount_REP {
+  string opStatus = 1;
+  uint64 count = 2;
+}
+
+// --- TOPK
+message TopKEntry {
+  double value = 1;
+  uint64 count = 2;
+}
+message TopK_REP {
+  string opStatus = 1;
+  repeated TopKEntry entries = 2;
 }

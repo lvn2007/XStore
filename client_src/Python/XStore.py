@@ -499,3 +499,47 @@ class XStoreClient:
         """
         return self._aggregate(XStore_Proto.OHLC, "ohlc", XStore_Proto.Ohlc_REP,
                                 startUnixTime, endUnixTime, targetDBName, columnIdx)
+
+    def percentile(self, startUnixTime, endUnixTime, targetDBName, columnIdx, percentile):
+        """
+        Exact percentile (PERCENTILE_CONT/linear-interpolation semantics),
+        percentile in [0.0, 1.0] (0.5 = median). Not zone-map-accelerated --
+        see Percentile_REQ's comment in XStore.proto.
+        :return: Percentile_REP (opStatus, value double)
+        """
+        envelope = XStore_Proto.Request()
+        payload = envelope.percentile
+        payload.RType = XStore_Proto.PERCENTILE
+        payload.startTime = startUnixTime
+        payload.endTime = endUnixTime
+        payload.dbName = targetDBName
+        payload.columnIdx = columnIdx
+        payload.percentile = percentile
+
+        return self._sendRecv(envelope, XStore_Proto.Percentile_REP)
+
+    def distinctCount(self, startUnixTime, endUnixTime, targetDBName, columnIdx):
+        """
+        Exact distinct-value count. Not zone-map-accelerated -- see
+        DistinctCount_REQ's comment in XStore.proto.
+        :return: DistinctCount_REP (opStatus, count uint64)
+        """
+        return self._aggregate(XStore_Proto.DISTINCTCOUNT, "distinctcount", XStore_Proto.DistinctCount_REP,
+                                startUnixTime, endUnixTime, targetDBName, columnIdx)
+
+    def topK(self, startUnixTime, endUnixTime, targetDBName, columnIdx, k):
+        """
+        Exact top-k most-frequent values (k=1 gives the mode). Not
+        zone-map-accelerated -- see TopK_REQ's comment in XStore.proto.
+        :return: TopK_REP (opStatus, entries repeated {value, count})
+        """
+        envelope = XStore_Proto.Request()
+        payload = envelope.topk
+        payload.RType = XStore_Proto.TOPK
+        payload.startTime = startUnixTime
+        payload.endTime = endUnixTime
+        payload.dbName = targetDBName
+        payload.columnIdx = columnIdx
+        payload.k = k
+
+        return self._sendRecv(envelope, XStore_Proto.TopK_REP)

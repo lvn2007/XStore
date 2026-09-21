@@ -3942,3 +3942,250 @@ TEST(XStorePreadPoolTest, ConcurrentParallelForFromManyThreadsNeverMissesOrDupli
     EXPECT_FALSE(mismatch.load()) << "some index was processed zero or multiple times -- "
                                       "XStorePreadPool lost or duplicated work under concurrent callers";
 }
+
+// ==================== PERCENTILE / DISTINCTCOUNT / TOPK (exact mode) ====================
+// All three are real full-scan aggregates (ProcessFileRangeCollectValues,
+// no zone-map pushdown -- see that kernel's comment in XStore.h) so there
+// is no separate "pushdown" test file section the way Sum/Variance/Ohlc
+// have in XStoreZoneMapTest.cpp; correctness here only ever depends on the
+// real-scan kernel and each op's own post-processing.
+
+TEST_F(XStoreTest, PercentileAggregateOnMissingDBReturnsError) {
+    XStore store;
+    XStore_Proto::Percentile_REP rep;
+    store.PercentileAggregate(TS_2016_MID, TS_2016_MID, "NOPE", 0, 0.5, &rep);
+    EXPECT_EQ(rep.opstatus(), "[WARNING] [PERCENTILE AGGREGATE] [DB: NOPE] - NOPE.CFG does not exist");
+}
+
+TEST_F(XStoreTest, PercentileAggregateRejectsStartAfterEnd) {
+    XStore store;
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
+    XStore_Proto::Percentile_REP rep;
+    store.PercentileAggregate(TS_2016_MID + 1, TS_2016_MID, "TESTDB", 0, 0.5, &rep);
+    EXPECT_EQ(rep.opstatus(), "[WARNING] [PERCENTILE AGGREGATE] [DB: TESTDB] - Target end time must be after start time");
+}
+
+TEST_F(XStoreTest, PercentileAggregateRejectsPercentileOutOfZeroOneRange) {
+    XStore store;
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
+    XStore_Proto::Percentile_REP rep;
+    store.PercentileAggregate(TS_2016_MID, TS_2016_MID, "TESTDB", 0, 1.5, &rep);
+    EXPECT_EQ(rep.opstatus(), "[WARNING] [PERCENTILE AGGREGATE] [DB: TESTDB] - percentile must be in [0.0, 1.0]");
+}
+
+TEST_F(XStoreTest, PercentileAggregateExactMedianWithOddCountNoInterpolationNeeded) {
+    // Sorted {1,2,3,4,5} -- rank = 0.5*(5-1) = 2.0, an exact index, no
+    // interpolation -- median is just the middle element, 3.
+    XStore store;
+    CreateTestDb(store, "PCTTEST", XStore_Proto::SECOND, 64);
+    const std::vector<double> values = {1, 3, 2, 5, 4};
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    for (size_t i = 0; i < values.size(); ++i) {
+        store.UnaryInsert(1000 + i, MakeRow({FDouble(values[i])}), "PCTTEST", &insert_rep);
+    }
+
+    XStore_Proto::Percentile_REP rep;
+    store.PercentileAggregate(1000, 1000 + values.size() - 1, "PCTTEST", 0, 0.5, &rep);
+    ASSERT_EQ(rep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(rep.value(), 3.0);
+}
+
+TEST_F(XStoreTest, PercentileAggregateInterpolatesBetweenTwoValuesWithEvenCount) {
+    // Sorted {1,2,3,4} -- rank = 0.5*(4-1) = 1.5, between index 1 (value 2)
+    // and index 2 (value 3) -- linear interpolation gives 2.5
+    // (PERCENTILE_CONT semantics, same as numpy.percentile's default).
+    XStore store;
+    CreateTestDb(store, "PCTTEST2", XStore_Proto::SECOND, 64);
+    const std::vector<double> values = {4, 2, 1, 3};
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    for (size_t i = 0; i < values.size(); ++i) {
+        store.UnaryInsert(1000 + i, MakeRow({FDouble(values[i])}), "PCTTEST2", &insert_rep);
+    }
+
+    XStore_Proto::Percentile_REP rep;
+    store.PercentileAggregate(1000, 1000 + values.size() - 1, "PCTTEST2", 0, 0.5, &rep);
+    ASSERT_EQ(rep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(rep.value(), 2.5);
+}
+
+TEST_F(XStoreTest, PercentileAggregateWithNoValidDataReturnsError) {
+    XStore store;
+    CreateTestDb(store, "PCTEMPTY", XStore_Proto::SECOND, 64);
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    store.UnaryInsert(TS_2031_MID, MakeRow({FDouble(1.0)}), "PCTEMPTY", &insert_rep); // pre-allocate the year file
+
+    XStore_Proto::Percentile_REP rep;
+    store.PercentileAggregate(TS_2016_MID, TS_2016_MID + 5, "PCTEMPTY", 0, 0.5, &rep); // disjoint range, no rows here
+    EXPECT_EQ(rep.opstatus(), "ERROR: No valid data found");
+}
+
+TEST_F(XStoreTest, DistinctCountAggregateOnMissingDBReturnsError) {
+    XStore store;
+    XStore_Proto::DistinctCount_REP rep;
+    store.DistinctCountAggregate(TS_2016_MID, TS_2016_MID, "NOPE", 0, &rep);
+    EXPECT_EQ(rep.opstatus(), "[WARNING] [DISTINCTCOUNT AGGREGATE] [DB: NOPE] - NOPE.CFG does not exist");
+}
+
+TEST_F(XStoreTest, DistinctCountAggregateRejectsStartAfterEnd) {
+    XStore store;
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
+    XStore_Proto::DistinctCount_REP rep;
+    store.DistinctCountAggregate(TS_2016_MID + 1, TS_2016_MID, "TESTDB", 0, &rep);
+    EXPECT_EQ(rep.opstatus(), "[WARNING] [DISTINCTCOUNT AGGREGATE] [DB: TESTDB] - Target end time must be after start time");
+}
+
+TEST_F(XStoreTest, DistinctCountAggregateCountsUniqueValuesCorrectly) {
+    XStore store;
+    CreateTestDb(store, "DCTEST", XStore_Proto::SECOND, 64);
+    const std::vector<double> values = {1, 2, 2, 3, 3, 3}; // 3 distinct values
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    for (size_t i = 0; i < values.size(); ++i) {
+        store.UnaryInsert(1000 + i, MakeRow({FDouble(values[i])}), "DCTEST", &insert_rep);
+    }
+
+    XStore_Proto::DistinctCount_REP rep;
+    store.DistinctCountAggregate(1000, 1000 + values.size() - 1, "DCTEST", 0, &rep);
+    ASSERT_EQ(rep.opstatus(), "SUCCESS");
+    EXPECT_EQ(rep.count(), 3u);
+}
+
+TEST_F(XStoreTest, DistinctCountAggregateWithNoValidDataReturnsZeroNotError) {
+    // Absence is a legitimate answer, same precedent ExistsAggregate uses
+    // for false -- an empty range's distinct count is genuinely zero, not
+    // an error the way Percentile's "undefined on nothing" is.
+    XStore store;
+    CreateTestDb(store, "DCEMPTY", XStore_Proto::SECOND, 64);
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    store.UnaryInsert(TS_2031_MID, MakeRow({FDouble(1.0)}), "DCEMPTY", &insert_rep); // pre-allocate the year file
+
+    XStore_Proto::DistinctCount_REP rep;
+    store.DistinctCountAggregate(TS_2016_MID, TS_2016_MID + 5, "DCEMPTY", 0, &rep); // disjoint range, no rows here
+    ASSERT_EQ(rep.opstatus(), "SUCCESS");
+    EXPECT_EQ(rep.count(), 0u);
+}
+
+TEST_F(XStoreTest, TopKAggregateOnMissingDBReturnsError) {
+    XStore store;
+    XStore_Proto::TopK_REP rep;
+    store.TopKAggregate(TS_2016_MID, TS_2016_MID, "NOPE", 0, 1, &rep);
+    EXPECT_EQ(rep.opstatus(), "[WARNING] [TOPK AGGREGATE] [DB: NOPE] - NOPE.CFG does not exist");
+}
+
+TEST_F(XStoreTest, TopKAggregateRejectsStartAfterEnd) {
+    XStore store;
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
+    XStore_Proto::TopK_REP rep;
+    store.TopKAggregate(TS_2016_MID + 1, TS_2016_MID, "TESTDB", 0, 1, &rep);
+    EXPECT_EQ(rep.opstatus(), "[WARNING] [TOPK AGGREGATE] [DB: TESTDB] - Target end time must be after start time");
+}
+
+TEST_F(XStoreTest, TopKAggregateReturnsMostFrequentValuesDescendingByCount) {
+    // 1 appears 3x, 2 appears 2x, 3 appears 1x -- k=2 should return
+    // [{value=1,count=3}, {value=2,count=2}], mode (k=1) would just be 1.
+    XStore store;
+    CreateTestDb(store, "TOPKTEST", XStore_Proto::SECOND, 64);
+    const std::vector<double> values = {3, 1, 2, 1, 2, 1};
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    for (size_t i = 0; i < values.size(); ++i) {
+        store.UnaryInsert(1000 + i, MakeRow({FDouble(values[i])}), "TOPKTEST", &insert_rep);
+    }
+
+    XStore_Proto::TopK_REP rep;
+    store.TopKAggregate(1000, 1000 + values.size() - 1, "TOPKTEST", 0, 2, &rep);
+    ASSERT_EQ(rep.opstatus(), "SUCCESS");
+    ASSERT_EQ(rep.entries_size(), 2);
+    EXPECT_DOUBLE_EQ(rep.entries(0).value(), 1.0);
+    EXPECT_EQ(rep.entries(0).count(), 3u);
+    EXPECT_DOUBLE_EQ(rep.entries(1).value(), 2.0);
+    EXPECT_EQ(rep.entries(1).count(), 2u);
+}
+
+TEST_F(XStoreTest, TopKAggregateTiesBreakByAscendingValue) {
+    // 1 and 2 both appear once each -- deterministic tie-break: ascending
+    // value, so {value=1} sorts before {value=2} despite equal counts.
+    XStore store;
+    CreateTestDb(store, "TOPKTIE", XStore_Proto::SECOND, 64);
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    store.UnaryInsert(1000, MakeRow({FDouble(2.0)}), "TOPKTIE", &insert_rep);
+    store.UnaryInsert(1001, MakeRow({FDouble(1.0)}), "TOPKTIE", &insert_rep);
+
+    XStore_Proto::TopK_REP rep;
+    store.TopKAggregate(1000, 1001, "TOPKTIE", 0, 2, &rep);
+    ASSERT_EQ(rep.opstatus(), "SUCCESS");
+    ASSERT_EQ(rep.entries_size(), 2);
+    EXPECT_DOUBLE_EQ(rep.entries(0).value(), 1.0);
+    EXPECT_DOUBLE_EQ(rep.entries(1).value(), 2.0);
+}
+
+TEST_F(XStoreTest, TopKAggregateWithFewerDistinctValuesThanKReturnsAllAvailable) {
+    // Only 2 distinct values exist -- k=5 should return exactly 2 entries,
+    // same as SQL's GROUP BY ... ORDER BY COUNT(*) DESC LIMIT k when fewer
+    // than k groups exist.
+    XStore store;
+    CreateTestDb(store, "TOPKFEW", XStore_Proto::SECOND, 64);
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    store.UnaryInsert(1000, MakeRow({FDouble(7.0)}), "TOPKFEW", &insert_rep);
+    store.UnaryInsert(1001, MakeRow({FDouble(8.0)}), "TOPKFEW", &insert_rep);
+
+    XStore_Proto::TopK_REP rep;
+    store.TopKAggregate(1000, 1001, "TOPKFEW", 0, 5, &rep);
+    ASSERT_EQ(rep.opstatus(), "SUCCESS");
+    EXPECT_EQ(rep.entries_size(), 2);
+}
+
+TEST_F(XStoreTest, TopKAggregateWithNoValidDataReturnsEmptyEntriesNotError) {
+    // Same "absence is legitimate" precedent as DistinctCount -- an empty
+    // range has zero top-k entries, not an error.
+    XStore store;
+    CreateTestDb(store, "TOPKEMPTY", XStore_Proto::SECOND, 64);
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    store.UnaryInsert(TS_2031_MID, MakeRow({FDouble(1.0)}), "TOPKEMPTY", &insert_rep); // pre-allocate the year file
+
+    XStore_Proto::TopK_REP rep;
+    store.TopKAggregate(TS_2016_MID, TS_2016_MID + 5, "TOPKEMPTY", 0, 3, &rep); // disjoint range, no rows here
+    ASSERT_EQ(rep.opstatus(), "SUCCESS");
+    EXPECT_EQ(rep.entries_size(), 0);
+}
+
+TEST_F(XStoreTest, ExactModeAggregatesAcrossWideMultiYearSpanUsePathAndMergeCorrectly) {
+    // Same technique as AggregateOverWideMultiYearSpanUsesParallelWalkCorrectly
+    // above: two data-bearing years ~6 years apart drive the request through
+    // WalkYearSpanParallel's real thread-per-segment dispatch (>= 4 segments)
+    // instead of the narrow-span sequential fallback -- verifying Percentile/
+    // DistinctCount/TopK's shared CollectPartial concatenation-merge (see
+    // XStore_Aggregates.cpp) produces the same answer as if all rows had been
+    // collected by one sequential scan. One test covers all three since they
+    // share the exact same collection/merge machinery, differing only in the
+    // post-processing performed on the fully-merged vector.
+    XStore store;
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
+
+    unsigned long long approx_future_ts = TS_2016_LAST + (6ULL * 365 * 86400);
+    TimeStruct future_year(static_cast<time_t>(approx_future_ts), XStore_Proto::SECOND);
+    unsigned long long future_year_first = static_cast<unsigned long long>(future_year.first_epoch);
+
+    // Early-year values: {1, 2, 3}; future-year value: {2} -- combined
+    // multiset {1,2,2,3}: distinct=3, mode=2 (count 2), median(0.5)=2.0.
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    store.UnaryInsert(TS_2016_LAST - 2, MakeRow({FDouble(1.0)}), "TESTDB", &insert_rep);
+    store.UnaryInsert(TS_2016_LAST - 1, MakeRow({FDouble(2.0)}), "TESTDB", &insert_rep);
+    store.UnaryInsert(TS_2016_LAST, MakeRow({FDouble(3.0)}), "TESTDB", &insert_rep);
+    store.UnaryInsert(future_year_first, MakeRow({FDouble(2.0)}), "TESTDB", &insert_rep);
+
+    XStore_Proto::Percentile_REP pct_rep;
+    store.PercentileAggregate(TS_2016_LAST - 2, future_year_first, "TESTDB", 0, 0.5, &pct_rep);
+    ASSERT_EQ(pct_rep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(pct_rep.value(), 2.0);
+
+    XStore_Proto::DistinctCount_REP dc_rep;
+    store.DistinctCountAggregate(TS_2016_LAST - 2, future_year_first, "TESTDB", 0, &dc_rep);
+    ASSERT_EQ(dc_rep.opstatus(), "SUCCESS");
+    EXPECT_EQ(dc_rep.count(), 3u);
+
+    XStore_Proto::TopK_REP topk_rep;
+    store.TopKAggregate(TS_2016_LAST - 2, future_year_first, "TESTDB", 0, 1, &topk_rep);
+    ASSERT_EQ(topk_rep.opstatus(), "SUCCESS");
+    ASSERT_EQ(topk_rep.entries_size(), 1);
+    EXPECT_DOUBLE_EQ(topk_rep.entries(0).value(), 2.0);
+    EXPECT_EQ(topk_rep.entries(0).count(), 2u);
+}
