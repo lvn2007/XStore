@@ -69,7 +69,8 @@ void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::R
     // will open/create for them -- see WalRecord::tracked_column_count.
     record.tracked_column_count = EffectiveTrackedColumnCount(cfg_struct);
     record.rows.push_back(WalRow{unix_time, std::string(row_buf.data(), cfg_struct.rowlength()),
-                                  BuildZoneMapObservations(*this, data, record.tracked_column_count)});
+                                  BuildZoneMapObservations(*this, data, record.tracked_column_count),
+                                  BuildCatIdxObservations(*this, data, record.tracked_column_count)});
     MaybeGrowColumnCount(db_name, db_base_path_str, data.fielddata_size());
 
     if (durability_mode == XStore_Proto::BYPASS) {

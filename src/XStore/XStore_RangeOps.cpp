@@ -103,7 +103,8 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client,
             [[maybe_unused]] bool serialize_ok = entry.data().SerializeToArray(row_bytes.data(), static_cast<int>(cfg_struct.rowlength()));
             std::memset(row_bytes.data() + serialized_size, 0, cfg_struct.rowlength() - serialized_size);
             record.rows.push_back(WalRow{entry.timestamp(), std::move(row_bytes),
-                                          BuildZoneMapObservations(*this, entry.data(), record.tracked_column_count)});
+                                          BuildZoneMapObservations(*this, entry.data(), record.tracked_column_count),
+                                          BuildCatIdxObservations(*this, entry.data(), record.tracked_column_count)});
             MaybeGrowColumnCount(db_name, db_base_path_str, entry.data().fielddata_size());
         }
 

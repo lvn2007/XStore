@@ -206,6 +206,10 @@ class XStore {
             // ASYNC durability mode where the real write happens later on
             // the WAL writer thread, not before this call returns.
             std::vector<ZoneMapObservation> zone_map_observations;
+            // Same "precomputed at enqueue time, applied by ApplyWalRecord
+            // only after this row's real pwrite succeeds" contract as
+            // zone_map_observations above -- see BuildCatIdxObservations.
+            std::vector<CatIdxObservation> catidx_observations;
         };
 
         // Cross-thread completion signal for one WalRecord -- replaces
@@ -822,6 +826,15 @@ class XStore {
         // GetFDataValue overload below; touches no instance state of its
         // own.
         static std::vector<ZoneMapObservation> BuildZoneMapObservations(XStore &store, const XStore_Proto::RowData &row, uint32_t tracked_column_count);
+
+        // Same purpose as BuildZoneMapObservations above but for the CatIdx
+        // bloom filter -- covers ALL FData oneof cases (no numeric-only
+        // gate), since bloom membership works on the encoded byte string
+        // regardless of type. Shared by Unary/Batch/RangeInsert, applied by
+        // ApplyWalRecord only after the corresponding row's pwrite succeeds
+        // (see WalRow::catidx_observations in XStore.h and XStore_Internal.h
+        // for the implementation).
+        static std::vector<CatIdxObservation> BuildCatIdxObservations(XStore &store, const XStore_Proto::RowData &row, uint32_t tracked_column_count);
 
         // Clamps a ConfigStruct's columnCount to MAX_TRACKED_COLUMN_COUNT,
         // logging once (spdlog::warn, same shape as CreateDB's own rejection

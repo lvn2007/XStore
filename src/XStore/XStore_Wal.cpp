@@ -201,6 +201,11 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply) {
     // never claim to track more columns than were actually folded into it.
     ZoneMapFile &zmap = GetOrOpenZoneMap(record_to_apply.db_base_path, first_ts.year, record_to_apply.row_length,
                                           record_to_apply.tracked_column_count);
+    // Same reasoning as zmap above, same (db, year, row_length,
+    // tracked_column_count) key -- the bloom filter is only ever updated
+    // here, alongside zmap, after a row's real pwrite is confirmed durable.
+    CatIdxFile &catidx = GetOrOpenCatIdx(record_to_apply.db_base_path, first_ts.year, record_to_apply.row_length,
+                                         record_to_apply.tracked_column_count);
 
     std::vector<unsigned long long> offsets(record_to_apply.rows.size());
     for (size_t i = 0; i < record_to_apply.rows.size(); ++i) {
@@ -246,6 +251,7 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply) {
             for (size_t i = run_start; i < run_end; ++i) {
                 uint64_t diff = record_to_apply.rows[i].epoch_time - first_ts.first_epoch;
                 zmap.UpdateRow(diff, record_to_apply.rows[i].zone_map_observations);
+                catidx.UpdateRow(diff, record_to_apply.rows[i].catidx_observations);
             }
         }
         run_start = run_end;

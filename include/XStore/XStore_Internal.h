@@ -98,4 +98,25 @@ inline std::vector<ZoneMapObservation> XStore::BuildZoneMapObservations(XStore &
     return observations;
 }
 
+// Definition of XStore::BuildCatIdxObservations (declared in XStore.h,
+// private static). Same enqueue-time-build / hole-padding contract as
+// BuildZoneMapObservations above, but covers ALL FData oneof cases -- not
+// gated to numeric -- since CatIdx's bloom filter works on
+// EncodeFDataForCatIdx's encoded byte string regardless of the field's
+// type (int/double/string/bytes/bool all encode to something hashable).
+inline std::vector<CatIdxObservation> XStore::BuildCatIdxObservations(XStore &store, const XStore_Proto::RowData &row, uint32_t tracked_column_count) {
+    (void)store; // unused -- unlike BuildZoneMapObservations, no GetFDataValue coercion needed; EncodeFDataForCatIdx reads FData directly
+    const int tracked = static_cast<int>(tracked_column_count);
+    std::vector<CatIdxObservation> observations;
+    observations.reserve(static_cast<size_t>(tracked));
+    for (int col = 0; col < tracked; ++col) {
+        if (col < row.fielddata_size() && row.fielddata(col).oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
+            observations.push_back({static_cast<uint32_t>(col), EncodeFDataForCatIdx(row.fielddata(col)), true});
+        } else {
+            observations.push_back({static_cast<uint32_t>(col), std::string(), false});
+        }
+    }
+    return observations;
+}
+
 #endif //XSTORE_XSTORE_INTERNAL_H

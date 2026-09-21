@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 #include "XStore/XStore_CatIdx.h"
 #include "XStore/XStore.h"
+#include "include/DataStructs/TimeStruct.h"
 #include "XStore.pb.h"
+#include "XStoreTestSupport.h"
 #include <filesystem>
 
 TEST(EncodeFDataForCatIdxTest, SameInt64ValueEncodesIdentically) {
@@ -145,3 +147,52 @@ TEST(GetOrOpenCatIdxTest, DifferentYearReturnsDifferentInstance) {
     CatIdxFile &b = XStore::GetOrOpenCatIdx(base, 2024, 64, 4);
     EXPECT_NE(&a, &b);
 }
+
+// Write-path integration (Task 6): a real UnaryInsert through the full WAL
+// apply path -- not a direct CatIdxFile::UpdateRow call like the tests
+// above -- must leave the bloom filter set for the value that was inserted.
+// Same fixture shape as XStoreZoneMapTest (XStoreZoneMapTest.cpp): one
+// ScratchDir per test, XStore/db created locally in the test body rather
+// than shared fixture members, since that's the pattern every *ZoneMapTest*
+// TEST_F in this codebase already uses.
+namespace {
+
+using xstore_test::ScratchDir;
+using xstore_test::CreateTestDb;
+
+class XStoreCatIdxTestFixture : public ::testing::Test {
+protected:
+    std::unique_ptr<ScratchDir> scratch;
+
+    void SetUp() override {
+        scratch = std::make_unique<ScratchDir>("xstore_catidx_test");
+        for (auto &shard : XStore::cfg_shards) shard.map.clear();
+        XStore::ClearCatIdxRegistryForTests();
+    }
+
+    void TearDown() override {
+        scratch.reset();
+    }
+
+    // db_name must already be upper-case.
+    std::string DbPath(std::string_view db_name) const {
+        return (scratch->test_root / "DataStore" / std::string(db_name)).string();
+    }
+};
+
+TEST_F(XStoreCatIdxTestFixture, InsertedValueBloomIsSetAfterApplyWalRecord) {
+    XStore store;
+    CreateTestDb(store, "CATIDXWRITE", XStore_Proto::SECOND, 64);
+
+    XStore_Proto::RowData row;
+    row.add_fielddata()->set_int64data(137);
+    XStore_Proto::UnaryInsert_REP rep;
+    store.UnaryInsert(1000, row, "CATIDXWRITE", &rep, XStore_Proto::SYNC);
+
+    XStore_Proto::FData val;
+    val.set_int64data(137);
+    CatIdxFile &catidx = XStore::GetOrOpenCatIdx(DbPath("CATIDXWRITE"), TimeStruct(1000, XStore_Proto::SECOND).year, 64, 1);
+    EXPECT_TRUE(catidx.MightContain(0, 0, EncodeFDataForCatIdx(val)));
+}
+
+} // namespace
