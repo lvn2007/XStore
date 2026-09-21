@@ -1,12 +1,15 @@
 #include "XStore/XStore_CatIdx.h"
+#include "include/XStore/XStore.h"
 
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <algorithm>
 #include <cstring>
+#include <stdexcept>
 
 #include <spdlog/spdlog.h>
+#include <spdlog/fmt/fmt.h>
 
 namespace {
 void BloomSetBit(unsigned char *entry, size_t entry_size, uint64_t h1, uint64_t h2, size_t k) {
@@ -160,4 +163,45 @@ bool CatIdxFile::MightContain(uint64_t block_index, uint32_t column_idx, const s
 
 CatIdxFile::~CatIdxFile() {
     if (fd_ >= 0) close(fd_);
+}
+
+std::mutex XStore::catidx_registry_mutex_;
+std::unordered_map<std::string, std::unique_ptr<CatIdxFile>> XStore::catidx_registry_;
+std::vector<std::string> XStore::catidx_registry_lru_;
+
+CatIdxFile& XStore::GetOrOpenCatIdx(std::string_view db_base_path, unsigned short year, uint16_t row_length,
+                                     uint32_t tracked_column_count) {
+    std::string key = fmt::format("{}/{}", db_base_path, year);
+    std::lock_guard<std::mutex> lock(catidx_registry_mutex_);
+
+    auto it = catidx_registry_.find(key);
+    if (it != catidx_registry_.end()) {
+        catidx_registry_lru_.erase(std::remove(catidx_registry_lru_.begin(), catidx_registry_lru_.end(), key),
+                                    catidx_registry_lru_.end());
+        catidx_registry_lru_.push_back(key);
+        return *it->second;
+    }
+
+    if (catidx_registry_.size() >= XStoreTunables::CATIDX_REGISTRY_CAP && !catidx_registry_lru_.empty()) {
+        std::string victim = catidx_registry_lru_.front();
+        catidx_registry_lru_.erase(catidx_registry_lru_.begin());
+        catidx_registry_.erase(victim); // ~CatIdxFile() closes the fd -- no flush needed, already durable (write-through UpdateRow)
+    }
+
+    auto catidx = std::make_unique<CatIdxFile>();
+    std::string path = fmt::format("{}/{}.catidx", db_base_path, year);
+    if (!catidx->Open(path, row_length, tracked_column_count)) {
+        spdlog::error("[CATIDX] - Unable to open {}", path);
+        throw std::runtime_error(fmt::format("CatIdxFile::Open failed for {}", path));
+    }
+    CatIdxFile &ref = *catidx;
+    catidx_registry_.emplace(key, std::move(catidx));
+    catidx_registry_lru_.push_back(key);
+    return ref;
+}
+
+void XStore::ClearCatIdxRegistryForTests() {
+    std::lock_guard<std::mutex> lock(catidx_registry_mutex_);
+    catidx_registry_.clear();
+    catidx_registry_lru_.clear();
 }

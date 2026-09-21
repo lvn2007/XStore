@@ -25,6 +25,7 @@
 #include "include/DataStructs/ValueStruct.h"
 #include "include/XStore/XStore_Tunables.h"
 #include "include/XStore/XStore_ZoneMap.h"
+#include "include/XStore/XStore_CatIdx.h"
 
 // Length of msg header
 #define TRACE_LEN 8
@@ -736,6 +737,20 @@ class XStore {
         // instance still holding an fd to the unlinked sidecar and hides it.
         static void ClearZoneMapRegistryForTests();
 
+        // Categorical bloom-index registry: one CatIdxFile per (db, year)
+        // pair, same process-wide/static shape and LRU-eviction-is-always-
+        // safe reasoning as GetOrOpenZoneMap above (CatIdxFile::UpdateRow is
+        // also write-through). Unlike GetOrOpenZoneMap, this does NOT clamp
+        // tracked_column_count down to an existing file's on-disk width --
+        // that guard lands in a later task once schema growth is wired up
+        // for .catidx.
+        static CatIdxFile& GetOrOpenCatIdx(std::string_view db_base_path, unsigned short year, uint16_t row_length, uint32_t tracked_column_count = XStoreTunables::CATIDX_MAX_TRACKED_COLUMNS);
+
+        // Test-only: mirrors ClearZoneMapRegistryForTests -- drops every
+        // warm CatIdxFile instance so the next GetOrOpenCatIdx reopens from
+        // disk.
+        static void ClearCatIdxRegistryForTests();
+
     private:
         // Get current base directory
         std::string GetBaseDir();
@@ -789,6 +804,16 @@ class XStore {
         static std::mutex zone_map_registry_mutex_;
         static std::unordered_map<std::string, std::unique_ptr<ZoneMapFile>> zone_map_registry_;
         static std::vector<std::string> zone_map_registry_lru_; // most-recently-touched at the back
+
+        // Categorical bloom-index registry: one CatIdxFile per (db, year)
+        // pair, keyed identically to zone_map_registry_ above
+        // ("<db_base_path>/<year>"). Deliberately separate mutex/map/LRU
+        // vector -- shares zero state with the zone-map registry -- so a
+        // .catidx-only workload's LRU pressure never evicts a warm .zmap
+        // instance (or vice versa).
+        static std::mutex catidx_registry_mutex_;
+        static std::unordered_map<std::string, std::unique_ptr<CatIdxFile>> catidx_registry_;
+        static std::vector<std::string> catidx_registry_lru_; // most-recently-touched at the back
 
         // Turns one row's proto fields into the zone map's per-column
         // observations -- shared by Unary/Batch/RangeInsert (all three

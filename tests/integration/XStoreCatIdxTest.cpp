@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "XStore/XStore_CatIdx.h"
+#include "XStore/XStore.h"
 #include "XStore.pb.h"
 #include <filesystem>
 
@@ -123,4 +124,24 @@ TEST(CatIdxFileTest, AbsentValueUsuallyNotFound) {
         if (f.MightContain(0, 0, EncodeFDataForCatIdx(val))) ++false_positives;
     }
     EXPECT_LT(false_positives, 20); // well under 10% at these fill levels
+}
+
+TEST(GetOrOpenCatIdxTest, SameDbYearReturnsSameInstance) {
+    XStore::ClearCatIdxRegistryForTests();
+    std::string base = TempCatIdxPath("registry_db");
+    std::filesystem::create_directories(base);
+
+    CatIdxFile &a = XStore::GetOrOpenCatIdx(base, 2024, 64, 4);
+    CatIdxFile &b = XStore::GetOrOpenCatIdx(base, 2024, 64, 4);
+    EXPECT_EQ(&a, &b);
+}
+
+TEST(GetOrOpenCatIdxTest, DifferentYearReturnsDifferentInstance) {
+    XStore::ClearCatIdxRegistryForTests();
+    std::string base = TempCatIdxPath("registry_db2");
+    std::filesystem::create_directories(base);
+
+    CatIdxFile &a = XStore::GetOrOpenCatIdx(base, 2023, 64, 4);
+    CatIdxFile &b = XStore::GetOrOpenCatIdx(base, 2024, 64, 4);
+    EXPECT_NE(&a, &b);
 }
