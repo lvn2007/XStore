@@ -243,7 +243,15 @@ void CatIdxFile::AppendBitmapSection(const std::unordered_map<uint32_t, std::map
         }
     }
 
-    [[maybe_unused]] ssize_t data_written = pwrite(fd_, buf.data(), buf.size(), append_offset);
+    ssize_t data_written = pwrite(fd_, buf.data(), buf.size(), append_offset);
+    if (data_written != static_cast<ssize_t>(buf.size())) {
+        // pwrite() caps a single transfer at ~0x7ffff000 bytes on Linux, and a single
+        // compaction pass over a full year of low-cardinality columns can exceed that --
+        // don't let a short/failed write land inside the committed, scannable range.
+        spdlog::error("[CATIDX] - Short/failed bitmap-section write ({}/{}); not committing",
+                       data_written, buf.size());
+        return; // uncommitted tail, safely ignorable -- next compaction pass rebuilds from scratch
+    }
     fdatasync(fd_);
 
     // Commit point: only now does the header admit this section exists.
