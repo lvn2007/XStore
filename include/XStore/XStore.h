@@ -805,6 +805,27 @@ class XStore {
         // ExtractColumnByIndexSkipParse/CompactColdCatIdxForAllDbs path.
         static void StartCatIdxCompactionThread(const std::string &data_store_dir);
 
+        // CatIdx compaction (Task 9): scans one cold <YEAR>.XSTORE file
+        // row-by-row and builds a bitmap section (value -> row indices) per
+        // tracked column via CatIdxFile::AppendBitmapSection, abandoning any
+        // column mid-scan the instant its distinct-value count crosses
+        // CATIDX_MAX_BITMAP_DISTINCT_VALUES (freed immediately, never
+        // finishes accumulating a disqualified column). Idempotent no-op if
+        // this year's .catidx already has a bitmap section.
+        //
+        // Deliberately a non-static instance method, unlike
+        // RebuildOneYearZoneMap below -- it must call the non-static
+        // ExtractColumnByIndexSkipParse, which needs an XStore instance. The
+        // background thread in StartCatIdxCompactionThread owns one such
+        // instance for its lifetime.
+        //
+        // Public (like GetOrOpenCatIdx/ClearCatIdxRegistryForTests above):
+        // it's both the real internal entry point CompactColdCatIdxForAllDbs
+        // calls, and the direct test entry point for exercising compaction
+        // synchronously without waiting on the hourly background thread.
+        void CompactOneYearCatIdx(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                   uint32_t tracked_column_count);
+
     private:
         // Get current base directory
         std::string GetBaseDir();
@@ -1181,25 +1202,6 @@ class XStore {
         // plan for why reusing UpdateRow here (instead of a bespoke bulk
         // writer) is the deliberate, simplicity-first choice.
         void RebuildOneYearZoneMap(const std::string &db_base_path, unsigned short year, uint16_t row_length, uint32_t tracked_column_count);
-
-        // CatIdx compaction (Task 9): scans one cold <YEAR>.XSTORE file
-        // row-by-row and builds a bitmap section (value -> row indices) per
-        // tracked column via CatIdxFile::AppendBitmapSection, abandoning any
-        // column mid-scan the instant its distinct-value count crosses
-        // CATIDX_MAX_BITMAP_DISTINCT_VALUES (freed immediately, never
-        // finishes accumulating a disqualified column). Idempotent no-op if
-        // this year's .catidx already has a bitmap section.
-        //
-        // Deliberately a non-static instance method, unlike
-        // RebuildOneYearZoneMap above -- it must call the non-static
-        // ExtractColumnByIndexSkipParse (see that method's declaration
-        // above), which needs an XStore instance. The background thread in
-        // StartCatIdxCompactionThread owns one such instance for its
-        // lifetime; there is no other threadless-context precedent for this
-        // (ApplyWalRecord/WalWriterLoop are static but never call
-        // ExtractColumnByIndexSkipParse).
-        void CompactOneYearCatIdx(const std::string &db_base_path, unsigned short year, uint16_t row_length,
-                                   uint32_t tracked_column_count);
 
         // Scans every DB directory under data_store_dir and compacts every
         // cold (year < current calendar year) .XSTORE file that doesn't

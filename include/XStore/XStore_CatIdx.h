@@ -152,14 +152,20 @@ public:
 
     bool MightContain(uint64_t block_index, uint32_t column_idx, const std::string &encoded_value);
 
-    // Appends one column's value->row-indices directory to the bitmap
-    // section (commit-safety: writes the directory bytes and fsyncs BEFORE
-    // updating+fsyncing header_.bitmap_section_offset -- a crash between the
-    // two leaves harmless unreferenced bytes past the last known-good
-    // offset, same "uncommitted tail is safely ignorable" shape the WAL
-    // itself relies on). Row indices per value need not be pre-sorted --
+    // Appends ALL surviving columns' value->row-indices directories to the
+    // bitmap section in one call (commit-safety: writes every column's
+    // directory bytes and fsyncs ONCE BEFORE updating+fsyncing
+    // header_.bitmap_section_offset ONCE -- a crash between the two leaves
+    // harmless unreferenced bytes past the last known-good offset, same
+    // "uncommitted tail is safely ignorable" shape the WAL itself relies
+    // on). Deliberately one call per compaction pass, not one per column:
+    // calling this once per column used to mean only the FIRST column's
+    // write got crash-safe commit semantics -- header_.bitmap_section_offset
+    // became non-zero after that first call, so a crash during a LATER
+    // column's write left torn bytes INSIDE the already-committed,
+    // scannable range. Row indices per value need not be pre-sorted --
     // stored as given (compaction naturally produces them in scan order).
-    void AppendBitmapSection(uint32_t column_idx, const std::map<std::string, std::vector<uint64_t>> &value_to_rows);
+    void AppendBitmapSection(const std::unordered_map<uint32_t, std::map<std::string, std::vector<uint64_t>>> &columns);
 
     bool HasBitmapSection() const { return header_.bitmap_section_offset != 0; }
 

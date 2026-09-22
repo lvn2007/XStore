@@ -91,8 +91,14 @@ void CatIdxFile::EnsureBlockLoaded(uint64_t block_index) {
     off_t offset = BloomSectionFileOffset(block_index);
     size_t bytes_to_read = header_.tracked_column_count * sizeof(BloomEntry);
 
-    struct stat st{};
-    if (fstat(fd_, &st) == 0 && st.st_size >= offset + static_cast<off_t>(bytes_to_read)) {
+    // Existence test is header_.block_count, NOT a raw file-size comparison
+    // -- st.st_size includes whatever the appended bitmap section directory
+    // added past the bloom region, and BloomSectionFileOffset's pure
+    // arithmetic can land inside that directory range for a block that was
+    // never actually written. header_.block_count is durably maintained
+    // only by FlushBlock (real bloom writes), so it's independent of the
+    // bitmap section's size.
+    if (block_index < header_.block_count) {
         // Existing on-disk block -- load its current (always-durable) bloom bytes.
         [[maybe_unused]] ssize_t read_bytes = pread(fd_, entries.data(), bytes_to_read, offset);
     } else {
@@ -126,6 +132,28 @@ void CatIdxFile::FlushBlock(uint64_t block_index) {
     if (it == cache_.end()) return;
     off_t offset = BloomSectionFileOffset(block_index);
     size_t bytes = header_.tracked_column_count * sizeof(BloomEntry);
+
+    // A never-touched block's arithmetic offset has no upper bound, and the
+    // appended bitmap section directory sits immediately past whatever the
+    // highest bloom block was at compaction time -- so a genuine write to a
+    // block that falls inside (or past) the committed directory range would
+    // otherwise overwrite directory bytes with bloom bytes, corrupting it
+    // (e.g. a backfill insert into an already-compacted cold year). Detect
+    // that here, BEFORE the data pwrite, and self-heal by invalidating the
+    // directory instead of corrupting it -- the next compaction pass sees
+    // HasBitmapSection() == false (its own idempotency check) and rebuilds
+    // the directory from scratch over the now-larger bloom region. Same
+    // "always fully re-derivable from real row data" precedent as the
+    // zone-map feature's version-bump-discards elsewhere in this codebase.
+    if (header_.bitmap_section_offset != 0 &&
+        static_cast<uint64_t>(offset) + bytes > header_.bitmap_section_offset) {
+        spdlog::warn("[CATIDX] - Block {} write would overlap the committed bitmap section -- "
+                     "invalidating it; next compaction pass will rebuild it", block_index);
+        header_.bitmap_section_offset = 0;
+        [[maybe_unused]] ssize_t invalidate_written = pwrite(fd_, &header_, sizeof(header_), 0);
+        fdatasync(fd_);
+    }
+
     // pwrite past the current end-of-file is standard sparse-file growth on
     // Linux -- no ftruncate needed first (this codebase already relies on
     // that pattern elsewhere for data files).
@@ -143,8 +171,10 @@ void CatIdxFile::FlushBlock(uint64_t block_index) {
     // durable -- moved here from EnsureBlockLoaded so a pure read
     // (MightContain) never bumps block_count/rewrites the header. FlushBlock
     // is only ever called from UpdateRow (a genuine mutation), so this is
-    // still write-through for every real write.
-    if (block_index >= header_.block_count) {
+    // still write-through for every real write. Guarded on the data write
+    // actually having succeeded (Minor #6) -- a short/failed write must not
+    // be recorded as if it durably landed.
+    if (written == static_cast<ssize_t>(bytes) && block_index >= header_.block_count) {
         header_.block_count = static_cast<uint32_t>(block_index + 1);
         [[maybe_unused]] ssize_t header_written = pwrite(fd_, &header_, sizeof(header_), 0);
     }
@@ -177,28 +207,40 @@ bool CatIdxFile::MightContain(uint64_t block_index, uint32_t column_idx, const s
                           h1, h2, XStoreTunables::CATIDX_BLOOM_HASH_COUNT);
 }
 
-void CatIdxFile::AppendBitmapSection(uint32_t column_idx, const std::map<std::string, std::vector<uint64_t>> &value_to_rows) {
+void CatIdxFile::AppendBitmapSection(const std::unordered_map<uint32_t, std::map<std::string, std::vector<uint64_t>>> &columns) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     struct stat st{};
     fstat(fd_, &st);
     off_t append_offset = st.st_size;
 
-    // Directory layout: [columnIdx u32][entryCount u32]
+    // One buffer holding every surviving column's directory back-to-back --
+    // deliberately ONE pwrite+fsync+header-commit for the whole compaction
+    // pass, not one per column. Committing after each column individually
+    // used to mean only the FIRST column's write was crash-safe: once
+    // header_.bitmap_section_offset went non-zero after that first commit,
+    // a crash during a LATER column's write left torn bytes INSIDE the
+    // already-committed, scannable range (LookupExact's scan loop has no way
+    // to tell a torn block from a real one).
+    //
+    // Per-column block layout (concatenated, LookupExact already scans
+    // multiple such blocks until EOF): [columnIdx u32][entryCount u32]
     //   then per entry, sorted by encoded value bytes for binary search:
     //   [valueLen u32][valueBytes][rowCount u32][rowIndices: u64 * rowCount]
     std::string buf;
-    buf.append(reinterpret_cast<const char*>(&column_idx), sizeof(column_idx));
-    uint32_t entry_count = static_cast<uint32_t>(value_to_rows.size());
-    buf.append(reinterpret_cast<const char*>(&entry_count), sizeof(entry_count));
+    for (const auto &[column_idx, value_to_rows] : columns) {
+        buf.append(reinterpret_cast<const char*>(&column_idx), sizeof(column_idx));
+        uint32_t entry_count = static_cast<uint32_t>(value_to_rows.size());
+        buf.append(reinterpret_cast<const char*>(&entry_count), sizeof(entry_count));
 
-    for (const auto &[value, rows] : value_to_rows) { // std::map iterates sorted by key -- binary-searchable on disk
-        uint32_t value_len = static_cast<uint32_t>(value.size());
-        buf.append(reinterpret_cast<const char*>(&value_len), sizeof(value_len));
-        buf.append(value);
-        uint32_t row_count = static_cast<uint32_t>(rows.size());
-        buf.append(reinterpret_cast<const char*>(&row_count), sizeof(row_count));
-        buf.append(reinterpret_cast<const char*>(rows.data()), rows.size() * sizeof(uint64_t));
+        for (const auto &[value, rows] : value_to_rows) { // std::map iterates sorted by key -- binary-searchable on disk
+            uint32_t value_len = static_cast<uint32_t>(value.size());
+            buf.append(reinterpret_cast<const char*>(&value_len), sizeof(value_len));
+            buf.append(value);
+            uint32_t row_count = static_cast<uint32_t>(rows.size());
+            buf.append(reinterpret_cast<const char*>(&row_count), sizeof(row_count));
+            buf.append(reinterpret_cast<const char*>(rows.data()), rows.size() * sizeof(uint64_t));
+        }
     }
 
     [[maybe_unused]] ssize_t data_written = pwrite(fd_, buf.data(), buf.size(), append_offset);
@@ -294,8 +336,18 @@ void XStore::CompactOneYearCatIdx(const std::string &db_base_path, unsigned shor
     std::string data_path = fmt::format("{}/{}.XSTORE", db_base_path, year);
     if (!std::filesystem::exists(data_path)) return;
 
-    CatIdxFile &catidx = GetOrOpenCatIdx(db_base_path, year, row_length, tracked_column_count);
-    if (catidx.HasBitmapSection()) return; // already compacted, idempotent no-op
+    {
+        // Reference scoped tightly to this idempotency check only -- do NOT
+        // hold it across the row scan below. The scan can run for minutes
+        // over a large year file, it never touches the registry (it reads
+        // the raw .XSTORE fd directly), and GetOrOpenCatIdx's registry can
+        // evict+destroy any CatIdxFile instance (including this one) under
+        // CATIDX_REGISTRY_CAP pressure from concurrent activity elsewhere --
+        // holding the reference across the whole scan would risk it dangling
+        // by the time AppendBitmapSection is finally called.
+        CatIdxFile &catidx = GetOrOpenCatIdx(db_base_path, year, row_length, tracked_column_count);
+        if (catidx.HasBitmapSection()) return; // already compacted, idempotent no-op
+    }
 
     struct stat st{};
     int fd = open(data_path.c_str(), O_RDONLY);
@@ -335,17 +387,27 @@ void XStore::CompactOneYearCatIdx(const std::string &db_base_path, unsigned shor
     }
     close(fd);
 
-    bool wrote_anything = false;
+    std::unordered_map<uint32_t, std::map<std::string, std::vector<uint64_t>>> surviving;
     for (auto &[col, value_map] : accumulators) {
         if (abandoned_columns.count(col) > 0 || value_map.empty()) continue;
-        catidx.AppendBitmapSection(col, value_map);
-        wrote_anything = true;
+        surviving.emplace(col, std::move(value_map));
     }
-    if (!wrote_anything) {
+    if (surviving.empty()) {
         // Every column abandoned or empty -- still mark this year compacted
         // (empty directory) so it isn't re-scanned every restart.
-        catidx.AppendBitmapSection(0, {});
+        surviving[0] = {};
     }
+
+    // Re-acquire FRESH here, immediately before the append -- see the scoped
+    // block above. This isn't a fully airtight fix (that would need
+    // GetOrOpenCatIdx to return shared_ptr instead of a reference, rippling
+    // into every already-shipped caller across Tasks 5-9 -- out of scope for
+    // this fix round), but it shrinks the dangling-reference exposure window
+    // from "the entire multi-minute scan" down to just this one call, and
+    // CATIDX_REGISTRY_CAP=256 makes eviction rare in realistic single-node
+    // workloads.
+    CatIdxFile &catidx = GetOrOpenCatIdx(db_base_path, year, row_length, tracked_column_count);
+    catidx.AppendBitmapSection(surviving);
 }
 
 void XStore::CompactColdCatIdxForAllDbs(const std::string &data_store_dir) {
@@ -366,6 +428,13 @@ void XStore::CompactColdCatIdxForAllDbs(const std::string &data_store_dir) {
         if (!GetOrLoadCfg(db_name, db_base_path, cfg_struct)) continue;
 
         for (auto &f : std::filesystem::directory_iterator(db_base_path)) {
+            // Bound shutdown latency: stop starting new year-scans once a
+            // shutdown has been signaled, rather than blocking the
+            // atexit-registered thread join until the whole remaining
+            // corpus finishes. Doesn't interrupt a scan already in
+            // progress (CompactOneYearCatIdx's own row loop doesn't check
+            // this) -- just "finish the current year, don't start another".
+            if (catidx_compaction_stop_flag_.load(std::memory_order_relaxed)) return;
             std::string filename = f.path().filename().string();
             if (filename.size() < 7 || filename.substr(filename.size() - 7) != ".XSTORE") continue;
             unsigned short year;
@@ -383,6 +452,16 @@ std::thread XStore::catidx_compaction_thread_;
 std::atomic<bool> XStore::catidx_compaction_stop_flag_{false};
 
 void XStore::StartCatIdxCompactionThread(const std::string &data_store_dir) {
+    // Minor #5: idempotency guard -- unlike StartWalWriters (whose callers
+    // wrap it in std::call_once, see XStore_Management.cpp), this has no
+    // built-in guard against a second call, which would operator= onto an
+    // already-joinable std::thread and crash via std::terminate.
+    static std::atomic<bool> already_started{false};
+    if (already_started.exchange(true, std::memory_order_relaxed)) {
+        spdlog::warn("[CATIDX] - StartCatIdxCompactionThread called more than once; ignoring");
+        return;
+    }
+
     catidx_compaction_thread_ = std::thread([data_store_dir]() {
         XStore compaction_store; // one instance for this thread's lifetime, same convention every ZMQ worker already follows
         while (!XStore::catidx_compaction_stop_flag_.load(std::memory_order_relaxed)) {
