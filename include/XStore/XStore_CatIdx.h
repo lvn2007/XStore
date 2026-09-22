@@ -101,6 +101,7 @@ inline std::string EncodeFDataForCatIdx(const XStore_Proto::FData &f_data) {
 }
 
 #include <array>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
@@ -150,6 +151,25 @@ public:
     void UpdateRow(uint64_t row_index, const std::vector<CatIdxObservation> &observations);
 
     bool MightContain(uint64_t block_index, uint32_t column_idx, const std::string &encoded_value);
+
+    // Appends one column's value->row-indices directory to the bitmap
+    // section (commit-safety: writes the directory bytes and fsyncs BEFORE
+    // updating+fsyncing header_.bitmap_section_offset -- a crash between the
+    // two leaves harmless unreferenced bytes past the last known-good
+    // offset, same "uncommitted tail is safely ignorable" shape the WAL
+    // itself relies on). Row indices per value need not be pre-sorted --
+    // stored as given (compaction naturally produces them in scan order).
+    void AppendBitmapSection(uint32_t column_idx, const std::map<std::string, std::vector<uint64_t>> &value_to_rows);
+
+    bool HasBitmapSection() const { return header_.bitmap_section_offset != 0; }
+
+    // Returns the exact row indices for (column_idx, encoded_value) if a
+    // directory exists for that column AND the value is present in it.
+    // nullopt covers BOTH "no directory for this column" (over cardinality
+    // cap, or year not compacted yet) and "directory exists but value
+    // absent" -- both mean the same thing to the caller: fall back to
+    // bloom+real-scan.
+    std::optional<std::vector<uint64_t>> LookupExact(uint32_t column_idx, const std::string &encoded_value);
 
     ~CatIdxFile();
 

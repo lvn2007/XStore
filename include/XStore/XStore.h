@@ -302,6 +302,17 @@ class XStore {
         // in-bounds rather than modulo-by-zero.
         static std::atomic<size_t> active_wal_shard_count;
 
+        // CatIdx compaction background thread (Task 9): one process-wide
+        // thread, started once from main.cpp (never from the XStore
+        // constructor -- unlike wal_shards/StartWalWriters, this must NOT
+        // fire during tests, since it owns a real background thread that
+        // polls the filesystem on an hour-long interval and would race
+        // against ScratchDir teardown between tests). Mirrors WalShard's
+        // stop_flag/thread shape one level up (one thread total here, not
+        // one per shard).
+        static std::thread catidx_compaction_thread_;
+        static std::atomic<bool> catidx_compaction_stop_flag_;
+
         std::string permitted_time_resolution[3] = {"SECOND", "MILLISECOND", "MICROSECOND"};
 
         int db_count = 0;
@@ -778,6 +789,22 @@ class XStore {
         // disk.
         static void ClearCatIdxRegistryForTests();
 
+        // Spawns the CatIdx compaction background thread (Task 9): once a
+        // year file goes cold (year < current calendar year), scans it once
+        // and builds an exact per-value bitmap directory, gated by
+        // CATIDX_MAX_BITMAP_DISTINCT_VALUES so a high-cardinality/continuous
+        // column never gets one (stays bloom+real-scan forever). Called
+        // exactly once, from main.cpp only -- deliberately NOT from the
+        // XStore constructor (unlike StartWalWriters), since every test in
+        // this binary constructs XStore instances against short-lived
+        // ScratchDir directories and this thread's own filesystem polling
+        // would otherwise race their teardown. The spawned thread owns one
+        // local XStore instance for its lifetime (this codebase's "one
+        // XStore per worker thread" convention, see the data_store_dir
+        // member comment above) so it can reach the non-static
+        // ExtractColumnByIndexSkipParse/CompactColdCatIdxForAllDbs path.
+        static void StartCatIdxCompactionThread(const std::string &data_store_dir);
+
     private:
         // Get current base directory
         std::string GetBaseDir();
@@ -1154,6 +1181,31 @@ class XStore {
         // plan for why reusing UpdateRow here (instead of a bespoke bulk
         // writer) is the deliberate, simplicity-first choice.
         void RebuildOneYearZoneMap(const std::string &db_base_path, unsigned short year, uint16_t row_length, uint32_t tracked_column_count);
+
+        // CatIdx compaction (Task 9): scans one cold <YEAR>.XSTORE file
+        // row-by-row and builds a bitmap section (value -> row indices) per
+        // tracked column via CatIdxFile::AppendBitmapSection, abandoning any
+        // column mid-scan the instant its distinct-value count crosses
+        // CATIDX_MAX_BITMAP_DISTINCT_VALUES (freed immediately, never
+        // finishes accumulating a disqualified column). Idempotent no-op if
+        // this year's .catidx already has a bitmap section.
+        //
+        // Deliberately a non-static instance method, unlike
+        // RebuildOneYearZoneMap above -- it must call the non-static
+        // ExtractColumnByIndexSkipParse (see that method's declaration
+        // above), which needs an XStore instance. The background thread in
+        // StartCatIdxCompactionThread owns one such instance for its
+        // lifetime; there is no other threadless-context precedent for this
+        // (ApplyWalRecord/WalWriterLoop are static but never call
+        // ExtractColumnByIndexSkipParse).
+        void CompactOneYearCatIdx(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                   uint32_t tracked_column_count);
+
+        // Scans every DB directory under data_store_dir and compacts every
+        // cold (year < current calendar year) .XSTORE file that doesn't
+        // already have a bitmap section. Called once per poll interval by
+        // the background thread started from StartCatIdxCompactionThread.
+        void CompactColdCatIdxForAllDbs(const std::string &data_store_dir);
 
         // Fetch targetFile's cached fd, creating (and ftruncate'ing to
         // totalRows*rowLength if new) the file on first use. Returns -1 on

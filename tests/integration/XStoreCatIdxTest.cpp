@@ -128,6 +128,64 @@ TEST(CatIdxFileTest, AbsentValueUsuallyNotFound) {
     EXPECT_LT(false_positives, 20); // well under 10% at these fill levels
 }
 
+// EnsureBlockLoaded/FlushBlock fix: MightContain (a pure read/query) must
+// never durably grow the .catidx file as a side effect of reading a
+// never-touched block -- only UpdateRow (a real mutation) may do that.
+TEST(CatIdxFileTest, MightContainOnNeverTouchedBlockDoesNotGrowFileButUpdateRowDoes) {
+    std::string path = TempCatIdxPath("might_contain_no_grow.catidx");
+    std::filesystem::remove(path);
+    CatIdxFile f;
+    ASSERT_TRUE(f.Open(path, 64, 4));
+
+    auto file_size = [&]() { return std::filesystem::file_size(path); };
+    uintmax_t size_after_open = file_size();
+
+    XStore_Proto::FData val;
+    val.set_int64data(999);
+    EXPECT_FALSE(f.MightContain(/*block_index=*/0, /*column_idx=*/0, EncodeFDataForCatIdx(val)));
+    EXPECT_EQ(file_size(), size_after_open)
+        << "MightContain on a never-touched block must not grow the file";
+
+    CatIdxObservation obs{/*column_idx=*/0, EncodeFDataForCatIdx(val), /*is_present=*/true};
+    f.UpdateRow(/*row_index=*/5, {obs});
+    EXPECT_GT(file_size(), size_after_open)
+        << "UpdateRow (a real mutation) must still write through";
+}
+
+TEST(CatIdxFileTest, AppendBitmapSectionThenExactLookupWorks) {
+    std::string path = TempCatIdxPath("bitmap_exact.catidx");
+    std::filesystem::remove(path);
+    CatIdxFile f;
+    ASSERT_TRUE(f.Open(path, 64, 1));
+
+    XStore_Proto::FData v137; v137.set_int64data(137);
+    std::string enc137 = EncodeFDataForCatIdx(v137);
+    f.AppendBitmapSection(/*column_idx=*/0, {{enc137, {5, 42, 99}}});
+
+    ASSERT_TRUE(f.HasBitmapSection());
+    auto rows = f.LookupExact(/*column_idx=*/0, enc137);
+    ASSERT_TRUE(rows.has_value());
+    EXPECT_EQ(*rows, (std::vector<uint64_t>{5, 42, 99}));
+
+    XStore_Proto::FData v138; v138.set_int64data(138);
+    EXPECT_FALSE(f.LookupExact(0, EncodeFDataForCatIdx(v138)).has_value());
+}
+
+TEST(CatIdxFileTest, ColumnOverCardinalityCapHasNoDirectory) {
+    std::string path = TempCatIdxPath("bitmap_over_cap.catidx");
+    std::filesystem::remove(path);
+    CatIdxFile f;
+    ASSERT_TRUE(f.Open(path, 64, 1));
+    // Column 0 never gets AppendBitmapSection called (compaction abandoned
+    // it mid-scan for exceeding CATIDX_MAX_BITMAP_DISTINCT_VALUES) --
+    // LookupExact must report "no directory" (nullopt), distinct from
+    // "directory exists but value absent" (also nullopt) -- both mean
+    // "caller must fall back to bloom+real-scan", so the same nullopt
+    // return is correct for both; HasBitmapSection() still returns false
+    // if literally nothing was ever appended for this year.
+    EXPECT_FALSE(f.HasBitmapSection());
+}
+
 TEST(GetOrOpenCatIdxTest, SameDbYearReturnsSameInstance) {
     XStore::ClearCatIdxRegistryForTests();
     std::string base = TempCatIdxPath("registry_db");

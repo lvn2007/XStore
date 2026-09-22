@@ -133,6 +133,17 @@ int main(int argc, char *argv[]) {
     // touches ZmqServer/XStore state -- see XStore_SysStats.h.
     SysStatsCollector::Start(host, stats_port, curve_identity, curve_keystore);
 
+    // Bootstrap XStore instance: its constructor is what actually starts
+    // StartWalWriters (via a process-wide once_flag) and runs InitDB for
+    // data_store_dir -- neither is called directly from main.cpp elsewhere.
+    // Reusing that same construction here (rather than duplicating
+    // GetBaseDir()'s cwd-based path logic) gives the compaction thread the
+    // authoritative data_store_dir and is a harmless no-op duplicate of the
+    // work every later ZmqServer worker's own XStore instance would trigger
+    // anyway (InitDB's own once-per-directory guard makes this idempotent).
+    XStore bootstrap_store;
+    XStore::StartCatIdxCompactionThread(bootstrap_store.data_store_dir);
+
     // Spin ZMQ Server
     ZmqServer x_store_zmq_server(thread_count);
     x_store_zmq_server.StartServer(host, port, curve_identity, curve_keystore);

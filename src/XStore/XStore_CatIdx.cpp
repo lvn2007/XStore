@@ -5,11 +5,18 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <algorithm>
+#include <chrono>
 #include <cstring>
+#include <ctime>
+#include <filesystem>
 #include <stdexcept>
+#include <thread>
+#include <unordered_set>
 
 #include <spdlog/spdlog.h>
 #include <spdlog/fmt/fmt.h>
+
+#include "include/DataStructs/TimeStruct.h"
 
 namespace {
 void BloomSetBit(unsigned char *entry, size_t entry_size, uint64_t h1, uint64_t h2, size_t k) {
@@ -89,20 +96,16 @@ void CatIdxFile::EnsureBlockLoaded(uint64_t block_index) {
         // Existing on-disk block -- load its current (always-durable) bloom bytes.
         [[maybe_unused]] ssize_t read_bytes = pread(fd_, entries.data(), bytes_to_read, offset);
     } else {
-        // Never-touched block -- zero-initialize and durably extend the file so
-        // later block-count math never has to guess whether this block exists.
+        // Never-touched block -- zero-initialize PURELY IN MEMORY. No disk
+        // write here: this branch is reached from MightContain (a pure
+        // read/query) just as often as from UpdateRow (a real mutation), and
+        // a FindByValue query over sparsely-populated data must never
+        // durably grow the .catidx file as a side effect of reading (see
+        // ZoneMapFile's equivalent method, which has the same "read never
+        // writes" contract). The durable write + block_count/header bump for
+        // a genuinely never-touched block now happens in FlushBlock, which
+        // is only ever called from UpdateRow.
         for (auto &e : entries) e.fill(0);
-        if (ftruncate(fd_, offset + static_cast<off_t>(bytes_to_read)) != 0) {
-            spdlog::error("[CATIDX] - Failed to extend file for block {}", block_index);
-        }
-        ssize_t written = pwrite(fd_, entries.data(), bytes_to_read, offset);
-        if (written != static_cast<ssize_t>(bytes_to_read)) {
-            spdlog::error("[CATIDX] - Short/failed write zero-filling block {}", block_index);
-        }
-        if (block_index >= header_.block_count) {
-            header_.block_count = static_cast<uint32_t>(block_index + 1);
-            [[maybe_unused]] ssize_t header_written = pwrite(fd_, &header_, sizeof(header_), 0);
-        }
     }
 
     cache_[block_index] = std::move(entries);
@@ -123,6 +126,9 @@ void CatIdxFile::FlushBlock(uint64_t block_index) {
     if (it == cache_.end()) return;
     off_t offset = BloomSectionFileOffset(block_index);
     size_t bytes = header_.tracked_column_count * sizeof(BloomEntry);
+    // pwrite past the current end-of-file is standard sparse-file growth on
+    // Linux -- no ftruncate needed first (this codebase already relies on
+    // that pattern elsewhere for data files).
     ssize_t written = pwrite(fd_, it->second.data(), bytes, offset);
     if (written != static_cast<ssize_t>(bytes)) {
         // Write-through is the whole point (see UpdateRow) -- a short/failed
@@ -131,6 +137,16 @@ void CatIdxFile::FlushBlock(uint64_t block_index) {
         // handling of the equivalent failure (UpdateRow's signature has no
         // failure-reaction path in this plan).
         spdlog::error("[CATIDX] - Short/failed write to block {}", block_index);
+    }
+
+    // This is the only place a never-touched block's existence becomes
+    // durable -- moved here from EnsureBlockLoaded so a pure read
+    // (MightContain) never bumps block_count/rewrites the header. FlushBlock
+    // is only ever called from UpdateRow (a genuine mutation), so this is
+    // still write-through for every real write.
+    if (block_index >= header_.block_count) {
+        header_.block_count = static_cast<uint32_t>(block_index + 1);
+        [[maybe_unused]] ssize_t header_written = pwrite(fd_, &header_, sizeof(header_), 0);
     }
 }
 
@@ -159,6 +175,73 @@ bool CatIdxFile::MightContain(uint64_t block_index, uint32_t column_idx, const s
     uint64_t h2 = Fnv1a64(encoded_value.data(), encoded_value.size());
     return BloomCheckBit(entries[column_idx].data(), entries[column_idx].size(),
                           h1, h2, XStoreTunables::CATIDX_BLOOM_HASH_COUNT);
+}
+
+void CatIdxFile::AppendBitmapSection(uint32_t column_idx, const std::map<std::string, std::vector<uint64_t>> &value_to_rows) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    struct stat st{};
+    fstat(fd_, &st);
+    off_t append_offset = st.st_size;
+
+    // Directory layout: [columnIdx u32][entryCount u32]
+    //   then per entry, sorted by encoded value bytes for binary search:
+    //   [valueLen u32][valueBytes][rowCount u32][rowIndices: u64 * rowCount]
+    std::string buf;
+    buf.append(reinterpret_cast<const char*>(&column_idx), sizeof(column_idx));
+    uint32_t entry_count = static_cast<uint32_t>(value_to_rows.size());
+    buf.append(reinterpret_cast<const char*>(&entry_count), sizeof(entry_count));
+
+    for (const auto &[value, rows] : value_to_rows) { // std::map iterates sorted by key -- binary-searchable on disk
+        uint32_t value_len = static_cast<uint32_t>(value.size());
+        buf.append(reinterpret_cast<const char*>(&value_len), sizeof(value_len));
+        buf.append(value);
+        uint32_t row_count = static_cast<uint32_t>(rows.size());
+        buf.append(reinterpret_cast<const char*>(&row_count), sizeof(row_count));
+        buf.append(reinterpret_cast<const char*>(rows.data()), rows.size() * sizeof(uint64_t));
+    }
+
+    [[maybe_unused]] ssize_t data_written = pwrite(fd_, buf.data(), buf.size(), append_offset);
+    fdatasync(fd_);
+
+    // Commit point: only now does the header admit this section exists.
+    if (header_.bitmap_section_offset == 0) {
+        header_.bitmap_section_offset = static_cast<uint64_t>(append_offset);
+    }
+    [[maybe_unused]] ssize_t header_written = pwrite(fd_, &header_, sizeof(header_), 0);
+    fdatasync(fd_);
+}
+
+std::optional<std::vector<uint64_t>> CatIdxFile::LookupExact(uint32_t column_idx, const std::string &encoded_value) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (header_.bitmap_section_offset == 0) return std::nullopt;
+
+    struct stat st{};
+    fstat(fd_, &st);
+    off_t pos = static_cast<off_t>(header_.bitmap_section_offset);
+
+    while (pos < st.st_size) {
+        uint32_t col; uint32_t entry_count;
+        [[maybe_unused]] ssize_t r1 = pread(fd_, &col, sizeof(col), pos); pos += sizeof(col);
+        [[maybe_unused]] ssize_t r2 = pread(fd_, &entry_count, sizeof(entry_count), pos); pos += sizeof(entry_count);
+
+        for (uint32_t i = 0; i < entry_count; ++i) {
+            uint32_t value_len;
+            [[maybe_unused]] ssize_t r3 = pread(fd_, &value_len, sizeof(value_len), pos); pos += sizeof(value_len);
+            std::string value(value_len, '\0');
+            [[maybe_unused]] ssize_t r4 = pread(fd_, value.data(), value_len, pos); pos += value_len;
+            uint32_t row_count;
+            [[maybe_unused]] ssize_t r5 = pread(fd_, &row_count, sizeof(row_count), pos); pos += sizeof(row_count);
+
+            if (col == column_idx && value == encoded_value) {
+                std::vector<uint64_t> rows(row_count);
+                [[maybe_unused]] ssize_t r6 = pread(fd_, rows.data(), row_count * sizeof(uint64_t), pos);
+                return rows;
+            }
+            pos += row_count * sizeof(uint64_t);
+        }
+    }
+    return std::nullopt;
 }
 
 CatIdxFile::~CatIdxFile() {
@@ -204,4 +287,118 @@ void XStore::ClearCatIdxRegistryForTests() {
     std::lock_guard<std::mutex> lock(catidx_registry_mutex_);
     catidx_registry_.clear();
     catidx_registry_lru_.clear();
+}
+
+void XStore::CompactOneYearCatIdx(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                   uint32_t tracked_column_count) {
+    std::string data_path = fmt::format("{}/{}.XSTORE", db_base_path, year);
+    if (!std::filesystem::exists(data_path)) return;
+
+    CatIdxFile &catidx = GetOrOpenCatIdx(db_base_path, year, row_length, tracked_column_count);
+    if (catidx.HasBitmapSection()) return; // already compacted, idempotent no-op
+
+    struct stat st{};
+    int fd = open(data_path.c_str(), O_RDONLY);
+    if (fd < 0) return;
+    fstat(fd, &st);
+    uint64_t total_rows = row_length > 0 ? static_cast<uint64_t>(st.st_size) / row_length : 0;
+
+    // {column_idx: {encoded_value: [row_index...]}} -- abandoned (erased)
+    // for a column the moment its distinct-value count crosses the cap, so
+    // an over-cap column never gets AppendBitmapSection called for it and
+    // stays bloom+real-scan-only, per the cardinality safety valve.
+    std::unordered_map<uint32_t, std::map<std::string, std::vector<uint64_t>>> accumulators;
+    std::unordered_set<uint32_t> abandoned_columns;
+    for (uint32_t c = 0; c < tracked_column_count; ++c) accumulators[c];
+
+    std::vector<char> row_buf(row_length);
+    for (uint64_t r = 0; r < total_rows; ++r) {
+        [[maybe_unused]] ssize_t row_read = pread(fd, row_buf.data(), row_length, static_cast<off_t>(r) * row_length);
+        for (uint32_t c = 0; c < tracked_column_count; ++c) {
+            if (abandoned_columns.count(c) > 0) continue;
+            XStore_Proto::FData f_data;
+            // Non-static member call, this XStore instance's own method --
+            // ExtractColumnByIndexSkipParse is non-static (needs `this`),
+            // which is exactly why CompactOneYearCatIdx itself is a
+            // non-static instance method rather than the brief's original
+            // static sketch. Signature: (row_ptr, row_len, unsigned short
+            // column_idx, FData& out_data) -> bool.
+            if (!ExtractColumnByIndexSkipParse(row_buf.data(), row_length, static_cast<unsigned short>(c), f_data)) continue;
+            std::string enc = EncodeFDataForCatIdx(f_data);
+            auto &bucket = accumulators[c][enc];
+            bucket.push_back(r);
+            if (accumulators[c].size() > XStoreTunables::CATIDX_MAX_BITMAP_DISTINCT_VALUES) {
+                accumulators[c].clear(); // free immediately, don't keep building a disqualified column
+                abandoned_columns.insert(c);
+            }
+        }
+    }
+    close(fd);
+
+    bool wrote_anything = false;
+    for (auto &[col, value_map] : accumulators) {
+        if (abandoned_columns.count(col) > 0 || value_map.empty()) continue;
+        catidx.AppendBitmapSection(col, value_map);
+        wrote_anything = true;
+    }
+    if (!wrote_anything) {
+        // Every column abandoned or empty -- still mark this year compacted
+        // (empty directory) so it isn't re-scanned every restart.
+        catidx.AppendBitmapSection(0, {});
+    }
+}
+
+void XStore::CompactColdCatIdxForAllDbs(const std::string &data_store_dir) {
+    unsigned short current_year = TimeStruct(static_cast<std::time_t>(std::time(nullptr)), XStore_Proto::SECOND).year;
+    if (!std::filesystem::exists(data_store_dir)) return;
+    for (auto &p : std::filesystem::directory_iterator(data_store_dir)) {
+        if (!p.is_directory()) continue;
+        std::string db_base_path = p.path().string();
+
+        // Reuse this XStore instance's own config loader (the same one
+        // every other read path uses, e.g. ExistsAggregate/FindByValue in
+        // XStore_Aggregates.cpp) rather than hand-rolling a config-file
+        // parse. GetOrLoadCfg returns false for a directory that isn't a
+        // real DB directory (e.g. the WAL/ sibling directory, which has no
+        // matching .CFG file) -- skip those.
+        XStore_Proto::ConfigStruct cfg_struct;
+        std::string db_name = p.path().filename().string();
+        if (!GetOrLoadCfg(db_name, db_base_path, cfg_struct)) continue;
+
+        for (auto &f : std::filesystem::directory_iterator(db_base_path)) {
+            std::string filename = f.path().filename().string();
+            if (filename.size() < 7 || filename.substr(filename.size() - 7) != ".XSTORE") continue;
+            unsigned short year;
+            try { year = static_cast<unsigned short>(std::stoi(filename.substr(0, filename.size() - 7))); }
+            catch (...) { continue; }
+            if (year >= current_year) continue; // only cold (closed) years
+
+            CompactOneYearCatIdx(db_base_path, year, static_cast<uint16_t>(cfg_struct.rowlength()),
+                                  EffectiveTrackedColumnCount(cfg_struct));
+        }
+    }
+}
+
+std::thread XStore::catidx_compaction_thread_;
+std::atomic<bool> XStore::catidx_compaction_stop_flag_{false};
+
+void XStore::StartCatIdxCompactionThread(const std::string &data_store_dir) {
+    catidx_compaction_thread_ = std::thread([data_store_dir]() {
+        XStore compaction_store; // one instance for this thread's lifetime, same convention every ZMQ worker already follows
+        while (!XStore::catidx_compaction_stop_flag_.load(std::memory_order_relaxed)) {
+            compaction_store.CompactColdCatIdxForAllDbs(data_store_dir);
+            for (uint64_t waited = 0; waited < XStoreTunables::CATIDX_COMPACTION_POLL_INTERVAL_SEC &&
+                 !XStore::catidx_compaction_stop_flag_.load(std::memory_order_relaxed); ++waited) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+        }
+    });
+    // Same atexit-at-spawn-time ordering argument as StartWalWriters: register
+    // the join here so it runs before any static logger/queue teardown.
+    std::atexit([]() {
+        XStore::catidx_compaction_stop_flag_.store(true, std::memory_order_relaxed);
+        if (XStore::catidx_compaction_thread_.joinable()) {
+            XStore::catidx_compaction_thread_.join();
+        }
+    });
 }
