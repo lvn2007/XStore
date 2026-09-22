@@ -1,4 +1,5 @@
 #include "include/XStore/XStore_Internal.h"
+#include "include/XStore/XStore_WireEncode.h"
 #include "include/DataStructs/TimeStruct.h"
 #include "include/DataStructs/FileRangeLock.h"
 #include "include/XStore/XStore_PreadPool.h"
@@ -968,4 +969,145 @@ void XStore::TopKAggregate(unsigned long long int start_epoch_t, unsigned long l
         entry->set_value(ranked[i].first);
         entry->set_count(ranked[i].second);
     }
+}
+
+// FIND BY VALUE (streamed, wire-format encode -- see XStore.h's declaration
+// comment for the general contract). Deliberately NOT built on
+// WalkYearSpan/WalkYearSpanParallel: every kernel that traversal drives
+// (Min/Max/Sum/Avg/Exists/Ohlc/Variance/Stddev/Percentile/DistinctCount/
+// TopK) only ever needs a year-relative row index, never a real epoch_time,
+// so that shared kernel signature has nothing that reconstructs one. This
+// mirrors RangeQuery's own hand-rolled per-year loop instead (see
+// XStore_RangeOps.cpp), where iter_epoch is the literal loop variable and
+// epoch_time is therefore always trivially correct -- adapted here so the
+// innermost loop walks BLOCKS (RowsPerBlock/BlockIndexForRow, same block
+// geometry the .zmap/.catidx files already share) rather than individual
+// rows: a CatIdxFile bloom filter (Task 4/5) can rule out an entire block at
+// once, skipping straight to the block's end+1, before falling back to a
+// real per-row decode+compare scan for any block it can't rule out. Matches
+// emit incrementally as they're found -- safe here (unlike a
+// WalkYearSpanParallel kernel) because this loop is single-threaded and
+// sequential, same as RangeQuery's own incremental emit_chunk calls.
+void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
+                          std::string_view db_name_view, int32_t column_idx, const XStore_Proto::FData &value,
+                          size_t chunk_size_bytes, const std::function<void(std::string&&, bool)> &emit_chunk) {
+    const std::string &db_name = UpperCaseInto(db_name_view);
+    const std::string &db_base_path_str = CachedDbBasePath(db_name);
+
+    bool has_warning = false;
+    std::string last_warning;
+    auto set_warning = [&](const char *tag, const std::string &body) {
+        has_warning = true;
+        last_warning = tag;
+        last_warning += body;
+    };
+    auto finish = [&](std::string &&chunk_buf) {
+        if (has_warning) {
+            XStoreWireEncode::AppendQueryStatus(chunk_buf, last_warning);
+        }
+        emit_chunk(std::move(chunk_buf), true);
+    };
+
+    XStore_Proto::ConfigStruct cfg_struct;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+        set_warning("[WARNING] ", fmt::format("[FINDBYVALUE] [DB: {}] - {}.CFG does not exist", db_name, db_name));
+        finish(std::string());
+        return;
+    }
+    if (start_epoch_t > end_epoch_t) {
+        set_warning("[WARNING] ", fmt::format("[FINDBYVALUE] [DB: {}] - Target end time must be after start time", db_name));
+        finish(std::string());
+        return;
+    }
+    if (std::filesystem::is_directory(db_base_path_str) == 0) {
+        set_warning("[WARNING] ", fmt::format("[FINDBYVALUE] [DB: {}] - DB does not exist", db_name));
+        finish(std::string());
+        return;
+    }
+
+    std::string encoded_target = EncodeFDataForCatIdx(value);
+    uint32_t tracked_column_count = EffectiveTrackedColumnCount(cfg_struct);
+
+    std::string chunk_buf;
+    chunk_buf.reserve(chunk_size_bytes + 4096);
+
+    unsigned long long int iter_epoch = start_epoch_t;
+    while (iter_epoch <= end_epoch_t) {
+        TimeStruct curr_ts(iter_epoch, cfg_struct.timeresolution());
+        const std::string &target_file_path = CachedYearFilePath(db_base_path_str, curr_ts.year);
+        const unsigned long long int segment_end = std::min(end_epoch_t, static_cast<unsigned long long int>(curr_ts.last_epoch));
+
+        if (std::filesystem::exists(target_file_path) == 0) {
+            set_warning("[WARNING] ", fmt::format("[FINDBYVALUE] [DB: {}] - {}.XSTORE does not exist", db_name, curr_ts.year));
+            iter_epoch = segment_end + 1;
+            continue;
+        }
+
+        std::shared_ptr<void> mapped_handle = GetOrMapFile(target_file_path, cfg_struct.rowlength(), curr_ts.last_epoch - curr_ts.first_epoch);
+        if (mapped_handle == nullptr) {
+            set_warning("[ERROR] ", fmt::format("[FINDBYVALUE] [DB: {}] - Unable to open/map {}.XSTORE", db_name, curr_ts.year));
+            iter_epoch = segment_end + 1;
+            continue;
+        }
+        void *mapped_base = mapped_handle.get();
+
+        CatIdxFile *catidx = nullptr;
+        if (column_idx >= 0 && static_cast<uint32_t>(column_idx) < tracked_column_count) {
+            catidx = &GetOrOpenCatIdx(db_base_path_str, curr_ts.year, static_cast<uint16_t>(cfg_struct.rowlength()), tracked_column_count);
+        }
+        uint64_t rows_per_block = RowsPerBlock(static_cast<uint16_t>(cfg_struct.rowlength()));
+
+        const unsigned long long int first_offset = (iter_epoch - curr_ts.first_epoch) * cfg_struct.rowlength();
+        const unsigned long long int region_length = (segment_end - iter_epoch + 1) * cfg_struct.rowlength();
+
+        {
+            FileRangeLockGuard guard(target_file_path, first_offset, region_length, FileRangeLock::LockType::READ);
+            {
+                static const long PAGE_SIZE = sysconf(_SC_PAGE_SIZE);
+                char *span_start = static_cast<char*>(mapped_base) + first_offset;
+                uintptr_t aligned_addr = reinterpret_cast<uintptr_t>(span_start) & ~(static_cast<uintptr_t>(PAGE_SIZE) - 1);
+                size_t align_slop = reinterpret_cast<uintptr_t>(span_start) - aligned_addr;
+                madvise(reinterpret_cast<void*>(aligned_addr), region_length + align_slop, MADV_WILLNEED);
+            }
+
+            unsigned long long int epoch_time = iter_epoch;
+            while (epoch_time <= segment_end) {
+                uint64_t row_index = epoch_time - curr_ts.first_epoch;
+                uint64_t block_index = BlockIndexForRow(row_index, rows_per_block);
+                uint64_t block_start_row = block_index * rows_per_block;
+                unsigned long long int block_end_epoch = std::min(segment_end,
+                    static_cast<unsigned long long int>(curr_ts.first_epoch + block_start_row + rows_per_block - 1));
+
+                bool must_scan = true;
+                if (catidx != nullptr) {
+                    must_scan = catidx->MightContain(block_index, static_cast<uint32_t>(column_idx), encoded_target);
+                    // (Task 10 inserts a bitmap-exact-lookup branch here, between
+                    // the bloom check above and the real-scan fallback below.)
+                }
+
+                if (must_scan && column_idx >= 0) {
+                    for (unsigned long long int e = epoch_time; e <= block_end_epoch; e++) {
+                        unsigned long long int offset = (e - curr_ts.first_epoch) * cfg_struct.rowlength();
+                        const char *row_ptr = static_cast<const char*>(mapped_base) + offset;
+                        XStore_Proto::FData f_data;
+                        if (ExtractColumnByIndexSkipParse(row_ptr, cfg_struct.rowlength(), static_cast<unsigned short>(column_idx), f_data)) {
+                            if (EncodeFDataForCatIdx(f_data) == encoded_target) {
+                                XStoreWireEncode::EncodeQueryResponseEntry(chunk_buf, e, row_ptr, cfg_struct.rowlength());
+                                if (chunk_buf.size() >= chunk_size_bytes) {
+                                    emit_chunk(std::move(chunk_buf), false);
+                                    chunk_buf.clear();
+                                    chunk_buf.reserve(chunk_size_bytes + 4096);
+                                }
+                            }
+                        }
+                    }
+                }
+                epoch_time = block_end_epoch + 1;
+            }
+        }
+
+        iter_epoch = segment_end + 1;
+    }
+
+    finish(std::move(chunk_buf));
 }

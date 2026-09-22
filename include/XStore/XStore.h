@@ -415,6 +415,29 @@ class XStore {
                                  std::string_view db_name, size_t chunk_size_bytes,
                                  const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk);
 
+        // FIND BY VALUE (streamed, wire-format encode -- same chunking
+        // contract as RangeQuery above, same RangeQuery_REP wire shape on
+        // the response). Equality lookup on one column: [startEpochT,
+        // endEpochT] narrows the year/row span the same way RangeQuery
+        // does, columnIdx picks which column to compare, and only rows
+        // whose column exactly matches value are emitted -- unlike
+        // RangeQuery, which emits every row in range unconditionally. Not
+        // built on WalkYearSpan/WalkYearSpanParallel: this needs a real
+        // per-row epoch_time (those kernels only ever hand back a
+        // year-relative row index), so it has its own RangeQuery-shaped
+        // manual per-year loop instead (see XStore_RangeOps.cpp -- no,
+        // XStore_Aggregates.cpp -- for the implementation and why). Per
+        // year, a CatIdxFile bloom filter (Task 4/5) prunes whole blocks
+        // that cannot contain the target value before falling back to a
+        // real per-row decode+compare scan for any block the bloom can't
+        // rule out; columnIdx >= this DB's EffectiveTrackedColumnCount (or
+        // negative) has no bloom coverage at all and unconditionally
+        // real-scans every block instead, still correct, just without the
+        // pruning speedup.
+        void FindByValue(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
+                          std::string_view db_name, int32_t column_idx, const XStore_Proto::FData &value,
+                          size_t chunk_size_bytes, const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk);
+
         // RANGE DELETE
         [[nodiscard]] XStore_Proto::RangeDelete_REP RangeDelete(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name);
 

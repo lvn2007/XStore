@@ -195,4 +195,69 @@ TEST_F(XStoreCatIdxTestFixture, InsertedValueBloomIsSetAfterApplyWalRecord) {
     EXPECT_TRUE(catidx.MightContain(0, 0, EncodeFDataForCatIdx(val)));
 }
 
+// FindByValue (Task 7): bloom-accelerated equality lookup with real-scan
+// fallback. Same fixture/insert pattern as InsertedValueBloomIsSetAfter
+// ApplyWalRecord above -- a real XStore instance + UnaryInsert through the
+// full WAL apply path, not a direct CatIdxFile call.
+TEST_F(XStoreCatIdxTestFixture, FindByValueReturnsOnlyMatchingRows) {
+    XStore store;
+    CreateTestDb(store, "FINDBYVALUE1", XStore_Proto::SECOND, 64);
+
+    for (int64_t i = 0; i < 300; ++i) {
+        XStore_Proto::RowData row;
+        row.add_fielddata()->set_int64data(i % 5); // column 0 cycles 0..4
+        XStore_Proto::UnaryInsert_REP rep;
+        store.UnaryInsert(1000 + i, row, "FINDBYVALUE1", &rep, XStore_Proto::SYNC);
+    }
+
+    XStore_Proto::FData target;
+    target.set_int64data(2);
+
+    std::string reassembled;
+    bool saw_last = false;
+    store.FindByValue(1000, 1000 + 299, "FINDBYVALUE1", /*column_idx=*/0, target,
+                       XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                       [&](std::string &&chunk, bool is_last) {
+                           reassembled += chunk;
+                           saw_last = is_last;
+                       });
+    EXPECT_TRUE(saw_last);
+
+    // Wire-compatible: FindByValue's chunk stream reuses RangeQuery's
+    // EncodeQueryResponseEntry, so RangeQuery_REP parses it directly.
+    XStore_Proto::RangeQuery_REP rep;
+    ASSERT_TRUE(rep.ParseFromString(reassembled));
+    EXPECT_EQ(rep.queryresponse_size(), 60); // 300 rows / 5 values = 60 matches for value=2
+    for (const auto &entry : rep.queryresponse()) {
+        EXPECT_EQ((entry.timestamp() - 1000) % 5, 2);
+    }
+}
+
+TEST_F(XStoreCatIdxTestFixture, FindByValueColumnPastTrackedCountStillCorrectViaFallback) {
+    // columnIdx >= trackedColumnCount: no bloom ever existed for it, must
+    // still run the fallback path safely and correctly, not error, crash,
+    // or spuriously match garbage bytes from a miscomputed offset. Column
+    // 999 was never populated (the row only has one real field, at index
+    // 0), so the correct answer is 0 matches -- a hole, not a match.
+    XStore store;
+    CreateTestDb(store, "FINDBYVALUE2", XStore_Proto::SECOND, 64);
+
+    XStore_Proto::RowData row;
+    row.add_fielddata()->set_int64data(42);
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    store.UnaryInsert(2000, row, "FINDBYVALUE2", &insert_rep, XStore_Proto::SYNC);
+
+    XStore_Proto::FData target;
+    target.set_int64data(42);
+
+    std::string reassembled;
+    store.FindByValue(2000, 2000, "FINDBYVALUE2", /*column_idx=*/999, target,
+                       XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                       [&](std::string &&chunk, bool) { reassembled += chunk; });
+
+    XStore_Proto::RangeQuery_REP rep;
+    ASSERT_TRUE(rep.ParseFromString(reassembled));
+    EXPECT_EQ(rep.queryresponse_size(), 0);
+}
+
 } // namespace
