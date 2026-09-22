@@ -1031,6 +1031,20 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
     std::string chunk_buf;
     chunk_buf.reserve(chunk_size_bytes + 4096);
 
+    // Unlike RangeQuery, an equality predicate's result size can't be known
+    // ahead of a scan (it depends on how many rows actually match, not the
+    // queried time range), so RangeQuery's pre-flight check-before-scanning
+    // guard (XStore_RangeOps.cpp) doesn't apply here -- but the same
+    // underlying risk does: the client reassembles every streamed chunk into
+    // one buffer before ParseFromArray/ParseFromString (XStore_Client.h's
+    // SendRecv), so a >2GB reassembled result still corrupts on the client.
+    // Tracked as a running total across the whole query (not just the
+    // current chunk_buf) and checked after every match, so an unselective
+    // predicate over a wide range stops scanning instead of streaming past
+    // the limit.
+    unsigned long long int total_emitted_bytes = 0;
+    bool size_limit_exceeded = false;
+
     unsigned long long int iter_epoch = start_epoch_t;
     while (iter_epoch <= end_epoch_t) {
         TimeStruct curr_ts(iter_epoch, cfg_struct.timeresolution());
@@ -1092,20 +1106,29 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
                         XStore_Proto::FData f_data;
                         if (ExtractColumnByIndexSkipParse(row_ptr, cfg_struct.rowlength(), static_cast<unsigned short>(column_idx), f_data)) {
                             if (EncodeFDataForCatIdx(f_data) == encoded_target) {
+                                size_t size_before = chunk_buf.size();
                                 XStoreWireEncode::EncodeQueryResponseEntry(chunk_buf, e, row_ptr, cfg_struct.rowlength());
+                                total_emitted_bytes += static_cast<unsigned long long int>(chunk_buf.size() - size_before);
                                 if (chunk_buf.size() >= chunk_size_bytes) {
                                     emit_chunk(std::move(chunk_buf), false);
                                     chunk_buf.clear();
                                     chunk_buf.reserve(chunk_size_bytes + 4096);
                                 }
+                                if (total_emitted_bytes > 2'000'000'000) {
+                                    set_warning("[WARNING] ", fmt::format("[FINDBYVALUE] [DB: {}] - Query results exceeded 2GB, results truncated", db_name));
+                                    size_limit_exceeded = true;
+                                    break;
+                                }
                             }
                         }
                     }
                 }
+                if (size_limit_exceeded) break;
                 epoch_time = block_end_epoch + 1;
             }
         }
 
+        if (size_limit_exceeded) break;
         iter_epoch = segment_end + 1;
     }
 

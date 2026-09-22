@@ -260,4 +260,39 @@ TEST_F(XStoreCatIdxTestFixture, FindByValueColumnPastTrackedCountStillCorrectVia
     EXPECT_EQ(rep.queryresponse_size(), 0);
 }
 
+// RowsPerBlock(64) = 32768 rows/block, so all 300 rows below (and the 300
+// rows in FindByValueReturnsOnlyMatchingRows above) fall inside block 0 --
+// neither of the tests above ever takes the MightContain()-returns-false
+// skip branch. This test queries a value that was never inserted (only
+// 0..4 ever appear), so the block's real bloom filter -- built from the
+// actual inserted values -- gets a genuine chance to say "definitely not
+// present" and exercise the skip-arithmetic (epoch_time = block_end_epoch +
+// 1). Bloom filters are probabilistic, so a false positive here (bloom says
+// "maybe", falls back to a real scan that correctly finds nothing) is also
+// valid behavior -- either way queryresponse_size() must be 0, so this
+// doesn't assert on which branch fired, only on the correct end result.
+TEST_F(XStoreCatIdxTestFixture, FindByValueForAbsentValueSkipsBlockViaBloom) {
+    XStore store;
+    CreateTestDb(store, "FINDBYVALUE3", XStore_Proto::SECOND, 64);
+
+    for (int64_t i = 0; i < 300; ++i) {
+        XStore_Proto::RowData row;
+        row.add_fielddata()->set_int64data(i % 5); // column 0 cycles 0..4
+        XStore_Proto::UnaryInsert_REP rep;
+        store.UnaryInsert(1000 + i, row, "FINDBYVALUE3", &rep, XStore_Proto::SYNC);
+    }
+
+    XStore_Proto::FData target;
+    target.set_int64data(99); // never inserted -- 0..4 are the only real values
+
+    std::string reassembled;
+    store.FindByValue(1000, 1000 + 299, "FINDBYVALUE3", /*column_idx=*/0, target,
+                       XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                       [&](std::string &&chunk, bool) { reassembled += chunk; });
+
+    XStore_Proto::RangeQuery_REP rep;
+    ASSERT_TRUE(rep.ParseFromString(reassembled));
+    EXPECT_EQ(rep.queryresponse_size(), 0);
+}
+
 } // namespace
