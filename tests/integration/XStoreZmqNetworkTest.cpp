@@ -126,6 +126,11 @@ XStore_Proto::Request Wrap(const XStore_Proto::TopK_REQ &req) {
     *w.mutable_topk() = req;
     return w;
 }
+XStore_Proto::Request Wrap(const XStore_Proto::FindByValue_REQ &req) {
+    XStore_Proto::Request w;
+    *w.mutable_findbyvalue() = req;
+    return w;
+}
 
 }  // namespace
 
@@ -641,6 +646,43 @@ TEST_F(XStoreZmqNetworkTest, PercentileDistinctCountTopKRoundTripOverNetwork) {
     ASSERT_EQ(topk_rep.entries_size(), 1);
     EXPECT_DOUBLE_EQ(topk_rep.entries(0).value(), 2.0);
     EXPECT_EQ(topk_rep.entries(0).count(), 2u);
+}
+
+// ---------------------------------------------------------------------
+// FIND BY VALUE -- categorical equality lookup, over the wire
+// ---------------------------------------------------------------------
+
+TEST_F(XStoreZmqNetworkTest, FindByValueRoundTripOverNetwork) {
+    XStore_Proto::CreateDB_REQ create_req;
+    create_req.set_rtype(XStore_Proto::CREATEDB);
+    create_req.set_dbname("ZMQ_FINDBYVALUE_DB");
+    create_req.set_timeresolution(XStore_Proto::SECOND);
+    create_req.set_rowlength(128);
+    SendRequest<XStore_Proto::CreateDB_REP>(Wrap(create_req));
+
+    for (int64_t i = 0; i < 50; ++i) {
+        XStore_Proto::UnaryInsert_REQ insert_req;
+        insert_req.set_rtype(XStore_Proto::UNARYINSERT);
+        insert_req.set_dbname("ZMQ_FINDBYVALUE_DB");
+        insert_req.set_timestamp(TS_2020_MID + i);
+        insert_req.set_durabilitymode(XStore_Proto::SYNC);
+        *insert_req.mutable_data() = MakeRow({FInt64(i % 3)});
+        SendRequest<XStore_Proto::UnaryInsert_REP>(Wrap(insert_req));
+    }
+
+    XStore_Proto::FindByValue_REQ find_req;
+    find_req.set_rtype(XStore_Proto::FINDBYVALUE);
+    find_req.set_dbname("ZMQ_FINDBYVALUE_DB");
+    find_req.set_starttime(TS_2020_MID);
+    find_req.set_endtime(TS_2020_MID + 49);
+    find_req.set_columnidx(0);
+    *find_req.mutable_value() = FInt64(1);
+
+    auto find_rep = SendRequest<XStore_Proto::FindByValue_REP>(Wrap(find_req));
+    ASSERT_GT(find_rep.queryresponse_size(), 0);
+    for (const auto &entry : find_rep.queryresponse()) {
+        EXPECT_EQ(static_cast<int64_t>(entry.timestamp() - TS_2020_MID) % 3, 1);
+    }
 }
 
 // ---------------------------------------------------------------------

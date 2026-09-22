@@ -521,6 +521,20 @@ class XStoreClient {
       return SendRecv<XStore_Proto::RangeQuery_REP>(to_server);
   }
 
+  [[nodiscard]] XStore_Proto::FindByValue_REP FindByValue(uint64_t start_time, uint64_t end_time,
+                                                            std::string_view db_name, int32_t column_idx,
+                                                            const XStore_Proto::FData &value) {
+      XStore_Proto::Request to_server;
+      auto *payload = to_server.mutable_findbyvalue();
+      payload->set_rtype(XStore_Proto::FINDBYVALUE);
+      payload->set_starttime(start_time);
+      payload->set_endtime(end_time);
+      payload->set_dbname(std::string(db_name));
+      payload->set_columnidx(column_idx);
+      *payload->mutable_value() = value;
+      return SendRecv<XStore_Proto::FindByValue_REP>(to_server);
+  }
+
   [[nodiscard]] std::string RangeDelete(uint64_t start_time, uint64_t end_time, std::string_view db_name) {
       XStore_Proto::Request to_server;
       auto *payload = to_server.mutable_rangedelete();

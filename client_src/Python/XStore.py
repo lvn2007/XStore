@@ -342,6 +342,22 @@ class XStoreClient:
 
         return self._sendRecv(envelope, XStore_Proto.RangeQuery_REP)
 
+    def findByValue(self, startUnixTime, endUnixTime, targetDBName, columnIdx, value):
+        """
+        :param value: an XStore_Proto.FData instance -- the exact value to match
+        :return: FindByValue_REP (queryResponse: repeated UnaryQuery_REP, queryStatus)
+        """
+        envelope = XStore_Proto.Request()
+        payload = envelope.findbyvalue
+        payload.RType = XStore_Proto.FINDBYVALUE
+        payload.startTime = startUnixTime
+        payload.endTime = endUnixTime
+        payload.dbName = targetDBName
+        payload.columnIdx = columnIdx
+        payload.value.CopyFrom(value)
+
+        return self._sendRecv(envelope, XStore_Proto.FindByValue_REP)
+
     def batchQuery(self, dataList, targetDBName, SortTime=False):
         """
         :param dataList:

@@ -419,6 +419,19 @@ void ZmqServer::WorkerRoutine(std::string server_addr) {
                     break;
                 }
 
+                // FIND BY VALUE (categorical equality lookup)
+                case XStore_Proto::Request::kFindbyvalue: {
+                    const auto &req = client_request->findbyvalue();
+                    my_store.FindByValue(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), req.value(),
+                        XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                        [&](std::string &&chunk, bool is_last) {
+                            socket.send(zmq::buffer(chunk),
+                                        is_last ? zmq::send_flags::dontwait
+                                                : (zmq::send_flags::dontwait | zmq::send_flags::sndmore));
+                        });
+                    break;
+                }
+
                 // RANGE DELETE
                 case XStore_Proto::Request::kRangedelete: {
                     const auto &req = client_request->rangedelete();
