@@ -494,33 +494,70 @@ void XStore::RebuildOneYearCatIdxBloom(const std::string &db_base_path, unsigned
 }
 
 void XStore::RebuildStaleCatIdxForDb(const std::string &db_name, const std::string &db_base_path,
-                                      const XStore_Proto::ConfigStruct &cfg_struct) {
+                                      const XStore_Proto::ConfigStruct &cfg_struct,
+                                      const std::set<unsigned short> &force_rebuild_years) {
     uint32_t desired_tracked_columns = EffectiveTrackedColumnCount(cfg_struct);
     uint16_t row_length = static_cast<uint16_t>(cfg_struct.rowlength());
 
+    // Pass 1 (read-only): enumerate <YEAR>.XSTORE data files, not .catidx
+    // sidecars -- a year with real row data but no .catidx at all (every
+    // pre-existing year, the first time this feature lands on old data)
+    // would never be seen by a .catidx-driven iteration at all, and would
+    // then only get a lazy, all-zero, permanently-false-negative .catidx
+    // the first time FindByValue happened to touch it. Collected into a
+    // vector here rather than acted on inline -- mutating db_base_path
+    // (the remove+rescan in pass 2) while a directory_iterator over that
+    // same directory is still alive is unspecified behavior.
+    std::vector<unsigned short> years_needing_rebuild;
     for (auto &f : std::filesystem::directory_iterator(db_base_path)) {
         std::string filename = f.path().filename().string();
-        if (filename.size() < 7 || filename.substr(filename.size() - 7) != ".catidx") continue;
+        if (filename.size() < 7 || filename.substr(filename.size() - 7) != ".XSTORE") continue;
         std::string year_str = filename.substr(0, filename.size() - 7);
         unsigned short year;
         try { year = static_cast<unsigned short>(std::stoi(year_str)); } catch (...) { continue; }
 
-        std::string path = f.path().string();
-        int fd = open(path.c_str(), O_RDONLY);
-        if (fd < 0) continue;
-        CatIdxFileHeader on_disk{};
-        bool readable = pread(fd, &on_disk, sizeof(on_disk), 0) == static_cast<ssize_t>(sizeof(on_disk));
-        close(fd);
-
-        bool stale = !readable || on_disk.magic != CatIdxFileHeader{}.magic ||
-                     on_disk.version != XStoreTunables::CATIDX_VERSION ||
-                     on_disk.tracked_column_count < desired_tracked_columns;
-        if (stale) {
-            spdlog::info("[CATIDX REBUILD] [DB: {}] - rebuilding stale {} (tracked_column_count {} < desired {})",
-                         db_name, filename, on_disk.tracked_column_count, desired_tracked_columns);
-            std::filesystem::remove(path);
-            RebuildOneYearCatIdxBloom(db_base_path, year, row_length, desired_tracked_columns);
+        bool stale;
+        if (force_rebuild_years.count(year) > 0) {
+            // WAL-replayed year: catidx_observations is never repopulated
+            // by ParseWalRecord, so ApplyWalRecord's UpdateRow(diff, {})
+            // sets zero bloom bits for these rows -- but the header stays
+            // structurally fine (right magic/version/width), so none of
+            // the checks below would ever catch it. Unconditional rebuild,
+            // same as RebuildStaleZoneMapsForDb's identical fix.
+            stale = true;
+        } else {
+            std::string catidx_path = fmt::format("{}/{}.catidx", db_base_path, year);
+            if (!std::filesystem::exists(catidx_path)) {
+                // No sidecar at all -- the exact gap this fix round closes.
+                stale = true;
+            } else {
+                int fd = open(catidx_path.c_str(), O_RDONLY);
+                if (fd < 0) {
+                    stale = true;
+                } else {
+                    CatIdxFileHeader on_disk{};
+                    bool readable = pread(fd, &on_disk, sizeof(on_disk), 0) == static_cast<ssize_t>(sizeof(on_disk));
+                    close(fd);
+                    stale = !readable || on_disk.magic != CatIdxFileHeader{}.magic ||
+                            on_disk.version != XStoreTunables::CATIDX_VERSION ||
+                            on_disk.tracked_column_count < desired_tracked_columns;
+                }
+            }
         }
+        if (stale) years_needing_rebuild.push_back(year);
+    }
+
+    // Pass 2 (mutating, sequential -- deliberately not parallelized): the
+    // directory_iterator above has gone out of scope, so remove+rescan is
+    // now safe. std::filesystem::remove(path, ec) is a documented no-op
+    // (returns false, no exception) when the path doesn't exist, so this
+    // is correct whether or not this year ever had a .catidx to begin with.
+    for (unsigned short year : years_needing_rebuild) {
+        std::string catidx_path = fmt::format("{}/{}.catidx", db_base_path, year);
+        spdlog::info("[CATIDX REBUILD] [DB: {}] - rebuilding stale/missing {}.catidx", db_name, year);
+        std::error_code remove_ec;
+        std::filesystem::remove(catidx_path, remove_ec);
+        RebuildOneYearCatIdxBloom(db_base_path, year, row_length, desired_tracked_columns);
     }
 }
 

@@ -846,14 +846,38 @@ class XStore {
         void RebuildOneYearCatIdxBloom(const std::string &db_base_path, unsigned short year, uint16_t row_length,
                                         uint32_t tracked_column_count);
 
-        // Task 11: scans db_base_path for every <YEAR>.catidx sidecar and
-        // discards+resynchronously-rebuilds (via RebuildOneYearCatIdxBloom)
-        // any whose on-disk tracked_column_count is narrower than this DB's
-        // current EffectiveTrackedColumnCount (or whose header is missing/
-        // corrupt/wrong-version) -- called from InitDB(), before any worker
-        // thread sharing this data_store_dir can serve a request, same
-        // synchronous-during-startup timing as RebuildStaleZoneMapsForDb.
-        // Deliberately narrower in scope than that zone-map sibling: only
+        // Task 11 (+ review fix round): scans db_base_path for every
+        // <YEAR>.XSTORE data file (NOT <YEAR>.catidx -- iterating the
+        // sidecar itself would silently skip any year that has real row
+        // data but no .catidx at all, which is exactly the state every
+        // pre-existing year is in the first time this feature is deployed
+        // onto old data; GetOrOpenCatIdx would then lazily create an
+        // all-zero .catidx the first time FindByValue happened to touch
+        // that year, and every block in it would be a permanent bloom
+        // false negative) and discards+resynchronously-rebuilds (via
+        // RebuildOneYearCatIdxBloom) any year whose .catidx is missing
+        // entirely, whose header is unreadable/corrupt/wrong-version, whose
+        // on-disk tracked_column_count is narrower than this DB's current
+        // EffectiveTrackedColumnCount, or whose year is in
+        // force_rebuild_years (this DB's entry from ReplayWal's
+        // ReplayedYearMap -- a WAL-replayed row carries no
+        // catidx_observations, so UpdateRow sets zero bloom bits for it,
+        // and the .catidx header stays structurally fine, so the other
+        // checks alone would never catch it; see ReplayedYearMap in this
+        // header for the identical zone-map-side bug this mirrors) --
+        // called from InitDB(), before any worker thread sharing this
+        // data_store_dir can serve a request, same synchronous-during-
+        // startup timing as RebuildStaleZoneMapsForDb.
+        //
+        // Two-pass: collects every year needing rebuild via a read-only
+        // directory_iterator pass first, THEN does the remove+rescan work
+        // in a second, plain sequential pass after that iterator has gone
+        // out of scope -- mutating db_base_path while a
+        // directory_iterator over it is still live is unspecified
+        // behavior, same reason RebuildStaleZoneMapsForDb collects into
+        // years_needing_rebuild before its own rebuild pass.
+        //
+        // Deliberately narrower in scope than its zone-map sibling: only
         // the bloom section gets this synchronous treatment (see
         // RebuildOneYearCatIdxBloom above for why); the bitmap section's
         // absence after a rebuild only costs performance (Task 10's
@@ -862,7 +886,8 @@ class XStore {
         // CompactColdCatIdxForAllDbs pass rather than rebuilt here.
         // Non-static, matching RebuildStaleZoneMapsForDb's real shape.
         void RebuildStaleCatIdxForDb(const std::string &db_name, const std::string &db_base_path,
-                                      const XStore_Proto::ConfigStruct &cfg_struct);
+                                      const XStore_Proto::ConfigStruct &cfg_struct,
+                                      const std::set<unsigned short> &force_rebuild_years);
 
     private:
         // Get current base directory

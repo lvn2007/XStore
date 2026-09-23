@@ -637,16 +637,20 @@ void XStore::InitDB() {
         // in XStore.h for why this must never run on the request path
         // instead.
         auto replayed_it = replayed_years.find(curr_db_name);
-        RebuildStaleZoneMapsForDb(curr_db_name, p.path().string(), cfg_struct,
-                                   replayed_it == replayed_years.end() ? kNoForcedYears : replayed_it->second);
+        const std::set<unsigned short> &force_rebuild_years_for_db =
+            replayed_it == replayed_years.end() ? kNoForcedYears : replayed_it->second;
+        RebuildStaleZoneMapsForDb(curr_db_name, p.path().string(), cfg_struct, force_rebuild_years_for_db);
 
-        // Task 11: mirrors the zone-map rebuild above, but for .catidx --
-        // same synchronous-during-InitDB() timing, so no worker thread can
-        // ever see a schema-grown DB's bloom filter left narrower than its
-        // current EffectiveTrackedColumnCount. See RebuildStaleCatIdxForDb's
-        // declaration comment in XStore.h for why this is narrower in scope
-        // than its zone-map sibling (bloom only, not the bitmap section).
-        RebuildStaleCatIdxForDb(curr_db_name, p.path().string(), cfg_struct);
+        // Task 11 (+ review fix round): mirrors the zone-map rebuild above,
+        // but for .catidx -- same synchronous-during-InitDB() timing, so no
+        // worker thread can ever see a schema-grown/WAL-replayed/missing
+        // .catidx left able to silently under-return via FindByValue. Same
+        // force_rebuild_years_for_db as the zone-map call above -- a
+        // WAL-replayed year needs the identical unconditional-rebuild
+        // treatment here (see RebuildStaleCatIdxForDb's declaration comment
+        // in XStore.h for why the header-only staleness checks alone can't
+        // catch that case).
+        RebuildStaleCatIdxForDb(curr_db_name, p.path().string(), cfg_struct, force_rebuild_years_for_db);
     }
 }
 

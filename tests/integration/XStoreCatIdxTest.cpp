@@ -641,4 +641,69 @@ TEST_F(XStoreCatIdxTestFixture, ColumnCountGrowthTriggersCatIdxRebuildAndPreserv
     EXPECT_EQ(rep.queryresponse(0).timestamp(), 1000u);
 }
 
+// Review fix round, Finding 2: a year with real row data but NO .catidx
+// sidecar at all (every pre-existing year, the first time this feature
+// lands on old data) must get a real, scan-based rebuild during InitDB() --
+// not a lazy, all-zero one the first time GetOrOpenCatIdx/FindByValue
+// happens to touch it. The old RebuildStaleCatIdxForDb iterated .catidx
+// files, so a year with no .catidx was invisible to it entirely.
+TEST_F(XStoreCatIdxTestFixture, MissingCatIdxFileForYearWithRealDataGetsRealRebuildOnInitDbNotLazyAllZero) {
+    XStore store;
+    std::string db_name = "CATIDXMISSINGFILE";
+    CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+
+    // Live insert -- writes real row data AND, as a side effect of the
+    // normal insert path, creates this year's .catidx sidecar.
+    XStore_Proto::RowData row;
+    row.add_fielddata()->set_int64data(777777);
+    XStore_Proto::UnaryInsert_REP rep;
+    store.UnaryInsert(1000, row, db_name, &rep, XStore_Proto::SYNC);
+
+    unsigned short year = TimeStruct(1000, XStore_Proto::SECOND).year;
+    std::string catidx_path = fmt::format("{}/{}.catidx", DbPath(db_name), year);
+    ASSERT_TRUE(std::filesystem::exists(catidx_path)) << "insert should have created the .catidx sidecar";
+
+    // Reproduce the exact starting condition Finding 2 closes: real row
+    // data on disk, but no .catidx at all for that year. Deleting it
+    // directly (not through RebuildStaleCatIdxForDb) simulates a
+    // pre-existing deployment that never had this feature's sidecars.
+    ASSERT_TRUE(std::filesystem::remove(catidx_path));
+    ASSERT_FALSE(std::filesystem::exists(catidx_path));
+
+    // Real restart simulation -- deliberately not preceded by a manual
+    // registry clear, so this also exercises RebuildOneYearCatIdxBloom's
+    // own registry-eviction fix against the still-warm entry the insert
+    // above left behind (same precedent as the column-count-growth test
+    // above).
+    store.InitDB();
+
+    // THE DISCRIMINATOR: the .catidx file must already exist again, with
+    // real data, the moment InitDB() returns -- BEFORE any query ever
+    // touches this year. Under the pre-fix behavior (iterating .catidx
+    // files, which found nothing to iterate since none existed), InitDB()
+    // would do nothing here at all, and the file would only spring into
+    // existence later, all-zero, the first time GetOrOpenCatIdx/
+    // FindByValue happened to touch this year -- which then permanently
+    // and silently fails to find this exact row (a bloom "no" on an
+    // all-zero entry is guaranteed on the very first bit check).
+    ASSERT_TRUE(std::filesystem::exists(catidx_path))
+        << "InitDB() must rebuild a missing .catidx from real row data, not leave it "
+           "for a later lazy/all-zero GetOrOpenCatIdx create";
+
+    XStore_Proto::FData val;
+    val.set_int64data(777777);
+    CatIdxFile &catidx = XStore::GetOrOpenCatIdx(DbPath(db_name), year, 64, /*tracked_column_count=*/1);
+    EXPECT_TRUE(catidx.MightContain(/*block_index=*/0, /*column_idx=*/0, EncodeFDataForCatIdx(val)))
+        << "bloom false negative -- missing .catidx was never really rebuilt, just lazily recreated all-zero";
+
+    std::string reassembled;
+    store.FindByValue(1000, 1000, db_name, /*column_idx=*/0, val,
+                       XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                       [&](std::string &&chunk, bool) { reassembled += chunk; });
+    XStore_Proto::RangeQuery_REP find_rep;
+    ASSERT_TRUE(find_rep.ParseFromString(reassembled));
+    ASSERT_EQ(find_rep.queryresponse_size(), 1);
+    EXPECT_EQ(find_rep.queryresponse(0).timestamp(), 1000u);
+}
+
 } // namespace
