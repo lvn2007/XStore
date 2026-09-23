@@ -1094,9 +1094,42 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
 
                 bool must_scan = true;
                 if (catidx != nullptr) {
-                    must_scan = catidx->MightContain(block_index, static_cast<uint32_t>(column_idx), encoded_target);
-                    // (Task 10 inserts a bitmap-exact-lookup branch here, between
-                    // the bloom check above and the real-scan fallback below.)
+                    bool maybe = catidx->MightContain(block_index, static_cast<uint32_t>(column_idx), encoded_target);
+                    if (!maybe) {
+                        must_scan = false; // definite absence -- skip this block entirely
+                    } else if (catidx->HasBitmapSection()) {
+                        auto exact_rows = catidx->LookupExact(static_cast<uint32_t>(column_idx), encoded_target);
+                        if (exact_rows.has_value()) {
+                            // Exact answer for this block -- fetch only these rows, no scan.
+                            for (uint64_t r : *exact_rows) {
+                                if (r < block_start_row || r >= block_start_row + rows_per_block) continue; // only this block's own rows
+                                unsigned long long int e = curr_ts.first_epoch + r;
+                                if (e < iter_epoch || e > segment_end) continue; // clip to the queried range too
+                                unsigned long long int offset = (e - curr_ts.first_epoch) * cfg_struct.rowlength();
+                                const char *row_ptr = static_cast<const char*>(mapped_base) + offset;
+                                size_t size_before = chunk_buf.size();
+                                XStoreWireEncode::EncodeQueryResponseEntry(chunk_buf, e, row_ptr, cfg_struct.rowlength());
+                                total_emitted_bytes += static_cast<unsigned long long int>(chunk_buf.size() - size_before);
+                                if (chunk_buf.size() >= chunk_size_bytes) {
+                                    emit_chunk(std::move(chunk_buf), false);
+                                    chunk_buf.clear();
+                                    chunk_buf.reserve(chunk_size_bytes + 4096);
+                                }
+                                if (total_emitted_bytes > 2'000'000'000) {
+                                    set_warning("[WARNING] ", fmt::format("[FINDBYVALUE] [DB: {}] - Query results exceeded 2GB, results truncated", db_name));
+                                    size_limit_exceeded = true;
+                                    break;
+                                }
+                            }
+                            must_scan = false;
+                        }
+                        // exact_rows == nullopt: bloom said maybe but this column's
+                        // directory doesn't have this value (either the column was
+                        // over the cardinality cap at compaction time, or -- rare --
+                        // a bloom false positive). Either way must_scan stays true:
+                        // real-scan this block, which is always correct regardless
+                        // of why the directory lookup came up empty.
+                    }
                 }
 
                 if (must_scan && column_idx >= 0) {
