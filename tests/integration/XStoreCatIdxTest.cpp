@@ -5,6 +5,9 @@
 #include "XStore.pb.h"
 #include "XStoreTestSupport.h"
 #include <filesystem>
+#include <fcntl.h>
+#include <unistd.h>
+#include <spdlog/fmt/fmt.h>
 
 TEST(EncodeFDataForCatIdxTest, SameInt64ValueEncodesIdentically) {
     XStore_Proto::FData a;
@@ -539,6 +542,103 @@ TEST_F(XStoreCatIdxTestFixture, FindByValueUsesBitmapDirectoryNotRealScanAfterCo
     for (const auto &entry : rep.queryresponse()) {
         EXPECT_EQ((entry.timestamp() - 1000) % 4, 3);
     }
+}
+
+// Task 11: proves Task 4's tracked-column-count growth and this task's
+// InitDB() rebuild compose correctly end-to-end -- same shape as
+// XStoreZoneMapTest's ColumnCountGrowthTriggersRebuildOnNextInitDb, but the
+// real assertion here is the false-negative fix specifically, not just that
+// tracked_column_count converges. The brief's original (wrong) design would
+// have discarded the stale .catidx and left its bloom repopulate "lazily via
+// ordinary inserts" -- which is unreachable for a row that gets no further
+// insert after the rebuild. Row 1 below (column 0 = 424242, inserted at
+// epoch 1000) is exactly that row: it is never touched again after InitDB()
+// runs, so it can only still be found if RebuildStaleCatIdxForDb genuinely
+// rescanned real row data (RebuildOneYearCatIdxBloom), not merely deleted
+// and walked away. Under the buggy design, the recreated .catidx's bloom
+// entry for this row's block would be all-zero, and
+// CatIdxFile::MightContain returns false (definite absence) the instant it
+// hits the first unset bit -- so FindByValue's `if (!maybe) must_scan =
+// false;` block-skip (XStore_Aggregates.cpp) would silently skip this block
+// entirely, never falling back to a real scan. That makes this a genuine
+// RED/GREEN discriminator, not a coincidental-correctness check: it fails
+// under the brief's original design and passes under the corrected one.
+TEST_F(XStoreCatIdxTestFixture, ColumnCountGrowthTriggersCatIdxRebuildAndPreservesBloomForUntouchedRow) {
+    XStore store;
+    std::string db_name = "CATIDXCOLGROWTH";
+    CreateTestDb(store, db_name, XStore_Proto::SECOND, 1536); // no seed -- starts at global default (64)
+
+    // Row 1: narrow, single column -- also the insert that first creates
+    // this year's .catidx, sizing its bloom at whatever
+    // EffectiveTrackedColumnCount(cfg) is at that moment (64, unseeded).
+    // This row receives NO further insert after the rebuild below.
+    XStore_Proto::RowData narrow_row;
+    narrow_row.add_fielddata()->set_int64data(424242);
+    XStore_Proto::UnaryInsert_REP narrow_rep;
+    store.UnaryInsert(1000, narrow_row, db_name, &narrow_rep, XStore_Proto::SYNC);
+
+    // Row 2: column index 69 populated -- past the default 64 tracked cap.
+    // MaybeGrowColumnCount grows columnCount to >=70 as a side effect of
+    // this insert, but the .catidx created above was already sized at 64
+    // and is never resized on the request path.
+    XStore_Proto::RowData wide_row;
+    for (int i = 0; i < 70; ++i) wide_row.add_fielddata()->set_int64data(i);
+    wide_row.mutable_fielddata(69)->set_int64data(999);
+    XStore_Proto::UnaryInsert_REP wide_rep;
+    store.UnaryInsert(1001, wide_row, db_name, &wide_rep, XStore_Proto::SYNC);
+
+    auto &shard = XStore::cfg_shards[std::hash<std::string>{}(db_name) % XStore::CFG_SHARD_COUNT];
+    ASSERT_TRUE(shard.map.count(db_name));
+    uint32_t grown_count = shard.map.at(db_name).columncount();
+    ASSERT_GE(grown_count, 70u);
+
+    unsigned short year = TimeStruct(1000, XStore_Proto::SECOND).year;
+    std::string catidx_path = fmt::format("{}/{}.catidx", DbPath(db_name), year);
+    auto read_tracked_column_count = [&]() {
+        int fd = open(catidx_path.c_str(), O_RDONLY);
+        EXPECT_GE(fd, 0);
+        CatIdxFileHeader header{};
+        EXPECT_EQ(pread(fd, &header, sizeof(header), 0), static_cast<ssize_t>(sizeof(header)));
+        close(fd);
+        return header.tracked_column_count;
+    };
+
+    // On-disk .catidx was created at the old (narrower) cap -- confirm it's
+    // stale before InitDB() rebuilds it.
+    EXPECT_LT(read_tracked_column_count(), grown_count);
+
+    // Re-run InitDB() the same way a server restart would -- this is what
+    // notices the tracked-column-count mismatch and rebuilds. Deliberately
+    // NOT preceded by a manual ClearCatIdxRegistryForTests() call here: this
+    // is what proves RebuildOneYearCatIdxBloom's own registry-eviction fix
+    // (see its comment in XStore_CatIdx.cpp) actually works even though
+    // this test's own inserts above already warmed the registry for
+    // (db_name, year) -- same faithful-in-process-restart precedent as the
+    // zone-map version of this test.
+    store.InitDB();
+
+    EXPECT_EQ(read_tracked_column_count(), grown_count);
+
+    // THE REAL CORRECTNESS CHECK: row 1000's value (column 0 = 424242) was
+    // never re-inserted after the rebuild.
+    XStore_Proto::FData narrow_val;
+    narrow_val.set_int64data(424242);
+    CatIdxFile &catidx = XStore::GetOrOpenCatIdx(DbPath(db_name), year, 1536, grown_count);
+    EXPECT_TRUE(catidx.MightContain(/*block_index=*/0, /*column_idx=*/0, EncodeFDataForCatIdx(narrow_val)))
+        << "bloom false negative for a row that received no insert after rebuild -- "
+           "the discard-and-lazy-repopulate bug is back";
+
+    // And FindByValue end-to-end confirms the same thing through the real
+    // query path (which is what actually exercises the
+    // `if (!maybe) must_scan = false;` block-skip this bug would trip).
+    std::string reassembled;
+    store.FindByValue(1000, 1000, db_name, /*column_idx=*/0, narrow_val,
+                       XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                       [&](std::string &&chunk, bool) { reassembled += chunk; });
+    XStore_Proto::RangeQuery_REP rep;
+    ASSERT_TRUE(rep.ParseFromString(reassembled));
+    ASSERT_EQ(rep.queryresponse_size(), 1);
+    EXPECT_EQ(rep.queryresponse(0).timestamp(), 1000u);
 }
 
 } // namespace

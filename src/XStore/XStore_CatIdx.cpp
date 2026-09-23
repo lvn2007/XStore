@@ -418,6 +418,112 @@ void XStore::CompactOneYearCatIdx(const std::string &db_base_path, unsigned shor
     catidx.AppendBitmapSection(surviving);
 }
 
+void XStore::RebuildOneYearCatIdxBloom(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                        uint32_t tracked_column_count) {
+    std::string data_path = fmt::format("{}/{}.XSTORE", db_base_path, year);
+    if (!std::filesystem::exists(data_path)) return;
+
+    // Force a genuine cache miss for this (db_base_path, year) key before
+    // reopening -- same registry-staleness fix RebuildOneYearZoneMap applies
+    // to zone_map_registry_ (see its comment in XStore_Management.cpp for
+    // the full reasoning). The caller (RebuildStaleCatIdxForDb) has just
+    // unlinked the on-disk .catidx file; if a warm registry entry for this
+    // exact key still exists (e.g. from an insert earlier in this same
+    // InitDB() pass, or an earlier compaction), GetOrOpenCatIdx's cache-hit
+    // branch below would hand back that instance WITHOUT ever calling
+    // Open() -- so no new file would ever be created on disk here at all.
+    // Every bit this function sets below would then live only in that
+    // instance's still-open fd to the now-unlinked inode: invisible on disk,
+    // and lost for good the moment that fd is ever closed (LRU eviction,
+    // test teardown, or process exit) -- silently reintroducing the exact
+    // all-zero-bloom false-negative bug this function exists to fix, just
+    // deferred to the next genuinely cold process instead of firing
+    // immediately.
+    {
+        std::string registry_key = fmt::format("{}/{}", db_base_path, year);
+        std::lock_guard<std::mutex> registry_lock(catidx_registry_mutex_);
+        catidx_registry_.erase(registry_key);
+        catidx_registry_lru_.erase(
+            std::remove(catidx_registry_lru_.begin(), catidx_registry_lru_.end(), registry_key),
+            catidx_registry_lru_.end());
+    }
+
+    // Real disk-backed Open() at the caller's authoritative tracked_column_count.
+    // The on-disk file was just deleted by RebuildStaleCatIdxForDb, so this
+    // always takes CatIdxFile::Open's WriteFreshHeader (all-zero bloom)
+    // branch -- the row scan below is what genuinely repopulates it.
+    CatIdxFile &catidx = GetOrOpenCatIdx(db_base_path, year, row_length, tracked_column_count);
+
+    struct stat st{};
+    int fd = open(data_path.c_str(), O_RDONLY);
+    if (fd < 0) return;
+    fstat(fd, &st);
+    uint64_t total_rows = row_length > 0 ? static_cast<uint64_t>(st.st_size) / row_length : 0;
+
+    std::vector<char> row_buf(row_length);
+    for (uint64_t r = 0; r < total_rows; ++r) {
+        ssize_t read_bytes = pread(fd, row_buf.data(), row_length, static_cast<off_t>(r) * row_length);
+        if (read_bytes != static_cast<ssize_t>(row_length)) continue;
+        // Never-written sparse hole -- same fast skip RebuildOneYearZoneMap/
+        // ProcessFileRangeAccumulate use. Load-bearing for performance here
+        // specifically (unlike CompactOneYearCatIdx, which only ever runs
+        // off a background thread): this function runs SYNCHRONOUSLY inside
+        // InitDB(), before any worker thread can serve a request, so
+        // skipping the ~tracked_column_count ExtractColumnByIndexSkipParse
+        // calls per row for the vast majority-sparse rows in a real year
+        // file is what keeps a restart from stalling for minutes per stale
+        // year.
+        if (row_buf[0] == 0) continue;
+
+        std::vector<CatIdxObservation> observations;
+        observations.reserve(tracked_column_count);
+        for (uint32_t c = 0; c < tracked_column_count; ++c) {
+            XStore_Proto::FData f_data;
+            if (ExtractColumnByIndexSkipParse(row_buf.data(), row_length, static_cast<unsigned short>(c), f_data)) {
+                observations.push_back({c, EncodeFDataForCatIdx(f_data), true});
+            } else {
+                observations.push_back({c, std::string(), false});
+            }
+        }
+        catidx.UpdateRow(r, observations);
+    }
+    close(fd);
+
+    spdlog::info("[CATIDX REBUILD] [{}/{}.XSTORE] - Rebuilt bloom for {} rows at tracked_column_count {}",
+                 db_base_path, year, total_rows, tracked_column_count);
+}
+
+void XStore::RebuildStaleCatIdxForDb(const std::string &db_name, const std::string &db_base_path,
+                                      const XStore_Proto::ConfigStruct &cfg_struct) {
+    uint32_t desired_tracked_columns = EffectiveTrackedColumnCount(cfg_struct);
+    uint16_t row_length = static_cast<uint16_t>(cfg_struct.rowlength());
+
+    for (auto &f : std::filesystem::directory_iterator(db_base_path)) {
+        std::string filename = f.path().filename().string();
+        if (filename.size() < 7 || filename.substr(filename.size() - 7) != ".catidx") continue;
+        std::string year_str = filename.substr(0, filename.size() - 7);
+        unsigned short year;
+        try { year = static_cast<unsigned short>(std::stoi(year_str)); } catch (...) { continue; }
+
+        std::string path = f.path().string();
+        int fd = open(path.c_str(), O_RDONLY);
+        if (fd < 0) continue;
+        CatIdxFileHeader on_disk{};
+        bool readable = pread(fd, &on_disk, sizeof(on_disk), 0) == static_cast<ssize_t>(sizeof(on_disk));
+        close(fd);
+
+        bool stale = !readable || on_disk.magic != CatIdxFileHeader{}.magic ||
+                     on_disk.version != XStoreTunables::CATIDX_VERSION ||
+                     on_disk.tracked_column_count < desired_tracked_columns;
+        if (stale) {
+            spdlog::info("[CATIDX REBUILD] [DB: {}] - rebuilding stale {} (tracked_column_count {} < desired {})",
+                         db_name, filename, on_disk.tracked_column_count, desired_tracked_columns);
+            std::filesystem::remove(path);
+            RebuildOneYearCatIdxBloom(db_base_path, year, row_length, desired_tracked_columns);
+        }
+    }
+}
+
 void XStore::CompactColdCatIdxForAllDbs(const std::string &data_store_dir) {
     unsigned short current_year = TimeStruct(static_cast<std::time_t>(std::time(nullptr)), XStore_Proto::SECOND).year;
     if (!std::filesystem::exists(data_store_dir)) return;

@@ -639,6 +639,14 @@ void XStore::InitDB() {
         auto replayed_it = replayed_years.find(curr_db_name);
         RebuildStaleZoneMapsForDb(curr_db_name, p.path().string(), cfg_struct,
                                    replayed_it == replayed_years.end() ? kNoForcedYears : replayed_it->second);
+
+        // Task 11: mirrors the zone-map rebuild above, but for .catidx --
+        // same synchronous-during-InitDB() timing, so no worker thread can
+        // ever see a schema-grown DB's bloom filter left narrower than its
+        // current EffectiveTrackedColumnCount. See RebuildStaleCatIdxForDb's
+        // declaration comment in XStore.h for why this is narrower in scope
+        // than its zone-map sibling (bloom only, not the bitmap section).
+        RebuildStaleCatIdxForDb(curr_db_name, p.path().string(), cfg_struct);
     }
 }
 

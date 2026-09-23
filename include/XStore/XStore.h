@@ -826,6 +826,44 @@ class XStore {
         void CompactOneYearCatIdx(const std::string &db_base_path, unsigned short year, uint16_t row_length,
                                    uint32_t tracked_column_count);
 
+        // Task 11: rescans one <YEAR>.XSTORE file row-by-row and folds every
+        // row into the (freshly-recreated, all-zero) bloom section of this
+        // year's .catidx via the same write-through UpdateRow path a live
+        // insert uses -- same "reuse UpdateRow instead of a bespoke bulk
+        // writer" precedent as RebuildOneYearZoneMap. Unlike zone-map's
+        // min/max/sum stats, a bloom bit is idempotent to re-set, so (unlike
+        // RebuildOneYearZoneMap) this never needs to truncate/guard against
+        // double-folding -- the caller (RebuildStaleCatIdxForDb) has already
+        // unlinked the stale file, so GetOrOpenCatIdx below always creates a
+        // genuinely fresh, all-zero file for this call to populate for real.
+        //
+        // A correctness requirement, not an optimization: the bloom filter
+        // must never produce a false negative (this feature's own stated
+        // invariant), and a discarded/narrow file cannot self-heal from
+        // future writes alone when historical rows that receive no further
+        // insert need to remain findable. Non-static, like CompactOneYearCatIdx
+        // above -- needs the non-static ExtractColumnByIndexSkipParse.
+        void RebuildOneYearCatIdxBloom(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                        uint32_t tracked_column_count);
+
+        // Task 11: scans db_base_path for every <YEAR>.catidx sidecar and
+        // discards+resynchronously-rebuilds (via RebuildOneYearCatIdxBloom)
+        // any whose on-disk tracked_column_count is narrower than this DB's
+        // current EffectiveTrackedColumnCount (or whose header is missing/
+        // corrupt/wrong-version) -- called from InitDB(), before any worker
+        // thread sharing this data_store_dir can serve a request, same
+        // synchronous-during-startup timing as RebuildStaleZoneMapsForDb.
+        // Deliberately narrower in scope than that zone-map sibling: only
+        // the bloom section gets this synchronous treatment (see
+        // RebuildOneYearCatIdxBloom above for why); the bitmap section's
+        // absence after a rebuild only costs performance (Task 10's
+        // real-scan fallback stays correct when LookupExact finds no
+        // directory), so it's left for the next scheduled
+        // CompactColdCatIdxForAllDbs pass rather than rebuilt here.
+        // Non-static, matching RebuildStaleZoneMapsForDb's real shape.
+        void RebuildStaleCatIdxForDb(const std::string &db_name, const std::string &db_base_path,
+                                      const XStore_Proto::ConfigStruct &cfg_struct);
+
     private:
         // Get current base directory
         std::string GetBaseDir();
