@@ -459,8 +459,21 @@ inline constexpr size_t ZONE_MAP_REGISTRY_CAP = 256;
 // zone-map-only queries, isolated corruption blast radius).
 inline constexpr uint32_t CATIDX_VERSION = 1;
 
-// k=7 hash functions, ~154 bytes/entry at n=128 (RowsPerBlock default),
-// 1% target false-positive rate -- rounded to 160B for 8-byte alignment.
+// k=7 hash functions, 160 bytes (1280 bits) per tracked column per block.
+//
+// KNOWN UNDERSIZED -- these numbers were derived for n=128 distinct values
+// per block, which is NOT the real block geometry: RowsPerBlock(row_length)
+// is ZONE_MAP_TARGET_BLOCK_BYTES / row_length (2MiB / row_length), i.e.
+// 32,768 rows/block at row_length=64 and 128 only at row_length=16384. At a
+// realistic few hundred to few thousand distinct values per block, 1280 bits
+// with k=7 saturates and the filter's effective selectivity degrades toward
+// zero pruning -- well before the high cardinalities this feature is named
+// for. This costs performance ONLY: a bloom filter can only ever
+// over-approximate, so a saturated filter just stops skipping blocks and
+// every query falls through to the real-scan path, which is always correct.
+// Retuning these two constants needs real cardinality data and benchmarking
+// (bigger entries cost disk on every block x every tracked column); tracked
+// as a follow-up in TODO.md, deliberately not guessed at here.
 inline constexpr size_t   CATIDX_BLOOM_HASH_COUNT = 7;
 inline constexpr size_t   CATIDX_BLOOM_BYTES_PER_ENTRY = 160;
 
