@@ -4,7 +4,9 @@
 #include "include/DataStructs/TimeStruct.h"
 #include "XStore.pb.h"
 #include "XStoreTestSupport.h"
+#include <algorithm>
 #include <filesystem>
+#include <vector>
 #include <fcntl.h>
 #include <unistd.h>
 #include <spdlog/fmt/fmt.h>
@@ -462,25 +464,26 @@ TEST_F(XStoreCatIdxTestFixture, CompactionThenBackfillIntoUntouchedBlockDoesNotC
     }
 }
 
-// FindByValue bitmap-aware query path (Task 10): once CompactOneYearCatIdx
-// has built the exact per-value row directory for a year, FindByValue must
-// consult it directly instead of always falling back to a real per-row
-// scan once the bloom filter says "maybe". Both the bitmap path and the
-// real-scan fallback produce the same correct answer on untouched data, so
-// a plain correctness check (insert, compact, query) can't tell them apart
-// -- that's exactly what FindByValueReturnsOnlyMatchingRows already covers
-// for the fallback. This test forces a genuine behavioral split instead:
-// after compaction snapshots the row directory, every NON-matching row
-// inside the queried block is overwritten (through a normal UnaryInsert --
-// the same write path every other test here uses, not a raw byte poke) to
-// also carry the target value. A plain write doesn't rebuild the bitmap
-// section (only an explicit, idempotent-skipped CompactOneYearCatIdx call
-// would), so the directory still holds its pre-overwrite snapshot:
-//   - bitmap path consulted -> returns exactly the original 25 rows the
-//     directory recorded, ignoring the overwrite entirely.
-//   - silently still real-scanning -> would see the just-overwritten data
-//     live in the mapped file and return up to 100 matches instead.
-// Only the bitmap path passes the EXPECT_EQ(25) below.
+// FindByValue bitmap-aware query path (Task 10), corrected by the final
+// whole-branch review's Critical C1. The bitmap directory is a
+// COMPACTION-TIME SNAPSHOT -- a candidate filter, never an authority on
+// what the rows currently hold. This test's earlier version asserted the
+// opposite (that a post-compaction overwrite of 75 rows to the target value
+// must still return only the 25 rows the directory recorded), which locked
+// the C1 bug in as expected behavior: the true correct answer is 100, since
+// all 100 rows really do carry the target value by then.
+//
+// It now proves three separate things, without ever using a WRONG answer as
+// the discriminator for "the bitmap path ran":
+//   1. The bitmap path's preconditions genuinely hold after compaction --
+//      HasBitmapSection() is true and a direct LookupExact returns the 25
+//      recorded rows (asserted directly on the CatIdxFile, not inferred
+//      from an end-to-end result).
+//   2. With the directory live and the data untouched, FindByValue returns
+//      the correct 25.
+//   3. After a post-compaction overwrite through the normal write path, the
+//      directory is invalidated (FlushBlock self-heal -- C1 part 2) and
+//      FindByValue returns the TRUE answer of 100, not the stale 25.
 TEST_F(XStoreCatIdxTestFixture, FindByValueUsesBitmapDirectoryNotRealScanAfterCompaction) {
     constexpr uint16_t kRowLength = 64;
     XStore store;
@@ -516,9 +519,26 @@ TEST_F(XStoreCatIdxTestFixture, FindByValueUsesBitmapDirectoryNotRealScanAfterCo
     ASSERT_TRUE(rows_at_compaction.has_value());
     ASSERT_EQ(rows_at_compaction->size(), 25u); // 100 rows / 4 values = 25 matches for value=3
 
+    auto find = [&]() {
+        std::string reassembled;
+        store.FindByValue(1000, 1099, "FINDBYVALUEBITMAP", /*column_idx=*/0, target,
+                           XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                           [&](std::string &&chunk, bool) { reassembled += chunk; });
+        XStore_Proto::RangeQuery_REP rep;
+        EXPECT_TRUE(rep.ParseFromString(reassembled));
+        return rep;
+    };
+
+    // (2) Directory live, data untouched -> the bitmap path runs and agrees
+    // with reality.
+    XStore_Proto::RangeQuery_REP before = find();
+    EXPECT_EQ(before.queryresponse_size(), 25);
+    for (const auto &entry : before.queryresponse()) {
+        EXPECT_EQ((entry.timestamp() - 1000) % 4, 3);
+    }
+
     // Overwrite every non-matching row with the target value, through the
-    // normal write path -- the bitmap directory snapshot above is untouched
-    // by this, since it's only ever rebuilt by an explicit compaction call.
+    // normal write path.
     for (int64_t i = 0; i < 100; ++i) {
         if (i % 4 == 3) continue;
         XStore_Proto::RowData row;
@@ -527,21 +547,78 @@ TEST_F(XStoreCatIdxTestFixture, FindByValueUsesBitmapDirectoryNotRealScanAfterCo
         store.UnaryInsert(1000 + i, row, "FINDBYVALUEBITMAP", &rep, XStore_Proto::SYNC);
     }
 
+    // (3) Any write into an already-compacted file invalidates the snapshot
+    // (C1 part 2), so the stale directory can't be trusted or consulted...
+    EXPECT_FALSE(catidx.HasBitmapSection())
+        << "a post-compaction write must invalidate the bitmap section -- otherwise the "
+           "directory silently drifts from real row data";
+    // ...and the answer is the TRUE one: all 100 rows now hold value 3.
+    XStore_Proto::RangeQuery_REP after = find();
+    EXPECT_EQ(after.queryresponse_size(), 100);
+}
+
+// C1 (final whole-branch review), the false-negative half: a row inserted
+// AFTER compaction must still be found by FindByValue. Under the old code
+// the bitmap directory stayed committed across such a backfill (its bloom
+// write never physically overlapped the directory bytes, so FlushBlock's
+// overlap-only invalidation check never tripped) and FindByValue trusted
+// LookupExact's compaction-time row list as complete -- so the new row was
+// never returned, directly violating this feature's own core invariant.
+TEST_F(XStoreCatIdxTestFixture, FindByValueFindsRowBackfilledAfterCompaction) {
+    constexpr uint16_t kRowLength = 64;
+    XStore store;
+    CreateTestDb(store, "FINDBYVALUEBACKFILL", XStore_Proto::SECOND, kRowLength);
+    uint64_t rows_per_block = RowsPerBlock(kRowLength);
+
+    // Rows 0..49 at epochs 1000..1049; only row 7 carries the target value.
+    for (int64_t i = 0; i < 50; ++i) {
+        XStore_Proto::RowData row;
+        row.add_fielddata()->set_int64data(i == 7 ? 909 : i);
+        XStore_Proto::UnaryInsert_REP rep;
+        store.UnaryInsert(1000 + i, row, "FINDBYVALUEBACKFILL", &rep, XStore_Proto::SYNC);
+    }
+
+    TimeStruct ref_ts(static_cast<std::time_t>(1000), XStore_Proto::SECOND);
+    unsigned short year = ref_ts.year;
+    const uint64_t first_epoch = static_cast<uint64_t>(ref_ts.first_epoch);
+    // Bound the compaction scan to block 0, same resize_file trick the other
+    // compaction tests here use (see their comments).
+    std::string xstore_path = DbPath("FINDBYVALUEBACKFILL") + "/" + std::to_string(year) + ".XSTORE";
+    std::error_code resize_ec;
+    std::filesystem::resize_file(xstore_path, rows_per_block * kRowLength, resize_ec);
+    ASSERT_FALSE(resize_ec) << resize_ec.message();
+
+    store.CompactOneYearCatIdx(DbPath("FINDBYVALUEBACKFILL"), year, kRowLength, /*tracked_column_count=*/1);
+    CatIdxFile &catidx = XStore::GetOrOpenCatIdx(DbPath("FINDBYVALUEBACKFILL"), year, kRowLength, 1);
+    ASSERT_TRUE(catidx.HasBitmapSection());
+
+    XStore_Proto::FData target;
+    target.set_int64data(909);
+    auto snapshot = catidx.LookupExact(/*column_idx=*/0, EncodeFDataForCatIdx(target));
+    ASSERT_TRUE(snapshot.has_value());
+    ASSERT_EQ(*snapshot, (std::vector<uint64_t>{1007ULL - first_epoch})); // only row 7 at compaction time
+
+    // Backfill a NEW row carrying the target value, into the same already-
+    // compacted block the directory snapshot covers.
+    XStore_Proto::RowData backfill;
+    backfill.add_fielddata()->set_int64data(909);
+    XStore_Proto::UnaryInsert_REP backfill_rep;
+    store.UnaryInsert(1077, backfill, "FINDBYVALUEBACKFILL", &backfill_rep, XStore_Proto::SYNC);
+
     std::string reassembled;
-    store.FindByValue(1000, 1099, "FINDBYVALUEBITMAP", /*column_idx=*/0, target,
+    store.FindByValue(1000, 1099, "FINDBYVALUEBACKFILL", /*column_idx=*/0, target,
                        XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
                        [&](std::string &&chunk, bool) { reassembled += chunk; });
-
     XStore_Proto::RangeQuery_REP rep;
     ASSERT_TRUE(rep.ParseFromString(reassembled));
-    // A real per-row scan would see the just-overwritten data (up to 100
-    // matches); only the bitmap directory's untouched compaction-time
-    // snapshot yields the original 25 -- proof the bitmap path specifically
-    // executed, not just that the final answer happens to be correct.
-    EXPECT_EQ(rep.queryresponse_size(), 25);
-    for (const auto &entry : rep.queryresponse()) {
-        EXPECT_EQ((entry.timestamp() - 1000) % 4, 3);
-    }
+
+    ASSERT_EQ(rep.queryresponse_size(), 2)
+        << "a row backfilled after compaction must still be found -- the bitmap directory is a "
+           "compaction-time snapshot, not an authority on current row contents";
+    std::vector<unsigned long long> found;
+    for (const auto &entry : rep.queryresponse()) found.push_back(entry.timestamp());
+    std::sort(found.begin(), found.end());
+    EXPECT_EQ(found, (std::vector<unsigned long long>{1007, 1077}));
 }
 
 // Task 11: proves Task 4's tracked-column-count growth and this task's

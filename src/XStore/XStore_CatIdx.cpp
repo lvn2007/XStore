@@ -133,22 +133,27 @@ void CatIdxFile::FlushBlock(uint64_t block_index) {
     off_t offset = BloomSectionFileOffset(block_index);
     size_t bytes = header_.tracked_column_count * sizeof(BloomEntry);
 
-    // A never-touched block's arithmetic offset has no upper bound, and the
-    // appended bitmap section directory sits immediately past whatever the
-    // highest bloom block was at compaction time -- so a genuine write to a
-    // block that falls inside (or past) the committed directory range would
-    // otherwise overwrite directory bytes with bloom bytes, corrupting it
-    // (e.g. a backfill insert into an already-compacted cold year). Detect
-    // that here, BEFORE the data pwrite, and self-heal by invalidating the
-    // directory instead of corrupting it -- the next compaction pass sees
-    // HasBitmapSection() == false (its own idempotency check) and rebuilds
-    // the directory from scratch over the now-larger bloom region. Same
-    // "always fully re-derivable from real row data" precedent as the
-    // zone-map feature's version-bump-discards elsewhere in this codebase.
-    if (header_.bitmap_section_offset != 0 &&
-        static_cast<uint64_t>(offset) + bytes > header_.bitmap_section_offset) {
-        spdlog::warn("[CATIDX] - Block {} write would overlap the committed bitmap section -- "
-                     "invalidating it; next compaction pass will rebuild it", block_index);
+    // The bitmap directory is a COMPACTION-TIME SNAPSHOT of real row data, so
+    // ANY bloom write to an already-compacted file means the underlying rows
+    // changed since that snapshot was taken and the directory can no longer be
+    // trusted -- it would report backfilled matches as absent (false negative)
+    // and overwritten/deleted rows as still matching (false positive).
+    // Invalidate on any write, not just one that would physically overlap the
+    // directory bytes: an overlap-only check (what this used to do) never
+    // trips for a write into a block index that already existed at compaction
+    // time, since bitmap_section_offset sits past every such block, which is
+    // exactly the common backfill/overwrite case. Self-heals the same way as
+    // before -- the next compaction pass sees HasBitmapSection() == false (its
+    // own idempotency check) and rebuilds the directory from scratch over the
+    // now-current row data; until then queries correctly fall back to
+    // bloom+real-scan. Same "always fully re-derivable from real row data"
+    // precedent as the zone-map feature's version-bump-discards elsewhere in
+    // this codebase. UpdateRow/FlushBlock on an already-compacted cold year is
+    // rare (compaction only ever targets closed years), so the extra header
+    // rewrite is not a hot-path cost.
+    if (header_.bitmap_section_offset != 0) {
+        spdlog::warn("[CATIDX] - Block {} write into an already-compacted file -- invalidating "
+                     "the bitmap section; next compaction pass will rebuild it", block_index);
         header_.bitmap_section_offset = 0;
         [[maybe_unused]] ssize_t invalidate_written = pwrite(fd_, &header_, sizeof(header_), 0);
         fdatasync(fd_);
@@ -211,7 +216,13 @@ void CatIdxFile::AppendBitmapSection(const std::unordered_map<uint32_t, std::map
     std::lock_guard<std::mutex> lock(mutex_);
 
     struct stat st{};
-    fstat(fd_, &st);
+    if (fstat(fd_, &st) != 0) {
+        // st.st_size is the append offset -- appending at a garbage offset
+        // would land directory bytes on top of the bloom section. Bail; the
+        // next compaction pass retries (HasBitmapSection() is still false).
+        spdlog::error("[CATIDX] - fstat failed before bitmap-section append; not committing");
+        return;
+    }
     off_t append_offset = st.st_size;
 
     // One buffer holding every surviving column's directory back-to-back --
@@ -267,28 +278,49 @@ std::optional<std::vector<uint64_t>> CatIdxFile::LookupExact(uint32_t column_idx
     if (header_.bitmap_section_offset == 0) return std::nullopt;
 
     struct stat st{};
-    fstat(fd_, &st);
+    if (fstat(fd_, &st) != 0) return std::nullopt;
     off_t pos = static_cast<off_t>(header_.bitmap_section_offset);
 
+    // Every read is bounds-checked against the real file size AND its return
+    // value verified before the bytes are used. value_len/row_count come
+    // straight off disk, so a truncated or corrupt directory would otherwise
+    // turn a garbage length into a multi-gigabyte allocation (or bad_alloc)
+    // on the query path. Any anomaly bails to nullopt, which every caller
+    // already handles as "no directory answer" by falling back to
+    // bloom+real-scan -- always correct, just unaccelerated.
+    auto fits = [&](size_t n) {
+        return pos >= 0 && pos <= st.st_size && n <= static_cast<size_t>(st.st_size - pos);
+    };
+    auto read_at = [&](void *dst, size_t n) {
+        if (!fits(n)) return false;
+        if (pread(fd_, dst, n, pos) != static_cast<ssize_t>(n)) return false;
+        pos += static_cast<off_t>(n);
+        return true;
+    };
+
     while (pos < st.st_size) {
-        uint32_t col; uint32_t entry_count;
-        [[maybe_unused]] ssize_t r1 = pread(fd_, &col, sizeof(col), pos); pos += sizeof(col);
-        [[maybe_unused]] ssize_t r2 = pread(fd_, &entry_count, sizeof(entry_count), pos); pos += sizeof(entry_count);
+        uint32_t col = 0;
+        uint32_t entry_count = 0;
+        if (!read_at(&col, sizeof(col))) return std::nullopt;
+        if (!read_at(&entry_count, sizeof(entry_count))) return std::nullopt;
 
         for (uint32_t i = 0; i < entry_count; ++i) {
-            uint32_t value_len;
-            [[maybe_unused]] ssize_t r3 = pread(fd_, &value_len, sizeof(value_len), pos); pos += sizeof(value_len);
+            uint32_t value_len = 0;
+            uint32_t row_count = 0;
+            if (!read_at(&value_len, sizeof(value_len))) return std::nullopt;
+            if (!fits(value_len)) return std::nullopt; // check BEFORE allocating
             std::string value(value_len, '\0');
-            [[maybe_unused]] ssize_t r4 = pread(fd_, value.data(), value_len, pos); pos += value_len;
-            uint32_t row_count;
-            [[maybe_unused]] ssize_t r5 = pread(fd_, &row_count, sizeof(row_count), pos); pos += sizeof(row_count);
+            if (!read_at(value.data(), value_len)) return std::nullopt;
+            if (!read_at(&row_count, sizeof(row_count))) return std::nullopt;
+            const size_t row_bytes = static_cast<size_t>(row_count) * sizeof(uint64_t);
+            if (!fits(row_bytes)) return std::nullopt; // check BEFORE allocating
 
             if (col == column_idx && value == encoded_value) {
                 std::vector<uint64_t> rows(row_count);
-                [[maybe_unused]] ssize_t r6 = pread(fd_, rows.data(), row_count * sizeof(uint64_t), pos);
+                if (!read_at(rows.data(), row_bytes)) return std::nullopt;
                 return rows;
             }
-            pos += row_count * sizeof(uint64_t);
+            pos += static_cast<off_t>(row_bytes);
         }
     }
     return std::nullopt;

@@ -21,13 +21,17 @@ include(GoogleTest)
 gtest_discover_tests(xstore_tests)
 
 # Run the suite automatically right after a successful build of this target,
-# so `cmake --build .` compiles and tests in one step. Scoped to this
-# binary's own suite (XStoreTest.*) so building just this target doesn't
-# report the other binary's tests as "_NOT_BUILT" if it hasn't been built yet.
+# so `cmake --build .` compiles and tests in one step. Scoped to THIS binary's
+# suites so building just this target doesn't report the other binaries' tests
+# as "_NOT_BUILT" if they haven't been built yet -- which means every suite
+# name declared in this target's sources must be listed here. It used to be
+# just "^XStoreTest\\.", silently skipping every zone-map and catidx suite
+# (worked around by a manual `ctest -R CatIdx` in each task instead).
 add_custom_command(TARGET xstore_tests POST_BUILD
-        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "^XStoreTest\\."
+        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "^(XStoreTest|XStoreWalTest|XStorePreadPoolTest|XStoreCrc32cTest|XStoreZoneMapTest|ZoneMapEntryLayoutTest|ZoneMapFileTest|ZoneMapFileVersionTest|ZoneMapMathTest|XStoreCatIdxTestFixture|CatIdxFileTest|GetOrOpenCatIdxTest|EncodeFDataForCatIdxTest)\\."
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         COMMENT "Running xstore_tests via ctest"
+        VERBATIM # the regex contains ( | ) -- without this CMake emits it unquoted and /bin/sh chokes
 )
 
 # xstore_network_tests drives the same operations through the real ZMQ wire

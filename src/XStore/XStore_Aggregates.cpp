@@ -1065,11 +1065,42 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
         }
         void *mapped_base = mapped_handle.get();
 
-        CatIdxFile *catidx = nullptr;
-        if (column_idx >= 0 && static_cast<uint32_t>(column_idx) < tracked_column_count) {
-            catidx = &GetOrOpenCatIdx(db_base_path_str, curr_ts.year, static_cast<uint16_t>(cfg_struct.rowlength()), tracked_column_count);
-        }
         uint64_t rows_per_block = RowsPerBlock(static_cast<uint16_t>(cfg_struct.rowlength()));
+
+        // Everything that needs the CatIdxFile is pulled out HERE, in one
+        // scoped acquisition per year segment, and the reference is dropped
+        // before the per-block scan below ever runs. GetOrOpenCatIdx's
+        // registry evicts and DESTROYS instances under CATIDX_REGISTRY_CAP
+        // pressure (which this feature's own hourly compaction sweep over
+        // every (db, year) pair creates for real), so holding a
+        // CatIdxFile*/& across a loop that can span ~961 blocks at SECOND
+        // resolution is a genuine use-after-free window -- the same hazard
+        // CompactOneYearCatIdx was already fixed for. Pre-fetching also makes
+        // LookupExact run ONCE per segment instead of once per "maybe" block,
+        // which is where it used to re-scan the whole year's directory.
+        const uint64_t first_block = BlockIndexForRow(iter_epoch - curr_ts.first_epoch, rows_per_block);
+        const uint64_t last_block = BlockIndexForRow(segment_end - curr_ts.first_epoch, rows_per_block);
+        std::vector<char> block_might_contain;       // empty == no bloom for this column, every block must scan
+        std::vector<uint64_t> bitmap_candidate_rows; // sorted year-relative row indices, only if compacted
+        bool have_bitmap_candidates = false;
+        if (column_idx >= 0 && static_cast<uint32_t>(column_idx) < tracked_column_count) {
+            CatIdxFile &catidx = GetOrOpenCatIdx(db_base_path_str, curr_ts.year,
+                                                  static_cast<uint16_t>(cfg_struct.rowlength()), tracked_column_count);
+            block_might_contain.assign(static_cast<size_t>(last_block - first_block + 1), 0);
+            for (uint64_t b = first_block; b <= last_block; ++b) {
+                block_might_contain[static_cast<size_t>(b - first_block)] =
+                    catidx.MightContain(b, static_cast<uint32_t>(column_idx), encoded_target) ? 1 : 0;
+            }
+            if (catidx.HasBitmapSection()) {
+                auto exact_rows = catidx.LookupExact(static_cast<uint32_t>(column_idx), encoded_target);
+                if (exact_rows.has_value()) {
+                    bitmap_candidate_rows = std::move(*exact_rows);
+                    std::sort(bitmap_candidate_rows.begin(), bitmap_candidate_rows.end());
+                    have_bitmap_candidates = true;
+                }
+            }
+        }
+        // No CatIdxFile reference is live past this point.
 
         const unsigned long long int first_offset = (iter_epoch - curr_ts.first_epoch) * cfg_struct.rowlength();
         const unsigned long long int region_length = (segment_end - iter_epoch + 1) * cfg_struct.rowlength();
@@ -1084,6 +1115,36 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
                 madvise(reinterpret_cast<void*>(aligned_addr), region_length + align_slop, MADV_WILLNEED);
             }
 
+            // One shared emitter for both the bitmap-candidate path and the
+            // real-scan path -- they only ever differ in WHICH rows they
+            // consider, never in how a confirmed match is emitted. Returns
+            // false once the 2GB streaming guard trips.
+            auto emit_match = [&](unsigned long long int e, const char *row_ptr) {
+                size_t size_before = chunk_buf.size();
+                XStoreWireEncode::EncodeQueryResponseEntry(chunk_buf, e, row_ptr, cfg_struct.rowlength());
+                total_emitted_bytes += static_cast<unsigned long long int>(chunk_buf.size() - size_before);
+                if (chunk_buf.size() >= chunk_size_bytes) {
+                    emit_chunk(std::move(chunk_buf), false);
+                    chunk_buf.clear();
+                    chunk_buf.reserve(chunk_size_bytes + 4096);
+                }
+                if (total_emitted_bytes > 2'000'000'000) {
+                    set_warning("[WARNING] ", fmt::format("[FINDBYVALUE] [DB: {}] - Query results exceeded 2GB, results truncated", db_name));
+                    size_limit_exceeded = true;
+                    return false;
+                }
+                return true;
+            };
+            // Confirms a row really still holds the target value right now, by
+            // decoding it from the mapped file -- identical to what the
+            // real-scan path does per row.
+            auto row_still_matches = [&](const char *row_ptr) {
+                XStore_Proto::FData f_data;
+                return ExtractColumnByIndexSkipParse(row_ptr, cfg_struct.rowlength(),
+                                                     static_cast<unsigned short>(column_idx), f_data)
+                       && EncodeFDataForCatIdx(f_data) == encoded_target;
+            };
+
             unsigned long long int epoch_time = iter_epoch;
             while (epoch_time <= segment_end) {
                 uint64_t row_index = epoch_time - curr_ts.first_epoch;
@@ -1092,68 +1153,49 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
                 unsigned long long int block_end_epoch = std::min(segment_end,
                     static_cast<unsigned long long int>(curr_ts.first_epoch + block_start_row + rows_per_block - 1));
 
+                // Bloom said "definitely absent" for this whole block -- skip
+                // it without touching a row. This is the only tier that may
+                // skip real data, and it is safe because a bloom filter never
+                // produces a false negative.
                 bool must_scan = true;
-                if (catidx != nullptr) {
-                    bool maybe = catidx->MightContain(block_index, static_cast<uint32_t>(column_idx), encoded_target);
-                    if (!maybe) {
-                        must_scan = false; // definite absence -- skip this block entirely
-                    } else if (catidx->HasBitmapSection()) {
-                        auto exact_rows = catidx->LookupExact(static_cast<uint32_t>(column_idx), encoded_target);
-                        if (exact_rows.has_value()) {
-                            // Exact answer for this block -- fetch only these rows, no scan.
-                            for (uint64_t r : *exact_rows) {
-                                if (r < block_start_row || r >= block_start_row + rows_per_block) continue; // only this block's own rows
-                                unsigned long long int e = curr_ts.first_epoch + r;
-                                if (e < iter_epoch || e > segment_end) continue; // clip to the queried range too
-                                unsigned long long int offset = (e - curr_ts.first_epoch) * cfg_struct.rowlength();
-                                const char *row_ptr = static_cast<const char*>(mapped_base) + offset;
-                                size_t size_before = chunk_buf.size();
-                                XStoreWireEncode::EncodeQueryResponseEntry(chunk_buf, e, row_ptr, cfg_struct.rowlength());
-                                total_emitted_bytes += static_cast<unsigned long long int>(chunk_buf.size() - size_before);
-                                if (chunk_buf.size() >= chunk_size_bytes) {
-                                    emit_chunk(std::move(chunk_buf), false);
-                                    chunk_buf.clear();
-                                    chunk_buf.reserve(chunk_size_bytes + 4096);
-                                }
-                                if (total_emitted_bytes > 2'000'000'000) {
-                                    set_warning("[WARNING] ", fmt::format("[FINDBYVALUE] [DB: {}] - Query results exceeded 2GB, results truncated", db_name));
-                                    size_limit_exceeded = true;
-                                    break;
-                                }
-                            }
-                            must_scan = false;
-                        }
-                        // exact_rows == nullopt: bloom said maybe but this column's
-                        // directory doesn't have this value (either the column was
-                        // over the cardinality cap at compaction time, or -- rare --
-                        // a bloom false positive). Either way must_scan stays true:
-                        // real-scan this block, which is always correct regardless
-                        // of why the directory lookup came up empty.
+                if (!block_might_contain.empty() &&
+                    block_might_contain[static_cast<size_t>(block_index - first_block)] == 0) {
+                    must_scan = false;
+                } else if (have_bitmap_candidates) {
+                    // The bitmap directory is a COMPACTION-TIME SNAPSHOT, i.e.
+                    // a candidate list, never an authority: rows it names may
+                    // since have been overwritten or deleted. So every
+                    // candidate is re-decoded and re-compared against the
+                    // CURRENT row bytes before it is emitted, exactly like the
+                    // real-scan path below -- still far cheaper than scanning
+                    // the block, since only the rows the directory names get
+                    // decoded. (The converse staleness -- rows backfilled
+                    // AFTER compaction that the directory never learned about
+                    // -- is handled upstream: any such write invalidates the
+                    // whole section in FlushBlock, so have_bitmap_candidates is
+                    // false and this block real-scans instead.)
+                    auto it = std::lower_bound(bitmap_candidate_rows.begin(), bitmap_candidate_rows.end(), block_start_row);
+                    for (; it != bitmap_candidate_rows.end() && *it < block_start_row + rows_per_block; ++it) {
+                        unsigned long long int e = curr_ts.first_epoch + *it;
+                        if (e < iter_epoch || e > segment_end) continue; // clip to the queried range too
+                        const char *row_ptr = static_cast<const char*>(mapped_base)
+                                              + (e - curr_ts.first_epoch) * cfg_struct.rowlength();
+                        if (!row_still_matches(row_ptr)) continue; // stale directory entry
+                        if (!emit_match(e, row_ptr)) break;
                     }
+                    must_scan = false;
                 }
+                // Neither tier above applied (bloom said maybe and no usable
+                // directory -- column over the cardinality cap at compaction,
+                // year not compacted yet, or directory invalidated since -- or
+                // the column is past tracked_column_count): real-scan the
+                // block, which is always correct.
 
                 if (must_scan && column_idx >= 0) {
                     for (unsigned long long int e = epoch_time; e <= block_end_epoch; e++) {
-                        unsigned long long int offset = (e - curr_ts.first_epoch) * cfg_struct.rowlength();
-                        const char *row_ptr = static_cast<const char*>(mapped_base) + offset;
-                        XStore_Proto::FData f_data;
-                        if (ExtractColumnByIndexSkipParse(row_ptr, cfg_struct.rowlength(), static_cast<unsigned short>(column_idx), f_data)) {
-                            if (EncodeFDataForCatIdx(f_data) == encoded_target) {
-                                size_t size_before = chunk_buf.size();
-                                XStoreWireEncode::EncodeQueryResponseEntry(chunk_buf, e, row_ptr, cfg_struct.rowlength());
-                                total_emitted_bytes += static_cast<unsigned long long int>(chunk_buf.size() - size_before);
-                                if (chunk_buf.size() >= chunk_size_bytes) {
-                                    emit_chunk(std::move(chunk_buf), false);
-                                    chunk_buf.clear();
-                                    chunk_buf.reserve(chunk_size_bytes + 4096);
-                                }
-                                if (total_emitted_bytes > 2'000'000'000) {
-                                    set_warning("[WARNING] ", fmt::format("[FINDBYVALUE] [DB: {}] - Query results exceeded 2GB, results truncated", db_name));
-                                    size_limit_exceeded = true;
-                                    break;
-                                }
-                            }
-                        }
+                        const char *row_ptr = static_cast<const char*>(mapped_base)
+                                              + (e - curr_ts.first_epoch) * cfg_struct.rowlength();
+                        if (row_still_matches(row_ptr) && !emit_match(e, row_ptr)) break;
                     }
                 }
                 if (size_limit_exceeded) break;
