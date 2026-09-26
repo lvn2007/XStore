@@ -535,6 +535,27 @@ class XStoreClient {
       return SendRecv<XStore_Proto::FindByValue_REP>(to_server);
   }
 
+  // Server side is a TEMPORARY IMPLEMENTATION (option A, brute-force scan);
+  // this call's shape is stable. LIKE: % any run, _ one byte, \ escapes.
+  // REGEX: RE2, unanchored. case_insensitive: ASCII fold for LIKE.
+  [[nodiscard]] XStore_Proto::FindByPattern_REP FindByPattern(uint64_t start_time, uint64_t end_time,
+                                                              std::string_view db_name, int32_t column_idx,
+                                                              std::string_view pattern,
+                                                              XStore_Proto::PatternMode mode = XStore_Proto::PATTERN_LIKE,
+                                                              bool case_insensitive = false) {
+      XStore_Proto::Request to_server;
+      auto *payload = to_server.mutable_findbypattern();
+      payload->set_rtype(XStore_Proto::FINDBYPATTERN);
+      payload->set_starttime(start_time);
+      payload->set_endtime(end_time);
+      payload->set_dbname(std::string(db_name));
+      payload->set_columnidx(column_idx);
+      payload->set_pattern(std::string(pattern));
+      payload->set_mode(mode);
+      payload->set_caseinsensitive(case_insensitive);
+      return SendRecv<XStore_Proto::FindByPattern_REP>(to_server);
+  }
+
   [[nodiscard]] std::string RangeDelete(uint64_t start_time, uint64_t end_time, std::string_view db_name) {
       XStore_Proto::Request to_server;
       auto *payload = to_server.mutable_rangedelete();

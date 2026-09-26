@@ -24,6 +24,7 @@
 #include <memory>
 #include <random>
 #include <string>
+#include <sys/resource.h>
 #include <thread>
 #include <unistd.h>
 #include <unordered_set>
@@ -630,4 +631,131 @@ TEST_F(XStorePerfTest, AvgAggregateThroughput) {
 
     ASSERT_EQ(avg_rep.opstatus(), "SUCCESS");
     ReportPerf({"AvgAggregate", n, elapsed});
+}
+
+// ---------------------------------------------------------------------
+// FindByPattern -- TEMPORARY IMPLEMENTATION (option A, brute-force scan).
+// Baseline for the A vs. B (per-block trigram bloom) vs. C (inverted index)
+// decision (TODO.md): rows scanned/sec per pattern shape, warm and cold
+// page cache. "rows" here = rows in the scanned range, not matches.
+// ---------------------------------------------------------------------
+
+TEST_F(XStorePerfTest, FindByPatternScanThroughput) {
+    XStore store;
+    CreateTestDb(store, "PERFPATTERN", XStore_Proto::SECOND, 64);
+    const unsigned long long n = PerfOpCount(200'000);
+
+    static const char *const SYMBOLS[] = {"AAPL", "MSFT", "GOOG", "AMZN", "META", "NVDA", "TSLA", "ORCL"};
+
+    // Load: BatchInsert in ~10k-row batches (SYNC durability) instead of one
+    // UnaryInsert call per row -- a calibration run at XSTORE_PERF_N=200000
+    // showed the per-row UnaryInsert loop (as in the original brief) would
+    // extrapolate to well over 10 minutes for the full 1,000,000-row load,
+    // which would dominate this test's wall time before the timed query
+    // cases even start. BatchInsert with explicit SYNC keeps the same
+    // durability guarantee (rows applied before the timed queries run) while
+    // batching the WAL append cost; row content/timestamps are unchanged
+    // from the brief (BASE_TS + i, "<SYMBOL>-order-<i>").
+    constexpr unsigned long long kBatchSize = 10'000;
+    for (unsigned long long batch_start = 0; batch_start < n; batch_start += kBatchSize) {
+        unsigned long long batch_end = std::min(batch_start + kBatchSize, n);
+        XStore_Proto::BatchInsert_REQ req;
+        req.set_dbname("PERFPATTERN");
+        req.set_durabilitymode(XStore_Proto::SYNC);
+        for (unsigned long long i = batch_start; i < batch_end; i++) {
+            XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
+            entry->set_timestamp(BASE_TS + i);
+            *entry->mutable_data() = MakeRow({FDouble(static_cast<double>(i)), FString(fmt::format("{}-order-{}", SYMBOLS[i % 8], i))});
+        }
+        XStore_Proto::BatchInsert_REP rep;
+        store.BatchInsert(&req, &rep);
+        // Match the success form specifically ("...elements successfully") --
+        // the failure message also contains "Inserted {N} elements" as a
+        // prefix ("...elements, but the write failed for at least one
+        // group", see XStore_BatchOps.cpp), so a substring match on just
+        // that much would pass on failure too.
+        ASSERT_NE(rep.insertstatus().find(fmt::format("Inserted {} elements successfully", batch_end - batch_start)), std::string::npos) << rep.insertstatus();
+    }
+
+    // Correctness guard -- so the perf numbers below can't be silently
+    // meaningless: confirm the loaded data actually has the shape the perf
+    // cases assume (1/8 of rows are AAPL, a known no-match pattern matches
+    // nothing) before trusting any timing.
+    {
+        std::string buffer;
+        store.FindByPattern(BASE_TS, BASE_TS + n - 1, "PERFPATTERN", 1, "AAPL%", XStore_Proto::PATTERN_LIKE, false,
+                            XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                            [&](std::string &&chunk, bool) { buffer += chunk; });
+        XStore_Proto::FindByPattern_REP rep;
+        ASSERT_TRUE(rep.ParseFromString(buffer)) << "FindByPattern reply failed to parse";
+        if (n % 8 == 0) {
+            ASSERT_EQ(rep.queryresponse_size(), (int)(n / 8)) << "AAPL% match count wrong -- data load or scan is broken";
+        }
+
+        std::string no_match_buffer;
+        store.FindByPattern(BASE_TS, BASE_TS + n - 1, "PERFPATTERN", 1, "%ZZZZ%", XStore_Proto::PATTERN_LIKE, false,
+                            XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                            [&](std::string &&chunk, bool) { no_match_buffer += chunk; });
+        XStore_Proto::FindByPattern_REP no_match_rep;
+        ASSERT_TRUE(no_match_rep.ParseFromString(no_match_buffer)) << "FindByPattern no-match reply failed to parse";
+        ASSERT_EQ(no_match_rep.queryresponse_size(), 0) << "no-match pattern returned rows -- scan is broken";
+    }
+
+    struct Case {
+        const char *name;
+        const char *pattern;
+        XStore_Proto::PatternMode mode;
+        bool case_insensitive;
+    };
+    std::vector<Case> cases = {
+        {"LIKE prefix 'AAPL%'", "AAPL%", XStore_Proto::PATTERN_LIKE, false},
+        {"LIKE suffix '%99'", "%99", XStore_Proto::PATTERN_LIKE, false},
+        {"LIKE substring '%order-1234%'", "%order-1234%", XStore_Proto::PATTERN_LIKE, false},
+        {"LIKE no-match '%ZZZZ%'", "%ZZZZ%", XStore_Proto::PATTERN_LIKE, false},
+        {"ILIKE '%aapl%'", "%aapl%", XStore_Proto::PATTERN_LIKE, true},
+    };
+#ifdef XSTORE_HAVE_RE2
+    cases.push_back({"REGEX '^(AAPL|MSFT)-order-[0-9]+7$'", "^(AAPL|MSFT)-order-[0-9]+7$", XStore_Proto::PATTERN_REGEX, false});
+#endif
+
+    auto run = [&](const Case &c) {
+        size_t bytes = 0;
+        store.FindByPattern(BASE_TS, BASE_TS + n - 1, "PERFPATTERN", 1, c.pattern, c.mode, c.case_insensitive,
+                            XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                            [&](std::string &&chunk, bool) { bytes += chunk.size(); });
+        return bytes;
+    };
+
+    // Same prefix RemoveDB passes to the private EraseMappedFilesUnderPrefix
+    // (db_loc + "/", where db_loc = JoinPath(data_store_dir, dbName)) --
+    // db_name is already upper-cased ("PERFPATTERN" has no lowercase chars
+    // to begin with).
+    const std::string mmap_prefix = store.data_store_dir + "/PERFPATTERN/";
+
+    for (const auto &c : cases) {
+        // Drop this process's own warm mapping FIRST, then the page cache:
+        // posix_fadvise(DONTNEED) (what DropPageCacheForDb uses) cannot
+        // evict a page that's still backing a live mapping in this process
+        // -- and by this point the untimed correctness guard above has
+        // already faulted the whole file's pages in via GetOrMapFile's
+        // process-wide cache. Without evicting the mapping first, every
+        // "cold" run below would actually run warm.
+        store.EvictMappedFilesUnderPrefixForTests(mmap_prefix);
+        DropPageCacheForDb("PERFPATTERN");
+        auto start = std::chrono::steady_clock::now();
+        run(c);
+        ReportPerf({fmt::format("FindByPattern cold {}", c.name), n,
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count()});
+
+        start = std::chrono::steady_clock::now();
+        size_t reply_bytes = run(c);
+        ReportPerf({fmt::format("FindByPattern warm {}", c.name), n,
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count()});
+        std::cout << "[PERF]   reply_bytes=" << reply_bytes << std::endl;
+    }
+
+    rusage usage{};
+    getrusage(RUSAGE_SELF, &usage);
+    std::cout << "[PERF] FindByPattern process peak RSS=" << usage.ru_maxrss << " KiB "
+              << "(includes the fixture's inserts and the 64 MiB streamed-chunk reserve per query)" << std::endl;
 }

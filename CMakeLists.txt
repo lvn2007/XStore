@@ -344,6 +344,8 @@ add_library(xstore_core STATIC
         src/XStore/XStore_Wal.cpp
         src/XStore/XStore_ZoneMap.cpp
         src/XStore/XStore_CatIdx.cpp
+        src/XStore/XStore_PatternMatch.cpp
+        include/XStore/XStore_PatternMatch.h
         src/XStore/XStore_Crc32c.cpp
         src/XStore/XStore_SysStats.cpp
         include/XStore/XStore_SysStats.h
@@ -353,6 +355,7 @@ add_library(xstore_core STATIC
         src/XStore/XStore_BatchOps.cpp
         src/XStore/XStore_RangeOps.cpp
         src/XStore/XStore_Aggregates.cpp
+        src/XStore/XStore_PatternOps.cpp
         include/XStore/XStore.h
         include/DataStructs/ValueStruct.h
         src/DataStructs/TimeStruct.cpp
@@ -364,6 +367,47 @@ add_library(xstore_core STATIC
 target_link_libraries(xstore_core PUBLIC protobuf::libprotobuf moodycamel Threads::Threads "stdc++fs")
 if(TARGET absl::log_internal_check_op)
     target_link_libraries(xstore_core PUBLIC absl::log_internal_check_op)
+endif()
+
+# --- RE2 (pinned to the 2025-11-05 release) --- FindByPattern's PATTERN_REGEX mode.
+# Fetched & built from source by default, like protobuf/sodium above, so a
+# fresh machine needs no `apt install libre2-dev`. RE2 only calls
+# find_package(absl) when absl::base doesn't exist yet -- protobuf's fetch
+# above already defined it, so RE2 builds against protobuf's own Abseil and
+# the binary carries exactly one Abseil. OFF -> system RE2 via pkg-config.
+# With no RE2 at all the server still builds and REGEX requests get
+# "[ERROR] ... built without RE2".
+option(XSTORE_FETCH_RE2 "Fetch & build RE2 from source instead of a system install" ON)
+
+if(XSTORE_FETCH_RE2 AND CMAKE_VERSION VERSION_LESS 3.22)
+    message(STATUS "RE2: CMake ${CMAKE_VERSION} < 3.22 (RE2's minimum) -- FindByPattern REGEX mode disabled")
+elseif(XSTORE_FETCH_RE2 AND NOT TARGET absl::base)
+    message(STATUS "RE2: no Abseil targets in this build (protobuf not fetched?) -- FindByPattern REGEX mode disabled")
+elseif(XSTORE_FETCH_RE2)
+    set(RE2_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(RE2_INSTALL       OFF CACHE BOOL "" FORCE)  # its install(EXPORT) can't reference protobuf's non-exported absl targets
+    FetchContent_Declare(
+            re2
+            GIT_REPOSITORY https://github.com/google/re2.git
+            GIT_TAG 2025-11-05
+            GIT_SHALLOW ON
+    )
+    FetchContent_MakeAvailable(re2)
+    target_link_libraries(xstore_core PUBLIC re2::re2)
+    target_compile_definitions(xstore_core PUBLIC XSTORE_HAVE_RE2)
+    message(STATUS "RE2: fetched & building from source (2025-11-05) -- FindByPattern REGEX mode enabled")
+else()
+    find_package(PkgConfig QUIET)
+    if(PKG_CONFIG_FOUND)
+        pkg_check_modules(RE2 QUIET IMPORTED_TARGET re2)
+    endif()
+    if(RE2_FOUND)
+        target_link_libraries(xstore_core PUBLIC PkgConfig::RE2)
+        target_compile_definitions(xstore_core PUBLIC XSTORE_HAVE_RE2)
+        message(STATUS "RE2: using system install ${RE2_VERSION} -- FindByPattern REGEX mode enabled")
+    else()
+        message(STATUS "RE2: not found -- FindByPattern REGEX mode disabled")
+    endif()
 endif()
 
 # CURVE key handling -- pure zmq + std, no protobuf, no core. Shared by the

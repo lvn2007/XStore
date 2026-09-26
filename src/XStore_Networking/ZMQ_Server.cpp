@@ -432,6 +432,21 @@ void ZmqServer::WorkerRoutine(std::string server_addr) {
                     break;
                 }
 
+                // FIND BY PATTERN (LIKE/ILIKE/REGEX) -- TEMPORARY IMPLEMENTATION (option A)
+                // behind it: brute-force scan, see XStore_PatternOps.cpp.
+                case XStore_Proto::Request::kFindbypattern: {
+                    const auto &req = client_request->findbypattern();
+                    my_store.FindByPattern(req.starttime(), req.endtime(), req.dbname(), req.columnidx(),
+                        req.pattern(), req.mode(), req.caseinsensitive(),
+                        XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                        [&](std::string &&chunk, bool is_last) {
+                            socket.send(zmq::buffer(chunk),
+                                        is_last ? zmq::send_flags::dontwait
+                                                : (zmq::send_flags::dontwait | zmq::send_flags::sndmore));
+                        });
+                    break;
+                }
+
                 // RANGE DELETE
                 case XStore_Proto::Request::kRangedelete: {
                     const auto &req = client_request->rangedelete();

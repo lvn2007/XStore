@@ -14,6 +14,7 @@ add_executable(xstore_tests
         integration/XStoreZoneMapTest.cpp
         integration/XStoreCrc32cTest.cpp
         integration/XStoreCatIdxTest.cpp
+        integration/XStorePatternTest.cpp
 )
 target_link_libraries(xstore_tests PRIVATE GTest::gtest_main xstore_core)
 
@@ -28,7 +29,7 @@ gtest_discover_tests(xstore_tests)
 # just "^XStoreTest\\.", silently skipping every zone-map and catidx suite
 # (worked around by a manual `ctest -R CatIdx` in each task instead).
 add_custom_command(TARGET xstore_tests POST_BUILD
-        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "^(XStoreTest|XStoreWalTest|XStorePreadPoolTest|XStoreCrc32cTest|XStoreZoneMapTest|ZoneMapEntryLayoutTest|ZoneMapFileTest|ZoneMapFileVersionTest|ZoneMapMathTest|XStoreCatIdxTestFixture|CatIdxFileTest|GetOrOpenCatIdxTest|EncodeFDataForCatIdxTest)\\."
+        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "^(XStoreTest|XStoreWalTest|XStorePreadPoolTest|XStoreCrc32cTest|XStoreZoneMapTest|ZoneMapEntryLayoutTest|ZoneMapFileTest|ZoneMapFileVersionTest|ZoneMapMathTest|XStoreCatIdxTestFixture|CatIdxFileTest|GetOrOpenCatIdxTest|EncodeFDataForCatIdxTest|PatternMatcherTest|XStorePatternTestFixture)\\."
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         COMMENT "Running xstore_tests via ctest"
         VERBATIM # the regex contains ( | ) -- without this CMake emits it unquoted and /bin/sh chokes

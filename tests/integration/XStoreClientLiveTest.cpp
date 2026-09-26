@@ -277,3 +277,32 @@ TEST_F(XStoreClientLiveTest, SumAndAvgAggregateOverRealNetworkMatchExpectedValue
 
     DropDb(db_name, {"2020.XSTORE"});
 }
+
+// ---------------------------------------------------------------------
+// FINDBYPATTERN -- LIKE over a string column, over the real network.
+// ---------------------------------------------------------------------
+TEST_F(XStoreClientLiveTest, FindByPatternReturnsOnlyMatchingRowsOnServer) {
+    const std::string db_name = UniqueDbName("PATTERN");
+    CreateDb(db_name);
+
+    const std::vector<std::pair<std::time_t, std::string>> rows = {
+        {1592222400, "order-AAPL-1"}, {1592222401, "order-MSFT-2"}, {1592222402, "order-AAPL-3"}};
+    for (const auto &[ts, text] : rows) {
+        XStore_Proto::RowData row = MakeRow({xstore_fdata::String(text)});
+        // SYNC (not the default ASYNC): the row must be durably applied to
+        // the .XSTORE file before this call returns, or the FindByPattern
+        // scan immediately below can race the WAL writer thread and see the
+        // year file as not-yet-created.
+        std::string status = client->UnaryInsert(ts, row, db_name, XStore_Proto::SYNC);
+        ASSERT_NE(status.find("[INFO]"), std::string::npos) << "UnaryInsert failed: " << status;
+    }
+
+    XStore_Proto::FindByPattern_REP rep =
+        client->FindByPattern(1592222400, 1592222402, db_name, 0, "%-aapl-%", XStore_Proto::PATTERN_LIKE, true);
+    EXPECT_FALSE(rep.has_querystatus()) << rep.querystatus();
+    ASSERT_EQ(rep.queryresponse_size(), 2);
+    EXPECT_EQ(rep.queryresponse(0).data().fielddata(0).stringdata(), "order-AAPL-1");
+    EXPECT_EQ(rep.queryresponse(1).data().fielddata(0).stringdata(), "order-AAPL-3");
+
+    DropDb(db_name, {"2020.XSTORE"});
+}

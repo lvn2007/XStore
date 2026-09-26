@@ -449,6 +449,20 @@ class XStore {
                           std::string_view db_name, int32_t column_idx, const XStore_Proto::FData &value,
                           size_t chunk_size_bytes, const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk);
 
+        // FIND BY PATTERN -- TEMPORARY IMPLEMENTATION (option A). Streams
+        // every row in [startEpochT, endEpochT] whose column_idx holds a
+        // stringData/bytesData value matching pattern (PATTERN_LIKE: SQL
+        // LIKE/ILIKE; PATTERN_REGEX: RE2 partial match), in the same chunked
+        // RangeQuery_REP wire shape as FindByValue. Brute-force: every row in
+        // range is decoded and tested, no index. The RPC is intended to be
+        // permanent; this scan is the baseline for the pending A (scan) vs.
+        // B (per-block trigram bloom) vs. C (inverted index) decision -- see
+        // TODO.md. Lives alone in XStore_PatternOps.cpp so B/C replace one file.
+        void FindByPattern(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
+                           std::string_view db_name, int32_t column_idx, std::string_view pattern,
+                           XStore_Proto::PatternMode mode, bool case_insensitive,
+                           size_t chunk_size_bytes, const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk);
+
         // RANGE DELETE
         [[nodiscard]] XStore_Proto::RangeDelete_REP RangeDelete(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name);
 
@@ -788,6 +802,20 @@ class XStore {
         // warm CatIdxFile instance so the next GetOrOpenCatIdx reopens from
         // disk.
         static void ClearCatIdxRegistryForTests();
+
+        // Test-only: drop every cached mapping whose path falls under
+        // db_dir_prefix, without deleting the DB itself (unlike RemoveDB,
+        // which calls the private EraseMappedFilesUnderPrefix this wraps for
+        // the same reason). Dropping the cache's entry releases this
+        // function's own shared_ptr reference; the actual munmap happens
+        // when the last shared_ptr holder releases the mapping -- immediately
+        // if no query is in flight, or once any in-flight query finishes. A
+        // test that wants to simulate a truly cold page cache (e.g. before a
+        // perf test's timed "cold" run) must drop this process's own mmap
+        // first -- posix_fadvise(DONTNEED) can't evict a page still backing a
+        // live mapping in this process, so page-cache-only eviction alone
+        // leaves a previously-touched file fully resident.
+        void EvictMappedFilesUnderPrefixForTests(const std::string &db_dir_prefix);
 
         // Spawns the CatIdx compaction background thread (Task 9): once a
         // year file goes cold (year < current calendar year), scans it once

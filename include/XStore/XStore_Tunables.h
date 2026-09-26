@@ -477,6 +477,16 @@ inline constexpr uint32_t CATIDX_VERSION = 1;
 inline constexpr size_t   CATIDX_BLOOM_HASH_COUNT = 7;
 inline constexpr size_t   CATIDX_BLOOM_BYTES_PER_ENTRY = 160;
 
+// FindByPattern (XStore_PatternMatch.*): a request's pattern longer than this
+// is rejected before compiling, so a hostile request can't force a huge LIKE
+// segment table or RE2 program.
+inline constexpr size_t   FIND_BY_PATTERN_MAX_PATTERN_BYTES = 4096;
+
+// RE2::Options::max_mem for one FindByPattern REGEX query (compiled program +
+// DFA cache). RE2's own default, made explicit so it's a visible bound on
+// per-query memory; a regex that needs more fails to compile, it never OOMs.
+inline constexpr int64_t  FIND_BY_PATTERN_REGEX_MAX_MEM_BYTES = 8ll << 20;
+
 // Same per-DB high-water-mark tracked-column-count concept zone-map uses
 // (ConfigStruct.columncount) -- reuse the existing cap rather than a second one.
 inline constexpr uint32_t CATIDX_MAX_TRACKED_COLUMNS = ZONE_MAP_MAX_TRACKED_COLUMNS;

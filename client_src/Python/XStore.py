@@ -358,6 +358,30 @@ class XStoreClient:
 
         return self._sendRecv(envelope, XStore_Proto.FindByValue_REP)
 
+    def findByPattern(self, startUnixTime, endUnixTime, targetDBName, columnIdx, pattern,
+                      mode=XStore_Proto.PATTERN_LIKE, caseInsensitive=False):
+        """
+        Server side is a TEMPORARY IMPLEMENTATION (option A, brute-force scan);
+        this call's shape is stable.
+        :param pattern: str (sent UTF-8 encoded) or bytes.
+            PATTERN_LIKE: % any run, _ one byte, \\ escapes; whole-value match.
+            PATTERN_REGEX: RE2 syntax, unanchored.
+        :param caseInsensitive: LIKE -> ASCII-only fold (ILIKE); REGEX -> RE2 case-insensitive.
+        :return: FindByPattern_REP (queryResponse: repeated UnaryQuery_REP, queryStatus)
+        """
+        envelope = XStore_Proto.Request()
+        payload = envelope.findbypattern
+        payload.RType = XStore_Proto.FINDBYPATTERN
+        payload.startTime = startUnixTime
+        payload.endTime = endUnixTime
+        payload.dbName = targetDBName
+        payload.columnIdx = columnIdx
+        payload.pattern = pattern.encode('utf-8') if isinstance(pattern, str) else pattern
+        payload.mode = mode
+        payload.caseInsensitive = caseInsensitive
+
+        return self._sendRecv(envelope, XStore_Proto.FindByPattern_REP)
+
     def batchQuery(self, dataList, targetDBName, SortTime=False):
         """
         :param dataList:

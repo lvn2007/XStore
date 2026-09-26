@@ -294,6 +294,28 @@ XStore's zone map (§4.14) accelerates `MIN`/`MAX`/`SUM`/`AVG`/`VARIANCE`/`STDDE
 
 ---
 
+### 4.16 String pattern search — `FindByPattern` (TEMPORARY IMPLEMENTATION (option A))
+
+`FINDBYPATTERN = 26` (`proto/XStore.proto`) streams every row in `[startTime, endTime]` whose `columnIdx` holds a `stringData`/`bytesData` value matching `pattern`, in the same `UnaryQuery_REP`-entry wire shape as `FindByValue`/`RangeQuery`. Any other `FData` type, a missing column, or an unwritten row never matches (no numeric-to-string coercion). Clients: `XStoreClient::FindByPattern` (C++), `XStoreClient.findByPattern` (Python).
+
+- **Modes (`PatternMode`).** `PATTERN_LIKE`: SQL `LIKE` — `%` any run of bytes, `_` exactly one **byte** (not one UTF-8 code point), `\` escapes the next byte, whole-value match; `caseInsensitive` = ASCII-only fold (`ILIKE`). `PATTERN_REGEX`: RE2, UTF-8, unanchored partial match (`^`/`$` to anchor); `caseInsensitive` = RE2 `case_sensitive=false`.
+- **RE2 build dependency.** Fetched and built from source by default (`XSTORE_FETCH_RE2=ON`, pinned `2025-11-05`), against protobuf's already-fetched Abseil — one Abseil per binary. `XSTORE_FETCH_RE2=OFF` uses a system RE2 via pkg-config. With no RE2 (or CMake < 3.22, RE2's minimum) the server still builds and REGEX requests return `[ERROR] ... REGEX mode unavailable: server built without RE2`.
+- **Limits.** Pattern ≤ `FIND_BY_PATTERN_MAX_PATTERN_BYTES` (4096). RE2 `max_mem` = `FIND_BY_PATTERN_REGEX_MAX_MEM_BYTES` (8 MiB) — a regex needing more fails to compile. RE2 is linear-time (no ReDoS). Same 2 GB streamed-result guard as `FindByValue`.
+- **Implementation — TEMPORARY.** `XStore::FindByPattern` (`src/XStore/XStore_PatternOps.cpp`, kept alone so it can be swapped out) is a brute-force sequential scan: per year segment, read-lock + `madvise(WILLNEED)`, then per row decode the one column via `ExtractColumnByIndexSkipParse` and test it with a per-query `PatternMatcher` (`XStore_PatternMatch.*`). LIKE splits the pattern on `%` into fixed-width segments: first/last checked anchored, middle ones by leftmost fit (`memmem` when a segment has no `_`). **No index and zero write-path cost** — inserts, the WAL apply path, `.zmap` and `.catidx` are untouched. The RPC and client APIs are intended to be permanent; this scan is the baseline for the pending A (scan) vs. B (per-block trigram bloom) vs. C (inverted trigram index) decision tracked in `TODO.md`.
+- **Baseline numbers** (`XStorePerfTest.FindByPatternScanThroughput`, `XSTORE_PERF_N=1000000`, 64-byte rows, one string column like `AAPL-order-123456`; 16 cores, 15 GB RAM, ext4, kernel 6.8.0-142; 2026-09-26). "Cold" = XStore's cached mmap dropped (`EvictMappedFilesUnderPrefixForTests`) + `POSIX_FADV_DONTNEED`; plain `DONTNEED` alone does not evict pages still mapped.
+
+  | Pattern | Cold | Warm | Warm rows/s |
+  |---|---|---|---|
+  | LIKE `AAPL%` | 0.26 s | 0.22 s | 4.6 M |
+  | LIKE `%99` | 0.24 s | 0.19 s | 5.2 M |
+  | LIKE `%order-1234%` | 0.27 s | 0.22 s | 4.5 M |
+  | LIKE no-match `%ZZZZ%` | 0.27 s | 0.22 s | 4.6 M |
+  | ILIKE `%aapl%` | 0.30 s | 0.26 s | 3.9 M |
+  | REGEX `^(AAPL\|MSFT)-order-[0-9]+7$` | 0.44 s | 0.39 s | 2.5 M |
+
+  Scan cost is dominated by row decode, not matching (a no-match scan costs the same as a 125k-match one), so only block/row skipping (B or C) can beat it; REGEX ≈ 1.8× LIKE. Cold is only 13–26% slower here because 64 MB fits a fast disk's readahead — data far larger than RAM is where B's block pruning would matter most.
+- **Memory (measured on a live server, 2026-09-26).** No growth: server heap flat across 9,000+ mixed LIKE/ILIKE/REGEX queries and repeated big-result rounds (one-time +11 MiB allocator warm-up, then constant). Per query: 0 extra for scans with no matches, ~proportional to result size otherwise (~8 MB result → +7 MiB), capped at ≈ 2 × `STREAMED_QUERY_CHUNK_SIZE_BYTES` (64 MiB buffer + ZMQ's copy while sending ≈ +128 MiB for a 75 MB result), released when the query ends. This ceiling is shared with `RangeQuery`/`FindByValue`/`BatchQuery` (same streaming path) — see TODO.md for lowering it.
+
 ## 5. Concurrency Control
 
 ### 5.1 In-process byte-range locking — `FileRangeLock` / `FileLockRegistry`
@@ -636,7 +658,7 @@ See the repository's `TODO.md` for the full, current list of tracked open work (
 - **Language/standard:** C++17 (`CMAKE_CXX_STANDARD 17`), compiled `-O3` in Release (the default build type if unspecified).
 - **Required external packages:** Abseil (`absl`, transitively via Protobuf), Google Protocol Buffers (≥3.18.1, `optimize_for = SPEED`, `--experimental_allow_proto3_optional`), ZeroMQ C++ bindings (cppzmq, ≥4.8.1 per README; headers vendored under `include/Networking/`), POSIX Threads.
 - **Vendored (bundled in-tree, not fetched):** spdlog (+ bundled fmt) under `third_party/spdlog/` — the large majority of the graphify-derived node/edge count for this repository is this vendored logging/formatting library, not XStore's own logic; ZeroMQ C++ header bindings (`zmq.hpp`, `zmq_addon.hpp`, `zhelpers.hpp`) live under `third_party/` (server copy) and are duplicated under `client_src/Cpp/third_party/` (client copy, kept self-contained within `client_src/Cpp/` so the client library has no dependency outside its own directory and can be copied out standalone).
-- **Fetched at configure time:** GoogleTest v1.17.0 via CMake `FetchContent` (only if `XSTORE_BUILD_TESTS`, default `ON`).
+- **Fetched at configure time:** GoogleTest v1.17.0 via CMake `FetchContent` (only if `XSTORE_BUILD_TESTS`, default `ON`); RE2 `2025-11-05` via CMake `FetchContent` (`XSTORE_FETCH_RE2`, default `ON` — OFF uses a system RE2 via pkg-config instead), built against protobuf's already-fetched Abseil, needs CMake ≥ 3.22 (otherwise REGEX mode is disabled).
 - **Build targets:** `XStore` (server executable), optional `client_src/Cpp` subdirectory (`XSTORE_BUILD_CLIENT`, default `ON`), optional `tests` subdirectory (`XSTORE_BUILD_TESTS`, default `ON`).
 - **Large-file support** explicitly enabled (`_LARGEFILE_SOURCE`, `_LARGE_FILES`, `_FILE_OFFSET_BITS=64`) — expected given year-files can be large, fixed-width, and pre-`ftruncate`d to full-year capacity up front.
 - **CI** (`.gitlab-ci.ymll`, GitLab CI over LXC-restored runners): stages are Initialize (LXC snapshot restore) → OS Configuration (apt update/upgrade, install `build-essential cmake g++ protobuf-compiler libzmq3-dev libzstd-dev`) → Build (server, then client) → Test → Cleanup.

@@ -38,6 +38,7 @@ enum RequestType {
   DISTINCTCOUNT = 23;
   TOPK = 24;
   FINDBYVALUE = 25;
+  FINDBYPATTERN = 26;
 }
 
 enum TimeUnit {
@@ -337,6 +338,30 @@ message FindByValue_REQ {
   FData value = 6;
 }
 
+// --- FINDBYPATTERN: string pattern match on one column over
+// [startTime, endTime]. Only stringData/bytesData values can match; any other
+// FData type, a missing column, or an unwritten row never matches.
+// TEMPORARY IMPLEMENTATION (option A): the server answers this with a
+// brute-force per-row scan, no index. This message/RPC shape is intended to
+// be permanent; the scan behind it is a baseline pending the A (scan) vs.
+// B (per-block trigram bloom) vs. C (inverted index) decision -- see TODO.md.
+// Reply reuses UnaryQuery_REP's wire shape, like FindByValue_REP.
+enum PatternMode {
+  PATTERN_LIKE = 0;   // SQL LIKE: % = any run of bytes, _ = exactly one byte, \ escapes the next byte. Whole-value match.
+  PATTERN_REGEX = 1;  // RE2 syntax, UTF-8, unanchored (partial) match. Requires a server built with RE2.
+}
+
+message FindByPattern_REQ {
+  RequestType RType = 1;
+  uint64 startTime = 2;
+  uint64 endTime = 3;
+  string dbName = 4;
+  sint32 columnIdx = 5;
+  bytes pattern = 6;          // bytes, not string: a LIKE pattern for a bytesData column need not be valid UTF-8
+  PatternMode mode = 7;
+  bool caseInsensitive = 8;   // LIKE: ASCII-only fold (ILIKE). REGEX: RE2 case_sensitive=false.
+}
+
 // --- OHLC: open/high/low/close bar over [startTime, endTime] for columnIdx.
 // Open/Close are the chronologically first/last numeric values in range (not
 // value-extremes -- see ZoneMapEntry's first_value/last_value, new in v3);
@@ -430,6 +455,7 @@ message Request {
     DistinctCount_REQ distinctcount = 24;
     TopK_REQ topk = 25;
     FindByValue_REQ findbyvalue = 26;
+    FindByPattern_REQ findbypattern = 27;
   }
 }
 
@@ -609,6 +635,12 @@ message Exists_REP {
 
 // --- FINDBYVALUE
 message FindByValue_REP {
+  repeated UnaryQuery_REP queryResponse = 1;
+  optional string queryStatus = 3;
+}
+
+// --- FINDBYPATTERN
+message FindByPattern_REP {
   repeated UnaryQuery_REP queryResponse = 1;
   optional string queryStatus = 3;
 }

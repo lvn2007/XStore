@@ -295,6 +295,11 @@ void XStore::EraseMappedFile(const std::string &target_file) {
     EraseAtIndex(shard, idx);
 }
 
+// Test-only public wrapper -- see the declaration comment in XStore.h.
+void XStore::EvictMappedFilesUnderPrefixForTests(const std::string &db_dir_prefix) {
+    EraseMappedFilesUnderPrefix(db_dir_prefix);
+}
+
 void XStore::EraseMappedFilesUnderPrefix(const std::string &db_dir_prefix) {
     // Prefix sweep doesn't know which shard(s) hold matching files, so it
     // walks all of them -- locked one shard at a time (not all at once),

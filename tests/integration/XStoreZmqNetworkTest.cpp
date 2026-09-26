@@ -131,6 +131,11 @@ XStore_Proto::Request Wrap(const XStore_Proto::FindByValue_REQ &req) {
     *w.mutable_findbyvalue() = req;
     return w;
 }
+XStore_Proto::Request Wrap(const XStore_Proto::FindByPattern_REQ &req) {
+    XStore_Proto::Request w;
+    *w.mutable_findbypattern() = req;
+    return w;
+}
 
 }  // namespace
 
@@ -683,6 +688,65 @@ TEST_F(XStoreZmqNetworkTest, FindByValueRoundTripOverNetwork) {
     for (const auto &entry : find_rep.queryresponse()) {
         EXPECT_EQ(static_cast<int64_t>(entry.timestamp() - TS_2020_MID) % 3, 1);
     }
+}
+
+TEST_F(XStoreZmqNetworkTest, FindByPatternRoundTripOverNetwork) {
+    XStore_Proto::CreateDB_REQ create_req;
+    create_req.set_rtype(XStore_Proto::CREATEDB);
+    create_req.set_dbname("ZMQ_FINDBYPATTERN_DB");
+    create_req.set_timeresolution(XStore_Proto::SECOND);
+    create_req.set_rowlength(128);
+    SendRequest<XStore_Proto::CreateDB_REP>(Wrap(create_req));
+
+    const char *const symbols[] = {"AAPL", "MSFT", "GOOG"};
+    for (int64_t i = 0; i < 30; ++i) {
+        XStore_Proto::UnaryInsert_REQ insert_req;
+        insert_req.set_rtype(XStore_Proto::UNARYINSERT);
+        insert_req.set_dbname("ZMQ_FINDBYPATTERN_DB");
+        insert_req.set_timestamp(TS_2020_MID + i);
+        insert_req.set_durabilitymode(XStore_Proto::SYNC);
+        *insert_req.mutable_data() = MakeRow({FString(symbols[i % 3])});
+        SendRequest<XStore_Proto::UnaryInsert_REP>(Wrap(insert_req));
+    }
+
+    XStore_Proto::FindByPattern_REQ find_req;
+    find_req.set_rtype(XStore_Proto::FINDBYPATTERN);
+    find_req.set_dbname("ZMQ_FINDBYPATTERN_DB");
+    find_req.set_starttime(TS_2020_MID);
+    find_req.set_endtime(TS_2020_MID + 29);
+    find_req.set_columnidx(0);
+    find_req.set_pattern("%sf%");
+    find_req.set_mode(XStore_Proto::PATTERN_LIKE);
+    find_req.set_caseinsensitive(true);
+
+    auto find_rep = SendRequest<XStore_Proto::FindByPattern_REP>(Wrap(find_req));
+    EXPECT_FALSE(find_rep.has_querystatus()) << find_rep.querystatus();
+    ASSERT_EQ(find_rep.queryresponse_size(), 10);
+    for (const auto &entry : find_rep.queryresponse()) {
+        EXPECT_EQ((entry.timestamp() - TS_2020_MID) % 3, 1u);
+        EXPECT_EQ(entry.data().fielddata(0).stringdata(), "MSFT");
+    }
+}
+
+TEST_F(XStoreZmqNetworkTest, FindByPatternInvalidPatternReportsErrorOverNetwork) {
+    XStore_Proto::CreateDB_REQ create_req;
+    create_req.set_rtype(XStore_Proto::CREATEDB);
+    create_req.set_dbname("ZMQ_FINDBYPATTERN_BAD");
+    create_req.set_timeresolution(XStore_Proto::SECOND);
+    create_req.set_rowlength(64);
+    SendRequest<XStore_Proto::CreateDB_REP>(Wrap(create_req));
+
+    XStore_Proto::FindByPattern_REQ find_req;
+    find_req.set_rtype(XStore_Proto::FINDBYPATTERN);
+    find_req.set_dbname("ZMQ_FINDBYPATTERN_BAD");
+    find_req.set_starttime(TS_2020_MID);
+    find_req.set_endtime(TS_2020_MID + 1);
+    find_req.set_columnidx(0);
+    find_req.set_pattern("bad\\");
+
+    auto find_rep = SendRequest<XStore_Proto::FindByPattern_REP>(Wrap(find_req));
+    EXPECT_EQ(find_rep.queryresponse_size(), 0);
+    EXPECT_NE(find_rep.querystatus().find("Invalid pattern"), std::string::npos) << find_rep.querystatus();
 }
 
 // ---------------------------------------------------------------------
