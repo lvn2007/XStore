@@ -711,6 +711,7 @@ TEST_F(XStorePerfTest, FindByPatternScanThroughput) {
         {"LIKE prefix 'AAPL%'", "AAPL%", XStore_Proto::PATTERN_LIKE, false},
         {"LIKE suffix '%99'", "%99", XStore_Proto::PATTERN_LIKE, false},
         {"LIKE substring '%order-1234%'", "%order-1234%", XStore_Proto::PATTERN_LIKE, false},
+        {"LIKE common literal '%order%'", "%order%", XStore_Proto::PATTERN_LIKE, false},
         {"LIKE no-match '%ZZZZ%'", "%ZZZZ%", XStore_Proto::PATTERN_LIKE, false},
         {"ILIKE '%aapl%'", "%aapl%", XStore_Proto::PATTERN_LIKE, true},
     };
