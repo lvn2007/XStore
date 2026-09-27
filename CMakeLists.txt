@@ -184,6 +184,73 @@ else()
     # pkg-config (i.e. libsodium-dev must be installed).
 endif()
 
+# --- jemalloc (pinned to the 5.4.0 release; process allocator for the
+# server + perf tests only -- see docs/superpowers/plans/2026-09-27-jemalloc-integration.md) ---
+option(XSTORE_USE_JEMALLOC "Link jemalloc (fetched, pinned 5.4.0) as the process allocator for the server and perf tests" ON)
+
+if("${CMAKE_CXX_FLAGS}" MATCHES "-fsanitize" OR "${CMAKE_EXE_LINKER_FLAGS}" MATCHES "-fsanitize")
+    set(XSTORE_USE_JEMALLOC OFF)
+    message(STATUS "jemalloc: disabled (sanitizer flags detected in CMAKE_CXX_FLAGS/CMAKE_EXE_LINKER_FLAGS)")
+elseif(XSTORE_USE_JEMALLOC)
+    FetchContent_Declare(
+            jemalloc
+            URL https://github.com/jemalloc/jemalloc/releases/download/5.4.0/jemalloc-5.4.0.tar.bz2
+            URL_HASH SHA256=200776fac271093e7c2f21edd6d62657ecd2be578d9328633f2a86bfa6ef4f1d
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_GetProperties(jemalloc)
+    if(NOT jemalloc_POPULATED)
+        FetchContent_Populate(jemalloc)
+    endif()
+    set(_xs_jemalloc_prefix ${CMAKE_BINARY_DIR}/_deps/jemalloc-install)
+    if(NOT EXISTS "${_xs_jemalloc_prefix}/lib/libjemalloc_pic.a")
+        message(STATUS "jemalloc: building from source (5.4.0, static) -- one-time step (~1-2 min)")
+        execute_process(
+                COMMAND ${jemalloc_SOURCE_DIR}/configure --prefix=${_xs_jemalloc_prefix} --disable-cxx
+                WORKING_DIRECTORY ${jemalloc_SOURCE_DIR}
+                RESULT_VARIABLE _xs_jemalloc_result)
+        if(NOT _xs_jemalloc_result EQUAL 0)
+            message(FATAL_ERROR
+                "jemalloc configure step failed. "
+                "Delete ${CMAKE_BINARY_DIR}/_deps/jemalloc-* and reconfigure.")
+        endif()
+        execute_process(
+                COMMAND make -j${_xs_nproc}
+                WORKING_DIRECTORY ${jemalloc_SOURCE_DIR}
+                RESULT_VARIABLE _xs_jemalloc_result)
+        if(NOT _xs_jemalloc_result EQUAL 0)
+            message(FATAL_ERROR
+                "jemalloc build step failed. "
+                "Delete ${CMAKE_BINARY_DIR}/_deps/jemalloc-* and reconfigure.")
+        endif()
+        execute_process(
+                COMMAND make install_lib_static install_include
+                WORKING_DIRECTORY ${jemalloc_SOURCE_DIR}
+                RESULT_VARIABLE _xs_jemalloc_result)
+        if(NOT _xs_jemalloc_result EQUAL 0)
+            # Fallback: some jemalloc releases name the target differently;
+            # `make install` covers static lib + headers (+ docs/shared lib
+            # we don't need) in one shot.
+            execute_process(
+                    COMMAND make install
+                    WORKING_DIRECTORY ${jemalloc_SOURCE_DIR}
+                    RESULT_VARIABLE _xs_jemalloc_result)
+            if(NOT _xs_jemalloc_result EQUAL 0)
+                message(FATAL_ERROR
+                    "jemalloc install step failed. "
+                    "Delete ${CMAKE_BINARY_DIR}/_deps/jemalloc-* and reconfigure.")
+            endif()
+        endif()
+    endif()
+    add_library(jemalloc::jemalloc STATIC IMPORTED)
+    set_target_properties(jemalloc::jemalloc PROPERTIES
+            IMPORTED_LOCATION "${_xs_jemalloc_prefix}/lib/libjemalloc_pic.a"
+            INTERFACE_LINK_LIBRARIES "pthread;dl")
+    message(STATUS "jemalloc: fetched & linked (5.4.0) -- server + perf tests")
+else()
+    message(STATUS "jemalloc: disabled (XSTORE_USE_JEMALLOC=OFF)")
+endif()
+
 # --- libzmq (C library; the cppzmq C++ headers are vendored in third_party) ---
 option(XSTORE_FETCH_ZMQ "Fetch & build libzmq from source instead of a system install" ON)
 
@@ -425,6 +492,17 @@ target_link_libraries(xstore_network PUBLIC xstore_core xstore_curve zmq)
 
 add_executable(XStore src/main.cpp third_party/argparse/argparse.hpp)
 target_link_libraries(XStore PRIVATE xstore_network)
+if(XSTORE_USE_JEMALLOC)
+    target_sources(XStore PRIVATE src/XStore_Alloc/jemalloc_conf.cpp)
+    target_link_libraries(XStore PRIVATE jemalloc::jemalloc)
+    # Nothing in our own TUs references "malloc" directly (allocation goes
+    # through operator new/delete in libstdc++.so), so the plain archive
+    # link above never has an undefined "malloc" to resolve and jemalloc's
+    # object files are silently dropped. --whole-archive forces every
+    # symbol (malloc/free/calloc/realloc/...) into the binary so they
+    # interpose glibc's at dynamic-link time.
+    target_link_options(XStore PRIVATE "-Wl,--whole-archive,$<TARGET_FILE:jemalloc::jemalloc>,--no-whole-archive")
+endif()
 
 add_subdirectory(tools/xstore-keys)
 
