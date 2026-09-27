@@ -230,6 +230,14 @@ ZoneMapFile& XStore::GetOrOpenZoneMap(std::string_view db_base_path, unsigned sh
     return ref;
 }
 
+std::optional<uint32_t> XStore::PeekOpenZoneMapWidth(std::string_view db_base_path, unsigned short year) {
+    std::string key = fmt::format("{}/{}", db_base_path, year);
+    std::lock_guard<std::mutex> lock(zone_map_registry_mutex_);
+    auto it = zone_map_registry_.find(key);
+    if (it == zone_map_registry_.end()) return std::nullopt;
+    return it->second->TrackedColumnCount();
+}
+
 void XStore::ClearZoneMapRegistryForTests() {
     std::lock_guard<std::mutex> lock(zone_map_registry_mutex_);
     zone_map_registry_.clear();
@@ -364,6 +372,7 @@ void XStore::MaybeGrowColumnCount(const std::string &db_name, const std::string 
     if (it == shard.map.end()) return;
     if (static_cast<uint32_t>(observed_column_count) <= it->second.columncount()) return; // lost the race to a larger grower
 
+    uint32_t old_effective_tracked = EffectiveTrackedColumnCount(it->second);
     it->second.set_columncount(static_cast<uint32_t>(observed_column_count));
     XStore_Proto::ConfigStruct cfg_copy = it->second;
 
@@ -380,6 +389,18 @@ void XStore::MaybeGrowColumnCount(const std::string &db_name, const std::string 
     std::fclose(b_file);
 
     spdlog::info("[COLUMN COUNT GROWTH] [DB: {}] - columnCount grew to {}", db_name, observed_column_count);
+
+    // Task 4: only worth a notice when this growth actually raised the
+    // effective width past what it was before -- e.g. observed_column_count
+    // clamped to a value <= the global floor never changes
+    // EffectiveTrackedColumnCount and doesn't leave any existing .zmap file
+    // behind.
+    uint32_t new_effective_tracked = EffectiveTrackedColumnCount(cfg_copy);
+    if (new_effective_tracked > old_effective_tracked) {
+        spdlog::warn("[ZONEMAP] [DB: {}] - tracked column width grows {} -> {}; existing year index files (if any) keep their width until restart "
+                     "(queries on the new columns full-scan meanwhile -- restart XStore to rebuild)",
+                     db_name, old_effective_tracked, new_effective_tracked);
+    }
 }
 
 XStore_Proto::CreateDB_REP XStore::CreateDB(std::string_view db_name_view, XStore_Proto::TimeUnit time_resolution, short int row_length, uint32_t column_count_seed,
@@ -671,6 +692,66 @@ bool XStore::ZoneMapNeedsRebuild(const std::string &zmap_path, uint32_t desired_
     return false;
 }
 
+std::string XStore::UnindexedColumnNotice(std::string_view op, const std::string &db_name, const std::string &db_base_path,
+                                           const XStore_Proto::ConfigStruct &cfg, unsigned long long start_epoch,
+                                           unsigned long long end_epoch, int32_t column_idx) {
+    if (column_idx < 0 || static_cast<uint32_t>(column_idx) >= EffectiveTrackedColumnCount(cfg)) return "";
+
+    // Every index file is created at least ZONE_MAP_MAX_TRACKED_COLUMNS wide
+    // (EffectiveTrackedColumnCount's floor), so a column below it is always
+    // indexed: answer without any I/O on the common path. This is the path
+    // every ordinary low-column-index query takes, so it must stay a single
+    // integer comparison -- no syscalls, no allocation.
+    if (column_idx < static_cast<int32_t>(XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS)) return "";
+
+    unsigned long long iter_epoch = start_epoch;
+    while (iter_epoch <= end_epoch) {
+        TimeStruct curr_ts(static_cast<std::time_t>(iter_epoch), cfg.timeresolution());
+        unsigned long long end_of_current_year = std::min(end_epoch, static_cast<unsigned long long>(curr_ts.last_epoch));
+
+        // Cheapest source of truth first: if this (db, year) is already a
+        // warm ZoneMapFile in the process-wide registry (the overwhelmingly
+        // common case -- the same query path's own zone-map pushdown either
+        // just opened it or already had it warm), PeekOpenZoneMapWidth
+        // answers from that live instance with one mutex + one map lookup,
+        // no open()/pread() at all. Only a genuinely cold (db, year) falls
+        // through to the header pread below.
+        std::optional<uint32_t> warm_width = PeekOpenZoneMapWidth(db_base_path, curr_ts.year);
+        if (warm_width.has_value()) {
+            if (static_cast<uint32_t>(column_idx) >= *warm_width) {
+                return fmt::format("[WARNING] [{}] [DB: {}] - column {} is not yet indexed in {} (index width {}); "
+                                    "answered by full scan -- restart XStore to rebuild the index",
+                                    op, db_name, column_idx, curr_ts.year, *warm_width);
+            }
+            iter_epoch = end_of_current_year + 1;
+            continue;
+        }
+
+        std::string zmap_path = fmt::format("{}/{}.zmap", db_base_path, curr_ts.year);
+        int fd = open(zmap_path.c_str(), O_RDONLY);
+        if (fd >= 0) {
+            ZoneMapFileHeader header{};
+            ssize_t read_bytes = pread(fd, &header, sizeof(header), 0);
+            close(fd);
+
+            if (read_bytes == static_cast<ssize_t>(sizeof(header)) &&
+                header.magic == ZoneMapFileHeader{}.magic &&
+                header.version == ZONE_MAP_VERSION &&
+                static_cast<uint32_t>(column_idx) >= header.tracked_column_count) {
+                return fmt::format("[WARNING] [{}] [DB: {}] - column {} is not yet indexed in {} (index width {}); "
+                                    "answered by full scan -- restart XStore to rebuild the index",
+                                    op, db_name, column_idx, curr_ts.year, header.tracked_column_count);
+            }
+        }
+        // Missing/corrupt/stale-version file -- no information either way
+        // (a subsequent GetOrOpenZoneMap on this year will (re)build it at
+        // the current width); just move on to the next year.
+
+        iter_epoch = end_of_current_year + 1;
+    }
+    return "";
+}
+
 void XStore::RebuildOneYearZoneMap(const std::string &db_base_path, unsigned short year, uint16_t row_length, uint32_t tracked_column_count) {
     std::string data_path = fmt::format("{}/{}.XSTORE", db_base_path, year);
     if (!std::filesystem::exists(data_path)) return;
@@ -780,7 +861,7 @@ void XStore::RebuildOneYearZoneMap(const std::string &db_base_path, unsigned sho
             row.ParseFromArray(row_buf.data(), static_cast<int>(real_len));
         }
         std::vector<ZoneMapObservation> observations = BuildZoneMapObservations(*this, row, tracked_column_count);
-        zmap.UpdateRow(row_index, observations);
+        zmap.UpdateRow(row_index, observations, tracked_column_count);
     }
     close(fd);
 

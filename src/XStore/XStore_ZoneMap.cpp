@@ -99,7 +99,7 @@ void ZoneMapFile::EvictIfOverCapacity() {
     }
 }
 
-void ZoneMapFile::UpdateRow(uint64_t row_index, const std::vector<ZoneMapObservation> &observations) {
+void ZoneMapFile::UpdateRow(uint64_t row_index, const std::vector<ZoneMapObservation> &observations, uint32_t pad_to) {
     std::lock_guard<std::mutex> lock(mutex_);
     uint64_t block_index = BlockIndexForRow(row_index, header_.rows_per_block);
     EnsureBlockLoaded(block_index);
@@ -133,6 +133,16 @@ void ZoneMapFile::UpdateRow(uint64_t row_index, const std::vector<ZoneMapObserva
         } else {
             e.null_count++;
         }
+    }
+
+    // Columns beyond the last observation (row narrower than this file's
+    // tracked width -- Task 2: observations only cover present columns now)
+    // are holes exactly like an explicitly-unset present column above, so
+    // they still bump null_count -- clamped to this file's own tracked width,
+    // never writing past entries' bounds.
+    const uint32_t pad_end = std::min(pad_to, header_.tracked_column_count);
+    for (uint32_t col = static_cast<uint32_t>(observations.size()); col < pad_end; ++col) {
+        entries[col].null_count++;
     }
 
     // Write-through: durable before this call returns, no dirty state left

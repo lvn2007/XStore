@@ -52,8 +52,8 @@ TEST(ZoneMapFileTest, SequentialUpdatesToSameBlockAreVisibleImmediately) {
     ASSERT_TRUE(zmap.Open(path.string(), /*row_length=*/64));
 
     // Two rows landing in the same block, column 0 values 5.0 and -3.0.
-    zmap.UpdateRow(0, {{0, 5.0, true}});
-    zmap.UpdateRow(1, {{0, -3.0, true}});
+    zmap.UpdateRow(0, {{0, 5.0, true}}, 1);
+    zmap.UpdateRow(1, {{0, -3.0, true}}, 1);
 
     // No explicit flush call -- write-through means this is already durable.
     auto stats = zmap.TryGetBlockStats(0);
@@ -70,7 +70,7 @@ TEST(ZoneMapFileTest, StatsSurviveReopenFromDiskWithNoCachedState) {
     {
         ZoneMapFile zmap;
         ASSERT_TRUE(zmap.Open(path.string(), 64));
-        zmap.UpdateRow(0, {{0, 10.0, true}});
+        zmap.UpdateRow(0, {{0, 10.0, true}}, 1);
         // Destructor runs here -- nothing to flush, already on disk.
     }
     ZoneMapFile reopened;
@@ -103,7 +103,7 @@ TEST(ZoneMapFileTest, ConcurrentUpdateRowFromMultipleThreadsDoesNotLoseUpdates) 
     for (int t = 0; t < kThreads; ++t) {
         threads.emplace_back([&zmap]() {
             for (int i = 0; i < kItersPerThread; ++i) {
-                zmap.UpdateRow(0, {{0, 1.0, true}});
+                zmap.UpdateRow(0, {{0, 1.0, true}}, 1);
             }
         });
     }
@@ -151,7 +151,7 @@ TEST(ZoneMapFileTest, ConcurrentUpdateRowWithDistinctRowIndicesConvergesToCorrec
         threads.emplace_back([&zmap, t]() {
             for (int i = 0; i < kItersPerThread; ++i) {
                 uint64_t row_index = static_cast<uint64_t>(t * kItersPerThread + i);
-                zmap.UpdateRow(row_index, {{0, static_cast<double>(row_index), true}});
+                zmap.UpdateRow(row_index, {{0, static_cast<double>(row_index), true}}, 1);
             }
         });
     }
@@ -174,7 +174,7 @@ TEST(ZoneMapFileTest, UntouchedBlockReportsZeroValidCountNotMissingData) {
     std::filesystem::path path = scratch.test_root / "2024.zmap";
     ZoneMapFile zmap;
     ASSERT_TRUE(zmap.Open(path.string(), 64));
-    zmap.UpdateRow(0, {{0, 1.0, true}}); // touches block 0 only
+    zmap.UpdateRow(0, {{0, 1.0, true}}, 1); // touches block 0 only
     auto stats = zmap.TryGetBlockStats(5); // block 5 never touched
     ASSERT_TRUE(stats.has_value()); // a real, safe answer: "zero rows here," not "unknown"
     EXPECT_EQ((*stats)[0].valid_count, 0u);
@@ -186,7 +186,7 @@ TEST(ZoneMapFileTest, ColumnIndexAtOrPastCapIsSilentlyIgnored) {
     ZoneMapFile zmap;
     ASSERT_TRUE(zmap.Open(path.string(), 64));
     // Must not crash/UB -- just has no effect on tracked columns.
-    zmap.UpdateRow(0, {{XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS, 1.0, true}});
+    zmap.UpdateRow(0, {{XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS, 1.0, true}}, 1);
     auto stats = zmap.TryGetBlockStats(0);
     ASSERT_TRUE(stats.has_value());
     EXPECT_EQ(stats->size(), XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS);
@@ -252,7 +252,7 @@ TEST_F(XStoreZoneMapTest, GetOrOpenZoneMapEvictsOldestPastRegistryCap) {
     // Evicting one instance must not lose durably-written data -- write-
     // through (Task 2) means eviction is just closing a file handle.
     store.GetOrOpenZoneMap(DbPath("ZMAPCAP"), 2000, 64)
-        .UpdateRow(0, {{0, 5.0, true}});
+        .UpdateRow(0, {{0, 5.0, true}}, 1);
     for (unsigned short year = 2001; year < 2000 + XStoreTunables::ZONE_MAP_REGISTRY_CAP + 20; ++year) {
         store.GetOrOpenZoneMap(DbPath("ZMAPCAP"), year, 64); // evicts year 2000 out
     }
@@ -557,8 +557,8 @@ TEST_F(ZoneMapFileVersionTest, UpdateRowFoldsSumOfSquaresIntoEntry) {
     std::string path = TestFilePath("sumsq.zmap");
     ASSERT_TRUE(zmap.Open(path, /*row_length=*/64));
 
-    zmap.UpdateRow(0, {{/*column_idx=*/0, /*value=*/3.0, /*is_numeric=*/true}});
-    zmap.UpdateRow(1, {{/*column_idx=*/0, /*value=*/4.0, /*is_numeric=*/true}});
+    zmap.UpdateRow(0, {{/*column_idx=*/0, /*value=*/3.0, /*is_numeric=*/true}}, 1);
+    zmap.UpdateRow(1, {{/*column_idx=*/0, /*value=*/4.0, /*is_numeric=*/true}}, 1);
 
     auto stats = zmap.TryGetBlockStats(0);
     ASSERT_TRUE(stats.has_value());
@@ -594,7 +594,7 @@ TEST_F(ZoneMapFileVersionTest, OpenDiscardsStaleVersionFileInsteadOfMisreadingIt
     EXPECT_EQ((*stats)[0].valid_count, 0u);
 
     // And it must be fully usable afterward -- a real update roundtrips.
-    zmap.UpdateRow(0, {{0, 5.0, true}});
+    zmap.UpdateRow(0, {{0, 5.0, true}}, 1);
     auto stats2 = zmap.TryGetBlockStats(0);
     ASSERT_TRUE(stats2.has_value());
     EXPECT_DOUBLE_EQ((*stats2)[0].sum_value, 5.0);
@@ -629,8 +629,8 @@ TEST_F(ZoneMapFileVersionTest, OpenDiscardsV2FileInsteadOfMisreadingIntoV3Layout
     ASSERT_TRUE(stats.has_value());
     EXPECT_EQ((*stats)[0].valid_count, 0u);
 
-    zmap.UpdateRow(0, {{0, 5.0, true}});
-    zmap.UpdateRow(1, {{0, 9.0, true}});
+    zmap.UpdateRow(0, {{0, 5.0, true}}, 1);
+    zmap.UpdateRow(1, {{0, 9.0, true}}, 1);
     auto stats2 = zmap.TryGetBlockStats(0);
     ASSERT_TRUE(stats2.has_value());
     EXPECT_DOUBLE_EQ((*stats2)[0].first_value, 5.0);

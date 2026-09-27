@@ -100,7 +100,14 @@ public:
     // no buffered state a crash can lose (see the Task 2 design note in the
     // plan for why this isn't a write-back cache). The in-memory cache below
     // only saves a repeat pread() when consecutive calls hit the same block.
-    void UpdateRow(uint64_t row_index, const std::vector<ZoneMapObservation> &observations);
+    // pad_to is REQUIRED (no default) so every caller is found at compile
+    // time (Task 2: observations now only cover present columns, so this
+    // tells UpdateRow how far -- e.g. the row's tracked_column_count -- to
+    // bump null_count for the columns past observations.size(), clamped to
+    // header_.tracked_column_count). Pass observations.size() itself for a
+    // caller that built its own already-complete observation vector and
+    // wants no additional padding.
+    void UpdateRow(uint64_t row_index, const std::vector<ZoneMapObservation> &observations, uint32_t pad_to);
 
     // Always returns real, safe stats for block_index -- a never-touched
     // block simply has valid_count==0 everywhere, which is the true and
@@ -111,6 +118,8 @@ public:
     ~ZoneMapFile();
 
     uint64_t RowsPerBlockValue() const { return header_.rows_per_block; }
+
+    [[nodiscard]] uint32_t TrackedColumnCount() const { return header_.tracked_column_count; }
 
 private:
     void EnsureBlockLoaded(uint64_t block_index);

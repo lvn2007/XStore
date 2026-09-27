@@ -65,13 +65,24 @@ void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::R
     record.time_resolution = cfg_struct.timeresolution();
     record.row_length = cfg_struct.rowlength();
     record.durability_mode = durability_mode;
+    // Grow the index width to this row's width BEFORE any WalRecord/zone-map
+    // file is created for it, so a fresh DB's first insert is born at its
+    // true width instead of staying at the floor until a restart picks up
+    // the grown column count (see BatchInsert/RangeInsert for the same
+    // fix's multi-row form).
+    const int widest = data.fielddata_size();
+    MaybeGrowColumnCount(db_name, db_base_path_str, widest);
     // One width for both the observations and the zone map ApplyWalRecord
     // will open/create for them -- see WalRecord::tracked_column_count.
-    record.tracked_column_count = EffectiveTrackedColumnCount(cfg_struct);
+    // Folded in with the pre-grown `widest` so a brand-new index file is
+    // created at this row's true width on this very first write, not just
+    // EffectiveTrackedColumnCount's pre-growth floor.
+    record.tracked_column_count = std::max(EffectiveTrackedColumnCount(cfg_struct),
+                                            std::min<uint32_t>(static_cast<uint32_t>(widest), XStoreTunables::MAX_TRACKED_COLUMN_COUNT));
     record.rows.push_back(WalRow{unix_time, std::string(row_buf.data(), cfg_struct.rowlength()),
                                   BuildZoneMapObservations(*this, data, record.tracked_column_count),
-                                  BuildCatIdxObservations(*this, data, record.tracked_column_count)});
-    MaybeGrowColumnCount(db_name, db_base_path_str, data.fielddata_size());
+                                  BuildCatIdxObservations(*this, data, record.tracked_column_count),
+                                  record.tracked_column_count});
 
     if (durability_mode == XStore_Proto::BYPASS) {
         // Skip WAL entirely -- no queue, no CRC32, no second write. Applies

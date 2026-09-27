@@ -250,7 +250,7 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply) {
             // real write just failed.
             for (size_t i = run_start; i < run_end; ++i) {
                 uint64_t diff = record_to_apply.rows[i].epoch_time - first_ts.first_epoch;
-                zmap.UpdateRow(diff, record_to_apply.rows[i].zone_map_observations);
+                zmap.UpdateRow(diff, record_to_apply.rows[i].zone_map_observations, record_to_apply.rows[i].zone_map_pad_to);
                 catidx.UpdateRow(diff, record_to_apply.rows[i].catidx_observations);
             }
         }
@@ -522,8 +522,9 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
     }
     // Per-file list of {pointer, length} pieces for one pwritev() call,
     // built to point DIRECTLY at each record's already-owned memory
-    // (db_base_path/rows[].row_bytes, both alive in `batch` until the next
-    // dequeue) instead of copying every record's bytes into one
+    // (db_base_path/rows[].row_bytes, both alive in `batch`, released at
+    // the end of this iteration after completions are signalled) instead
+    // of copying every record's bytes into one
     // concatenated buffer first -- the thing that used to cost a full
     // extra payload-sized memcpy per record here. record_headers/
     // extra_epoch_bufs below hold the small (tens of bytes) per-record
@@ -906,5 +907,10 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
                 }
             }
         }
+
+        // Release applied records now (after every completion above is
+        // signalled) instead of when a later dequeue overwrites the slot --
+        // same destructor work, earlier, off the SYNC callers' latency path.
+        for (size_t i = 0; i < count; ++i) batch[i] = WalRecord{};
     }
 }

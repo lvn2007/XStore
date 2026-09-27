@@ -436,6 +436,8 @@ void XStore::MinAggregate(unsigned long long int start_epoch_t, unsigned long lo
         return;
     }
 
+    const std::string unindexed_notice = UnindexedColumnNotice("MIN AGGREGATE", db_name, db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t, column_idx);
+
     // Narrow spans (< kMinSegmentsForParallelWalk years) delegate straight
     // to WalkYearSpan internally -- identical to the pre-parallel code path,
     // same tie-break guarantee (first-encountered-row-wins, verified by
@@ -472,6 +474,9 @@ void XStore::MinAggregate(unsigned long long int start_epoch_t, unsigned long lo
         return_data->set_opstatus("ERROR: No valid data found");
         spdlog::warn("[MIN AGGREGATE] [DB: {}] - No valid data for column {} over [{}, {}]", db_name, column_idx, start_epoch_t, end_epoch_t);
     }
+    if (!unindexed_notice.empty()) {
+        return_data->set_opstatus(return_data->opstatus() + " | " + unindexed_notice);
+    }
 }
 
 void XStore::MaxAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
@@ -494,6 +499,8 @@ void XStore::MaxAggregate(unsigned long long int start_epoch_t, unsigned long lo
         spdlog::warn(err_msg);
         return;
     }
+
+    const std::string unindexed_notice = UnindexedColumnNotice("MAX AGGREGATE", db_name, db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t, column_idx);
 
     MinMaxPartial final = WalkYearSpanParallel<MinMaxPartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
         MinMaxPartial{},
@@ -520,6 +527,9 @@ void XStore::MaxAggregate(unsigned long long int start_epoch_t, unsigned long lo
         return_data->set_opstatus("ERROR: No valid data found");
         spdlog::warn("[MAX AGGREGATE] [DB: {}] - No valid data for column {} over [{}, {}]", db_name, column_idx, start_epoch_t, end_epoch_t);
     }
+    if (!unindexed_notice.empty()) {
+        return_data->set_opstatus(return_data->opstatus() + " | " + unindexed_notice);
+    }
 }
 
 void XStore::SumAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
@@ -542,6 +552,8 @@ void XStore::SumAggregate(unsigned long long int start_epoch_t, unsigned long lo
         spdlog::warn(err_msg);
         return;
     }
+
+    const std::string unindexed_notice = UnindexedColumnNotice("SUM AGGREGATE", db_name, db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t, column_idx);
 
     // Wide spans (>= kMinSegmentsForParallelWalk years) sum per-thread
     // partial sums together sequentially in the merge step -- this
@@ -573,6 +585,9 @@ void XStore::SumAggregate(unsigned long long int start_epoch_t, unsigned long lo
         return_data->set_opstatus("ERROR: No valid data found");
         spdlog::warn("[SUM AGGREGATE] [DB: {}] - No valid data for column {} over [{}, {}]", db_name, column_idx, start_epoch_t, end_epoch_t);
     }
+    if (!unindexed_notice.empty()) {
+        return_data->set_opstatus(return_data->opstatus() + " | " + unindexed_notice);
+    }
 }
 
 void XStore::AvgAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
@@ -595,6 +610,8 @@ void XStore::AvgAggregate(unsigned long long int start_epoch_t, unsigned long lo
         spdlog::warn(err_msg);
         return;
     }
+
+    const std::string unindexed_notice = UnindexedColumnNotice("AVG AGGREGATE", db_name, db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t, column_idx);
 
     // See SumAggregate for the parallel-merge floating-point reassociation
     // note -- same tradeoff applies here since Avg is Sum's kernel plus one
@@ -620,6 +637,9 @@ void XStore::AvgAggregate(unsigned long long int start_epoch_t, unsigned long lo
         return_data->set_opstatus("ERROR: No valid data found");
         spdlog::warn("[AVG AGGREGATE] [DB: {}] - No valid data for column {} over [{}, {}]", db_name, column_idx, start_epoch_t, end_epoch_t);
     }
+    if (!unindexed_notice.empty()) {
+        return_data->set_opstatus(return_data->opstatus() + " | " + unindexed_notice);
+    }
 }
 
 void XStore::VarianceAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
@@ -642,6 +662,8 @@ void XStore::VarianceAggregate(unsigned long long int start_epoch_t, unsigned lo
         spdlog::warn(err_msg);
         return;
     }
+
+    const std::string unindexed_notice = UnindexedColumnNotice("VARIANCE AGGREGATE", db_name, db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t, column_idx);
 
     // Sample variance (N-1), naive sum/sum-of-squares -- never Welford's/
     // Chan's algorithm (plan requirement). See AccumulateSegmentWithZoneMapPushdown
@@ -669,6 +691,9 @@ void XStore::VarianceAggregate(unsigned long long int start_epoch_t, unsigned lo
         return_data->set_opstatus("ERROR: No valid data found");
         spdlog::warn("[VARIANCE AGGREGATE] [DB: {}] - No valid data for column {} over [{}, {}]", db_name, column_idx, start_epoch_t, end_epoch_t);
     }
+    if (!unindexed_notice.empty()) {
+        return_data->set_opstatus(return_data->opstatus() + " | " + unindexed_notice);
+    }
 }
 
 void XStore::StddevAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
@@ -691,6 +716,8 @@ void XStore::StddevAggregate(unsigned long long int start_epoch_t, unsigned long
         spdlog::warn(err_msg);
         return;
     }
+
+    const std::string unindexed_notice = UnindexedColumnNotice("STDDEV AGGREGATE", db_name, db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t, column_idx);
 
     // Same naive sum/sum-of-squares sample-variance computation as
     // VarianceAggregate -- Stddev is just its sqrt.
@@ -717,6 +744,9 @@ void XStore::StddevAggregate(unsigned long long int start_epoch_t, unsigned long
         return_data->set_opstatus("ERROR: No valid data found");
         spdlog::warn("[STDDEV AGGREGATE] [DB: {}] - No valid data for column {} over [{}, {}]", db_name, column_idx, start_epoch_t, end_epoch_t);
     }
+    if (!unindexed_notice.empty()) {
+        return_data->set_opstatus(return_data->opstatus() + " | " + unindexed_notice);
+    }
 }
 
 void XStore::ExistsAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
@@ -740,6 +770,8 @@ void XStore::ExistsAggregate(unsigned long long int start_epoch_t, unsigned long
         return;
     }
 
+    const std::string unindexed_notice = UnindexedColumnNotice("EXISTS AGGREGATE", db_name, db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t, column_idx);
+
     // false is a legitimate answer, not an error -- unlike Min/Max/Sum/Avg's
     // "ERROR: No valid data found", a range with no matching value is a
     // real, successful EXISTS=false result.
@@ -755,6 +787,9 @@ void XStore::ExistsAggregate(unsigned long long int start_epoch_t, unsigned long
 
     return_data->set_opstatus("SUCCESS");
     return_data->set_exists(final.found);
+    if (!unindexed_notice.empty()) {
+        return_data->set_opstatus(return_data->opstatus() + " | " + unindexed_notice);
+    }
 }
 
 void XStore::OhlcAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
@@ -777,6 +812,8 @@ void XStore::OhlcAggregate(unsigned long long int start_epoch_t, unsigned long l
         spdlog::warn(err_msg);
         return;
     }
+
+    const std::string unindexed_notice = UnindexedColumnNotice("OHLC AGGREGATE", db_name, db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t, column_idx);
 
     // Narrow-span sequential path calls ScanSegmentForOhlc repeatedly on the
     // SAME partial across consecutive years -- correct by construction, see
@@ -815,6 +852,9 @@ void XStore::OhlcAggregate(unsigned long long int start_epoch_t, unsigned long l
     } else {
         return_data->set_opstatus("ERROR: No valid data found");
         spdlog::warn("[OHLC AGGREGATE] [DB: {}] - No valid data for column {} over [{}, {}]", db_name, column_idx, start_epoch_t, end_epoch_t);
+    }
+    if (!unindexed_notice.empty()) {
+        return_data->set_opstatus(return_data->opstatus() + " | " + unindexed_notice);
     }
 }
 
@@ -997,8 +1037,13 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
     bool has_warning = false;
     std::string last_warning;
     auto set_warning = [&](const char *tag, const std::string &body) {
+        // Append rather than overwrite: a later warning (e.g. year-missing)
+        // must not silently drop an earlier one (e.g. the full-scan notice).
+        if (has_warning) {
+            last_warning += " | ";
+        }
         has_warning = true;
-        last_warning = tag;
+        last_warning += tag;
         last_warning += body;
     };
     auto finish = [&](std::string &&chunk_buf) {
@@ -1023,6 +1068,15 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
         set_warning("[WARNING] ", fmt::format("[FINDBYVALUE] [DB: {}] - DB does not exist", db_name));
         finish(std::string());
         return;
+    }
+
+    // Task 4: notice-only, uses the same header-only .zmap peek every
+    // zone-map-pushdown aggregate above does -- FindByValue's own scan is
+    // always correct regardless of index width (real-scan fallback), the
+    // caller just deserves to know it paid for a full scan.
+    std::string unindexed_notice = UnindexedColumnNotice("FINDBYVALUE", db_name, db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t, column_idx);
+    if (!unindexed_notice.empty()) {
+        set_warning("", unindexed_notice);
     }
 
     std::string encoded_target = EncodeFDataForCatIdx(value);

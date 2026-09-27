@@ -2,6 +2,7 @@
 #define XSTORE_XSTORE_INTERNAL_H
 
 #include "include/XStore/XStore.h"
+#include <algorithm>
 #include <string_view>
 #include <vector>
 
@@ -65,33 +66,32 @@ inline void AppendToYearBucket(YearBucketMap &buckets, unsigned short int year, 
 // Definition of XStore::BuildZoneMapObservations (declared in XStore.h,
 // private static). Built once at WAL enqueue time (row_bytes --
 // already-serialized wire bytes -- is all ApplyWalRecord has later, not the
-// original RowData, so this can't be deferred to apply time). Always emits
-// exactly tracked_column_count observations, one per tracked column, never
-// fewer: a column past the row's own fielddata_size() is exactly as much a
-// hole as an explicitly unset field at a present index
-// (XStoreZoneMapTest.UnaryInsertTreatsHoleAsNullNotZero -- an entirely
-// empty row still records a hole at column 0), so this does NOT stop at
-// row.fielddata_size(). tracked_column_count comes from
-// XStore::EffectiveTrackedColumnCount(cfg_struct) at every call site --
-// the per-DB columnCount high-water mark when it's been seeded/grown past
-// 0, otherwise the global ZONE_MAP_MAX_TRACKED_COLUMNS default. Numeric-case
-// check mirrors ProcessFileRangeSelect/ProcessFileRangeAccumulate's own
-// oneOfData_case() guard (XStore_IO.cpp) -- same "1..12 is numeric" rule the
-// aggregate kernels already use, so a bool/string/bytes column is a hole
-// here too, not a crash or a silently-wrong 0.
+// original RowData, so this can't be deferred to apply time). Only emits
+// observations for columns actually present in the row (col <
+// row.fielddata_size()) -- columns past that, up to tracked_column_count,
+// are exactly as much a hole as an explicitly unset field at a present
+// index (XStoreZoneMapTest.UnaryInsertTreatsHoleAsNullNotZero -- an entirely
+// empty row still records a hole at column 0), but ZoneMapFile::UpdateRow's
+// pad_to parameter now bumps null_count for those instead of this building
+// an explicit is_numeric=false entry per hole -- same total effect, no
+// wasted observations for a narrow row against a wide tracked width.
+// tracked_column_count comes from XStore::EffectiveTrackedColumnCount(cfg_struct)
+// at every call site -- the per-DB columnCount high-water mark when it's
+// been seeded/grown past 0, otherwise the global ZONE_MAP_MAX_TRACKED_COLUMNS
+// default. Numeric-case check mirrors ProcessFileRangeSelect/
+// ProcessFileRangeAccumulate's own oneOfData_case() guard (XStore_IO.cpp) --
+// same "1..12 is numeric" rule the aggregate kernels already use, so a
+// bool/string/bytes column is a hole here too, not a crash or a silently-wrong 0.
 inline std::vector<ZoneMapObservation> XStore::BuildZoneMapObservations(XStore &store, const XStore_Proto::RowData &row, uint32_t tracked_column_count) {
-    const int tracked = static_cast<int>(tracked_column_count);
+    const int tracked = std::min(static_cast<int>(tracked_column_count), row.fielddata_size());
     std::vector<ZoneMapObservation> observations;
-    observations.reserve(static_cast<size_t>(tracked));
+    observations.reserve(static_cast<size_t>(std::max(tracked, 0)));
     for (int col = 0; col < tracked; ++col) {
-        bool is_numeric = false;
+        const XStore_Proto::FData &f_data = row.fielddata(col);
+        bool is_numeric = f_data.oneOfData_case() > 0 && f_data.oneOfData_case() <= 12;
         ValueStruct vs{};
-        if (col < row.fielddata_size()) {
-            const XStore_Proto::FData &f_data = row.fielddata(col);
-            is_numeric = f_data.oneOfData_case() > 0 && f_data.oneOfData_case() <= 12;
-            if (is_numeric) {
-                store.GetFDataValue(&f_data, &vs);
-            }
+        if (is_numeric) {
+            store.GetFDataValue(&f_data, &vs);
         }
         observations.push_back({static_cast<uint32_t>(col), static_cast<double>(vs.value), is_numeric});
     }
@@ -99,21 +99,23 @@ inline std::vector<ZoneMapObservation> XStore::BuildZoneMapObservations(XStore &
 }
 
 // Definition of XStore::BuildCatIdxObservations (declared in XStore.h,
-// private static). Same enqueue-time-build / hole-padding contract as
+// private static). Same enqueue-time-build contract as
 // BuildZoneMapObservations above, but covers ALL FData oneof cases -- not
 // gated to numeric -- since CatIdx's bloom filter works on
 // EncodeFDataForCatIdx's encoded byte string regardless of the field's
 // type (int/double/string/bytes/bool all encode to something hashable).
+// Only emits an entry for columns that are both present AND set --
+// CatIdxFile::UpdateRow already skips !is_present entries, so there is no
+// pad_to equivalent needed here: omitting the entry outright has the exact
+// same effect as pushing one with is_present=false.
 inline std::vector<CatIdxObservation> XStore::BuildCatIdxObservations(XStore &store, const XStore_Proto::RowData &row, uint32_t tracked_column_count) {
     (void)store; // unused -- unlike BuildZoneMapObservations, no GetFDataValue coercion needed; EncodeFDataForCatIdx reads FData directly
-    const int tracked = static_cast<int>(tracked_column_count);
+    const int tracked = std::min(static_cast<int>(tracked_column_count), row.fielddata_size());
     std::vector<CatIdxObservation> observations;
-    observations.reserve(static_cast<size_t>(tracked));
+    observations.reserve(static_cast<size_t>(std::max(tracked, 0)));
     for (int col = 0; col < tracked; ++col) {
-        if (col < row.fielddata_size() && row.fielddata(col).oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
+        if (row.fielddata(col).oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
             observations.push_back({static_cast<uint32_t>(col), EncodeFDataForCatIdx(row.fielddata(col)), true});
-        } else {
-            observations.push_back({static_cast<uint32_t>(col), std::string(), false});
         }
     }
     return observations;

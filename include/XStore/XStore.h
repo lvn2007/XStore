@@ -210,6 +210,16 @@ class XStore {
             // only after this row's real pwrite succeeds" contract as
             // zone_map_observations above -- see BuildCatIdxObservations.
             std::vector<CatIdxObservation> catidx_observations;
+            // Observations above now hold only PRESENT columns (Task 2), so
+            // ZoneMapFile::UpdateRow needs this to know how far to bump
+            // null_count for the columns past the end of that vector, up to
+            // the file's own tracked width -- the same total effect the old
+            // one-observation-per-tracked-column vector used to have, without
+            // building holes for columns the row never touched. 0 for
+            // WAL-replayed rows (ParseWalRecord default-constructs WalRow, so
+            // this stays 0), which correctly causes NO index update on replay
+            // -- see ApplyWalRecord's comment on why replay must be a no-op.
+            uint32_t zone_map_pad_to = 0;
         };
 
         // Cross-thread completion signal for one WalRecord -- replaces
@@ -253,8 +263,9 @@ class XStore {
             std::string db_base_path;          // full path -- locates this DB's WAL subdir and, at apply time, its .XSTORE file
             XStore_Proto::TimeUnit time_resolution = XStore_Proto::SECOND;
             unsigned short row_length = 0;
-            // The DB's EffectiveTrackedColumnCount as of the moment this
-            // record's rows were turned into ZoneMapObservations -- carried
+            // max(the DB's EffectiveTrackedColumnCount, this record's widest
+            // accepted row) as of the moment this record's rows were turned
+            // into ZoneMapObservations -- carried
             // here (per RECORD, not per row: every row in a record shares
             // one (db, year) and one cfg snapshot) so ApplyWalRecord opens
             // this DB's zone map at exactly the width its observations were
@@ -773,6 +784,16 @@ class XStore {
         // worker anyway.
         static ZoneMapFile& GetOrOpenZoneMap(std::string_view db_base_path, unsigned short year, uint16_t row_length, uint32_t tracked_column_count = XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS);
 
+        // Lookup-only peek at the same process-wide registry GetOrOpenZoneMap
+        // uses (same key, same mutex) -- never opens, creates, or touches LRU
+        // order. Returns the warm instance's TrackedColumnCount() if this
+        // (db_base_path, year) is already cached, nullopt otherwise (a cold
+        // caller falls back to a header pread instead of paying to warm the
+        // registry just to answer a peek). Exists so UnindexedColumnNotice
+        // can check an already-open zone map for free before ever touching
+        // disk -- see its call site for why that matters on the hot path.
+        static std::optional<uint32_t> PeekOpenZoneMapWidth(std::string_view db_base_path, unsigned short year);
+
         // Test-only introspection -- not part of the public API surface any
         // real caller needs, same as this codebase's other test-only
         // accessors.
@@ -1286,6 +1307,33 @@ class XStore {
         // is missing, wrong version, or tracked for a different column
         // count than desired_tracked_columns.
         static bool ZoneMapNeedsRebuild(const std::string &zmap_path, uint32_t desired_tracked_columns);
+
+        // Task 4 (insert-path memory plan): a query's column can be inside
+        // EffectiveTrackedColumnCount(cfg) (so the caller expects zone-map
+        // acceleration) yet still exceed what THIS year's .zmap file was
+        // actually built with, if that file predates a later columnCount
+        // growth on the same DB (see MaybeGrowColumnCount) -- the result is
+        // still correct (every zone-map-pushdown kernel falls back to a
+        // real scan for an out-of-range column), but the caller has no way
+        // to know it paid for a full scan instead of an indexed read.
+        // Returns "" when column_idx is out of [0, EffectiveTrackedColumnCount)
+        // or every year's .zmap in [start_epoch, end_epoch] already covers
+        // column_idx; otherwise a one-line notice naming the first year
+        // whose header falls short. Three tiers, cheapest first: (1) a
+        // zero-I/O fast path for column_idx below ZONE_MAP_MAX_TRACKED_COLUMNS
+        // (always indexed by construction, so no file access is needed at
+        // all); (2) PeekOpenZoneMapWidth, a registry peek that answers from
+        // an already-open ZoneMapFile with no I/O; (3) only if neither above
+        // resolves it, the same header-only open+pread+magic/version check
+        // as ZoneMapNeedsRebuild -- deliberately never calls
+        // GetOrOpenZoneMap, which would create/widen the file as a side
+        // effect of merely answering a query. For FindByValue specifically,
+        // the notice follows the .zmap file's width as a proxy for the
+        // .catidx file's width; the two can differ in mismatch states, but
+        // FindByValue's own real-scan fallback keeps results correct either way.
+        static std::string UnindexedColumnNotice(std::string_view op, const std::string &db_name, const std::string &db_base_path,
+                                                  const XStore_Proto::ConfigStruct &cfg, unsigned long long start_epoch,
+                                                  unsigned long long end_epoch, int32_t column_idx);
 
         // Rescans one <YEAR>.XSTORE file row-by-row and folds every row
         // into a freshly-reinitialized zone map via the same UpdateRow

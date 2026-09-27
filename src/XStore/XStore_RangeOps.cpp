@@ -74,6 +74,22 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client,
     const XStore_Proto::WalDurabilityMode durability_mode = proto_from_client->durabilitymode();
     bool any_sync_failed = false;
 
+    // Grow the index width to this request's widest row BEFORE any
+    // WalRecord/zone-map file is created for it -- one pass over the whole
+    // request, done once (not per year-bucket group, not per row), so a
+    // fresh DB's first batch is born at its true width instead of staying
+    // at the floor until a restart picks up the grown column count.
+    int widest = 0;
+    for (int i = 0; i < proto_from_client->rangeinsert_data_size(); i++) {
+        // Rejected oversized rows must not grow the persisted width.
+        const auto &row_data = proto_from_client->rangeinsert_data(i).data();
+        if (row_data.fielddata_size() > widest &&
+            row_data.ByteSizeLong() <= static_cast<size_t>(cfg_struct.rowlength())) {
+            widest = row_data.fielddata_size();
+        }
+    }
+    MaybeGrowColumnCount(db_name, db_base_path_str, widest);
+
     // Iterate through each key (year) of dataMap
     for (const std::pair<unsigned short int, std::vector<unsigned long long int>> &pair : data_map) {
         unsigned short int year_key = pair.first;
@@ -90,7 +106,11 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client,
         // WalRecord::tracked_column_count. cfg_struct is this call's own
         // local snapshot, so this stays constant across the whole loop even
         // as MaybeGrowColumnCount moves the persisted value underneath.
-        record.tracked_column_count = EffectiveTrackedColumnCount(cfg_struct);
+        // Folded in with the pre-grown `widest` so a brand-new index file
+        // is created at the request's true width on this very first write,
+        // not just EffectiveTrackedColumnCount's pre-growth floor.
+        record.tracked_column_count = std::max(EffectiveTrackedColumnCount(cfg_struct),
+                                                std::min<uint32_t>(static_cast<uint32_t>(widest), XStoreTunables::MAX_TRACKED_COLUMN_COUNT));
         record.rows.reserve(indices.size());
 
         for (unsigned long long int idx : indices) {
@@ -104,8 +124,8 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client,
             std::memset(row_bytes.data() + serialized_size, 0, cfg_struct.rowlength() - serialized_size);
             record.rows.push_back(WalRow{entry.timestamp(), std::move(row_bytes),
                                           BuildZoneMapObservations(*this, entry.data(), record.tracked_column_count),
-                                          BuildCatIdxObservations(*this, entry.data(), record.tracked_column_count)});
-            MaybeGrowColumnCount(db_name, db_base_path_str, entry.data().fielddata_size());
+                                          BuildCatIdxObservations(*this, entry.data(), record.tracked_column_count),
+                                          record.tracked_column_count});
         }
 
         if (record.rows.empty()) {
