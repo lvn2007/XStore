@@ -187,6 +187,7 @@ endif()
 # --- jemalloc (pinned to the 5.4.0 release; process allocator for the
 # server + perf tests only -- see docs/superpowers/plans/2026-09-27-jemalloc-integration.md) ---
 option(XSTORE_USE_JEMALLOC "Link jemalloc (fetched, pinned 5.4.0) as the process allocator for the server and perf tests" ON)
+option(XSTORE_JEMALLOC_THP "jemalloc heap on transparent huge pages (thp:always): +23% BatchInsert / +45% RangeInsert, ~2x steady-state RSS" ON)
 
 if("${CMAKE_CXX_FLAGS}" MATCHES "-fsanitize" OR "${CMAKE_EXE_LINKER_FLAGS}" MATCHES "-fsanitize")
     set(XSTORE_USE_JEMALLOC OFF)
@@ -246,7 +247,7 @@ elseif(XSTORE_USE_JEMALLOC)
     set_target_properties(jemalloc::jemalloc PROPERTIES
             IMPORTED_LOCATION "${_xs_jemalloc_prefix}/lib/libjemalloc_pic.a"
             INTERFACE_LINK_LIBRARIES "pthread;dl")
-    message(STATUS "jemalloc: fetched & linked (5.4.0) -- server + perf tests")
+    message(STATUS "jemalloc: fetched & linked (5.4.0) -- server + perf tests; THP ${XSTORE_JEMALLOC_THP}")
 else()
     message(STATUS "jemalloc: disabled (XSTORE_USE_JEMALLOC=OFF)")
 endif()
@@ -494,6 +495,7 @@ add_executable(XStore src/main.cpp third_party/argparse/argparse.hpp)
 target_link_libraries(XStore PRIVATE xstore_network)
 if(XSTORE_USE_JEMALLOC)
     target_sources(XStore PRIVATE src/XStore_Alloc/jemalloc_conf.cpp)
+    target_compile_definitions(XStore PRIVATE XSTORE_JEMALLOC_THP=$<BOOL:${XSTORE_JEMALLOC_THP}>)
     target_link_libraries(XStore PRIVATE jemalloc::jemalloc)
     # Nothing in our own TUs references "malloc" directly (allocation goes
     # through operator new/delete in libstdc++.so), so the plain archive

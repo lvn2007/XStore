@@ -116,6 +116,7 @@ add_executable(xstore_perf_tests
 target_link_libraries(xstore_perf_tests PRIVATE GTest::gtest_main xstore_core)
 if(XSTORE_USE_JEMALLOC)
     target_sources(xstore_perf_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/XStore_Alloc/jemalloc_conf.cpp)
+    target_compile_definitions(xstore_perf_tests PRIVATE XSTORE_JEMALLOC_THP=$<BOOL:${XSTORE_JEMALLOC_THP}>)
     target_link_libraries(xstore_perf_tests PRIVATE jemalloc::jemalloc)
     # See CMakeLists.txt's XStore target for why --whole-archive is required.
     target_link_options(xstore_perf_tests PRIVATE "-Wl,--whole-archive,$<TARGET_FILE:jemalloc::jemalloc>,--no-whole-archive")
