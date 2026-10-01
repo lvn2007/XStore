@@ -126,7 +126,13 @@ struct CatIdxFileHeader {
     uint32_t tracked_column_count  = 0;
     uint32_t block_count           = 0;
     uint64_t bitmap_section_offset = 0; // 0 = not compacted yet
+    // 1 = may hold writes not yet synced alongside the data file (set before
+    // the first write of a session, cleared only after data + index are
+    // fsynced); 1 at startup => rebuild. See Durability A plan.
+    uint32_t dirty    = 0;
+    uint32_t reserved = 0;
 };
+static_assert(sizeof(CatIdxFileHeader) == 32);
 
 // FNV-1a 64-bit -- trivial, no external dependency, used as the second of
 // two hash functions for Kirsch-Mitzenmacher double-hashing

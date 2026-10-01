@@ -457,7 +457,7 @@ inline constexpr size_t ZONE_MAP_REGISTRY_CAP = 256;
 // 2026-09-21-categorical-high-cardinality-acceleration-design.md for why:
 // independent version churn, no cache-footprint regression to existing
 // zone-map-only queries, isolated corruption blast radius).
-inline constexpr uint32_t CATIDX_VERSION = 1;
+inline constexpr uint32_t CATIDX_VERSION = 2;
 
 // k=7 hash functions, 160 bytes (1280 bits) per tracked column per block.
 //

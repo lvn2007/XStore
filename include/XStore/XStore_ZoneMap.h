@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include <type_traits>
 #include "include/XStore/XStore_Tunables.h"
@@ -45,14 +46,20 @@ static_assert(sizeof(ZoneMapEntry) == 80, "update size-dependent capacity-planni
 // Open() truncates and reinitializes it instead (see Open's comment). Named
 // out so a future format change is a one-line bump + rebuild, not a magic-
 // number hunt across the codebase.
-inline constexpr uint32_t ZONE_MAP_VERSION = 3;
+inline constexpr uint32_t ZONE_MAP_VERSION = 4;
 
 struct ZoneMapFileHeader {
     uint32_t magic   = 0x5A4D4150; // 'ZMAP'
     uint32_t version = ZONE_MAP_VERSION;
     uint32_t tracked_column_count = 0;
+    // 1 = may hold writes not yet synced alongside the data file (set before
+    // the first write of a session, cleared only after data + index are
+    // fsynced); 1 at startup => rebuild. See Durability A plan.
+    uint32_t dirty = 0;
     uint64_t rows_per_block = 0;
 };
+static_assert(sizeof(ZoneMapFileHeader) == 24);
+static_assert(offsetof(ZoneMapFileHeader, dirty) == 12);
 
 #include <mutex>
 #include <optional>

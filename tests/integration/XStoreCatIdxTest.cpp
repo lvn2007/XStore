@@ -72,6 +72,41 @@ TEST(CatIdxFileTest, OpenCreatesFreshFile) {
     ASSERT_TRUE(f.Open(path, /*row_length=*/64, /*tracked_column_count=*/4));
 }
 
+TEST(CatIdxFileTest, OpenDiscardsV1FileInsteadOfMisreadingIt) {
+    // Same discard-not-migrate contract as ZoneMapFile's version tests: a
+    // v1 .catidx (before the Durability A `dirty`/`reserved` fields existed)
+    // must never be reinterpreted as v2 -- it must be truncated and
+    // recreated fresh.
+    std::string path = TempCatIdxPath("stale_v1.catidx");
+    std::filesystem::remove(path);
+    {
+        CatIdxFileHeader old_header;
+        old_header.version = 1; // stale -- current CATIDX_VERSION is 2
+        old_header.tracked_column_count = 4;
+        int fd = open(path.c_str(), O_RDWR | O_CREAT, 0644);
+        ASSERT_GE(fd, 0);
+        ASSERT_EQ(pwrite(fd, &old_header, sizeof(old_header), 0), static_cast<ssize_t>(sizeof(old_header)));
+        close(fd);
+    }
+
+    CatIdxFile f;
+    ASSERT_TRUE(f.Open(path, /*row_length=*/64, /*tracked_column_count=*/4));
+
+    XStore_Proto::FData val;
+    val.set_int64data(137);
+    CatIdxObservation obs{/*column_idx=*/2, EncodeFDataForCatIdx(val), /*is_present=*/true};
+    f.UpdateRow(/*row_index=*/5, {obs});
+    EXPECT_TRUE(f.MightContain(/*block_index=*/0, /*column_idx=*/2, EncodeFDataForCatIdx(val)));
+
+    CatIdxFileHeader on_disk{};
+    int fd = open(path.c_str(), O_RDONLY);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(pread(fd, &on_disk, sizeof(on_disk), 0), static_cast<ssize_t>(sizeof(on_disk)));
+    close(fd);
+    EXPECT_EQ(on_disk.version, XStoreTunables::CATIDX_VERSION);
+    EXPECT_EQ(on_disk.dirty, 0u);
+}
+
 TEST(CatIdxFileTest, InsertedValueIsFound) {
     std::string path = TempCatIdxPath("insert_found.catidx");
     std::filesystem::remove(path);

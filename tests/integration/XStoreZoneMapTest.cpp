@@ -613,7 +613,7 @@ TEST_F(ZoneMapFileVersionTest, OpenDiscardsV2FileInsteadOfMisreadingIntoV3Layout
 
     {
         ZoneMapFileHeader old_header;
-        old_header.version = 2; // stale -- current ZONE_MAP_VERSION is 3
+        old_header.version = 2; // stale -- current ZONE_MAP_VERSION is 4
         old_header.tracked_column_count = 64;
         old_header.rows_per_block = 100;
         int fd = open(path.c_str(), O_RDWR | O_CREAT, 0644);
@@ -635,6 +635,51 @@ TEST_F(ZoneMapFileVersionTest, OpenDiscardsV2FileInsteadOfMisreadingIntoV3Layout
     ASSERT_TRUE(stats2.has_value());
     EXPECT_DOUBLE_EQ((*stats2)[0].first_value, 5.0);
     EXPECT_DOUBLE_EQ((*stats2)[0].last_value, 9.0);
+}
+
+TEST_F(ZoneMapFileVersionTest, OpenDiscardsV3FileInsteadOfMisreadingIntoV4Layout) {
+    // Durability A's Task 1 bump: v3 -> v4 adds `dirty` into the header's
+    // existing padding hole (offset 12) without changing sizeof or
+    // ZoneMapEntry's layout at all. That similarity is exactly why this
+    // needs its own test, not just reuse of the v2->v3 one above: a v3
+    // file and a v4-shaped header have the SAME size and the SAME bytes at
+    // every offset except that offset-12 was uninitialized padding under
+    // v3. Only the explicit version check (not a size/shape mismatch)
+    // catches this and forces the discard-and-recreate path.
+    std::string path = TestFilePath("v3_stale.zmap");
+
+    {
+        ZoneMapFileHeader old_header;
+        old_header.version = 3; // stale -- current ZONE_MAP_VERSION is 4
+        old_header.tracked_column_count = 64;
+        old_header.rows_per_block = 100;
+        int fd = open(path.c_str(), O_RDWR | O_CREAT, 0644);
+        ASSERT_GE(fd, 0);
+        ASSERT_EQ(pwrite(fd, &old_header, sizeof(old_header), 0), static_cast<ssize_t>(sizeof(old_header)));
+        close(fd);
+    }
+
+    ZoneMapFile zmap;
+    ASSERT_TRUE(zmap.Open(path, /*row_length=*/64));
+
+    auto stats = zmap.TryGetBlockStats(0);
+    ASSERT_TRUE(stats.has_value());
+    EXPECT_EQ((*stats)[0].valid_count, 0u);
+
+    zmap.UpdateRow(0, {{0, 5.0, true}}, 1);
+    zmap.UpdateRow(1, {{0, 9.0, true}}, 1);
+    auto stats2 = zmap.TryGetBlockStats(0);
+    ASSERT_TRUE(stats2.has_value());
+    EXPECT_DOUBLE_EQ((*stats2)[0].first_value, 5.0);
+    EXPECT_DOUBLE_EQ((*stats2)[0].last_value, 9.0);
+
+    ZoneMapFileHeader on_disk{};
+    int fd = open(path.c_str(), O_RDONLY);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(pread(fd, &on_disk, sizeof(on_disk), 0), static_cast<ssize_t>(sizeof(on_disk)));
+    close(fd);
+    EXPECT_EQ(on_disk.version, ZONE_MAP_VERSION);
+    EXPECT_EQ(on_disk.dirty, 0u);
 }
 
 } // namespace
