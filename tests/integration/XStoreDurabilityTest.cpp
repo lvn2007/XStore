@@ -372,4 +372,93 @@ TEST_F(DurabilityRebuildTest, DirtyIndexesOverYearWithNoRowsRebuildToCleanWithou
     EXPECT_EQ(std::filesystem::file_size(Path(".zmap")), sizeof(ZoneMapFileHeader)) << "no rows => header-only zmap";
 }
 
+// ---- Task 4: XStore::Shutdown() (DD7) --------------------------------------
+
+// Shutdown() stops the process-wide WAL writers; ResetShutdownForTests()
+// revives them so later tests in the same process can still insert.
+class DurabilityShutdownTest : public DurabilityRebuildTest {
+protected:
+    void TearDown() override {
+        XStore::ResetShutdownForTests();
+        DurabilityRebuildTest::TearDown();
+    }
+};
+
+TEST_F(DurabilityShutdownTest, ShutdownMarksBothIndexesCleanSoInitDbSkipsRebuild) {
+    XStore store;
+    InsertRows(store);
+    ASSERT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), 1u) << "precondition: inserts dirty the zmap";
+    ASSERT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), 1u) << "precondition: inserts dirty the catidx";
+
+    XStore::Shutdown();
+
+    EXPECT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), 0u);
+    EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), 0u);
+
+    // Tamper both index bodies; the clean flags must make InitDB trust them.
+    // (DropRegistriesAndZeroBody also checkpoints the WAL: a live WAL record
+    // would force a rebuild of its year regardless of the flag.)
+    DropRegistriesAndZeroBody(Path(".zmap"), sizeof(ZoneMapFileHeader));
+    DropRegistriesAndZeroBody(Path(".catidx"), sizeof(CatIdxFileHeader));
+    store.InitDB();
+
+    EXPECT_EQ(ReadZmapEntry0().valid_count, 0u) << "zmap was rebuilt despite a clean header";
+    XStore_Proto::FData val = xstore_test::FDouble(137.0);
+    EXPECT_FALSE(XStore::GetOrOpenCatIdx(DbPath(), year, kRowLength).MightContain(0, 0, EncodeFDataForCatIdx(val)))
+        << "catidx was rebuilt despite a clean header";
+    EXPECT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), 0u);
+    EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), 0u);
+}
+
+TEST_F(DurabilityShutdownTest, SecondShutdownIsANoOp) {
+    XStore store;
+    InsertRows(store);
+    XStore::Shutdown();
+    ASSERT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), 0u);
+
+    // Re-dirty the zmap behind Shutdown's back; a second Shutdown that did
+    // real work would MarkClean it again.
+    XStore::GetOrOpenZoneMap(DbPath(), year, kRowLength).UpdateRow(0, ZmapObs(1.0), 1);
+    ASSERT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), 1u);
+
+    XStore::Shutdown();
+
+    EXPECT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), 1u);
+}
+
+TEST_F(DurabilityShutdownTest, InsertsAfterShutdownAreRejected) {
+    XStore store;
+    InsertRows(store);
+    XStore::Shutdown();
+    ASSERT_TRUE(XStore::IsShutDown());
+
+    XStore_Proto::RowData row;
+    row.add_fielddata()->set_doubledata(1.0);
+
+    XStore_Proto::UnaryInsert_REP unary_rep;
+    store.UnaryInsert(kBaseEpoch + kRows, row, db_name, &unary_rep, XStore_Proto::SYNC);
+    EXPECT_EQ(unary_rep.insertstatus().rfind("[ERROR]", 0), 0u) << unary_rep.insertstatus();
+    EXPECT_NE(unary_rep.insertstatus().find("shut down"), std::string::npos);
+
+    XStore_Proto::BatchInsert_REQ batch_req;
+    batch_req.set_dbname(db_name);
+    batch_req.set_durabilitymode(XStore_Proto::SYNC);
+    XStore_Proto::BatchInsert_DATA *entry = batch_req.add_batchinsert_data();
+    entry->set_timestamp(kBaseEpoch + kRows);
+    *entry->mutable_data() = row;
+    XStore_Proto::BatchInsert_REP batch_rep;
+    store.BatchInsert(&batch_req, &batch_rep);
+    EXPECT_EQ(batch_rep.insertstatus().rfind("[ERROR]", 0), 0u) << batch_rep.insertstatus();
+
+    XStore_Proto::RangeInsert_REQ range_req;
+    range_req.set_dbname(db_name);
+    range_req.set_durabilitymode(XStore_Proto::SYNC);
+    XStore_Proto::RangeInsert_DATA *range_entry = range_req.add_rangeinsert_data();
+    range_entry->set_timestamp(kBaseEpoch + kRows);
+    *range_entry->mutable_data() = row;
+    XStore_Proto::RangeInsert_REP range_rep;
+    store.RangeInsert(&range_req, &range_rep);
+    EXPECT_EQ(range_rep.insertstatus().rfind("[ERROR]", 0), 0u) << range_rep.insertstatus();
+}
+
 } // namespace

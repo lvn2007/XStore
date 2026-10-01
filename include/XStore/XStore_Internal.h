@@ -18,6 +18,15 @@
 // filename-append site) can chain off it.
 std::string* SetTaggedStatus(std::string *status, const char *tag, const std::string &body);
 
+// Insert entry-point guard: after XStore::Shutdown() the WAL writers are
+// gone (a SYNC enqueue would block forever), so every insert path rejects
+// up front. Writes an [ERROR] status and returns true when shut down.
+inline bool RejectInsertIfShutDown(std::string *status, const char *op) {
+    if (!XStore::IsShutDown()) return false;
+    SetTaggedStatus(status, "[ERROR] ", std::string("[") + op + "] - Server has shut down; insert rejected");
+    return true;
+}
+
 // Uppercases src into a thread_local reused buffer and returns a reference
 // to it. Backs every public XStore method's dbName handling: those take
 // dbName as a std::string_view parameter (a trivial pointer+length pass,

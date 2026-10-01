@@ -15,6 +15,7 @@ using namespace XStoreWireEncode;
 
 // RANGE INSERT
 void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client, XStore_Proto::RangeInsert_REP *return_data) {
+    if (RejectInsertIfShutDown(return_data->mutable_insertstatus(), "RANGE INSERT")) return;
     // Ensure DB Name string is all capitalized
     std::string db_name = proto_from_client->dbname();
     ToUpperCase(db_name.begin(), db_name.end());

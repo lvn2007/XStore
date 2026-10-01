@@ -12,6 +12,7 @@
 // UNARY INSERT
 void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::RowData &data, std::string_view db_name_view,
                           XStore_Proto::UnaryInsert_REP *return_data, XStore_Proto::WalDurabilityMode durability_mode) {
+    if (RejectInsertIfShutDown(return_data->mutable_insertstatus(), "UNARY INSERT")) return;
     // Ensure dbName string is all capitalized
     const std::string &db_name = UpperCaseInto(db_name_view);
 

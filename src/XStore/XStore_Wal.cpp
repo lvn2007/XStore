@@ -7,6 +7,7 @@
 #include "include/Logger/Logger.h"
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cstring>
 #include <chrono>
 #include <deque>
@@ -15,6 +16,7 @@
 #include <sys/uio.h>
 #include <unistd.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 std::array<XStore::WalShard, XStoreTunables::WAL_SHARD_COUNT> XStore::wal_shards;
@@ -297,6 +299,8 @@ void XStore::ReclaimWalFileSize(int fd, const std::string &wal_path, uintmax_t o
 }
 
 bool XStore::EnqueueWalRecord(WalRecord record) {
+    // Writers are stopped after Shutdown(); a SYNC wait here would never wake.
+    if (IsShutDown()) return false;
     // Per-DB hash, not round-robin: tried round-robin first (spreads a
     // single hot DB across every active shard), but on a single physical
     // storage device that backfires -- it splits what could be one shard's
@@ -438,22 +442,113 @@ void XStore::StartWalWriters(const std::string &data_store_dir) {
     // before any static destructors registered after this call, so
     // registering here (at the moment the threads are actually started)
     // guarantees this runs first.
-    std::atexit([]() {
-        for (size_t i = 0; i < XStoreTunables::WAL_SHARD_COUNT; ++i) {
-            wal_shards[i].stop_flag.store(true, std::memory_order_relaxed);
+    std::atexit([]() { XStore::StopWalWriters(); });
+}
+
+std::atomic<bool> XStore::shutdown_flag_{false};
+
+void XStore::StopWalWriters() {
+    for (size_t i = 0; i < XStoreTunables::WAL_SHARD_COUNT; ++i) {
+        wal_shards[i].stop_flag.store(true, std::memory_order_relaxed);
+    }
+    for (size_t i = 0; i < XStoreTunables::WAL_SHARD_COUNT; ++i) {
+        if (wal_shards[i].writer_thread.joinable()) {
+            wal_shards[i].writer_thread.join();
         }
-        for (size_t i = 0; i < XStoreTunables::WAL_SHARD_COUNT; ++i) {
-            if (wal_shards[i].writer_thread.joinable()) {
-                wal_shards[i].writer_thread.join();
+    }
+#ifdef XSTORE_WAL_STATS_ENABLED
+    wal_stats_stop_flag.store(true, std::memory_order_relaxed);
+    if (wal_stats_reporter_thread.joinable()) {
+        wal_stats_reporter_thread.join();
+    }
+#endif
+}
+
+void XStore::Shutdown() {
+    if (shutdown_flag_.exchange(true, std::memory_order_acq_rel)) return;
+
+    StopWalWriters();
+
+    // Data files first: an index may only be marked clean once the data file
+    // it describes is durable. First the fd cache (snapshot shared_ptrs under
+    // each shard lock, sync outside it), remembering which paths succeeded.
+    std::unordered_set<std::string> synced;
+    for (FdShard &shard : fd_shards) {
+        std::vector<std::pair<std::string, std::shared_ptr<int>>> snapshot;
+        {
+            std::lock_guard<std::mutex> lock(shard.mutex);
+            for (size_t i = 0; i < shard.count; ++i) {
+                snapshot.emplace_back(shard.entries[i].key, shard.entries[i].value);
             }
         }
-#ifdef XSTORE_WAL_STATS_ENABLED
-        wal_stats_stop_flag.store(true, std::memory_order_relaxed);
-        if (wal_stats_reporter_thread.joinable()) {
-            wal_stats_reporter_thread.join();
+        for (auto &[path, fd] : snapshot) {
+            if (fdatasync(*fd) == 0) {
+                synced.insert(path);
+            } else {
+                spdlog::error("[SHUTDOWN] - fdatasync failed for {}: {}", path, std::strerror(errno));
+            }
         }
+    }
+
+    // Registry key is "<db_base_path>/<year>", i.e. the data file is
+    // "<key>.XSTORE" (same string CachedYearFilePath builds). If the fd cache
+    // evicted it, sync it through a throwaway read-only fd (fdatasync flushes
+    // the inode's dirty pages whichever fd wrote them, mmap included).
+    auto data_file_synced = [&](const std::string &key) {
+        std::string data_path = key + ".XSTORE";
+        if (synced.count(data_path) != 0) return true;
+        int fd = open(data_path.c_str(), O_RDONLY);
+        if (fd < 0 || fdatasync(fd) != 0) {
+            spdlog::error("[SHUTDOWN] - Cannot sync {} ({}); leaving its indexes dirty", data_path, std::strerror(errno));
+            if (fd >= 0) close(fd);
+            return false;
+        }
+        close(fd);
+        synced.insert(std::move(data_path));
+        return true;
+    };
+
+    // Registry mutex is held only around the MarkClean() calls (not the data
+    // syncs): it also guards entry lifetime against LRU eviction, so a file
+    // can't be destroyed mid-MarkClean. Order is registry mutex -> file
+    // mutex; no file method takes a registry mutex, so no inversion. A write
+    // racing in after MarkClean simply re-marks the file dirty.
+    auto mark_registry_clean = [&](std::mutex &registry_mutex, auto &registry, const char *what) {
+        std::vector<std::string> keys;
+        {
+            std::lock_guard<std::mutex> lock(registry_mutex);
+            keys.reserve(registry.size());
+            for (const auto &entry : registry) keys.push_back(entry.first);
+        }
+        std::vector<std::string> ready;
+        for (std::string &key : keys) {
+            if (data_file_synced(key)) ready.push_back(std::move(key));
+        }
+        std::lock_guard<std::mutex> lock(registry_mutex);
+        for (const std::string &key : ready) {
+            auto it = registry.find(key);
+            if (it != registry.end() && !it->second->MarkClean()) {
+                spdlog::error("[SHUTDOWN] - MarkClean failed for {} {}; leaving it dirty", what, key);
+            }
+        }
+    };
+    mark_registry_clean(zone_map_registry_mutex_, zone_map_registry_, ".zmap");
+    mark_registry_clean(catidx_registry_mutex_, catidx_registry_, ".catidx");
+}
+
+void XStore::ResetShutdownForTests() {
+    if (!shutdown_flag_.exchange(false, std::memory_order_acq_rel)) return;
+    // Writers resolve their WAL fd lazily from each record's path when
+    // handed no preopened fd.
+    size_t active = active_wal_shard_count.load(std::memory_order_relaxed);
+    for (size_t i = 0; i < active; ++i) {
+        wal_shards[i].stop_flag.store(false, std::memory_order_relaxed);
+        wal_shards[i].writer_thread = std::thread(&XStore::WalWriterLoop, i, std::string{}, -1);
+    }
+#ifdef XSTORE_WAL_STATS_ENABLED
+    wal_stats_stop_flag.store(false, std::memory_order_relaxed);
+    wal_stats_reporter_thread = std::thread(&XStore::WalStatsReporterLoop);
 #endif
-    });
 }
 
 #ifdef XSTORE_WAL_STATS_ENABLED

@@ -37,6 +37,7 @@ void SortBatch(Iterator begin, Iterator end, Compare comp) {
 
 // BATCH INSERT
 void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStore_Proto::BatchInsert_REP *return_data) {
+    if (RejectInsertIfShutDown(return_data->mutable_insertstatus(), "BATCH INSERT")) return;
     // Ensure DB Name string is all capitalized
     std::string db_name = proto_from_client->dbname();
     ToUpperCase(db_name.begin(), db_name.end());
