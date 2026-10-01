@@ -186,10 +186,13 @@ void XStoreZapHandler::Loop() {
     try {
         zap.bind("inproc://zeromq.zap.01");
     } catch (const zmq::error_t &e) {
-        spdlog::error("[CURVE] - ZAP handler failed to bind inproc://zeromq.zap.01: {}", e.what());
+        if (e.num() != ETERM) spdlog::error("[CURVE] - ZAP handler failed to bind inproc://zeromq.zap.01: {}", e.what());
         return;
     }
 
+    // ETERM = the owning context was shut down (ZmqServer::RequestStop):
+    // leave quietly instead of letting the exception terminate the process.
+    try {
     while (!stop_flag_.load(std::memory_order_relaxed)) {
         std::vector<zmq::message_t> request;
         if (!zmq::recv_multipart(zap, std::back_inserter(request))) continue;  // timeout
@@ -244,5 +247,8 @@ void XStoreZapHandler::Loop() {
         reply.addstr(user_id);
         reply.addstr("");  // metadata, unused
         reply.send(zap);
+    }
+    } catch (const zmq::error_t &e) {
+        if (e.num() != ETERM) throw;
     }
 }

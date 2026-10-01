@@ -249,8 +249,24 @@ protected:
         ASSERT_TRUE(XStore::GetOrOpenCatIdx(DbPath(), year, kRowLength).MarkClean());
     }
 
-    void DropRegistriesAndZeroBody(const std::string &path, size_t header_size) {
-        CheckpointWal();
+    // Number of WAL shard files whose leading recordLen is non-zero, i.e. that
+    // InitDB's replay would still find a record in.
+    size_t LiveWalShards() const {
+        size_t live = 0;
+        std::filesystem::path wal_dir = scratch->test_root / "DataStore" / XStoreTunables::WAL_DIR_NAME;
+        if (!std::filesystem::is_directory(wal_dir)) return 0;
+        for (auto &f : std::filesystem::directory_iterator(wal_dir)) {
+            int fd = open(f.path().c_str(), O_RDONLY);
+            if (fd < 0) continue;
+            uint32_t len = 0;
+            if (pread(fd, &len, sizeof(len), 0) == static_cast<ssize_t>(sizeof(len)) && len != 0) ++live;
+            close(fd);
+        }
+        return live;
+    }
+
+    void DropRegistriesAndZeroBody(const std::string &path, size_t header_size, bool checkpoint_wal = true) {
+        if (checkpoint_wal) CheckpointWal();
         XStore::ClearZoneMapRegistryForTests();
         XStore::ClearCatIdxRegistryForTests();
         int fd = open(path.c_str(), O_RDWR);
@@ -408,6 +424,43 @@ TEST_F(DurabilityShutdownTest, ShutdownMarksBothIndexesCleanSoInitDbSkipsRebuild
         << "catidx was rebuilt despite a clean header";
     EXPECT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), 0u);
     EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), 0u);
+}
+
+// Task 5 sub-step: a graceful Shutdown() checkpoints the WAL itself, so the
+// next start neither replays nor force-rebuilds the years the last batch
+// touched. Unlike the test above, nothing here calls CheckpointWal().
+TEST_F(DurabilityShutdownTest, ShutdownInvalidatesWalSoNextStartDoesNotRebuild) {
+    XStore store;
+    InsertRows(store);
+    ASSERT_GT(LiveWalShards(), 0u) << "precondition: a SYNC insert leaves its batch in a WAL shard";
+
+    XStore::Shutdown();
+
+    EXPECT_EQ(LiveWalShards(), 0u) << "Shutdown must invalidate every WAL header it knows to be fully applied+synced";
+
+    DropRegistriesAndZeroBody(Path(".zmap"), sizeof(ZoneMapFileHeader), /*checkpoint_wal=*/false);
+    DropRegistriesAndZeroBody(Path(".catidx"), sizeof(CatIdxFileHeader), /*checkpoint_wal=*/false);
+    store.InitDB();
+
+    EXPECT_EQ(ReadZmapEntry0().valid_count, 0u) << "zmap was force-rebuilt: the WAL was replayed";
+    XStore_Proto::FData val = xstore_test::FDouble(137.0);
+    EXPECT_FALSE(XStore::GetOrOpenCatIdx(DbPath(), year, kRowLength).MightContain(0, 0, EncodeFDataForCatIdx(val)))
+        << "catidx was force-rebuilt: the WAL was replayed";
+}
+
+// A WAL record whose data file cannot be synced must stay replayable. The
+// data file is moved away, so Shutdown's path-based sync of it fails (open
+// ENOENT) => the WAL stays intact.
+TEST_F(DurabilityShutdownTest, ShutdownLeavesWalIntactWhenADataFileCannotBeSynced) {
+    XStore store;
+    InsertRows(store);
+    const size_t live_before = LiveWalShards();
+    ASSERT_GT(live_before, 0u);
+    ASSERT_EQ(rename(Path(".XSTORE").c_str(), (Path(".XSTORE") + ".moved").c_str()), 0);
+
+    XStore::Shutdown();
+
+    EXPECT_EQ(LiveWalShards(), live_before) << "WAL was invalidated although its data file could not be synced";
 }
 
 TEST_F(DurabilityShutdownTest, SecondShutdownIsANoOp) {

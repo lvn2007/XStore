@@ -43,15 +43,20 @@ add_custom_command(TARGET xstore_tests POST_BUILD
 add_executable(xstore_network_tests
         integration/XStoreZmqNetworkTest.cpp
         integration/XStoreCurveTest.cpp
+        integration/XStoreGracefulShutdownTest.cpp
 )
 # xstore_network brings the core (xstore_core) and curve-key handling
 # (xstore_curve) with it.
 target_link_libraries(xstore_network_tests PRIVATE GTest::gtest_main xstore_network)
+# XStoreGracefulShutdownTest launches the real server binary (SIGTERM/SIGKILL
+# black-box tests), so it must be built first.
+target_compile_definitions(xstore_network_tests PRIVATE XSTORE_BIN="$<TARGET_FILE:XStore>")
+add_dependencies(xstore_network_tests XStore)
 
 gtest_discover_tests(xstore_network_tests)
 
 add_custom_command(TARGET xstore_network_tests POST_BUILD
-        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "^XStoreZmqNetworkTest\\.\\|^XStoreZmqConcurrentTest\\.\\|^XStoreCurve"
+        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "^XStoreZmqNetworkTest\\.\\|^XStoreZmqConcurrentTest\\.\\|^XStoreCurve\\|^XStoreGracefulShutdownTest\\."
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         COMMENT "Running xstore_network_tests via ctest"
 )

@@ -4,9 +4,31 @@
 #include "include/XStore/XStore_SysStats.h"
 #include "include/Networking/XStore_Curve.h"
 #include <argparse/argparse.hpp>
+#include <csignal>
+#include <cstring>
 #include <filesystem>
+#include <mutex>
+#include <thread>
+#include <unistd.h>
+
+namespace {
+// Guards g_server against the signal thread racing main's teardown of it.
+std::mutex g_server_mutex;
+ZmqServer *g_server = nullptr;
+}  // namespace
 
 int main(int argc, char *argv[]) {
+    // Graceful shutdown (Durability A, DD7). SIGINT/SIGTERM are blocked here,
+    // before ANY thread exists (spdlog, ZMQ, WAL writers... all inherit the
+    // mask), so they are only ever consumed by the sigwait thread started
+    // below -- never by a default handler that would kill the process with
+    // the indexes still marked dirty.
+    sigset_t stop_signals;
+    sigemptyset(&stop_signals);
+    sigaddset(&stop_signals, SIGINT);
+    sigaddset(&stop_signals, SIGTERM);
+    pthread_sigmask(SIG_BLOCK, &stop_signals, nullptr);
+
     spdlog::level::level_enum console_level = spdlog::level::warn;
     spdlog::level::level_enum file_level = spdlog::level::trace;
     unsigned short int flush_interval = 10;
@@ -127,6 +149,26 @@ int main(int argc, char *argv[]) {
     // fixes.
     XStorePreadPool::Init(static_cast<size_t>(thread_count));
 
+    // Constructed (not started) before the slow boot work below so that a
+    // signal arriving during InitDB/WAL replay is remembered: RequestStop()
+    // shuts the context down and StartServer then returns immediately.
+    ZmqServer x_store_zmq_server(thread_count);
+    g_server = &x_store_zmq_server;
+    std::thread([stop_signals]() {
+        int sig = 0;
+        sigwait(&stop_signals, &sig);
+        spdlog::warn("[SHUTDOWN] - Received signal {} ({}); stopping the server", sig, strsignal(sig));
+        {
+            std::lock_guard<std::mutex> lock(g_server_mutex);
+            if (g_server != nullptr) g_server->RequestStop();
+        }
+        // A second signal while shutting down means "now": leave the indexes
+        // dirty (the next start rebuilds them) rather than wait.
+        sigwait(&stop_signals, &sig);
+        spdlog::default_logger()->flush();
+        _exit(1);
+    }).detach();
+
     // Host-metrics broadcast: independent background thread + its own PUB
     // socket, started before the ZMQ server so it's already publishing by
     // the time any client (desktop viewer or otherwise) connects. Never
@@ -144,7 +186,26 @@ int main(int argc, char *argv[]) {
     XStore bootstrap_store;
     XStore::StartCatIdxCompactionThread(bootstrap_store.data_store_dir);
 
-    // Spin ZMQ Server
-    ZmqServer x_store_zmq_server(thread_count);
-    x_store_zmq_server.StartServer(host, port, curve_identity, curve_keystore);
+    // Spin ZMQ Server. Returns after a stop signal, once the workers have
+    // drained (or the drain timeout hit).
+    const bool drained = x_store_zmq_server.StartServer(host, port, curve_identity, curve_keystore);
+    {
+        std::lock_guard<std::mutex> lock(g_server_mutex);
+        g_server = nullptr;
+    }
+    if (!drained) {
+        // A worker may still be inserting: Shutdown()'s "indexes are quiescent"
+        // precondition does not hold, so do NOT mark anything clean. Dirty
+        // flags stay set; the next start rebuilds.
+        spdlog::error("[SHUTDOWN] - Workers did not drain in time; exiting without a clean shutdown (indexes stay dirty)");
+        spdlog::default_logger()->flush();
+        _exit(1);
+    }
+
+    // Server quiescent: no request can mutate data from here on. The
+    // compaction thread is stopped first so it cannot re-dirty an index.
+    XStore::StopCatIdxCompactionThread();
+    XStore::Shutdown();
+    spdlog::info("[SHUTDOWN] - Clean shutdown complete");
+    return 0;
 }

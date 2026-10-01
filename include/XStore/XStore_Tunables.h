@@ -177,6 +177,13 @@ inline constexpr unsigned    WAL_ADAPTIVE_POLL_WINDOW_US = 50000;
 // cores/SMT lanes for this to share with other work.
 inline constexpr unsigned    ZMQ_ADAPTIVE_POLL_WINDOW_US = 50000;
 
+// Graceful shutdown (ZmqServer::StartServer): after the ZMQ context is shut
+// down, how long to wait for the worker threads to finish their in-flight
+// request and exit before giving up. On timeout the process must NOT run
+// XStore::Shutdown() (a worker may still be inserting) -- it exits with the
+// indexes left dirty instead, which the next start rebuilds.
+inline constexpr unsigned    ZMQ_SHUTDOWN_DRAIN_TIMEOUT_S = 10;
+
 // Debug/benchmark-only (see the XSTORE_WAL_STATS CMake option): how often
 // WalStatsReporterLoop logs each shard's average batch size. Only compiled
 // in / used when that flag is on -- harmless as a plain constant otherwise.

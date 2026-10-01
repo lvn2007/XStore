@@ -439,6 +439,12 @@ void XStore::CompactOneYearCatIdx(const std::string &db_base_path, unsigned shor
 
     std::vector<char> row_buf(row_length);
     for (uint64_t r = 0; r < total_rows; ++r) {
+        // Graceful shutdown must not wait out a multi-minute scan: abandon
+        // the year (nothing was appended, so it is simply retried next start).
+        if ((r & 0xFFFFu) == 0 && catidx_compaction_stop_flag_.load(std::memory_order_relaxed)) {
+            close(fd);
+            return;
+        }
         [[maybe_unused]] ssize_t row_read = pread(fd, row_buf.data(), row_length, static_cast<off_t>(r) * row_length);
         for (uint32_t c = 0; c < tracked_column_count; ++c) {
             if (abandoned_columns.count(c) > 0) continue;
@@ -666,9 +672,8 @@ void XStore::CompactColdCatIdxForAllDbs(const std::string &data_store_dir) {
             // Bound shutdown latency: stop starting new year-scans once a
             // shutdown has been signaled, rather than blocking the
             // atexit-registered thread join until the whole remaining
-            // corpus finishes. Doesn't interrupt a scan already in
-            // progress (CompactOneYearCatIdx's own row loop doesn't check
-            // this) -- just "finish the current year, don't start another".
+            // corpus finishes. CompactOneYearCatIdx's row loop also checks
+            // the flag (every 64K rows) and abandons the year in progress.
             if (catidx_compaction_stop_flag_.load(std::memory_order_relaxed)) return;
             std::string filename = f.path().filename().string();
             if (filename.size() < 7 || filename.substr(filename.size() - 7) != ".XSTORE") continue;
@@ -709,10 +714,12 @@ void XStore::StartCatIdxCompactionThread(const std::string &data_store_dir) {
     });
     // Same atexit-at-spawn-time ordering argument as StartWalWriters: register
     // the join here so it runs before any static logger/queue teardown.
-    std::atexit([]() {
-        XStore::catidx_compaction_stop_flag_.store(true, std::memory_order_relaxed);
-        if (XStore::catidx_compaction_thread_.joinable()) {
-            XStore::catidx_compaction_thread_.join();
-        }
-    });
+    std::atexit([]() { XStore::StopCatIdxCompactionThread(); });
+}
+
+void XStore::StopCatIdxCompactionThread() {
+    catidx_compaction_stop_flag_.store(true, std::memory_order_relaxed);
+    if (catidx_compaction_thread_.joinable()) {
+        catidx_compaction_thread_.join();
+    }
 }

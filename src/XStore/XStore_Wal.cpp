@@ -13,6 +13,9 @@
 #include <deque>
 #include <fcntl.h>
 #include <filesystem>
+#include <mutex>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/uio.h>
 #include <unistd.h>
 #include <unordered_map>
@@ -534,6 +537,79 @@ void XStore::Shutdown() {
     };
     mark_registry_clean(zone_map_registry_mutex_, zone_map_registry_, ".zmap");
     mark_registry_clean(catidx_registry_mutex_, catidx_registry_, ".catidx");
+
+    CheckpointWals();
+}
+
+namespace {
+std::mutex wal_dirs_mutex;
+std::vector<std::string> wal_dirs;
+} // namespace
+
+void XStore::RegisterDataStoreDir(const std::string &data_store_dir) {
+    std::lock_guard<std::mutex> lock(wal_dirs_mutex);
+    wal_dirs.push_back(data_store_dir);
+}
+
+// Writers are joined, so each shard file is quiescent and holds exactly what
+// ReplayWal would find: its last batch (plus, possibly, a CRC-valid stale
+// tail). Parsing it with ParseWalRecord gives the (db, year) data files replay
+// would write into; the header is invalidated only once every one of them has
+// been fdatasynced by path (a throwaway fd, so an fd-cache eviction cannot
+// hide a file, and the file at THAT path is the one flushed). Any failure
+// leaves that shard's WAL untouched => the next start replays + rebuilds.
+void XStore::CheckpointWals() {
+    std::vector<std::string> dirs;
+    {
+        std::lock_guard<std::mutex> lock(wal_dirs_mutex);
+        dirs = wal_dirs;
+    }
+    std::unordered_set<std::string> synced;
+    auto sync_path = [&](const std::string &path) {
+        if (synced.count(path) != 0) return true;
+        int fd = open(path.c_str(), O_RDONLY);
+        if (fd < 0 || fdatasync(fd) != 0) {
+            spdlog::error("[SHUTDOWN] - Cannot sync {} ({}); leaving its WAL records for replay", path, std::strerror(errno));
+            if (fd >= 0) close(fd);
+            return false;
+        }
+        close(fd);
+        synced.insert(path);
+        return true;
+    };
+
+    for (const std::string &dir : dirs) {
+        const std::filesystem::path wal_dir = std::filesystem::path(dir) / XStoreTunables::WAL_DIR_NAME;
+        if (!std::filesystem::is_directory(wal_dir)) continue;
+        for (size_t shard_idx = 0; shard_idx < XStoreTunables::WAL_SHARD_COUNT; ++shard_idx) {
+            const std::string wal_path = (wal_dir / ("shard_" + std::to_string(shard_idx) + ".WAL")).string();
+            int wal_fd = open(wal_path.c_str(), O_RDWR);
+            if (wal_fd < 0) continue; // shard never used
+            struct stat st{};
+            void *map = MAP_FAILED;
+            if (fstat(wal_fd, &st) == 0 && st.st_size > 0) {
+                map = mmap(nullptr, static_cast<size_t>(st.st_size), PROT_READ, MAP_PRIVATE, wal_fd, 0);
+            }
+            if (map == MAP_FAILED) {
+                spdlog::error("[SHUTDOWN] - Cannot read {}; leaving it for replay", wal_path);
+                close(wal_fd);
+                continue;
+            }
+            const char *base = static_cast<const char *>(map);
+            const size_t size = static_cast<size_t>(st.st_size);
+            bool all_synced = true;
+            WalRecord record;
+            for (size_t off = 0, consumed = 0; off < size && all_synced; off += consumed) {
+                if (!ParseWalRecord(base + off, size - off, consumed, record)) break;
+                if (record.rows.empty()) continue;
+                TimeStruct ts(static_cast<std::time_t>(record.rows.front().epoch_time), record.time_resolution);
+                all_synced = sync_path(fmt::format("{}/{}.XSTORE", JoinPath(dir, record.db_name), ts.year));
+            }
+            munmap(map, size);
+            if (all_synced) InvalidateWalFileHeader(wal_fd, wal_path);
+            close(wal_fd);
+        }
+    }
 }
 
 void XStore::ResetShutdownForTests() {

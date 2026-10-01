@@ -313,6 +313,15 @@ class XStore {
         // in-bounds rather than modulo-by-zero.
         static std::atomic<size_t> active_wal_shard_count;
 
+        // Set once by Shutdown(); see IsShutDown().
+        static std::atomic<bool> shutdown_flag_;
+        // Stops + joins every WAL writer thread (and the stats reporter).
+        // Safe to call repeatedly; shared by Shutdown() and the atexit hook.
+        static void StopWalWriters();
+        // Shutdown() step (4): checkpoints WAL shard files whose records'
+        // data files are all synced. See Shutdown().
+        static void CheckpointWals();
+
         // CatIdx compaction background thread (Task 9): one process-wide
         // thread, started once from main.cpp (never from the XStore
         // constructor -- unlike wal_shards/StartWalWriters, this must NOT
@@ -746,6 +755,36 @@ class XStore {
         // directly (as tests do) always re-runs it, guard or not.
         void InitDB();
 
+        // Graceful shutdown (Durability A, DD7). In order: (1) stops+joins
+        // the WAL writer threads (same code the atexit hook runs); (2)
+        // fdatasyncs every cached data-file fd, plus -- for any open index
+        // whose .XSTORE isn't in the fd cache -- that file via a throwaway
+        // read-only fd; (3) MarkClean()s every registry-open ZoneMapFile /
+        // CatIdxFile whose data file was synced; (4) WAL checkpoint: for each
+        // WAL shard file of every initialized data_store_dir, parses the
+        // records still in it, fdatasyncs (by path, throwaway fd) every data
+        // file they touch, and only if ALL of those synced invalidates the
+        // shard's header (InvalidateWalFileHeader) so the next start neither
+        // replays it nor force-rebuilds the years it touched. A WAL with any
+        // unsyncable data file is left intact (replay + rebuild: safe). A
+        // failure anywhere is logged and leaves that index/WAL as-is; it
+        // never aborts the rest. ASYNC records still queued when the writers
+        // stop are dropped (unchanged behavior). Idempotent (atomic flag;
+        // later calls are no-ops). Once set, Unary/Batch/RangeInsert and
+        // EnqueueWalRecord reject writes.
+        //
+        // PRECONDITION: the caller has already stopped serving requests (the
+        // ZMQ workers are stopped/drained -- see main.cpp). An insert racing
+        // Shutdown could leave an index clean over an unsynced data row, or
+        // enqueue a SYNC waiter after the WAL writer exited, which would
+        // never be woken.
+        static void Shutdown();
+        // Single relaxed load -- cheap enough for every insert's entry.
+        static bool IsShutDown() { return shutdown_flag_.load(std::memory_order_relaxed); }
+        // Test-only: undoes Shutdown() (clears the flag, restarts the WAL
+        // writer threads) so later tests in the same process can insert.
+        static void ResetShutdownForTests();
+
         // Fetch (creating if needed) the ZoneMapFile for (dbBasePath, year),
         // opening its "<dbBasePath>/<year>.zmap" sidecar on first touch and
         // reusing the same in-registry instance on every later call --
@@ -853,6 +892,14 @@ class XStore {
         // member comment above) so it can reach the non-static
         // ExtractColumnByIndexSkipParse/CompactColdCatIdxForAllDbs path.
         static void StartCatIdxCompactionThread(const std::string &data_store_dir);
+        // Stops + joins the compaction thread (no-op if never started or
+        // already stopped); the atexit hook runs the same code. main.cpp
+        // calls it before Shutdown() so a compaction cannot re-dirty an
+        // index Shutdown just marked clean.
+        static void StopCatIdxCompactionThread();
+        // Records a data_store_dir the constructor initialized, so
+        // Shutdown()'s WAL checkpoint knows which WAL directories exist.
+        static void RegisterDataStoreDir(const std::string &data_store_dir);
 
         // CatIdx compaction (Task 9): scans one cold <YEAR>.XSTORE file
         // row-by-row and builds a bitmap section (value -> row indices) per

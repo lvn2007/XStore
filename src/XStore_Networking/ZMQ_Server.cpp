@@ -1,5 +1,6 @@
 #include "include/Networking/ZMQ_Server.h"
 #include <google/protobuf/arena.h>
+#include <cerrno>
 #include <chrono>
 #include <fstream>
 #include <memory>
@@ -98,9 +99,36 @@ ZmqServer::ZmqServer(int num_threads) {
     this->num_threads = num_threads;
 }
 
-void ZmqServer::StartServer(std::string listen_addr, std::string listen_port,
+void ZmqServer::RequestStop() {
+    ctx.shutdown();
+}
+
+bool ZmqServer::StartServer(std::string listen_addr, std::string listen_port,
                              std::optional<XStoreCurveKeyPair> curve_identity,
                              std::shared_ptr<KeyStore> curve_keystore) {
+    try {
+        Serve(listen_addr, listen_port, curve_identity, curve_keystore);
+    } catch (const zmq::error_t &e) {
+        if (e.num() != ETERM) throw;
+    }
+    // Sockets are closed by now. Workers see ETERM on their next recv (or on
+    // the send of the reply they were computing) and leave.
+    spdlog::info("[NETWORKING] - Stopping: waiting up to {}s for {} worker(s) to finish in-flight requests",
+                 XStoreTunables::ZMQ_SHUTDOWN_DRAIN_TIMEOUT_S, num_threads);
+    std::unique_lock<std::mutex> lock(latch_->mutex);
+    const bool drained = latch_->cv.wait_for(
+        lock, std::chrono::seconds(XStoreTunables::ZMQ_SHUTDOWN_DRAIN_TIMEOUT_S),
+        [&] { return latch_->running == 0; });
+    if (!drained) {
+        spdlog::error("[NETWORKING] - {} worker(s) still busy after {}s; not safe to shut the store down",
+                      latch_->running, XStoreTunables::ZMQ_SHUTDOWN_DRAIN_TIMEOUT_S);
+    }
+    return drained;
+}
+
+void ZmqServer::Serve(const std::string &listen_addr, const std::string &listen_port,
+                      const std::optional<XStoreCurveKeyPair> &curve_identity,
+                      const std::shared_ptr<KeyStore> &curve_keystore) {
     // Deliberately a runtime throw, not assert(): this project's Release
     // build happens not to define NDEBUG today (see CMakeLists.txt), but
     // relying on that staying true would make the failure mode for a caller
@@ -126,6 +154,10 @@ void ZmqServer::StartServer(std::string listen_addr, std::string listen_port,
     // pool, this queues in RAM instead of blocking/dropping at the socket.
     client_socket.set(zmq::sockopt::sndhwm, 0);
     client_socket.set(zmq::sockopt::rcvhwm, 0);
+    // Bounded linger: after RequestStop() the context destructor blocks until
+    // queued outgoing messages are delivered or this expires (default: forever,
+    // e.g. a client that stopped reading).
+    client_socket.set(zmq::sockopt::linger, 1000);
 
     std::unique_ptr<XStoreZapHandler> zap_handler;
     if (curve_identity && curve_keystore) {
@@ -154,9 +186,14 @@ void ZmqServer::StartServer(std::string listen_addr, std::string listen_port,
     zmq::socket_t worker_socket(ctx, zmq::socket_type::dealer);
     worker_socket.set(zmq::sockopt::sndhwm, 0);
     worker_socket.set(zmq::sockopt::rcvhwm, 0);
+    worker_socket.set(zmq::sockopt::linger, 0);
     worker_socket.bind("inproc://workers");
 
     //  Launch pool of WORKER threads
+    {
+        std::lock_guard<std::mutex> lock(latch_->mutex);
+        latch_->running += num_threads;
+    }
     for (int i = 0; i < num_threads; i++) {
         std::thread worker(&ZmqServer::WorkerRoutine, this, server_addr.substr(6));
         worker.detach();
@@ -168,6 +205,25 @@ void ZmqServer::StartServer(std::string listen_addr, std::string listen_port,
 }
 
 void ZmqServer::WorkerRoutine(std::string server_addr) {
+    // Declared first => destroyed last: the count drops only after every
+    // worker-owned socket/XStore below is gone, so StartServer's return (and
+    // the context teardown after it) never races a live worker socket.
+    struct ExitGuard {
+        std::shared_ptr<WorkerLatch> latch;
+        ~ExitGuard() {
+            std::lock_guard<std::mutex> lock(latch->mutex);
+            --latch->running;
+            latch->cv.notify_all();
+        }
+    } guard{latch_};
+    try {
+        WorkerLoop(server_addr);
+    } catch (const zmq::error_t &e) {
+        if (e.num() != ETERM) throw;  // anything else is a real bug: keep the old terminate-loudly behavior
+    }
+}
+
+void ZmqServer::WorkerLoop(const std::string &server_addr) {
     // Instantiate XStore for each thread
     XStore my_store;
 
@@ -176,6 +232,7 @@ void ZmqServer::WorkerRoutine(std::string server_addr) {
     zmq::socket_t socket(ctx, zmq::socket_type::rep);
     socket.set(zmq::sockopt::sndhwm, 0);
     socket.set(zmq::sockopt::rcvhwm, 0);
+    socket.set(zmq::sockopt::linger, 0);
     socket.connect("inproc://workers");
 
     // One arena per worker thread, reused for every request via Reset()
@@ -565,6 +622,9 @@ void ZmqServer::WorkerRoutine(std::string server_addr) {
                 }
             }
         } catch (const std::exception &e) {
+            // Context shut down mid-request (the reply send failed): not an
+            // error, unwind to WorkerRoutine.
+            if (auto *ze = dynamic_cast<const zmq::error_t *>(&e); ze != nullptr && ze->num() == ETERM) throw;
             spdlog::error("[NETWORKING] - Request handler threw ({}), replying empty and continuing", e.what());
             try { socket.send(zmq::message_t(0), zmq::send_flags::dontwait); } catch (...) {}
         } catch (...) {
