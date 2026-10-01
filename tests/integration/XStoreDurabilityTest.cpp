@@ -7,7 +7,10 @@
 #include "XStore/XStore_ZoneMap.h"
 #include "XStore/XStore_CatIdx.h"
 #include "XStoreTestSupport.h"
+#include "include/DataStructs/TimeStruct.h"
 #include <cstddef>
+#include <filesystem>
+#include <memory>
 #include <fcntl.h>
 #include <unistd.h>
 #include <vector>
@@ -173,6 +176,200 @@ TEST(DurabilityMarkDirtyTest, CatIdxBitmapAppendMarksDirtyAndCommitCarriesIt) {
     catidx.AppendBitmapSection({{0u, {{"b", {4}}}}});
     EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(path), 1u);
     EXPECT_EQ(catidx.DirtyMarkWritesForTests(), 2u);
+}
+
+// ---- Task 3: dirty index => rebuild at startup (DD4/DD5) ------------------
+
+// Rows 1000..1299 (one year), column 0 = double 0..299. "Crash" is simulated
+// by dropping the registries without MarkClean and zeroing the index bodies
+// (lost index writes); InitDB is the restart.
+class DurabilityRebuildTest : public ::testing::Test {
+protected:
+    static constexpr uint64_t kBaseEpoch = 1000;
+    static constexpr uint64_t kRows = 300;
+    static constexpr uint16_t kRowLength = 64;
+    const std::string db_name = "DURREBUILD";
+    std::unique_ptr<ScratchDir> scratch;
+    unsigned short year = 0;
+
+    void SetUp() override {
+        scratch = std::make_unique<ScratchDir>("xstore_durability_rebuild_test");
+        for (auto &shard : XStore::cfg_shards) shard.map.clear();
+        XStore::ClearZoneMapRegistryForTests();
+        XStore::ClearCatIdxRegistryForTests();
+        year = TimeStruct(kBaseEpoch, XStore_Proto::SECOND).year;
+    }
+    void TearDown() override {
+        XStore::ClearZoneMapRegistryForTests();
+        XStore::ClearCatIdxRegistryForTests();
+        scratch.reset();
+    }
+
+    std::string DbPath() const { return (scratch->test_root / "DataStore" / db_name).string(); }
+    std::string Path(const char *ext) const { return DbPath() + "/" + std::to_string(year) + ext; }
+
+    void InsertRows(XStore &store) {
+        xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, kRowLength);
+        for (uint64_t i = 0; i < kRows; ++i) {
+            XStore_Proto::RowData row;
+            row.add_fielddata()->set_doubledata(static_cast<double>(i));
+            XStore_Proto::UnaryInsert_REP rep;
+            store.UnaryInsert(kBaseEpoch + i, row, db_name, &rep, XStore_Proto::SYNC);
+        }
+        // UnaryInsert preallocates the whole calendar year (31.5M rows); the
+        // rebuild scans every one. Keep only the rows written (runtime only).
+        int fd = open(Path(".XSTORE").c_str(), O_WRONLY);
+        ASSERT_GE(fd, 0);
+        ASSERT_EQ(ftruncate(fd, static_cast<off_t>((kBaseEpoch + kRows) * kRowLength)), 0);
+        close(fd);
+    }
+
+    // Checkpoints every WAL shard (zeroes the leading recordLen, exactly what
+    // InvalidateWalFileHeader does) so InitDB's WAL replay cannot force a
+    // rebuild -- these tests isolate the dirty flag as the only trigger.
+    void CheckpointWal() {
+        std::filesystem::path wal_dir = scratch->test_root / "DataStore" / XStoreTunables::WAL_DIR_NAME;
+        if (!std::filesystem::is_directory(wal_dir)) return;
+        for (auto &f : std::filesystem::directory_iterator(wal_dir)) {
+            int fd = open(f.path().c_str(), O_WRONLY);
+            if (fd < 0) continue;
+            uint32_t zero = 0;
+            EXPECT_EQ(pwrite(fd, &zero, sizeof(zero), 0), static_cast<ssize_t>(sizeof(zero)));
+            close(fd);
+        }
+    }
+
+    // What a clean shutdown does: data file synced first, then both indexes.
+    void CleanShutdown() {
+        int fd = open(Path(".XSTORE").c_str(), O_RDONLY);
+        ASSERT_GE(fd, 0);
+        ASSERT_EQ(fdatasync(fd), 0);
+        close(fd);
+        ASSERT_TRUE(XStore::GetOrOpenZoneMap(DbPath(), year, kRowLength).MarkClean());
+        ASSERT_TRUE(XStore::GetOrOpenCatIdx(DbPath(), year, kRowLength).MarkClean());
+    }
+
+    void DropRegistriesAndZeroBody(const std::string &path, size_t header_size) {
+        CheckpointWal();
+        XStore::ClearZoneMapRegistryForTests();
+        XStore::ClearCatIdxRegistryForTests();
+        int fd = open(path.c_str(), O_RDWR);
+        ASSERT_GE(fd, 0);
+        off_t size = lseek(fd, 0, SEEK_END);
+        ASSERT_GT(size, static_cast<off_t>(header_size));
+        std::vector<char> zeros(static_cast<size_t>(size) - header_size, 0);
+        ASSERT_EQ(pwrite(fd, zeros.data(), zeros.size(), static_cast<off_t>(header_size)),
+                  static_cast<ssize_t>(zeros.size()));
+        close(fd);
+    }
+
+    ZoneMapEntry ReadZmapEntry0() const {
+        ZoneMapEntry e{};
+        int fd = open(Path(".zmap").c_str(), O_RDONLY);
+        EXPECT_GE(fd, 0);
+        EXPECT_EQ(pread(fd, &e, sizeof(e), sizeof(ZoneMapFileHeader)), static_cast<ssize_t>(sizeof(e)));
+        close(fd);
+        return e;
+    }
+
+    // Returns the timestamps FindByValue reports for column 0 == value.
+    std::vector<uint64_t> FindDouble(XStore &store, double value) {
+        std::string buf;
+        store.FindByValue(kBaseEpoch, kBaseEpoch + kRows - 1, db_name, 0, xstore_test::FDouble(value),
+                          XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                          [&](std::string &&chunk, bool) { buf += chunk; });
+        XStore_Proto::RangeQuery_REP rep;
+        EXPECT_TRUE(rep.ParseFromString(buf));
+        std::vector<uint64_t> ts;
+        for (int i = 0; i < rep.queryresponse_size(); ++i) ts.push_back(rep.queryresponse(i).timestamp());
+        return ts;
+    }
+};
+
+TEST_F(DurabilityRebuildTest, DirtyZoneMapIsRebuiltAtStartupAndEndsClean) {
+    XStore store;
+    InsertRows(store);
+    ASSERT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), 1u) << "precondition: no MarkClean => dirty";
+    DropRegistriesAndZeroBody(Path(".zmap"), sizeof(ZoneMapFileHeader));
+    ASSERT_EQ(ReadZmapEntry0().valid_count, 0u) << "precondition: stats tampered";
+
+    store.InitDB();
+
+    ZoneMapEntry e = ReadZmapEntry0();
+    EXPECT_EQ(e.valid_count, kRows);
+    XStore_Proto::Min_REP min_rep;
+    XStore_Proto::Max_REP max_rep;
+    store.MinAggregate(kBaseEpoch, kBaseEpoch + kRows - 1, db_name, 0, &min_rep);
+    store.MaxAggregate(kBaseEpoch, kBaseEpoch + kRows - 1, db_name, 0, &max_rep);
+    EXPECT_DOUBLE_EQ(min_rep.opresult().doubledata(), 0.0);
+    EXPECT_DOUBLE_EQ(max_rep.opresult().doubledata(), 299.0);
+    EXPECT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), 0u) << "rebuild must MarkClean after syncing data";
+}
+
+TEST_F(DurabilityRebuildTest, CleanZoneMapIsNotRebuiltAtStartup) {
+    XStore store;
+    InsertRows(store);
+    CleanShutdown();
+    ASSERT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), 0u);
+    DropRegistriesAndZeroBody(Path(".zmap"), sizeof(ZoneMapFileHeader));
+
+    store.InitDB();
+
+    // Tampered stats survive => InitDB trusted the clean flag and skipped the rebuild.
+    EXPECT_EQ(ReadZmapEntry0().valid_count, 0u);
+    EXPECT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), 0u);
+}
+
+TEST_F(DurabilityRebuildTest, DirtyCatIdxIsRebuiltAtStartupAndEndsClean) {
+    XStore store;
+    InsertRows(store);
+    ASSERT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), 1u) << "precondition: no MarkClean => dirty";
+    DropRegistriesAndZeroBody(Path(".catidx"), sizeof(CatIdxFileHeader));
+
+    store.InitDB();
+
+    EXPECT_EQ(FindDouble(store, 137.0), (std::vector<uint64_t>{kBaseEpoch + 137}));
+    EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), 0u) << "rebuild must MarkClean after syncing data";
+}
+
+TEST_F(DurabilityRebuildTest, CleanCatIdxIsNotRebuiltAtStartup) {
+    XStore store;
+    InsertRows(store);
+    CleanShutdown();
+    ASSERT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), 0u);
+    DropRegistriesAndZeroBody(Path(".catidx"), sizeof(CatIdxFileHeader));
+
+    store.InitDB();
+
+    // Zeroed bloom survives => no rebuild: the bloom reports definite absence.
+    XStore_Proto::FData val = xstore_test::FDouble(137.0);
+    EXPECT_FALSE(XStore::GetOrOpenCatIdx(DbPath(), year, kRowLength).MightContain(0, 0, EncodeFDataForCatIdx(val)));
+    EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), 0u);
+}
+
+TEST_F(DurabilityRebuildTest, DirtyIndexesOverYearWithNoRowsRebuildToCleanWithoutError) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, kRowLength);
+    {
+        int fd = open(Path(".XSTORE").c_str(), O_WRONLY | O_CREAT, 0644);
+        ASSERT_GE(fd, 0);
+        ASSERT_EQ(ftruncate(fd, 10 * kRowLength), 0); // all sparse holes, no rows
+        close(fd);
+        ZoneMapFile zmap;
+        ASSERT_TRUE(zmap.Open(Path(".zmap"), kRowLength, 64));
+        zmap.UpdateRow(0, ZmapObs(1.0), 1);
+        CatIdxFile catidx;
+        ASSERT_TRUE(catidx.Open(Path(".catidx"), kRowLength, 64));
+        catidx.UpdateRow(0, CatObs(1));
+    }
+    ASSERT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), 1u);
+    ASSERT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), 1u);
+
+    store.InitDB();
+
+    EXPECT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), 0u);
+    EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), 0u);
+    EXPECT_EQ(std::filesystem::file_size(Path(".zmap")), sizeof(ZoneMapFileHeader)) << "no rows => header-only zmap";
 }
 
 } // namespace

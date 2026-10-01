@@ -689,6 +689,13 @@ bool XStore::ZoneMapNeedsRebuild(const std::string &zmap_path, uint32_t desired_
     if (header.magic != ZoneMapFileHeader{}.magic) return true;
     if (header.version != ZONE_MAP_VERSION) return true;
     if (header.tracked_column_count != desired_tracked_columns) return true;
+    if (header.dirty != 0) {
+        // Durability A: the previous session never reached MarkClean (crash /
+        // kill -9), so index writes may be lost or torn. The index is derived
+        // data -- re-derive it from the .XSTORE rows.
+        spdlog::info("[ZONE MAP REBUILD] [{}] - marked dirty (unclean shutdown) -- rebuilding", zmap_path);
+        return true;
+    }
     return false;
 }
 
@@ -847,10 +854,12 @@ void XStore::RebuildOneYearZoneMap(const std::string &db_base_path, unsigned sho
     }
 
     std::vector<char> row_buf(row_length);
+    bool scan_complete = true;
     for (uint64_t row_index = 0; row_index < total_rows; ++row_index) {
         ssize_t read_bytes = pread(fd, row_buf.data(), row_length, static_cast<off_t>(row_index) * row_length);
         if (read_bytes != static_cast<ssize_t>(row_length)) {
             spdlog::error("[ZONE MAP REBUILD] [{}/{}.XSTORE] - Short read at row {}", db_base_path, year, row_index);
+            scan_complete = false;
             continue;
         }
         if (row_buf[0] == 0) continue; // never-written sparse hole -- same fast skip ProcessFileRangeAccumulate uses
@@ -862,6 +871,18 @@ void XStore::RebuildOneYearZoneMap(const std::string &db_base_path, unsigned sho
         }
         std::vector<ZoneMapObservation> observations = BuildZoneMapObservations(*this, row, tracked_column_count);
         zmap.UpdateRow(row_index, observations, tracked_column_count);
+    }
+    // Durability A (DD4): data file first, then clear the index's dirty flag --
+    // the index must never claim "clean" while the rows it summarizes could
+    // still be lost. Any failure leaves it dirty, so the next start rebuilds.
+    // `zmap` is the registry-open instance, so its dirty_on_disk_ stays in
+    // step with the header it just cleared.
+    if (!scan_complete) {
+        spdlog::error("[ZONE MAP REBUILD] [{}/{}.XSTORE] - Incomplete scan; leaving zone map dirty", db_base_path, year);
+    } else if (fdatasync(fd) != 0) {
+        spdlog::error("[ZONE MAP REBUILD] [{}/{}.XSTORE] - fdatasync of data file failed; leaving zone map dirty", db_base_path, year);
+    } else if (!zmap.MarkClean()) {
+        spdlog::error("[ZONE MAP REBUILD] [{}/{}.zmap] - MarkClean failed; leaving zone map dirty", db_base_path, year);
     }
     close(fd);
 

@@ -527,9 +527,13 @@ void XStore::RebuildOneYearCatIdxBloom(const std::string &db_base_path, unsigned
     uint64_t total_rows = row_length > 0 ? static_cast<uint64_t>(st.st_size) / row_length : 0;
 
     std::vector<char> row_buf(row_length);
+    bool scan_complete = true;
     for (uint64_t r = 0; r < total_rows; ++r) {
         ssize_t read_bytes = pread(fd, row_buf.data(), row_length, static_cast<off_t>(r) * row_length);
-        if (read_bytes != static_cast<ssize_t>(row_length)) continue;
+        if (read_bytes != static_cast<ssize_t>(row_length)) {
+            scan_complete = false;
+            continue;
+        }
         // Never-written sparse hole -- same fast skip RebuildOneYearZoneMap/
         // ProcessFileRangeAccumulate use. Load-bearing for performance here
         // specifically (unlike CompactOneYearCatIdx, which only ever runs
@@ -552,6 +556,15 @@ void XStore::RebuildOneYearCatIdxBloom(const std::string &db_base_path, unsigned
             }
         }
         catidx.UpdateRow(r, observations);
+    }
+    // Durability A (DD4): data file first, then clear the index's dirty flag
+    // (see RebuildOneYearZoneMap). `catidx` is the registry-open instance.
+    if (!scan_complete) {
+        spdlog::error("[CATIDX REBUILD] [{}/{}.XSTORE] - Incomplete scan; leaving catidx dirty", db_base_path, year);
+    } else if (fdatasync(fd) != 0) {
+        spdlog::error("[CATIDX REBUILD] [{}/{}.XSTORE] - fdatasync of data file failed; leaving catidx dirty", db_base_path, year);
+    } else if (!catidx.MarkClean()) {
+        spdlog::error("[CATIDX REBUILD] [{}/{}.catidx] - MarkClean failed; leaving catidx dirty", db_base_path, year);
     }
     close(fd);
 
@@ -607,6 +620,11 @@ void XStore::RebuildStaleCatIdxForDb(const std::string &db_name, const std::stri
                     stale = !readable || on_disk.magic != CatIdxFileHeader{}.magic ||
                             on_disk.version != XStoreTunables::CATIDX_VERSION ||
                             on_disk.tracked_column_count < desired_tracked_columns;
+                    if (!stale && on_disk.dirty != 0) {
+                        // Durability A: unclean shutdown -- treat like a stale width.
+                        spdlog::info("[CATIDX REBUILD] [{}] - marked dirty (unclean shutdown) -- rebuilding", catidx_path);
+                        stale = true;
+                    }
                 }
             }
         }
