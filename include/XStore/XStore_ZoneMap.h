@@ -128,7 +128,21 @@ public:
 
     [[nodiscard]] uint32_t TrackedColumnCount() const { return header_.tracked_column_count; }
 
+    // Clears the on-disk dirty flag: fdatasync(index content), then header
+    // dirty=0 + fdatasync. Returns false on any failure, leaving the file
+    // marked dirty. The caller must have fdatasync'd the .XSTORE data file
+    // FIRST -- this only makes the index itself durable.
+    [[nodiscard]] bool MarkClean();
+
+    // Number of successful header dirty-mark writes (test-visible).
+    [[nodiscard]] uint64_t DirtyMarkWritesForTests() const;
+
 private:
+    // Every method that writes index content calls this first (mutex_ held):
+    // one predictable branch once the flag is on disk.
+    void EnsureDirtyOnDisk() { if (!dirty_on_disk_) MarkDirtyOnDisk(); }
+    void MarkDirtyOnDisk();
+
     void EnsureBlockLoaded(uint64_t block_index);
     void EvictIfOverCapacity();
     off_t BlockFileOffset(uint64_t block_index) const;
@@ -140,11 +154,13 @@ private:
 
     int fd_ = -1;
     ZoneMapFileHeader header_;
+    bool dirty_on_disk_ = false; // header_.dirty == 1 is durable on disk
+    uint64_t dirty_mark_writes_ = 0;
     std::unordered_map<uint64_t, std::vector<ZoneMapEntry>> cache_; // pure read-cache, always disk-coherent
     std::vector<uint64_t> lru_order_; // most-recently-touched at the back
     // GetOrOpenZoneMap hands out a ZoneMapFile& to one shared, process-wide
     // instance per (db,year) -- every server worker thread touching the
     // same DB/year concurrently calls UpdateRow/TryGetBlockStats on this
     // SAME object. Guards cache_/lru_order_/fd_ against exactly that.
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
 };

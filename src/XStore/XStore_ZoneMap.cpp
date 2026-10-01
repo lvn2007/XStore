@@ -16,6 +16,7 @@ bool ZoneMapFile::Open(const std::string &path, uint16_t row_length, uint32_t tr
         if (read_bytes != static_cast<ssize_t>(sizeof(header_)) || header_.magic != ZoneMapFileHeader{}.magic) {
             return false; // corrupt/foreign file -- caller falls back to no acceleration
         }
+        dirty_on_disk_ = header_.dirty != 0;
         if (header_.version != ZONE_MAP_VERSION || tracked_column_count > header_.tracked_column_count) {
             // A zone map is always a derived, rebuildable index, never a
             // source of truth (TryGetBlockStats already treats "no
@@ -55,6 +56,7 @@ bool ZoneMapFile::Open(const std::string &path, uint16_t row_length, uint32_t tr
 
 bool ZoneMapFile::WriteFreshHeader(uint16_t row_length, uint32_t tracked_column_count) {
     header_ = ZoneMapFileHeader{};
+    dirty_on_disk_ = false;
     header_.tracked_column_count = tracked_column_count;
     header_.rows_per_block = RowsPerBlock(row_length);
     ssize_t written = pwrite(fd_, &header_, sizeof(header_), 0);
@@ -101,6 +103,7 @@ void ZoneMapFile::EvictIfOverCapacity() {
 
 void ZoneMapFile::UpdateRow(uint64_t row_index, const std::vector<ZoneMapObservation> &observations, uint32_t pad_to) {
     std::lock_guard<std::mutex> lock(mutex_);
+    EnsureDirtyOnDisk(); // covers the block pwrite below
     uint64_t block_index = BlockIndexForRow(row_index, header_.rows_per_block);
     EnsureBlockLoaded(block_index);
 
@@ -180,6 +183,36 @@ std::optional<std::vector<ZoneMapEntry>> ZoneMapFile::TryGetBlockStats(uint64_t 
     ssize_t read_bytes = pread(fd_, entries.data(), header_.tracked_column_count * sizeof(ZoneMapEntry), offset);
     if (read_bytes != static_cast<ssize_t>(header_.tracked_column_count * sizeof(ZoneMapEntry))) return std::nullopt;
     return entries;
+}
+
+void ZoneMapFile::MarkDirtyOnDisk() {
+    header_.dirty = 1;
+    if (pwrite(fd_, &header_, sizeof(header_), 0) == static_cast<ssize_t>(sizeof(header_)) && fdatasync(fd_) == 0) {
+        dirty_on_disk_ = true;
+        ++dirty_mark_writes_;
+        return;
+    }
+    // Log-and-continue: inserts must not fail; the next write retries.
+    header_.dirty = 0;
+    spdlog::error("[ZONE MAP] - Failed to persist dirty flag");
+}
+
+bool ZoneMapFile::MarkClean() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (fdatasync(fd_) != 0) return false;
+    if (!dirty_on_disk_) return true;
+    header_.dirty = 0;
+    if (pwrite(fd_, &header_, sizeof(header_), 0) != static_cast<ssize_t>(sizeof(header_)) || fdatasync(fd_) != 0) {
+        header_.dirty = 1;
+        return false;
+    }
+    dirty_on_disk_ = false;
+    return true;
+}
+
+uint64_t ZoneMapFile::DirtyMarkWritesForTests() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return dirty_mark_writes_;
 }
 
 ZoneMapFile::~ZoneMapFile() {

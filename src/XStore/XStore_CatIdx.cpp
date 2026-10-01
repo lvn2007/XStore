@@ -57,6 +57,7 @@ bool CatIdxFile::Open(const std::string &path, uint16_t row_length, uint32_t tra
             on_disk.version == XStoreTunables::CATIDX_VERSION &&
             on_disk.tracked_column_count > 0) {
             header_ = on_disk;
+            dirty_on_disk_ = header_.dirty != 0;
             return true;
         }
     }
@@ -66,6 +67,7 @@ bool CatIdxFile::Open(const std::string &path, uint16_t row_length, uint32_t tra
 
 bool CatIdxFile::WriteFreshHeader(uint16_t /*row_length*/, uint32_t tracked_column_count) {
     header_ = CatIdxFileHeader{};
+    dirty_on_disk_ = false;
     header_.tracked_column_count = tracked_column_count;
     header_.block_count = 0;
     header_.bitmap_section_offset = 0;
@@ -130,6 +132,7 @@ void CatIdxFile::EvictIfOverCapacity() {
 void CatIdxFile::FlushBlock(uint64_t block_index) {
     auto it = cache_.find(block_index);
     if (it == cache_.end()) return;
+    EnsureDirtyOnDisk(); // covers the invalidation, bloom-block and block_count header writes below
     off_t offset = BloomSectionFileOffset(block_index);
     size_t bytes = header_.tracked_column_count * sizeof(BloomEntry);
 
@@ -214,6 +217,7 @@ bool CatIdxFile::MightContain(uint64_t block_index, uint32_t column_idx, const s
 
 void CatIdxFile::AppendBitmapSection(const std::unordered_map<uint32_t, std::map<std::string, std::vector<uint64_t>>> &columns) {
     std::lock_guard<std::mutex> lock(mutex_);
+    EnsureDirtyOnDisk(); // covers the bitmap-section append and its header commit
 
     struct stat st{};
     if (fstat(fd_, &st) != 0) {
@@ -324,6 +328,36 @@ std::optional<std::vector<uint64_t>> CatIdxFile::LookupExact(uint32_t column_idx
         }
     }
     return std::nullopt;
+}
+
+void CatIdxFile::MarkDirtyOnDisk() {
+    header_.dirty = 1;
+    if (pwrite(fd_, &header_, sizeof(header_), 0) == static_cast<ssize_t>(sizeof(header_)) && fdatasync(fd_) == 0) {
+        dirty_on_disk_ = true;
+        ++dirty_mark_writes_;
+        return;
+    }
+    // Log-and-continue: inserts must not fail; the next write retries.
+    header_.dirty = 0;
+    spdlog::error("[CATIDX] - Failed to persist dirty flag");
+}
+
+bool CatIdxFile::MarkClean() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (fdatasync(fd_) != 0) return false;
+    if (!dirty_on_disk_) return true;
+    header_.dirty = 0;
+    if (pwrite(fd_, &header_, sizeof(header_), 0) != static_cast<ssize_t>(sizeof(header_)) || fdatasync(fd_) != 0) {
+        header_.dirty = 1;
+        return false;
+    }
+    dirty_on_disk_ = false;
+    return true;
+}
+
+uint64_t CatIdxFile::DirtyMarkWritesForTests() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return dirty_mark_writes_;
 }
 
 CatIdxFile::~CatIdxFile() {

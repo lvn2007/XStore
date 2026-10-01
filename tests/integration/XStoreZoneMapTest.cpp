@@ -679,7 +679,7 @@ TEST_F(ZoneMapFileVersionTest, OpenDiscardsV3FileInsteadOfMisreadingIntoV4Layout
     ASSERT_EQ(pread(fd, &on_disk, sizeof(on_disk), 0), static_cast<ssize_t>(sizeof(on_disk)));
     close(fd);
     EXPECT_EQ(on_disk.version, ZONE_MAP_VERSION);
-    EXPECT_EQ(on_disk.dirty, 0u);
+    EXPECT_EQ(on_disk.dirty, 1u); // a write happened this session (Durability A Task 2)
 }
 
 } // namespace

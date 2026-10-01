@@ -104,7 +104,7 @@ TEST(CatIdxFileTest, OpenDiscardsV1FileInsteadOfMisreadingIt) {
     ASSERT_EQ(pread(fd, &on_disk, sizeof(on_disk), 0), static_cast<ssize_t>(sizeof(on_disk)));
     close(fd);
     EXPECT_EQ(on_disk.version, XStoreTunables::CATIDX_VERSION);
-    EXPECT_EQ(on_disk.dirty, 0u);
+    EXPECT_EQ(on_disk.dirty, 1u); // a write happened this session (Durability A Task 2)
 }
 
 TEST(CatIdxFileTest, InsertedValueIsFound) {

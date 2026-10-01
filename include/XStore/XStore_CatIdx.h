@@ -187,7 +187,21 @@ public:
 
     uint64_t RowsPerBlockValue() const { return rows_per_block_; }
 
+    // Clears the on-disk dirty flag: fdatasync(index content), then header
+    // dirty=0 + fdatasync. Returns false on any failure, leaving the file
+    // marked dirty. The caller must have fdatasync'd the .XSTORE data file
+    // FIRST -- this only makes the index itself durable.
+    [[nodiscard]] bool MarkClean();
+
+    // Number of successful header dirty-mark writes (test-visible).
+    [[nodiscard]] uint64_t DirtyMarkWritesForTests() const;
+
 private:
+    // Every method that writes index content calls this first (mutex_ held):
+    // one predictable branch once the flag is on disk.
+    void EnsureDirtyOnDisk() { if (!dirty_on_disk_) MarkDirtyOnDisk(); }
+    void MarkDirtyOnDisk();
+
     using BloomEntry = std::array<unsigned char, XStoreTunables::CATIDX_BLOOM_BYTES_PER_ENTRY>;
 
     void EnsureBlockLoaded(uint64_t block_index);
@@ -199,7 +213,9 @@ private:
     int fd_ = -1;
     CatIdxFileHeader header_;
     uint64_t rows_per_block_ = 0;
+    bool dirty_on_disk_ = false; // header_.dirty == 1 is durable on disk
+    uint64_t dirty_mark_writes_ = 0;
     std::unordered_map<uint64_t, std::vector<BloomEntry>> cache_; // block_index -> per-column bloom bytes
     std::vector<uint64_t> lru_order_;
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
 };
