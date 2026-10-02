@@ -32,7 +32,7 @@ gtest_discover_tests(xstore_tests)
 # just "^XStoreTest\\.", silently skipping every zone-map and catidx suite
 # (worked around by a manual `ctest -R CatIdx` in each task instead).
 add_custom_command(TARGET xstore_tests POST_BUILD
-        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "^(XStoreTest|XStoreWalTest|XStorePreadPoolTest|XStorePreadPoolDeathTest|XStoreCrc32cTest|XStoreZoneMapTest|ZoneMapEntryLayoutTest|ZoneMapFileTest|ZoneMapFileVersionTest|ZoneMapMathTest|XStoreCatIdxTestFixture|CatIdxFileTest|GetOrOpenCatIdxTest|EncodeFDataForCatIdxTest|PatternMatcherTest|XStorePatternTestFixture|XStoreMemoryTest|DurabilityHeaderLayoutTest|DurabilityMarkDirtyTest|DurabilityRebuildTest|DurabilityShutdownTest|WalRingFormatTest|WalRingWriterTest)\\."
+        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "^(XStoreTest|XStoreWalTest|XStorePreadPoolTest|XStorePreadPoolDeathTest|XStoreCrc32cTest|XStoreZoneMapTest|ZoneMapEntryLayoutTest|ZoneMapFileTest|ZoneMapFileVersionTest|ZoneMapMathTest|XStoreCatIdxTestFixture|CatIdxFileTest|GetOrOpenCatIdxTest|EncodeFDataForCatIdxTest|PatternMatcherTest|XStorePatternTestFixture|XStoreMemoryTest|DurabilityHeaderLayoutTest|DurabilityMarkDirtyTest|DurabilityRebuildTest|DurabilityShutdownTest|WalRingFormatTest|WalRingWriterTest|WalCheckpointTest)\\."
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         COMMENT "Running xstore_tests via ctest"
         VERBATIM # the regex contains ( | ) -- without this CMake emits it unquoted and /bin/sh chokes

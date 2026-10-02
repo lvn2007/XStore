@@ -6,6 +6,7 @@
 #include "include/XStore/XStore.h"
 #include "include/XStore/XStore_Crc32c.h"
 #include "include/XStore/XStore_WalRing.h"
+#include "include/XStore/XStore_WalCheckpoint.h"
 #include "include/DataStructs/TimeStruct.h"
 #include <spdlog/fmt/fmt.h>
 #include <chrono>
@@ -204,6 +205,8 @@ class WalRingWriterTest : public ::testing::Test {
 protected:
     static constexpr uint64_t kBaseEpoch = 1700000000;
     const std::string db_name = "WALRINGW";
+    // These tests hand-drive checkpoints and inspect ring heads: no background checkpointer.
+    xstore_test::ScopedCheckpointerPause checkpointer_paused_;
     std::unique_ptr<xstore_test::ScratchDir> scratch;
 
     void ClearRegistries() {
@@ -615,6 +618,388 @@ TEST_F(WalRingWriterTest, BypassWriteIsTrackedButDoesNotBlockRingClear) {
     ASSERT_TRUE(snap.ranges.count(data_path));
     const uint64_t off = (kBaseEpoch + 9 - ts.first_epoch) * kRowLength;
     EXPECT_TRUE(Covers(snap.ranges.at(data_path), off, off + kRowLength));
+}
+
+// ---- Task 3 polish --------------------------------------------------------
+
+TEST_F(WalRingWriterTest, SingleNoteBridgesSeveralRanges) {
+    walring::DirtyTracker t;
+    t.Note(nullptr, "/f", 0, 10, 0);
+    t.Note(nullptr, "/f", 20, 30, 0);
+    t.Note(nullptr, "/f", 40, 50, 0);
+    t.Note(nullptr, "/f", 60, 70, 0);
+    EXPECT_EQ(t.UnflushedBytes(), 40u);
+    t.Note(nullptr, "/f", 5, 45, 0);      // bridges [0,10) [20,30) [40,50) in one Note
+    EXPECT_EQ(t.UnflushedBytes(), 50u + 10u);
+    const auto snap = t.Take();
+    const auto &r = snap.ranges.at("/f");
+    ASSERT_EQ(r.size(), 2u);
+    EXPECT_EQ(r[0].begin, 0u);  EXPECT_EQ(r[0].end, 50u);
+    EXPECT_EQ(r[1].begin, 60u); EXPECT_EQ(r[1].end, 70u);
+}
+
+TEST_F(WalRingWriterTest, WriterRecordsTheExactEndLsn) {
+    constexpr uint16_t kRowLength = 64;
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, kRowLength);
+    ASSERT_TRUE(InsertSync(store, 1));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    ASSERT_GT(ring->HeadLsn(), 1u);
+    const TimeStruct ts(kBaseEpoch, XStore_Proto::SECOND);
+    const std::string data_path = fmt::format("{}/{}.XSTORE", (scratch->test_root / "DataStore" / db_name).string(), ts.year);
+
+    ring->AdvanceCheckpoint(ring->HeadLsn() - 1);
+    EXPECT_FALSE(walring::Dirty().RingClear(data_path)) << "the mark is the record's END lsn: head-1 must not clear it";
+    ring->AdvanceCheckpoint(ring->HeadLsn());
+    EXPECT_TRUE(walring::Dirty().RingClear(data_path)) << "head clears it exactly";
+}
+
+// ---- Task 4: checkpointer ---------------------------------------------------
+
+TEST_F(WalRingWriterTest, PeekRangesDoesNotReset) {
+    walring::DirtyTracker t;
+    t.Note(nullptr, "/a", 0, 8, 0);
+    t.Note(nullptr, "/a", 16, 24, 0);
+    const auto peek = t.PeekRanges();
+    ASSERT_EQ(peek.ranges.at("/a").size(), 2u);
+    EXPECT_EQ(t.UnflushedBytes(), 16u) << "Peek must not clear the bytes";
+    EXPECT_EQ(t.PeekRanges().ranges.at("/a").size(), 2u);
+    EXPECT_EQ(t.Take().ranges.at("/a").size(), 2u) << "Take still sees everything after a Peek";
+    EXPECT_TRUE(t.PeekRanges().ranges.empty());
+}
+
+namespace {
+struct ShutdownReset { ~ShutdownReset() { XStore::ResetShutdownForTests(); } };
+}  // namespace
+
+class WalCheckpointTest : public WalRingWriterTest {
+protected:
+    static walring::Checkpointer &Ckpt() { return walring::Checkpointer::Instance(); }
+
+    void TearDown() override {
+        Ckpt().SetPausedForTests(true);
+        Ckpt().FailNextDataSyncsForTests(0);
+        Ckpt().FailNextDirSyncsForTests(0);
+        Ckpt().ClearPoisonForTests();
+        Ckpt().SetIdleMsForTests(0);
+        Ckpt().SetMaxAgeMsForTests(0);
+        Ckpt().Start();   // a test may have stopped it
+        WalRingWriterTest::TearDown();
+    }
+
+    std::string DataPath() const {
+        const TimeStruct ts(kBaseEpoch, XStore_Proto::SECOND);
+        return fmt::format("{}/{}.XSTORE", (scratch->test_root / "DataStore" / db_name).string(), ts.year);
+    }
+    template <typename Pred>
+    static bool WaitFor(Pred pred, std::chrono::milliseconds limit) {
+        const auto deadline = std::chrono::steady_clock::now() + limit;
+        while (!pred()) {
+            if (std::chrono::steady_clock::now() >= deadline) return false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        return true;
+    }
+    // Inserts rows until the busy ring's fill reaches `fill` (checkpointer must not be cycling).
+    std::shared_ptr<walring::Ring> FillTo(XStore &store, double fill, uint64_t &next) {
+        std::shared_ptr<walring::Ring> ring;
+        while (!ring || ring->Fill() < fill) {
+            EXPECT_TRUE(InsertSync(store, next++));
+            if (!ring) ring = BusyRing();
+            if (next > 1000) break;
+        }
+        return ring;
+    }
+};
+
+TEST_F(WalCheckpointTest, CycleAdvancesCheckpointToAppliedAndPersistsIt) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    for (uint64_t i = 0; i < 50; ++i) ASSERT_TRUE(InsertSync(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    ASSERT_GT(ring->HeadLsn(), 0u);
+    EXPECT_EQ(ring->CheckpointLsn(), 0u);
+
+    ASSERT_TRUE(Ckpt().RunCycle());
+    EXPECT_EQ(ring->CheckpointLsn(), ring->AppliedLsn());
+    EXPECT_EQ(ring->AppliedLsn(), ring->HeadLsn());
+    EXPECT_EQ(Ckpt().LastCycleSyncedPaths().count(DataPath()), 1u);
+
+    const int fd = open(ring->path().c_str(), O_RDONLY);
+    ASSERT_GE(fd, 0);
+    walring::RingHeader h;
+    ASSERT_TRUE(walring::ReadBestHeader(fd, h));
+    close(fd);
+    EXPECT_EQ(h.checkpoint_lsn, ring->HeadLsn()) << "the checkpoint must be persisted in the header";
+}
+
+TEST_F(WalCheckpointTest, CheckpointNeverAdvancesWhenDataSyncFails) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    for (uint64_t i = 0; i < 5; ++i) ASSERT_TRUE(InsertSync(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+
+    Ckpt().FailNextDataSyncsForTests(1);
+    EXPECT_FALSE(Ckpt().RunCycle());
+    EXPECT_EQ(ring->CheckpointLsn(), 0u) << "a failed data fsync must not release WAL space";
+
+    // The failed cycle already Took the dirty set; the retry must still sync that file.
+    EXPECT_EQ(walring::Dirty().UnflushedBytes(), 0u);
+    ASSERT_TRUE(Ckpt().RunCycle());
+    EXPECT_EQ(ring->CheckpointLsn(), ring->HeadLsn());
+    EXPECT_EQ(Ckpt().LastCycleSyncedPaths().count(DataPath()), 1u) << "retry synced the carried file";
+}
+
+TEST_F(WalCheckpointTest, CheckpointNeverAdvancesWhenDirSyncFails) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    for (uint64_t i = 0; i < 5; ++i) ASSERT_TRUE(InsertSync(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+
+    Ckpt().FailNextDirSyncsForTests(1);
+    EXPECT_FALSE(Ckpt().RunCycle());
+    EXPECT_EQ(ring->CheckpointLsn(), 0u);
+    ASSERT_TRUE(Ckpt().RunCycle());
+    EXPECT_EQ(ring->CheckpointLsn(), ring->HeadLsn());
+}
+
+TEST_F(WalCheckpointTest, NewYearFileParentDirIsSyncedBeforeAdvance) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    ASSERT_TRUE(InsertSync(store, 0));   // creates this year's file
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+
+    const uint64_t before = Ckpt().DirSyncsForTests();
+    Ckpt().FailNextDirSyncsForTests(1);
+    EXPECT_FALSE(Ckpt().RunCycle());
+    EXPECT_EQ(ring->CheckpointLsn(), 0u) << "no advance without the directory entry being durable";
+    EXPECT_EQ(Ckpt().DirSyncsForTests(), before) << "the failed dir sync was not counted";
+    ASSERT_TRUE(Ckpt().RunCycle());
+    EXPECT_GE(Ckpt().DirSyncsForTests(), before + 1) << "the directory was fsync'd in the cycle that advanced the checkpoint";
+    EXPECT_EQ(ring->CheckpointLsn(), ring->HeadLsn());
+    const std::string year_dir = std::filesystem::path(DataPath()).parent_path().string();
+    EXPECT_EQ(Ckpt().LastCycleSyncedDirsForTests().count(year_dir), 1u) << "the year file's parent directory must be among the synced dirs";
+}
+
+TEST_F(WalCheckpointTest, RetryableInjectedFailureStillRetries) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    for (uint64_t i = 0; i < 5; ++i) ASSERT_TRUE(InsertSync(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    Ckpt().FailNextDataSyncsForTests(1);
+    Ckpt().FailNextDirSyncsForTests(1);
+    EXPECT_FALSE(Ckpt().RunCycle());
+    EXPECT_FALSE(Ckpt().Poisoned()) << "a plain injected failure stays retryable";
+    EXPECT_FALSE(Ckpt().RunCycle()) << "second cycle consumes the dir-sync failure";
+    EXPECT_FALSE(Ckpt().Poisoned());
+    EXPECT_EQ(ring->CheckpointLsn(), 0u);
+    ASSERT_TRUE(Ckpt().RunCycle());
+    EXPECT_EQ(ring->CheckpointLsn(), ring->HeadLsn());
+}
+
+TEST_F(WalCheckpointTest, StickySyncErrorPoisonsAndNeverAdvancesAgain) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    for (uint64_t i = 0; i < 5; ++i) ASSERT_TRUE(InsertSync(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    Ckpt().FailNextDataSyncsStickyForTests(1);
+    EXPECT_FALSE(Ckpt().RunCycle());
+    EXPECT_TRUE(Ckpt().Poisoned());
+    EXPECT_EQ(ring->CheckpointLsn(), 0u);
+    // No hooks left: a real retried fdatasync would now return 0 -- it must still not advance.
+    EXPECT_FALSE(Ckpt().RunCycle());
+    EXPECT_FALSE(Ckpt().RunCycle());
+    EXPECT_EQ(ring->CheckpointLsn(), 0u);
+    EXPECT_TRUE(Ckpt().Poisoned());
+    // The thread does not retry either, even with every trigger satisfied.
+    Ckpt().SetIdleMsForTests(1);
+    Ckpt().SetPausedForTests(false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    EXPECT_EQ(ring->CheckpointLsn(), 0u);
+}
+
+TEST_F(WalCheckpointTest, StickyDirSyncErrorAlsoPoisons) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    for (uint64_t i = 0; i < 5; ++i) ASSERT_TRUE(InsertSync(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    Ckpt().FailNextDirSyncsStickyForTests(1);
+    EXPECT_FALSE(Ckpt().RunCycle());
+    EXPECT_TRUE(Ckpt().Poisoned());
+    EXPECT_FALSE(Ckpt().RunCycle());
+    EXPECT_EQ(ring->CheckpointLsn(), 0u);
+}
+
+TEST_F(WalCheckpointTest, PoisonedCheckpointerMakesWritersStallThenFail) {
+    constexpr uint64_t kRing = 256 << 10;
+    walring::SetRingBytesForTests(kRing);
+    walring::SetStallTimeoutMsForTests(200);
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 4096);
+    ASSERT_TRUE(InsertSync(store, 0));
+    size_t accepted = 1;
+    Ckpt().FailNextDataSyncsStickyForTests(1);
+    ASSERT_FALSE(Ckpt().RunCycle());
+    ASSERT_TRUE(Ckpt().Poisoned());
+    Ckpt().SetPausedForTests(false);   // the thread must not rescue the ring
+    const uint64_t stalls_before = XStore::wal_ring_stalls.load();
+
+    bool failed = false;
+    for (uint64_t i = 1; i < 200 && !failed; ++i) {
+        if (InsertSync(store, i)) ++accepted; else failed = true;
+    }
+    ASSERT_TRUE(failed) << "a poisoned checkpointer can never free the ring";
+    EXPECT_GT(XStore::wal_ring_stalls.load(), stalls_before);
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    EXPECT_EQ(ring->CheckpointLsn(), 0u);
+    EXPECT_LE(ring->HeadLsn(), kRing) << "never beyond one lap";
+    const RingWalk w = WalkRing(*ring, 0, ring->HeadLsn());
+    EXPECT_EQ(w.end_lsn, ring->HeadLsn()) << "every acknowledged record must still parse (nothing overwritten)";
+    EXPECT_EQ(w.records, accepted);
+}
+
+TEST_F(WalCheckpointTest, CheckpointWalsDoesNotAdvanceWhenPoisoned) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    for (uint64_t i = 0; i < 5; ++i) ASSERT_TRUE(InsertSync(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    Ckpt().FailNextDataSyncsStickyForTests(1);
+    ASSERT_FALSE(Ckpt().RunCycle());
+    ASSERT_TRUE(Ckpt().Poisoned());
+    {
+        // Shutdown: the final cycle refuses (poisoned); the interim CheckpointWals() would
+        // happily fdatasync by path and advance -- it must refuse as well.
+        ShutdownReset reset;
+        XStore::Shutdown();
+        EXPECT_EQ(ring->CheckpointLsn(), 0u);
+        EXPECT_GT(ring->HeadLsn(), 0u);
+    }
+}
+
+TEST_F(WalCheckpointTest, DeletedDataFileDoesNotBlockTheCheckpoint) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    ASSERT_TRUE(InsertSync(store, 0));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    ASSERT_EQ(rename(DataPath().c_str(), (DataPath() + ".gone").c_str()), 0);   // as if the DB were deleted
+
+    ASSERT_TRUE(Ckpt().RunCycle()) << "ENOENT = deleted DB: nothing left to make durable, never a permanent stall";
+    EXPECT_EQ(ring->CheckpointLsn(), ring->HeadLsn());
+    EXPECT_EQ(Ckpt().LastCycleSyncedPaths().count(DataPath()), 0u) << "a file that was not synced must not be claimed synced";
+}
+
+TEST_F(WalCheckpointTest, IdleTriggersACycleWithinBounds) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    Ckpt().SetIdleMsForTests(50);
+    Ckpt().SetPausedForTests(false);
+    for (uint64_t i = 0; i < 5; ++i) ASSERT_TRUE(InsertSync(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    EXPECT_TRUE(WaitFor([&] { return ring->CheckpointLsn() == ring->HeadLsn(); }, std::chrono::milliseconds(1000)))
+        << "checkpoint=" << ring->CheckpointLsn() << " head=" << ring->HeadLsn();
+}
+
+TEST_F(WalCheckpointTest, LazyBelowSoftFillNoCycle) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    Ckpt().SetIdleMsForTests(1000000);
+    Ckpt().SetMaxAgeMsForTests(1000000);
+    for (uint64_t i = 0; i < 5; ++i) ASSERT_TRUE(InsertSync(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    Ckpt().SetPausedForTests(false);
+    const uint64_t cycles = Ckpt().CyclesForTests();
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_EQ(Ckpt().CyclesForTests(), cycles);
+    EXPECT_EQ(ring->CheckpointLsn(), 0u);
+}
+
+TEST_F(WalCheckpointTest, SoftFillStartsPacedFlushWithoutAdvancingCheckpoint) {
+    constexpr uint64_t kRing = 256 << 10;
+    walring::SetRingBytesForTests(kRing);
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 4096);
+    Ckpt().SetIdleMsForTests(1000000);
+    Ckpt().SetMaxAgeMsForTests(1000000);
+    const uint64_t cycles = Ckpt().CyclesForTests();
+    const uint64_t flushed = Ckpt().PacedFlushBytesForTests();
+    uint64_t next = 0;
+    auto ring = FillTo(store, 0.27, next);   // ~70 KiB of a 256 KiB ring; the cycle threshold is 50%
+    ASSERT_NE(ring, nullptr);
+    ASSERT_GE(ring->Fill(), 0.25);
+    ASSERT_LT(ring->Fill(), 0.5);
+
+    Ckpt().SetPausedForTests(false);
+    EXPECT_TRUE(WaitFor([&] { return Ckpt().PacedFlushBytesForTests() > flushed; }, std::chrono::milliseconds(2000)))
+        << "fill >= SOFT must start flushing dirty ranges";
+    EXPECT_EQ(ring->CheckpointLsn(), 0u) << "a paced flush never advances the checkpoint";
+    EXPECT_EQ(Ckpt().CyclesForTests(), cycles);
+}
+
+TEST_F(WalCheckpointTest, FullRingUnblocksWhenCheckpointerRuns) {
+    constexpr uint64_t kRing = 256 << 10;
+    walring::SetRingBytesForTests(kRing);
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 4096);
+    Ckpt().SetPausedForTests(false);
+    const uint64_t total = 4 * kRing / 4096 + 8;   // > 4 laps of ~4 KiB records
+    for (uint64_t i = 0; i < total; ++i) ASSERT_TRUE(InsertSync(store, i)) << "insert " << i;
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    EXPECT_GT(ring->HeadLsn(), 4 * kRing);
+    EXPECT_GT(ring->CheckpointLsn(), 0u);
+}
+
+TEST_F(WalCheckpointTest, ShutdownRunsFinalCycle) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    for (uint64_t i = 0; i < 20; ++i) ASSERT_TRUE(InsertSync(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    ASSERT_GT(ring->HeadLsn(), ring->CheckpointLsn());
+    {
+        ShutdownReset reset;
+        XStore::Shutdown();
+        for (auto &r : MyRings()) {
+            EXPECT_EQ(r->CheckpointLsn(), r->HeadLsn()) << r->path();
+            const int fd = open(r->path().c_str(), O_RDONLY);
+            ASSERT_GE(fd, 0);
+            walring::RingHeader h;
+            ASSERT_TRUE(walring::ReadBestHeader(fd, h));
+            close(fd);
+            EXPECT_EQ(h.checkpoint_lsn, r->HeadLsn());
+        }
+    }
+}
+
+TEST_F(WalCheckpointTest, StopAfterFinalCycleIsIdempotent) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    for (uint64_t i = 0; i < 5; ++i) ASSERT_TRUE(InsertSync(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    Ckpt().StopAfterFinalCycle();
+    EXPECT_EQ(ring->CheckpointLsn(), ring->HeadLsn()) << "the final cycle ran";
+    Ckpt().StopAfterFinalCycle();   // second call: no hang, no crash
+
+    // Restartable: the thread comes back and the idle trigger works again.
+    Ckpt().Start();
+    Ckpt().Start();   // idempotent
+    Ckpt().SetPausedForTests(false);
+    for (uint64_t i = 5; i < 8; ++i) ASSERT_TRUE(InsertSync(store, i));
+    EXPECT_TRUE(WaitFor([&] { return ring->CheckpointLsn() == ring->HeadLsn(); }, std::chrono::milliseconds(1500)));
 }
 
 TEST(WalRingFormatTest, DefaultRingBytesOverrideLayers) {

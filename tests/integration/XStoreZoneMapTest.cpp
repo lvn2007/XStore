@@ -1416,6 +1416,9 @@ TEST_F(XStoreZoneMapTest, SumAndVarianceOnColumnAboveGrownColumnCountReadRealDat
 // Fix: ReplayWal returns the (db, year) pairs it touched and InitDB forces
 // RebuildOneYearZoneMap for each, independent of ZoneMapNeedsRebuild.
 TEST_F(XStoreZoneMapTest, InitDbFoldsWalReplayedRowsWhenSidecarIsMissing) {
+    // The test rewrites a ring file into a legacy WAL by hand: the background
+    // checkpointer must not write ring headers behind its back.
+    xstore_test::ScopedCheckpointerPause checkpointer_paused;
     XStore store;
     std::string db_name = "WALREPLAYZMAP";
     CreateTestDb(store, db_name, XStore_Proto::SECOND, kPreexistRowLength);

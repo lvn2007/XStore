@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <memory>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
@@ -190,6 +191,8 @@ protected:
     static constexpr uint64_t kRows = 300;
     static constexpr uint16_t kRowLength = 64;
     const std::string db_name = "DURREBUILD";
+    // LiveWalShards()/CheckpointWal() hand-drive ring checkpoints: no background checkpointer.
+    xstore_test::ScopedCheckpointerPause checkpointer_paused_;
     std::unique_ptr<ScratchDir> scratch;
     unsigned short year = 0;
 
@@ -447,14 +450,17 @@ TEST_F(DurabilityShutdownTest, ShutdownInvalidatesWalSoNextStartDoesNotRebuild) 
 }
 
 // A WAL record whose data file cannot be synced must stay replayable. The
-// data file is moved away, so Shutdown's path-based sync of it fails (open
-// ENOENT) => the WAL stays intact.
+// data file's mode is cleared, so the checkpointer's path-based sync of it
+// fails (open EACCES) => the WAL stays intact. (A MISSING file is different:
+// the checkpointer treats ENOENT as a deleted DB and moves on -- see
+// WalCheckpointTest.DeletedDataFileDoesNotBlockTheCheckpoint.)
 TEST_F(DurabilityShutdownTest, ShutdownLeavesWalIntactWhenADataFileCannotBeSynced) {
+    if (geteuid() == 0) GTEST_SKIP() << "root bypasses file modes";
     XStore store;
     InsertRows(store);
     const size_t live_before = LiveWalShards();
     ASSERT_GT(live_before, 0u);
-    ASSERT_EQ(rename(Path(".XSTORE").c_str(), (Path(".XSTORE") + ".moved").c_str()), 0);
+    ASSERT_EQ(chmod(Path(".XSTORE").c_str(), 0), 0);
 
     XStore::Shutdown();
 

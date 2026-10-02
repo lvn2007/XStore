@@ -48,6 +48,14 @@ bool ReadSlot(int fd, size_t slot, RingHeader &out) {
 
 }  // namespace
 
+bool FsyncDirectory(const std::string &dir) {
+    const int fd = open(dir.empty() ? "." : dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) return false;
+    const bool ok = fsync(fd) == 0;
+    close(fd);
+    return ok;
+}
+
 bool ReadBestHeader(int fd, RingHeader &out) {
     RingHeader a, b;
     const bool ok_a = ReadSlot(fd, 0, a);
@@ -258,6 +266,13 @@ std::shared_ptr<Ring> GetOrOpenRing(const std::string &wal_path, uint32_t shard_
             close(fd);
             return nullptr;
         }
+        // fsync of the file does not make its directory entry durable: a brand-new
+        // shard_N.WAL could vanish in a crash together with every record in it.
+        if (!FsyncDirectory(std::filesystem::path(wal_path).parent_path().string())) {
+            spdlog::error("[WAL] - Unable to fsync the directory of {}", wal_path);
+            close(fd);
+            return nullptr;
+        }
     }
     auto ring = std::make_shared<Ring>(fd, wal_path, shard_id, ring_bytes, start_lsn);
     g_rings.emplace(key, ring);
@@ -294,7 +309,8 @@ void DirtyTracker::Note(const std::shared_ptr<Ring> &ring, const std::string &da
         for (RingMark &m : file.marks) {
             if (m.key != ring.get()) continue;
             if (ring_lsn_end > m.last_lsn) m.last_lsn = ring_lsn_end;
-            m.ring = ring;   // a recycled address must point at the live ring
+            // A recycled address must point at the live ring; same control block = no weak-count churn.
+            if (m.ring.owner_before(ring) || ring.owner_before(m.ring)) m.ring = ring;
             found = true;
             break;
         }
@@ -343,6 +359,19 @@ DirtyTracker::Snapshot DirtyTracker::Take() {
     }
     bytes_ = 0;
     have_oldest_ = false;
+    return snap;
+}
+
+DirtyTracker::Snapshot DirtyTracker::PeekRanges() const {
+    Snapshot snap;
+    std::lock_guard<std::mutex> lock(mu_);
+    for (const auto &entry : files_) {
+        if (entry.second.ranges.empty()) continue;
+        std::vector<DirtyRange> out;
+        out.reserve(entry.second.ranges.size());
+        for (const auto &r : entry.second.ranges) out.push_back(DirtyRange{r.first, r.second});
+        snap.ranges.emplace(entry.first, std::move(out));
+    }
     return snap;
 }
 

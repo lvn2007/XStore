@@ -2,6 +2,7 @@
 #include "include/XStore/XStore.h"
 #include "include/XStore/XStore_Crc32c.h"
 #include "include/XStore/XStore_WalRing.h"
+#include "include/XStore/XStore_WalCheckpoint.h"
 #include "include/DataStructs/FileRangeLock.h"
 #include "include/DataStructs/TimeStruct.h"
 #include <spdlog/fmt/fmt.h>
@@ -494,6 +495,9 @@ void XStore::StartWalWriters(const std::string &data_store_dir) {
     // registering here (at the moment the threads are actually started)
     // guarantees this runs first.
     std::atexit([]() { XStore::StopWalWriters(); });
+    // Started last, stopped last (StopWalWriters, after the writers are joined):
+    // it syncs what the writers applied and advances the rings' checkpoints.
+    walring::Checkpointer::Instance().Start();
 }
 
 std::atomic<bool> XStore::shutdown_flag_{false};
@@ -513,6 +517,10 @@ void XStore::StopWalWriters() {
         wal_stats_reporter_thread.join();
     }
 #endif
+    // Writers are joined: nothing applies any more. One final cycle syncs every
+    // data file they touched and advances each ring's checkpoint to its head,
+    // then the checkpointer thread is joined. Also runs from the atexit hook.
+    walring::Checkpointer::Instance().StopAfterFinalCycle();
 }
 
 void XStore::Shutdown() {
@@ -634,6 +642,10 @@ void XStore::CheckpointWals() {
     auto checkpoint_ring = [&](const std::string &dir, const std::string &wal_path, size_t shard_idx) {
         std::shared_ptr<walring::Ring> ring = walring::GetOrOpenRing(wal_path, static_cast<uint32_t>(shard_idx));
         if (!ring) return;
+        if (walring::Checkpointer::Instance().Poisoned()) {
+            spdlog::error("[SHUTDOWN] - Checkpointer poisoned by a sync error; leaving {} for replay", wal_path);
+            return;
+        }
         const uint64_t head = ring->HeadLsn();
         uint64_t lsn = ring->CheckpointLsn();
         if (lsn >= head) return;
@@ -707,6 +719,7 @@ void XStore::ResetShutdownForTests() {
     // Writers resolve their ring lazily from each record's path when handed
     // no preopened ring.
     size_t active = active_wal_shard_count.load(std::memory_order_relaxed);
+    walring::Checkpointer::Instance().Start();
     for (size_t i = 0; i < active; ++i) {
         wal_shards[i].stop_flag.store(false, std::memory_order_relaxed);
         wal_shards[i].writer_thread = std::thread(&XStore::WalWriterLoop, i, std::shared_ptr<walring::Ring>{});
@@ -876,6 +889,10 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
             if (count == 0) continue;
         }
         last_activity = std::chrono::steady_clock::now();
+        // The checkpointer's idle trigger reads this: one relaxed store per gathered batch, nothing per row.
+        walring::last_writer_activity_ns.store(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(last_activity.time_since_epoch()).count(),
+            std::memory_order_relaxed);
 
         // Group-commit gather: the blocking wait above returns the instant
         // the first record arrives, which alone gives near-zero batching
@@ -1081,9 +1098,10 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                     } else {
                         wal_ring_stalls.fetch_add(1, std::memory_order_relaxed);
                         spdlog::error("[WAL] - ring full ({}: {} bytes unflushed of {}, needs {} more): no checkpoint progress within {} ms; "
-                                      "failing the batch (overloaded)",
+                                      "failing the batch (overloaded){}",
                                       file.ring->path(), file.ring->HeadLsn() - file.ring->CheckpointLsn(), file.ring->ring_bytes(),
-                                      file.total, walring::StallTimeoutMs());
+                                      file.total, walring::StallTimeoutMs(),
+                                      walring::Checkpointer::Instance().Poisoned() ? "; checkpointer poisoned by a sync error" : "");
                     }
                 }
 

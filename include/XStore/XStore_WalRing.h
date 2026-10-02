@@ -40,6 +40,8 @@ static_assert(sizeof(RingHeader) == 48);
 
 // Valid slot with the highest slot_seq; false if neither slot is valid.
 [[nodiscard]] bool ReadBestHeader(int fd, RingHeader &out);
+// open(dir, O_DIRECTORY) + fsync: makes directory entries (created/renamed files) durable.
+[[nodiscard]] bool FsyncDirectory(const std::string &dir);
 // Computes crc, writes the slot (header.slot_seq % 2), fdatasync.
 [[nodiscard]] bool WriteHeaderSlot(int fd, RingHeader header);
 // FRESH (empty or about-to-be-overwritten) files only: it zero-fills the ring,
@@ -168,6 +170,9 @@ public:
     // state (bytes, age). Does NOT touch the per-file ring-LSN bookkeeping:
     // RingClear still needs it until the ring is checkpointed past it.
     Snapshot Take();
+    // Same view as Take() but resets nothing (the paced flush reads ranges it
+    // does not own; the cycle's Take is what consumes them).
+    Snapshot PeekRanges() const;
 
     // True iff no un-checkpointed ring record touched `data_path`: for every
     // ring that recorded a write to it and is still alive,

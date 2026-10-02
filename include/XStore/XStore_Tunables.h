@@ -675,7 +675,7 @@ inline constexpr double      WAL_CKPT_SOFT_FILL            = 0.25;        // rin
 inline constexpr double      WAL_CKPT_CYCLE_FILL           = 0.50;        // fill fraction that forces a full checkpoint cycle
 inline constexpr double      WAL_STALL_FILL                = 0.90;        // fill fraction at which writers stall for the checkpoint
 inline constexpr unsigned    WAL_STALL_TIMEOUT_MS          = 5000;        // max writer stall before the insert is failed
-inline constexpr unsigned    WAL_CKPT_MAX_AGE_MS           = 5000;        // checkpoint at least this often while the ring is non-empty
+inline constexpr unsigned    WAL_CKPT_MAX_AGE_MS           = 5000;        // full checkpoint cycle once the oldest not-yet-flushed dirty-tracker entry is this old
 inline constexpr unsigned    WAL_CKPT_IDLE_MS              = 50;          // idle time with no WAL traffic that triggers a checkpoint
 inline constexpr size_t      WAL_FLUSH_CHUNK_BYTES         = 4u << 20;    // paced data-file flush granularity during a checkpoint
 

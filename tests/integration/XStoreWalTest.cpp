@@ -156,6 +156,8 @@ TEST_F(XStoreWalTest, BypassAppliesBeforeReturning) {
 // byte-for-byte unchanged, while the BYPASS row is independently visible
 // via query (proving it landed in the data file, not lost).
 TEST_F(XStoreWalTest, BypassWritesNoWalRecord) {
+    // Compares whole ring-file bytes (header slots included): no background checkpoint may rewrite them.
+    xstore_test::ScopedCheckpointerPause checkpointer_paused;
     XStore store;
     CreateTestDb(store, "WALBYPASSNOWAL", XStore_Proto::SECOND, 64);
 

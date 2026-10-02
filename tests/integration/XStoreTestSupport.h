@@ -14,6 +14,7 @@
 
 #include "include/XStore/XStore.h"
 #include "include/XStore/XStore_WalRing.h"
+#include "include/XStore/XStore_WalCheckpoint.h"
 
 namespace xstore_test {
 
@@ -27,6 +28,16 @@ namespace fs = std::filesystem;
 inline constexpr uint64_t kTestDefaultRingBytes = 8u << 20;
 // C++17 inline variable: initialized once per process, in every TU that includes this header.
 inline const bool kTestDefaultRingInstalled = (walring::SetDefaultRingBytesForTests(kTestDefaultRingBytes), true);
+
+// RAII: the background checkpointer takes no action while one of these is alive,
+// for tests that inspect or hand-drive ring heads/checkpoints. (RunCycle() still
+// works explicitly; pausing waits for an in-flight cycle to finish.)
+struct ScopedCheckpointerPause {
+    ScopedCheckpointerPause() { walring::Checkpointer::Instance().SetPausedForTests(true); }
+    ~ScopedCheckpointerPause() { walring::Checkpointer::Instance().SetPausedForTests(false); }
+    ScopedCheckpointerPause(const ScopedCheckpointerPause &) = delete;
+    ScopedCheckpointerPause &operator=(const ScopedCheckpointerPause &) = delete;
+};
 
 // One factory per `oneof oneOfData` branch in FData (see proto/XStore.proto)
 // so tests can build rows out of every type the wire format actually allows,

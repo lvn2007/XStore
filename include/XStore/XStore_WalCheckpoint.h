@@ -1,0 +1,129 @@
+#pragma once
+// Lazy, paced WAL checkpointer (Durability C, spec §2/§3.2).
+//
+// INVARIANT: for every data-file write, either its WAL record is still inside
+// the live ring, or a data sync that STARTED AFTER the write finished has
+// completed. A ring's checkpoint_lsn (the space the writer may reuse) therefore
+// moves only after the data files it covers were fdatasync'd.
+//
+// RunCycle ordering (all under one cycle mutex):
+//   1. snapshot every ring's AppliedLsn()           (acquire)
+//   2. Dirty().Take()  -> merged into the carried set of unsynced files
+//   3. fdatasync every carried file (opened by path; ENOENT = deleted DB, skip)
+//   4. fsync each file's parent directory (a new year file's directory entry is
+//      not made durable by fdatasync of the file)
+//   5. only if 3 and 4 fully succeeded: AdvanceCheckpoint(snapshot) per ring
+// Snapshot-before-Take is what makes it safe: every apply with lsn < snapshot
+// had finished (and Note'd its file) before the Take, so its bytes are in the
+// set that gets synced. Records applied after the snapshot are deliberately not
+// passed; the next cycle covers them. A failed step keeps the carried set for
+// retry and advances nothing.
+//
+// A REAL sync error is sticky ("fsyncgate"): after a genuine writeback error the
+// kernel may mark the lost pages clean, so a RETRIED fdatasync can return 0 with
+// the data not on disk, and the retry would then advance the checkpoint over rows
+// only the WAL still holds. The first real error from fdatasync(data file),
+// fsync(directory) or sync_file_range (EIO/ENOSPC/EDQUOT; EINTR/EAGAIN are retried
+// in place) therefore POISONS the checkpointer for the life of the process:
+// RunCycle() returns false without advancing anything, the thread stops cycling,
+// and a CRITICAL line is logged once. Writers then stall at the full-ring
+// threshold and fail callers as "overloaded"; a restart replays from the last good
+// checkpoint. Not poisoning (still retryable): open() failures other than ENOENT
+// and the plain test-injected failures.
+//
+// Apply failure: if ApplyWalRecord fails for a record in a durable ring the
+// applied position still advances and the checkpoint may pass it (pre-existing
+// behaviour: replay used to invalidate the log unconditionally too).
+//
+// Hot path: the writer does ONE relaxed store of last_writer_activity_ns per
+// gathered batch; nothing per row.
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <map>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
+
+namespace walring {
+
+// One cache line of its own: every shard writer stores to it, so it must not
+// false-share with neighbouring globals.
+struct alignas(64) PaddedAtomicI64 : std::atomic<int64_t> {
+    constexpr PaddedAtomicI64(int64_t v = 0) noexcept : std::atomic<int64_t>(v) {}
+};
+// steady_clock ns of the last batch a WAL writer gathered; read by the idle trigger.
+extern PaddedAtomicI64 last_writer_activity_ns;
+
+// Leaked singleton (detached threads / exit-time statics may still reach it).
+class Checkpointer {
+public:
+    static Checkpointer &Instance();
+
+    // Idempotent; starts the thread if it is not running (also restarts after a stop).
+    void Start();
+    // Runs RunCycle() once, then stops and joins the thread. Idempotent; safe if Start() never ran.
+    void StopAfterFinalCycle();
+    // Synchronous full cycle. false = a data/dir sync failed (or a header write
+    // did not stick): nothing (or not everything) advanced; retry is safe.
+    bool RunCycle();
+
+    // Data files fdatasync'd by the last successful cycle (Task 6 gates MarkClean on it).
+    std::unordered_set<std::string> LastCycleSyncedPaths() const;
+
+    // True once a real (non-retryable) sync error occurred; sticky for the process.
+    bool Poisoned() const { return poisoned_.load(std::memory_order_acquire); }
+
+    // ---- test hooks ----
+    void ClearPoisonForTests();                   // also drops the sticky hooks
+    void FailNextDataSyncsStickyForTests(int n);  // like a real fdatasync error: poisons
+    void FailNextDirSyncsStickyForTests(int n);   // like a real directory fsync error: poisons
+    std::unordered_set<std::string> LastCycleSyncedDirsForTests() const;   // directories fsync'd by the last successful cycle
+    void SetPausedForTests(bool paused);          // waits for an in-flight cycle/flush; RunCycle() still works
+    void FailNextDataSyncsForTests(int n);        // next n data-file fdatasyncs report failure
+    void FailNextDirSyncsForTests(int n);         // next n directory fsyncs report failure
+    uint64_t CyclesForTests() const { return cycles_.load(std::memory_order_relaxed); }
+    uint64_t DirSyncsForTests() const { return dir_syncs_.load(std::memory_order_relaxed); }
+    uint64_t PacedFlushBytesForTests() const { return paced_bytes_.load(std::memory_order_relaxed); }
+    void SetIdleMsForTests(unsigned ms);          // 0 restores XStoreTunables::WAL_CKPT_IDLE_MS
+    void SetMaxAgeMsForTests(unsigned ms);        // 0 restores XStoreTunables::WAL_CKPT_MAX_AGE_MS
+
+private:
+    Checkpointer() = default;
+    void Loop();
+    bool RunCycleLocked();                        // cycle_mutex_ held
+    bool PacedFlushStep();                        // one <= WAL_FLUSH_CHUNK_BYTES sync_file_range; true if it did work
+    static bool ConsumeFailure(std::atomic<int> &counter);
+    void Poison(const char *what, const std::string &path, int err);
+
+    std::mutex cycle_mutex_;                      // one cycle / paced step at a time
+    std::unordered_set<std::string> carried_;     // unsynced data files (guarded by cycle_mutex_)
+    std::unordered_map<std::string, std::map<uint64_t, uint64_t>> flushed_;   // paced-flushed ranges (guarded by cycle_mutex_)
+    mutable std::mutex synced_mutex_;
+    std::unordered_set<std::string> last_synced_;
+    std::unordered_set<std::string> last_synced_dirs_;
+
+    std::mutex lifecycle_mutex_;                  // serializes Start / StopAfterFinalCycle (held across the join)
+    std::thread thread_;                          // guarded by lifecycle_mutex_
+    std::mutex wake_mutex_;                       // guards stop_ for the loop's timed wait
+    std::condition_variable wake_;
+    bool stop_ = false;
+
+    std::atomic<bool> paused_{false};
+    std::atomic<int> fail_data_syncs_{0};
+    std::atomic<int> fail_dir_syncs_{0};
+    std::atomic<int> fail_data_sticky_{0};
+    std::atomic<int> fail_dir_sticky_{0};
+    std::atomic<bool> poisoned_{false};
+    std::atomic<bool> poison_logged_{false};
+    std::atomic<uint64_t> cycles_{0};
+    std::atomic<uint64_t> dir_syncs_{0};
+    std::atomic<uint64_t> paced_bytes_{0};
+    std::atomic<uint64_t> advances_{0};           // rings advanced, ever (progress detector for back-to-back cycles)
+    std::atomic<unsigned> idle_ms_override_{0};
+    std::atomic<unsigned> max_age_override_{0};
+};
+
+}  // namespace walring
