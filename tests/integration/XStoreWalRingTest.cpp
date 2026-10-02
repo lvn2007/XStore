@@ -16,6 +16,7 @@
 #include <memory>
 #include <string>
 #include <sys/stat.h>
+#include <thread>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -210,6 +211,7 @@ protected:
         XStore::ClearZoneMapRegistryForTests();
         XStore::ClearCatIdxRegistryForTests();
         walring::ClearRingRegistryForTests();
+        walring::ClearDirtyForTests();
     }
     void SetUp() override {
         scratch = std::make_unique<xstore_test::ScratchDir>("xstore_walring_writer_test");
@@ -449,6 +451,170 @@ TEST_F(WalRingWriterTest, RegistryClearIsSeenByWriterThreads) {
     ASSERT_NE(second, nullptr) << "writer kept appending through a Ring the registry no longer knows";
     EXPECT_NE(second.get(), first.get());
     EXPECT_GT(second->HeadLsn(), 0u);
+}
+
+// ---- Task 3: dirty-range tracking at the apply choke point ------------------
+
+namespace {
+// The merged ranges `ranges` holds for `path` cover [begin, end) in full.
+bool Covers(const std::vector<walring::DirtyRange> &ranges, uint64_t begin, uint64_t end) {
+    for (const auto &r : ranges) if (r.begin <= begin && end <= r.end) return true;
+    return false;
+}
+}  // namespace
+
+TEST_F(WalRingWriterTest, DirtyTrackerMergesAdjacentRanges) {
+    walring::DirtyTracker t;
+    t.Note(nullptr, "/f", 0, 10, 0);
+    t.Note(nullptr, "/f", 10, 20, 0);
+    t.Note(nullptr, "/f", 40, 50, 0);
+    t.Note(nullptr, "/f", 45, 60, 0);    // overlaps the previous one
+    t.Note(nullptr, "/f", 5, 12, 0);     // inside an existing range
+    EXPECT_EQ(t.UnflushedBytes(), 20u + 20u);
+    const auto snap = t.Take();
+    ASSERT_EQ(snap.ranges.size(), 1u);
+    const auto &r = snap.ranges.at("/f");
+    ASSERT_EQ(r.size(), 2u);
+    EXPECT_EQ(r[0].begin, 0u);  EXPECT_EQ(r[0].end, 20u);
+    EXPECT_EQ(r[1].begin, 40u); EXPECT_EQ(r[1].end, 60u);
+}
+
+TEST_F(WalRingWriterTest, TakeSwapsAndClears) {
+    walring::DirtyTracker t;
+    EXPECT_EQ(t.OldestUnsyncedAgeMs(), 0u);
+    EXPECT_EQ(t.UnflushedBytes(), 0u);
+    t.Note(nullptr, "/a", 0, 8, 0);
+    t.Note(nullptr, "/b", 100, 164, 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    EXPECT_GE(t.OldestUnsyncedAgeMs(), 10u);
+    EXPECT_EQ(t.UnflushedBytes(), 72u);
+
+    const auto first = t.Take();
+    EXPECT_EQ(first.ranges.size(), 2u);
+    EXPECT_EQ(t.UnflushedBytes(), 0u);
+    EXPECT_EQ(t.OldestUnsyncedAgeMs(), 0u);
+    EXPECT_TRUE(t.Take().ranges.empty()) << "a second Take sees nothing";
+
+    t.Note(nullptr, "/a", 8, 16, 0);
+    const auto again = t.Take();
+    ASSERT_EQ(again.ranges.size(), 1u);
+    EXPECT_EQ(again.ranges.at("/a")[0].begin, 8u);
+}
+
+TEST_F(WalRingWriterTest, RingClearReflectsCheckpoint) {
+    auto ring = walring::GetOrOpenRing((scratch->test_root / "dirty_ring.WAL").string(), 0);
+    ASSERT_NE(ring, nullptr);
+    ring->CommitAppended(1000);
+
+    walring::DirtyTracker t;
+    EXPECT_TRUE(t.RingClear("/f")) << "a file nothing ever touched is clear";
+    t.Note(nullptr, "/f", 0, 8, 0);
+    EXPECT_TRUE(t.RingClear("/f")) << "a direct write carries no ring record";
+    t.Note(ring, "/f", 8, 16, 500);
+    EXPECT_FALSE(t.RingClear("/f"));
+    EXPECT_TRUE(t.RingClear("/other"));
+    (void)t.Take();
+    EXPECT_FALSE(t.RingClear("/f")) << "Take must not forget un-checkpointed ring records";
+
+    ring->AdvanceCheckpoint(499);
+    EXPECT_FALSE(t.RingClear("/f"));
+    ring->AdvanceCheckpoint(500);
+    EXPECT_TRUE(t.RingClear("/f"));
+    t.NoteCheckpointed(ring.get(), 500);   // pruning is hygiene only
+    EXPECT_TRUE(t.RingClear("/f"));
+
+    // A destroyed ring counts as clear.
+    auto ring2 = walring::GetOrOpenRing((scratch->test_root / "dirty_ring2.WAL").string(), 1);
+    ASSERT_NE(ring2, nullptr);
+    ring2->CommitAppended(1000);
+    t.Note(ring2, "/g", 0, 8, 900);
+    EXPECT_FALSE(t.RingClear("/g"));
+    ring2.reset();
+    walring::ClearRingRegistryForTests();
+    EXPECT_TRUE(t.RingClear("/g"));
+}
+
+TEST_F(WalRingWriterTest, EveryDataWriteIsTracked) {
+    constexpr uint16_t kRowLength = 64;
+    constexpr uint64_t kYear2Epoch = 1740000000;   // a different year than kBaseEpoch
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, kRowLength);
+    (void)walring::Dirty().Take();                 // CreateDB's own writes are not under test
+
+    ASSERT_TRUE(InsertSync(store, 5));
+    XStore_Proto::BatchInsert_REQ req;
+    req.set_dbname(db_name);
+    req.set_durabilitymode(XStore_Proto::SYNC);
+    for (uint64_t i = 0; i < 3; ++i) {
+        for (uint64_t base : {kBaseEpoch + 100, kYear2Epoch}) {
+            XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
+            entry->set_timestamp(base + i);
+            entry->mutable_data()->add_fielddata()->set_doubledata(static_cast<double>(i));
+        }
+    }
+    XStore_Proto::BatchInsert_REP rep;
+    store.BatchInsert(&req, &rep);
+    ASSERT_NE(rep.insertstatus().rfind("[ERROR]", 0), 0u) << rep.insertstatus();
+
+    const std::string db_base = (scratch->test_root / "DataStore" / db_name).string();
+    const TimeStruct ts1(kBaseEpoch, XStore_Proto::SECOND);
+    const TimeStruct ts2(kYear2Epoch, XStore_Proto::SECOND);
+    ASSERT_NE(ts1.year, ts2.year);
+    const std::string path1 = fmt::format("{}/{}.XSTORE", db_base, ts1.year);
+    const std::string path2 = fmt::format("{}/{}.XSTORE", db_base, ts2.year);
+
+    const auto snap = walring::Dirty().Take();
+    ASSERT_TRUE(snap.ranges.count(path1)) << "unary + batch rows of year 1";
+    ASSERT_TRUE(snap.ranges.count(path2)) << "batch rows of year 2";
+    for (uint64_t i : {uint64_t{5}, uint64_t{100}, uint64_t{101}, uint64_t{102}}) {
+        const uint64_t off = (kBaseEpoch + i - ts1.first_epoch) * kRowLength;
+        EXPECT_TRUE(Covers(snap.ranges.at(path1), off, off + kRowLength)) << "year-1 row " << i;
+    }
+    for (uint64_t i = 0; i < 3; ++i) {
+        const uint64_t off = (kYear2Epoch + i - ts2.first_epoch) * kRowLength;
+        EXPECT_TRUE(Covers(snap.ranges.at(path2), off, off + kRowLength)) << "year-2 row " << i;
+    }
+    // Contiguous rows 100..102 are ONE run, not three.
+    const uint64_t off100 = (kBaseEpoch + 100 - ts1.first_epoch) * kRowLength;
+    EXPECT_TRUE(Covers(snap.ranges.at(path1), off100, off100 + 3 * kRowLength));
+}
+
+TEST_F(WalRingWriterTest, RingClearIsFalseUntilCheckpointPassesTheRecord) {
+    constexpr uint16_t kRowLength = 64;
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, kRowLength);
+    ASSERT_TRUE(InsertSync(store, 1));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    const TimeStruct ts(kBaseEpoch, XStore_Proto::SECOND);
+    const std::string data_path = fmt::format("{}/{}.XSTORE", (scratch->test_root / "DataStore" / db_name).string(), ts.year);
+
+    EXPECT_FALSE(walring::Dirty().RingClear(data_path)) << "the ring record is still un-checkpointed";
+    (void)walring::Dirty().Take();
+    EXPECT_FALSE(walring::Dirty().RingClear(data_path)) << "Take must not clear the ring bookkeeping";
+    ring->AdvanceCheckpoint(ring->HeadLsn());
+    EXPECT_TRUE(walring::Dirty().RingClear(data_path));
+}
+
+TEST_F(WalRingWriterTest, BypassWriteIsTrackedButDoesNotBlockRingClear) {
+    constexpr uint16_t kRowLength = 64;
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, kRowLength);
+    (void)walring::Dirty().Take();
+
+    XStore_Proto::RowData row;
+    row.add_fielddata()->set_doubledata(1.0);
+    XStore_Proto::UnaryInsert_REP rep;
+    store.UnaryInsert(kBaseEpoch + 9, row, db_name, &rep, XStore_Proto::BYPASS);
+    ASSERT_NE(rep.insertstatus().rfind("[ERROR]", 0), 0u) << rep.insertstatus();
+
+    const TimeStruct ts(kBaseEpoch, XStore_Proto::SECOND);
+    const std::string data_path = fmt::format("{}/{}.XSTORE", (scratch->test_root / "DataStore" / db_name).string(), ts.year);
+    EXPECT_TRUE(walring::Dirty().RingClear(data_path)) << "no ring record covers a BYPASS write";
+    const auto snap = walring::Dirty().Take();
+    ASSERT_TRUE(snap.ranges.count(data_path));
+    const uint64_t off = (kBaseEpoch + 9 - ts.first_epoch) * kRowLength;
+    EXPECT_TRUE(Covers(snap.ranges.at(data_path), off, off + kRowLength));
 }
 
 TEST(WalRingFormatTest, DefaultRingBytesOverrideLayers) {

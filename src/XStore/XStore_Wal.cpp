@@ -210,7 +210,7 @@ enum class WalRecordKind : uint8_t { kRing, kInterim, kFail };
 
 } // namespace
 
-bool XStore::ApplyWalRecord(const WalRecord &record_to_apply) {
+bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_ptr<walring::Ring> &ring, uint64_t ring_lsn_end) {
     // Precondition: every row in one WalRecord belongs to the same (db,
     // year) file, and rows are ordered ascending by epoch_time. True for
     // every current producer -- UnaryInsert's 1-row records trivially
@@ -295,6 +295,9 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply) {
             spdlog::error("[WAL APPLY] [DB: {}] - Short/failed write to {}.XSTORE", record_to_apply.db_name, first_ts.year);
             all_rows_ok = false;
         } else {
+            // The data file now holds bytes the checkpointer must fdatasync
+            // before it may pass this record's ring LSN (spec §3.2).
+            walring::Dirty().Note(ring, target_file, offsets[run_start], offsets[run_start] + run_bytes, ring_lsn_end);
             // Only reached when this run's rows are confirmed durably
             // written above -- never update the zone map for a row whose
             // real write just failed.
@@ -815,6 +818,7 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
     std::vector<std::string> record_wal_path(XStoreTunables::WAL_BATCH_MAX_RECORDS);
     std::vector<walring::Ring *> record_ring(XStoreTunables::WAL_BATCH_MAX_RECORDS, nullptr);
     std::vector<size_t> record_total(XStoreTunables::WAL_BATCH_MAX_RECORDS, 0);
+    std::vector<uint64_t> record_end_lsn(XStoreTunables::WAL_BATCH_MAX_RECORDS, 0);   // ring LSN just past each ring record
     std::vector<WalRecordKind> record_kind(XStoreTunables::WAL_BATCH_MAX_RECORDS, WalRecordKind::kRing);
     std::vector<SubBatchFile *> record_file(XStoreTunables::WAL_BATCH_MAX_RECORDS, nullptr);
     std::vector<bool> record_ok(XStoreTunables::WAL_BATCH_MAX_RECORDS, false);
@@ -1091,6 +1095,7 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                     const WalRecord &record = batch[i];
                     const uint64_t lsn = file.cursor;
                     file.cursor += record_total[i];
+                    record_end_lsn[i] = file.cursor;
 
                     // Header piece: everything on the wire except row bytes
                     // (kept as separate iovecs below, no copy) -- recordLen and
@@ -1221,7 +1226,11 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                         record_ok[i] = false;
                         continue;
                     }
-                    const bool apply_ok = ApplyWalRecord(batch[i]);
+                    // record_wal_path[i] is always a key of `rings` for a kRing record.
+                    const auto ring_it = rings.find(record_wal_path[i]);
+                    const bool apply_ok = ApplyWalRecord(batch[i],
+                                                         ring_it != rings.end() ? ring_it->second : std::shared_ptr<walring::Ring>(),
+                                                         record_end_lsn[i]);
                     record_ok[i] = apply_ok;
                     if (!apply_ok) {
                         spdlog::error("[WAL] [DB: {}] - Record is in the WAL but its rows failed to apply", batch[i].db_name);

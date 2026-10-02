@@ -9,9 +9,11 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace walring {
@@ -139,5 +141,67 @@ uint64_t RegistryEpoch();
 std::shared_ptr<Ring> GetOrOpenRing(const std::string &wal_path, uint32_t shard_id, bool reinit_legacy = false);
 std::vector<std::shared_ptr<Ring>> AllRings();
 void ClearRingRegistryForTests();
+
+// Dirty-range tracking at the data-write choke point (XStore::ApplyWalRecord).
+// Records which byte ranges of which .XSTORE files were written but not yet
+// fdatasync'd, and which un-checkpointed ring records cover each file, so the
+// checkpointer can sync only what it must (spec §3.2/§3.3).
+//
+// SAFETY RULE: a missing RANGE only makes a later sync heavier (it syncs the
+// whole file or a coarser span); a missing FILE would be a durability hole
+// (a checkpoint could pass a record whose data was never synced). So every
+// data-file write must Note its file; ranges may be merged/coarsened freely.
+//
+// Ring-record bookkeeping is keyed by RING, not by shard index: one shard
+// index has a separate ring per data_store_dir. ring == nullptr and
+// ring_lsn_end == 0 mean a direct/BYPASS/replay write (no ring record).
+struct DirtyRange { uint64_t begin = 0, end = 0; };   // [begin, end) byte range in a data file
+
+class DirtyTracker {
+public:
+    // One short lock; adjacent/overlapping ranges of a file merge in place.
+    // ring_lsn_end = END lsn of the ring record that carries this write.
+    void Note(const std::shared_ptr<Ring> &ring, const std::string &data_path, uint64_t begin, uint64_t end, uint64_t ring_lsn_end);
+
+    struct Snapshot { std::unordered_map<std::string, std::vector<DirtyRange>> ranges; };
+    // Swaps out and returns every file's merged ranges and resets the range
+    // state (bytes, age). Does NOT touch the per-file ring-LSN bookkeeping:
+    // RingClear still needs it until the ring is checkpointed past it.
+    Snapshot Take();
+
+    // True iff no un-checkpointed ring record touched `data_path`: for every
+    // ring that recorded a write to it and is still alive,
+    // last_ring_lsn <= ring->CheckpointLsn(). A destroyed ring, or no
+    // recorded ring, counts as clear.
+    bool RingClear(const std::string &data_path) const;
+    // Memory hygiene only (RingClear queries the live ring): drops per-file
+    // entries for `ring` whose last_ring_lsn <= checkpoint_lsn.
+    void NoteCheckpointed(const Ring *ring, uint64_t checkpoint_lsn);
+
+    uint64_t OldestUnsyncedAgeMs() const;   // age of the oldest range noted since the last Take; 0 if none
+    uint64_t UnflushedBytes() const;        // bytes currently held in ranges
+    void ClearForTests();                   // drops ranges AND ring bookkeeping
+
+private:
+    struct RingMark {
+        const Ring *key;               // identity only; never dereferenced
+        std::weak_ptr<Ring> ring;
+        uint64_t last_lsn;
+    };
+    struct FileState {
+        std::map<uint64_t, uint64_t> ranges;   // begin -> end, disjoint and non-adjacent
+        std::vector<RingMark> marks;           // one per distinct ring that wrote here
+    };
+    mutable std::mutex mu_;
+    std::unordered_map<std::string, FileState> files_;
+    uint64_t bytes_ = 0;
+    bool have_oldest_ = false;
+    std::chrono::steady_clock::time_point oldest_{};
+};
+
+// Process-wide instance (intentionally leaked: detached threads may still
+// call it during exit()).
+DirtyTracker &Dirty();
+void ClearDirtyForTests();
 
 }  // namespace walring

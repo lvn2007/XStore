@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstring>
 #include <filesystem>
+#include <iterator>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -276,5 +277,121 @@ void ClearRingRegistryForTests() {
     g_rings.clear();
     g_registry_epoch.fetch_add(1, std::memory_order_relaxed);
 }
+
+// ---- Dirty tracking ---------------------------------------------------------
+
+void DirtyTracker::Note(const std::shared_ptr<Ring> &ring, const std::string &data_path, uint64_t begin, uint64_t end, uint64_t ring_lsn_end) {
+    if (end <= begin) return;
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!have_oldest_) {
+        have_oldest_ = true;
+        oldest_ = std::chrono::steady_clock::now();
+    }
+    FileState &file = files_[data_path];   // allocates only the first time a path is seen
+
+    if (ring && ring_lsn_end != 0) {
+        bool found = false;
+        for (RingMark &m : file.marks) {
+            if (m.key != ring.get()) continue;
+            if (ring_lsn_end > m.last_lsn) m.last_lsn = ring_lsn_end;
+            m.ring = ring;   // a recycled address must point at the live ring
+            found = true;
+            break;
+        }
+        if (!found) file.marks.push_back(RingMark{ring.get(), ring, ring_lsn_end});
+    }
+
+    // Merge [begin, end) into the sorted disjoint map. The common cases
+    // (extend the previous range / fall inside it) edit a node in place.
+    auto &ranges = file.ranges;
+    auto next = ranges.upper_bound(begin);
+    std::map<uint64_t, uint64_t>::iterator target;
+    if (next != ranges.begin() && std::prev(next)->second >= begin) {
+        target = std::prev(next);
+        if (end > target->second) {
+            bytes_ += end - target->second;
+            target->second = end;
+        }
+    } else {
+        target = ranges.emplace_hint(next, begin, end);
+        bytes_ += end - begin;
+    }
+    // Absorb following ranges the (possibly extended) target now reaches.
+    for (auto it = std::next(target); it != ranges.end() && it->first <= target->second; it = ranges.erase(it)) {
+        const uint64_t len = it->second - it->first;
+        bytes_ -= len;
+        if (it->second > target->second) {
+            bytes_ += it->second - target->second;
+            target->second = it->second;
+        }
+    }
+}
+
+DirtyTracker::Snapshot DirtyTracker::Take() {
+    Snapshot snap;
+    std::lock_guard<std::mutex> lock(mu_);
+    for (auto it = files_.begin(); it != files_.end(); ) {
+        FileState &file = it->second;
+        if (!file.ranges.empty()) {
+            std::vector<DirtyRange> out;
+            out.reserve(file.ranges.size());
+            for (const auto &r : file.ranges) out.push_back(DirtyRange{r.first, r.second});
+            snap.ranges.emplace(it->first, std::move(out));
+            file.ranges.clear();
+        }
+        it = file.marks.empty() ? files_.erase(it) : std::next(it);
+    }
+    bytes_ = 0;
+    have_oldest_ = false;
+    return snap;
+}
+
+bool DirtyTracker::RingClear(const std::string &data_path) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    const auto it = files_.find(data_path);
+    if (it == files_.end()) return true;
+    for (const RingMark &m : it->second.marks) {
+        const std::shared_ptr<Ring> ring = m.ring.lock();
+        if (ring && m.last_lsn > ring->CheckpointLsn()) return false;
+    }
+    return true;
+}
+
+void DirtyTracker::NoteCheckpointed(const Ring *ring, uint64_t checkpoint_lsn) {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (auto it = files_.begin(); it != files_.end(); ) {
+        auto &marks = it->second.marks;
+        marks.erase(std::remove_if(marks.begin(), marks.end(),
+                                   [&](const RingMark &m) { return m.key == ring && m.last_lsn <= checkpoint_lsn; }),
+                    marks.end());
+        it = (marks.empty() && it->second.ranges.empty()) ? files_.erase(it) : std::next(it);
+    }
+}
+
+uint64_t DirtyTracker::OldestUnsyncedAgeMs() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!have_oldest_) return 0;
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - oldest_).count());
+}
+
+uint64_t DirtyTracker::UnflushedBytes() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return bytes_;
+}
+
+void DirtyTracker::ClearForTests() {
+    std::lock_guard<std::mutex> lock(mu_);
+    files_.clear();
+    bytes_ = 0;
+    have_oldest_ = false;
+}
+
+DirtyTracker &Dirty() {
+    static DirtyTracker *tracker = new DirtyTracker();   // leaked on purpose: see header
+    return *tracker;
+}
+
+void ClearDirtyForTests() { Dirty().ClearForTests(); }
 
 }  // namespace walring

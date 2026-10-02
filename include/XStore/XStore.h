@@ -1199,7 +1199,12 @@ class XStore {
         // hand this a record with hundreds of thousands of rows, so this
         // isn't optional the way it might have been for UnaryInsert's
         // always-1-row records.
-        [[nodiscard]] static bool ApplyWalRecord(const WalRecord &record_to_apply);
+        // `ring`/`ring_lsn_end`: the WAL ring record carrying this write (its END lsn),
+        // forwarded to walring::Dirty(); the defaults (BYPASS, replay, the interim
+        // oversized path) mean a direct write with no ring record.
+        [[nodiscard]] static bool ApplyWalRecord(const WalRecord &record_to_apply,
+                                                  const std::shared_ptr<walring::Ring> &ring = nullptr,
+                                                  uint64_t ring_lsn_end = 0);
 
         // Checkpoint step for a preallocated WAL file, called only from
         // ReplayWal (not from every live commit -- see WalWriterLoop):
