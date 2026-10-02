@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include "XStore/XStore_ZoneMap.h"
 #include "XStore/XStore_CatIdx.h"
+#include "XStore/XStore_WalRing.h"
 #include "XStoreTestSupport.h"
 #include "include/DataStructs/TimeStruct.h"
 #include <cstddef>
@@ -197,12 +198,23 @@ protected:
         for (auto &shard : XStore::cfg_shards) shard.map.clear();
         XStore::ClearZoneMapRegistryForTests();
         XStore::ClearCatIdxRegistryForTests();
+        walring::ClearRingRegistryForTests();
         year = TimeStruct(kBaseEpoch, XStore_Proto::SECOND).year;
     }
     void TearDown() override {
         XStore::ClearZoneMapRegistryForTests();
         XStore::ClearCatIdxRegistryForTests();
+        walring::ClearRingRegistryForTests();
         scratch.reset();
+    }
+
+    // Rings whose WAL file lives under this test's scratch dir.
+    std::vector<std::shared_ptr<walring::Ring>> MyRings() const {
+        std::vector<std::shared_ptr<walring::Ring>> mine;
+        for (auto &ring : walring::AllRings()) {
+            if (ring->path().rfind(scratch->test_root.string(), 0) == 0) mine.push_back(ring);
+        }
+        return mine;
     }
 
     std::string DbPath() const { return (scratch->test_root / "DataStore" / db_name).string(); }
@@ -224,19 +236,11 @@ protected:
         close(fd);
     }
 
-    // Checkpoints every WAL shard (zeroes the leading recordLen, exactly what
-    // InvalidateWalFileHeader does) so InitDB's WAL replay cannot force a
-    // rebuild -- these tests isolate the dirty flag as the only trigger.
+    // Checkpoints every WAL ring (checkpoint_lsn := head_lsn, persisted in the
+    // ring header) so InitDB's WAL replay cannot force a rebuild -- these tests
+    // isolate the dirty flag as the only trigger.
     void CheckpointWal() {
-        std::filesystem::path wal_dir = scratch->test_root / "DataStore" / XStoreTunables::WAL_DIR_NAME;
-        if (!std::filesystem::is_directory(wal_dir)) return;
-        for (auto &f : std::filesystem::directory_iterator(wal_dir)) {
-            int fd = open(f.path().c_str(), O_WRONLY);
-            if (fd < 0) continue;
-            uint32_t zero = 0;
-            EXPECT_EQ(pwrite(fd, &zero, sizeof(zero), 0), static_cast<ssize_t>(sizeof(zero)));
-            close(fd);
-        }
+        for (auto &ring : MyRings()) ring->AdvanceCheckpoint(ring->HeadLsn());
     }
 
     // What a clean shutdown does: data file synced first, then both indexes.
@@ -249,18 +253,12 @@ protected:
         ASSERT_TRUE(XStore::GetOrOpenCatIdx(DbPath(), year, kRowLength).MarkClean());
     }
 
-    // Number of WAL shard files whose leading recordLen is non-zero, i.e. that
-    // InitDB's replay would still find a record in.
+    // Number of WAL rings still holding un-checkpointed records, i.e. that
+    // InitDB's replay would still have to consult.
     size_t LiveWalShards() const {
         size_t live = 0;
-        std::filesystem::path wal_dir = scratch->test_root / "DataStore" / XStoreTunables::WAL_DIR_NAME;
-        if (!std::filesystem::is_directory(wal_dir)) return 0;
-        for (auto &f : std::filesystem::directory_iterator(wal_dir)) {
-            int fd = open(f.path().c_str(), O_RDONLY);
-            if (fd < 0) continue;
-            uint32_t len = 0;
-            if (pread(fd, &len, sizeof(len), 0) == static_cast<ssize_t>(sizeof(len)) && len != 0) ++live;
-            close(fd);
+        for (auto &ring : MyRings()) {
+            if (ring->HeadLsn() > ring->CheckpointLsn()) ++live;
         }
         return live;
     }

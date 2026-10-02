@@ -6,16 +6,27 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <fcntl.h>
 #include <unistd.h>
 #include <vector>
 
 #include <gtest/gtest.h>
 
 #include "include/XStore/XStore.h"
+#include "include/XStore/XStore_WalRing.h"
 
 namespace xstore_test {
 
 namespace fs = std::filesystem;
+
+// Suite-wide default WAL ring size for in-process XStore instances. A production
+// ring (64 MiB) is zero-filled and fsynced on creation -- about a second per test
+// process for the eagerly created shard rings. Tests that depend on a specific
+// size call walring::SetRingBytesForTests(explicit). The forked real server in
+// XStoreGracefulShutdownTest is a separate process and keeps the production size.
+inline constexpr uint64_t kTestDefaultRingBytes = 8u << 20;
+// C++17 inline variable: initialized once per process, in every TU that includes this header.
+inline const bool kTestDefaultRingInstalled = (walring::SetDefaultRingBytesForTests(kTestDefaultRingBytes), true);
 
 // One factory per `oneof oneOfData` branch in FData (see proto/XStore.proto)
 // so tests can build rows out of every type the wire format actually allows,
@@ -117,6 +128,41 @@ public:
         fs::remove_all(test_root, ec);
     }
 };
+
+// Checkpoints a ring-format WAL file by hand, from outside the process that
+// wrote it (e.g. after the forked server was SIGKILLed): finds the end of the
+// log by walking from the header's checkpoint_lsn with the replay rule, then
+// persists checkpoint_lsn = that end in the alternate header slot. Returns
+// false if the file is not a valid ring.
+inline bool CheckpointRingFileByHand(const std::string &path) {
+    int fd = open(path.c_str(), O_RDWR);
+    if (fd < 0) return false;
+    walring::RingHeader header;
+    bool ok = walring::ReadBestHeader(fd, header);
+    if (ok) {
+        std::string ring(header.ring_bytes, '\0');
+        ok = pread(fd, ring.data(), ring.size(), walring::HEADER_REGION_BYTES) == static_cast<ssize_t>(ring.size());
+        uint64_t lsn = header.checkpoint_lsn;
+        uint64_t last_good = lsn;
+        while (ok) {
+            const uint64_t off = lsn % header.ring_bytes;
+            const uint64_t rem = header.ring_bytes - off;
+            if (rem < walring::RECORD_FIXED_BYTES) { lsn += rem; continue; }
+            XStore::WalRecord record;
+            size_t used = 0;
+            if (XStore::ParseWalRecordV2(ring.data() + off, rem, lsn, used, record) == XStore::RingParse::kEnd) break;
+            lsn += used;
+            last_good = lsn;
+        }
+        if (ok) {
+            header.checkpoint_lsn = last_good;
+            header.slot_seq += 1;
+            ok = walring::WriteHeaderSlot(fd, header);
+        }
+    }
+    close(fd);
+    return ok;
+}
 
 }  // namespace xstore_test
 

@@ -3,6 +3,7 @@
 #include "include/DataStructs/TimeStruct.h"
 #include "include/XStore/XStore_PreadPool.h"
 #include "include/XStore/XStore_WireEncode.h"
+#include "include/XStore/XStore_WalRing.h"
 #include <spdlog/fmt/fmt.h>
 #include "include/Logger/Logger.h"
 #include <algorithm>
@@ -941,6 +942,20 @@ XStore::ReplayedYearMap XStore::ReplayWal() {
 
     for (size_t shard_idx = 0; shard_idx < XStoreTunables::WAL_SHARD_COUNT; ++shard_idx) {
         std::filesystem::path wal_path = wal_dir / ("shard_" + std::to_string(shard_idx) + ".WAL");
+        // Ring-format shard file (valid ring header): ring-aware replay is
+        // Task 5. Until then leave it strictly alone -- the legacy parse
+        // below would read the header as a record and, worse,
+        // InvalidateWalFileHeader would zero the header's first 4 bytes.
+        {
+            int ring_fd = open(wal_path.c_str(), O_RDONLY);
+            if (ring_fd >= 0) {
+                walring::RingHeader ring_header;
+                const bool is_ring = walring::ReadBestHeader(ring_fd, ring_header);
+                close(ring_fd);
+                if (is_ring) continue;
+            }
+        }
+
         // No file_size()==0 fast-skip: shard files are now preallocated
         // (see OpenAndPreallocateWalFile) and stay at that fixed size even
         // when logically empty, so a real "nothing pending" file no longer

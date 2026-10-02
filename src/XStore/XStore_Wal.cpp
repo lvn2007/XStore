@@ -15,16 +15,19 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <mutex>
+#include <stdexcept>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 std::array<XStore::WalShard, XStoreTunables::WAL_SHARD_COUNT> XStore::wal_shards;
 std::atomic<size_t> XStore::active_wal_shard_count{XStoreTunables::WAL_SHARD_COUNT};
+std::atomic<uint64_t> XStore::wal_ring_stalls{0};
 moodycamel::ConcurrentQueue<XStore::WalCompletion*> XStore::completion_pool;
 #ifdef XSTORE_WAL_STATS_ENABLED
 std::atomic<bool> XStore::wal_stats_stop_flag{false};
@@ -190,31 +193,20 @@ std::string WalFilePathForDataStoreDir(const std::string &data_store_dir, size_t
     return (wal_dir / ("shard_" + std::to_string(shard_idx) + ".WAL")).string();
 }
 
-// Opens wal_path (creating it if needed) and ensures it has at least
-// WAL_FILE_PREALLOC_BYTES of real, block-allocated space (fallocate, not a
-// sparse ftruncate) -- called both eagerly (StartWalWriters, the known-
-// data_store_dir production case) and lazily (WalWriterLoop's fd-cache-miss
-// path, the multi-data_store_dir test case). fallocate only ever grows an
-// existing file's allocated range, never truncates/zeroes bytes already
-// written, so this is always safe to call on a file that may already hold
-// real not-yet-replayed WAL data. Returns -1 on any failure.
-int OpenAndPreallocateWalFile(const std::string &wal_path) {
-    std::filesystem::create_directories(std::filesystem::path(wal_path).parent_path());
-    int fd = open(wal_path.c_str(), O_WRONLY | O_CREAT, 0644);
-    if (fd < 0) {
-        spdlog::error("[WAL] - Unable to open {}", wal_path);
-        return -1;
-    }
-    // posix_fallocate (POSIX-portable) over the Linux-specific fallocate()
-    // -- same real-block-allocation guarantee, no _GNU_SOURCE dependency.
-    // Returns the errno value directly rather than setting errno.
-    if (int err = posix_fallocate(fd, 0, static_cast<off_t>(XStoreTunables::WAL_FILE_PREALLOC_BYTES)); err != 0) {
-        spdlog::error("[WAL] - Unable to preallocate {}: {}", wal_path, std::strerror(err));
-        close(fd);
-        return -1;
-    }
-    return fd;
-}
+// One file's slice of a writer sub-batch: the ring it appends to, the
+// reserved LSN range, and the iovecs (header+row pieces) to pwritev there.
+struct SubBatchFile {
+    walring::Ring *ring = nullptr;
+    std::vector<struct iovec> iov;
+    size_t total = 0;      // ring-bound bytes of this file's records in the sub-batch
+    uint64_t start = 0;    // first LSN of the run (after any PAD)
+    uint64_t cursor = 0;   // next record's LSN while headers are being built
+    size_t pad = 0;        // PAD record bytes to write at start - pad (0 = none)
+    bool reserved = false;
+    bool durable = false;
+};
+
+enum class WalRecordKind : uint8_t { kRing, kInterim, kFail };
 
 } // namespace
 
@@ -474,17 +466,17 @@ void XStore::StartWalWriters(const std::string &data_store_dir) {
     active_wal_shard_count.store(active, std::memory_order_relaxed);
 
     for (size_t i = 0; i < active; ++i) {
-        // Eagerly open + fallocate here (not lazily on first write) --
-        // production has exactly one data_store_dir, known now, so there's
-        // no reason to pay the first commit's latency for it. Safe even if
-        // this file already holds real crash-recovery data from an
-        // unclean shutdown: OpenAndPreallocateWalFile's fallocate only
-        // ever grows, never truncates/zeroes existing bytes, and this runs
-        // before ReplayWal (called later, from InitDB) gets a chance to
-        // read it.
+        // Eagerly open (and, if the file is new/empty, initialize) this
+        // shard's ring here, not lazily on first write -- production has
+        // exactly one data_store_dir, known now, so there's no reason to pay
+        // the first commit's latency for it. A non-empty file WITHOUT a valid
+        // ring header is a legacy WAL that ReplayWal (called later, from
+        // InitDB) still has to read: GetOrOpenRing returns nullptr for it
+        // rather than wiping it, and the writer opens it lazily on its first
+        // append instead.
         std::string wal_path = WalFilePathForDataStoreDir(data_store_dir, i);
-        int fd = OpenAndPreallocateWalFile(wal_path);
-        wal_shards[i].writer_thread = std::thread(&XStore::WalWriterLoop, i, wal_path, fd);
+        std::shared_ptr<walring::Ring> ring = walring::GetOrOpenRing(wal_path, static_cast<uint32_t>(i));
+        wal_shards[i].writer_thread = std::thread(&XStore::WalWriterLoop, i, std::move(ring));
     }
 #ifdef XSTORE_WAL_STATS_ENABLED
     wal_stats_reporter_thread = std::thread(&XStore::WalStatsReporterLoop);
@@ -631,6 +623,42 @@ void XStore::CheckpointWals() {
         return true;
     };
 
+    // Ring-format shard file (writers joined, so quiescent): every record in
+    // [checkpoint_lsn, head_lsn) must have its data file fdatasynced by path
+    // before the checkpoint may move to head. Any failure leaves the
+    // checkpoint untouched. Interim: Task 6 replaces this with the
+    // checkpointer's final cycle.
+    auto checkpoint_ring = [&](const std::string &dir, const std::string &wal_path, size_t shard_idx) {
+        std::shared_ptr<walring::Ring> ring = walring::GetOrOpenRing(wal_path, static_cast<uint32_t>(shard_idx));
+        if (!ring) return;
+        const uint64_t head = ring->HeadLsn();
+        uint64_t lsn = ring->CheckpointLsn();
+        if (lsn >= head) return;
+        const uint64_t ring_bytes = ring->ring_bytes();
+        void *map = mmap(nullptr, walring::HEADER_REGION_BYTES + ring_bytes, PROT_READ, MAP_SHARED, ring->fd(), 0);
+        if (map == MAP_FAILED) {
+            spdlog::error("[SHUTDOWN] - Cannot read {}; leaving it for replay", wal_path);
+            return;
+        }
+        const char *base = static_cast<const char *>(map) + walring::HEADER_REGION_BYTES;
+        bool all_synced = true;
+        WalRecord record;
+        while (lsn < head && all_synced) {
+            const uint64_t off = lsn % ring_bytes;
+            const uint64_t rem = ring_bytes - off;
+            if (rem < walring::RECORD_FIXED_BYTES) { lsn += rem; continue; }   // implicit wrap, same rule as the writer
+            size_t consumed = 0;
+            const RingParse r = ParseWalRecordV2(base + off, static_cast<size_t>(rem), lsn, consumed, record);
+            if (r == RingParse::kEnd) { all_synced = false; break; }   // log ends before head: do not trust it, keep the checkpoint
+            lsn += consumed;
+            if (r == RingParse::kPad || record.rows.empty()) continue;
+            TimeStruct ts(static_cast<std::time_t>(record.rows.front().epoch_time), record.time_resolution);
+            all_synced = sync_path(fmt::format("{}/{}.XSTORE", JoinPath(dir, record.db_name), ts.year));
+        }
+        munmap(map, walring::HEADER_REGION_BYTES + ring_bytes);
+        if (all_synced) ring->AdvanceCheckpoint(head);
+    };
+
     for (const std::string &dir : dirs) {
         const std::filesystem::path wal_dir = std::filesystem::path(dir) / XStoreTunables::WAL_DIR_NAME;
         if (!std::filesystem::is_directory(wal_dir)) continue;
@@ -638,6 +666,12 @@ void XStore::CheckpointWals() {
             const std::string wal_path = (wal_dir / ("shard_" + std::to_string(shard_idx) + ".WAL")).string();
             int wal_fd = open(wal_path.c_str(), O_RDWR);
             if (wal_fd < 0) continue; // shard never used
+            walring::RingHeader ring_header;
+            if (walring::ReadBestHeader(wal_fd, ring_header)) {
+                close(wal_fd);
+                checkpoint_ring(dir, wal_path, shard_idx);
+                continue;
+            }
             struct stat st{};
             void *map = MAP_FAILED;
             if (fstat(wal_fd, &st) == 0 && st.st_size > 0) {
@@ -667,12 +701,12 @@ void XStore::CheckpointWals() {
 
 void XStore::ResetShutdownForTests() {
     if (!shutdown_flag_.exchange(false, std::memory_order_acq_rel)) return;
-    // Writers resolve their WAL fd lazily from each record's path when
-    // handed no preopened fd.
+    // Writers resolve their ring lazily from each record's path when handed
+    // no preopened ring.
     size_t active = active_wal_shard_count.load(std::memory_order_relaxed);
     for (size_t i = 0; i < active; ++i) {
         wal_shards[i].stop_flag.store(false, std::memory_order_relaxed);
-        wal_shards[i].writer_thread = std::thread(&XStore::WalWriterLoop, i, std::string{}, -1);
+        wal_shards[i].writer_thread = std::thread(&XStore::WalWriterLoop, i, std::shared_ptr<walring::Ring>{});
     }
 #ifdef XSTORE_WAL_STATS_ENABLED
     wal_stats_stop_flag.store(false, std::memory_order_relaxed);
@@ -716,33 +750,23 @@ void XStore::WalStatsReporterLoop() {
 }
 #endif
 
-void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int preopened_fd) {
+void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preopened_ring) {
     WalShard &shard = wal_shards[shard_idx];
     std::vector<WalRecord> batch(XStoreTunables::WAL_BATCH_MAX_RECORDS);
-    // Thread-local to this one writer thread -- no lock needed, only this
-    // thread ever touches it. Declared once outside the loop and reused
-    // (via .clear()/reset each iteration, or sized once and indexed) rather
-    // than re-declared per batch, to avoid a fresh heap allocation on the
-    // writer's per-batch hot path.
+    // Everything below is thread-local to this one writer thread -- no lock
+    // needed, only this thread ever touches it. Declared once outside the
+    // loop and reused (via .clear()/reset each iteration, or sized once and
+    // indexed) rather than re-declared per batch, to avoid a fresh heap
+    // allocation on the writer's per-batch hot path.
     //
-    // known_size tracks each file's actual on-disk size so the
-    // oversized_write check below can compare against reality instead of
-    // always against the static WAL_FILE_PREALLOC_BYTES constant. A file
-    // only ever grows (fallocate never truncates, and every pass writes
-    // from offset 0, never shrinking it -- see WalWriterLoop's own comment
-    // on that below), so once a file has organically grown past the
-    // constant, a later smaller pass that fits inside its already-grown
-    // size needs no metadata-changing write and can safely use
-    // fdatasync() again. No fstat() needed to seed this: every file this
-    // loop opens (preopened or lazily via OpenAndPreallocateWalFile) is
-    // fallocated to at least WAL_FILE_PREALLOC_BYTES before its fd is
-    // handed back, so that constant is exactly the correct known starting
-    // size.
-    std::unordered_map<std::string, size_t> wal_fds_known_size;
-    std::unordered_map<std::string, int> wal_fds;
-    if (preopened_fd >= 0) {
-        wal_fds_known_size.emplace(preopened_path, XStoreTunables::WAL_FILE_PREALLOC_BYTES);
-        wal_fds.emplace(std::move(preopened_path), preopened_fd);
+    // Ring cache per WAL file path (one data_store_dir in production; tests
+    // run several): the shared_ptr keeps the ring (and its fd) alive even if
+    // the process-wide registry is cleared underneath us.
+    std::unordered_map<std::string, std::shared_ptr<walring::Ring>> rings;
+    uint64_t seen_registry_epoch = walring::RegistryEpoch();
+    if (preopened_ring) {
+        std::string key = preopened_ring->path();
+        rings.emplace(std::move(key), std::move(preopened_ring));
     }
     // Per-file list of {pointer, length} pieces for one pwritev() call,
     // built to point DIRECTLY at each record's already-owned memory
@@ -764,18 +788,17 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
     // pwritev calls per file (advancing the file offset between chunks)
     // instead of relying on a single-call bound -- see
     // XStoreTunables::WAL_PWRITEV_MAX_IOVECS.
-    std::unordered_map<std::string, std::vector<struct iovec>> iovecs_by_file;
+    std::unordered_map<walring::Ring *, SubBatchFile> sub_batch_files;   // keyed by Ring: two path spellings of one file are one entry
     // Deques, not vectors: push_back on a deque never invalidates
     // references to earlier elements (only vector's does, on reallocation)
     // -- iovecs above hold raw pointers into these, taken before all of
-    // this batch's records have been processed, so that stability matters.
-    // Each entry: [recordLen(4)][crc32c(4)][dbNameLen(2)][rowLength(2)]
-    // [timeResolution(4)][rowCount(4)][dbName][first row's epochTime(8) if
-    // any] -- everything on the wire except row bytes themselves (kept as
-    // separate iovec entries pointing straight at WalRow::row_bytes) and
-    // any 2nd-or-later row's epochTime (in extra_epoch_bufs, rare/unused
-    // today -- WAL's only current producer, UnaryInsert, always builds
-    // exactly 1 row per record).
+    // this sub-batch's records have been processed, so that stability
+    // matters. Each entry: [recordLen(4)][crc32c(4)][lsn(8)][dbNameLen(2)]
+    // [rowLength(2)][timeResolution(4)][rowCount(4)][dbName][first row's
+    // epochTime(8) if any] -- everything on the wire except row bytes
+    // themselves (kept as separate iovec entries pointing straight at
+    // WalRow::row_bytes) and any 2nd-or-later row's epochTime (in
+    // extra_epoch_bufs).
     std::deque<std::string> record_headers;
     std::deque<std::array<char, sizeof(uint64_t)>> extra_epoch_bufs;
     // Memoizes WalFilePathFor within one batch: it's pure path computation
@@ -786,16 +809,20 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
     // reason to recompute the identical path once per record when it's
     // usually the same 1-2 distinct paths for the whole batch.
     std::unordered_map<std::string, std::string> wal_path_cache;
-    // Per-file durability outcome for THIS batch -- replaces a single
-    // all_durable flag so one file's fsync failure in a multi-DB batch
-    // doesn't wrongly withhold the checkpoint (truncate) for a DIFFERENT
-    // file that genuinely succeeded, and doesn't wrongly report success for
-    // records that share that failed file.
-    std::unordered_map<std::string, bool> file_durable;
-    // Which wal_path each dequeued record's bytes went into, so the
-    // per-record durability check below doesn't need to recompute
-    // WalFilePathFor a second time.
+    // Per dequeued record: which WAL file it targets, the ring serving it
+    // (nullptr = could not be opened), its ring-bound size, how it is
+    // handled, the sub-batch file slice it belongs to, and its outcome.
     std::vector<std::string> record_wal_path(XStoreTunables::WAL_BATCH_MAX_RECORDS);
+    std::vector<walring::Ring *> record_ring(XStoreTunables::WAL_BATCH_MAX_RECORDS, nullptr);
+    std::vector<size_t> record_total(XStoreTunables::WAL_BATCH_MAX_RECORDS, 0);
+    std::vector<WalRecordKind> record_kind(XStoreTunables::WAL_BATCH_MAX_RECORDS, WalRecordKind::kRing);
+    std::vector<SubBatchFile *> record_file(XStoreTunables::WAL_BATCH_MAX_RECORDS, nullptr);
+    std::vector<bool> record_ok(XStoreTunables::WAL_BATCH_MAX_RECORDS, false);
+    // Bytes already placed per ring in the sub-batch being assembled (linear
+    // scan: one or two rings in practice).
+    std::vector<std::pair<walring::Ring *, size_t>> sub_batch_bytes;
+    // PAD record scratch (only wrap-around sub-batches touch it).
+    std::vector<char> pad_buf;
     // Tracks which records in the current batch have already had their
     // completion resolved -- lets the catch block below resolve only the
     // ones an exception left unresolved, instead of risking a second
@@ -916,204 +943,303 @@ void XStore::WalWriterLoop(size_t shard_idx, std::string preopened_path, int pre
         // either) is the graceful-degradation behavior a durability layer
         // is expected to have.
         try {
-            // Group this batch by target WAL file -- always exactly one
-            // group in production (one data_store_dir per process); only
-            // tests running multiple data_store_dirs in one binary ever
-            // see more.
-            iovecs_by_file.clear();
+            // ClearRingRegistryForTests() (tests only) bumps the epoch: drop our
+            // cached Rings so we reopen through the registry instead of pinning a
+            // Ring (and the fd of a possibly deleted file) the registry forgot.
+            // The Ring's destructor closes its fd. One relaxed load per batch.
+            if (const uint64_t epoch = walring::RegistryEpoch(); epoch != seen_registry_epoch) {
+                rings.clear();
+                seen_registry_epoch = epoch;
+            }
             record_headers.clear();
             extra_epoch_bufs.clear();
             wal_path_cache.clear();
-            for (size_t i = 0; i < count; ++i) {
-                const WalRecord &record = batch[i];
-                auto [path_it, inserted] = wal_path_cache.try_emplace(record.db_base_path);
-                if (inserted) {
-                    path_it->second = WalFilePathFor(record.db_base_path, shard_idx);
-                }
-                record_wal_path[i] = path_it->second;
 
-                // Header piece: everything on the wire except row bytes
-                // (kept as separate iovecs below, no copy) -- recordLen and
-                // crc32c are patched in after being computed further down,
-                // but the iovec pointing at this buffer's final address can
-                // be pushed now since pwritev only reads it after the patch.
-                record_headers.emplace_back();
-                std::string &hdr = record_headers.back();
-                hdr.reserve(XStoreTunables::WAL_RECORD_HEADER_BYTES + record.db_name.size() + sizeof(uint64_t));
-                hdr.resize(8); // recordLen+crc32c placeholder, patched below
-                AppendPod<uint16_t>(hdr, static_cast<uint16_t>(record.db_name.size()));
-                AppendPod<uint16_t>(hdr, record.row_length);
-                AppendPod<int32_t>(hdr, static_cast<int32_t>(record.time_resolution));
-                AppendPod<uint32_t>(hdr, static_cast<uint32_t>(record.rows.size()));
-                hdr.append(record.db_name);
-                if (!record.rows.empty()) {
-                    AppendPod<uint64_t>(hdr, record.rows[0].epoch_time);
-                }
-
-                std::vector<struct iovec> &iov_list = iovecs_by_file[record_wal_path[i]];
-                iov_list.push_back({hdr.data(), hdr.size()});
-
-                uint32_t crc = Crc32cUpdate(Crc32cInit(), hdr.data() + 8, hdr.size() - 8);
-                size_t payload_size_after_header = hdr.size() - 8;
-                if (!record.rows.empty()) {
-                    const std::string &row_bytes = record.rows[0].row_bytes;
-                    iov_list.push_back({const_cast<char *>(row_bytes.data()), row_bytes.size()});
-                    crc = Crc32cUpdate(crc, row_bytes.data(), row_bytes.size());
-                    payload_size_after_header += row_bytes.size();
-                }
-                for (size_t r = 1; r < record.rows.size(); ++r) {
-                    extra_epoch_bufs.emplace_back();
-                    auto &eb = extra_epoch_bufs.back();
-                    uint64_t epoch = record.rows[r].epoch_time;
-                    std::memcpy(eb.data(), &epoch, sizeof(epoch));
-                    iov_list.push_back({eb.data(), eb.size()});
-                    crc = Crc32cUpdate(crc, eb.data(), eb.size());
-
-                    const std::string &row_bytes = record.rows[r].row_bytes;
-                    iov_list.push_back({const_cast<char *>(row_bytes.data()), row_bytes.size()});
-                    crc = Crc32cUpdate(crc, row_bytes.data(), row_bytes.size());
-                    payload_size_after_header += eb.size() + row_bytes.size();
-                }
-                crc = Crc32cFinal(crc);
-
-                uint32_t record_len = static_cast<uint32_t>(4 + payload_size_after_header);
-                std::memcpy(hdr.data(), &record_len, sizeof(record_len));
-                std::memcpy(hdr.data() + 4, &crc, sizeof(crc));
-            }
-
-            file_durable.clear();
-            for (auto &entry : iovecs_by_file) {
-                const std::string &wal_path = entry.first;
-                std::vector<struct iovec> &iov_list = entry.second;
-                file_durable[wal_path] = false;
-
-                auto it = wal_fds.find(wal_path);
-                int fd;
-                if (it == wal_fds.end()) {
-                    // Test-only path in production (StartWalWriters already
-                    // pre-opened+preallocated the one data_store_dir it
-                    // knows about) -- reached for a second/third distinct
-                    // data_store_dir in a multi-instance test binary.
-                    fd = OpenAndPreallocateWalFile(wal_path);
-                    if (fd < 0) {
-                        continue;
-                    }
-                    wal_fds.emplace(wal_path, fd);
-                    wal_fds_known_size.emplace(wal_path, XStoreTunables::WAL_FILE_PREALLOC_BYTES);
-                } else {
-                    fd = it->second;
-                }
-                size_t &known_size = wal_fds_known_size.at(wal_path);
-
-                // Chunk this file's iovecs into groups of at most
-                // WAL_PWRITEV_MAX_IOVECS -- the common case (few
-                // records/rows) is exactly one chunk, unchanged from
-                // before; only a large multi-row Batch/Range record (or
-                // enough concurrent records landing on the same file in one
-                // gather window) ever needs more than one pwritev call.
-                // Offset advances across chunks within THIS batch pass only
-                // -- the WAL file itself is still overwritten from offset 0
-                // on every writer-loop pass (see WalWriterLoop's own
-                // comment on this), unrelated to chunking.
-                //
-                // Runtime size check (see the NOTE on WAL_FILE_PREALLOC_BYTES
-                // in XStore_Tunables.h): that bound was sized assuming 1 row
-                // per WalRecord, true only for UnaryInsert. BatchInsert/
-                // RangeInsert can hand this loop a single year-bucket group
-                // with hundreds of thousands of rows, whose total on-wire
-                // bytes for one file can legitimately exceed the
-                // preallocated region. fdatasync() alone is only correct
-                // when a write never changes the file's size/metadata --
-                // true as long as every byte lands inside the file's actual
-                // current on-disk size (known_size), false the instant
-                // total_file_bytes below crosses it. Compared against
-                // known_size rather than the static WAL_FILE_PREALLOC_BYTES
-                // constant so that once a file has organically grown past
-                // the constant (fallocate never truncates, and every pass
-                // writes from offset 0 -- see the chunking comment above --
-                // so a file's real size is monotonically non-decreasing for
-                // its whole lifetime), a later smaller pass that fits inside
-                // that already-grown size doesn't keep needlessly paying for
-                // fsync(). Detected up front (before writing) rather than
-                // reacting to a surprising post-write file size, so the
-                // fallback to a real fsync() -- which DOES flush the
-                // size-changing metadata-journal update -- is decided once,
-                // not per chunk.
-                size_t total_file_bytes = 0;
-                for (const struct iovec &iov : iov_list) total_file_bytes += iov.iov_len;
-                bool oversized_write = total_file_bytes > known_size;
-                if (oversized_write) {
-                    spdlog::warn("[WAL] - Batch for {} totals {} bytes, exceeding its current on-disk size ({}) -- "
-                                 "this write grows the file further; falling back to a real fsync() for this "
-                                 "commit (one-time metadata-journal cost) instead of fdatasync().",
-                                 wal_path, total_file_bytes, known_size);
-                    // known_size is only bumped once the write+sync below
-                    // actually succeed -- bumping it here, before the write
-                    // is even attempted, would let a later smaller pass
-                    // wrongly assume the file already covers it (and use
-                    // fdatasync()) even though this write never durably
-                    // grew it.
-                }
-
-                bool file_write_ok = true;
-                off_t chunk_offset = 0;
-                for (size_t iov_start = 0; iov_start < iov_list.size(); ) {
-                    size_t iov_count = std::min(iov_list.size() - iov_start, XStoreTunables::WAL_PWRITEV_MAX_IOVECS);
-                    size_t chunk_bytes = 0;
-                    for (size_t i = iov_start; i < iov_start + iov_count; ++i) chunk_bytes += iov_list[i].iov_len;
-
-                    ssize_t written = pwritev(fd, iov_list.data() + iov_start, static_cast<int>(iov_count), chunk_offset);
-                    if (written != static_cast<ssize_t>(chunk_bytes)) {
-                        file_write_ok = false;
-                        break;
-                    }
-                    chunk_offset += static_cast<off_t>(chunk_bytes);
-                    iov_start += iov_count;
-                }
-
-                bool sync_ok = oversized_write ? (fsync(fd) == 0) : (fdatasync(fd) == 0);
-                if (!file_write_ok || !sync_ok) {
-                    spdlog::error("[WAL] - Failed to durably write/{} {}", oversized_write ? "fsync" : "fdatasync", wal_path);
-                    continue;
-                }
-                if (oversized_write) known_size = total_file_bytes;
-                file_durable[wal_path] = true;
-            }
-
-            // Apply every request's rows to their real data files -- same
-            // in-memory bytes already held from enqueue, no WAL re-read
-            // (WAL is only ever read back during ReplayWal, never
-            // mid-batch). A record only counts as durable if BOTH its
-            // WAL file's fsync succeeded above AND every one of its rows
-            // applied cleanly here -- either failing means the caller must
-            // be told, not silently given a success signal.
-            for (size_t i = 0; i < count; ++i) {
-                bool wal_ok = file_durable[record_wal_path[i]];
-                bool apply_ok = ApplyWalRecord(batch[i]);
-                bool record_ok = wal_ok && apply_ok;
-                if (!record_ok) {
-                    spdlog::error("[WAL] [DB: {}] - Record not durably persisted (wal_durable={}, applied={})",
-                                  batch[i].db_name, wal_ok, apply_ok);
-                }
+            // Resolves record i exactly once: result, then wake the SYNC caller.
+            auto complete = [&](size_t i, bool ok) {
                 if (batch[i].completion) {
-                    batch[i].completion->result = record_ok;
+                    batch[i].completion->result = ok;
                     batch[i].completion->sem.signal();
                 }
                 resolved[i] = true;
+            };
+
+            // Pass A -- no row data touched: per record, its WAL file, the
+            // ring serving that file, its exact ring-bound size
+            // (RECORD_FIXED_BYTES + dbName + rows * (epoch + row)), and how it
+            // is handled.
+            for (size_t i = 0; i < count; ++i) {
+                const WalRecord &record = batch[i];
+                if (i > 0 && record.db_base_path == batch[i - 1].db_base_path) {
+                    // Same DB as the previous record (the usual case: they hashed
+                    // to this shard together): same file, same ring.
+                    record_wal_path[i] = record_wal_path[i - 1];
+                    record_ring[i] = record_ring[i - 1];
+                } else {
+                    auto [path_it, inserted] = wal_path_cache.try_emplace(record.db_base_path);
+                    if (inserted) {
+                        path_it->second = WalFilePathFor(record.db_base_path, shard_idx);
+                    }
+                    record_wal_path[i] = path_it->second;
+
+                    auto ring_it = rings.find(record_wal_path[i]);
+                    if (ring_it == rings.end()) {
+                        std::shared_ptr<walring::Ring> ring = walring::GetOrOpenRing(record_wal_path[i], static_cast<uint32_t>(shard_idx));
+                        if (!ring) {
+                            // Non-empty without a valid ring header: a legacy WAL.
+                            // If InitDB's ReplayWal had run it would be a ring (or
+                            // empty) by now; reaching the first append means no
+                            // replay is coming for this file.
+                            spdlog::warn("[WAL] - {} has no ring header (legacy WAL never replayed?); initializing it as a ring",
+                                         record_wal_path[i]);
+                            ring = walring::GetOrOpenRing(record_wal_path[i], static_cast<uint32_t>(shard_idx), /*reinit_legacy=*/true);
+                        }
+                        if (ring) ring_it = rings.emplace(record_wal_path[i], std::move(ring)).first;
+                    }
+                    record_ring[i] = ring_it != rings.end() ? ring_it->second.get() : nullptr;
+                }
+                record_total[i] = walring::RECORD_FIXED_BYTES + record.db_name.size()
+                                + record.rows.size() * (sizeof(uint64_t) + record.row_length);
+                if (record_ring[i] == nullptr) {
+                    record_kind[i] = WalRecordKind::kFail;
+                } else if (record_total[i] > record_ring[i]->ring_bytes() / 2) {
+                    record_kind[i] = WalRecordKind::kInterim;
+                } else {
+                    record_kind[i] = WalRecordKind::kRing;
+                }
             }
 
-            // No per-commit checkpoint here (used to call
-            // InvalidateWalFileHeader on every durable batch -- a second
-            // fsync on every single commit). Not needed: ReplayWal already
-            // invalidates every shard file unconditionally on every
-            // startup, regardless of whether anything was found to replay
-            // or whether the apply succeeded. That alone fully closes the
-            // "orphaned record replays forever" bug -- the record left
-            // sitting here after a live commit gets naturally overwritten
-            // by this shard's next real write (offset-0 overwrite, same as
-            // always), and if no next write ever comes, the worst case is
-            // one redundant (harmless, idempotent) re-apply attempt the
-            // next time the process restarts, not a repeat-forever failure.
+            // Records are handled in queue order so same-timestamp writes
+            // apply in order: a maximal run of ring records forms one
+            // sub-batch (byte-bounded per ring); a non-ring record is its own
+            // step.
+            for (size_t pos = 0; pos < count; ) {
+                if (record_kind[pos] == WalRecordKind::kFail) {
+                    spdlog::error("[WAL] [DB: {}] - Unable to open the WAL ring {}", batch[pos].db_name, record_wal_path[pos]);
+                    complete(pos, false);
+                    ++pos;
+                    continue;
+                }
+                if (record_kind[pos] == WalRecordKind::kInterim) {
+                    // INTERIM (Task 7 replaces this with the ordering-rule
+                    // direct path): a record too big for the ring is not
+                    // logged. Apply it, then make it durable by fdatasync of
+                    // its data file before acking.
+                    const WalRecord &record = batch[pos];
+                    spdlog::warn("[WAL] [DB: {}] - Record of {} bytes exceeds half the ring ({} bytes); applying directly with a data-file fdatasync",
+                                 record.db_name, record_total[pos], record_ring[pos]->ring_bytes() / 2);
+                    bool ok = ApplyWalRecord(record);
+                    if (ok && !record.rows.empty()) {
+                        TimeStruct ts(record.rows.front().epoch_time, record.time_resolution);
+                        const int data_fd = open(CachedYearFilePath(record.db_base_path, ts.year).c_str(), O_RDONLY);
+                        ok = data_fd >= 0 && fdatasync(data_fd) == 0;
+                        if (data_fd >= 0) close(data_fd);
+                        if (!ok) spdlog::error("[WAL] [DB: {}] - Unable to fdatasync the data file for a direct-path record", record.db_name);
+                    }
+                    complete(pos, ok);
+                    ++pos;
+                    continue;
+                }
+
+                // Sub-batch = [pos, end): ring records until a non-ring
+                // record or a ring would exceed ring_bytes/4 (a lone record
+                // larger than that still forms its own sub-batch).
+                sub_batch_bytes.clear();
+                size_t end = pos;
+                for (; end < count && record_kind[end] == WalRecordKind::kRing; ++end) {
+                    auto entry = std::find_if(sub_batch_bytes.begin(), sub_batch_bytes.end(),
+                                              [&](const auto &e) { return e.first == record_ring[end]; });
+                    if (entry == sub_batch_bytes.end()) {
+                        sub_batch_bytes.emplace_back(record_ring[end], 0);
+                        entry = sub_batch_bytes.end() - 1;
+                    }
+                    if (entry->second != 0 && entry->second + record_total[end] > record_ring[end]->ring_bytes() / 4) break;
+                    entry->second += record_total[end];
+                }
+
+                // (1) Group by WAL file and reserve each file's ring space.
+                sub_batch_files.clear();
+                for (size_t i = pos; i < end; ++i) {
+                    SubBatchFile &file = sub_batch_files[record_ring[i]];
+                    file.ring = record_ring[i];
+                    file.total += record_total[i];
+                    record_file[i] = &file;
+                }
+                for (auto &entry : sub_batch_files) {
+                    SubBatchFile &file = entry.second;
+                    uint64_t start = 0;
+                    size_t pad = 0;
+                    if (file.ring->Reserve(file.total, std::chrono::milliseconds(walring::StallTimeoutMs()), start, pad)) {
+                        file.reserved = true;
+                        file.start = start;
+                        file.cursor = start;
+                        file.pad = pad;
+                    } else {
+                        wal_ring_stalls.fetch_add(1, std::memory_order_relaxed);
+                        spdlog::error("[WAL] - ring full ({}: {} bytes unflushed of {}, needs {} more): no checkpoint progress within {} ms; "
+                                      "failing the batch (overloaded)",
+                                      file.ring->path(), file.ring->HeadLsn() - file.ring->CheckpointLsn(), file.ring->ring_bytes(),
+                                      file.total, walring::StallTimeoutMs());
+                    }
+                }
+
+                // (2) Build each record's header (LSN assigned in queue order,
+                // contiguous per file) and its iovecs.
+                for (size_t i = pos; i < end; ++i) {
+                    SubBatchFile &file = *record_file[i];
+                    if (!file.reserved) continue;
+                    const WalRecord &record = batch[i];
+                    const uint64_t lsn = file.cursor;
+                    file.cursor += record_total[i];
+
+                    // Header piece: everything on the wire except row bytes
+                    // (kept as separate iovecs below, no copy) -- recordLen and
+                    // crc32c are patched in after being computed further down,
+                    // but the iovec pointing at this buffer's final address can
+                    // be pushed now since pwritev only reads it after the patch.
+                    record_headers.emplace_back();
+                    std::string &hdr = record_headers.back();
+                    hdr.reserve(XStoreTunables::WAL_RECORD_HEADER_BYTES + sizeof(uint64_t) + record.db_name.size() + sizeof(uint64_t));
+                    hdr.resize(16); // recordLen+crc32c placeholder (patched below), then the LSN
+                    std::memcpy(hdr.data() + 8, &lsn, sizeof(lsn));
+                    AppendPod<uint16_t>(hdr, static_cast<uint16_t>(record.db_name.size()));
+                    AppendPod<uint16_t>(hdr, record.row_length);
+                    AppendPod<int32_t>(hdr, static_cast<int32_t>(record.time_resolution));
+                    AppendPod<uint32_t>(hdr, static_cast<uint32_t>(record.rows.size()));
+                    hdr.append(record.db_name);
+                    if (!record.rows.empty()) {
+                        AppendPod<uint64_t>(hdr, record.rows[0].epoch_time);
+                    }
+
+                    std::vector<struct iovec> &iov_list = file.iov;
+                    iov_list.push_back({hdr.data(), hdr.size()});
+
+                    // CRC covers everything after itself (the LSN included).
+                    uint32_t crc = Crc32cUpdate(Crc32cInit(), hdr.data() + 8, hdr.size() - 8);
+                    size_t payload_size_after_header = hdr.size() - 8;
+                    if (!record.rows.empty()) {
+                        const std::string &row_bytes = record.rows[0].row_bytes;
+                        iov_list.push_back({const_cast<char *>(row_bytes.data()), row_bytes.size()});
+                        crc = Crc32cUpdate(crc, row_bytes.data(), row_bytes.size());
+                        payload_size_after_header += row_bytes.size();
+                    }
+                    for (size_t r = 1; r < record.rows.size(); ++r) {
+                        extra_epoch_bufs.emplace_back();
+                        auto &eb = extra_epoch_bufs.back();
+                        uint64_t epoch = record.rows[r].epoch_time;
+                        std::memcpy(eb.data(), &epoch, sizeof(epoch));
+                        iov_list.push_back({eb.data(), eb.size()});
+                        crc = Crc32cUpdate(crc, eb.data(), eb.size());
+
+                        const std::string &row_bytes = record.rows[r].row_bytes;
+                        iov_list.push_back({const_cast<char *>(row_bytes.data()), row_bytes.size()});
+                        crc = Crc32cUpdate(crc, row_bytes.data(), row_bytes.size());
+                        payload_size_after_header += eb.size() + row_bytes.size();
+                    }
+                    crc = Crc32cFinal(crc);
+
+                    uint32_t record_len = static_cast<uint32_t>(4 + payload_size_after_header);
+                    // The LSNs handed out above assumed record_total[i]; a row
+                    // whose bytes are not row_length long would break that
+                    // contiguity, so fail the batch instead of writing it.
+                    if (static_cast<size_t>(record_len) + 4 != record_total[i]) {
+                        throw std::runtime_error("WAL record size differs from its planned ring size");
+                    }
+                    std::memcpy(hdr.data(), &record_len, sizeof(record_len));
+                    std::memcpy(hdr.data() + 4, &crc, sizeof(crc));
+                }
+
+                // (3) Write + fdatasync each reserved file, then advance its head.
+                for (auto &entry : sub_batch_files) {
+                    SubBatchFile &file = entry.second;
+                    if (!file.reserved) continue;
+                    walring::Ring &ring = *file.ring;
+                    const int fd = ring.fd();
+
+                    bool file_write_ok = true;
+                    if (file.pad > 0) {
+                        // Tail of the lap too small for the run: fill it with a PAD
+                        // record so replay can step over it.
+                        const uint64_t pad_lsn = file.start - file.pad;
+                        pad_buf.resize(file.pad);
+                        walring::BuildPad(pad_buf.data(), file.pad, pad_lsn);
+                        file_write_ok = pwrite(fd, pad_buf.data(), file.pad,
+                                               static_cast<off_t>(walring::RingOffset(pad_lsn, ring.ring_bytes())))
+                                        == static_cast<ssize_t>(file.pad);
+                    }
+
+                    // Chunk this file's iovecs into groups of at most
+                    // WAL_PWRITEV_MAX_IOVECS -- the common case (few
+                    // records/rows) is exactly one chunk; only a large
+                    // multi-row Batch/Range record (or enough concurrent
+                    // records landing on the same file in one gather window)
+                    // ever needs more than one pwritev call. The run never
+                    // straddles the ring end (PlanAppend), so one base offset
+                    // plus a running chunk offset is enough.
+                    off_t chunk_offset = static_cast<off_t>(walring::RingOffset(file.start, ring.ring_bytes()));
+                    for (size_t iov_start = 0; file_write_ok && iov_start < file.iov.size(); ) {
+                        size_t iov_count = std::min(file.iov.size() - iov_start, XStoreTunables::WAL_PWRITEV_MAX_IOVECS);
+                        size_t chunk_bytes = 0;
+                        for (size_t k = iov_start; k < iov_start + iov_count; ++k) chunk_bytes += file.iov[k].iov_len;
+
+                        ssize_t written = pwritev(fd, file.iov.data() + iov_start, static_cast<int>(iov_count), chunk_offset);
+                        if (written != static_cast<ssize_t>(chunk_bytes)) {
+                            file_write_ok = false;
+                            break;
+                        }
+                        chunk_offset += static_cast<off_t>(chunk_bytes);
+                        iov_start += iov_count;
+                    }
+
+                    // Always fdatasync: the ring is fixed-size and pre-zeroed, so
+                    // no write ever changes file size/metadata.
+                    const bool sync_ok = (fdatasync(fd) == 0) && !walring::ConsumeInjectedWalSyncFailure();
+                    if (!file_write_ok || !sync_ok) {
+                        spdlog::error("[WAL] - Failed to durably write/fdatasync {}", ring.path());
+                        continue;
+                    }
+                    file.durable = true;
+                    ring.CommitAppended(file.start + file.total);
+                }
+
+                // (4) Apply every record's rows to their real data files --
+                // same in-memory bytes already held from enqueue, no WAL
+                // re-read (WAL is only ever read back during ReplayWal, never
+                // mid-batch). A record only counts as durable if BOTH its WAL
+                // file's fdatasync succeeded above AND every one of its rows
+                // applied cleanly here -- either failing means the caller must
+                // be told, not silently given a success signal. A record whose
+                // ring space could not be reserved, or whose WAL write/sync
+                // failed, is not applied at all.
+                for (size_t i = pos; i < end; ++i) {
+                    const SubBatchFile &file = *record_file[i];
+                    // Invariant: a data-file write only happens for a record whose
+                    // ring record is durable (inside [checkpoint, head)). A record
+                    // whose space timed out or whose WAL write/fdatasync failed is
+                    // neither applied nor acknowledged.
+                    if (!file.reserved || !file.durable) {
+                        record_ok[i] = false;
+                        continue;
+                    }
+                    const bool apply_ok = ApplyWalRecord(batch[i]);
+                    record_ok[i] = apply_ok;
+                    if (!apply_ok) {
+                        spdlog::error("[WAL] [DB: {}] - Record is in the WAL but its rows failed to apply", batch[i].db_name);
+                    }
+                }
+
+                // (5) Publish applied LSNs, THEN release the callers, so a
+                // returned SYNC insert is already visible in the ring accounting.
+                for (auto &entry : sub_batch_files) {
+                    if (entry.second.durable) entry.second.ring->PublishApplied(entry.second.start + entry.second.total);
+                }
+                for (size_t i = pos; i < end; ++i) complete(i, record_ok[i]);
+                pos = end;
+            }
+
+            // No per-commit checkpoint here: the checkpoint (Task 4) trails
+            // applied_lsn and is persisted in the ring header, so there is
+            // nothing to invalidate per batch.
         } catch (const std::exception &ex) {
             spdlog::error("[WAL] - Writer loop caught exception, failing this batch: {}", ex.what());
             for (size_t i = 0; i < count; ++i) {

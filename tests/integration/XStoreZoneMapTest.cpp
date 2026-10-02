@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 #include "include/XStore/XStore.h"
 #include "include/XStore/XStore_ZoneMap.h"
+#include "include/XStore/XStore_Crc32c.h"
+#include "include/XStore/XStore_WalRing.h"
 #include "include/DataStructs/TimeStruct.h"
 #include "XStoreTestSupport.h"
 #include <algorithm>
@@ -1431,6 +1433,47 @@ TEST_F(XStoreZoneMapTest, InitDbFoldsWalReplayedRowsWhenSidecarIsMissing) {
     std::string zmap_path = fmt::format("{}/{}.zmap", db_base_path, 2023);
     ASSERT_TRUE(std::filesystem::exists(data_path));
     ASSERT_TRUE(std::filesystem::exists(zmap_path));
+
+    // INTERIM (WAL ring Task 2 -> Task 5): the insert's record now lives in a
+    // ring file, and ring-aware replay does not exist yet (ReplayWal skips
+    // ring files). To keep exercising what this test is about -- replay of a
+    // WAL record folds into the zone map via a forced rebuild -- turn the
+    // shard file that took the insert back into a LEGACY WAL file holding the
+    // same record, which the unchanged legacy replay path still consumes.
+    // Task 5: delete this block and replay the ring record itself.
+    {
+        std::shared_ptr<walring::Ring> busy;
+        for (auto &ring : walring::AllRings()) {
+            if (ring->path().rfind(std::filesystem::path(db_base_path).parent_path().string(), 0) == 0 && ring->HeadLsn() > 0) busy = ring;
+        }
+        ASSERT_NE(busy, nullptr) << "no ring took the insert";
+        XStore_Proto::RowData wal_row;
+        wal_row.add_fielddata()->set_doubledata(42.0);
+        std::string row_bytes(kPreexistRowLength, '\0');
+        wal_row.SerializeToArray(row_bytes.data(), static_cast<int>(wal_row.ByteSizeLong()));
+        std::string payload;
+        auto put = [&](auto value) { payload.append(reinterpret_cast<const char *>(&value), sizeof(value)); };
+        put(static_cast<uint16_t>(db_name.size()));
+        put(static_cast<uint16_t>(kPreexistRowLength));
+        put(static_cast<int32_t>(XStore_Proto::SECOND));
+        put(static_cast<uint32_t>(1));
+        payload.append(db_name);
+        put(static_cast<uint64_t>(kYear2023StartEpoch + kRowIndex));
+        payload.append(row_bytes);
+        std::string record;
+        const uint32_t record_len = static_cast<uint32_t>(4 + payload.size());
+        const uint32_t crc = Crc32c(payload.data(), payload.size());
+        record.append(reinterpret_cast<const char *>(&record_len), 4);
+        record.append(reinterpret_cast<const char *>(&crc), 4);
+        record.append(payload);
+        const std::string wal_path = busy->path();
+        walring::ClearRingRegistryForTests();   // the old Ring (and its head) is gone with the file's format
+        int fd = open(wal_path.c_str(), O_WRONLY | O_TRUNC);
+        ASSERT_GE(fd, 0);
+        ASSERT_EQ(write(fd, record.data(), record.size()), static_cast<ssize_t>(record.size()));
+        ASSERT_EQ(fsync(fd), 0);
+        close(fd);
+    }
 
     // Setup guard: the WAL must genuinely still hold this insert's record,
     // or "replay" below replays nothing and the test proves nothing. A live

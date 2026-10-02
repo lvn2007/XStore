@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 #include "include/XStore/XStore.h"
 #include "include/XStore/XStore_Crc32c.h"
+#include "include/XStore/XStore_WalRing.h"
 #include "XStoreTestSupport.h"
 #include <chrono>
 #include <filesystem>
@@ -957,16 +958,11 @@ TEST_F(XStoreWalTest, ReplayRecoversMultiRowUnappliedRecord) {
 // builds one WalRecord per year-bucket group, so a single call with enough
 // rows in one year can legitimately exceed that bound. This drives a
 // single-year batch past WAL_FILE_PREALLOC_BYTES and confirms: (1) the
-// write still durably lands and every row reads back correctly
-// (WalWriterLoop's oversized_write fallback to a real fsync() instead of
-// fdatasync()), (2) the corresponding shard file's on-disk size actually
-// grew to cover it (proof the fallback engaged, not that the insert
-// happened to succeed some other way) and stayed within an explainable
-// bound rather than growing unboundedly, and (3) a subsequent ReplayWal
-// pass over that larger-than-normal file doesn't crash, and every row still
-// replays correctly (ReplayWal's streaming reader now bounds a single
-// allocation by WAL_REPLAY_MAX_RECORD_BYTES per record, not by the file's
-// overall size -- see that constant's comment).
+// write still durably lands and every row reads back correctly (WAL ring
+// layout: the record exceeds ring_bytes/2, so it takes the interim direct
+// path -- apply + data-file fdatasync -- instead of the ring), (2) no shard
+// file grew past its fixed ring and no ring head moved, and (3) a subsequent
+// InitDB doesn't crash or corrupt the data.
 TEST_F(XStoreWalTest, BatchInsertRecordExceedingWalPreallocBoundPersistsAndReplays) {
     XStore store;
     CreateTestDb(store, "WALOVERSIZEBATCH", XStore_Proto::SECOND, 1024);
@@ -1010,31 +1006,27 @@ TEST_F(XStoreWalTest, BatchInsertRecordExceedingWalPreallocBoundPersistsAndRepla
     ASSERT_TRUE(last_q.has_data()) << "last row";
     EXPECT_DOUBLE_EQ(last_q.data().fielddata(0).doubledata(), static_cast<double>(kRowCount - 1));
 
-    // At least one shard file must have grown past WAL_FILE_PREALLOC_BYTES
-    // -- proof the oversized_write fallback actually engaged -- and that
-    // growth must stay within an explainable bound (this record's own
-    // size plus a generous margin), not unbounded.
+    // WAL ring layout: the shard files are fixed-size rings (header + ring_bytes)
+    // and never grow. A record this large (> ring_bytes/2) cannot be logged at
+    // all; it takes the interim direct path (apply + data-file fdatasync), so no
+    // shard file holds it and none exceeds header + one ring.
     std::filesystem::path wal_dir = scratch->test_root / "DataStore" / "WAL";
-    uintmax_t max_shard_bytes = 0;
     for (size_t shard_idx = 0; shard_idx < XStoreTunables::WAL_SHARD_COUNT; ++shard_idx) {
         std::filesystem::path shard_file = wal_dir / ("shard_" + std::to_string(shard_idx) + ".WAL");
         if (!std::filesystem::exists(shard_file)) continue;
-        max_shard_bytes = std::max(max_shard_bytes, static_cast<uintmax_t>(std::filesystem::file_size(shard_file)));
+        EXPECT_LE(std::filesystem::file_size(shard_file), walring::HEADER_REGION_BYTES + XStoreTunables::WAL_RING_BYTES)
+            << shard_file << " grew past its ring";
     }
-    EXPECT_GT(max_shard_bytes, XStoreTunables::WAL_FILE_PREALLOC_BYTES)
-        << "expected at least one shard file to have grown past the preallocated bound";
-    EXPECT_LT(max_shard_bytes, XStoreTunables::WAL_FILE_PREALLOC_BYTES + 10ull * 1024 * 1024)
-        << "growth should be explainable by this one oversized record, not unbounded";
+    for (auto &ring : walring::AllRings()) {
+        if (ring->path().rfind(scratch->test_root.string(), 0) != 0) continue;
+        EXPECT_EQ(ring->HeadLsn(), 0u) << ring->path() << ": the oversized record must not be appended to the ring";
+    }
 
     // Re-running InitDB (same trick ReplayRecoversMultiRowUnappliedRecord
-    // above uses to simulate a restart within one test process) forces
-    // ReplayWal to stream-parse this now-larger-than-default file again. The
-    // record was already durably applied above, so this is a redundant,
-    // idempotent re-apply (see WalWriterLoop's "no per-commit checkpoint"
-    // comment) -- what this actually proves is that ReplayWal's streaming
-    // reader correctly walks a real record this large (well under
-    // WAL_REPLAY_MAX_RECORD_BYTES) across however many WAL_REPLAY_READ_
-    // CHUNK_BYTES-sized reads it takes, not just that a small record works.
+    // above uses to simulate a restart within one test process) must leave the
+    // already-applied data intact. Ring-aware replay is Task 5; until then
+    // ReplayWal leaves ring files alone, so this proves the restart path
+    // neither crashes on nor corrupts the data after a direct-path write.
     store.InitDB();
     XStore_Proto::UnaryQuery_REP replay_q;
     store.UnaryQuery(base_ts, "WALOVERSIZEBATCH", &replay_q);

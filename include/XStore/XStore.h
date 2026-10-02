@@ -35,6 +35,8 @@
 #define ERROR_LEN 8
 #define CRITICAL_LEN 11
 
+namespace walring { class Ring; }
+
 class XStore {
     public:
         // Convention: every directory-path member/return value in this class
@@ -312,6 +314,9 @@ class XStore {
         // so any (theoretical) use before StartWalWriters runs still stays
         // in-bounds rather than modulo-by-zero.
         static std::atomic<size_t> active_wal_shard_count;
+        // Times a WAL writer gave up waiting for ring space (walring::Ring::Reserve
+        // timed out) and failed a whole sub-batch as "overloaded". Process-wide.
+        static std::atomic<uint64_t> wal_ring_stalls;
 
         // Set once by Shutdown(); see IsShutDown().
         static std::atomic<bool> shutdown_flag_;
@@ -1254,22 +1259,23 @@ class XStore {
         // for more to arrive on the same shard --
         // stopping the moment the batch fills or the window elapses,
         // whichever first -- so genuinely concurrent commits share one
-        // fsync instead of each paying for their own. Fsyncs the batch to
-        // WAL, applies every record, then releases every synchronous
-        // caller's completion future. Never ftruncates the file -- it's
-        // preallocated once (see StartWalWriters/OpenAndPreallocateWalFile)
-        // and each batch's self-framed, CRC-checked bytes simply overwrite
-        // from offset 0; no per-commit checkpoint either (see
-        // InvalidateWalFileHeader for why that's safe to skip here).
+        // fsync instead of each paying for their own. Appends the batch to
+        // this shard's WAL ring file (LSN-stamped records, see
+        // XStore_WalRing.h), in byte-bounded sub-batches (<= ring_bytes/4
+        // per ring each) of: reserve ring space -> pwritev -> fdatasync ->
+        // apply every record -> PublishApplied -> release every synchronous
+        // caller's completion. A full ring stalls, then fails the sub-batch
+        // ("overloaded"), instead of overwriting unflushed records. Records
+        // larger than ring_bytes/2 take an interim direct path (apply + data
+        // file fdatasync, no ring record).
         //
-        // preopened_path/preopened_fd: when StartWalWriters already
-        // opened+fallocated this shard's file up front (the production
-        // case, one known data_store_dir), seeds this thread's local fd
-        // cache with it so the very first batch skips the lazy-open path.
-        // Empty path / fd < 0 means "no such shard file yet" (open lazily
-        // on first use instead) -- true for shard indices beyond the
-        // constructor's data_store_dir in multi-directory test scenarios.
-        static void WalWriterLoop(size_t shard_idx, std::string preopened_path, int preopened_fd);
+        // preopened_ring: the ring StartWalWriters already opened for this
+        // shard (production, one known data_store_dir); seeds this thread's
+        // per-path ring cache. nullptr = open lazily on first use via
+        // walring::GetOrOpenRing (shards beyond the constructor's
+        // data_store_dir in multi-directory test scenarios, or a legacy WAL
+        // file that was still awaiting replay at startup).
+        static void WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preopened_ring);
 
 #ifdef XSTORE_WAL_STATS_ENABLED
         // Debug/benchmark-only (XSTORE_WAL_STATS): periodically logs each

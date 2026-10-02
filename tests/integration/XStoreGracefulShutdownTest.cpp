@@ -212,20 +212,18 @@ IndexDirtyFlags ReadDirtyFlags(const std::filesystem::path &dir) {
     return flags;
 }
 
-// After a SIGKILL the WAL still holds each shard's last batch. Replaying it
-// (a) force-rebuilds the years it touched whatever the dirty flag says, which
-// would hide what this test is about, and (b) re-extends the year file to its
-// full length. The SYNC inserts were already applied to the data file, so
-// checkpoint the WAL by hand (zero each shard's leading recordLen, exactly
-// what XStore::InvalidateWalFileHeader does) to leave the dirty flag as the
-// only rebuild trigger.
+// After a SIGKILL the WAL still holds each shard's un-checkpointed records.
+// Replaying them would (a) force-rebuild the years they touched whatever the
+// dirty flag says, which would hide what this test is about, and (b) re-extend
+// the year file to its full length. The SYNC inserts were already applied to
+// the data file, so checkpoint every WAL ring by hand (checkpoint_lsn := end of
+// log, persisted in the ring header) to leave the dirty flag as the only
+// rebuild trigger. (Until the ring-aware replay lands, ReplayWal skips ring
+// files outright, so this is not yet load-bearing -- it keeps the test valid
+// once replay consults checkpoint_lsn.)
 void CheckpointWalByHand(const std::filesystem::path &dir) {
     for (auto &entry : std::filesystem::directory_iterator(dir / "DataStore" / "WAL")) {
-        int fd = open(entry.path().c_str(), O_WRONLY);
-        ASSERT_GE(fd, 0);
-        const uint32_t zero = 0;
-        EXPECT_EQ(pwrite(fd, &zero, sizeof(zero), 0), static_cast<ssize_t>(sizeof(zero)));
-        close(fd);
+        EXPECT_TRUE(xstore_test::CheckpointRingFileByHand(entry.path().string())) << entry.path();
     }
 }
 
