@@ -3943,6 +3943,28 @@ TEST(XStorePreadPoolTest, ConcurrentParallelForFromManyThreadsNeverMissesOrDupli
                                       "XStorePreadPool lost or duplicated work under concurrent callers";
 }
 
+// The pool's workers are detached threads blocked on a function-local static
+// queue. If that queue is destroyed by exit()'s static destructors while a
+// worker is still retiring its last ticket, the worker faults (~18% of
+// processes before the fix). "threadsafe" death tests re-exec the binary, so
+// each child is a fresh process whose pool has not started yet.
+TEST(XStorePreadPoolDeathTest, ProcessExitAfterParallelForNeverCrashesDetachedWorkers) {
+    GTEST_FLAG_SET(death_test_style, "threadsafe");
+    for (int i = 0; i < 40; i++) {
+        EXPECT_EXIT(
+            {
+                std::atomic<size_t> sum{0};
+                XStorePreadPool::ParallelFor(64, [&](size_t k) {
+                    sum.fetch_add(k, std::memory_order_relaxed);
+                    for (volatile int j = 0; j < 2000; ++j) {}
+                });
+                std::exit(0);
+            },
+            ::testing::ExitedWithCode(0), "")
+            << "child " << i;
+    }
+}
+
 // ==================== PERCENTILE / DISTINCTCOUNT / TOPK (exact mode) ====================
 // All three are real full-scan aggregates (ProcessFileRangeCollectValues,
 // no zone-map pushdown -- see that kernel's comment in XStore.h) so there

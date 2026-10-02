@@ -50,8 +50,15 @@ struct Job {
 // size a real cross-call concurrency cap (see XStore_Tunables.h) rather
 // than a per-call one.
 moodycamel::BlockingConcurrentQueue<Job *> &TicketQueue() {
-    static moodycamel::BlockingConcurrentQueue<Job *> queue;
-    return queue;
+    // Heap-allocated and deliberately never freed. The workers are detached
+    // and sit blocked on this queue for the life of the process, so a
+    // function-local static would be destroyed by exit()'s static
+    // destructors while a worker could still be retiring its last ticket
+    // and looping back into wait_dequeue -- a use-after-destruction that
+    // crashed ~18% of processes that exited right after a ParallelFor.
+    // A leaked queue stays valid until the process is torn down.
+    static auto *queue = new moodycamel::BlockingConcurrentQueue<Job *>();
+    return *queue;
 }
 
 // Set via Init(), read once by PoolSize() at first-use. Relaxed: Init() is
