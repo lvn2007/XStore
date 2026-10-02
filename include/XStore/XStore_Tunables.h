@@ -667,4 +667,16 @@ inline constexpr size_t      BATCH_QUERY_PARALLEL_PREAD_MIN_ROWS  = 256;
 // transform itself is expensive (this measurement used 64-byte rows;
 // unproven at, say, a 128-column/1KB-row dataset).
 
+// --- WAL ring + paced checkpoint (Durability C) ---
+inline constexpr uint64_t    WAL_RING_BYTES                = 64u << 20;   // per-shard ring size (bytes of log retained between checkpoints)
+inline constexpr size_t      WAL_DIRECT_MIN_BYTES          = 1u << 20;    // batch/range inserts at least this big skip the WAL (direct apply)
+inline constexpr size_t      WAL_DIRECT_PRESSURE_MIN_BYTES = 64u << 10;   // same bypass threshold while the ring is under pressure
+inline constexpr double      WAL_CKPT_SOFT_FILL            = 0.25;        // ring fill fraction that starts an opportunistic checkpoint
+inline constexpr double      WAL_CKPT_CYCLE_FILL           = 0.50;        // fill fraction that forces a full checkpoint cycle
+inline constexpr double      WAL_STALL_FILL                = 0.90;        // fill fraction at which writers stall for the checkpoint
+inline constexpr unsigned    WAL_STALL_TIMEOUT_MS          = 5000;        // max writer stall before the insert is failed
+inline constexpr unsigned    WAL_CKPT_MAX_AGE_MS           = 5000;        // checkpoint at least this often while the ring is non-empty
+inline constexpr unsigned    WAL_CKPT_IDLE_MS              = 50;          // idle time with no WAL traffic that triggers a checkpoint
+inline constexpr size_t      WAL_FLUSH_CHUNK_BYTES         = 4u << 20;    // paced data-file flush granularity during a checkpoint
+
 } // namespace XStoreTunables

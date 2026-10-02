@@ -410,6 +410,8 @@ add_library(xstore_core STATIC
         src/XStore/XStore_Management.cpp
         src/XStore/XStore_IO.cpp
         src/XStore/XStore_Wal.cpp
+        src/XStore/XStore_WalRing.cpp
+        include/XStore/XStore_WalRing.h
         src/XStore/XStore_ZoneMap.cpp
         src/XStore/XStore_CatIdx.cpp
         src/XStore/XStore_PatternMatch.cpp

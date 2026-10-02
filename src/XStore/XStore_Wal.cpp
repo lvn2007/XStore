@@ -1,6 +1,7 @@
 // src/XStore/XStore_Wal.cpp
 #include "include/XStore/XStore.h"
 #include "include/XStore/XStore_Crc32c.h"
+#include "include/XStore/XStore_WalRing.h"
 #include "include/DataStructs/FileRangeLock.h"
 #include "include/DataStructs/TimeStruct.h"
 #include <spdlog/fmt/fmt.h>
@@ -109,6 +110,58 @@ bool XStore::ParseWalRecord(const char *data, size_t len, size_t &consumed, XSto
 
     consumed = 4 + record_len;
     return true;
+}
+
+// Record v2 (ring format): [u32 recordLen][u32 crc32c][u64 lsn][u16 dbNameLen]
+// [u16 rowLength][i32 timeRes][u32 rowCount][dbName][rows as in v1].
+// recordLen counts every byte after itself; crc32c covers lsn..last row byte.
+// dbNameLen == walring::PAD_DB_NAME_LEN marks a PAD (ring-end filler, no rows).
+XStore::RingParse XStore::ParseWalRecordV2(const char *data, size_t len, uint64_t expected_lsn, size_t &consumed, XStore::WalRecord &out_record) {
+    if (len < walring::RECORD_FIXED_BYTES) return RingParse::kEnd;
+    uint32_t record_len;
+    std::memcpy(&record_len, data, 4);
+    // Widened before the addition, same wraparound reasoning as ParseWalRecord.
+    if (record_len < walring::RECORD_FIXED_BYTES - 4 || len < static_cast<size_t>(record_len) + 4) return RingParse::kEnd;
+
+    uint32_t stored_crc;
+    std::memcpy(&stored_crc, data + 4, 4);
+    const char *payload = data + 8;
+    const size_t payload_len = record_len - 4;
+    if (Crc32c(payload, payload_len) != stored_crc) return RingParse::kEnd;
+
+    uint64_t lsn; std::memcpy(&lsn, payload, 8);
+    if (lsn != expected_lsn) return RingParse::kEnd;
+
+    size_t off = 8;
+    uint16_t db_name_len; std::memcpy(&db_name_len, payload + off, 2); off += 2;
+    uint16_t row_length;  std::memcpy(&row_length, payload + off, 2); off += 2;
+    int32_t time_res;     std::memcpy(&time_res, payload + off, 4); off += 4;
+    uint32_t row_count;   std::memcpy(&row_count, payload + off, 4); off += 4;
+
+    if (db_name_len == walring::PAD_DB_NAME_LEN) {
+        consumed = 4 + static_cast<size_t>(record_len);
+        return RingParse::kPad;
+    }
+
+    if (off + db_name_len > payload_len) return RingParse::kEnd;
+    const size_t expected_rows_bytes = static_cast<size_t>(row_count) * (8u + row_length);
+    if (off + db_name_len + expected_rows_bytes != payload_len) return RingParse::kEnd;
+
+    out_record.db_name.assign(payload + off, db_name_len);
+    off += db_name_len;
+    out_record.row_length = row_length;
+    out_record.time_resolution = static_cast<XStore_Proto::TimeUnit>(time_res);
+    out_record.rows.clear();
+    out_record.rows.reserve(row_count);
+    for (uint32_t i = 0; i < row_count; ++i) {
+        XStore::WalRow row;
+        std::memcpy(&row.epoch_time, payload + off, 8); off += 8;
+        row.row_bytes.assign(payload + off, row_length);
+        off += row_length;
+        out_record.rows.push_back(std::move(row));
+    }
+    consumed = 4 + static_cast<size_t>(record_len);
+    return RingParse::kOk;
 }
 
 namespace {

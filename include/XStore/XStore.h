@@ -985,6 +985,14 @@ class XStore {
                                       const XStore_Proto::ConfigStruct &cfg_struct,
                                       const std::set<unsigned short> &force_rebuild_years);
 
+        // Ring-format (record v2: ParseWalRecord's layout plus a u64 LSN after
+        // the CRC; see XStore_WalRing.h) parser. kOk = real record (out_record
+        // filled), kPad = PAD filler to skip (consumed set, no rows), kEnd =
+        // torn/CRC-bad/LSN-mismatch (a stale lap's bytes carry a different
+        // LSN) -- stop replay, consumed untouched.
+        enum class RingParse { kOk, kPad, kEnd };
+        static RingParse ParseWalRecordV2(const char *data, size_t len, uint64_t expected_lsn, size_t &consumed, WalRecord &out_record);
+
     private:
         // Get current base directory
         std::string GetBaseDir();
