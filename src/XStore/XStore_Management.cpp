@@ -4,15 +4,18 @@
 #include "include/XStore/XStore_PreadPool.h"
 #include "include/XStore/XStore_WireEncode.h"
 #include "include/XStore/XStore_WalRing.h"
+#include "include/XStore/XStore_WalCheckpoint.h"
 #include <spdlog/fmt/fmt.h>
 #include "include/Logger/Logger.h"
 #include <algorithm>
+#include <cerrno>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <set>
 #include <stdexcept>
 #include <unordered_set>
 
@@ -932,6 +935,25 @@ void XStore::RebuildStaleZoneMapsForDb(const std::string &db_name, const std::st
     });
 }
 
+namespace {
+// "The DB this record was written for is gone" (deleted, or never recreated before replay) is the one
+// benign reason an apply fails; a DB that is not positively gone failing to apply is an I/O or
+// permission problem that must not be papered over by moving the checkpoint past the record.
+bool PositivelyGone(const std::string &path) {
+    std::error_code ec;
+    const std::filesystem::file_status st = std::filesystem::status(path, ec);
+    if (!ec) return st.type() == std::filesystem::file_type::not_found;
+    return ec == std::errc::no_such_file_or_directory || ec == std::errc::not_a_directory;
+}
+// FAIL-SAFE: the DB counts as deleted only when the filesystem positively says its directory or CFG is
+// gone (not_found / ENOENT / ENOTDIR). EACCES (a directory that lost search permission), EIO, ... mean
+// "cannot tell" => the DB is treated as existing, so a failed apply fences the shard instead of
+// silently skipping the record.
+bool DbStillExists(const std::string &db_base_path, const std::string &db_name) {
+    return !PositivelyGone(db_base_path) && !PositivelyGone(db_base_path + "/" + db_name + ".CFG");
+}
+}  // namespace
+
 XStore::ReplayedYearMap XStore::ReplayWal() {
     ReplayedYearMap replayed_years;
 
@@ -942,153 +964,374 @@ XStore::ReplayedYearMap XStore::ReplayWal() {
 
     for (size_t shard_idx = 0; shard_idx < XStoreTunables::WAL_SHARD_COUNT; ++shard_idx) {
         std::filesystem::path wal_path = wal_dir / ("shard_" + std::to_string(shard_idx) + ".WAL");
-        // Ring-format shard file (valid ring header): ring-aware replay is
-        // Task 5. Until then leave it strictly alone -- the legacy parse
-        // below would read the header as a record and, worse,
-        // InvalidateWalFileHeader would zero the header's first 4 bytes.
-        {
-            int ring_fd = open(wal_path.c_str(), O_RDONLY);
-            if (ring_fd >= 0) {
-                walring::RingHeader ring_header;
-                const bool is_ring = walring::ReadBestHeader(ring_fd, ring_header);
-                close(ring_fd);
-                if (is_ring) continue;
-            }
-        }
-
-        // No file_size()==0 fast-skip: shard files are now preallocated
-        // (see OpenAndPreallocateWalFile) and stay at that fixed size even
-        // when logically empty, so a real "nothing pending" file no longer
-        // reads as size 0 -- ParseWalRecord's CRC check below correctly
-        // and cheaply finds nothing on the first attempt instead.
-        if (!std::filesystem::exists(wal_path)) {
-            continue;
-        }
-
-        // Stat purely to hand to ReclaimWalFileSize afterward (it needs to
-        // know whether this file grew past default) -- no longer used to
-        // gate whether replay happens at all, see the streaming read below.
+        // Every replay attempt starts unfenced, including when the file is missing/empty this time.
+        walring::UnfenceWalFile(wal_path.string());
         std::error_code file_size_ec;
-        uintmax_t on_disk_bytes = std::filesystem::file_size(wal_path, file_size_ec);
+        const uintmax_t on_disk_bytes = std::filesystem::file_size(wal_path, file_size_ec);
         if (file_size_ec) {
-            spdlog::error("[WAL REPLAY] - Unable to stat {}: {}", wal_path.string(), file_size_ec.message());
+            if (!std::filesystem::exists(wal_path)) continue;   // shard never used
+            spdlog::error("[WAL REPLAY] - Unable to stat {}: {}; the shard is fenced until restart", wal_path.string(), file_size_ec.message());
+            walring::FenceWalFile(wal_path.string());
             continue;
         }
+        // An empty file is neither a ring nor a legacy WAL: GetOrOpenRing initializes it.
+        if (on_disk_bytes == 0) continue;
 
-        std::ifstream in(wal_path, std::ios::binary);
-        if (!in) {
-            spdlog::error("[WAL REPLAY] - Unable to open {}", wal_path.string());
+        const int fd = open(wal_path.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+            spdlog::error("[WAL REPLAY] - Unable to open {}; the shard is fenced until restart", wal_path.string());
+            walring::FenceWalFile(wal_path.string());
             continue;
         }
-
-        // Streams this file's records in bounded WAL_REPLAY_READ_CHUNK_BYTES
-        // chunks rather than loading the whole file into one std::string --
-        // a shard file's on-disk size is no longer a trustworthy bound for a
-        // single allocation (see WAL_REPLAY_MAX_RECORD_BYTES's comment in
-        // XStore_Tunables.h for why). buffer only ever holds "a chunk or two
-        // plus one in-flight record's worth of bytes", grown on demand and
-        // shrunk (erase) as each record is consumed, never proportional to
-        // on_disk_bytes.
-        std::string buffer;
-        auto ensure_available = [&](size_t needed) -> bool {
-            while (buffer.size() < needed) {
-                size_t old_size = buffer.size();
-                buffer.resize(old_size + XStoreTunables::WAL_REPLAY_READ_CHUNK_BYTES);
-                in.read(buffer.data() + old_size, static_cast<std::streamsize>(XStoreTunables::WAL_REPLAY_READ_CHUNK_BYTES));
-                std::streamsize got = in.gcount();
-                buffer.resize(old_size + static_cast<size_t>(got));
-                if (got <= 0) return false; // true EOF -- can't satisfy `needed`
-            }
-            return true;
-        };
-
-        unsigned replayed_count = 0;
-        while (true) {
-            if (!ensure_available(8)) {
-                // Fewer than 8 bytes left anywhere in the file -- clean end
-                // or torn tail, same as before.
-                break;
-            }
-            uint32_t declared_record_len;
-            std::memcpy(&declared_record_len, buffer.data(), 4);
-            if (declared_record_len > XStoreTunables::WAL_REPLAY_MAX_RECORD_BYTES) {
-                // Checked BEFORE trying to satisfy it -- a corrupt/bogus
-                // record_len can't force ensure_available to keep growing
-                // the buffer chasing it. Same "stop here" outcome as a torn
-                // or CRC-invalid record below, just caught earlier.
-                spdlog::error("[WAL REPLAY] - {} has a record declaring {} bytes, exceeding the "
-                              "{}-byte single-record replay sanity ceiling -- stopping replay of "
-                              "this shard here; check for corruption.",
-                              wal_path.string(), declared_record_len,
-                              XStoreTunables::WAL_REPLAY_MAX_RECORD_BYTES);
-                break;
-            }
-            if (!ensure_available(4 + static_cast<size_t>(declared_record_len))) {
-                // Torn tail: file ends before this record's declared length
-                // is satisfied.
-                break;
-            }
-
-            XStore::WalRecord record;
-            size_t consumed = 0;
-            if (!ParseWalRecord(buffer.data(), buffer.size(), consumed, record)) {
-                // CRC/structure failure -- genuine corruption/torn record;
-                // every record before this point already passed its own CRC
-                // check, and already-applied.
-                break;
-            }
-            record.db_base_path = DbBasePath(record.db_name);
-            if (!ApplyWalRecord(record)) {
-                spdlog::error("[WAL REPLAY] [DB: {}] - One or more rows failed to apply", record.db_name);
-            }
-
-            // Recorded whether or not the apply above fully succeeded: a
-            // partial apply still put SOME rows into the data file with no
-            // matching zone-map fold, which is the same gap. Year is derived
-            // the exact same way ApplyWalRecord derives it (every row in a
-            // record shares one (db, year) -- that function's documented
-            // precondition), so the pair recorded here is precisely the pair
-            // it just wrote into. Keyed by db_name rather than
-            // record.db_base_path so InitDB's lookup can't be defeated by a
-            // second spelling of the same directory.
-            if (!record.rows.empty()) {
-                TimeStruct replayed_ts(static_cast<std::time_t>(record.rows.front().epoch_time), record.time_resolution);
-                replayed_years[record.db_name].insert(replayed_ts.year);
-            }
-
-            replayed_count += static_cast<unsigned>(record.rows.size());
-            buffer.erase(0, consumed);
+        walring::RingHeader header;
+        const bool is_ring = walring::ReadBestHeader(fd, header);
+        if (is_ring) {
+            // The HEADER's ring size, never the process default: the file may
+            // have been created under a different setting.
+            ReplayRingShard(wal_path.string(), shard_idx, fd, header.ring_bytes, header.checkpoint_lsn, replayed_years);
         }
-        in.close();
-
-        if (replayed_count > 0) {
-            spdlog::info("[WAL REPLAY] - Replayed {} record(s) from {}", replayed_count, wal_path.string());
-        }
-
-        // Checkpoint unconditionally, whether or not any record was found
-        // and regardless of individual ApplyWalRecord outcomes -- this
-        // file's WAL evidence has now been fully consulted. Critically
-        // NOT conditioned on apply success: a record here can legitimately
-        // fail to apply because its DB no longer exists (deleted, or -- as
-        // here -- not yet recreated at this point in startup, since
-        // ReplayWal always runs before any client can reach CreateDB), and
-        // that failure will recur identically on every future restart
-        // unless the stale bytes are invalidated now. No file-size
-        // change, so no metadata-journal cost -- see
-        // InvalidateWalFileHeader.
-        int fd = open(wal_path.c_str(), O_WRONLY);
-        if (fd >= 0) {
-            InvalidateWalFileHeader(fd, wal_path.string());
-            // Now that this file's WAL evidence is fully consulted, shrink
-            // it back to default if a prior oversized BatchInsert/RangeInsert
-            // pass grew it -- see ReclaimWalFileSize's comment in XStore.h
-            // for why this is the one safe place to pay that ftruncate cost.
-            ReclaimWalFileSize(fd, wal_path.string(), on_disk_bytes);
-            close(fd);
-        }
+        close(fd);
+        if (!is_ring) ReplayLegacyShard(wal_path.string(), shard_idx, replayed_years);
     }
 
     return replayed_years;
+}
+
+void XStore::ReplayRingShard(const std::string &wal_path, size_t shard_idx, int fd, uint64_t ring_bytes,
+                             uint64_t checkpoint_lsn, ReplayedYearMap &replayed_years) {
+    // InitDB must precede all inserts to this data_store_dir (CommitReplay is not concurrency-safe
+    // against the writer's blind CommitAppended/PublishApplied).
+    walring::UnfenceWalFile(wal_path);   // a previous failed attempt in this process is retried from scratch
+    const uint64_t start_lsn = checkpoint_lsn;
+    uint64_t lsn = start_lsn;
+
+    // buf holds the file bytes for LSNs [window_lsn, window_lsn + buf.size()), never
+    // crossing a ring end (a record never straddles it). Refilled in
+    // WAL_REPLAY_READ_CHUNK_BYTES reads, or one record's size if larger.
+    std::string buf;
+    uint64_t window_lsn = 0;
+    bool read_error = false;
+    auto fill = [&](size_t needed) -> bool {
+        const uint64_t lap_left = ring_bytes - lsn % ring_bytes;
+        if (needed > lap_left) return false;
+        if (!buf.empty() && lsn >= window_lsn && lsn + needed <= window_lsn + buf.size()) return true;
+        const size_t want = static_cast<size_t>(std::min<uint64_t>(
+            lap_left, std::max<uint64_t>(needed, XStoreTunables::WAL_REPLAY_READ_CHUNK_BYTES)));
+        buf.resize(want);
+        const off_t base = static_cast<off_t>(walring::RingOffset(lsn, ring_bytes));
+        size_t got = 0;
+        while (got < want) {
+            if (walring::ConsumeInjectedReplayReadFailure()) { read_error = true; break; }
+            const ssize_t n = pread(fd, buf.data() + got, want - got, base + static_cast<off_t>(got));
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                read_error = true;   // NOT the end of the log: the checkpoint must not move
+                break;
+            }
+            if (n == 0) break;       // EOF: bytes past the file end hold no records
+            got += static_cast<size_t>(n);
+        }
+        buf.resize(got);
+        window_lsn = lsn;
+        return got >= needed;
+    };
+
+    unsigned replayed_count = 0;
+    std::set<std::string> touched_paths;
+    WalRecord record;
+    // Why the scan stopped. A DAMAGED record (CRC failure, impossible length, structure mismatch) whose
+    // UNCHECKED LSN field (bytes [8,16) of the candidate) equals the expected LSN is a torn record of THIS
+    // lap: "corrupt_end". Bytes after it may hold intact leftovers of unacknowledged records of this lap
+    // whose LSNs will match once the log grows back over them, so they are zeroed below. Everything else
+    // is a CLEAN end and is never zeroed (that would cost a ring write per shard on every start): all-zero
+    // bytes, a CRC-valid record carrying another LSN, and damaged-looking bytes whose LSN field does not
+    // match -- after the ring has lapped, the bytes at the log end are mid-record leftovers of an older lap.
+    // ACCEPTED TRADE-OFF: a torn record whose first sector (the one holding the LSN field) was lost reads
+    // as a clean end -- the same class as the accepted "zero hole in front of an intact N+1" case.
+    bool corrupt_end = false;
+    bool apply_failed = false;
+    auto lsn_field_matches = [&]() {   // needs >= 16 bytes in the window: the loop guarantees RECORD_FIXED_BYTES
+        uint64_t stored;
+        std::memcpy(&stored, buf.data() + (lsn - window_lsn) + 8, sizeof stored);
+        return stored == lsn;
+    };
+    // A legitimate log never spans more than one lap (writers stall instead of overwriting), so a
+    // step budget of ring_bytes also stops a pathological file from looping.
+    while (lsn - start_lsn < ring_bytes) {
+        const uint64_t rem = ring_bytes - lsn % ring_bytes;
+        if (rem < walring::RECORD_FIXED_BYTES) { lsn += rem; continue; }   // implicit wrap, same rule as the writer
+        if (!fill(walring::RECORD_FIXED_BYTES)) break;
+        uint32_t declared_record_len;
+        std::memcpy(&declared_record_len, buf.data() + (lsn - window_lsn), 4);
+        if (declared_record_len == 0) break;                               // zeros: clean end
+        if (declared_record_len > XStoreTunables::WAL_REPLAY_MAX_RECORD_BYTES) {
+            spdlog::error("[WAL REPLAY] - {} has a record declaring {} bytes, exceeding the {}-byte "
+                          "single-record replay sanity ceiling -- stopping replay of this shard here; "
+                          "check for corruption.",
+                          wal_path, declared_record_len, XStoreTunables::WAL_REPLAY_MAX_RECORD_BYTES);
+            corrupt_end = lsn_field_matches();
+            break;
+        }
+        const size_t needed = 4 + static_cast<size_t>(declared_record_len);
+        if (needed < walring::RECORD_FIXED_BYTES || needed > rem) { corrupt_end = lsn_field_matches(); break; }   // impossible length
+        if (!fill(needed)) break;                                          // file ends inside the record
+
+        size_t consumed = 0;
+        bool damaged = false;
+        const RingParse parsed = ParseWalRecordV2(buf.data() + (lsn - window_lsn), needed, lsn, consumed, record, &damaged);
+        if (parsed == RingParse::kEnd) { corrupt_end = damaged && lsn_field_matches(); break; }
+        if (parsed == RingParse::kPad) { lsn += consumed; continue; }
+
+        record.db_base_path = DbBasePath(record.db_name);
+        if (!ApplyWalRecord(record)) {
+            if (DbStillExists(record.db_base_path, record.db_name)) {
+                spdlog::error("[WAL REPLAY] [DB: {}] - Record at LSN {} ({} rows) failed to apply although the DB is not gone (reason: see the "
+                              "preceding [WAL APPLY] line); this shard's replay FAILS and the shard is fenced until restart",
+                              record.db_name, lsn, record.rows.size());
+                apply_failed = true;
+            } else {
+                spdlog::error("[WAL REPLAY] [DB: {}] - One or more rows failed to apply (DB no longer exists; skipped)", record.db_name);
+            }
+        }
+        // Recorded whether or not the apply fully succeeded: a partial apply still put SOME rows
+        // into the data file with no zone-map fold. Same derivation as ApplyWalRecord (one (db, year)
+        // per record); keyed by db_name so InitDB's lookup cannot be defeated by another spelling.
+        if (!record.rows.empty()) {
+            TimeStruct replayed_ts(static_cast<std::time_t>(record.rows.front().epoch_time), record.time_resolution);
+            replayed_years[record.db_name].insert(replayed_ts.year);
+            touched_paths.insert(CachedYearFilePath(record.db_base_path, replayed_ts.year));
+        }
+        replayed_count += static_cast<unsigned>(record.rows.size());
+        lsn += consumed;
+    }
+    const uint64_t end_lsn = lsn;
+
+    if (read_error) {
+        spdlog::error("[WAL REPLAY] - Read error in {}; leaving its checkpoint untouched (records replay again next start); "
+                      "the shard is fenced until restart", wal_path);
+        walring::FenceWalFile(wal_path);
+        return;
+    }
+    if (replayed_count > 0) {
+        spdlog::info("[WAL REPLAY] - Replayed {} record(s) from {}", replayed_count, wal_path);
+    }
+    if (apply_failed) {
+        // The records stay in the log (checkpoint untouched) and replay again next start; until then
+        // nothing may append to this ring.
+        walring::FenceWalFile(wal_path);
+        return;
+    }
+    if (end_lsn == start_lsn && !corrupt_end) return;
+
+    // Spec §2 ordering: every touched data file (and its directory entry) must be durable BEFORE the
+    // checkpoint moves. Any failure leaves the header alone: the records replay again (idempotent).
+    if (!walring::Checkpointer::Instance().SyncPathsForReplay(touched_paths)) {
+        spdlog::error("[WAL REPLAY] - Could not sync the data files replayed from {}; checkpoint left at {}; the shard is fenced until restart",
+                      wal_path, start_lsn);
+        walring::FenceWalFile(wal_path);   // appends would restart on top of un-checkpointed records
+        return;
+    }
+    if (corrupt_end && end_lsn < start_lsn + ring_bytes) {
+        // Zero everything past the damaged record, durably, before the checkpoint can move: see corrupt_end.
+        // Order: everything behind the first 4 bytes of the damaged record first, sync, THEN its length
+        // field. After a crash in between, the record's LSN field (bytes [8,16)) is already zero, so the
+        // next start reads it as a clean end -- with everything behind it already zeroed, nothing stale is
+        // left ahead. What can never happen is "zeros at X with an intact N+1 behind them", which would
+        // also read as a clean end but leave a stale same-lap record.
+        // The 4 bytes cannot straddle the ring end: the scan only stops here with >= RECORD_FIXED_BYTES left.
+        const int wfd = open(wal_path.c_str(), O_RDWR | O_CLOEXEC);
+        const uint64_t zero_to = start_lsn + ring_bytes;
+        const uint64_t head_end = std::min<uint64_t>(end_lsn + 4, zero_to);
+        bool zeroed = wfd >= 0 && !walring::ConsumeInjectedReplayZeroingFailure() &&
+                      walring::ZeroRingRange(wfd, head_end, zero_to, ring_bytes) && fdatasync(wfd) == 0 &&
+                      walring::ZeroRingRange(wfd, end_lsn, head_end, ring_bytes) && fdatasync(wfd) == 0;
+        if (wfd >= 0) close(wfd);
+        if (!zeroed) {
+            spdlog::error("[WAL REPLAY] - Could not zero the ring past the damaged record at LSN {} in {}; checkpoint left at {}; "
+                          "the shard is fenced until restart", end_lsn, wal_path, start_lsn);
+            walring::FenceWalFile(wal_path);   // a stale same-lap record could come back if appends resumed
+            return;
+        }
+        walring::CountReplayZeroedBytes(zero_to - end_lsn);
+        spdlog::warn("[WAL REPLAY] - Damaged/torn record at LSN {} in {}: discarded everything after it", end_lsn, wal_path);
+    }
+    const std::shared_ptr<walring::Ring> ring = walring::GetOrOpenRing(wal_path, static_cast<uint32_t>(shard_idx));
+    if (!ring || ring->ring_bytes() != ring_bytes) {
+        spdlog::error("[WAL REPLAY] - No matching ring for {}; checkpoint left at {}; the shard is fenced until restart", wal_path, start_lsn);
+        walring::FenceWalFile(wal_path);
+        return;
+    }
+    if (!ring->CommitReplay(end_lsn)) {
+        spdlog::error("[WAL REPLAY] - Could not persist the checkpoint for {}; records replay again next start; "
+                      "the shard is fenced until restart", wal_path);
+        walring::FenceWalFile(wal_path);
+    }
+}
+
+void XStore::ReplayLegacyShard(const std::string &wal_path, size_t shard_idx, ReplayedYearMap &replayed_years) {
+    // Pre-ring format (no ring header): the original streaming parse, unchanged,
+    // then a one-time upgrade to the ring layout.
+    walring::UnfenceWalFile(wal_path);   // a previous failed attempt in this process is retried from scratch
+    std::ifstream in(wal_path, std::ios::binary);
+    if (!in) {
+        spdlog::error("[WAL REPLAY] - Unable to open {}; the shard is fenced until restart", wal_path);
+        walring::FenceWalFile(wal_path);
+        return;
+    }
+
+    // Streams this file's records in bounded WAL_REPLAY_READ_CHUNK_BYTES
+    // chunks rather than loading the whole file into one std::string --
+    // a shard file's on-disk size is no longer a trustworthy bound for a
+    // single allocation (see WAL_REPLAY_MAX_RECORD_BYTES's comment in
+    // XStore_Tunables.h for why). buffer only ever holds "a chunk or two
+    // plus one in-flight record's worth of bytes", grown on demand and
+    // shrunk (erase) as each record is consumed.
+    std::string buffer;
+    // A short read that only hit EOF sets eofbit|failbit; a real I/O error sets badbit (or is injected by
+    // tests). The latter is NOT the end of the log: the records behind it are unread.
+    bool read_error = false;
+    auto ensure_available = [&](size_t needed) -> bool {
+        while (buffer.size() < needed) {
+            size_t old_size = buffer.size();
+            buffer.resize(old_size + XStoreTunables::WAL_REPLAY_READ_CHUNK_BYTES);
+            in.read(buffer.data() + old_size, static_cast<std::streamsize>(XStoreTunables::WAL_REPLAY_READ_CHUNK_BYTES));
+            std::streamsize got = in.gcount();
+            buffer.resize(old_size + static_cast<size_t>(got));
+            if (in.bad() || walring::ConsumeInjectedReplayReadFailure()) { read_error = true; return false; }
+            if (got <= 0) return false; // true EOF -- can't satisfy `needed`
+        }
+        return true;
+    };
+
+    std::set<std::string> touched_paths;
+    unsigned replayed_count = 0;
+    unsigned parsed_records = 0;
+    bool apply_failed = false;
+    while (true) {
+        if (!ensure_available(8)) {
+            // Fewer than 8 bytes left anywhere in the file -- clean end or torn tail.
+            break;
+        }
+        uint32_t declared_record_len;
+        std::memcpy(&declared_record_len, buffer.data(), 4);
+        if (declared_record_len > XStoreTunables::WAL_REPLAY_MAX_RECORD_BYTES) {
+            // Checked BEFORE trying to satisfy it -- a corrupt/bogus record_len can't force
+            // ensure_available to keep growing the buffer chasing it.
+            spdlog::error("[WAL REPLAY] - {} has a record declaring {} bytes, exceeding the "
+                          "{}-byte single-record replay sanity ceiling -- stopping replay of "
+                          "this shard here; check for corruption.",
+                          wal_path, declared_record_len,
+                          XStoreTunables::WAL_REPLAY_MAX_RECORD_BYTES);
+            break;
+        }
+        if (!ensure_available(4 + static_cast<size_t>(declared_record_len))) {
+            // Torn tail: file ends before this record's declared length is satisfied.
+            break;
+        }
+
+        XStore::WalRecord record;
+        size_t consumed = 0;
+        if (!ParseWalRecord(buffer.data(), buffer.size(), consumed, record)) {
+            // CRC/structure failure -- genuine corruption/torn record; every record before
+            // this point already passed its own CRC check, and already-applied.
+            break;
+        }
+        ++parsed_records;
+        record.db_base_path = DbBasePath(record.db_name);
+        if (!ApplyWalRecord(record)) {
+            if (DbStillExists(record.db_base_path, record.db_name)) {
+                spdlog::error("[WAL REPLAY] [DB: {}] - Legacy record ({} rows) failed to apply although the DB is not gone (reason: see the "
+                              "preceding [WAL APPLY] line); the file is NOT converted and the shard is fenced until restart",
+                              record.db_name, record.rows.size());
+                apply_failed = true;
+            } else {
+                spdlog::error("[WAL REPLAY] [DB: {}] - One or more rows failed to apply (DB no longer exists; skipped)", record.db_name);
+            }
+        }
+
+        // Recorded whether or not the apply above fully succeeded: a partial apply still put
+        // SOME rows into the data file with no matching zone-map fold, which is the same gap.
+        // Year is derived the exact same way ApplyWalRecord derives it. Keyed by db_name rather
+        // than record.db_base_path so InitDB's lookup can't be defeated by a second spelling of
+        // the same directory.
+        if (!record.rows.empty()) {
+            TimeStruct replayed_ts(static_cast<std::time_t>(record.rows.front().epoch_time), record.time_resolution);
+            replayed_years[record.db_name].insert(replayed_ts.year);
+            touched_paths.insert(CachedYearFilePath(record.db_base_path, replayed_ts.year));
+        }
+
+        replayed_count += static_cast<unsigned>(record.rows.size());
+        buffer.erase(0, consumed);
+    }
+    in.close();
+
+    if (replayed_count > 0) {
+        spdlog::info("[WAL REPLAY] - Replayed {} record(s) from {}", replayed_count, wal_path);
+    }
+    if (read_error) {
+        // Records behind the failed read are unread: converting would wipe them. The file stays legacy.
+        spdlog::error("[WAL REPLAY] - Read error in legacy {}; NOT converting it; inserts to this shard fail (fenced) until the next start retries",
+                      wal_path);
+        walring::FenceWalFile(wal_path);
+        return;
+    }
+
+    // Upgrade: the legacy file becomes a ring ONLY once what it held is durable in the data
+    // files. A record for a DB that no longer exists does not block this (it would recur
+    // identically on every restart); a failed apply for an existing DB or a failed SYNC does, and
+    // the file is left as is, fenced so the writer cannot wipe it meanwhile.
+    if (apply_failed) {
+        walring::FenceWalFile(wal_path);
+        return;
+    }
+    // Nothing parsed, yet the first 4 KiB is not all zero and the first u32 is not the zeroed
+    // record_len of an invalidated legacy file (and no slot carries the ring magic): this may be a RING file whose two header slots are
+    // both damaged (or a torn first legacy record). Never wipe it automatically.
+    if (parsed_records == 0) {
+        char head[walring::HEADER_REGION_BYTES] = {};
+        const int hfd = open(wal_path.c_str(), O_RDONLY | O_CLOEXEC);
+        ssize_t got = hfd >= 0 ? pread(hfd, head, sizeof head, 0) : -1;
+        if (hfd >= 0) close(hfd);
+        uint32_t first_u32 = 0, slot_magic[2] = {0, 0};
+        std::memcpy(&first_u32, head, sizeof first_u32);
+        // A fresh ring only ever wrote one slot (slot_seq 1 -> slot 1), so look at both.
+        std::memcpy(&slot_magic[0], head, sizeof slot_magic[0]);
+        std::memcpy(&slot_magic[1], head + walring::HEADER_SLOT_BYTES, sizeof slot_magic[1]);
+        const bool ring_magic = slot_magic[0] == walring::RING_MAGIC || slot_magic[1] == walring::RING_MAGIC;
+        const bool all_zero = got >= 0 && std::all_of(head, head + (got > 0 ? got : 0), [](char c) { return c == 0; });
+        if (got < 0 || (!all_zero && (first_u32 != 0 || ring_magic))) {
+            spdlog::error("[WAL REPLAY] - {} has no valid ring header and no parseable legacy record, but is not blank: "
+                          "either a ring file with BOTH header slots damaged, or a legacy WAL whose first record was torn. "
+                          "NOT converting/wiping it; inserts to this shard fail (fenced) until the next start. Inspect the file "
+                          "and, if its records are not needed, remove it (a new ring is created on the next start).",
+                          wal_path);
+            walring::FenceWalFile(wal_path);
+            return;
+        }
+    }
+    if (!walring::Checkpointer::Instance().SyncPathsForReplay(touched_paths)) {
+        spdlog::error("[WAL REPLAY] - Could not sync the data files replayed from legacy {}; leaving it for the next start", wal_path);
+        walring::FenceWalFile(wal_path);   // the writer must not wipe it meanwhile
+        return;
+    }
+    const int fd = open(wal_path.c_str(), O_RDWR | O_CLOEXEC);
+    bool converted = false;
+    if (fd >= 0) {
+        // ftruncate(0) then InitRingFile: a crash in between leaves an empty or zero-headed file,
+        // which replays as "nothing" (the data is already synced) and is re-initialized.
+        // InitRingFile fsyncs the zero-filled ring before writing a header that describes it.
+        converted = ftruncate(fd, 0) == 0 && walring::InitRingFile(fd, static_cast<uint32_t>(shard_idx), walring::DefaultRingBytes());
+        close(fd);
+    }
+    if (!converted) {
+        spdlog::error("[WAL REPLAY] - Unable to convert legacy {} to a ring; the writer will retry", wal_path);
+        return;
+    }
+    // A Ring the registry already holds over this file (opened before the upgrade) restarts at LSN 0.
+    if (const std::shared_ptr<walring::Ring> ring = walring::GetOrOpenRing(wal_path, static_cast<uint32_t>(shard_idx))) {
+        ring->ResetTo(0);
+    }
+    spdlog::info("[WAL REPLAY] - Converted legacy WAL {} to a ring", wal_path);
 }
 
 std::string XStore::GetBaseDir() {

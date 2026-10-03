@@ -322,7 +322,9 @@ class XStore {
         static std::atomic<bool> shutdown_flag_;
         // Stops + joins every WAL writer thread (and the stats reporter).
         // Safe to call repeatedly; shared by Shutdown() and the atexit hook.
-        static void StopWalWriters();
+        // final_checkpoint_cycle=false (WalSimulateRestartForTests only) skips the
+        // checkpointer's final cycle: a simulated kill -9.
+        static void StopWalWriters(bool final_checkpoint_cycle = true);
         // Shutdown() step (4): checkpoints WAL shard files whose records'
         // data files are all synced. See Shutdown().
         static void CheckpointWals();
@@ -789,6 +791,20 @@ class XStore {
         // Test-only: undoes Shutdown() (clears the flag, restarts the WAL
         // writer threads) so later tests in the same process can insert.
         static void ResetShutdownForTests();
+        // Test-only: simulates kill -9 + restart inside one process. Stops the WAL
+        // writers and the checkpointer WITHOUT a final cycle, CheckpointWals or
+        // MarkClean; drops the ring registry, the dirty tracker and the zone-map /
+        // catidx registries; then restarts writers + checkpointer (as
+        // ResetShutdownForTests does). Safe whether or not Shutdown() ran. Callers
+        // clear cfg_shards themselves and call InitDB() to replay.
+        static void WalSimulateRestartForTests();
+        // Test-only: close + drop target_file's cached fd (a "new process" does not have it).
+        void EvictFdForTests(const std::string &target_file) { EraseOpenFile(target_file); }
+        // Test-only: cache an fd for target_file WITHOUT growing it past total_rows (a cold GetOrOpenFile
+        // preallocates the whole calendar year, which makes a replay's forced rebuild scan 31.5M rows).
+        void WarmFdForTests(const std::string &target_file, size_t row_length, unsigned long long total_rows) {
+            static_cast<void>(GetOrOpenFile(target_file, row_length, total_rows));
+        }
 
         // Fetch (creating if needed) the ZoneMapFile for (dbBasePath, year),
         // opening its "<dbBasePath>/<year>.zmap" sidecar on first touch and
@@ -996,7 +1012,12 @@ class XStore {
         // torn/CRC-bad/LSN-mismatch (a stale lap's bytes carry a different
         // LSN) -- stop replay, consumed untouched.
         enum class RingParse { kOk, kPad, kEnd };
-        static RingParse ParseWalRecordV2(const char *data, size_t len, uint64_t expected_lsn, size_t &consumed, WalRecord &out_record);
+        // `corrupt` (optional): set for a kEnd caused by a record that is damaged
+        // (impossible length, CRC failure, structure mismatch) and cleared for the
+        // clean ends (a CRC-valid record whose LSN is not the expected one). Replay
+        // zeroes the ring past a damaged record, never past a clean end.
+        static RingParse ParseWalRecordV2(const char *data, size_t len, uint64_t expected_lsn, size_t &consumed, WalRecord &out_record,
+                                          bool *corrupt = nullptr);
 
     private:
         // Get current base directory
@@ -1327,20 +1348,38 @@ class XStore {
         // UpdateRow accumulates rather than replaces.
         using ReplayedYearMap = std::unordered_map<std::string, std::set<unsigned short>>;
 
-        // Called once from InitDB, before the server starts taking traffic:
-        // replays every shard WAL file left over from an unclean shutdown
-        // (WAL_SHARD_COUNT of them, regardless of how many were actually
-        // active as writers in this run -- see active_wal_shard_count),
-        // then checkpoints via InvalidateWalFileHeader (never ftruncate --
-        // same reasoning as WalWriterLoop). Idempotent by construction
-        // (XStore's direct-offset addressing means re-applying an already-
-        // applied record is a harmless overwrite of identical bytes) so
-        // this never needs to track which records were already durable in
-        // the data file before the crash -- but the checkpoint still must
-        // run and must be durable, since the DB a stale record targets can
-        // be deleted and recreated by the time of a *later* restart, at
-        // which point "idempotent re-apply" no longer holds (see
-        // InvalidateWalFileHeader).
+        // Called once from InitDB, before the server starts taking traffic
+        // (InitDB must precede all inserts to this data_store_dir): replays
+        // every shard WAL file (WAL_SHARD_COUNT of them, regardless of how
+        // many were active as writers in this run -- see
+        // active_wal_shard_count). A ring-format file (valid header) replays
+        // [checkpoint_lsn, end of log) using its own ring size; only after
+        // every touched data file (and its directory) is fdatasync'd does the
+        // checkpoint move to the log end (the invariant: a record leaves the
+        // log only once its data is durable). A pre-ring ("legacy") file is
+        // replayed once and, if its data synced, recreated as a ring.
+        // Replay is idempotent (direct-offset addressing: re-applying a
+        // record rewrites identical bytes), so a failed replay leaves the
+        // checkpoint/legacy file untouched and the next start replays it again.
+        // Most failures also FENCE the file (walring::FenceWalFile:
+        // GetOrOpenRing refuses it, so inserts to that shard fail loudly until
+        // the next InitDB/start, which unfences every shard file first):
+        //  ring: a pread error, a data-file/directory sync failure (or an
+        //    already poisoned checkpointer), a record that cannot be applied
+        //    although its DB is not positively gone, a failed zeroing of the
+        //    ring past a damaged record, no matching ring, a failed checkpoint
+        //    write;
+        //  both: a stat/open failure of the shard file;
+        //  legacy: a read error (badbit, not EOF), an apply failure, a sync
+        //    failure, an unparseable non-blank file (maybe a ring with both
+        //    header slots damaged).
+        // NOT fenced: success; a ring scan that ends where it started without
+        // damage (nothing to do); a legacy conversion failure AFTER the data
+        // sync succeeded (the data is durable, the writer may re-init the
+        // file). A record whose DB is positively gone (ENOENT/ENOTDIR/
+        // not_found) is skipped, not a failure. A torn record of this lap ends
+        // the scan and the ring past it is zeroed (length field last), so
+        // unacknowledged leftovers cannot come back later.
         //
         // Returns the set of years it actually applied a record into, per
         // (already upper-cased) dbName -- keyed by dbName rather than
@@ -1350,6 +1389,14 @@ class XStore {
         // ReplayedYearMap above for why that is a correctness requirement
         // and not an optimization.
         [[nodiscard]] ReplayedYearMap ReplayWal();
+        // ReplayWal's two per-shard-file bodies (see XStore_Management.cpp).
+        // Ring: replay [checkpoint_lsn, end) with the file's OWN ring_bytes, fdatasync
+        // the touched data files, and only then persist checkpoint_lsn = end.
+        // Legacy: the pre-ring parse, then (only if the touched data files synced) the
+        // file is recreated as a ring.
+        void ReplayRingShard(const std::string &wal_path, size_t shard_idx, int fd, uint64_t ring_bytes,
+                             uint64_t checkpoint_lsn, ReplayedYearMap &replayed_years);
+        void ReplayLegacyShard(const std::string &wal_path, size_t shard_idx, ReplayedYearMap &replayed_years);
 
         // Called once from InitDB(), after that DB's ConfigStruct is
         // loaded -- rescans every <YEAR>.XSTORE file under db_base_path

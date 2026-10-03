@@ -2,9 +2,13 @@
 #include "include/XStore/XStore.h"
 #include "include/XStore/XStore_PreadPool.h"
 #include "include/XStore/XStore_SysStats.h"
+#include "include/XStore/XStore_WalCheckpoint.h"
 #include "include/Networking/XStore_Curve.h"
 #include <argparse/argparse.hpp>
 #include <csignal>
+#include <cerrno>
+#include <climits>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
@@ -174,6 +178,26 @@ int main(int argc, char *argv[]) {
     // the time any client (desktop viewer or otherwise) connects. Never
     // touches ZmqServer/XStore state -- see XStore_SysStats.h.
     SysStatsCollector::Start(host, stats_port, curve_identity, curve_keystore);
+
+    // Ops/testing knobs, read once here (before the WAL checkpointer starts doing work): how long the
+    // WAL writers must be idle (XSTORE_CKPT_IDLE_MS) / how old the oldest unsynced data may get
+    // (XSTORE_CKPT_MAX_AGE_MS) before the checkpointer runs a cycle. Unset/0/invalid = the tunable
+    // defaults. A graceful stop still runs a final cycle whatever these say.
+    // Digits only (ParseMsKnob), <= UINT_MAX; anything else is a WARNING and the tunable default stays.
+    auto apply_ms_knob = [](const char *name, void (walring::Checkpointer::*setter)(unsigned), unsigned default_ms) {
+        const char *v = std::getenv(name);
+        if (v == nullptr) return;
+        unsigned ms = 0;
+        if (!walring::ParseMsKnob(v, ms)) {
+            spdlog::warn("[CONFIG] - Ignoring {}=\"{}\": expected an unsigned decimal integer of milliseconds <= {}; keeping the default ({} ms)",
+                         name, v, UINT_MAX, default_ms);
+            return;
+        }
+        (walring::Checkpointer::Instance().*setter)(ms);
+        spdlog::info("[CONFIG] - {} = {} ms effective", name, ms == 0 ? default_ms : ms);
+    };
+    apply_ms_knob("XSTORE_CKPT_IDLE_MS", &walring::Checkpointer::SetIdleMs, XStoreTunables::WAL_CKPT_IDLE_MS);
+    apply_ms_knob("XSTORE_CKPT_MAX_AGE_MS", &walring::Checkpointer::SetMaxAgeMs, XStoreTunables::WAL_CKPT_MAX_AGE_MS);
 
     // Bootstrap XStore instance: its constructor is what actually starts
     // StartWalWriters (via a process-wide once_flag) and runs InitDB for

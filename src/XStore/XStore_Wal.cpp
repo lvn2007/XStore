@@ -120,7 +120,13 @@ bool XStore::ParseWalRecord(const char *data, size_t len, size_t &consumed, XSto
 // [u16 rowLength][i32 timeRes][u32 rowCount][dbName][rows as in v1].
 // recordLen counts every byte after itself; crc32c covers lsn..last row byte.
 // dbNameLen == walring::PAD_DB_NAME_LEN marks a PAD (ring-end filler, no rows).
-XStore::RingParse XStore::ParseWalRecordV2(const char *data, size_t len, uint64_t expected_lsn, size_t &consumed, XStore::WalRecord &out_record) {
+XStore::RingParse XStore::ParseWalRecordV2(const char *data, size_t len, uint64_t expected_lsn, size_t &consumed, XStore::WalRecord &out_record,
+                                           bool *corrupt) {
+    // kEnd is "clean" (corrupt=false) only for a CRC-valid record carrying another LSN: stale lap bytes.
+    // Everything else that stops the parse is damage (or a torn tail).
+    bool dummy = false;
+    bool &damaged = corrupt != nullptr ? *corrupt : dummy;
+    damaged = true;
     if (len < walring::RECORD_FIXED_BYTES) return RingParse::kEnd;
     uint32_t record_len;
     std::memcpy(&record_len, data, 4);
@@ -134,7 +140,7 @@ XStore::RingParse XStore::ParseWalRecordV2(const char *data, size_t len, uint64_
     if (Crc32c(payload, payload_len) != stored_crc) return RingParse::kEnd;
 
     uint64_t lsn; std::memcpy(&lsn, payload, 8);
-    if (lsn != expected_lsn) return RingParse::kEnd;
+    if (lsn != expected_lsn) { damaged = false; return RingParse::kEnd; }
 
     size_t off = 8;
     uint16_t db_name_len; std::memcpy(&db_name_len, payload + off, 2); off += 2;
@@ -144,6 +150,7 @@ XStore::RingParse XStore::ParseWalRecordV2(const char *data, size_t len, uint64_
 
     if (db_name_len == walring::PAD_DB_NAME_LEN) {
         consumed = 4 + static_cast<size_t>(record_len);
+        damaged = false;
         return RingParse::kPad;
     }
 
@@ -165,6 +172,7 @@ XStore::RingParse XStore::ParseWalRecordV2(const char *data, size_t len, uint64_
         out_record.rows.push_back(std::move(row));
     }
     consumed = 4 + static_cast<size_t>(record_len);
+    damaged = false;
     return RingParse::kOk;
 }
 
@@ -502,7 +510,7 @@ void XStore::StartWalWriters(const std::string &data_store_dir) {
 
 std::atomic<bool> XStore::shutdown_flag_{false};
 
-void XStore::StopWalWriters() {
+void XStore::StopWalWriters(bool final_checkpoint_cycle) {
     for (size_t i = 0; i < XStoreTunables::WAL_SHARD_COUNT; ++i) {
         wal_shards[i].stop_flag.store(true, std::memory_order_relaxed);
     }
@@ -520,7 +528,11 @@ void XStore::StopWalWriters() {
     // Writers are joined: nothing applies any more. One final cycle syncs every
     // data file they touched and advances each ring's checkpoint to its head,
     // then the checkpointer thread is joined. Also runs from the atexit hook.
-    walring::Checkpointer::Instance().StopAfterFinalCycle();
+    if (final_checkpoint_cycle) {
+        walring::Checkpointer::Instance().StopAfterFinalCycle();
+    } else {
+        walring::Checkpointer::Instance().StopWithoutFinalCycleForTests();
+    }
 }
 
 void XStore::Shutdown() {
@@ -728,6 +740,19 @@ void XStore::ResetShutdownForTests() {
     wal_stats_stop_flag.store(false, std::memory_order_relaxed);
     wal_stats_reporter_thread = std::thread(&XStore::WalStatsReporterLoop);
 #endif
+}
+
+void XStore::WalSimulateRestartForTests() {
+    // Already shut down: writers and checkpointer are stopped (and checkpointed
+    // gracefully) -- only the in-memory state below needs dropping.
+    if (!shutdown_flag_.exchange(true, std::memory_order_acq_rel)) {
+        StopWalWriters(/*final_checkpoint_cycle=*/false);
+    }
+    walring::ClearRingRegistryForTests();
+    walring::ClearDirtyForTests();
+    ClearZoneMapRegistryForTests();
+    ClearCatIdxRegistryForTests();
+    ResetShutdownForTests();
 }
 
 #ifdef XSTORE_WAL_STATS_ENABLED
@@ -1219,6 +1244,15 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                     const bool sync_ok = (fdatasync(fd) == 0) && !walring::ConsumeInjectedWalSyncFailure();
                     if (!file_write_ok || !sync_ok) {
                         spdlog::error("[WAL] - Failed to durably write/fdatasync {}", ring.path());
+                        // head does not advance, so this range is free space again -- but its bytes may
+                        // be intact on disk (a failed fdatasync does not undo the write). A later,
+                        // shorter record at the same head would leave this record's tail beyond it,
+                        // with LSNs that still match: an unacknowledged record that replay could apply
+                        // after a later crash. Best effort: overwrite the range with zeros.
+                        if (!walring::ZeroRingRange(fd, file.start - file.pad, file.start + file.total, ring.ring_bytes()) ||
+                            fdatasync(fd) != 0) {
+                            spdlog::error("[WAL] - Could not zero the failed append range in {}", ring.path());
+                        }
                         continue;
                     }
                     file.durable = true;

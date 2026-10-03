@@ -427,9 +427,9 @@ TEST_F(DurabilityShutdownTest, ShutdownMarksBothIndexesCleanSoInitDbSkipsRebuild
     EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), 0u);
 }
 
-// Task 5 sub-step: a graceful Shutdown() checkpoints the WAL itself, so the
-// next start neither replays nor force-rebuilds the years the last batch
-// touched. Unlike the test above, nothing here calls CheckpointWal().
+// A graceful Shutdown()'s final checkpoint cycle passes every record, so the
+// next start replays nothing and therefore force-rebuilds nothing. Unlike the
+// test above, nothing here calls CheckpointWal().
 TEST_F(DurabilityShutdownTest, ShutdownInvalidatesWalSoNextStartDoesNotRebuild) {
     XStore store;
     InsertRows(store);
@@ -437,7 +437,7 @@ TEST_F(DurabilityShutdownTest, ShutdownInvalidatesWalSoNextStartDoesNotRebuild) 
 
     XStore::Shutdown();
 
-    EXPECT_EQ(LiveWalShards(), 0u) << "Shutdown must invalidate every WAL header it knows to be fully applied+synced";
+    EXPECT_EQ(LiveWalShards(), 0u) << "Shutdown must checkpoint every WAL ring it knows to be fully applied+synced";
 
     DropRegistriesAndZeroBody(Path(".zmap"), sizeof(ZoneMapFileHeader), /*checkpoint_wal=*/false);
     DropRegistriesAndZeroBody(Path(".catidx"), sizeof(CatIdxFileHeader), /*checkpoint_wal=*/false);
@@ -447,6 +447,29 @@ TEST_F(DurabilityShutdownTest, ShutdownInvalidatesWalSoNextStartDoesNotRebuild) 
     XStore_Proto::FData val = xstore_test::FDouble(137.0);
     EXPECT_FALSE(XStore::GetOrOpenCatIdx(DbPath(), year, kRowLength).MightContain(0, 0, EncodeFDataForCatIdx(val)))
         << "catidx was force-rebuilt: the WAL was replayed";
+}
+
+// Control for the test above: same shape, but the process is killed instead of
+// shut down. The indexes are marked clean by hand (so the dirty flag cannot be
+// what triggers a rebuild), the WAL ring still holds the batch, and the next
+// start DOES replay it and force-rebuild the year it touched.
+TEST_F(DurabilityShutdownTest, WithoutShutdownNextStartReplaysAndForceRebuilds) {
+    XStore store;
+    InsertRows(store);
+    CleanShutdown();   // data synced + both indexes MarkClean; the WAL is NOT checkpointed
+    ASSERT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), 0u);
+    ASSERT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), 0u);
+    ASSERT_GT(LiveWalShards(), 0u) << "precondition: the ring still holds the batch";
+
+    DropRegistriesAndZeroBody(Path(".zmap"), sizeof(ZoneMapFileHeader), /*checkpoint_wal=*/false);
+    DropRegistriesAndZeroBody(Path(".catidx"), sizeof(CatIdxFileHeader), /*checkpoint_wal=*/false);
+    ASSERT_EQ(ReadZmapEntry0().valid_count, 0u) << "precondition: stats tampered";
+    store.InitDB();
+
+    EXPECT_EQ(ReadZmapEntry0().valid_count, kRows) << "zmap must be force-rebuilt: the WAL was replayed";
+    XStore_Proto::FData val = xstore_test::FDouble(137.0);
+    EXPECT_TRUE(XStore::GetOrOpenCatIdx(DbPath(), year, kRowLength).MightContain(0, 0, EncodeFDataForCatIdx(val)))
+        << "catidx must be force-rebuilt: the WAL was replayed";
 }
 
 // A WAL record whose data file cannot be synced must stay replayable. The

@@ -96,6 +96,14 @@ public:
     void AdvanceCheckpoint(uint64_t lsn);
     // head = applied = checkpoint = lsn, in memory only (replay re-seats the ring).
     void ResetTo(uint64_t lsn);
+    // Replay finished at `end_lsn` with every touched data file synced: persist
+    // checkpoint_lsn = end_lsn in the alternate header slot (slot_seq re-read from
+    // the file), THEN raise checkpoint/head/applied to at least end_lsn. Monotone
+    // (never lowers anything, so a re-replay with live writers cannot rewind them).
+    // false = the header write failed; nothing changed.
+    // InitDB must precede all inserts to this data_store_dir (CommitReplay is not
+    // concurrency-safe against the writer's blind CommitAppended/PublishApplied).
+    [[nodiscard]] bool CommitReplay(uint64_t end_lsn);
 
     int fd() const { return fd_; }
     const std::string &path() const { return path_; }
@@ -143,6 +151,27 @@ uint64_t RegistryEpoch();
 std::shared_ptr<Ring> GetOrOpenRing(const std::string &wal_path, uint32_t shard_id, bool reinit_legacy = false);
 std::vector<std::shared_ptr<Ring>> AllRings();
 void ClearRingRegistryForTests();
+// A WAL file whose replay failed (a record could not be applied, or its data could
+// not be made durable) must replay again next start and must not be appended to or
+// wiped meanwhile: while fenced GetOrOpenRing returns nullptr for it (the writer then
+// fails inserts to that shard loudly), a registry Ring over it is dropped and the
+// writer caches are invalidated (RegistryEpoch). ReplayWal unfences at the start of
+// every replay of the file and fences again on failure; a process restart clears all.
+void FenceWalFile(const std::string &wal_path);
+void UnfenceWalFile(const std::string &wal_path);
+
+// Overwrites the ring bytes for LSNs [from_lsn, to_lsn) with zeros (wrap-aware, 1 MiB
+// writes). Does NOT sync; the caller fdatasyncs. false = a pwrite failed.
+[[nodiscard]] bool ZeroRingRange(int fd, uint64_t from_lsn, uint64_t to_lsn, uint64_t ring_bytes);
+// Total bytes ZeroRingRange has written by replay (not by the writer), for tests.
+uint64_t ReplayZeroedBytesForTests();
+// The next n replay ring reads / replay zeroing steps fail (n = 0 clears): lets tests reach the
+// "replay could not finish" exits that fence the ring.
+void FailNextReplayReadsForTests(int n);
+bool ConsumeInjectedReplayReadFailure();
+void FailNextReplayZeroingsForTests(int n);
+bool ConsumeInjectedReplayZeroingFailure();
+void CountReplayZeroedBytes(uint64_t bytes);
 
 // Dirty-range tracking at the data-write choke point (XStore::ApplyWalRecord).
 // Records which byte ranges of which .XSTORE files were written but not yet

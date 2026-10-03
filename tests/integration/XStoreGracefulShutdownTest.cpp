@@ -74,11 +74,17 @@ int FreePort() {
 
 class ServerProcess {
 public:
-    ServerProcess(const std::filesystem::path &dir, int port, int stats_port) : port_(port) {
+    // hold_checkpoints: XSTORE_CKPT_IDLE_MS / XSTORE_CKPT_MAX_AGE_MS = 1 h, so the WAL checkpointer cannot
+    // run a cycle before a kill (a graceful stop still runs its final cycle).
+    ServerProcess(const std::filesystem::path &dir, int port, int stats_port, bool hold_checkpoints = false) : port_(port) {
         std::string dir_s = dir.string(), port_s = std::to_string(port), stats_s = std::to_string(stats_port);
         pid_ = fork();
         if (pid_ == 0) {
             if (chdir(dir_s.c_str()) != 0) _exit(127);
+            if (hold_checkpoints) {
+                setenv("XSTORE_CKPT_IDLE_MS", "3600000", 1);
+                setenv("XSTORE_CKPT_MAX_AGE_MS", "3600000", 1);
+            }
             int devnull = open("/dev/null", O_RDWR);
             if (devnull >= 0) { dup2(devnull, 0); dup2(devnull, 1); dup2(devnull, 2); }
             execl(XSTORE_BIN, XSTORE_BIN, "-H", "127.0.0.1", "-p", port_s.c_str(), "-s", stats_s.c_str(),
@@ -212,34 +218,6 @@ IndexDirtyFlags ReadDirtyFlags(const std::filesystem::path &dir) {
     return flags;
 }
 
-// After a SIGKILL the WAL still holds each shard's un-checkpointed records.
-// Replaying them would (a) force-rebuild the years they touched whatever the
-// dirty flag says, which would hide what this test is about, and (b) re-extend
-// the year file to its full length. The SYNC inserts were already applied to
-// the data file, so checkpoint every WAL ring by hand (checkpoint_lsn := end of
-// log, persisted in the ring header) to leave the dirty flag as the only
-// rebuild trigger. (Until the ring-aware replay lands, ReplayWal skips ring
-// files outright, so this is not yet load-bearing -- it keeps the test valid
-// once replay consults checkpoint_lsn.)
-void CheckpointWalByHand(const std::filesystem::path &dir) {
-    for (auto &entry : std::filesystem::directory_iterator(dir / "DataStore" / "WAL")) {
-        EXPECT_TRUE(xstore_test::CheckpointRingFileByHand(entry.path().string())) << entry.path();
-    }
-}
-
-// The server preallocates (sparsely) the whole calendar year: ~31.5M rows,
-// and every restart-time index rebuild / catidx compaction preads them all
-// (tens of seconds). The server is dead when this runs; cutting the file to
-// the written rows leaves the data intact and keeps restarts fast.
-void TrimYearFile(const std::filesystem::path &dir) {
-    for (auto &entry : std::filesystem::directory_iterator(dir / "DataStore" / DB_NAME)) {
-        if (entry.path().extension() != ".XSTORE") continue;
-        std::error_code ec;
-        std::filesystem::resize_file(entry.path(), (BASE_TS + ROWS) * ROW_LENGTH, ec);
-        EXPECT_FALSE(ec) << ec.message();
-    }
-}
-
 std::string ReadLog(const std::filesystem::path &dir) {
     std::ifstream in(dir / "logs" / "server.log");
     std::stringstream ss;
@@ -261,6 +239,20 @@ void ExpectCleanExit(int status) {
 }
 
 }  // namespace
+
+// The server preallocates (sparsely) the whole calendar year: ~31.5M rows,
+// and every restart-time index rebuild / catidx compaction preads them all
+// (tens of seconds). The server is dead when this runs; cutting the file to
+// the written rows leaves the data intact and keeps restarts fast. (A restart
+// that REPLAYS the WAL re-extends the file to its full length again.)
+void TrimYearFile(const std::filesystem::path &dir) {
+    for (auto &entry : std::filesystem::directory_iterator(dir / "DataStore" / DB_NAME)) {
+        if (entry.path().extension() != ".XSTORE") continue;
+        std::error_code ec;
+        std::filesystem::resize_file(entry.path(), (BASE_TS + ROWS) * ROW_LENGTH, ec);
+        EXPECT_FALSE(ec) << ec.message();
+    }
+}
 
 class XStoreGracefulShutdownTest : public ::testing::Test {
 protected:
@@ -310,11 +302,18 @@ TEST_F(XStoreGracefulShutdownTest, SigintAlsoShutsDownGracefully) {
     ASSERT_NO_FATAL_FAILURE(ExpectAllDirty(ReadDirtyFlags(dir.path), 0u));
 }
 
-// SIGKILL gives the server no chance to clean up: headers stay dirty, and the
-// next start rebuilds them and still answers correctly.
+// SIGKILL gives the server no chance to clean up: headers stay dirty, the WAL
+// ring still holds every un-checkpointed record (the server is started with the
+// checkpointer's idle/age triggers held at 1 h, so no cycle can run before the
+// kill: deterministic), and the next start replays them, rebuilds the indexes and
+// still answers correctly. (The replayed year is force-rebuilt, which is why the
+// dirty-flag-only rebuild path -- "marked dirty" in the log -- is not observable
+// here; the in-process DurabilityRebuildTest cases cover it. Replay re-extends
+// the year file to its full sparse length, so this restart rebuilds ~31.5M
+// rows, ~50 s: a year has that many rows at every resolution CreateDB permits.)
 TEST_F(XStoreGracefulShutdownTest, SigkillLeavesIndexesDirtyAndRestartRebuildsThem) {
     {
-        ServerProcess server(dir.path, FreePort(), FreePort());
+        ServerProcess server(dir.path, FreePort(), FreePort(), /*hold_checkpoints=*/true);
         ASSERT_TRUE(server.Started());
         ASSERT_TRUE(server.WaitReady(chrono::seconds(60))) << "server did not come up";
         ASSERT_NO_FATAL_FAILURE(InsertRows(server));
@@ -325,20 +324,21 @@ TEST_F(XStoreGracefulShutdownTest, SigkillLeavesIndexesDirtyAndRestartRebuildsTh
         ASSERT_TRUE(WIFSIGNALED(status));
     }
     ASSERT_NO_FATAL_FAILURE(ExpectAllDirty(ReadDirtyFlags(dir.path), 1u));
-    ASSERT_NO_FATAL_FAILURE(CheckpointWalByHand(dir.path));
     TrimYearFile(dir.path);
 
     {
         ServerProcess restarted(dir.path, FreePort(), FreePort());
         ASSERT_TRUE(restarted.Started());
-        ASSERT_TRUE(restarted.WaitReady(chrono::seconds(60))) << "restart did not come up";
+        ASSERT_TRUE(restarted.WaitReady(chrono::seconds(240))) << "restart did not come up";
         EXPECT_DOUBLE_EQ(QueryMin(restarted), 10.0);
         restarted.Signal(SIGTERM);  // graceful, so the log is flushed
         ASSERT_NO_FATAL_FAILURE(ExpectCleanExit(restarted.WaitExit(chrono::seconds(15))));
     }
     const std::string log = ReadLog(dir.path);
-    EXPECT_NE(log.find("marked dirty"), std::string::npos)
-        << "restart log lacks the dirty-rebuild line; log head:\n" << log.substr(0, 3000);
+    EXPECT_NE(log.find("REBUILD]"), std::string::npos)
+        << "restart log lacks the index-rebuild lines; log head:\n" << log.substr(0, 3000);
     EXPECT_NE(log.find("rebuilding"), std::string::npos);
+    EXPECT_NE(log.find("[WAL REPLAY] - Replayed"), std::string::npos)
+        << "restart after SIGKILL must replay the ring from its checkpoint; log head:\n" << log.substr(0, 3000);
     ASSERT_NO_FATAL_FAILURE(ExpectAllDirty(ReadDirtyFlags(dir.path), 0u));
 }

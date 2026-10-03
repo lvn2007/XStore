@@ -41,6 +41,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <map>
+#include <set>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -57,6 +58,10 @@ struct alignas(64) PaddedAtomicI64 : std::atomic<int64_t> {
 // steady_clock ns of the last batch a WAL writer gathered; read by the idle trigger.
 extern PaddedAtomicI64 last_writer_activity_ns;
 
+// Parses an ops knob given in milliseconds (XSTORE_CKPT_IDLE_MS / XSTORE_CKPT_MAX_AGE_MS): the text must
+// start with a digit and be all digits (no whitespace, sign, hex or trailing junk) and fit an unsigned.
+bool ParseMsKnob(const char *text, unsigned &out);
+
 // Leaked singleton (detached threads / exit-time statics may still reach it).
 class Checkpointer {
 public:
@@ -70,6 +75,19 @@ public:
     // did not stick): nothing (or not everything) advanced; retry is safe.
     bool RunCycle();
 
+    // Ops/testing knobs (src/main.cpp: XSTORE_CKPT_IDLE_MS / XSTORE_CKPT_MAX_AGE_MS): the writer-idle and
+    // oldest-unsynced-data triggers of a cycle. 0 restores XStoreTunables::WAL_CKPT_IDLE_MS / WAL_CKPT_MAX_AGE_MS.
+    // The final cycle of a graceful stop runs regardless.
+    void SetIdleMs(unsigned ms);
+    void SetMaxAgeMs(unsigned ms);
+
+    // Replay (XStore::ReplayWal): fdatasync each data file in `paths` (by path) and fsync their
+    // parent directories, through the SAME fault hooks / poison rule as RunCycle. Touches no ring,
+    // no dirty state. true = everything durable (ENOENT = deleted DB is skipped, as in a cycle).
+    // false = nothing may be checkpointed over these records: a hook/open failure (retryable) or a
+    // real sync error (poisons). Always false once poisoned.
+    [[nodiscard]] bool SyncPathsForReplay(const std::set<std::string> &paths);
+
     // Data files fdatasync'd by the last successful cycle (Task 6 gates MarkClean on it).
     std::unordered_set<std::string> LastCycleSyncedPaths() const;
 
@@ -81,14 +99,16 @@ public:
     void FailNextDataSyncsStickyForTests(int n);  // like a real fdatasync error: poisons
     void FailNextDirSyncsStickyForTests(int n);   // like a real directory fsync error: poisons
     std::unordered_set<std::string> LastCycleSyncedDirsForTests() const;   // directories fsync'd by the last successful cycle
+    // Simulated kill -9: joins the thread WITHOUT the final cycle and forgets carried/flushed state.
+    void StopWithoutFinalCycleForTests();
     void SetPausedForTests(bool paused);          // waits for an in-flight cycle/flush; RunCycle() still works
     void FailNextDataSyncsForTests(int n);        // next n data-file fdatasyncs report failure
     void FailNextDirSyncsForTests(int n);         // next n directory fsyncs report failure
     uint64_t CyclesForTests() const { return cycles_.load(std::memory_order_relaxed); }
     uint64_t DirSyncsForTests() const { return dir_syncs_.load(std::memory_order_relaxed); }
     uint64_t PacedFlushBytesForTests() const { return paced_bytes_.load(std::memory_order_relaxed); }
-    void SetIdleMsForTests(unsigned ms);          // 0 restores XStoreTunables::WAL_CKPT_IDLE_MS
-    void SetMaxAgeMsForTests(unsigned ms);        // 0 restores XStoreTunables::WAL_CKPT_MAX_AGE_MS
+    void SetIdleMsForTests(unsigned ms) { SetIdleMs(ms); }
+    void SetMaxAgeMsForTests(unsigned ms) { SetMaxAgeMs(ms); }
 
 private:
     Checkpointer() = default;
@@ -96,6 +116,10 @@ private:
     bool RunCycleLocked();                        // cycle_mutex_ held
     bool PacedFlushStep();                        // one <= WAL_FLUSH_CHUNK_BYTES sync_file_range; true if it did work
     static bool ConsumeFailure(std::atomic<int> &counter);
+    // One data-file fdatasync / directory fsync with the hooks and poison rule (cycle_mutex_ held).
+    enum class SyncResult { kOk, kSkipped, kRetryable, kPoisoned };
+    SyncResult SyncDataFile(const std::string &path);
+    SyncResult SyncDirectory(const std::string &dir);
     void Poison(const char *what, const std::string &path, int err);
 
     std::mutex cycle_mutex_;                      // one cycle / paced step at a time

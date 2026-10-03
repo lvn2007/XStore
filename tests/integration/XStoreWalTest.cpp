@@ -5,6 +5,7 @@
 #include "include/XStore/XStore_WalRing.h"
 #include "XStoreTestSupport.h"
 #include <chrono>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -496,8 +497,16 @@ TEST_F(XStoreWalTest, ReplayReclaimsOversizedFileAfterRecoveringRecord) {
     ASSERT_TRUE(query_rep.has_data());
     EXPECT_DOUBLE_EQ(query_rep.data().fielddata(0).doubledata(), 7.5);
 
-    // And the file was shrunk back to default afterward.
-    EXPECT_EQ(std::filesystem::file_size(wal_file), XStoreTunables::WAL_FILE_PREALLOC_BYTES);
+    // And the oversized legacy file was recreated as a fixed-size ring (header + one
+    // default ring): it neither stays oversized nor keeps the legacy layout.
+    EXPECT_EQ(std::filesystem::file_size(wal_file), walring::HEADER_REGION_BYTES + walring::DefaultRingBytes());
+    {
+        int fd = open(wal_file.c_str(), O_RDONLY);
+        ASSERT_GE(fd, 0);
+        walring::RingHeader header;
+        EXPECT_TRUE(walring::ReadBestHeader(fd, header));
+        close(fd);
+    }
 }
 
 // A shard WAL file whose reported size is enormous -- far past even the old
@@ -547,8 +556,8 @@ TEST_F(XStoreWalTest, ReplayRecoversRecordEvenWhenFileFarExceedsOldFileCeiling) 
     ASSERT_TRUE(query_rep.has_data());
     EXPECT_DOUBLE_EQ(query_rep.data().fielddata(0).doubledata(), 3.25);
 
-    // And reclaimed back to default afterward, same as any oversized file.
-    EXPECT_EQ(std::filesystem::file_size(wal_file), XStoreTunables::WAL_FILE_PREALLOC_BYTES);
+    // And recreated as a fixed-size ring afterward, same as any oversized legacy file.
+    EXPECT_EQ(std::filesystem::file_size(wal_file), walring::HEADER_REGION_BYTES + walring::DefaultRingBytes());
 }
 
 // The one thing that must still stop replay of a record: the record itself
@@ -788,25 +797,29 @@ TEST_F(XStoreWalTest, ReplayOfOrphanedRecordIsNotRetriedForever) {
     // the real assertion is that the checkpoint still ran anyway.
     XStore store;
 
-    std::ifstream in(wal_file, std::ios::binary);
-    uint32_t header_after_first_replay = 0xFFFFFFFFu;
-    in.read(reinterpret_cast<char *>(&header_after_first_replay), 4);
-    in.close();
-    EXPECT_EQ(header_after_first_replay, 0u)
-        << "orphaned record's WAL header must be invalidated after replay, "
-           "even though ApplyWalRecord failed -- otherwise it replays (and "
-           "fails) again on every future restart";
+    // The legacy file was consumed by that replay and recreated as an (empty) ring:
+    // a valid ring header at checkpoint 0 and a zeroed ring, so the orphaned record
+    // is gone for good instead of replaying (and failing) again on every restart.
+    auto expect_empty_ring = [&](const char *when) {
+        int fd = open(wal_file.c_str(), O_RDONLY);
+        ASSERT_GE(fd, 0) << when;
+        walring::RingHeader header;
+        ASSERT_TRUE(walring::ReadBestHeader(fd, header)) << when << ": not a ring after replay";
+        EXPECT_EQ(header.checkpoint_lsn, 0u) << when;
+        uint64_t first_ring_bytes = 0xFFFFFFFFFFFFFFFFull;
+        EXPECT_EQ(pread(fd, &first_ring_bytes, sizeof(first_ring_bytes), walring::HEADER_REGION_BYTES),
+                  static_cast<ssize_t>(sizeof(first_ring_bytes))) << when;
+        EXPECT_EQ(first_ring_bytes, 0u) << when << ": the orphaned record's bytes must not survive the upgrade";
+        close(fd);
+    };
+    expect_empty_ring("after the first replay");
 
     // A second explicit "restart" against the same file must find nothing
     // left to replay (and therefore log no further apply failure) -- calls
     // InitDB directly since the constructor-level once-per-directory guard
     // already ran it once above (same pattern as ReplayRecoversUnappliedRecord).
     store.InitDB();
-    std::ifstream in2(wal_file, std::ios::binary);
-    uint32_t header_after_second_replay = 0xFFFFFFFFu;
-    in2.read(reinterpret_cast<char *>(&header_after_second_replay), 4);
-    in2.close();
-    EXPECT_EQ(header_after_second_replay, 0u);
+    expect_empty_ring("after the second replay");
 }
 
 // Before Task 3's fix, a single WalRecord with enough rows blows past
@@ -1026,9 +1039,8 @@ TEST_F(XStoreWalTest, BatchInsertRecordExceedingWalPreallocBoundPersistsAndRepla
 
     // Re-running InitDB (same trick ReplayRecoversMultiRowUnappliedRecord
     // above uses to simulate a restart within one test process) must leave the
-    // already-applied data intact. Ring-aware replay is Task 5; until then
-    // ReplayWal leaves ring files alone, so this proves the restart path
-    // neither crashes on nor corrupts the data after a direct-path write.
+    // already-applied data intact: the direct-path record is in no ring, and
+    // ring replay only touches records at or after the checkpoint.
     store.InitDB();
     XStore_Proto::UnaryQuery_REP replay_q;
     store.UnaryQuery(base_ts, "WALOVERSIZEBATCH", &replay_q);

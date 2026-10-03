@@ -140,41 +140,6 @@ public:
     }
 };
 
-// Checkpoints a ring-format WAL file by hand, from outside the process that
-// wrote it (e.g. after the forked server was SIGKILLed): finds the end of the
-// log by walking from the header's checkpoint_lsn with the replay rule, then
-// persists checkpoint_lsn = that end in the alternate header slot. Returns
-// false if the file is not a valid ring.
-inline bool CheckpointRingFileByHand(const std::string &path) {
-    int fd = open(path.c_str(), O_RDWR);
-    if (fd < 0) return false;
-    walring::RingHeader header;
-    bool ok = walring::ReadBestHeader(fd, header);
-    if (ok) {
-        std::string ring(header.ring_bytes, '\0');
-        ok = pread(fd, ring.data(), ring.size(), walring::HEADER_REGION_BYTES) == static_cast<ssize_t>(ring.size());
-        uint64_t lsn = header.checkpoint_lsn;
-        uint64_t last_good = lsn;
-        while (ok) {
-            const uint64_t off = lsn % header.ring_bytes;
-            const uint64_t rem = header.ring_bytes - off;
-            if (rem < walring::RECORD_FIXED_BYTES) { lsn += rem; continue; }
-            XStore::WalRecord record;
-            size_t used = 0;
-            if (XStore::ParseWalRecordV2(ring.data() + off, rem, lsn, used, record) == XStore::RingParse::kEnd) break;
-            lsn += used;
-            last_good = lsn;
-        }
-        if (ok) {
-            header.checkpoint_lsn = last_good;
-            header.slot_seq += 1;
-            ok = walring::WriteHeaderSlot(fd, header);
-        }
-    }
-    close(fd);
-    return ok;
-}
-
 }  // namespace xstore_test
 
 #endif  // XSTORE_TEST_SUPPORT_H

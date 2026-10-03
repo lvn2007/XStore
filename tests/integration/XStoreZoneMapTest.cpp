@@ -1,7 +1,6 @@
 #include <gtest/gtest.h>
 #include "include/XStore/XStore.h"
 #include "include/XStore/XStore_ZoneMap.h"
-#include "include/XStore/XStore_Crc32c.h"
 #include "include/XStore/XStore_WalRing.h"
 #include "include/DataStructs/TimeStruct.h"
 #include "XStoreTestSupport.h"
@@ -1416,14 +1415,14 @@ TEST_F(XStoreZoneMapTest, SumAndVarianceOnColumnAboveGrownColumnCountReadRealDat
 // Fix: ReplayWal returns the (db, year) pairs it touched and InitDB forces
 // RebuildOneYearZoneMap for each, independent of ZoneMapNeedsRebuild.
 TEST_F(XStoreZoneMapTest, InitDbFoldsWalReplayedRowsWhenSidecarIsMissing) {
-    // The test rewrites a ring file into a legacy WAL by hand: the background
-    // checkpointer must not write ring headers behind its back.
+    // The record must still be in the ring when the "crash" happens: a background
+    // checkpoint would pass it and leave nothing to replay.
     xstore_test::ScopedCheckpointerPause checkpointer_paused;
     XStore store;
     std::string db_name = "WALREPLAYZMAP";
     CreateTestDb(store, db_name, XStore_Proto::SECOND, kPreexistRowLength);
 
-    // Ordinary insert path -- this is what puts a record in the WAL (SYNC,
+    // Ordinary insert path -- this is what puts a record in the WAL ring (SYNC,
     // so it is durably written AND applied before this returns).
     constexpr uint64_t kRowIndex = 10;
     XStore_Proto::RowData row;
@@ -1437,64 +1436,14 @@ TEST_F(XStoreZoneMapTest, InitDbFoldsWalReplayedRowsWhenSidecarIsMissing) {
     ASSERT_TRUE(std::filesystem::exists(data_path));
     ASSERT_TRUE(std::filesystem::exists(zmap_path));
 
-    // INTERIM (WAL ring Task 2 -> Task 5): the insert's record now lives in a
-    // ring file, and ring-aware replay does not exist yet (ReplayWal skips
-    // ring files). To keep exercising what this test is about -- replay of a
-    // WAL record folds into the zone map via a forced rebuild -- turn the
-    // shard file that took the insert back into a LEGACY WAL file holding the
-    // same record, which the unchanged legacy replay path still consumes.
-    // Task 5: delete this block and replay the ring record itself.
-    {
-        std::shared_ptr<walring::Ring> busy;
-        for (auto &ring : walring::AllRings()) {
-            if (ring->path().rfind(std::filesystem::path(db_base_path).parent_path().string(), 0) == 0 && ring->HeadLsn() > 0) busy = ring;
-        }
-        ASSERT_NE(busy, nullptr) << "no ring took the insert";
-        XStore_Proto::RowData wal_row;
-        wal_row.add_fielddata()->set_doubledata(42.0);
-        std::string row_bytes(kPreexistRowLength, '\0');
-        wal_row.SerializeToArray(row_bytes.data(), static_cast<int>(wal_row.ByteSizeLong()));
-        std::string payload;
-        auto put = [&](auto value) { payload.append(reinterpret_cast<const char *>(&value), sizeof(value)); };
-        put(static_cast<uint16_t>(db_name.size()));
-        put(static_cast<uint16_t>(kPreexistRowLength));
-        put(static_cast<int32_t>(XStore_Proto::SECOND));
-        put(static_cast<uint32_t>(1));
-        payload.append(db_name);
-        put(static_cast<uint64_t>(kYear2023StartEpoch + kRowIndex));
-        payload.append(row_bytes);
-        std::string record;
-        const uint32_t record_len = static_cast<uint32_t>(4 + payload.size());
-        const uint32_t crc = Crc32c(payload.data(), payload.size());
-        record.append(reinterpret_cast<const char *>(&record_len), 4);
-        record.append(reinterpret_cast<const char *>(&crc), 4);
-        record.append(payload);
-        const std::string wal_path = busy->path();
-        walring::ClearRingRegistryForTests();   // the old Ring (and its head) is gone with the file's format
-        int fd = open(wal_path.c_str(), O_WRONLY | O_TRUNC);
-        ASSERT_GE(fd, 0);
-        ASSERT_EQ(write(fd, record.data(), record.size()), static_cast<ssize_t>(record.size()));
-        ASSERT_EQ(fsync(fd), 0);
-        close(fd);
-    }
-
-    // Setup guard: the WAL must genuinely still hold this insert's record,
-    // or "replay" below replays nothing and the test proves nothing. A live
-    // record is a shard file whose leading u32 recordLen is non-zero
-    // (InvalidateWalFileHeader zeroes exactly those 4 bytes to checkpoint).
+    // Setup guard: the ring must genuinely still hold this insert's record
+    // (head past checkpoint), or "replay" below replays nothing and the test
+    // proves nothing.
     {
         bool found_live_record = false;
-        std::filesystem::path wal_dir = std::filesystem::path(db_base_path).parent_path() / XStoreTunables::WAL_DIR_NAME;
-        ASSERT_TRUE(std::filesystem::is_directory(wal_dir));
-        for (auto &f : std::filesystem::directory_iterator(wal_dir)) {
-            int fd = open(f.path().c_str(), O_RDONLY);
-            if (fd < 0) continue;
-            uint32_t record_len = 0;
-            if (pread(fd, &record_len, sizeof(record_len), 0) == static_cast<ssize_t>(sizeof(record_len)) && record_len != 0) {
-                found_live_record = true;
-            }
-            close(fd);
-            if (found_live_record) break;
+        const std::string data_store_dir = std::filesystem::path(db_base_path).parent_path().string();
+        for (auto &ring : walring::AllRings()) {
+            if (ring->path().rfind(data_store_dir, 0) == 0 && ring->HeadLsn() > ring->CheckpointLsn()) found_live_record = true;
         }
         ASSERT_TRUE(found_live_record)
             << "test setup error: no un-checkpointed WAL record left to replay";
@@ -1513,11 +1462,12 @@ TEST_F(XStoreZoneMapTest, InitDbFoldsWalReplayedRowsWhenSidecarIsMissing) {
         close(fd);
     }
 
-    // The restart. Sidecar gone, registry genuinely cold (a warm registry
-    // would hand replay an instance still holding an fd to the unlinked
-    // inode -- correct stats, wrong reason, test proves nothing).
+    // The restart: kill -9 (no final checkpoint, no MarkClean), sidecar gone,
+    // registry genuinely cold (a warm registry would hand replay an instance
+    // still holding an fd to the unlinked inode -- correct stats, wrong reason,
+    // test proves nothing).
+    XStore::WalSimulateRestartForTests();
     ASSERT_TRUE(std::filesystem::remove(zmap_path));
-    XStore::ClearZoneMapRegistryForTests();
 
     store.InitDB();
 

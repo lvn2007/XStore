@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace walring {
@@ -226,18 +227,90 @@ void Ring::ResetTo(uint64_t lsn) {
     cv_.notify_all();
 }
 
+bool Ring::CommitReplay(uint64_t end_lsn) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (end_lsn <= checkpoint_.load(std::memory_order_relaxed)) return true;
+    RingHeader best;
+    if (ReadBestHeader(fd_, best)) slot_seq_ = std::max(slot_seq_, best.slot_seq);
+    RingHeader h;
+    h.shard_id = shard_id_;
+    h.ring_bytes = ring_bytes_;
+    h.checkpoint_lsn = end_lsn;
+    h.slot_seq = slot_seq_ + 1;
+    if (!WriteHeaderSlot(fd_, h)) {
+        spdlog::error("[WAL REPLAY] - Failed to persist checkpoint {} for {}", end_lsn, path_);
+        return false;
+    }
+    slot_seq_ = h.slot_seq;
+    if (head_.load(std::memory_order_relaxed) < end_lsn) head_.store(end_lsn, std::memory_order_release);
+    if (applied_.load(std::memory_order_relaxed) < end_lsn) applied_.store(end_lsn, std::memory_order_release);
+    checkpoint_.store(end_lsn, std::memory_order_release);
+    cv_.notify_all();
+    return true;
+}
+
 // ---- Registry ---------------------------------------------------------------
 
 namespace {
 std::mutex g_registry_mutex;
 std::unordered_map<std::string, std::shared_ptr<Ring>> g_rings;
+std::unordered_set<std::string> g_fenced;   // normalized WAL paths; guarded by g_registry_mutex
+
+std::string NormalizedKey(const std::string &wal_path) {
+    return std::filesystem::path(wal_path).lexically_normal().string();
+}
 }  // namespace
+
+void FenceWalFile(const std::string &wal_path) {
+    std::lock_guard<std::mutex> lock(g_registry_mutex);
+    const std::string key = NormalizedKey(wal_path);
+    g_fenced.insert(key);
+    // Drop the live Ring (if any) and make the writers drop their cached copies.
+    if (g_rings.erase(key) != 0) g_registry_epoch.fetch_add(1, std::memory_order_relaxed);
+}
+void UnfenceWalFile(const std::string &wal_path) {
+    std::lock_guard<std::mutex> lock(g_registry_mutex);
+    g_fenced.erase(NormalizedKey(wal_path));
+}
+
+namespace {
+std::atomic<uint64_t> g_replay_zeroed_bytes{0};
+}
+namespace {
+std::atomic<int> g_fail_replay_reads{0};
+std::atomic<int> g_fail_replay_zeroings{0};
+bool ConsumeCounter(std::atomic<int> &c) {
+    int n = c.load(std::memory_order_relaxed);
+    while (n > 0) {
+        if (c.compare_exchange_weak(n, n - 1, std::memory_order_relaxed)) return true;
+    }
+    return false;
+}
+}  // namespace
+void FailNextReplayReadsForTests(int n) { g_fail_replay_reads.store(n, std::memory_order_relaxed); }
+bool ConsumeInjectedReplayReadFailure() { return ConsumeCounter(g_fail_replay_reads); }
+void FailNextReplayZeroingsForTests(int n) { g_fail_replay_zeroings.store(n, std::memory_order_relaxed); }
+bool ConsumeInjectedReplayZeroingFailure() { return ConsumeCounter(g_fail_replay_zeroings); }
+uint64_t ReplayZeroedBytesForTests() { return g_replay_zeroed_bytes.load(std::memory_order_relaxed); }
+void CountReplayZeroedBytes(uint64_t bytes) { g_replay_zeroed_bytes.fetch_add(bytes, std::memory_order_relaxed); }
+
+bool ZeroRingRange(int fd, uint64_t from_lsn, uint64_t to_lsn, uint64_t ring_bytes) {
+    static const std::vector<char> zeros(1u << 20, 0);
+    for (uint64_t lsn = from_lsn; lsn < to_lsn;) {
+        const uint64_t lap_left = ring_bytes - lsn % ring_bytes;
+        const size_t n = static_cast<size_t>(std::min<uint64_t>({zeros.size(), to_lsn - lsn, lap_left}));
+        if (!PwriteAll(fd, zeros.data(), n, static_cast<off_t>(RingOffset(lsn, ring_bytes)))) return false;
+        lsn += n;
+    }
+    return true;
+}
 
 std::shared_ptr<Ring> GetOrOpenRing(const std::string &wal_path, uint32_t shard_id, bool reinit_legacy) {
     // One ring per file no matter how the path is spelled ("a//b", "a/./b", ...):
     // two Rings over one file would each think they own the head.
     const std::string key = std::filesystem::path(wal_path).lexically_normal().string();
     std::lock_guard<std::mutex> lock(g_registry_mutex);
+    if (g_fenced.count(key) != 0) return nullptr;   // replay failed: must replay again, nothing may append or wipe
     if (auto it = g_rings.find(key); it != g_rings.end()) return it->second;
 
     std::error_code ec;
@@ -290,6 +363,7 @@ std::vector<std::shared_ptr<Ring>> AllRings() {
 void ClearRingRegistryForTests() {
     std::lock_guard<std::mutex> lock(g_registry_mutex);
     g_rings.clear();
+    g_fenced.clear();
     g_registry_epoch.fetch_add(1, std::memory_order_relaxed);
 }
 

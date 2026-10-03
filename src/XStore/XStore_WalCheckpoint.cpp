@@ -7,7 +7,9 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
+#include <limits>
 #include <vector>
 #include <fcntl.h>
 #include <unistd.h>
@@ -15,6 +17,16 @@
 namespace walring {
 
 PaddedAtomicI64 last_writer_activity_ns{0};
+
+bool ParseMsKnob(const char *text, unsigned &out) {
+    if (text == nullptr || text[0] < '0' || text[0] > '9') return false;
+    char *end = nullptr;
+    errno = 0;
+    const unsigned long long parsed = std::strtoull(text, &end, 10);
+    if (end == text || *end != '\0' || errno == ERANGE || parsed > std::numeric_limits<unsigned>::max()) return false;
+    out = static_cast<unsigned>(parsed);
+    return true;
+}
 
 namespace {
 
@@ -75,8 +87,8 @@ bool Checkpointer::ConsumeFailure(std::atomic<int> &counter) {
 
 void Checkpointer::FailNextDataSyncsForTests(int n) { fail_data_syncs_.store(n, std::memory_order_relaxed); }
 void Checkpointer::FailNextDirSyncsForTests(int n) { fail_dir_syncs_.store(n, std::memory_order_relaxed); }
-void Checkpointer::SetIdleMsForTests(unsigned ms) { idle_ms_override_.store(ms, std::memory_order_relaxed); }
-void Checkpointer::SetMaxAgeMsForTests(unsigned ms) { max_age_override_.store(ms, std::memory_order_relaxed); }
+void Checkpointer::SetIdleMs(unsigned ms) { idle_ms_override_.store(ms, std::memory_order_relaxed); }
+void Checkpointer::SetMaxAgeMs(unsigned ms) { max_age_override_.store(ms, std::memory_order_relaxed); }
 
 void Checkpointer::FailNextDataSyncsStickyForTests(int n) { fail_data_sticky_.store(n, std::memory_order_relaxed); }
 void Checkpointer::FailNextDirSyncsStickyForTests(int n) { fail_dir_sticky_.store(n, std::memory_order_relaxed); }
@@ -142,6 +154,103 @@ void Checkpointer::StopAfterFinalCycle() {
     static_cast<void>(RunCycle());
 }
 
+Checkpointer::SyncResult Checkpointer::SyncDataFile(const std::string &path) {
+    const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno == ENOENT) return SyncResult::kSkipped;   // DB deleted: nothing left to make durable
+        spdlog::error("[WAL CKPT] - Cannot open {} for sync: {}", path, std::strerror(errno));
+        return SyncResult::kRetryable;
+    }
+    int err = 0;
+    bool sticky = false;
+    if (ConsumeFailure(fail_data_sticky_)) {
+        err = EIO; sticky = true;
+    } else if (ConsumeFailure(fail_data_syncs_)) {
+        err = EIO;   // injected, retryable
+    } else {
+        int rc;
+        do { rc = fdatasync(fd); } while (rc != 0 && errno == EINTR);
+        if (rc != 0) { err = errno; sticky = true; }
+    }
+    close(fd);
+    if (err == 0) return SyncResult::kOk;
+    if (sticky) {
+        Poison("fdatasync", path, err);
+        return SyncResult::kPoisoned;
+    }
+    spdlog::error("[WAL CKPT] - fdatasync failed for {}; checkpoint not advanced", path);
+    return SyncResult::kRetryable;
+}
+
+Checkpointer::SyncResult Checkpointer::SyncDirectory(const std::string &dir) {
+    const int dfd = open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dfd < 0) {
+        if (errno == ENOENT) return SyncResult::kSkipped;
+        spdlog::error("[WAL CKPT] - Cannot open directory {}: {}", dir, std::strerror(errno));
+        return SyncResult::kRetryable;
+    }
+    int err = 0;
+    bool sticky = false;
+    if (ConsumeFailure(fail_dir_sticky_)) {
+        err = EIO; sticky = true;
+    } else if (ConsumeFailure(fail_dir_syncs_)) {
+        err = EIO;   // injected, retryable
+    } else {
+        int rc;
+        do { rc = fsync(dfd); } while (rc != 0 && errno == EINTR);
+        if (rc != 0) { err = errno; sticky = true; }
+    }
+    close(dfd);
+    if (err == 0) {
+        dir_syncs_.fetch_add(1, std::memory_order_relaxed);
+        return SyncResult::kOk;
+    }
+    if (sticky) {
+        Poison("fsync(directory)", dir, err);
+        return SyncResult::kPoisoned;
+    }
+    spdlog::error("[WAL CKPT] - fsync failed for directory {}; checkpoint not advanced", dir);
+    return SyncResult::kRetryable;
+}
+
+bool Checkpointer::SyncPathsForReplay(const std::set<std::string> &paths) {
+    std::lock_guard<std::mutex> cycle(cycle_mutex_);   // hooks are consumed by exactly one party at a time
+    if (poisoned_.load(std::memory_order_acquire)) return false;
+    std::set<std::string> synced;
+    for (const std::string &path : paths) {
+        switch (SyncDataFile(path)) {
+            case SyncResult::kOk: synced.insert(path); break;
+            case SyncResult::kSkipped: break;
+            case SyncResult::kRetryable: return false;
+            case SyncResult::kPoisoned: return false;
+        }
+    }
+    std::set<std::string> dirs;
+    for (const std::string &path : synced) {
+        std::string dir = std::filesystem::path(path).parent_path().string();
+        if (dir.empty()) dir = ".";
+        if (!dirs.insert(dir).second) continue;
+        const SyncResult r = SyncDirectory(dir);
+        if (r == SyncResult::kRetryable || r == SyncResult::kPoisoned) return false;
+    }
+    return true;
+}
+
+void Checkpointer::StopWithoutFinalCycleForTests() {
+    std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
+    if (thread_.joinable()) {
+        {
+            std::lock_guard<std::mutex> lock(wake_mutex_);
+            stop_ = true;
+        }
+        wake_.notify_all();
+        thread_.join();
+    }
+    std::lock_guard<std::mutex> cycle(cycle_mutex_);
+    carried_.clear();
+    flushed_.clear();
+}
+
 bool Checkpointer::RunCycle() {
     std::lock_guard<std::mutex> cycle(cycle_mutex_);
     return RunCycleLocked();
@@ -163,35 +272,12 @@ bool Checkpointer::RunCycleLocked() {
     bool ok = true;
     std::unordered_set<std::string> synced;
     for (const std::string &path : carried_) {
-        const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
-        if (fd < 0) {
-            if (errno == ENOENT) continue;   // DB deleted: nothing left to make durable
-            spdlog::error("[WAL CKPT] - Cannot open {} for sync: {}", path, std::strerror(errno));
-            ok = false;
-            continue;
+        switch (SyncDataFile(path)) {
+            case SyncResult::kOk: synced.insert(path); break;
+            case SyncResult::kSkipped: break;
+            case SyncResult::kRetryable: ok = false; break;
+            case SyncResult::kPoisoned: return false;
         }
-        int err = 0;
-        bool sticky = false;
-        if (ConsumeFailure(fail_data_sticky_)) {
-            err = EIO; sticky = true;
-        } else if (ConsumeFailure(fail_data_syncs_)) {
-            err = EIO;   // injected, retryable
-        } else {
-            int rc;
-            do { rc = fdatasync(fd); } while (rc != 0 && errno == EINTR);
-            if (rc != 0) { err = errno; sticky = true; }
-        }
-        close(fd);
-        if (err == 0) {
-            synced.insert(path);
-            continue;
-        }
-        ok = false;
-        if (sticky) {
-            Poison("fdatasync", path, err);
-            return false;
-        }
-        spdlog::error("[WAL CKPT] - fdatasync failed for {}; checkpoint not advanced", path);
     }
 
     // (4) The directory entry of a newly created year file is not made durable by
@@ -202,36 +288,12 @@ bool Checkpointer::RunCycleLocked() {
             std::string dir = std::filesystem::path(path).parent_path().string();
             if (dir.empty()) dir = ".";
             if (!dirs.insert(dir).second) continue;
-            const int dfd = open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-            if (dfd < 0) {
-                if (errno == ENOENT) continue;
-                spdlog::error("[WAL CKPT] - Cannot open directory {}: {}", dir, std::strerror(errno));
-                ok = false;
-                continue;
+            switch (SyncDirectory(dir)) {
+                case SyncResult::kOk: synced_dirs.insert(dir); break;
+                case SyncResult::kSkipped: break;
+                case SyncResult::kRetryable: ok = false; break;
+                case SyncResult::kPoisoned: return false;
             }
-            int err = 0;
-            bool sticky = false;
-            if (ConsumeFailure(fail_dir_sticky_)) {
-                err = EIO; sticky = true;
-            } else if (ConsumeFailure(fail_dir_syncs_)) {
-                err = EIO;   // injected, retryable
-            } else {
-                int rc;
-                do { rc = fsync(dfd); } while (rc != 0 && errno == EINTR);
-                if (rc != 0) { err = errno; sticky = true; }
-            }
-            close(dfd);
-            if (err == 0) {
-                dir_syncs_.fetch_add(1, std::memory_order_relaxed);
-                synced_dirs.insert(dir);
-                continue;
-            }
-            ok = false;
-            if (sticky) {
-                Poison("fsync(directory)", dir, err);
-                return false;
-            }
-            spdlog::error("[WAL CKPT] - fsync failed for directory {}; checkpoint not advanced", dir);
         }
     }
     if (!ok) return false;   // carried_ kept for the retry; nothing advances
