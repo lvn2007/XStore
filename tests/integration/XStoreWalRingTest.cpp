@@ -9,13 +9,17 @@
 #include "include/XStore/XStore_WalCheckpoint.h"
 #include "include/DataStructs/TimeStruct.h"
 #include <spdlog/fmt/fmt.h>
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <fcntl.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <memory>
+#include <random>
 #include <string>
 #include <sys/stat.h>
 #include <thread>
@@ -2467,6 +2471,451 @@ TEST_F(WalDirectPathTest, RingPressureLowersTheThresholdEndToEnd) {
 
     ASSERT_FALSE(Failed(Batch(store, db_name, kEpoch0, 300, 9.0)));   // 21600 B >= pressure threshold (16 KiB)
     EXPECT_EQ(DirectRecords(), direct0 + 1);
+}
+
+// ---- Task 8: crash simulation (lost page cache) and concurrency ----------------------------------
+//
+// PAGE-CACHE-LOSS MODEL. A power loss keeps everything the kernel was told to make durable (fdatasync/fsync
+// returned) and loses the rest of the page cache. Process death alone (what WalSimulateRestartForTests does) keeps
+// the whole page cache, so on its own it cannot expose a missing data fdatasync. This fixture adds the loss:
+//   * images_[file] = the first ImageBytes() bytes of a data file "as of the last moment the SYSTEM guaranteed them
+//     durable". It is refreshed at exactly two kinds of moment:
+//       (a) right after a successful Checkpointer::RunCycle() (the cycle fdatasyncs every dirty data file BEFORE it
+//           advances any checkpoint), for every tracked file; and
+//       (b) right after an acknowledged DIRECT-path write returned (it fdatasyncs the file before the ack), for that
+//           file only. The ring-clear ordering rule guarantees the file had no pending ring record then, so its whole
+//           content is durable (fdatasync flushes the whole file, not just the new range).
+//       (c) after InitDB for every file: replay fdatasyncs the files it touched before it checkpoints.
+//     Bytes pwritten by ring-path records since the last refresh are NOT in the image.
+//   * LosePageCache(): WalSimulateRestartForTests() (writers/checkpointer stopped without a final cycle, in-memory
+//     state dropped, the poison flag cleared like a fresh process), then each tracked data file is truncated/extended
+//     to ImageBytes() and overwritten with its image (never-imaged file = all zeros). The WAL ring files are left
+//     exactly as they are: records were fdatasynced before the ack, so they survive a power loss.
+//   * Recover(): InitDB (replay from the persisted checkpoint_lsn; the stale, dirty-flagged .zmap/.catidx rebuild).
+// What it cannot model: partial/torn page writeback (a real crash may persist SOME unsynced pages -- strictly easier
+// than "none", but not exercised), reordering of unsynced pages among themselves, loss of a freshly created file's
+// directory entry (file existence is treated as durable), durability of the index sidecars (they are always rebuilt
+// after a crash here), and a crash in the middle of replay or of a checkpoint cycle. It trusts that fdatasync really
+// reached stable storage; the tests tie the (a)/(b) moments to the production syncs via DataSyncsForTests().
+class WalCrashSimTest : public WalDirectPathTest {
+protected:
+    // Rows live at epochs [kEpoch0, kEpoch0 + kSpanRows) of the 1970 file and at kOtherYearEpoch + [0, kSpanRows) of the 1971 file.
+    static constexpr uint64_t kSpanRows = 4000;
+    static constexpr uint64_t kYear1971Start = 31536000;
+    static constexpr uint64_t kSmallBatchRows = 500;   // 500 x 72 = 36000 B > the 32 KiB direct threshold set by the base fixture
+
+    std::map<std::string, std::string> images_;
+    std::vector<std::string> files_;
+
+    void TearDown() override {
+        images_.clear();
+        files_.clear();
+        WalDirectPathTest::TearDown();
+    }
+
+    uint64_t ImageBytes() const { return (kEpoch0 + kSpanRows + 1) * row_length; }
+    std::string Year1971File() const {
+        return fmt::format("{}/{}.XSTORE", (scratch->test_root / "DataStore" / db_name).string(),
+                           TimeStruct(kOtherYearEpoch, XStore_Proto::SECOND).year);
+    }
+
+    std::string ReadPrefix(const std::string &path) const {
+        std::string bytes(ImageBytes(), '\0');
+        const int fd = open(path.c_str(), O_RDONLY);
+        if (fd < 0) return bytes;   // not created yet: durable image is "all zeros"
+        size_t done = 0;
+        while (done < bytes.size()) {
+            const ssize_t n = pread(fd, bytes.data() + done, bytes.size() - done, static_cast<off_t>(done));
+            if (n <= 0) break;       // past EOF reads as zero
+            done += static_cast<size_t>(n);
+        }
+        close(fd);
+        return bytes;
+    }
+    void Snapshot(const std::string &path) { images_[path] = ReadPrefix(path); }
+    void SnapshotAll() { for (const auto &f : files_) Snapshot(f); }
+
+    void LosePageCache() {
+        Crash();
+        Ckpt().ClearPoisonForTests();   // a restart is a fresh process: no sticky sync error
+        for (const auto &f : files_) {
+            const int fd = open(f.c_str(), O_WRONLY);
+            if (fd < 0) continue;       // never created
+            const auto it = images_.find(f);
+            const std::string zeros(it == images_.end() ? ImageBytes() : 0, '\0');
+            const std::string &img = it == images_.end() ? zeros : it->second;
+            ASSERT_EQ(ftruncate(fd, static_cast<off_t>(ImageBytes())), 0);
+            ASSERT_EQ(pwrite(fd, img.data(), img.size(), 0), static_cast<ssize_t>(img.size()));
+            close(fd);
+        }
+    }
+    void Recover(XStore &store) {
+        store.InitDB();
+        SnapshotAll();   // (c): replay fdatasynced what it touched before checkpointing
+    }
+    void PowerLoss(XStore &store) {
+        LosePageCache();
+        Recover(store);
+    }
+
+    bool Put(XStore &store, uint64_t epoch, double v) {
+        XStore_Proto::RowData row;
+        row.add_fielddata()->set_doubledata(v);
+        XStore_Proto::UnaryInsert_REP rep;
+        store.UnaryInsert(epoch, row, db_name, &rep, XStore_Proto::SYNC);
+        return !Failed(rep.insertstatus());
+    }
+    // Returns false if the row is absent.
+    bool Lookup(XStore &store, const std::string &db, uint64_t epoch, double &v) {
+        XStore_Proto::UnaryQuery_REP q;
+        store.UnaryQuery(epoch, db, &q);
+        if (!q.has_data() || q.data().fielddata_size() != 1) return false;
+        v = q.data().fielddata(0).doubledata();
+        return true;
+    }
+    // Every acked (epoch -> value) must read back exactly. Reports the first few mismatches.
+    void VerifyAll(XStore &store, const std::map<uint64_t, double> &acked, const std::string &when) {
+        size_t bad = 0;
+        for (const auto &kv : acked) {
+            double v = 0;
+            if (!Lookup(store, db_name, kv.first, v) || v != kv.second) {
+                if (++bad <= 5) ADD_FAILURE() << when << ": acked row " << kv.first << " expected " << kv.second << " got " << (Lookup(store, db_name, kv.first, v) ? std::to_string(v) : std::string("<absent>"));
+            }
+        }
+        EXPECT_EQ(bad, 0u) << when << ": " << bad << " of " << acked.size() << " acknowledged rows lost or stale";
+    }
+
+    // 5 rounds of: 200 acked rows, a successful checkpoint cycle (durable image), 200 more acked rows, power loss.
+    void RunAckedRounds(uint64_t ring_bytes) {
+        walring::SetRingBytesForTests(ring_bytes);
+        XStore store;
+        xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+        files_ = {YearFile()};
+
+        std::map<uint64_t, double> acked;
+        uint64_t next = 0;
+        auto put_batch = [&](int round, uint64_t n) {
+            for (uint64_t i = 0; i < n; ++i, ++next) {
+                const double v = static_cast<double>(next) * 1.5 + static_cast<double>(round);
+                ASSERT_TRUE(Put(store, kEpoch0 + next, v)) << "insert " << next;
+                acked[kEpoch0 + next] = v;
+            }
+        };
+        for (int round = 1; round <= 5; ++round) {
+            put_batch(round, 200);
+            ASSERT_FALSE(HasFailure());
+            const uint64_t syncs0 = Ckpt().DataSyncsForTests();
+            ASSERT_TRUE(Ckpt().RunCycle());
+            ASSERT_GT(Ckpt().DataSyncsForTests(), syncs0) << "the cycle must have fdatasynced the dirty year file";
+            SnapshotAll();                        // (a) durable image
+            put_batch(round, 200);                // acked, but only in the WAL + page cache
+            ASSERT_FALSE(HasFailure());
+            LosePageCache();
+            ASSERT_FALSE(RowPresent(next - 1)) << "the model must bite: the last acked row exists only in the WAL until replay";
+            ASSERT_TRUE(RowPresent(next - 201)) << "...while the checkpointed batch is in the durable image";
+            Recover(store);
+            VerifyAll(store, acked, "after round " + std::to_string(round));
+            if (HasFailure()) return;
+        }
+        if (ring_bytes < (1u << 20)) {
+            EXPECT_GT(TotalHead(), 2 * ring_bytes) << "the small ring must have wrapped during the rounds";
+        }
+    }
+};
+
+TEST_F(WalCrashSimTest, AckedSyncRowsSurviveLostPageCache) { RunAckedRounds(8u << 20); }
+
+TEST_F(WalCrashSimTest, AckedSyncRowsSurviveLostPageCacheWithWrappingRing) { RunAckedRounds(64u << 10); }
+
+TEST_F(WalCrashSimTest, LargeDirectBatchSurvivesLostPageCache) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    files_ = {YearFile(), Year1971File()};
+    std::map<uint64_t, double> acked;
+
+    // A small ring record on the 1971 file: acked, never checkpointed, so only the WAL has it.
+    ASSERT_TRUE(Put(store, kOtherYearEpoch, 4242.0));
+    acked[kOtherYearEpoch] = 4242.0;
+    const uint64_t head_small = TotalHead();
+    ASSERT_GT(head_small, 0u);
+
+    // A large batch on the (clear) 1970 file takes the direct path: fdatasync'd before the ack, no ring record.
+    const uint64_t direct0 = DirectRecords(), data_syncs0 = Ckpt().DataSyncsForTests();
+    ASSERT_FALSE(Failed(BigBatch(store, 500.0)));
+    ASSERT_EQ(DirectRecords(), direct0 + 1) << "must be the direct path";
+    ASSERT_GT(Ckpt().DataSyncsForTests(), data_syncs0) << "the ack came after a data fdatasync (checkpointer is paused)";
+    ASSERT_EQ(TotalHead(), head_small) << "a direct write appends nothing to the ring";
+    Snapshot(YearFile());                         // (b) durable at the ack; the 1971 file is NOT imaged
+    for (uint64_t i = 0; i < kBatchRows; ++i) acked[kEpoch0 + i] = 500.0 + static_cast<double>(i);
+
+    LosePageCache();
+    for (uint64_t i = 0; i < kBatchRows; ++i) ASSERT_TRUE(RowPresent(i)) << "direct batch row " << i << " must survive WITHOUT replay";
+    {   // The small record's data lived only in the page cache of the 1971 file: gone until replay.
+        const int fd = open(Year1971File().c_str(), O_RDONLY);
+        ASSERT_GE(fd, 0);
+        std::string row(row_length, 'x');
+        ASSERT_EQ(pread(fd, row.data(), row.size(), static_cast<off_t>(kEpoch0 * row_length)), static_cast<ssize_t>(row.size()));
+        close(fd);
+        EXPECT_EQ(row, std::string(row_length, '\0')) << "the un-checkpointed ring row must have been lost with the page cache";
+    }
+    Recover(store);
+    VerifyAll(store, acked, "after recovery");
+    EXPECT_EQ(DirectRecords(), direct0 + 1);
+}
+
+TEST_F(WalCrashSimTest, RepeatedOverwritesOfOneRowKeepTheNewestValueAfterLostPageCache) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    files_ = {YearFile()};
+    constexpr uint64_t kT = kEpoch0 + 7;
+    double last = 0;
+    for (int k = 1; k <= 50; ++k) {
+        last = 100.0 + k;
+        ASSERT_TRUE(Put(store, kT, last)) << k;
+        if (k % 10 == 0 && k < 50) {   // durable images hold 110, 120, 130, 140; 141..150 exist only in the WAL
+            ASSERT_TRUE(Ckpt().RunCycle());
+            SnapshotAll();
+        }
+    }
+    PowerLoss(store);
+    double v = 0;
+    ASSERT_TRUE(Lookup(store, db_name, kT, v));
+    EXPECT_EQ(v, last) << "replay of records 141..150 in log order must leave the LAST acked value";
+}
+
+TEST_F(WalCrashSimTest, CrashStormNeverLosesAnAckedRow) {
+    walring::SetRingBytesForTests(2u << 20);
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    files_ = {YearFile(), Year1971File()};
+    std::mt19937_64 rng(0xC0FFEE);
+    std::map<uint64_t, double> acked;
+    double counter = 1.0;
+    size_t direct_batches = 0, ring_batches = 0, cycles = 0, small = 0;
+    const auto epoch_of = [](bool y71, uint64_t idx) { return (y71 ? kYear1971Start : uint64_t{0}) + kEpoch0 + idx; };
+    for (int round = 1; round <= 30; ++round) {
+        const unsigned ops = 5 + static_cast<unsigned>(rng() % 20);
+        for (unsigned op = 0; op < ops; ++op) {
+            const unsigned dice = static_cast<unsigned>(rng() % 100);
+            const bool y71 = rng() & 1;
+            const uint64_t idx = rng() % (kSpanRows - kSmallBatchRows);
+            if (dice < 75) {
+                const double v = counter++;
+                ASSERT_TRUE(Put(store, epoch_of(y71, idx), v));
+                acked[epoch_of(y71, idx)] = v;
+                ++small;
+            } else if (dice < 83) {
+                ASSERT_TRUE(Ckpt().RunCycle());
+                SnapshotAll();
+                ++cycles;
+            } else {
+                const uint64_t direct0 = DirectRecords();
+                const double base = counter;
+                counter += static_cast<double>(kSmallBatchRows);
+                const std::string status = Batch(store, db_name, epoch_of(y71, idx), kSmallBatchRows, base);
+                ASSERT_FALSE(Failed(status)) << status;
+                for (uint64_t i = 0; i < kSmallBatchRows; ++i) acked[epoch_of(y71, idx) + i] = base + static_cast<double>(i);
+                if (DirectRecords() > direct0) {
+                    Snapshot(y71 ? Year1971File() : YearFile());   // (b)
+                    ++direct_batches;
+                } else {
+                    ++ring_batches;
+                }
+            }
+        }
+        PowerLoss(store);
+        VerifyAll(store, acked, "storm round " + std::to_string(round));
+        if (HasFailure()) return;
+    }
+    EXPECT_GT(direct_batches, 0u);
+    EXPECT_GT(ring_batches, 0u);
+    EXPECT_GT(cycles, 0u);
+    EXPECT_GT(small, 0u);
+}
+
+TEST_F(WalCrashSimTest, PowerLossWithPoisonedCheckpointerReplaysFromLastGoodCheckpoint) {
+    walring::SetRingBytesForTests(256 << 10);
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    files_ = {YearFile()};
+    std::map<uint64_t, double> acked;
+    uint64_t next = 0;
+    const auto put = [&](uint64_t n) {
+        for (uint64_t i = 0; i < n; ++i, ++next) {
+            ASSERT_TRUE(Put(store, kEpoch0 + next, static_cast<double>(next) + 0.25)) << next;
+            acked[kEpoch0 + next] = static_cast<double>(next) + 0.25;
+        }
+    };
+    put(100);
+    ASSERT_TRUE(Ckpt().RunCycle());
+    SnapshotAll();                                 // the last GOOD checkpoint
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    const uint64_t good_ckpt = ring->CheckpointLsn();
+    ASSERT_EQ(good_ckpt, ring->HeadLsn());
+
+    put(50);
+    Ckpt().FailNextDataSyncsStickyForTests(1);     // a real fdatasync error: dirty pages may be dropped by the kernel
+    ASSERT_FALSE(Ckpt().RunCycle());
+    ASSERT_TRUE(Ckpt().Poisoned());
+    put(50);                                       // still acked through the ring (far below the stall limit)
+    EXPECT_EQ(ring->CheckpointLsn(), good_ckpt) << "a failed sync must never let the checkpoint pass unsynced data";
+    EXPECT_GT(ring->HeadLsn(), good_ckpt);
+    ring.reset();
+
+    LosePageCache();
+    ASSERT_TRUE(RowPresent(99));
+    ASSERT_FALSE(RowPresent(100)) << "rows acked after the last good checkpoint exist only in the WAL until replay";
+    ASSERT_FALSE(RowPresent(199));
+    Recover(store);
+    VerifyAll(store, acked, "after poisoned power loss");
+}
+
+TEST_F(WalCrashSimTest, ConcurrentWritersAndCheckpointerStayConsistent) {
+    constexpr uint64_t kRing = 256 << 10;
+    constexpr int kThreads = 8, kOps = 500;
+    walring::SetRingBytesForTests(kRing);
+    XStore store;
+    const std::string dbs[2] = {"CRASHCONCA", "CRASHCONCB"};
+    constexpr short kWideRow = 256;                // ~300 B ring records so 4800 rows wrap a 256 KiB ring
+    for (const auto &db : dbs) xstore_test::CreateTestDb(store, db, XStore_Proto::SECOND, kWideRow);
+    Ckpt().SetPausedForTests(false);               // the REAL checkpointer
+
+    const auto value_of = [](uint64_t epoch) { return static_cast<double>(epoch) + 0.5; };
+    std::atomic<int> failures{0};
+    std::atomic<bool> done{false};
+    std::atomic<uint64_t> violations{0}, max_gap{0}, samples{0};
+    std::thread monitor([&] {
+        while (!done.load(std::memory_order_acquire)) {
+            for (const auto &ring : walring::AllRings()) {
+                const uint64_t ckpt = ring->CheckpointLsn();   // read first: head only grows, so the gap can only be over-estimated
+                const uint64_t head = ring->HeadLsn();
+                const uint64_t gap = head - ckpt;
+                if (head < ckpt || gap > ring->ring_bytes()) violations.fetch_add(1, std::memory_order_relaxed);
+                uint64_t prev = max_gap.load(std::memory_order_relaxed);
+                while (gap > prev && !max_gap.compare_exchange_weak(prev, gap, std::memory_order_relaxed)) {}
+                samples.fetch_add(1, std::memory_order_relaxed);
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+    });
+
+    std::vector<std::thread> writers;
+    for (int t = 0; t < kThreads; ++t) {
+        writers.emplace_back([&, t] {
+            const std::string &db = dbs[t % 2];
+            for (int i = 0; i < kOps; ++i) {
+                const uint64_t ts = kEpoch0 + static_cast<uint64_t>(t) * 5000 + static_cast<uint64_t>(i) * 4;
+                if (i % 10 == 9) {   // a 3-row SYNC batch
+                    if (Failed(Batch(store, db, ts, 3, value_of(ts)))) failures.fetch_add(1);
+                } else {
+                    XStore_Proto::RowData row;
+                    row.add_fielddata()->set_doubledata(value_of(ts));
+                    XStore_Proto::UnaryInsert_REP rep;
+                    store.UnaryInsert(ts, row, db, &rep, XStore_Proto::SYNC);
+                    if (Failed(rep.insertstatus())) failures.fetch_add(1);
+                }
+            }
+        });
+    }
+    for (auto &w : writers) w.join();
+    done.store(true, std::memory_order_release);
+    monitor.join();
+
+    EXPECT_EQ(failures.load(), 0);
+    EXPECT_EQ(violations.load(), 0u) << "HeadLsn - CheckpointLsn exceeded the ring size (max observed gap " << max_gap.load() << ")";
+    EXPECT_GT(samples.load(), 0u);
+    size_t rows = 0, missing = 0;
+    for (int t = 0; t < kThreads; ++t) {
+        for (int i = 0; i < kOps; ++i) {
+            const uint64_t ts = kEpoch0 + static_cast<uint64_t>(t) * 5000 + static_cast<uint64_t>(i) * 4;
+            for (uint64_t j = 0; j < (i % 10 == 9 ? 3u : 1u); ++j, ++rows) {
+                double v = 0;
+                if (!Lookup(store, dbs[t % 2], ts + j, v) || v != value_of(ts + j)) ++missing;
+            }
+        }
+    }
+    EXPECT_EQ(missing, 0u) << "of " << rows << " acknowledged rows";
+    uint64_t max_head = 0;
+    for (const auto &r : walring::AllRings()) max_head = std::max(max_head, r->HeadLsn());
+    EXPECT_GT(max_head, kRing) << "at least one ring must have wrapped, so the checkpointer really ran concurrently";
+
+    {
+        ShutdownReset reset;
+        XStore::Shutdown();
+        for (const auto &r : walring::AllRings()) {
+            EXPECT_EQ(r->CheckpointLsn(), r->HeadLsn()) << r->path();
+            EXPECT_EQ(OnDiskCheckpoint(*r), r->HeadLsn()) << r->path();
+        }
+    }
+}
+
+TEST_F(WalCrashSimTest, EveryInsertApiMarksItsFileDirty) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    const std::string path = YearFile();
+    enum class Api { kUnary, kBatch, kRange };
+    int slot = 0;
+    for (const Api api : {Api::kUnary, Api::kBatch, Api::kRange}) {
+        for (const auto mode : {XStore_Proto::SYNC, XStore_Proto::ASYNC}) {
+            const uint64_t first = kEpoch0 + 100 * static_cast<uint64_t>(++slot);
+            const uint64_t rows = api == Api::kUnary ? 1 : 3;
+            (void)walring::Dirty().Take();
+            if (api == Api::kUnary) {
+                XStore_Proto::RowData row;
+                row.add_fielddata()->set_doubledata(1.0);
+                XStore_Proto::UnaryInsert_REP rep;
+                store.UnaryInsert(first, row, db_name, &rep, mode);
+                ASSERT_FALSE(Failed(rep.insertstatus())) << rep.insertstatus();
+            } else if (api == Api::kBatch) {
+                XStore_Proto::BatchInsert_REQ req;
+                req.set_dbname(db_name);
+                req.set_durabilitymode(mode);
+                for (uint64_t i = 0; i < rows; ++i) {
+                    auto *e = req.add_batchinsert_data();
+                    e->set_timestamp(first + i);
+                    e->mutable_data()->add_fielddata()->set_doubledata(2.0);
+                }
+                XStore_Proto::BatchInsert_REP rep;
+                store.BatchInsert(&req, &rep);
+                ASSERT_FALSE(Failed(rep.insertstatus())) << rep.insertstatus();
+            } else {
+                XStore_Proto::RangeInsert_REQ req;
+                req.set_dbname(db_name);
+                req.set_durabilitymode(mode);
+                for (uint64_t i = 0; i < rows; ++i) {
+                    auto *e = req.add_rangeinsert_data();
+                    e->set_timestamp(first + i);
+                    e->mutable_data()->add_fielddata()->set_doubledata(3.0);
+                }
+                XStore_Proto::RangeInsert_REP rep;
+                store.RangeInsert(&req, &rep);
+                ASSERT_FALSE(Failed(rep.insertstatus())) << rep.insertstatus();
+            }
+            const auto covered = [&] {
+                const auto snap = walring::Dirty().PeekRanges();
+                const auto it = snap.ranges.find(path);
+                if (it == snap.ranges.end()) return false;
+                for (uint64_t i = 0; i < rows; ++i) {
+                    const uint64_t off = (first + i) * row_length;   // 1970: first_epoch == 0
+                    if (!Covers(it->second, off, off + row_length)) return false;
+                }
+                return true;
+            };
+            const char *name = api == Api::kUnary ? "Unary" : api == Api::kBatch ? "Batch" : "Range";
+            if (mode == XStore_Proto::SYNC) {
+                EXPECT_TRUE(covered()) << name << " SYNC: every written row must be in the dirty ranges once the call returned";
+            } else {
+                EXPECT_TRUE(WaitFor(covered, std::chrono::milliseconds(2000))) << name << " ASYNC: rows never appeared in the dirty ranges";
+                // The dirty note precedes the writer's zone-map/catidx update: wait for the whole record to be applied,
+                // or TearDown's registry clear would destroy those indexes under the still-running writer (TSAN-visible).
+                EXPECT_TRUE(WaitFor([&] {
+                    for (const auto &r : MyRings()) if (r->AppliedLsn() != r->HeadLsn()) return false;
+                    return true;
+                }, std::chrono::milliseconds(2000))) << name << " ASYNC: record never finished applying";
+            }
+        }
+    }
 }
 
 }  // namespace
