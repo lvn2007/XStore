@@ -321,43 +321,6 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
     return all_rows_ok;
 }
 
-void XStore::InvalidateWalFileHeader(int fd, const std::string &wal_path) {
-    static constexpr char ZERO_LEN_HEADER[4] = {0, 0, 0, 0};
-    // fdatasync, not fsync: this write never changes file size (always inside
-    // the preallocated region, see WAL_FILE_PREALLOC_BYTES), so metadata
-    // durability isn't needed, only the 4 written bytes.
-    if (pwrite(fd, ZERO_LEN_HEADER, sizeof(ZERO_LEN_HEADER), 0) != static_cast<ssize_t>(sizeof(ZERO_LEN_HEADER)) || fdatasync(fd) != 0) {
-        // Not fatal to the batch that just durably applied -- those rows
-        // are safely on disk in the real data file regardless. Worst case
-        // on a crash before this is retried: the stale record replays
-        // again next restart, which is only wrong if its DB was deleted
-        // and recreated in between -- log it so that's diagnosable instead
-        // of silently risking a future "unable to open" surprise.
-        spdlog::error("[WAL] - Failed to invalidate checkpoint header for {}", wal_path);
-    }
-}
-
-void XStore::ReclaimWalFileSize(int fd, const std::string &wal_path, uintmax_t on_disk_bytes) {
-    if (on_disk_bytes <= XStoreTunables::WAL_FILE_PREALLOC_BYTES) {
-        return;
-    }
-    // fsync, not fdatasync: shrinking IS a file-size change, the exact
-    // class of metadata WalWriterLoop's own oversized_write fallback exists
-    // to durably flush -- see the comment on this function in XStore.h.
-    if (ftruncate(fd, static_cast<off_t>(XStoreTunables::WAL_FILE_PREALLOC_BYTES)) != 0 || fsync(fd) != 0) {
-        // Not fatal: the file just stays at its current (larger) size,
-        // same as before this reclaim step existed -- correctness is
-        // unaffected, only the disk-space cleanup is deferred to the next
-        // restart's attempt.
-        spdlog::error("[WAL] - Failed to reclaim {} back to its default preallocated size ({} bytes); "
-                      "leaving it at {} bytes.",
-                      wal_path, XStoreTunables::WAL_FILE_PREALLOC_BYTES, on_disk_bytes);
-        return;
-    }
-    spdlog::info("[WAL] - Reclaimed {} from {} bytes back down to its default preallocated size ({} bytes).",
-                 wal_path, on_disk_bytes, XStoreTunables::WAL_FILE_PREALLOC_BYTES);
-}
-
 bool XStore::EnqueueWalRecord(WalRecord record) {
     // Writers are stopped after Shutdown(); a SYNC wait here would never wake.
     if (IsShutDown()) return false;
@@ -536,194 +499,42 @@ void XStore::StopWalWriters(bool final_checkpoint_cycle) {
 }
 
 void XStore::Shutdown() {
+    // Flag first: from here every insert entry point and EnqueueWalRecord rejects, so no
+    // write can race the sequence below.
     if (shutdown_flag_.exchange(true, std::memory_order_acq_rel)) return;
 
+    // Joins the writers, then the checkpointer's final cycle fdatasyncs every data file
+    // dirtied since the previous cycle (by path, throwaway fd) and advances each ring's
+    // checkpoint to its head.
     StopWalWriters();
 
-    // Data files first: an index may only be marked clean once the data file
-    // it describes is durable. First the fd cache (snapshot shared_ptrs under
-    // each shard lock, sync outside it), remembering which paths succeeded.
-    std::unordered_set<std::string> synced;
-    for (FdShard &shard : fd_shards) {
-        std::vector<std::pair<std::string, std::shared_ptr<int>>> snapshot;
-        {
-            std::lock_guard<std::mutex> lock(shard.mutex);
-            for (size_t i = 0; i < shard.count; ++i) {
-                snapshot.emplace_back(shard.entries[i].key, shard.entries[i].value);
-            }
-        }
-        for (auto &[path, fd] : snapshot) {
-            if (fdatasync(*fd) == 0) {
-                synced.insert(path);
-            } else {
-                spdlog::error("[SHUTDOWN] - fdatasync failed for {}: {}", path, std::strerror(errno));
-            }
-        }
+    // An index may only be marked clean once every data file it describes is durable.
+    // Earlier cycles synced the files that were clean by the final one, so the gate is
+    // the final cycle's outcome plus "never poisoned" (after a real writeback error the
+    // kernel may have dropped pages that later syncs report as fine) -- not per-path
+    // membership in the last cycle's synced set. Nothing is re-synced here: a fresh fd
+    // would not see a prior writeback error.
+    walring::Checkpointer &checkpointer = walring::Checkpointer::Instance();
+    if (!checkpointer.FinalCycleOk() || checkpointer.Poisoned()) {
+        spdlog::error("[SHUTDOWN] - indexes left dirty (final checkpoint did not complete / checkpointer poisoned); "
+                      "next start will rebuild them");
+        return;
     }
 
-    // Registry key is "<db_base_path>/<year>", i.e. the data file is
-    // "<key>.XSTORE" (same string CachedYearFilePath builds). If the fd cache
-    // evicted it, sync it through a throwaway read-only fd (fdatasync flushes
-    // the inode's dirty pages whichever fd wrote them, mmap included).
-    auto data_file_synced = [&](const std::string &key) {
-        std::string data_path = key + ".XSTORE";
-        if (synced.count(data_path) != 0) return true;
-        int fd = open(data_path.c_str(), O_RDONLY);
-        if (fd < 0 || fdatasync(fd) != 0) {
-            spdlog::error("[SHUTDOWN] - Cannot sync {} ({}); leaving its indexes dirty", data_path, std::strerror(errno));
-            if (fd >= 0) close(fd);
-            return false;
-        }
-        close(fd);
-        synced.insert(std::move(data_path));
-        return true;
-    };
-
-    // Registry mutex is held only around the MarkClean() calls (not the data
-    // syncs): it also guards entry lifetime against LRU eviction, so a file
-    // can't be destroyed mid-MarkClean. Order is registry mutex -> file
-    // mutex; no file method takes a registry mutex, so no inversion. A write
-    // racing in after MarkClean simply re-marks the file dirty.
-    auto mark_registry_clean = [&](std::mutex &registry_mutex, auto &registry, const char *what) {
-        std::vector<std::string> keys;
-        {
-            std::lock_guard<std::mutex> lock(registry_mutex);
-            keys.reserve(registry.size());
-            for (const auto &entry : registry) keys.push_back(entry.first);
-        }
-        std::vector<std::string> ready;
-        for (std::string &key : keys) {
-            if (data_file_synced(key)) ready.push_back(std::move(key));
-        }
+    // Registry mutex is held across MarkClean(): it also guards entry lifetime against
+    // LRU eviction. Order is registry mutex -> file mutex; no file method takes a
+    // registry mutex, so no inversion. A write racing in after MarkClean simply
+    // re-marks the file dirty.
+    auto mark_registry_clean = [](std::mutex &registry_mutex, auto &registry, const char *what) {
         std::lock_guard<std::mutex> lock(registry_mutex);
-        for (const std::string &key : ready) {
-            auto it = registry.find(key);
-            if (it != registry.end() && !it->second->MarkClean()) {
-                spdlog::error("[SHUTDOWN] - MarkClean failed for {} {}; leaving it dirty", what, key);
+        for (const auto &entry : registry) {
+            if (!entry.second->MarkClean()) {
+                spdlog::error("[SHUTDOWN] - MarkClean failed for {} {}; leaving it dirty", what, entry.first);
             }
         }
     };
     mark_registry_clean(zone_map_registry_mutex_, zone_map_registry_, ".zmap");
     mark_registry_clean(catidx_registry_mutex_, catidx_registry_, ".catidx");
-
-    CheckpointWals();
-}
-
-namespace {
-std::mutex wal_dirs_mutex;
-std::vector<std::string> wal_dirs;
-} // namespace
-
-void XStore::RegisterDataStoreDir(const std::string &data_store_dir) {
-    std::lock_guard<std::mutex> lock(wal_dirs_mutex);
-    wal_dirs.push_back(data_store_dir);
-}
-
-// Writers are joined, so each shard file is quiescent and holds exactly what
-// ReplayWal would find: its last batch (plus, possibly, a CRC-valid stale
-// tail). Parsing it with ParseWalRecord gives the (db, year) data files replay
-// would write into; the header is invalidated only once every one of them has
-// been fdatasynced by path (a throwaway fd, so an fd-cache eviction cannot
-// hide a file, and the file at THAT path is the one flushed). Any failure
-// leaves that shard's WAL untouched => the next start replays + rebuilds.
-void XStore::CheckpointWals() {
-    std::vector<std::string> dirs;
-    {
-        std::lock_guard<std::mutex> lock(wal_dirs_mutex);
-        dirs = wal_dirs;
-    }
-    std::unordered_set<std::string> synced;
-    auto sync_path = [&](const std::string &path) {
-        if (synced.count(path) != 0) return true;
-        int fd = open(path.c_str(), O_RDONLY);
-        if (fd < 0 || fdatasync(fd) != 0) {
-            spdlog::error("[SHUTDOWN] - Cannot sync {} ({}); leaving its WAL records for replay", path, std::strerror(errno));
-            if (fd >= 0) close(fd);
-            return false;
-        }
-        close(fd);
-        synced.insert(path);
-        return true;
-    };
-
-    // Ring-format shard file (writers joined, so quiescent): every record in
-    // [checkpoint_lsn, head_lsn) must have its data file fdatasynced by path
-    // before the checkpoint may move to head. Any failure leaves the
-    // checkpoint untouched. Interim: Task 6 replaces this with the
-    // checkpointer's final cycle.
-    auto checkpoint_ring = [&](const std::string &dir, const std::string &wal_path, size_t shard_idx) {
-        std::shared_ptr<walring::Ring> ring = walring::GetOrOpenRing(wal_path, static_cast<uint32_t>(shard_idx));
-        if (!ring) return;
-        if (walring::Checkpointer::Instance().Poisoned()) {
-            spdlog::error("[SHUTDOWN] - Checkpointer poisoned by a sync error; leaving {} for replay", wal_path);
-            return;
-        }
-        const uint64_t head = ring->HeadLsn();
-        uint64_t lsn = ring->CheckpointLsn();
-        if (lsn >= head) return;
-        const uint64_t ring_bytes = ring->ring_bytes();
-        void *map = mmap(nullptr, walring::HEADER_REGION_BYTES + ring_bytes, PROT_READ, MAP_SHARED, ring->fd(), 0);
-        if (map == MAP_FAILED) {
-            spdlog::error("[SHUTDOWN] - Cannot read {}; leaving it for replay", wal_path);
-            return;
-        }
-        const char *base = static_cast<const char *>(map) + walring::HEADER_REGION_BYTES;
-        bool all_synced = true;
-        WalRecord record;
-        while (lsn < head && all_synced) {
-            const uint64_t off = lsn % ring_bytes;
-            const uint64_t rem = ring_bytes - off;
-            if (rem < walring::RECORD_FIXED_BYTES) { lsn += rem; continue; }   // implicit wrap, same rule as the writer
-            size_t consumed = 0;
-            const RingParse r = ParseWalRecordV2(base + off, static_cast<size_t>(rem), lsn, consumed, record);
-            if (r == RingParse::kEnd) { all_synced = false; break; }   // log ends before head: do not trust it, keep the checkpoint
-            lsn += consumed;
-            if (r == RingParse::kPad || record.rows.empty()) continue;
-            TimeStruct ts(static_cast<std::time_t>(record.rows.front().epoch_time), record.time_resolution);
-            all_synced = sync_path(fmt::format("{}/{}.XSTORE", JoinPath(dir, record.db_name), ts.year));
-        }
-        munmap(map, walring::HEADER_REGION_BYTES + ring_bytes);
-        if (all_synced) ring->AdvanceCheckpoint(head);
-    };
-
-    for (const std::string &dir : dirs) {
-        const std::filesystem::path wal_dir = std::filesystem::path(dir) / XStoreTunables::WAL_DIR_NAME;
-        if (!std::filesystem::is_directory(wal_dir)) continue;
-        for (size_t shard_idx = 0; shard_idx < XStoreTunables::WAL_SHARD_COUNT; ++shard_idx) {
-            const std::string wal_path = (wal_dir / ("shard_" + std::to_string(shard_idx) + ".WAL")).string();
-            int wal_fd = open(wal_path.c_str(), O_RDWR);
-            if (wal_fd < 0) continue; // shard never used
-            walring::RingHeader ring_header;
-            if (walring::ReadBestHeader(wal_fd, ring_header)) {
-                close(wal_fd);
-                checkpoint_ring(dir, wal_path, shard_idx);
-                continue;
-            }
-            struct stat st{};
-            void *map = MAP_FAILED;
-            if (fstat(wal_fd, &st) == 0 && st.st_size > 0) {
-                map = mmap(nullptr, static_cast<size_t>(st.st_size), PROT_READ, MAP_PRIVATE, wal_fd, 0);
-            }
-            if (map == MAP_FAILED) {
-                spdlog::error("[SHUTDOWN] - Cannot read {}; leaving it for replay", wal_path);
-                close(wal_fd);
-                continue;
-            }
-            const char *base = static_cast<const char *>(map);
-            const size_t size = static_cast<size_t>(st.st_size);
-            bool all_synced = true;
-            WalRecord record;
-            for (size_t off = 0, consumed = 0; off < size && all_synced; off += consumed) {
-                if (!ParseWalRecord(base + off, size - off, consumed, record)) break;
-                if (record.rows.empty()) continue;
-                TimeStruct ts(static_cast<std::time_t>(record.rows.front().epoch_time), record.time_resolution);
-                all_synced = sync_path(fmt::format("{}/{}.XSTORE", JoinPath(dir, record.db_name), ts.year));
-            }
-            munmap(map, size);
-            if (all_synced) InvalidateWalFileHeader(wal_fd, wal_path);
-            close(wal_fd);
-        }
-    }
 }
 
 void XStore::ResetShutdownForTests() {

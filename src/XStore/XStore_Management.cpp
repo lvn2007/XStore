@@ -45,7 +45,6 @@ XStore::XStore() {
     std::lock_guard<std::mutex> lock(init_mutex);
     if (initialized_dirs.insert(data_store_dir).second) {
         std::filesystem::create_directories(data_store_dir);
-        RegisterDataStoreDir(data_store_dir);
         InitDB();
     }
 }

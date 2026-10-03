@@ -4,9 +4,10 @@
 //
 // Every server process is owned by a ServerProcess guard that SIGKILLs and
 // reaps it by PID on any exit path, and the temp dir is removed after it, so
-// no test can leave a server running or an (up to 2 GB: the server
-// preallocates its WAL shards) directory behind.
+// no test can leave a server running or a (few hundred MiB: the server
+// preallocates its WAL rings, 64 MiB each) directory behind.
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <arpa/inet.h>
 #include <chrono>
 #include <cmath>
@@ -27,6 +28,7 @@
 
 #include "include/Networking/ZMQ_Server.h"
 #include "XStore/XStore_CatIdx.h"
+#include "XStore/XStore_WalRing.h"
 #include "XStore/XStore_ZoneMap.h"
 #include "XStoreTestSupport.h"
 
@@ -218,6 +220,26 @@ IndexDirtyFlags ReadDirtyFlags(const std::filesystem::path &dir) {
     return flags;
 }
 
+// Highest checkpoint_lsn over every ring-format shard file under <dir>/DataStore/WAL
+// (0 if none advanced). A graceful shutdown's final cycle moves the busy shard's
+// checkpoint to its head (> 0 once any record was logged); a killed server that
+// had checkpoints held at 1 h leaves every ring at 0.
+uint64_t MaxRingCheckpoint(const std::filesystem::path &dir) {
+    uint64_t best = 0;
+    const auto wal_dir = dir / "DataStore" / "WAL";
+    if (!std::filesystem::is_directory(wal_dir)) return 0;
+    for (auto &entry : std::filesystem::directory_iterator(wal_dir)) {
+        if (entry.path().extension() != ".WAL") continue;
+        int fd = open(entry.path().c_str(), O_RDONLY);
+        EXPECT_GE(fd, 0);
+        if (fd < 0) continue;
+        walring::RingHeader h;
+        if (walring::ReadBestHeader(fd, h)) best = std::max(best, h.checkpoint_lsn);
+        close(fd);
+    }
+    return best;
+}
+
 std::string ReadLog(const std::filesystem::path &dir) {
     std::ifstream in(dir / "logs" / "server.log");
     std::stringstream ss;
@@ -274,6 +296,7 @@ TEST_F(XStoreGracefulShutdownTest, SigtermExitsZeroMarksIndexesCleanAndNextStart
         ASSERT_NO_FATAL_FAILURE(ExpectCleanExit(server.WaitExit(chrono::seconds(15))));
     }
     ASSERT_NO_FATAL_FAILURE(ExpectAllDirty(ReadDirtyFlags(dir.path), 0u));
+    EXPECT_GT(MaxRingCheckpoint(dir.path), 0u) << "the final checkpoint cycle did not advance the ring";
     TrimYearFile(dir.path);
 
     ServerProcess restarted(dir.path, FreePort(), FreePort());
@@ -324,6 +347,7 @@ TEST_F(XStoreGracefulShutdownTest, SigkillLeavesIndexesDirtyAndRestartRebuildsTh
         ASSERT_TRUE(WIFSIGNALED(status));
     }
     ASSERT_NO_FATAL_FAILURE(ExpectAllDirty(ReadDirtyFlags(dir.path), 1u));
+    EXPECT_EQ(MaxRingCheckpoint(dir.path), 0u) << "a killed server must leave every ring un-checkpointed";
     TrimYearFile(dir.path);
 
     {

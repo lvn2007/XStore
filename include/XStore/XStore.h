@@ -325,9 +325,6 @@ class XStore {
         // final_checkpoint_cycle=false (WalSimulateRestartForTests only) skips the
         // checkpointer's final cycle: a simulated kill -9.
         static void StopWalWriters(bool final_checkpoint_cycle = true);
-        // Shutdown() step (4): checkpoints WAL shard files whose records'
-        // data files are all synced. See Shutdown().
-        static void CheckpointWals();
 
         // CatIdx compaction background thread (Task 9): one process-wide
         // thread, started once from main.cpp (never from the XStore
@@ -762,23 +759,22 @@ class XStore {
         // directly (as tests do) always re-runs it, guard or not.
         void InitDB();
 
-        // Graceful shutdown (Durability A, DD7). In order: (1) stops+joins
-        // the WAL writer threads (same code the atexit hook runs); (2)
-        // fdatasyncs every cached data-file fd, plus -- for any open index
-        // whose .XSTORE isn't in the fd cache -- that file via a throwaway
-        // read-only fd; (3) MarkClean()s every registry-open ZoneMapFile /
-        // CatIdxFile whose data file was synced; (4) WAL checkpoint: for each
-        // WAL shard file of every initialized data_store_dir, parses the
-        // records still in it, fdatasyncs (by path, throwaway fd) every data
-        // file they touch, and only if ALL of those synced invalidates the
-        // shard's header (InvalidateWalFileHeader) so the next start neither
-        // replays it nor force-rebuilds the years it touched. A WAL with any
-        // unsyncable data file is left intact (replay + rebuild: safe). A
-        // failure anywhere is logged and leaves that index/WAL as-is; it
-        // never aborts the rest. ASYNC records still queued when the writers
-        // stop are dropped (unchanged behavior). Idempotent (atomic flag;
-        // later calls are no-ops). Once set, Unary/Batch/RangeInsert and
-        // EnqueueWalRecord reject writes.
+        // Graceful shutdown (Durability A DD7 / Durability C). In order: (0) sets
+        // the shutdown flag, so Unary/Batch/RangeInsert and EnqueueWalRecord reject
+        // writes from here on; (1) StopWalWriters(): joins the WAL writer threads,
+        // then the checkpointer runs its FINAL cycle -- every data file dirtied
+        // since the previous cycle is fdatasynced (by path, throwaway fd) and each
+        // ring's checkpoint_lsn moves to its head, so the next start replays and
+        // force-rebuilds nothing; (2) if that final cycle succeeded and the
+        // checkpointer is not poisoned, MarkClean()s every registry-open
+        // ZoneMapFile / CatIdxFile. Otherwise it logs an ERROR and leaves every
+        // index dirty (the next start rebuilds them) -- it still returns normally.
+        // The gate is deliberately the final cycle's outcome, not per-path
+        // membership in its synced set: files clean since an earlier cycle were
+        // synced then. Shutdown re-syncs nothing itself (a fresh fd would not see a
+        // prior writeback error). ASYNC records still queued when the writers stop
+        // are dropped (unchanged behavior). Idempotent (atomic flag; later calls
+        // are no-ops).
         //
         // PRECONDITION: the caller has already stopped serving requests (the
         // ZMQ workers are stopped/drained -- see main.cpp). An insert racing
@@ -792,7 +788,7 @@ class XStore {
         // writer threads) so later tests in the same process can insert.
         static void ResetShutdownForTests();
         // Test-only: simulates kill -9 + restart inside one process. Stops the WAL
-        // writers and the checkpointer WITHOUT a final cycle, CheckpointWals or
+        // writers and the checkpointer WITHOUT a final cycle or
         // MarkClean; drops the ring registry, the dirty tracker and the zone-map /
         // catidx registries; then restarts writers + checkpointer (as
         // ResetShutdownForTests does). Safe whether or not Shutdown() ran. Callers
@@ -918,9 +914,6 @@ class XStore {
         // calls it before Shutdown() so a compaction cannot re-dirty an
         // index Shutdown just marked clean.
         static void StopCatIdxCompactionThread();
-        // Records a data_store_dir the constructor initialized, so
-        // Shutdown()'s WAL checkpoint knows which WAL directories exist.
-        static void RegisterDataStoreDir(const std::string &data_store_dir);
 
         // CatIdx compaction (Task 9): scans one cold <YEAR>.XSTORE file
         // row-by-row and builds a bitmap section (value -> row indices) per
@@ -1226,57 +1219,6 @@ class XStore {
         [[nodiscard]] static bool ApplyWalRecord(const WalRecord &record_to_apply,
                                                   const std::shared_ptr<walring::Ring> &ring = nullptr,
                                                   uint64_t ring_lsn_end = 0);
-
-        // Checkpoint step for a preallocated WAL file, called only from
-        // ReplayWal (not from every live commit -- see WalWriterLoop):
-        // zeroes just the 4-byte record_len header at offset 0 and fsyncs
-        // that (tiny, in-place, already-allocated) write -- never
-        // ftruncate/resize itself (see ReclaimWalFileSize below for the
-        // sibling step that does, called right after this one). record_len=0
-        // fails ParseWalRecord's own length check immediately, so a zeroed
-        // file replays as "nothing pending". Durability matters here: a DB
-        // can be deleted and recreated (RemoveDB, or an external wipe)
-        // between a record's apply and the next process restart -- if the
-        // invalidation itself weren't fsync'd before a crash, the
-        // still-valid-looking old bytes would resurface at the *next*
-        // ReplayWal too and get reapplied against whatever now lives at
-        // that path, not the DB they actually belonged to. Calling this
-        // once per shard file per restart (regardless of what was or
-        // wasn't found to replay) is enough to guarantee that -- a live
-        // commit's own record doesn't additionally need it: the shard's
-        // next real write naturally overwrites it (offset-0 overwrite,
-        // same mechanism), and if no next write ever comes, the only cost
-        // is one redundant, harmless, idempotent re-apply attempt at the
-        // next restart, not a repeat-forever failure -- not worth a second
-        // fsync on every single commit to avoid.
-        static void InvalidateWalFileHeader(int fd, const std::string &wal_path);
-
-        // Shrinks a shard WAL file back down to WAL_FILE_PREALLOC_BYTES via
-        // ftruncate, called only from ReplayWal, right after this file's WAL
-        // evidence has already been fully consulted -- ReplayWal's streaming
-        // reader always attempts every record (see WAL_REPLAY_MAX_RECORD_
-        // BYTES), stopping early only at a genuinely unparseable or
-        // implausibly-huge one, same as any torn/corrupt record; either way
-        // nothing valid is left unconsulted by the time this runs, so
-        // nothing valid is lost by shrinking. No-op if on_disk_bytes is
-        // already <= the default. WalWriterLoop
-        // itself deliberately never ftruncates (see InvalidateWalFileHeader
-        // above / WalWriterLoop's own comment) to avoid a second fsync on
-        // every live commit -- but that means a file which ever grows past
-        // default (a legitimately oversized BatchInsert/RangeInsert pass,
-        // see WAL_FILE_PREALLOC_BYTES) stays that size forever, across every
-        // future restart, with no other reclaim point. ReplayWal is the one
-        // safe place to pay that ftruncate+fsync cost: startup-only
-        // (regardless of the current known_size), an fsync() not
-        // fdatasync() since shrinking changes file size same as the
-        // oversized_write growth case, and safe from racing WalWriterLoop's
-        // already-running writer threads (StartWalWriters starts them in
-        // the XStore constructor, before InitDB/ReplayWal) only because
-        // ReplayWal is guaranteed to finish before any client can reach
-        // CreateDB/EnqueueWalRecord -- see ReplayWal's own comment -- so
-        // this shard's writer thread is guaranteed idle (blocked on an
-        // empty queue) for the whole window this runs in.
-        static void ReclaimWalFileSize(int fd, const std::string &wal_path, uintmax_t on_disk_bytes);
 
         // Body of one shard's dedicated writer thread: waits (bounded by
         // WAL_GROUP_COMMIT_WINDOW_US) for the first record, then actively

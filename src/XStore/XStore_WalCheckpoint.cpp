@@ -93,10 +93,16 @@ void Checkpointer::SetMaxAgeMs(unsigned ms) { max_age_override_.store(ms, std::m
 void Checkpointer::FailNextDataSyncsStickyForTests(int n) { fail_data_sticky_.store(n, std::memory_order_relaxed); }
 void Checkpointer::FailNextDirSyncsStickyForTests(int n) { fail_dir_sticky_.store(n, std::memory_order_relaxed); }
 
+void Checkpointer::SimulateDirSyncErrnoForTests(int err) {
+    sim_dir_errno_.store(err, std::memory_order_relaxed);
+    dir_unsupported_warned_.store(false, std::memory_order_relaxed);
+}
+
 void Checkpointer::ClearPoisonForTests() {
     std::lock_guard<std::mutex> lock(cycle_mutex_);
     fail_data_sticky_.store(0, std::memory_order_relaxed);
     fail_dir_sticky_.store(0, std::memory_order_relaxed);
+    sim_dir_errno_.store(0, std::memory_order_relaxed);
     poisoned_.store(false, std::memory_order_release);
     poison_logged_.store(false, std::memory_order_relaxed);
 }
@@ -136,10 +142,11 @@ void Checkpointer::Start() {
         std::lock_guard<std::mutex> lock(wake_mutex_);
         stop_ = false;
     }
+    final_cycle_ok_.store(false, std::memory_order_release);
     thread_ = std::thread(&Checkpointer::Loop, this);
 }
 
-void Checkpointer::StopAfterFinalCycle() {
+bool Checkpointer::StopAfterFinalCycle() {
     std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
     if (thread_.joinable()) {
         {
@@ -151,7 +158,9 @@ void Checkpointer::StopAfterFinalCycle() {
     }
     // No loop thread any more: this is the last word. Failure is logged by RunCycle;
     // the checkpoint simply stays behind and the next start replays from it.
-    static_cast<void>(RunCycle());
+    const bool ok = RunCycle();
+    final_cycle_ok_.store(ok, std::memory_order_release);
+    return ok;
 }
 
 Checkpointer::SyncResult Checkpointer::SyncDataFile(const std::string &path) {
@@ -195,12 +204,24 @@ Checkpointer::SyncResult Checkpointer::SyncDirectory(const std::string &dir) {
         err = EIO; sticky = true;
     } else if (ConsumeFailure(fail_dir_syncs_)) {
         err = EIO;   // injected, retryable
+    } else if (const int simulated = sim_dir_errno_.load(std::memory_order_relaxed); simulated != 0) {
+        err = simulated; sticky = true;
     } else {
         int rc;
         do { rc = fsync(dfd); } while (rc != 0 && errno == EINTR);
         if (rc != 0) { err = errno; sticky = true; }
     }
     close(dfd);
+    if (sticky && (err == EINVAL || err == ENOTSUP || err == EOPNOTSUPP || err == EROFS)) {
+        // This filesystem cannot fsync directories (not a writeback error): treat the sync as done.
+        if (!dir_unsupported_warned_.exchange(true, std::memory_order_relaxed)) {
+            dir_unsupported_warnings_.fetch_add(1, std::memory_order_relaxed);
+            spdlog::warn("[WAL CKPT] - fsync of directory {} failed with errno {} ({}): this filesystem cannot fsync directories, "
+                         "so new-file directory entries cannot be made durable here",
+                         dir, err, std::strerror(err));
+        }
+        return SyncResult::kSkipped;
+    }
     if (err == 0) {
         dir_syncs_.fetch_add(1, std::memory_order_relaxed);
         return SyncResult::kOk;
@@ -419,7 +440,7 @@ void Checkpointer::Loop() {
             } else {
                 retry = true;
                 wait = RETRY_BACKOFF;
-                if (Due(last_fail_log, std::chrono::seconds(10))) spdlog::error("[WAL CKPT] - checkpoint cycle failed; retrying in {} ms", RETRY_BACKOFF.count());
+                if (!poisoned_.load(std::memory_order_acquire) && Due(last_fail_log, std::chrono::seconds(10))) spdlog::error("[WAL CKPT] - checkpoint cycle failed; retrying in {} ms", RETRY_BACKOFF.count());
             }
         } else if (fill >= XStoreTunables::WAL_CKPT_SOFT_FILL) {
             static_cast<void>(PacedFlushStep());

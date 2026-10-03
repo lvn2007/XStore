@@ -11,6 +11,7 @@
 #include <spdlog/fmt/fmt.h>
 #include <chrono>
 #include <fcntl.h>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -692,6 +693,27 @@ protected:
         const TimeStruct ts(kBaseEpoch, XStore_Proto::SECOND);
         return fmt::format("{}/{}.XSTORE", (scratch->test_root / "DataStore" / db_name).string(), ts.year);
     }
+    // `dirty` flag of this test's year index (".zmap" / ".catidx"), read from disk by path.
+    template <typename Header>
+    uint32_t OnDiskDirty(const char *ext) const {
+        const std::string path = std::filesystem::path(DataPath()).replace_extension(ext).string();
+        Header h{};
+        const int fd = open(path.c_str(), O_RDONLY);
+        EXPECT_GE(fd, 0) << path;
+        EXPECT_EQ(pread(fd, &h, sizeof(h), 0), static_cast<ssize_t>(sizeof(h)));
+        close(fd);
+        return h.dirty;
+    }
+    uint32_t ZmapDirty() const { return OnDiskDirty<ZoneMapFileHeader>(".zmap"); }
+    uint32_t CatIdxDirty() const { return OnDiskDirty<CatIdxFileHeader>(".catidx"); }
+    uint64_t OnDiskCheckpoint(const walring::Ring &ring) const {
+        const int fd = open(ring.path().c_str(), O_RDONLY);
+        EXPECT_GE(fd, 0);
+        walring::RingHeader h;
+        EXPECT_TRUE(walring::ReadBestHeader(fd, h));
+        close(fd);
+        return h.checkpoint_lsn;
+    }
     template <typename Pred>
     static bool WaitFor(Pred pred, std::chrono::milliseconds limit) {
         const auto deadline = std::chrono::steady_clock::now() + limit;
@@ -867,25 +889,6 @@ TEST_F(WalCheckpointTest, PoisonedCheckpointerMakesWritersStallThenFail) {
     EXPECT_EQ(w.records, accepted);
 }
 
-TEST_F(WalCheckpointTest, CheckpointWalsDoesNotAdvanceWhenPoisoned) {
-    XStore store;
-    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
-    for (uint64_t i = 0; i < 5; ++i) ASSERT_TRUE(InsertSync(store, i));
-    auto ring = BusyRing();
-    ASSERT_NE(ring, nullptr);
-    Ckpt().FailNextDataSyncsStickyForTests(1);
-    ASSERT_FALSE(Ckpt().RunCycle());
-    ASSERT_TRUE(Ckpt().Poisoned());
-    {
-        // Shutdown: the final cycle refuses (poisoned); the interim CheckpointWals() would
-        // happily fdatasync by path and advance -- it must refuse as well.
-        ShutdownReset reset;
-        XStore::Shutdown();
-        EXPECT_EQ(ring->CheckpointLsn(), 0u);
-        EXPECT_GT(ring->HeadLsn(), 0u);
-    }
-}
-
 TEST_F(WalCheckpointTest, DeletedDataFileDoesNotBlockTheCheckpoint) {
     XStore store;
     xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
@@ -1000,6 +1003,170 @@ TEST_F(WalCheckpointTest, StopAfterFinalCycleIsIdempotent) {
     Ckpt().SetPausedForTests(false);
     for (uint64_t i = 5; i < 8; ++i) ASSERT_TRUE(InsertSync(store, i));
     EXPECT_TRUE(WaitFor([&] { return ring->CheckpointLsn() == ring->HeadLsn(); }, std::chrono::milliseconds(1500)));
+}
+
+// ---- Task 6: Shutdown relies on the final cycle; index MarkClean is gated on it ----
+
+TEST_F(WalCheckpointTest, ShutdownMarksIndexesCleanAfterFinalCycle) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    for (uint64_t i = 0; i < 20; ++i) ASSERT_TRUE(InsertSync(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    ASSERT_EQ(ZmapDirty(), 1u) << "precondition: inserts dirty the zone map";
+    ASSERT_EQ(CatIdxDirty(), 1u) << "precondition: inserts dirty the catidx";
+    {
+        ShutdownReset reset;
+        XStore::Shutdown();
+        EXPECT_TRUE(Ckpt().FinalCycleOk());
+        EXPECT_EQ(ZmapDirty(), 0u);
+        EXPECT_EQ(CatIdxDirty(), 0u);
+        EXPECT_EQ(ring->CheckpointLsn(), ring->HeadLsn());
+        EXPECT_EQ(OnDiskCheckpoint(*ring), ring->HeadLsn());
+    }
+}
+
+TEST_F(WalCheckpointTest, ShutdownDoesNotMarkIndexesCleanWhenPoisoned) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    for (uint64_t i = 0; i < 5; ++i) ASSERT_TRUE(InsertSync(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    const uint64_t head = ring->HeadLsn();
+    ASSERT_GT(head, 0u);
+    ASSERT_EQ(ZmapDirty(), 1u);
+    ASSERT_EQ(CatIdxDirty(), 1u);
+
+    Ckpt().FailNextDataSyncsStickyForTests(1);   // the final cycle itself hits the real-style error
+    {
+        ShutdownReset reset;
+        XStore::Shutdown();   // returns normally: no throw, no abort
+        EXPECT_TRUE(Ckpt().Poisoned());
+        EXPECT_FALSE(Ckpt().FinalCycleOk());
+        EXPECT_EQ(ZmapDirty(), 1u) << "an index must not be marked clean over unsynced data";
+        EXPECT_EQ(CatIdxDirty(), 1u);
+        EXPECT_EQ(ring->CheckpointLsn(), 0u);
+        EXPECT_EQ(ring->HeadLsn(), head);
+        EXPECT_EQ(OnDiskCheckpoint(*ring), 0u);
+    }
+}
+
+TEST_F(WalCheckpointTest, ShutdownDoesNotMarkIndexesCleanWhenPoisonedBeforeShutdown) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    for (uint64_t i = 0; i < 5; ++i) ASSERT_TRUE(InsertSync(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    Ckpt().FailNextDataSyncsStickyForTests(1);
+    ASSERT_FALSE(Ckpt().RunCycle());
+    ASSERT_TRUE(Ckpt().Poisoned());
+    {
+        ShutdownReset reset;
+        XStore::Shutdown();   // the final cycle refuses (poisoned)
+        EXPECT_EQ(ring->CheckpointLsn(), 0u);
+        EXPECT_GT(ring->HeadLsn(), 0u);
+        EXPECT_EQ(ZmapDirty(), 1u);
+        EXPECT_EQ(CatIdxDirty(), 1u);
+    }
+}
+
+TEST_F(WalCheckpointTest, ShutdownDoesNotMarkIndexesCleanWhenFinalCycleFails) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    for (uint64_t i = 0; i < 5; ++i) ASSERT_TRUE(InsertSync(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    Ckpt().FailNextDataSyncsForTests(1);   // retryable: consumed by the final cycle (the thread is paused)
+    {
+        ShutdownReset reset;
+        XStore::Shutdown();
+        EXPECT_FALSE(Ckpt().Poisoned()) << "a retryable failure does not poison";
+        EXPECT_FALSE(Ckpt().FinalCycleOk());
+        EXPECT_EQ(ZmapDirty(), 1u);
+        EXPECT_EQ(CatIdxDirty(), 1u);
+        EXPECT_EQ(ring->CheckpointLsn(), 0u) << "the WAL must stay replayable";
+    }
+}
+
+// The final cycle only syncs files dirtied since the previous cycle, so a file synced by an
+// earlier cycle is absent from LastCycleSyncedPaths() although its data is durable. Gating
+// MarkClean on that set would leave its indexes dirty for no reason.
+TEST_F(WalCheckpointTest, ShutdownMarksCleanEvenForFilesSyncedInEarlierCycles) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    for (uint64_t i = 0; i < 5; ++i) ASSERT_TRUE(InsertSync(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    ASSERT_TRUE(Ckpt().RunCycle());
+    ASSERT_EQ(ring->CheckpointLsn(), ring->HeadLsn());
+    ASSERT_EQ(ZmapDirty(), 1u) << "a cycle alone never marks an index clean";
+    {
+        ShutdownReset reset;
+        XStore::Shutdown();   // no new writes: nothing dirty for the final cycle
+        EXPECT_EQ(Ckpt().LastCycleSyncedPaths().count(DataPath()), 0u) << "the case an old per-path gate would have broken";
+        EXPECT_TRUE(Ckpt().FinalCycleOk());
+        EXPECT_EQ(ZmapDirty(), 0u);
+        EXPECT_EQ(CatIdxDirty(), 0u);
+    }
+}
+
+// A filesystem that cannot fsync directories (EINVAL ...) is not a writeback error.
+TEST_F(WalCheckpointTest, DirectoryFsyncUnsupportedDoesNotPoison) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    Ckpt().SimulateDirSyncErrnoForTests(EINVAL);
+    const uint64_t warnings = Ckpt().DirSyncUnsupportedWarningsForTests();
+    const uint64_t dir_syncs = Ckpt().DirSyncsForTests();
+
+    for (uint64_t i = 0; i < 3; ++i) ASSERT_TRUE(InsertSync(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    ASSERT_TRUE(Ckpt().RunCycle()) << "an unsupported directory fsync must not fail the cycle";
+    EXPECT_FALSE(Ckpt().Poisoned());
+    EXPECT_EQ(ring->CheckpointLsn(), ring->HeadLsn());
+
+    for (uint64_t i = 3; i < 6; ++i) ASSERT_TRUE(InsertSync(store, i));   // dirties the file again => a second dir sync attempt
+    ASSERT_TRUE(Ckpt().RunCycle());
+    EXPECT_FALSE(Ckpt().Poisoned());
+    EXPECT_EQ(ring->CheckpointLsn(), ring->HeadLsn());
+
+    EXPECT_EQ(Ckpt().DirSyncUnsupportedWarningsForTests(), warnings + 1) << "one warning per process, not per cycle";
+    EXPECT_EQ(Ckpt().DirSyncsForTests(), dir_syncs) << "no directory was actually made durable";
+
+    // A genuine writeback error on the same path still poisons.
+    Ckpt().SimulateDirSyncErrnoForTests(EIO);
+    for (uint64_t i = 6; i < 8; ++i) ASSERT_TRUE(InsertSync(store, i));
+    EXPECT_FALSE(Ckpt().RunCycle());
+    EXPECT_TRUE(Ckpt().Poisoned());
+}
+
+// Informational: prints the time; the bound is deliberately generous.
+TEST_F(WalCheckpointTest, ShutdownTimeIsSmallAfterBulkInsert) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    constexpr int kBatches = 20, kRowsPerBatch = 1000;
+    for (int b = 0; b < kBatches; ++b) {
+        XStore_Proto::BatchInsert_REQ req;
+        req.set_dbname(db_name);
+        req.set_durabilitymode(XStore_Proto::SYNC);
+        for (int i = 0; i < kRowsPerBatch; ++i) {
+            XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
+            entry->set_timestamp(kBaseEpoch + static_cast<uint64_t>(b) * kRowsPerBatch + static_cast<uint64_t>(i));
+            entry->mutable_data()->add_fielddata()->set_doubledata(static_cast<double>(i));
+        }
+        XStore_Proto::BatchInsert_REP rep;
+        store.BatchInsert(&req, &rep);
+        ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+    }
+    {
+        ShutdownReset reset;
+        const auto t0 = std::chrono::steady_clock::now();
+        XStore::Shutdown();
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        std::printf("[ INFO ] Shutdown() after %d SYNC rows took %lld ms\n", kBatches * kRowsPerBatch, static_cast<long long>(ms));
+        EXPECT_LT(ms, 5000);
+        EXPECT_EQ(ZmapDirty(), 0u);
+    }
 }
 
 // ---- Task 5: replay from checkpoint_lsn; legacy upgrade ----------------------

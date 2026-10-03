@@ -450,14 +450,13 @@ TEST_F(XStoreWalTest, ReplayRecoversUnappliedRecord) {
     EXPECT_DOUBLE_EQ(query_rep.data().fielddata(0).doubledata(), 99.25);
 }
 
-// A shard WAL file that's grown past WAL_FILE_PREALLOC_BYTES (a prior
-// oversized BatchInsert/RangeInsert pass, see WAL_FILE_PREALLOC_BYTES's own
-// comment) must: (1) still have its real record correctly replayed --
-// ReplayWal's streaming parser no longer gates on the file's overall size at
-// all, only on each individual record's own declared length, see
-// WAL_REPLAY_MAX_RECORD_BYTES -- and (2) get shrunk back down to default
-// afterward by ReclaimWalFileSize, so it doesn't stay oversized forever
-// across every future restart. Grows the file via a cheap sparse
+// A legacy shard WAL file that's grown far past any sane size (the old
+// fallocate'd, ever-growing layout) must: (1) still have its real record
+// correctly replayed -- ReplayWal's streaming parser doesn't gate on the file's
+// overall size at all, only on each individual record's own declared length,
+// see WAL_REPLAY_MAX_RECORD_BYTES -- and (2) be recreated as a fixed-size ring
+// afterward, so it doesn't stay oversized forever across every future restart.
+// Grows the file via a cheap sparse
 // resize_file rather than writing that much real data -- ReplayWal reads in
 // bounded chunks regardless of the file's reported size, so this exercises
 // the exact same code path a real oversized write would, without the test
@@ -484,9 +483,10 @@ TEST_F(XStoreWalTest, ReplayReclaimsOversizedFileAfterRecoveringRecord) {
     out.close();
 
     std::error_code resize_ec;
-    std::filesystem::resize_file(wal_file, XStoreTunables::WAL_FILE_PREALLOC_BYTES + 4096, resize_ec);
+    constexpr uintmax_t kOversizedLegacyBytes = 512ull * 1024 * 1024 + 4096;
+    std::filesystem::resize_file(wal_file, kOversizedLegacyBytes, resize_ec);
     ASSERT_FALSE(resize_ec) << resize_ec.message();
-    ASSERT_GT(std::filesystem::file_size(wal_file), XStoreTunables::WAL_FILE_PREALLOC_BYTES);
+    ASSERT_GT(std::filesystem::file_size(wal_file), walring::HEADER_REGION_BYTES + walring::DefaultRingBytes());
 
     XStore store2;
     store2.InitDB();
@@ -539,13 +539,13 @@ TEST_F(XStoreWalTest, ReplayRecoversRecordEvenWhenFileFarExceedsOldFileCeiling) 
     out.write(record.data(), static_cast<std::streamsize>(record.size()));
     out.close();
 
-    // Sized well past what the old file-level ceiling (8x default) would
+    // Sized well past what the old file-level ceiling (8 x 512 MiB) would
     // have allowed, to prove size alone no longer matters.
-    uintmax_t huge_size = 2 * (8 * XStoreTunables::WAL_FILE_PREALLOC_BYTES);
+    constexpr uintmax_t kOldFileCeilingBytes = 8ull * 512 * 1024 * 1024;
     std::error_code resize_ec;
-    std::filesystem::resize_file(wal_file, huge_size, resize_ec);
+    std::filesystem::resize_file(wal_file, 2 * kOldFileCeilingBytes, resize_ec);
     ASSERT_FALSE(resize_ec) << resize_ec.message();
-    ASSERT_GT(std::filesystem::file_size(wal_file), 8 * XStoreTunables::WAL_FILE_PREALLOC_BYTES);
+    ASSERT_GT(std::filesystem::file_size(wal_file), kOldFileCeilingBytes);
 
     XStore store2;
     store2.InitDB();
@@ -743,7 +743,7 @@ TEST_F(XStoreWalTest, BatchInsertGappedRunsLandAtCorrectOffsets) {
 // client can reach CreateDB). Under the original truncate-per-commit
 // design this self-healed within one run (the file was ~always empty by
 // the time of the next crash); the preallocated/never-truncated redesign
-// needed an explicit checkpoint (InvalidateWalFileHeader) to avoid
+// needed an explicit checkpoint (replay converts/advances the log) to avoid
 // replaying -- and failing on -- the same orphaned record on every single
 // future restart forever.
 TEST_F(XStoreWalTest, ReplayOfOrphanedRecordIsNotRetriedForever) {
@@ -967,32 +967,25 @@ TEST_F(XStoreWalTest, ReplayRecoversMultiRowUnappliedRecord) {
     }
 }
 
-// Task 11 fix 1 regression test: WAL_FILE_PREALLOC_BYTES (40MB) was sized
-// assuming exactly 1 row per WalRecord (true only for UnaryInsert -- see
-// the NOTE on WAL_FILE_PREALLOC_BYTES in XStore_Tunables.h). BatchInsert
-// builds one WalRecord per year-bucket group, so a single call with enough
-// rows in one year can legitimately exceed that bound. This drives a
-// single-year batch past WAL_FILE_PREALLOC_BYTES and confirms: (1) the
-// write still durably lands and every row reads back correctly (WAL ring
-// layout: the record exceeds ring_bytes/2, so it takes the interim direct
-// path -- apply + data-file fdatasync -- instead of the ring), (2) no shard
-// file grew past its fixed ring and no ring head moved, and (3) a subsequent
-// InitDB doesn't crash or corrupt the data.
-TEST_F(XStoreWalTest, BatchInsertRecordExceedingWalPreallocBoundPersistsAndReplays) {
+// Regression test: BatchInsert builds one WalRecord per year-bucket group, so a
+// single call with enough rows in one year can legitimately exceed a ring's
+// capacity (a WalRecord holds unlimited rows). This drives a single-year batch
+// past the default ring size and confirms: (1) the write still durably lands
+// and every row reads back correctly (the record exceeds ring_bytes/2, so it
+// takes the interim direct path -- apply + data-file fdatasync -- instead of
+// the ring), (2) no shard file grew past its fixed ring and no ring head moved,
+// and (3) a subsequent InitDB doesn't crash or corrupt the data.
+TEST_F(XStoreWalTest, BatchInsertRecordExceedingRingCapacityPersistsAndReplays) {
     XStore store;
     CreateTestDb(store, "WALOVERSIZEBATCH", XStore_Proto::SECOND, 1024);
 
-    // Row count is derived from the current WAL_FILE_PREALLOC_BYTES rather
-    // than a fixed literal, so this test keeps proving what it claims to
-    // (the batch genuinely exceeds the preallocated bound) regardless of
-    // how that tunable gets retuned later -- a hardcoded row count here
-    // already went stale once (a prior default of 40 MiB vs. today's much
-    // larger one) without the test itself failing to compile or obviously
-    // signal it had quietly stopped exercising the oversized_write path.
+    // Row count is derived from the effective ring size rather than a fixed
+    // literal, so this keeps proving what it claims (the batch genuinely
+    // exceeds the ring) however the size is configured.
     // kRowWireBytes mirrors the per-row wire cost every row actually pays
     // (epoch_time(8) + row_length), see SerializeWalRecord/ParseWalRecord.
     constexpr size_t kRowWireBytes = 8 + 1024;
-    const int kRowCount = static_cast<int>(XStoreTunables::WAL_FILE_PREALLOC_BYTES / kRowWireBytes) + 5000;
+    const int kRowCount = static_cast<int>(walring::DefaultRingBytes() / kRowWireBytes) + 5000;
     XStore_Proto::BatchInsert_REQ req;
     req.set_dbname("WALOVERSIZEBATCH");
     req.set_durabilitymode(XStore_Proto::SYNC);
@@ -1029,7 +1022,7 @@ TEST_F(XStoreWalTest, BatchInsertRecordExceedingWalPreallocBoundPersistsAndRepla
     for (size_t shard_idx = 0; shard_idx < XStoreTunables::WAL_SHARD_COUNT; ++shard_idx) {
         std::filesystem::path shard_file = wal_dir / ("shard_" + std::to_string(shard_idx) + ".WAL");
         if (!std::filesystem::exists(shard_file)) continue;
-        EXPECT_LE(std::filesystem::file_size(shard_file), walring::HEADER_REGION_BYTES + XStoreTunables::WAL_RING_BYTES)
+        EXPECT_LE(std::filesystem::file_size(shard_file), walring::HEADER_REGION_BYTES + walring::DefaultRingBytes())
             << shard_file << " grew past its ring";
     }
     for (auto &ring : walring::AllRings()) {

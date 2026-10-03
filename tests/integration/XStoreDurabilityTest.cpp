@@ -7,6 +7,7 @@
 #include "XStore/XStore_ZoneMap.h"
 #include "XStore/XStore_CatIdx.h"
 #include "XStore/XStore_WalRing.h"
+#include "XStore/XStore_WalCheckpoint.h"
 #include "XStoreTestSupport.h"
 #include "include/DataStructs/TimeStruct.h"
 #include <cstddef>
@@ -473,21 +474,23 @@ TEST_F(DurabilityShutdownTest, WithoutShutdownNextStartReplaysAndForceRebuilds) 
 }
 
 // A WAL record whose data file cannot be synced must stay replayable. The
-// data file's mode is cleared, so the checkpointer's path-based sync of it
-// fails (open EACCES) => the WAL stays intact. (A MISSING file is different:
-// the checkpointer treats ENOENT as a deleted DB and moves on -- see
-// WalCheckpointTest.DeletedDataFileDoesNotBlockTheCheckpoint.)
+// checkpointer's data-sync fault hook fails the final cycle (retryable), so
+// the ring checkpoint stays behind the head and the indexes stay dirty. (A
+// MISSING file is different: the checkpointer treats ENOENT as a deleted DB
+// and moves on -- see WalCheckpointTest.DeletedDataFileDoesNotBlockTheCheckpoint.)
 TEST_F(DurabilityShutdownTest, ShutdownLeavesWalIntactWhenADataFileCannotBeSynced) {
-    if (geteuid() == 0) GTEST_SKIP() << "root bypasses file modes";
     XStore store;
     InsertRows(store);
     const size_t live_before = LiveWalShards();
     ASSERT_GT(live_before, 0u);
-    ASSERT_EQ(chmod(Path(".XSTORE").c_str(), 0), 0);
+    walring::Checkpointer::Instance().FailNextDataSyncsForTests(1000);   // the checkpointer thread is paused: only the final cycle syncs
 
     XStore::Shutdown();
+    walring::Checkpointer::Instance().FailNextDataSyncsForTests(0);
 
     EXPECT_EQ(LiveWalShards(), live_before) << "WAL was invalidated although its data file could not be synced";
+    EXPECT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), 1u) << "index marked clean over an unsynced data file";
+    EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), 1u);
 }
 
 TEST_F(DurabilityShutdownTest, SecondShutdownIsANoOp) {

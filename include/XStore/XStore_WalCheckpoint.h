@@ -29,7 +29,9 @@
 // and a CRITICAL line is logged once. Writers then stall at the full-ring
 // threshold and fail callers as "overloaded"; a restart replays from the last good
 // checkpoint. Not poisoning (still retryable): open() failures other than ENOENT
-// and the plain test-injected failures.
+// and the plain test-injected failures. Directory fsync failing with EINVAL/ENOTSUP/EOPNOTSUPP/EROFS
+// means the filesystem cannot fsync directories at all: that neither poisons nor fails the cycle (one
+// WARNING per process; new-file directory entries just cannot be made durable there).
 //
 // Apply failure: if ApplyWalRecord fails for a record in a durable ring the
 // applied position still advances and the checkpoint may pass it (pre-existing
@@ -70,7 +72,12 @@ public:
     // Idempotent; starts the thread if it is not running (also restarts after a stop).
     void Start();
     // Runs RunCycle() once, then stops and joins the thread. Idempotent; safe if Start() never ran.
-    void StopAfterFinalCycle();
+    // Returns that final cycle's outcome (also kept for FinalCycleOk()).
+    bool StopAfterFinalCycle();
+    // Outcome of the last StopAfterFinalCycle(): true = the cycle succeeded (nothing dirty counts as
+    // success); false = it failed, the checkpointer was poisoned, or no final cycle has run since Start().
+    // XStore::Shutdown() marks indexes clean only if this is true and !Poisoned().
+    bool FinalCycleOk() const { return final_cycle_ok_.load(std::memory_order_acquire); }
     // Synchronous full cycle. false = a data/dir sync failed (or a header write
     // did not stick): nothing (or not everything) advanced; retry is safe.
     bool RunCycle();
@@ -88,7 +95,8 @@ public:
     // real sync error (poisons). Always false once poisoned.
     [[nodiscard]] bool SyncPathsForReplay(const std::set<std::string> &paths);
 
-    // Data files fdatasync'd by the last successful cycle (Task 6 gates MarkClean on it).
+    // Data files fdatasync'd by the last successful cycle. Only files dirtied since the cycle before it,
+    // so it is NOT a "durable" set (clean-since-then files are absent): never gate MarkClean on it.
     std::unordered_set<std::string> LastCycleSyncedPaths() const;
 
     // True once a real (non-retryable) sync error occurred; sticky for the process.
@@ -98,6 +106,10 @@ public:
     void ClearPoisonForTests();                   // also drops the sticky hooks
     void FailNextDataSyncsStickyForTests(int n);  // like a real fdatasync error: poisons
     void FailNextDirSyncsStickyForTests(int n);   // like a real directory fsync error: poisons
+    // Directory fsyncs report `err` (e.g. EINVAL) until cleared with 0; also re-arms the once-per-process
+    // "cannot fsync directories" warning so a test can observe it.
+    void SimulateDirSyncErrnoForTests(int err);
+    uint64_t DirSyncUnsupportedWarningsForTests() const { return dir_unsupported_warnings_.load(std::memory_order_relaxed); }
     std::unordered_set<std::string> LastCycleSyncedDirsForTests() const;   // directories fsync'd by the last successful cycle
     // Simulated kill -9: joins the thread WITHOUT the final cycle and forgets carried/flushed state.
     void StopWithoutFinalCycleForTests();
@@ -140,6 +152,10 @@ private:
     std::atomic<int> fail_dir_syncs_{0};
     std::atomic<int> fail_data_sticky_{0};
     std::atomic<int> fail_dir_sticky_{0};
+    std::atomic<int> sim_dir_errno_{0};
+    std::atomic<bool> dir_unsupported_warned_{false};
+    std::atomic<uint64_t> dir_unsupported_warnings_{0};
+    std::atomic<bool> final_cycle_ok_{false};
     std::atomic<bool> poisoned_{false};
     std::atomic<bool> poison_logged_{false};
     std::atomic<uint64_t> cycles_{0};
