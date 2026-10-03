@@ -88,8 +88,8 @@ public:
     void SetIdleMs(unsigned ms);
     void SetMaxAgeMs(unsigned ms);
 
-    // Replay (XStore::ReplayWal): fdatasync each data file in `paths` (by path) and fsync their
-    // parent directories, through the SAME fault hooks / poison rule as RunCycle. Touches no ring,
+    // Replay (XStore::ReplayWal) and the WAL writer's direct path (spec §3.3): fdatasync each data file in `paths`
+    // (by path) and fsync their parent directories, through the SAME fault hooks / poison rule as RunCycle. Touches no ring,
     // no dirty state. true = everything durable (ENOENT = deleted DB is skipped, as in a cycle).
     // false = nothing may be checkpointed over these records: a hook/open failure (retryable) or a
     // real sync error (poisons). Always false once poisoned.
@@ -118,6 +118,7 @@ public:
     void FailNextDirSyncsForTests(int n);         // next n directory fsyncs report failure
     uint64_t CyclesForTests() const { return cycles_.load(std::memory_order_relaxed); }
     uint64_t DirSyncsForTests() const { return dir_syncs_.load(std::memory_order_relaxed); }
+    uint64_t DataSyncsForTests() const { return data_syncs_.load(std::memory_order_relaxed); }   // successful data-file fdatasyncs, any caller
     uint64_t PacedFlushBytesForTests() const { return paced_bytes_.load(std::memory_order_relaxed); }
     void SetIdleMsForTests(unsigned ms) { SetIdleMs(ms); }
     void SetMaxAgeMsForTests(unsigned ms) { SetMaxAgeMs(ms); }
@@ -160,6 +161,7 @@ private:
     std::atomic<bool> poison_logged_{false};
     std::atomic<uint64_t> cycles_{0};
     std::atomic<uint64_t> dir_syncs_{0};
+    std::atomic<uint64_t> data_syncs_{0};
     std::atomic<uint64_t> paced_bytes_{0};
     std::atomic<uint64_t> advances_{0};           // rings advanced, ever (progress detector for back-to-back cycles)
     std::atomic<unsigned> idle_ms_override_{0};

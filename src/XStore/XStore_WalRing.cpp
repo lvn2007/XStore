@@ -126,6 +126,9 @@ std::atomic<uint64_t> g_default_ring_bytes_override{0};
 std::atomic<unsigned> g_stall_timeout_override{0};
 std::atomic<int> g_fail_wal_syncs{0};
 std::atomic<uint64_t> g_registry_epoch{0};
+std::atomic<size_t> g_direct_min_override{0};
+std::atomic<size_t> g_direct_pressure_min_override{0};
+std::atomic<int> g_fail_direct_syncs{0};
 }  // namespace
 
 void SetRingBytesForTests(uint64_t ring_bytes) { g_ring_bytes_override.store(ring_bytes, std::memory_order_relaxed); }
@@ -135,6 +138,38 @@ bool ConsumeInjectedWalSyncFailure() {
     int n = g_fail_wal_syncs.load(std::memory_order_relaxed);
     while (n > 0) {
         if (g_fail_wal_syncs.compare_exchange_weak(n, n - 1, std::memory_order_relaxed)) return true;
+    }
+    return false;
+}
+void SetDirectMinBytesForTests(size_t bytes) { g_direct_min_override.store(bytes, std::memory_order_relaxed); }
+void SetDirectPressureMinBytesForTests(size_t bytes) { g_direct_pressure_min_override.store(bytes, std::memory_order_relaxed); }
+size_t DirectMinBytes() {
+    const size_t o = g_direct_min_override.load(std::memory_order_relaxed);
+    return o != 0 ? o : XStoreTunables::WAL_DIRECT_MIN_BYTES;
+}
+size_t DirectPressureMinBytes() {
+    const size_t o = g_direct_pressure_min_override.load(std::memory_order_relaxed);
+    return o != 0 ? o : XStoreTunables::WAL_DIRECT_PRESSURE_MIN_BYTES;
+}
+void FailNextDirectSyncsForTests(int n) { g_fail_direct_syncs.store(n, std::memory_order_relaxed); }
+bool ConsumeInjectedDirectSyncFailure() {
+    int n = g_fail_direct_syncs.load(std::memory_order_relaxed);
+    while (n > 0) {
+        if (g_fail_direct_syncs.compare_exchange_weak(n, n - 1, std::memory_order_relaxed)) return true;
+    }
+    return false;
+}
+
+Route ChooseRoute(size_t payload_bytes, bool is_bypass, bool is_unary, bool pressure, bool ring_clear, size_t ring_bytes) {
+    if (is_bypass || is_unary) return Route::kRing;
+    if (payload_bytes > ring_bytes / 2) return ring_clear ? Route::kDirect : Route::kRing;   // not clear: the writer forces cycles first
+    const size_t threshold = pressure ? DirectPressureMinBytes() : DirectMinBytes();
+    return (payload_bytes >= threshold && ring_clear) ? Route::kDirect : Route::kRing;
+}
+
+bool RingPressure() {
+    for (const std::shared_ptr<Ring> &ring : AllRings()) {
+        if (ring->Fill() >= XStoreTunables::WAL_CKPT_CYCLE_FILL) return true;
     }
     return false;
 }
@@ -255,6 +290,7 @@ namespace {
 std::mutex g_registry_mutex;
 std::unordered_map<std::string, std::shared_ptr<Ring>> g_rings;
 std::unordered_set<std::string> g_fenced;   // normalized WAL paths; guarded by g_registry_mutex
+std::atomic<size_t> g_fenced_count{0};      // == g_fenced.size(), republished under g_registry_mutex after every change
 
 std::string NormalizedKey(const std::string &wal_path) {
     return std::filesystem::path(wal_path).lexically_normal().string();
@@ -265,13 +301,16 @@ void FenceWalFile(const std::string &wal_path) {
     std::lock_guard<std::mutex> lock(g_registry_mutex);
     const std::string key = NormalizedKey(wal_path);
     g_fenced.insert(key);
+    g_fenced_count.store(g_fenced.size(), std::memory_order_relaxed);
     // Drop the live Ring (if any) and make the writers drop their cached copies.
     if (g_rings.erase(key) != 0) g_registry_epoch.fetch_add(1, std::memory_order_relaxed);
 }
 void UnfenceWalFile(const std::string &wal_path) {
     std::lock_guard<std::mutex> lock(g_registry_mutex);
     g_fenced.erase(NormalizedKey(wal_path));
+    g_fenced_count.store(g_fenced.size(), std::memory_order_relaxed);
 }
+bool AnyFenced() { return g_fenced_count.load(std::memory_order_relaxed) != 0; }
 
 namespace {
 std::atomic<uint64_t> g_replay_zeroed_bytes{0};
@@ -364,6 +403,7 @@ void ClearRingRegistryForTests() {
     std::lock_guard<std::mutex> lock(g_registry_mutex);
     g_rings.clear();
     g_fenced.clear();
+    g_fenced_count.store(0, std::memory_order_relaxed);
     g_registry_epoch.fetch_add(1, std::memory_order_relaxed);
 }
 

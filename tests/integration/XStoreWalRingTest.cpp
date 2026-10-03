@@ -350,39 +350,6 @@ TEST_F(WalRingWriterTest, FullRingStallsThenFailsWithoutOverwriting) {
     EXPECT_TRUE(InsertSync(store, 1000));
 }
 
-TEST_F(WalRingWriterTest, OversizedRecordTakesInterimDirectPath) {
-    constexpr uint64_t kRing = 256 << 10;
-    walring::SetRingBytesForTests(kRing);
-    XStore store;
-    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
-    ASSERT_TRUE(InsertSync(store, 0));
-    auto ring = BusyRing();
-    ASSERT_NE(ring, nullptr);
-    const uint64_t head_before = ring->HeadLsn();
-
-    constexpr uint64_t kRows = 3000;   // 3000 x (8 + 64) = 216000 B > kRing / 2
-    XStore_Proto::BatchInsert_REQ req;
-    req.set_dbname(db_name);
-    req.set_durabilitymode(XStore_Proto::SYNC);
-    for (uint64_t i = 0; i < kRows; ++i) {
-        XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
-        entry->set_timestamp(kBaseEpoch + 10 + i);
-        entry->mutable_data()->add_fielddata()->set_doubledata(static_cast<double>(i) + 0.5);
-    }
-    XStore_Proto::BatchInsert_REP rep;
-    store.BatchInsert(&req, &rep);
-    ASSERT_NE(rep.insertstatus().rfind("[ERROR]", 0), 0u) << rep.insertstatus();
-
-    EXPECT_EQ(ring->HeadLsn(), head_before) << "an oversized record bypasses the ring";
-    for (uint64_t i : {uint64_t{0}, kRows / 2, kRows - 1}) {
-        XStore_Proto::UnaryQuery_REP q;
-        store.UnaryQuery(kBaseEpoch + 10 + i, db_name, &q);
-        ASSERT_TRUE(q.has_data()) << i;
-        EXPECT_DOUBLE_EQ(q.data().fielddata(0).doubledata(), static_cast<double>(i) + 0.5);
-    }
-}
-
-
 // A sub-batch whose WAL write/fdatasync fails has no durable ring record, so its
 // rows must not reach the data file or the index sidecars (spec invariant: every
 // data-file write has its WAL record inside [checkpoint, head)), and the caller
@@ -2176,6 +2143,330 @@ TEST(WalRingFormatTest, DefaultRingBytesOverrideLayers) {
     walring::SetDefaultRingBytesForTests(0);
     EXPECT_EQ(walring::DefaultRingBytes(), tunable);
     walring::SetDefaultRingBytesForTests(xstore_test::kTestDefaultRingBytes);   // back to the suite-wide value
+}
+
+// ---- Direct path for large records (spec §3.3) -------------------------------------------------
+
+class WalDirectPathTest : public WalReplayTest {
+protected:
+    static constexpr uint64_t kBatchRows = 1000;                  // 1000 x (8 + 64) = 72000 B
+    static constexpr uint64_t kOtherYearEpoch = 31536000 + 1000;   // 1971: a different data file
+
+    void SetUp() override {
+        WalReplayTest::SetUp();
+        walring::SetDirectMinBytesForTests(32 << 10);
+        walring::SetDirectPressureMinBytesForTests(16 << 10);
+    }
+    void TearDown() override {
+        walring::SetDirectMinBytesForTests(0);
+        walring::SetDirectPressureMinBytesForTests(0);
+        walring::FailNextDirectSyncsForTests(0);
+        WalReplayTest::TearDown();
+    }
+
+    static uint64_t DirectRecords() { return XStore::wal_direct_records.load(); }
+    static uint64_t RingRecords() { return XStore::wal_ring_records.load(); }
+    uint64_t TotalHead() const {
+        uint64_t sum = 0;
+        for (auto &r : MyRings()) sum += r->HeadLsn();
+        return sum;
+    }
+    // One SYNC BatchInsert of `rows` rows at epoch first_epoch.. ; row i holds the double base + i.
+    static std::string Batch(XStore &store, const std::string &db, uint64_t first_epoch, uint64_t rows, double base) {
+        XStore_Proto::BatchInsert_REQ req;
+        req.set_dbname(db);
+        req.set_durabilitymode(XStore_Proto::SYNC);
+        for (uint64_t i = 0; i < rows; ++i) {
+            XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
+            entry->set_timestamp(first_epoch + i);
+            entry->mutable_data()->add_fielddata()->set_doubledata(base + static_cast<double>(i));
+        }
+        XStore_Proto::BatchInsert_REP rep;
+        store.BatchInsert(&req, &rep);
+        return rep.insertstatus();
+    }
+    static bool Failed(const std::string &status) { return status.rfind("[ERROR]", 0) == 0; }
+    std::string BigBatch(XStore &store, double base) { return Batch(store, db_name, kEpoch0, kBatchRows, base); }
+    double Read(XStore &store, uint64_t epoch) {
+        XStore_Proto::UnaryQuery_REP q;
+        store.UnaryQuery(epoch, db_name, &q);
+        EXPECT_TRUE(q.has_data()) << epoch;
+        return q.has_data() ? q.data().fielddata(0).doubledata() : -1.0;
+    }
+};
+
+TEST_F(WalDirectPathTest, ChooseRouteTable) {
+    using walring::ChooseRoute;
+    using walring::Route;
+    walring::SetDirectMinBytesForTests(0);
+    walring::SetDirectPressureMinBytesForTests(0);
+    constexpr size_t kRing = 64u << 20;
+    constexpr size_t k64K = 64u << 10, k1M = 1u << 20;
+    //                                payload  bypass unary  pressure clear
+    EXPECT_EQ(ChooseRoute(k64K,       false, false, false, true,  kRing), Route::kRing);
+    EXPECT_EQ(ChooseRoute(k1M,        false, false, false, true,  kRing), Route::kDirect);
+    EXPECT_EQ(ChooseRoute(k1M,        false, false, false, false, kRing), Route::kRing) << "ordering rule: not clear => ring";
+    EXPECT_EQ(ChooseRoute(k64K,       false, false, true,  true,  kRing), Route::kDirect) << "pressure lowers the threshold";
+    EXPECT_EQ(ChooseRoute(k64K,       false, false, true,  false, kRing), Route::kRing);
+    EXPECT_EQ(ChooseRoute(8u << 20,   false, true,  false, true,  kRing), Route::kRing) << "unary never direct";
+    EXPECT_EQ(ChooseRoute(8u << 20,   false, true,  true,  true,  8u << 20), Route::kRing) << "unary, even over half the ring";
+    EXPECT_EQ(ChooseRoute(8u << 20,   true,  false, false, true,  kRing), Route::kRing) << "BYPASS never reaches the writer";
+    EXPECT_EQ(ChooseRoute(kRing / 2 + 1, false, false, false, true,  kRing), Route::kDirect) << "over half the ring, clear";
+    EXPECT_EQ(ChooseRoute(kRing / 2 + 1, false, false, false, false, kRing), Route::kRing) << "over half, not clear: the writer forces a checkpoint";
+    EXPECT_EQ(ChooseRoute(k1M - 1,    false, false, false, true,  kRing), Route::kRing);
+    EXPECT_EQ(ChooseRoute(k64K - 1,   false, false, true,  true,  kRing), Route::kRing);
+    EXPECT_EQ(ChooseRoute(k64K,       false, false, true,  true,  kRing), Route::kDirect) << "exactly at the pressure threshold";
+    EXPECT_EQ(ChooseRoute(k1M,        false, false, false, true,  kRing), Route::kDirect) << "exactly at the threshold";
+    // The override setters feed the same decision (0 restores the tunable).
+    walring::SetDirectMinBytesForTests(1000);
+    EXPECT_EQ(ChooseRoute(1000, false, false, false, true, kRing), Route::kDirect);
+    EXPECT_EQ(ChooseRoute(999,  false, false, false, true, kRing), Route::kRing);
+    walring::SetDirectMinBytesForTests(0);
+    EXPECT_EQ(walring::DirectMinBytes(), XStoreTunables::WAL_DIRECT_MIN_BYTES);
+    EXPECT_EQ(walring::DirectPressureMinBytes(), XStoreTunables::WAL_DIRECT_PRESSURE_MIN_BYTES);
+}
+
+TEST_F(WalDirectPathTest, LargeBatchOnCleanFileGoesDirectAndIsSyncedBeforeAck) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    const uint64_t direct0 = DirectRecords(), head0 = TotalHead();
+    const uint64_t data_syncs0 = Ckpt().DataSyncsForTests(), dir_syncs0 = Ckpt().DirSyncsForTests(), cycles0 = Ckpt().CyclesForTests();
+
+    const std::string status = BigBatch(store, 100.0);
+    ASSERT_FALSE(Failed(status)) << status;
+
+    // Everything below is read right after the call returned and the checkpointer is paused, so the
+    // syncs can only have come from the direct path, before the ack.
+    EXPECT_EQ(DirectRecords(), direct0 + 1);
+    EXPECT_EQ(TotalHead(), head0) << "no ring record for a direct write";
+    EXPECT_GE(Ckpt().DataSyncsForTests(), data_syncs0 + 1);
+    EXPECT_GE(Ckpt().DirSyncsForTests(), dir_syncs0 + 1);
+    EXPECT_EQ(Ckpt().CyclesForTests(), cycles0);
+    for (uint64_t i : {uint64_t{0}, kBatchRows / 2, kBatchRows - 1}) EXPECT_DOUBLE_EQ(Read(store, kEpoch0 + i), 100.0 + static_cast<double>(i));
+    EXPECT_TRUE(RowPresent(0));
+    EXPECT_TRUE(RowPresent(kBatchRows - 1));
+}
+
+TEST_F(WalDirectPathTest, DirectPathAlsoFsyncsParentDirectory) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    const uint64_t dir_syncs0 = Ckpt().DirSyncsForTests();
+    const std::string status = BigBatch(store, 1.0);   // creates the year file
+    ASSERT_FALSE(Failed(status)) << status;
+    EXPECT_EQ(Ckpt().DirSyncsForTests(), dir_syncs0 + 1) << "one distinct parent directory => one directory fsync";
+
+    // And the directory fsync is on the ack path: failing it fails the caller.
+    Ckpt().FailNextDirSyncsForTests(1);
+    EXPECT_TRUE(Failed(BigBatch(store, 2.0)));
+    EXPECT_FALSE(Ckpt().Poisoned());
+    EXPECT_FALSE(Failed(BigBatch(store, 3.0)));
+}
+
+TEST_F(WalDirectPathTest, LargeBatchGoesThroughRingWhenSmallRecordPending) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    ASSERT_TRUE(InsertAt(store, 0));   // un-checkpointed ring record on this year's file
+    const uint64_t direct0 = DirectRecords(), ring0 = RingRecords(), head0 = TotalHead();
+
+    ASSERT_FALSE(Failed(Batch(store, db_name, kEpoch0 + 10, kBatchRows, 5.0)));
+    EXPECT_EQ(DirectRecords(), direct0) << "ordering rule: the file has a pending ring record";
+    EXPECT_EQ(RingRecords(), ring0 + 1);
+    EXPECT_GT(TotalHead(), head0);
+
+    ASSERT_TRUE(Ckpt().RunCycle());
+    const uint64_t head1 = TotalHead();
+    ASSERT_FALSE(Failed(Batch(store, db_name, kEpoch0 + 2000, kBatchRows, 7.0)));
+    EXPECT_EQ(DirectRecords(), direct0 + 1) << "after the checkpoint passed it, the file is clear";
+    EXPECT_EQ(TotalHead(), head1);
+}
+
+// The hazard: SYNC insert T=v1 (ring), then a large batch overwriting T=v2. If the batch went direct, a
+// crash that loses the page cache replays the OLD ring record over the (synced) v2.
+TEST_F(WalDirectPathTest, OverwriteOrderingSurvivesLostPageCache) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    constexpr uint64_t kT = 5;
+    ASSERT_TRUE(InsertAt(store, kT));   // T = 6.0 (ring record, checkpointer paused)
+    const std::string v1 = RowBytes(kT);
+    const uint64_t direct0 = DirectRecords();
+
+    ASSERT_FALSE(Failed(BigBatch(store, 100.0)));   // T = 105.0
+    EXPECT_EQ(DirectRecords(), direct0) << "must take the ring path: the file has an un-checkpointed record";
+    const std::string v2 = RowBytes(kT), v2_other = RowBytes(500);
+    ASSERT_NE(v1, v2);
+
+    BusyRing().reset();
+    // Lost page cache: the data file reverts to its last checkpointed (synced) state. The file did not
+    // exist at the last checkpoint, so that state is "all zeros"; the truncation keeps the sparse
+    // year-sized file small so InitDB's index rebuild is quick (same as the other replay fixtures).
+    ShrinkDataFile(kBatchRows);
+    Crash();
+    ZeroRows(0, kBatchRows);
+    store.InitDB();
+
+    EXPECT_EQ(RowBytes(kT), v2) << "ring replay applies v1 then v2 in log order";
+    EXPECT_EQ(RowBytes(500), v2_other);
+}
+
+// A fenced shard's ring still holds un-checkpointed records that replay applied with no ring/dirty mark,
+// so RingClear would say "clear" for their file: a direct write elsewhere would be undone by the next
+// start's replay of the fenced ring. While anything is fenced, large records must take the ring.
+TEST_F(WalDirectPathTest, FencedShardForcesLargeBatchesOntoTheRing) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    ASSERT_TRUE(InsertAt(store, 0));   // un-checkpointed ring record on this thread's shard
+    BusyRing().reset();
+    ShrinkDataFile(kBatchRows);
+    Crash();
+    Ckpt().FailNextDataSyncsForTests(1);
+    store.InitDB();   // replay applies the record, its data sync fails => the shard is fenced
+    ASSERT_TRUE(walring::AnyFenced());
+
+    // A DB whose writes land on a healthy shard. (The shard is the DB's name hash plus a per-thread salt, and
+    // thread ids hash alike here, so vary the DB.) Probe with a tiny batch; the fence is process-wide, so
+    // the large batch to that DB must still not go direct.
+    const uint64_t direct0 = DirectRecords();
+    std::string healthy;
+    for (int n = 0; n < 32 && healthy.empty(); ++n) {
+        const std::string candidate = fmt::format("WALDIRHEALTHY{}", n);
+        xstore_test::CreateTestDb(store, candidate, XStore_Proto::SECOND, row_length);
+        if (!Failed(Batch(store, candidate, kOtherYearEpoch, 2, 1.0))) healthy = candidate;   // other year: 1970 stays clear
+    }
+    ASSERT_FALSE(healthy.empty()) << "no DB landed on a healthy shard";
+    const std::string big = Batch(store, healthy, kEpoch0 + 100, kBatchRows, 200.0);
+    EXPECT_FALSE(Failed(big)) << big;
+    EXPECT_EQ(DirectRecords(), direct0) << "a fenced WAL file anywhere disables the direct path";
+    XStore_Proto::UnaryQuery_REP q;
+    store.UnaryQuery(kEpoch0 + 105, healthy, &q);
+    ASSERT_TRUE(q.has_data());
+    EXPECT_DOUBLE_EQ(q.data().fielddata(0).doubledata(), 205.0);
+
+    // InitDB rebuilds dirty indexes by scanning each year file, which is year-sized (sparse): truncate the
+    // healthy DB's files first, as ShrinkDataFile does for the primary one.
+    for (const auto &[year, rows] : {std::pair<const char *, uint64_t>{"1970", kEpoch0 + kBatchRows + 200},
+                                     std::pair<const char *, uint64_t>{"1971", 1100}}) {
+        const std::string file = fmt::format("{}/{}.XSTORE", (scratch->test_root / "DataStore" / healthy).string(), year);
+        ASSERT_EQ(truncate(file.c_str(), static_cast<off_t>(rows * row_length)), 0) << file;
+    }
+    store.InitDB();   // unfence + successful replay
+    ASSERT_FALSE(walring::AnyFenced());
+    ASSERT_TRUE(Ckpt().RunCycle());
+    ASSERT_FALSE(Failed(Batch(store, healthy, kEpoch0 + 2000, kBatchRows, 300.0)));
+    EXPECT_EQ(DirectRecords(), direct0 + 1) << "unfenced and checkpointed clear: direct again";
+}
+
+TEST_F(WalDirectPathTest, OversizedRecordForcesCheckpointThenGoesDirect) {
+    constexpr uint64_t kRing = 256 << 10;
+    walring::SetRingBytesForTests(kRing);
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    ASSERT_TRUE(InsertAt(store, 0));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    const uint64_t head0 = ring->HeadLsn(), direct0 = DirectRecords(), cycles0 = Ckpt().CyclesForTests();
+    ASSERT_EQ(ring->CheckpointLsn(), 0u);
+
+    constexpr uint64_t kRows = 3000;   // 3000 x (8 + 64) = 216000 B > kRing / 2
+    ASSERT_FALSE(Failed(Batch(store, db_name, kEpoch0 + 10, kRows, 0.5)));
+    EXPECT_EQ(DirectRecords(), direct0 + 1);
+    EXPECT_EQ(ring->HeadLsn(), head0) << "an oversized record never enters the ring";
+    EXPECT_EQ(ring->CheckpointLsn(), head0) << "the pending record's checkpoint passed before the direct write";
+    EXPECT_GT(Ckpt().CyclesForTests(), cycles0);
+    for (uint64_t i : {uint64_t{0}, kRows / 2, kRows - 1}) EXPECT_DOUBLE_EQ(Read(store, kEpoch0 + 10 + i), 0.5 + static_cast<double>(i));
+}
+
+TEST_F(WalDirectPathTest, OversizedRecordFailsWhenTheFileCannotBeCheckpointedClear) {
+    walring::SetRingBytesForTests(256 << 10);
+    walring::SetStallTimeoutMsForTests(150);
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    ASSERT_TRUE(InsertAt(store, 0));
+    const uint64_t direct0 = DirectRecords();
+    Ckpt().FailNextDataSyncsForTests(1000000);   // every forced cycle fails retryably
+
+    EXPECT_TRUE(Failed(Batch(store, db_name, kEpoch0 + 10, 3000, 0.5)));
+    EXPECT_EQ(DirectRecords(), direct0);
+    EXPECT_FALSE(Ckpt().Poisoned());
+    Ckpt().FailNextDataSyncsForTests(0);
+    EXPECT_FALSE(Failed(Batch(store, db_name, kEpoch0 + 10, 3000, 0.5))) << "recovers once checkpoints can progress";
+}
+
+TEST_F(WalDirectPathTest, OversizedRecordWaitingForClearLeavesOnShutdown) {
+    walring::SetRingBytesForTests(256 << 10);
+    walring::SetStallTimeoutMsForTests(60000);   // the wait would otherwise outlast the test
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    ASSERT_TRUE(InsertAt(store, 0));
+    Ckpt().FailNextDataSyncsForTests(1000000);   // forced cycles never succeed: the file never becomes clear
+
+    std::string status;
+    const auto t0 = std::chrono::steady_clock::now();
+    std::thread worker([&] { status = Batch(store, db_name, kEpoch0 + 10, 3000, 0.5); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    Crash();   // stops the writers
+    worker.join();
+    EXPECT_LT(std::chrono::steady_clock::now() - t0, std::chrono::seconds(20)) << "the writer must leave its forced-cycle loop on shutdown";
+    EXPECT_TRUE(Failed(status));
+}
+
+TEST_F(WalDirectPathTest, DirectSyncFailureFailsTheCaller) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+
+    walring::FailNextDirectSyncsForTests(1);
+    EXPECT_TRUE(Failed(BigBatch(store, 10.0)));
+    EXPECT_FALSE(Ckpt().Poisoned());
+    EXPECT_FALSE(Failed(BigBatch(store, 10.0))) << "the failure was retryable";
+
+    Ckpt().FailNextDataSyncsForTests(1);
+    EXPECT_TRUE(Failed(BigBatch(store, 20.0)));
+    EXPECT_FALSE(Ckpt().Poisoned());
+    EXPECT_FALSE(Failed(BigBatch(store, 20.0)));
+    EXPECT_DOUBLE_EQ(Read(store, kEpoch0 + 3), 23.0);
+}
+
+TEST_F(WalDirectPathTest, DirectPathRefusesWhenPoisoned) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    Ckpt().FailNextDataSyncsStickyForTests(1);   // like a real fdatasync error
+    EXPECT_TRUE(Failed(BigBatch(store, 10.0))) << "a real sync error is never acknowledged";
+    ASSERT_TRUE(Ckpt().Poisoned());
+
+    const uint64_t direct0 = DirectRecords();
+    EXPECT_TRUE(Failed(BigBatch(store, 20.0))) << "a fresh fd after a writeback error cannot be trusted";
+    EXPECT_EQ(DirectRecords(), direct0) << "refused at decision time, nothing applied";
+}
+
+TEST_F(WalDirectPathTest, UnaryNeverGoesDirect) {
+    walring::SetDirectMinBytesForTests(1);
+    walring::SetDirectPressureMinBytesForTests(1);
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    const uint64_t direct0 = DirectRecords(), ring0 = RingRecords(), head0 = TotalHead();
+    ASSERT_TRUE(InsertAt(store, 0));
+    EXPECT_EQ(DirectRecords(), direct0);
+    EXPECT_EQ(RingRecords(), ring0 + 1);
+    EXPECT_GT(TotalHead(), head0);
+    // A one-row batch is unary-sized for the writer: also the ring.
+    ASSERT_TRUE(Ckpt().RunCycle());
+    ASSERT_FALSE(Failed(Batch(store, db_name, kEpoch0 + 50, 1, 1.0)));
+    EXPECT_EQ(DirectRecords(), direct0);
+}
+
+TEST_F(WalDirectPathTest, RingPressureLowersTheThresholdEndToEnd) {
+    walring::SetRingBytesForTests(256 << 10);
+    walring::SetDirectMinBytesForTests(1u << 30);   // only pressure can make a batch direct
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    const uint64_t direct0 = DirectRecords();
+    // Fill the ring past WAL_CKPT_CYCLE_FILL with records on ANOTHER year's file (this year stays clear).
+    ASSERT_FALSE(Failed(Batch(store, db_name, kOtherYearEpoch, kBatchRows, 1.0)));
+    ASSERT_FALSE(Failed(Batch(store, db_name, kOtherYearEpoch + 2000, kBatchRows, 1.0)));
+    ASSERT_TRUE(walring::RingPressure());
+    EXPECT_EQ(DirectRecords(), direct0) << "below the (huge) normal threshold: ring";
+
+    ASSERT_FALSE(Failed(Batch(store, db_name, kEpoch0, 300, 9.0)));   // 21600 B >= pressure threshold (16 KiB)
+    EXPECT_EQ(DirectRecords(), direct0 + 1);
 }
 
 }  // namespace

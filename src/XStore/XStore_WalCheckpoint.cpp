@@ -182,7 +182,10 @@ Checkpointer::SyncResult Checkpointer::SyncDataFile(const std::string &path) {
         if (rc != 0) { err = errno; sticky = true; }
     }
     close(fd);
-    if (err == 0) return SyncResult::kOk;
+    if (err == 0) {
+        data_syncs_.fetch_add(1, std::memory_order_relaxed);
+        return SyncResult::kOk;
+    }
     if (sticky) {
         Poison("fdatasync", path, err);
         return SyncResult::kPoisoned;

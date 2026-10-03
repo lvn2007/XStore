@@ -141,6 +141,28 @@ unsigned StallTimeoutMs();
 // Bumped by ClearRingRegistryForTests; writer threads drop their per-path Ring caches when it changes.
 uint64_t RegistryEpoch();
 
+// ---- Direct path routing (spec §3.3) ----------------------------------------
+// How the WAL writer handles one record: appended to the ring (kRing) or applied to the data
+// file and fdatasync'd + directory-fsync'd inline with no log record (kDirect).
+enum class Route { kRing, kDirect };
+// Pure decision. payload_bytes = rows * (8 + row_length); pressure = max ring Fill() >= WAL_CKPT_CYCLE_FILL;
+// ring_clear = Dirty().RingClear(data file) (no un-checkpointed ring record touched the file: the
+// ORDERING RULE -- otherwise a direct overwrite could be undone by replaying an older ring record).
+//   BYPASS never reaches the writer (is_bypass kept for completeness => kRing); unary => kRing;
+//   payload > ring_bytes/2 => kDirect only if ring_clear (otherwise the writer forces checkpoint
+//   cycles until clear, then goes direct); else payload >= (pressure ? PRESSURE_MIN : MIN) && ring_clear => kDirect.
+[[nodiscard]] Route ChooseRoute(size_t payload_bytes, bool is_bypass, bool is_unary, bool pressure, bool ring_clear, size_t ring_bytes);
+// Effective thresholds (test override, else XStoreTunables::WAL_DIRECT_MIN_BYTES / WAL_DIRECT_PRESSURE_MIN_BYTES).
+size_t DirectMinBytes();
+size_t DirectPressureMinBytes();
+void SetDirectMinBytesForTests(size_t bytes);           // 0 restores the tunable
+void SetDirectPressureMinBytesForTests(size_t bytes);   // 0 restores the tunable
+// The next n direct-path sync steps fail retryably (n = 0 clears): the record is not acknowledged, nothing poisons.
+void FailNextDirectSyncsForTests(int n);
+bool ConsumeInjectedDirectSyncFailure();
+// max Fill() over every registered ring >= XStoreTunables::WAL_CKPT_CYCLE_FILL.
+[[nodiscard]] bool RingPressure();
+
 // Static, mutex-guarded registry keyed by WAL file path.
 //  * valid ring header      -> ring, start_lsn = checkpoint_lsn (ring size from the header)
 //  * empty / new file       -> InitRingFile
@@ -159,6 +181,10 @@ void ClearRingRegistryForTests();
 // every replay of the file and fences again on failure; a process restart clears all.
 void FenceWalFile(const std::string &wal_path);
 void UnfenceWalFile(const std::string &wal_path);
+// True while ANY WAL file is fenced in this process (one relaxed load). A fenced ring still holds
+// un-checkpointed records for data files, but replay applied them with no ring/dirty mark, so
+// Dirty().RingClear() cannot see them: the direct path must treat every file as NOT ring-clear then.
+bool AnyFenced();
 
 // Overwrites the ring bytes for LSNs [from_lsn, to_lsn) with zeros (wrap-aware, 1 MiB
 // writes). Does NOT sync; the caller fdatasyncs. false = a pwrite failed.

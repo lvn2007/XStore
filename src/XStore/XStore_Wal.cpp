@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -29,6 +30,8 @@
 std::array<XStore::WalShard, XStoreTunables::WAL_SHARD_COUNT> XStore::wal_shards;
 std::atomic<size_t> XStore::active_wal_shard_count{XStoreTunables::WAL_SHARD_COUNT};
 std::atomic<uint64_t> XStore::wal_ring_stalls{0};
+std::atomic<uint64_t> XStore::wal_direct_records{0};
+std::atomic<uint64_t> XStore::wal_ring_records{0};
 moodycamel::ConcurrentQueue<XStore::WalCompletion*> XStore::completion_pool;
 #ifdef XSTORE_WAL_STATS_ENABLED
 std::atomic<bool> XStore::wal_stats_stop_flag{false};
@@ -215,7 +218,11 @@ struct SubBatchFile {
     bool durable = false;
 };
 
-enum class WalRecordKind : uint8_t { kRing, kInterim, kFail };
+// kRing: appended to the ring. kLarge: big enough that it MAY go direct -- ChooseRoute decides when the
+// writer reaches it (not at gather time: earlier records of the same batch must have been applied first,
+// or RingClear would miss them); the decision rewrites it to kRing. kFail: can never be handled (no ring
+// could be opened, or a single-row record larger than half the ring); failed without touching any file.
+enum class WalRecordKind : uint8_t { kRing, kLarge, kFail };
 
 } // namespace
 
@@ -598,6 +605,9 @@ void XStore::WalStatsReporterLoop() {
             spdlog::warn("[WAL STATS] shard={} batches={} records={} avg_batch_size={:.2f}",
                          i, d_batches, d_records, avg_batch_size);
         }
+        spdlog::warn("[WAL STATS] total ring_records={} direct_records={} ring_stalls={}",
+                     wal_ring_records.load(std::memory_order_relaxed), wal_direct_records.load(std::memory_order_relaxed),
+                     wal_ring_stalls.load(std::memory_order_relaxed));
     }
 }
 #endif
@@ -670,6 +680,12 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
     std::vector<uint64_t> record_end_lsn(XStoreTunables::WAL_BATCH_MAX_RECORDS, 0);   // ring LSN just past each ring record
     std::vector<WalRecordKind> record_kind(XStoreTunables::WAL_BATCH_MAX_RECORDS, WalRecordKind::kRing);
     std::vector<SubBatchFile *> record_file(XStoreTunables::WAL_BATCH_MAX_RECORDS, nullptr);
+    // kLarge records only: the data file the record targets (same string ApplyWalRecord uses).
+    std::vector<std::string> record_data_path(XStoreTunables::WAL_BATCH_MAX_RECORDS);
+    // Direct-path scratch: records of the current direct run that applied and await the data sync, and
+    // the distinct data files they touched (one fdatasync + parent-dir fsync per file per run).
+    std::vector<size_t> direct_idx;
+    std::set<std::string> direct_paths;
     std::vector<bool> record_ok(XStoreTunables::WAL_BATCH_MAX_RECORDS, false);
     // Bytes already placed per ring in the sub-batch being assembled (linear
     // scan: one or two rings in practice).
@@ -821,6 +837,74 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                 resolved[i] = true;
             };
 
+            const size_t large_threshold = std::min(walring::DirectMinBytes(), walring::DirectPressureMinBytes());
+            // Route of one kLarge record, decided HERE (when the writer reaches it, after every earlier
+            // record of this batch has been applied and Note'd) so RingClear sees all earlier ring records.
+            //
+            // What the ordering rule guarantees: every ring record that was ACKED before this record was
+            // submitted has already been Note'd on its file (Note precedes PublishApplied precedes the ack)
+            // and RingClear walks every ring mark of the file, whichever shard/ring it came from -- so a
+            // direct write is never undone by replaying one of those. NOT covered: CONCURRENT un-acked
+            // writes to the same row (EnqueueWalRecord salts one DB across WAL_SHARDS_PER_DB shards by
+            // calling thread, so a file can have ring records from several writer threads); they have no
+            // defined order. Pre-existing property, unchanged here: replay processes rings one shard at a
+            // time in shard-index order, so two un-checkpointed ring writes to one row from different
+            // shards can replay in a different order than they were acked (also true of the old WAL).
+            // Follow-up, not part of this task.
+            //
+            // A fenced WAL file (replay failed) still holds un-checkpointed records that replay applied
+            // with no ring/dirty mark, so RingClear cannot see them: while ANY file is fenced nothing is
+            // ring-clear (large records go to the ring; ones over ring/2 fail "overloaded" after the timeout).
+            enum class LargeRoute { kRing, kDirect, kFail };
+            auto decide_large = [&](size_t i) -> LargeRoute {
+                const WalRecord &record = batch[i];
+                const size_t ring_bytes = record_ring[i]->ring_bytes();
+                const size_t payload = record.rows.size() * (sizeof(uint64_t) + record.row_length);
+                const TimeStruct first_ts(record.rows.front().epoch_time, record.time_resolution);
+                record_data_path[i] = CachedYearFilePath(record.db_base_path, first_ts.year);
+                const std::string &path = record_data_path[i];
+                auto file_clear = [&]() { return !walring::AnyFenced() && walring::Dirty().RingClear(path); };
+
+                const bool over_half = payload > ring_bytes / 2;
+                // Size first: the fence flag and RingClear (one mutex) only for records at/above the applicable threshold.
+                const bool pressure = !over_half && payload < walring::DirectMinBytes() && walring::RingPressure();
+                const size_t threshold = pressure ? walring::DirectPressureMinBytes() : walring::DirectMinBytes();
+                const bool ring_clear = (over_half || payload >= threshold) && file_clear();
+                walring::Route route = walring::ChooseRoute(payload, /*is_bypass=*/false, /*is_unary=*/false, pressure, ring_clear, ring_bytes);
+
+                if (over_half && !ring_clear) {
+                    // Too big for the ring and the file is not clear: force checkpoint cycles (this thread
+                    // holds no ring lock; RunCycle serializes on its own cycle mutex) until it is, then go
+                    // direct. Bounded by the stall timeout; also leaves on shutdown.
+                    walring::Checkpointer &ckpt = walring::Checkpointer::Instance();
+                    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(walring::StallTimeoutMs());
+                    while (!file_clear()) {
+                        if (shard.stop_flag.load(std::memory_order_relaxed)) {
+                            spdlog::error("[WAL] [DB: {}] - record of {} bytes exceeds half the ring: shutting down, failing it", record.db_name, payload);
+                            return LargeRoute::kFail;
+                        }
+                        if (ckpt.Poisoned() || std::chrono::steady_clock::now() >= deadline) {
+                            wal_ring_stalls.fetch_add(1, std::memory_order_relaxed);
+                            spdlog::error("[WAL] [DB: {}] - record of {} bytes exceeds half the ring ({} bytes) and {} could not be "
+                                          "checkpointed clear within {} ms: failing it (overloaded){}{}",
+                                          record.db_name, payload, ring_bytes, path, walring::StallTimeoutMs(),
+                                          ckpt.Poisoned() ? "; checkpointer poisoned by a sync error" : "",
+                                          walring::AnyFenced() ? "; a WAL file is fenced (failed replay)" : "");
+                            return LargeRoute::kFail;
+                        }
+                        (void)ckpt.RunCycle();
+                        if (!file_clear()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    }
+                    route = walring::Route::kDirect;
+                }
+                if (route == walring::Route::kRing) return LargeRoute::kRing;
+                if (walring::Checkpointer::Instance().Poisoned()) {
+                    spdlog::error("[WAL] [DB: {}] - direct write cannot be made durable: checkpointer poisoned/sync error", record.db_name);
+                    return LargeRoute::kFail;
+                }
+                return LargeRoute::kDirect;
+            };
+
             // Pass A -- no row data touched: per record, its WAL file, the
             // ring serving that file, its exact ring-bound size
             // (RECORD_FIXED_BYTES + dbName + rows * (epoch + row)), and how it
@@ -857,12 +941,18 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                 }
                 record_total[i] = walring::RECORD_FIXED_BYTES + record.db_name.size()
                                 + record.rows.size() * (sizeof(uint64_t) + record.row_length);
+                // Hot path: a small record pays one multiply-compare. Only multi-row records
+                // at/above the smaller direct threshold (or over half the ring) are kLarge; the
+                // dirty-tracker lookup happens later, in decide_large, for those alone.
+                const size_t ring_half = record_ring[i] != nullptr ? record_ring[i]->ring_bytes() / 2 : 0;
                 if (record_ring[i] == nullptr) {
                     record_kind[i] = WalRecordKind::kFail;
-                } else if (record_total[i] > record_ring[i]->ring_bytes() / 2) {
-                    record_kind[i] = WalRecordKind::kInterim;
+                } else if (record.rows.size() == 1) {
+                    // Unary-sized: never direct. Only a (test-sized) tiny ring can make one not fit.
+                    record_kind[i] = record_total[i] > ring_half ? WalRecordKind::kFail : WalRecordKind::kRing;
                 } else {
-                    record_kind[i] = WalRecordKind::kRing;
+                    const size_t payload = record.rows.size() * (sizeof(uint64_t) + record.row_length);
+                    record_kind[i] = (payload >= large_threshold || payload > ring_half) ? WalRecordKind::kLarge : WalRecordKind::kRing;
                 }
             }
 
@@ -872,30 +962,66 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
             // step.
             for (size_t pos = 0; pos < count; ) {
                 if (record_kind[pos] == WalRecordKind::kFail) {
-                    spdlog::error("[WAL] [DB: {}] - Unable to open the WAL ring {}", batch[pos].db_name, record_wal_path[pos]);
+                    if (record_ring[pos] == nullptr) {
+                        spdlog::error("[WAL] [DB: {}] - Unable to open the WAL ring {}", batch[pos].db_name, record_wal_path[pos]);
+                    } else {
+                        spdlog::error("[WAL] [DB: {}] - Single-row record of {} bytes cannot fit half of the {}-byte ring {}",
+                                      batch[pos].db_name, record_total[pos], record_ring[pos]->ring_bytes(), record_wal_path[pos]);
+                    }
                     complete(pos, false);
                     ++pos;
                     continue;
                 }
-                if (record_kind[pos] == WalRecordKind::kInterim) {
-                    // INTERIM (Task 7 replaces this with the ordering-rule
-                    // direct path): a record too big for the ring is not
-                    // logged. Apply it, then make it durable by fdatasync of
-                    // its data file before acking.
-                    const WalRecord &record = batch[pos];
-                    spdlog::warn("[WAL] [DB: {}] - Record of {} bytes exceeds half the ring ({} bytes); applying directly with a data-file fdatasync",
-                                 record.db_name, record_total[pos], record_ring[pos]->ring_bytes() / 2);
-                    bool ok = ApplyWalRecord(record);
-                    if (ok && !record.rows.empty()) {
-                        TimeStruct ts(record.rows.front().epoch_time, record.time_resolution);
-                        const int data_fd = open(CachedYearFilePath(record.db_base_path, ts.year).c_str(), O_RDONLY);
-                        ok = data_fd >= 0 && fdatasync(data_fd) == 0;
-                        if (data_fd >= 0) close(data_fd);
-                        if (!ok) spdlog::error("[WAL] [DB: {}] - Unable to fdatasync the data file for a direct-path record", record.db_name);
+                if (record_kind[pos] == WalRecordKind::kLarge) {
+                    // Direct run: consecutive kLarge records that route direct are applied in queue
+                    // order, then their data files are synced ONCE per distinct file, then (and only
+                    // then) the records are acknowledged. A kLarge record that routes to the ring ends
+                    // the run and is handled as an ordinary ring record below / next iteration.
+                    direct_idx.clear();
+                    direct_paths.clear();
+                    size_t run_end = pos;
+                    while (run_end < count && record_kind[run_end] == WalRecordKind::kLarge) {
+                        const LargeRoute decision = decide_large(run_end);
+                        if (decision == LargeRoute::kRing) {
+                            record_kind[run_end] = WalRecordKind::kRing;   // decided; do not decide again
+                            break;
+                        }
+                        if (decision == LargeRoute::kFail) {
+                            complete(run_end, false);
+                            ++run_end;
+                            continue;
+                        }
+                        wal_direct_records.fetch_add(1, std::memory_order_relaxed);
+                        if (ApplyWalRecord(batch[run_end])) {
+                            direct_paths.insert(record_data_path[run_end]);
+                            direct_idx.push_back(run_end);
+                        } else {
+                            spdlog::error("[WAL] [DB: {}] - Direct-path record failed to apply", batch[run_end].db_name);
+                            complete(run_end, false);   // no sync attempted for it
+                        }
+                        ++run_end;
                     }
-                    complete(pos, ok);
-                    ++pos;
-                    continue;
+                    if (!direct_idx.empty()) {
+                        // fdatasync every touched data file + fsync its parent directory (a new year file's
+                        // directory entry is not made durable by fdatasync of the file) through the
+                        // checkpointer's shared helpers: same fault hooks, same sticky-poison rule.
+                        // On failure the rows are ALREADY in the data file (like BYPASS) -- acceptable
+                        // because the caller is told the write failed; the range stays in the dirty set so the
+                        // checkpointer syncs it later. Never acknowledge what a fresh fd cannot vouch for.
+                        const bool durable = !walring::ConsumeInjectedDirectSyncFailure() &&
+                                             walring::Checkpointer::Instance().SyncPathsForReplay(direct_paths);
+                        if (!durable) {
+                            spdlog::error("[WAL] - direct write cannot be made durable: {} ({} data file(s), first {})",
+                                          walring::Checkpointer::Instance().Poisoned() ? "checkpointer poisoned/sync error" : "sync failed",
+                                          direct_paths.size(), *direct_paths.begin());
+                        }
+                        for (size_t idx : direct_idx) complete(idx, durable);
+                    }
+                    if (run_end != pos) {
+                        pos = run_end;
+                        continue;
+                    }
+                    // The first record routed to the ring (kind rewritten above): fall through.
                 }
 
                 // Sub-batch = [pos, end): ring records until a non-ring
@@ -913,6 +1039,8 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                     if (entry->second != 0 && entry->second + record_total[end] > record_ring[end]->ring_bytes() / 4) break;
                     entry->second += record_total[end];
                 }
+
+                wal_ring_records.fetch_add(end - pos, std::memory_order_relaxed);
 
                 // (1) Group by WAL file and reserve each file's ring space.
                 sub_batch_files.clear();

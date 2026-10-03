@@ -317,6 +317,12 @@ class XStore {
         // Times a WAL writer gave up waiting for ring space (walring::Ring::Reserve
         // timed out) and failed a whole sub-batch as "overloaded". Process-wide.
         static std::atomic<uint64_t> wal_ring_stalls;
+        // Records the WAL writer processed, by route (spec §3.3): applied + synced inline with no ring
+        // record (wal_direct_records) vs appended to a ring (wal_ring_records). wal_direct_records is
+        // counted when the record is ROUTED direct, so it includes ones whose apply or sync later failed.
+        // Relaxed, process-wide.
+        static std::atomic<uint64_t> wal_direct_records;
+        static std::atomic<uint64_t> wal_ring_records;
 
         // Set once by Shutdown(); see IsShutDown().
         static std::atomic<bool> shutdown_flag_;
@@ -1214,8 +1220,8 @@ class XStore {
         // isn't optional the way it might have been for UnaryInsert's
         // always-1-row records.
         // `ring`/`ring_lsn_end`: the WAL ring record carrying this write (its END lsn),
-        // forwarded to walring::Dirty(); the defaults (BYPASS, replay, the interim
-        // oversized path) mean a direct write with no ring record.
+        // forwarded to walring::Dirty(); the defaults (BYPASS, replay, the WAL
+        // writer's direct path) mean a direct write with no ring record.
         [[nodiscard]] static bool ApplyWalRecord(const WalRecord &record_to_apply,
                                                   const std::shared_ptr<walring::Ring> &ring = nullptr,
                                                   uint64_t ring_lsn_end = 0);
@@ -1233,9 +1239,10 @@ class XStore {
         // per ring each) of: reserve ring space -> pwritev -> fdatasync ->
         // apply every record -> PublishApplied -> release every synchronous
         // caller's completion. A full ring stalls, then fails the sub-batch
-        // ("overloaded"), instead of overwriting unflushed records. Records
-        // larger than ring_bytes/2 take an interim direct path (apply + data
-        // file fdatasync, no ring record).
+        // ("overloaded"), instead of overwriting unflushed records. Large
+        // multi-row records (walring::ChooseRoute) on a file with no
+        // un-checkpointed ring records take the direct path: apply, then
+        // fdatasync the data file(s) + fsync the directory, no ring record.
         //
         // preopened_ring: the ring StartWalWriters already opened for this
         // shard (production, one known data_store_dir); seeds this thread's
