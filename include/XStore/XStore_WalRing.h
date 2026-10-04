@@ -67,12 +67,17 @@ void BuildPad(char *out, size_t pad_bytes, uint64_t lsn);
 // gate. Exactly one writer thread appends (Reserve/CommitAppended/
 // PublishApplied); AdvanceCheckpoint/ResetTo/readers may run on other threads.
 //   checkpoint_lsn <= applied_lsn <= head_lsn
-// Owns the fd (closed on destruction). Shared via std::shared_ptr.
+// Owns TWO fds on the file (both closed on destruction), opened by two separate open() calls (NOT
+// dup()): `fd` for the writer's record pwritev/fdatasync, `hdr_fd` for the checkpointer's and
+// replay's header writes. Linux reports a writeback error once per open FILE DESCRIPTION, to
+// whichever fdatasync runs first, so a shared description would let a header sync swallow the error
+// of the writer's ring pages (an acked record lost) or the reverse (a checkpoint advanced in memory
+// but not on disk). Shared via std::shared_ptr.
 class Ring {
 public:
     // head = applied = checkpoint = start_lsn. The next header slot_seq is
     // seeded from the file's current best header (1 if none).
-    Ring(int fd, std::string path, uint32_t shard_id, uint64_t ring_bytes, uint64_t start_lsn);
+    Ring(int fd, int hdr_fd, std::string path, uint32_t shard_id, uint64_t ring_bytes, uint64_t start_lsn);
     ~Ring();
     Ring(const Ring &) = delete;
     Ring &operator=(const Ring &) = delete;
@@ -90,30 +95,38 @@ public:
     uint64_t AppliedLsn() const { return applied_.load(std::memory_order_acquire); }
     uint64_t CheckpointLsn() const { return checkpoint_.load(std::memory_order_acquire); }
     double Fill() const;                     // (head - checkpoint) / ring_bytes
-    // Persist checkpoint_lsn in the alternate header slot, then free the space and
+    // Outcome of a header write: `failed` = nothing changed; `real` = a genuine pwrite/fdatasync error
+    // (sticky: the kernel may have dropped the header page, so a retry proves nothing -- the caller must
+    // poison the checkpointer), as opposed to a test-injected retryable failure.
+    struct HeaderWriteStatus { bool failed = false; bool real = false; int err = 0; };
+    // Persist checkpoint_lsn in the alternate header slot (through the header fd), then free the space and
     // wake stalled Reserve()s. No-op if lsn <= current; refused (logged) if lsn > head;
-    // unchanged if the header write fails.
-    void AdvanceCheckpoint(uint64_t lsn);
+    // unchanged if the header write fails (details in *status when given).
+    void AdvanceCheckpoint(uint64_t lsn, HeaderWriteStatus *status = nullptr);
     // head = applied = checkpoint = lsn, in memory only (replay re-seats the ring).
     void ResetTo(uint64_t lsn);
     // Replay finished at `end_lsn` with every touched data file synced: persist
     // checkpoint_lsn = end_lsn in the alternate header slot (slot_seq re-read from
     // the file), THEN raise checkpoint/head/applied to at least end_lsn. Monotone
     // (never lowers anything, so a re-replay with live writers cannot rewind them).
-    // false = the header write failed; nothing changed.
+    // false = the header write failed; nothing changed (details in *status when given).
     // InitDB must precede all inserts to this data_store_dir (CommitReplay is not
     // concurrency-safe against the writer's blind CommitAppended/PublishApplied).
-    [[nodiscard]] bool CommitReplay(uint64_t end_lsn);
+    [[nodiscard]] bool CommitReplay(uint64_t end_lsn, HeaderWriteStatus *status = nullptr);
 
     int fd() const { return fd_; }
+    int HeaderFdForTests() const { return hdr_fd_; }
     const std::string &path() const { return path_; }
     uint64_t ring_bytes() const { return ring_bytes_; }
     uint32_t ShardId() const { return shard_id_; }
 
 private:
     bool TryPlan(size_t bytes, uint64_t &start_lsn, size_t &pad_bytes) const;
+    // WriteHeaderSlot through hdr_fd_, honoring the header-write test hooks (mu_ held).
+    bool WriteHeader(const RingHeader &header, HeaderWriteStatus &status);
 
-    const int fd_;
+    const int fd_;       // writer: record pwrite/pwritev + fdatasync
+    const int hdr_fd_;   // checkpointer/replay: header slots only (a separate open file description)
     const std::string path_;
     const uint32_t shard_id_;
     const uint64_t ring_bytes_;
@@ -133,9 +146,19 @@ void SetRingBytesForTests(uint64_t ring_bytes);
 void SetDefaultRingBytesForTests(uint64_t ring_bytes);
 void SetStallTimeoutMsForTests(unsigned ms);
 // The next n WAL fdatasyncs by the writer are treated as failed (n = 0 clears). The bytes are still written.
+// Retryable: the batch fails, nothing else happens.
 void FailNextWalSyncsForTests(int n);
+// Same, but behaves like a REAL fdatasync error: the batch fails AND the checkpointer is poisoned.
+void FailNextWalSyncsStickyForTests(int n);
 // True (and counts the hook down) if this writer sync should be treated as failed.
 bool ConsumeInjectedWalSyncFailure();
+// Failure path only (never on the success path): was the injected failure just consumed a sticky one?
+bool InjectedWalSyncFailureIsSticky();
+// The next n ring-header writes (AdvanceCheckpoint / CommitReplay) fail without touching the file:
+// retryable (the cycle fails and is retried) / sticky (behaves like a real pwrite/fdatasync error:
+// poisons the checkpointer, and a replay commit also fences). n = 0 clears both.
+void FailNextHeaderWritesForTests(int n);
+void FailNextHeaderWritesStickyForTests(int n);
 uint64_t DefaultRingBytes();
 unsigned StallTimeoutMs();
 // Bumped by ClearRingRegistryForTests; writer threads drop their per-path Ring caches when it changes.

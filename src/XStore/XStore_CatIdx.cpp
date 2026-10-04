@@ -337,8 +337,9 @@ void CatIdxFile::MarkDirtyOnDisk() {
         ++dirty_mark_writes_;
         return;
     }
-    // Log-and-continue: inserts must not fail; the next write retries.
-    header_.dirty = 0;
+    // Log-and-continue: inserts must not fail; the next write retries (dirty_on_disk_ stays false). header_.dirty
+    // stays 1 in memory: a failed pwrite/fdatasync may still have put the 1 on disk, and any later header write
+    // must not turn that into a 0 over index content that was not marked.
     spdlog::error("[CATIDX] - Failed to persist dirty flag");
 }
 

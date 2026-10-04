@@ -1,4 +1,5 @@
 #include "include/XStore/XStore_Internal.h"
+#include "include/XStore/XStore_WalRing.h"
 #include "include/XStore/XStore_PreadPool.h"
 #include "include/XStore/XStore_WireEncode.h"
 #include "include/DataStructs/TimeStruct.h"
@@ -541,7 +542,11 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
                 unsigned long long int offset = (proto_from_client->timestamp(idx) - this_ts.first_epoch) * cfg_struct.rowlength();
 
                 // Deallocate data according to N bytes from rowLength
-                fallocate64(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfg_struct.rowlength());
+                if (fallocate64(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfg_struct.rowlength()) == 0) {
+                    // The punch is a metadata change fdatasync must cover: mark the file so the next checkpoint
+                    // cycle (and the final one at a clean stop) syncs it. No ring record carries it.
+                    walring::Dirty().Note(nullptr, target_file, offset, offset + cfg_struct.rowlength(), 0);
+                }
                 delete_count++;
             }
         }

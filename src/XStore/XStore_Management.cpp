@@ -39,8 +39,10 @@ XStore::XStore() {
     // different data_store_dir, which is what lets tests construct many
     // XStore instances against many distinct scratch directories within one
     // process.
-    static std::mutex init_mutex;
-    static std::unordered_set<std::string> initialized_dirs;
+    // Heap-allocated and leaked: these are constructed AFTER StartWalWriters registered its atexit hook,
+    // so as plain function-local statics they would be destroyed before the hook joins the threads.
+    static std::mutex &init_mutex = *new std::mutex();
+    static std::unordered_set<std::string> &initialized_dirs = *new std::unordered_set<std::string>();
 
     std::lock_guard<std::mutex> lock(init_mutex);
     if (initialized_dirs.insert(data_store_dir).second) {
@@ -502,6 +504,18 @@ XStore_Proto::CreateDB_REP XStore::CreateDB(std::string_view db_name_view, XStor
     return to_return;
 }
 
+namespace {
+// Runs one synchronous checkpoint cycle ahead of a removal (see RemoveDB). A failed or refused cycle (poisoned
+// checkpointer, sync error) must not hang or block the removal: warn and proceed.
+void CheckpointBeforeRemoval(const std::string &db_name) {
+    if (!walring::Checkpointer::Instance().RunCycle()) {
+        spdlog::warn("[REMOVE DB] [DB: {}] - Could not checkpoint the WAL before removing files (checkpointer poisoned or a sync "
+                     "failed); un-checkpointed WAL records for this DB may be replayed into a DB re-created under the same name",
+                     db_name);
+    }
+}
+}  // namespace
+
 XStore_Proto::RemoveDB_REP XStore::RemoveDB(std::string_view db_name_view) {
     // Protobuf obj to be returned
     std::string remove_status;
@@ -521,6 +535,12 @@ XStore_Proto::RemoveDB_REP XStore::RemoveDB(std::string_view db_name_view) {
         spdlog::warn(remove_status);
         return to_return;
     }
+
+    // Un-checkpointed ring records for this DB would replay into a DB re-created under the same name (with a
+    // possibly different row length, corrupting it, or resurrecting deleted years). Checkpoint first so every
+    // acknowledged record is past the checkpoint before the files go. Rare operation; the cycle mutex makes it
+    // safe against the background checkpointer.
+    CheckpointBeforeRemoval(db_name);
 
     // Recursively remove entire DB with given DB Name
     std::filesystem::remove_all(db_loc);
@@ -560,6 +580,9 @@ XStore_Proto::RemoveDBFiles_REP XStore::RemoveDBFiles(XStore_Proto::RemoveDBFile
         }
         return to_return;
     }
+
+    // Same reason as RemoveDB: records for the files about to be unlinked must be checkpointed first.
+    CheckpointBeforeRemoval(db_name);
 
     // Loop through each requested file name
     for (int i = 0; i < proto_from_client->filename_size(); i++) {
@@ -954,6 +977,8 @@ bool DbStillExists(const std::string &db_base_path, const std::string &db_name) 
 }  // namespace
 
 XStore::ReplayedYearMap XStore::ReplayWal() {
+    // No idle-triggered checkpoint cycles while replay Notes files (see Checkpointer::HoldForBoot).
+    const walring::BootHold boot_hold;
     ReplayedYearMap replayed_years;
 
     std::filesystem::path wal_dir = std::filesystem::path(data_store_dir) / XStoreTunables::WAL_DIR_NAME;
@@ -1160,10 +1185,14 @@ void XStore::ReplayRingShard(const std::string &wal_path, size_t shard_idx, int 
         walring::FenceWalFile(wal_path);
         return;
     }
-    if (!ring->CommitReplay(end_lsn)) {
+    walring::Ring::HeaderWriteStatus header_status;
+    if (!ring->CommitReplay(end_lsn, &header_status)) {
         spdlog::error("[WAL REPLAY] - Could not persist the checkpoint for {}; records replay again next start; "
                       "the shard is fenced until restart", wal_path);
         walring::FenceWalFile(wal_path);
+        // A genuine header pwrite/fdatasync error is fsyncgate too (the page may have been dropped while a
+        // retry reports success): also poison, so no later cycle advances a ring over this device.
+        if (header_status.real) walring::Checkpointer::Instance().ReportRealError("ring header write (replay)", wal_path, header_status.err);
     }
 }
 

@@ -1,4 +1,5 @@
 #include "include/XStore/XStore_Internal.h"
+#include "include/XStore/XStore_WalRing.h"
 #include "include/XStore/XStore_WireEncode.h"
 #include "include/DataStructs/TimeStruct.h"
 #include "include/DataStructs/FileRangeLock.h"
@@ -383,7 +384,10 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(unsigned long long int start_e
             FileRangeLockGuard guard(target_file_path, offset, cfg_struct.rowlength() * range_count, FileRangeLock::LockType::WRITE);
 
             // Deallocate data according to N bytes from rowLength
-            fallocate64(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfg_struct.rowlength() * range_count);
+            if (fallocate64(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfg_struct.rowlength() * range_count) == 0) {
+                // The punch is a metadata change fdatasync must cover (see BatchDelete).
+                walring::Dirty().Note(nullptr, target_file_path, offset, offset + cfg_struct.rowlength() * range_count, 0);
+            }
             delete_count += range_count;
         }
 

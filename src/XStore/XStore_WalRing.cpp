@@ -125,6 +125,16 @@ std::atomic<uint64_t> g_ring_bytes_override{0};
 std::atomic<uint64_t> g_default_ring_bytes_override{0};
 std::atomic<unsigned> g_stall_timeout_override{0};
 std::atomic<int> g_fail_wal_syncs{0};
+std::atomic<bool> g_wal_sync_failure_sticky{false};   // read on the failure path only
+std::atomic<int> g_fail_header_writes{0};
+std::atomic<int> g_fail_header_writes_sticky{0};
+bool ConsumeCounter(std::atomic<int> &c) {
+    int n = c.load(std::memory_order_relaxed);
+    while (n > 0) {
+        if (c.compare_exchange_weak(n, n - 1, std::memory_order_relaxed)) return true;
+    }
+    return false;
+}
 std::atomic<uint64_t> g_registry_epoch{0};
 std::atomic<size_t> g_direct_min_override{0};
 std::atomic<size_t> g_direct_pressure_min_override{0};
@@ -133,7 +143,17 @@ std::atomic<int> g_fail_direct_syncs{0};
 
 void SetRingBytesForTests(uint64_t ring_bytes) { g_ring_bytes_override.store(ring_bytes, std::memory_order_relaxed); }
 void SetDefaultRingBytesForTests(uint64_t ring_bytes) { g_default_ring_bytes_override.store(ring_bytes, std::memory_order_relaxed); }
-void FailNextWalSyncsForTests(int n) { g_fail_wal_syncs.store(n, std::memory_order_relaxed); }
+void FailNextWalSyncsForTests(int n) {
+    g_wal_sync_failure_sticky.store(false, std::memory_order_relaxed);
+    g_fail_wal_syncs.store(n, std::memory_order_relaxed);
+}
+void FailNextWalSyncsStickyForTests(int n) {
+    g_wal_sync_failure_sticky.store(true, std::memory_order_relaxed);
+    g_fail_wal_syncs.store(n, std::memory_order_relaxed);
+}
+bool InjectedWalSyncFailureIsSticky() { return g_wal_sync_failure_sticky.load(std::memory_order_relaxed); }
+void FailNextHeaderWritesForTests(int n) { g_fail_header_writes.store(n, std::memory_order_relaxed); }
+void FailNextHeaderWritesStickyForTests(int n) { g_fail_header_writes_sticky.store(n, std::memory_order_relaxed); }
 bool ConsumeInjectedWalSyncFailure() {
     int n = g_fail_wal_syncs.load(std::memory_order_relaxed);
     while (n > 0) {
@@ -187,8 +207,9 @@ unsigned StallTimeoutMs() {
     return o != 0 ? o : XStoreTunables::WAL_STALL_TIMEOUT_MS;
 }
 
-Ring::Ring(int fd, std::string path, uint32_t shard_id, uint64_t ring_bytes, uint64_t start_lsn)
+Ring::Ring(int fd, int hdr_fd, std::string path, uint32_t shard_id, uint64_t ring_bytes, uint64_t start_lsn)
     : fd_(fd),
+      hdr_fd_(hdr_fd),
       path_(std::move(path)),
       shard_id_(shard_id),
       ring_bytes_(ring_bytes),
@@ -203,6 +224,23 @@ Ring::Ring(int fd, std::string path, uint32_t shard_id, uint64_t ring_bytes, uin
 
 Ring::~Ring() {
     if (fd_ >= 0) close(fd_);
+    if (hdr_fd_ >= 0) close(hdr_fd_);
+}
+
+bool Ring::WriteHeader(const RingHeader &header, HeaderWriteStatus &status) {
+    status = HeaderWriteStatus{};
+    bool ok;
+    if (ConsumeCounter(g_fail_header_writes_sticky)) {
+        ok = false; status.real = true; status.err = EIO;
+    } else if (ConsumeCounter(g_fail_header_writes)) {
+        ok = false; status.err = EIO;   // injected: retryable
+    } else {
+        errno = 0;
+        ok = WriteHeaderSlot(hdr_fd_, header);
+        if (!ok) { status.real = true; status.err = errno != 0 ? errno : EIO; }
+    }
+    status.failed = !ok;
+    return ok;
 }
 
 // The checkpoint only moves forward and only the single writer moves head, so a
@@ -233,7 +271,8 @@ double Ring::Fill() const {
     return static_cast<double>(head - std::min(head, ckpt)) / static_cast<double>(ring_bytes_);
 }
 
-void Ring::AdvanceCheckpoint(uint64_t lsn) {
+void Ring::AdvanceCheckpoint(uint64_t lsn, HeaderWriteStatus *status) {
+    if (status) *status = HeaderWriteStatus{};
     std::lock_guard<std::mutex> lock(mu_);
     if (lsn <= checkpoint_.load(std::memory_order_relaxed)) return;
     if (lsn > head_.load(std::memory_order_acquire)) {
@@ -245,7 +284,8 @@ void Ring::AdvanceCheckpoint(uint64_t lsn) {
     h.ring_bytes = ring_bytes_;
     h.checkpoint_lsn = lsn;
     h.slot_seq = slot_seq_ + 1;
-    if (!WriteHeaderSlot(fd_, h)) {
+    HeaderWriteStatus local;
+    if (!WriteHeader(h, status ? *status : local)) {
         spdlog::error("[WAL] - Failed to persist checkpoint {} for {}", lsn, path_);
         return;
     }
@@ -262,17 +302,19 @@ void Ring::ResetTo(uint64_t lsn) {
     cv_.notify_all();
 }
 
-bool Ring::CommitReplay(uint64_t end_lsn) {
+bool Ring::CommitReplay(uint64_t end_lsn, HeaderWriteStatus *status) {
+    if (status) *status = HeaderWriteStatus{};
     std::lock_guard<std::mutex> lock(mu_);
     if (end_lsn <= checkpoint_.load(std::memory_order_relaxed)) return true;
     RingHeader best;
-    if (ReadBestHeader(fd_, best)) slot_seq_ = std::max(slot_seq_, best.slot_seq);
+    if (ReadBestHeader(hdr_fd_, best)) slot_seq_ = std::max(slot_seq_, best.slot_seq);
     RingHeader h;
     h.shard_id = shard_id_;
     h.ring_bytes = ring_bytes_;
     h.checkpoint_lsn = end_lsn;
     h.slot_seq = slot_seq_ + 1;
-    if (!WriteHeaderSlot(fd_, h)) {
+    HeaderWriteStatus local;
+    if (!WriteHeader(h, status ? *status : local)) {
         spdlog::error("[WAL REPLAY] - Failed to persist checkpoint {} for {}", end_lsn, path_);
         return false;
     }
@@ -318,13 +360,6 @@ std::atomic<uint64_t> g_replay_zeroed_bytes{0};
 namespace {
 std::atomic<int> g_fail_replay_reads{0};
 std::atomic<int> g_fail_replay_zeroings{0};
-bool ConsumeCounter(std::atomic<int> &c) {
-    int n = c.load(std::memory_order_relaxed);
-    while (n > 0) {
-        if (c.compare_exchange_weak(n, n - 1, std::memory_order_relaxed)) return true;
-    }
-    return false;
-}
 }  // namespace
 void FailNextReplayReadsForTests(int n) { g_fail_replay_reads.store(n, std::memory_order_relaxed); }
 bool ConsumeInjectedReplayReadFailure() { return ConsumeCounter(g_fail_replay_reads); }
@@ -334,11 +369,14 @@ uint64_t ReplayZeroedBytesForTests() { return g_replay_zeroed_bytes.load(std::me
 void CountReplayZeroedBytes(uint64_t bytes) { g_replay_zeroed_bytes.fetch_add(bytes, std::memory_order_relaxed); }
 
 bool ZeroRingRange(int fd, uint64_t from_lsn, uint64_t to_lsn, uint64_t ring_bytes) {
-    static const std::vector<char> zeros(1u << 20, 0);
+    // Heap-allocated and leaked on purpose: a function-local static vector would be destroyed by exit()'s
+    // static destructors before the atexit hook has joined the writers / checkpointer (same bug class as
+    // XStorePreadPool's ticket queue).
+    static const std::vector<char> *const zeros = new std::vector<char>(1u << 20, 0);
     for (uint64_t lsn = from_lsn; lsn < to_lsn;) {
         const uint64_t lap_left = ring_bytes - lsn % ring_bytes;
-        const size_t n = static_cast<size_t>(std::min<uint64_t>({zeros.size(), to_lsn - lsn, lap_left}));
-        if (!PwriteAll(fd, zeros.data(), n, static_cast<off_t>(RingOffset(lsn, ring_bytes)))) return false;
+        const size_t n = static_cast<size_t>(std::min<uint64_t>({zeros->size(), to_lsn - lsn, lap_left}));
+        if (!PwriteAll(fd, zeros->data(), n, static_cast<off_t>(RingOffset(lsn, ring_bytes)))) return false;
         lsn += n;
     }
     return true;
@@ -386,7 +424,15 @@ std::shared_ptr<Ring> GetOrOpenRing(const std::string &wal_path, uint32_t shard_
             return nullptr;
         }
     }
-    auto ring = std::make_shared<Ring>(fd, wal_path, shard_id, ring_bytes, start_lsn);
+    // A second, independent open file description for the header writes (see Ring): opened AFTER init so
+    // it never sees an error from the zero-fill. Failing to open it fails the ring.
+    const int hdr_fd = open(wal_path.c_str(), O_RDWR | O_CLOEXEC);
+    if (hdr_fd < 0) {
+        spdlog::error("[WAL] - Unable to open a header descriptor for {}: {}", wal_path, std::strerror(errno));
+        close(fd);
+        return nullptr;
+    }
+    auto ring = std::make_shared<Ring>(fd, hdr_fd, wal_path, shard_id, ring_bytes, start_lsn);
     g_rings.emplace(key, ring);
     return ring;
 }

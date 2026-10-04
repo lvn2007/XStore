@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstring>
 #include <cstdlib>
+#include <thread>
 #include <filesystem>
 #include <limits>
 #include <vector>
@@ -77,6 +78,9 @@ Checkpointer &Checkpointer::Instance() {
     return *instance;
 }
 
+BootHold::BootHold() { Checkpointer::Instance().HoldForBoot(); }
+BootHold::~BootHold() { Checkpointer::Instance().ReleaseBoot(); }
+
 bool Checkpointer::ConsumeFailure(std::atomic<int> &counter) {
     int n = counter.load(std::memory_order_relaxed);
     while (n > 0) {
@@ -103,6 +107,7 @@ void Checkpointer::ClearPoisonForTests() {
     fail_data_sticky_.store(0, std::memory_order_relaxed);
     fail_dir_sticky_.store(0, std::memory_order_relaxed);
     sim_dir_errno_.store(0, std::memory_order_relaxed);
+    sim_sfr_errno_.store(0, std::memory_order_relaxed);
     poisoned_.store(false, std::memory_order_release);
     poison_logged_.store(false, std::memory_order_relaxed);
 }
@@ -238,6 +243,11 @@ Checkpointer::SyncResult Checkpointer::SyncDirectory(const std::string &dir) {
 }
 
 bool Checkpointer::SyncPathsForReplay(const std::set<std::string> &paths) {
+    if (const unsigned delay_ms = replay_sync_delay_ms_.load(std::memory_order_relaxed); delay_ms != 0) {
+        const uint64_t before = cycles_.load(std::memory_order_relaxed);
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+        replay_window_cycles_.store(cycles_.load(std::memory_order_relaxed) - before, std::memory_order_relaxed);
+    }
     std::lock_guard<std::mutex> cycle(cycle_mutex_);   // hooks are consumed by exactly one party at a time
     if (poisoned_.load(std::memory_order_acquire)) return false;
     std::set<std::string> synced;
@@ -332,9 +342,16 @@ bool Checkpointer::RunCycleLocked() {
     }
     for (size_t i = 0; i < rings.size(); ++i) {
         if (snapshot[i] <= rings[i]->CheckpointLsn()) continue;
-        rings[i]->AdvanceCheckpoint(snapshot[i]);
+        Ring::HeaderWriteStatus header_status;
+        rings[i]->AdvanceCheckpoint(snapshot[i], &header_status);
+        if (header_status.real) {
+            // A genuine header pwrite/fdatasync error: the slot may or may not be on disk and a retried
+            // fdatasync could report success for a dropped page, leaving memory ahead of disk. Sticky.
+            Poison("ring header write", rings[i]->path(), header_status.err);
+            return false;
+        }
         if (rings[i]->CheckpointLsn() < snapshot[i]) {
-            ok = false;   // header write failed; AdvanceCheckpoint logged it
+            ok = false;   // injected/retryable header failure (or refused); AdvanceCheckpoint logged it
             continue;
         }
         Dirty().NoteCheckpointed(rings[i].get(), snapshot[i]);
@@ -365,16 +382,24 @@ bool Checkpointer::PacedFlushStep() {
             }
             int rc = 0, err = 0;
             for (int attempt = 0; attempt < 3; ++attempt) {
-                rc = sync_file_range(fd, static_cast<off64_t>(begin), static_cast<off64_t>(end - begin),
-                                     SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER);
-                err = rc == 0 ? 0 : errno;
+                if (const int simulated = sim_sfr_errno_.load(std::memory_order_relaxed); simulated != 0) {
+                    rc = -1; err = simulated;
+                } else {
+                    rc = sync_file_range(fd, static_cast<off64_t>(begin), static_cast<off64_t>(end - begin),
+                                         SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER);
+                    err = rc == 0 ? 0 : errno;
+                }
                 if (rc == 0 || (err != EINTR && err != EAGAIN)) break;
             }
             close(fd);
-            // A writeback error here consumes the file's error state, so a later fdatasync could
-            // report success for dropped pages: poison (see the header). Other failures (EINVAL,
-            // ENOMEM, ...) are best effort -- the cycle's fdatasync is the arbiter.
-            if (err == EIO || err == ENOSPC || err == EDQUOT) {
+            // sync_file_range(WAIT_AFTER) consumes ANY writeback error of the file, so a later fdatasync could
+            // report success for dropped pages: every errno poisons (see the header) except EINTR/EAGAIN
+            // (retried above; a persistent one is a plain skip) and the "unsupported here" usage errors
+            // EINVAL/ESPIPE/ENOSYS/EBADF, which never touch writeback state. The cycle's fdatasync is the arbiter
+            // for everything skipped.
+            const bool benign = err == 0 || err == EINTR || err == EAGAIN || err == EINVAL || err == ESPIPE ||
+                                err == ENOSYS || err == EBADF;
+            if (!benign) {
                 Poison("sync_file_range", path, err);
                 return false;
             }
@@ -423,7 +448,8 @@ void Checkpointer::Loop() {
             ? max_age_override_.load(std::memory_order_relaxed) : XStoreTunables::WAL_CKPT_MAX_AGE_MS;
         const bool cycle_fill = fill >= XStoreTunables::WAL_CKPT_CYCLE_FILL;
 
-        if (retry || cycle_fill || age_ms >= age_limit || (dirty && idle_ms >= static_cast<int64_t>(idle_limit))) {
+        const bool booting = boot_holds_.load(std::memory_order_acquire) != 0;   // ReplayWal running: no idle trigger
+        if (retry || cycle_fill || age_ms >= age_limit || (!booting && dirty && idle_ms >= static_cast<int64_t>(idle_limit))) {
             if (cycle_fill && Due(last_fill_warn, std::chrono::seconds(60))) {
                 spdlog::warn("[WAL CKPT] - ring fill {:.0f}% >= {:.0f}%: checkpointing back-to-back; writers will stall near {:.0f}%",
                              fill * 100, XStoreTunables::WAL_CKPT_CYCLE_FILL * 100, XStoreTunables::WAL_STALL_FILL * 100);

@@ -1144,6 +1144,7 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                     const int fd = ring.fd();
 
                     bool file_write_ok = true;
+                    int write_errno = 0;   // set on the failure path only
                     if (file.pad > 0) {
                         // Tail of the lap too small for the run: fill it with a PAD
                         // record so replay can step over it.
@@ -1153,6 +1154,7 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                         file_write_ok = pwrite(fd, pad_buf.data(), file.pad,
                                                static_cast<off_t>(walring::RingOffset(pad_lsn, ring.ring_bytes())))
                                         == static_cast<ssize_t>(file.pad);
+                        if (!file_write_ok) write_errno = errno != 0 ? errno : EIO;
                     }
 
                     // Chunk this file's iovecs into groups of at most
@@ -1172,6 +1174,7 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                         ssize_t written = pwritev(fd, file.iov.data() + iov_start, static_cast<int>(iov_count), chunk_offset);
                         if (written != static_cast<ssize_t>(chunk_bytes)) {
                             file_write_ok = false;
+                            write_errno = written < 0 && errno != 0 ? errno : EIO;
                             break;
                         }
                         chunk_offset += static_cast<off_t>(chunk_bytes);
@@ -1180,9 +1183,21 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
 
                     // Always fdatasync: the ring is fixed-size and pre-zeroed, so
                     // no write ever changes file size/metadata.
-                    const bool sync_ok = (fdatasync(fd) == 0) && !walring::ConsumeInjectedWalSyncFailure();
+                    const bool real_sync_ok = fdatasync(fd) == 0;
+                    const bool sync_ok = real_sync_ok && !walring::ConsumeInjectedWalSyncFailure();
                     if (!file_write_ok || !sync_ok) {
+                        const int sync_errno = real_sync_ok ? 0 : errno;   // first thing: logging clobbers errno
                         spdlog::error("[WAL] - Failed to durably write/fdatasync {}", ring.path());
+                        // A REAL ring pwritev/fdatasync error (anything but EINTR/EAGAIN, or a sticky injected one)
+                        // means the device may be dropping this file's pages and the kernel reports a writeback error
+                        // only once: the batch fails to its callers (below), and from now on the checkpointer must
+                        // not advance any ring over data files either (fsyncgate). Error path only.
+                        const int real_err = !file_write_ok ? write_errno : sync_errno;
+                        const bool injected_sticky = real_sync_ok && file_write_ok && walring::InjectedWalSyncFailureIsSticky();
+                        if (injected_sticky || (real_err != 0 && real_err != EINTR && real_err != EAGAIN)) {
+                            walring::Checkpointer::Instance().ReportRealError(
+                                !file_write_ok ? "WAL ring pwritev" : "WAL ring fdatasync", ring.path(), injected_sticky ? EIO : real_err);
+                        }
                         // head does not advance, so this range is free space again -- but its bytes may
                         // be intact on disk (a failed fdatasync does not undo the write). A later,
                         // shorter record at the same head would leave this record's tail beyond it,

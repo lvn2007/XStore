@@ -16,15 +16,19 @@
 // Snapshot-before-Take is what makes it safe: every apply with lsn < snapshot
 // had finished (and Note'd its file) before the Take, so its bytes are in the
 // set that gets synced. Records applied after the snapshot are deliberately not
-// passed; the next cycle covers them. A failed step keeps the carried set for
-// retry and advances nothing.
+// passed; the next cycle covers them. A failed data/dir sync keeps the carried set for
+// retry and advances nothing; a header write that fails for ONE ring leaves the other
+// rings free to advance (conservative: each ring's checkpoint is independent).
 //
 // A REAL sync error is sticky ("fsyncgate"): after a genuine writeback error the
 // kernel may mark the lost pages clean, so a RETRIED fdatasync can return 0 with
 // the data not on disk, and the retry would then advance the checkpoint over rows
 // only the WAL still holds. The first real error from fdatasync(data file),
-// fsync(directory) or sync_file_range (EIO/ENOSPC/EDQUOT; EINTR/EAGAIN are retried
-// in place) therefore POISONS the checkpointer for the life of the process:
+// fsync(directory), the ring HEADER write (pwrite/fdatasync, through the ring's
+// separate header file description), the WAL writer's own ring pwritev/fdatasync,
+// or sync_file_range (every errno except EINTR/EAGAIN, retried in place, and
+// EINVAL/ESPIPE/ENOSYS/EBADF, "unsupported here", skipped) therefore POISONS the
+// checkpointer for the life of the process:
 // RunCycle() returns false without advancing anything, the thread stops cycling,
 // and a CRITICAL line is logged once. Writers then stall at the full-ring
 // threshold and fail callers as "overloaded"; a restart replays from the last good
@@ -64,6 +68,15 @@ extern PaddedAtomicI64 last_writer_activity_ns;
 // start with a digit and be all digits (no whitespace, sign, hex or trailing junk) and fit an unsigned.
 bool ParseMsKnob(const char *text, unsigned &out);
 
+// RAII boot hold (see Checkpointer::HoldForBoot).
+class BootHold {
+public:
+    BootHold();
+    ~BootHold();
+    BootHold(const BootHold &) = delete;
+    BootHold &operator=(const BootHold &) = delete;
+};
+
 // Leaked singleton (detached threads / exit-time statics may still reach it).
 class Checkpointer {
 public:
@@ -79,8 +92,21 @@ public:
     // XStore::Shutdown() marks indexes clean only if this is true and !Poisoned().
     bool FinalCycleOk() const { return final_cycle_ok_.load(std::memory_order_acquire); }
     // Synchronous full cycle. false = a data/dir sync failed (or a header write
-    // did not stick): nothing (or not everything) advanced; retry is safe.
+    // did not stick): nothing (or not everything) advanced; retry is safe -- unless the
+    // checkpointer got poisoned (a real error), in which case it never advances again.
     bool RunCycle();
+
+    // Boot hold: while at least one hold is taken (XStore::ReplayWal takes one for its whole duration)
+    // the loop's IDLE trigger does not fire -- replay Notes files while last_writer_activity_ns is
+    // still 0, which would otherwise look like "dirty and idle for decades" and cycle every
+    // millisecond, contending with SyncPathsForReplay on cycle_mutex_. The fill, max-age and retry
+    // triggers keep working. Prefer the RAII BootHold above.
+    void HoldForBoot() { boot_holds_.fetch_add(1, std::memory_order_acq_rel); }
+    void ReleaseBoot() { boot_holds_.fetch_sub(1, std::memory_order_acq_rel); }
+
+    // A REAL error on a descriptor the checkpointer does not own (the WAL writer's ring pwritev/fdatasync,
+    // a replay header commit): poisons exactly as a failed data fdatasync would.
+    void ReportRealError(const char *what, const std::string &path, int err) { Poison(what, path, err); }
 
     // Ops/testing knobs (src/main.cpp: XSTORE_CKPT_IDLE_MS / XSTORE_CKPT_MAX_AGE_MS): the writer-idle and
     // oldest-unsynced-data triggers of a cycle. 0 restores XStoreTunables::WAL_CKPT_IDLE_MS / WAL_CKPT_MAX_AGE_MS.
@@ -109,6 +135,12 @@ public:
     // Directory fsyncs report `err` (e.g. EINVAL) until cleared with 0; also re-arms the once-per-process
     // "cannot fsync directories" warning so a test can observe it.
     void SimulateDirSyncErrnoForTests(int err);
+    // sync_file_range (the paced flush) reports `err` until cleared with 0.
+    void SimulateSyncFileRangeErrnoForTests(int err) { sim_sfr_errno_.store(err, std::memory_order_relaxed); }
+    // SyncPathsForReplay sleeps `ms` BEFORE taking the cycle mutex and records how many cycles ran in
+    // that window (ReplaySyncWindowCyclesForTests): lets a test observe the loop during a slow replay.
+    void SetReplaySyncDelayMsForTests(unsigned ms) { replay_sync_delay_ms_.store(ms, std::memory_order_relaxed); }
+    uint64_t ReplaySyncWindowCyclesForTests() const { return replay_window_cycles_.load(std::memory_order_relaxed); }
     uint64_t DirSyncUnsupportedWarningsForTests() const { return dir_unsupported_warnings_.load(std::memory_order_relaxed); }
     std::unordered_set<std::string> LastCycleSyncedDirsForTests() const;   // directories fsync'd by the last successful cycle
     // Simulated kill -9: joins the thread WITHOUT the final cycle and forgets carried/flushed state.
@@ -154,6 +186,10 @@ private:
     std::atomic<int> fail_data_sticky_{0};
     std::atomic<int> fail_dir_sticky_{0};
     std::atomic<int> sim_dir_errno_{0};
+    std::atomic<int> sim_sfr_errno_{0};
+    std::atomic<int> boot_holds_{0};
+    std::atomic<unsigned> replay_sync_delay_ms_{0};
+    std::atomic<uint64_t> replay_window_cycles_{0};
     std::atomic<bool> dir_unsupported_warned_{false};
     std::atomic<uint64_t> dir_unsupported_warnings_{0};
     std::atomic<bool> final_cycle_ok_{false};

@@ -22,6 +22,7 @@
 #include <random>
 #include <string>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <thread>
 #include <unistd.h>
 #include <utility>
@@ -229,6 +230,8 @@ protected:
         walring::SetRingBytesForTests(0);
         walring::SetStallTimeoutMsForTests(0);
         walring::FailNextWalSyncsForTests(0);
+        walring::FailNextHeaderWritesForTests(0);
+        walring::FailNextHeaderWritesStickyForTests(0);
         ClearRegistries();
         scratch.reset();
     }
@@ -641,6 +644,45 @@ TEST_F(WalRingWriterTest, PeekRangesDoesNotReset) {
     EXPECT_TRUE(t.PeekRanges().ranges.empty());
 }
 
+// M6: a hole-punch is a metadata change nothing else marks dirty; without a Note a clean stop would never
+// fdatasync it (the final cycle only syncs noted files).
+TEST_F(WalRingWriterTest, EveryDeleteMarksItsFileDirty) {
+    constexpr uint16_t kRowLength = 64;
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, kRowLength);
+    for (uint64_t i = 0; i < 12; ++i) ASSERT_TRUE(InsertSync(store, i));
+    const TimeStruct ts(kBaseEpoch, XStore_Proto::SECOND);
+    const std::string path = fmt::format("{}/{}.XSTORE", (scratch->test_root / "DataStore" / db_name).string(), ts.year);
+    const auto offset_of = [&](uint64_t i) { return (kBaseEpoch + i - ts.first_epoch) * kRowLength; };
+    // Dirty ranges noted since the last Take for `path`, after the delete under test.
+    const auto expect_marked = [&](const char *what, uint64_t first_row, uint64_t row_count) {
+        const auto snap = walring::Dirty().Take();
+        const auto it = snap.ranges.find(path);
+        ASSERT_NE(it, snap.ranges.end()) << what << ": the punched file was not marked dirty";
+        EXPECT_TRUE(Covers(it->second, offset_of(first_row), offset_of(first_row) + row_count * kRowLength)) << what;
+    };
+
+    (void)walring::Dirty().Take();
+    EXPECT_NE(store.UnaryDelete(kBaseEpoch + 1, db_name).deletestatus().find("[INFO]"), std::string::npos);
+    expect_marked("UnaryDelete", 1, 1);
+
+    XStore_Proto::BatchDelete_REQ req;
+    req.set_dbname(db_name);
+    for (uint64_t i : {uint64_t{3}, uint64_t{5}, uint64_t{9}}) req.add_timestamp(kBaseEpoch + i);
+    EXPECT_NE(store.BatchDelete(&req).deletestatus().find("Deleted 3 items"), std::string::npos);
+    {
+        const auto snap = walring::Dirty().Take();
+        const auto it = snap.ranges.find(path);
+        ASSERT_NE(it, snap.ranges.end()) << "BatchDelete: the punched file was not marked dirty";
+        for (uint64_t i : {uint64_t{3}, uint64_t{5}, uint64_t{9}}) {
+            EXPECT_TRUE(Covers(it->second, offset_of(i), offset_of(i) + kRowLength)) << "BatchDelete row " << i;
+        }
+    }
+
+    EXPECT_NE(store.RangeDelete(kBaseEpoch + 6, kBaseEpoch + 8, db_name).deletestatus().find("Deleted 3 items"), std::string::npos);
+    expect_marked("RangeDelete", 6, 3);
+}
+
 namespace {
 struct ShutdownReset { ~ShutdownReset() { XStore::ResetShutdownForTests(); } };
 }  // namespace
@@ -656,6 +698,7 @@ protected:
         Ckpt().ClearPoisonForTests();
         Ckpt().SetIdleMsForTests(0);
         Ckpt().SetMaxAgeMsForTests(0);
+        Ckpt().SetReplaySyncDelayMsForTests(0);
         Ckpt().Start();   // a test may have stopped it
         WalRingWriterTest::TearDown();
     }
@@ -829,6 +872,164 @@ TEST_F(WalCheckpointTest, StickyDirSyncErrorAlsoPoisons) {
     EXPECT_TRUE(Ckpt().Poisoned());
     EXPECT_FALSE(Ckpt().RunCycle());
     EXPECT_EQ(ring->CheckpointLsn(), 0u);
+}
+
+// ---- Final fix round: separate header file description (I-1), sticky header/WAL errors ----
+
+namespace {
+// "ino:" line of /proc/self/fdinfo/<fd>; 0 if unavailable.
+uint64_t FdInode(int fd) {
+    std::FILE *f = std::fopen(fmt::format("/proc/self/fdinfo/{}", fd).c_str(), "r");
+    if (!f) return 0;
+    char line[256];
+    uint64_t ino = 0;
+    while (std::fgets(line, sizeof line, f)) {
+        if (std::strncmp(line, "ino:", 4) == 0) ino = std::strtoull(line + 4, nullptr, 10);
+    }
+    std::fclose(f);
+    return ino;
+}
+}  // namespace
+
+// Linux reports a writeback error once per open FILE DESCRIPTION. If the checkpointer's header fdatasync and the
+// writer's ring fdatasync shared one, either could swallow the other's error. The Ring therefore opens the file twice.
+TEST_F(WalCheckpointTest, RingHeaderWritesUseAnIndependentFileDescription) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    ASSERT_TRUE(InsertSync(store, 0));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    const int fd = ring->fd(), hdr = ring->HeaderFdForTests();
+    ASSERT_GE(fd, 0);
+    ASSERT_GE(hdr, 0);
+    EXPECT_NE(hdr, fd);
+    // Same file...
+    const uint64_t ino = FdInode(fd);
+    ASSERT_NE(ino, 0u) << "/proc/self/fdinfo unavailable";
+    EXPECT_EQ(FdInode(hdr), ino);
+    // ...but two open file descriptions: a dup()'d descriptor would share this offset (and the error cursor).
+    const off_t w0 = lseek(fd, 0, SEEK_CUR), h0 = lseek(hdr, 0, SEEK_CUR);
+    ASSERT_GE(w0, 0);
+    ASSERT_GE(h0, 0);
+    ASSERT_EQ(lseek(hdr, 12345, SEEK_SET), 12345);
+    EXPECT_EQ(lseek(fd, 0, SEEK_CUR), w0) << "the header fd shares an open file description with the writer fd";
+    ASSERT_EQ(lseek(hdr, h0, SEEK_SET), h0);
+    // Where the kernel allows it, ask directly (0 = same description).
+    const long same = syscall(SYS_kcmp, getpid(), getpid(), 0 /*KCMP_FILE*/, fd, hdr);
+    if (same != -1) EXPECT_NE(same, 0L) << "kcmp says both fds are the same open file description";
+}
+
+// Proves the header slots really are written through hdr_fd_ (not fd_): make hdr_fd_ read-only; the next header
+// write must fail with a REAL error (EBADF) and poison.
+TEST_F(WalCheckpointTest, HeaderWritesGoThroughTheHeaderFd) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    for (uint64_t i = 0; i < 3; ++i) ASSERT_TRUE(InsertSync(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    const int ro = open(ring->path().c_str(), O_RDONLY);
+    ASSERT_GE(ro, 0);
+    ASSERT_EQ(dup2(ro, ring->HeaderFdForTests()), ring->HeaderFdForTests());
+    close(ro);
+    EXPECT_FALSE(Ckpt().RunCycle());
+    EXPECT_TRUE(Ckpt().Poisoned()) << "a genuine header pwrite error is sticky";
+    EXPECT_EQ(ring->CheckpointLsn(), 0u);
+    EXPECT_EQ(OnDiskCheckpoint(*ring), 0u);
+}
+
+TEST_F(WalCheckpointTest, HeaderWriteRealErrorPoisonsCheckpointer) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    for (uint64_t i = 0; i < 5; ++i) ASSERT_TRUE(InsertSync(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    walring::FailNextHeaderWritesStickyForTests(1);
+    EXPECT_FALSE(Ckpt().RunCycle());
+    EXPECT_TRUE(Ckpt().Poisoned());
+    EXPECT_EQ(ring->CheckpointLsn(), 0u);
+    EXPECT_EQ(OnDiskCheckpoint(*ring), 0u);
+    // No hook left: a retried header fdatasync could now "succeed" -- the checkpointer must still never advance.
+    EXPECT_FALSE(Ckpt().RunCycle());
+    EXPECT_EQ(ring->CheckpointLsn(), 0u);
+    EXPECT_TRUE(Ckpt().Poisoned());
+}
+
+TEST_F(WalCheckpointTest, HeaderWriteInjectedErrorStillRetries) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    for (uint64_t i = 0; i < 5; ++i) ASSERT_TRUE(InsertSync(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    walring::FailNextHeaderWritesForTests(1);
+    EXPECT_FALSE(Ckpt().RunCycle());
+    EXPECT_FALSE(Ckpt().Poisoned()) << "a plain injected header failure stays retryable";
+    EXPECT_EQ(ring->CheckpointLsn(), 0u);
+    EXPECT_EQ(OnDiskCheckpoint(*ring), 0u);
+    ASSERT_TRUE(Ckpt().RunCycle());
+    EXPECT_EQ(ring->CheckpointLsn(), ring->HeadLsn());
+    EXPECT_EQ(OnDiskCheckpoint(*ring), ring->HeadLsn());
+}
+
+// The failed batch is reported to its callers, AND the checkpointer is poisoned: a device that is dropping the
+// writer's ring pages must not have the checkpoint advanced over data files either.
+TEST_F(WalCheckpointTest, WriterRingSyncRealErrorPoisons) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    ASSERT_TRUE(InsertSync(store, 0));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    const uint64_t head = ring->HeadLsn();
+    walring::FailNextWalSyncsStickyForTests(1);
+    EXPECT_FALSE(InsertSync(store, 1)) << "the caller of the failed batch must be told";
+    EXPECT_EQ(ring->HeadLsn(), head);
+    EXPECT_TRUE(Ckpt().Poisoned());
+    EXPECT_FALSE(Ckpt().RunCycle()) << "poisoned: nothing advances";
+    EXPECT_EQ(ring->CheckpointLsn(), 0u);
+}
+
+TEST_F(WalCheckpointTest, WriterRingSyncInjectedErrorDoesNotPoison) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    ASSERT_TRUE(InsertSync(store, 0));
+    walring::FailNextWalSyncsForTests(1);
+    EXPECT_FALSE(InsertSync(store, 1));
+    EXPECT_FALSE(Ckpt().Poisoned()) << "the plain injected WAL sync failure stays retryable";
+    EXPECT_TRUE(InsertSync(store, 2));
+    EXPECT_TRUE(Ckpt().RunCycle());
+}
+
+// M9: sync_file_range consumes ANY writeback error, so every errno poisons except the retried EINTR/EAGAIN and
+// the "unsupported here" usage errors.
+TEST_F(WalCheckpointTest, PacedFlushPoisonsOnEveryErrnoExceptUsageErrors) {
+    constexpr uint64_t kRing = 512 << 10;
+    walring::SetRingBytesForTests(kRing);
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 4096);
+    Ckpt().SetIdleMsForTests(1000000);
+    Ckpt().SetMaxAgeMsForTests(1000000);
+    uint64_t next = 0;
+    auto ring = FillTo(store, 0.27, next);   // above the 25% soft threshold, far below the 50% cycle threshold
+    ASSERT_NE(ring, nullptr);
+    Ckpt().SetPausedForTests(false);
+    ASSERT_TRUE(WaitFor([&] { return Ckpt().PacedFlushBytesForTests() > 0; }, std::chrono::milliseconds(2000)));
+
+    // Benign: skipped as best effort, the flush carries on, nothing poisons.
+    for (const int err : {EINTR, EAGAIN, EINVAL, ESPIPE, ENOSYS, EBADF}) {
+        const uint64_t flushed = Ckpt().PacedFlushBytesForTests();
+        Ckpt().SimulateSyncFileRangeErrnoForTests(err);
+        ASSERT_TRUE(InsertSync(store, next++));   // a fresh dirty range for the loop to flush
+        EXPECT_TRUE(WaitFor([&] { return Ckpt().PacedFlushBytesForTests() > flushed; }, std::chrono::milliseconds(2000)))
+            << "errno " << err << " must be skipped, not stop the flush";
+        EXPECT_FALSE(Ckpt().Poisoned()) << "errno " << err << " is a usage/transient error";
+    }
+    // Everything else poisons (EIO/ENOSPC/EDQUOT as before; ENOMEM, EROFS, EBADMSG, ... newly).
+    for (const int err : {EIO, ENOSPC, EDQUOT, ENOMEM, EROFS, EBADMSG}) {
+        Ckpt().ClearPoisonForTests();
+        Ckpt().SimulateSyncFileRangeErrnoForTests(err);
+        ASSERT_TRUE(InsertSync(store, next++));
+        EXPECT_TRUE(WaitFor([&] { return Ckpt().Poisoned(); }, std::chrono::milliseconds(2000))) << "errno " << err << " must poison";
+        EXPECT_EQ(ring->CheckpointLsn(), 0u);
+    }
 }
 
 TEST_F(WalCheckpointTest, PoisonedCheckpointerMakesWritersStallThenFail) {
@@ -1301,6 +1502,126 @@ TEST_F(WalReplayTest, ReplayRealSyncErrorPoisons) {
     EXPECT_EQ(ReadHeader(wal_path).checkpoint_lsn, 0u);
     store.InitDB();   // no hooks left, but poisoned: still no checkpoint
     EXPECT_EQ(ReadHeader(wal_path).checkpoint_lsn, 0u);
+}
+
+// A real header error while committing a replay is fsyncgate too: the shard is fenced (as for any failed commit)
+// AND the checkpointer is poisoned. A plain injected failure only fences.
+TEST_F(WalReplayTest, ReplayCommitReplayRealErrorFencesAndPoisons) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    for (uint64_t i = 0; i < 3; ++i) ASSERT_TRUE(InsertAt(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    const uint64_t head = ring->HeadLsn();
+    const std::string wal_path = ring->path();
+    ring.reset();
+    ShrinkDataFile(6);
+    Crash();
+
+    walring::FailNextHeaderWritesStickyForTests(1);
+    store.InitDB();
+    EXPECT_EQ(ReadHeader(wal_path).checkpoint_lsn, 0u) << "the header write failed: the checkpoint must not move";
+    EXPECT_TRUE(Ckpt().Poisoned()) << "a real header error during replay poisons";
+    EXPECT_FALSE(InsertAt(store, 5)) << "the ring is fenced: appends would land on top of un-checkpointed records";
+
+    Ckpt().ClearPoisonForTests();
+    store.InitDB();   // unfence + retry
+    EXPECT_EQ(ReadHeader(wal_path).checkpoint_lsn, head);
+    EXPECT_TRUE(InsertAt(store, 5));
+}
+
+TEST_F(WalReplayTest, ReplayCommitReplayInjectedErrorFencesWithoutPoison) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    for (uint64_t i = 0; i < 3; ++i) ASSERT_TRUE(InsertAt(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    const uint64_t head = ring->HeadLsn();
+    const std::string wal_path = ring->path();
+    ring.reset();
+    ShrinkDataFile(6);
+    Crash();
+
+    walring::FailNextHeaderWritesForTests(1);
+    store.InitDB();
+    EXPECT_EQ(ReadHeader(wal_path).checkpoint_lsn, 0u);
+    EXPECT_FALSE(Ckpt().Poisoned());
+    EXPECT_FALSE(InsertAt(store, 5));
+    store.InitDB();
+    EXPECT_EQ(ReadHeader(wal_path).checkpoint_lsn, head);
+}
+
+// M3: replay Notes files while last_writer_activity_ns is still 0 ("idle since forever"); without the boot hold the
+// loop would cycle on the idle trigger during the replay.
+TEST_F(WalReplayTest, CheckpointerDoesNotCycleOnIdleDuringReplay) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    for (uint64_t i = 0; i < 5; ++i) ASSERT_TRUE(InsertAt(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    ring.reset();
+    ShrinkDataFile(5);
+    Crash();
+
+    Ckpt().SetIdleMsForTests(1);
+    Ckpt().SetMaxAgeMsForTests(1000000);
+    Ckpt().SetReplaySyncDelayMsForTests(300);   // the replayed rows sit dirty for 300 ms before their sync
+    Ckpt().SetPausedForTests(false);
+    store.InitDB();
+    EXPECT_EQ(Ckpt().ReplaySyncWindowCyclesForTests(), 0u) << "the idle trigger must not fire while ReplayWal runs";
+
+    // The hold is released afterwards: the idle trigger works again.
+    Ckpt().SetReplaySyncDelayMsForTests(0);
+    ASSERT_TRUE(InsertAt(store, 5));
+    auto live = BusyRing();
+    ASSERT_NE(live, nullptr);
+    EXPECT_TRUE(WaitFor([&] { return live->CheckpointLsn() == live->HeadLsn(); }, std::chrono::milliseconds(2000)));
+}
+
+// M5: un-checkpointed ring records of a removed DB must not replay into a DB re-created under the same name.
+TEST_F(WalReplayTest, RemoveDbCheckpointsFirstSoReplayCannotCorruptARecreatedDb) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    for (uint64_t i = 0; i < 10; ++i) ASSERT_TRUE(InsertAt(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    ASSERT_EQ(ring->CheckpointLsn(), 0u) << "precondition: the DB's records are not checkpointed";
+
+    (void)store.RemoveDB(db_name);
+    EXPECT_EQ(ring->CheckpointLsn(), ring->HeadLsn()) << "RemoveDB must checkpoint before unlinking";
+
+    row_length = 128;   // a different row length: replaying the old 64-byte rows would scribble over the new file
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    ASSERT_TRUE(InsertAt(store, 3));
+    ring.reset();
+    ShrinkDataFile(10);
+    Crash();
+    store.InitDB();
+
+    std::string bytes((kEpoch0 + 11) * row_length, '\0');
+    const int fd = open(YearFile().c_str(), O_RDONLY);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(pread(fd, bytes.data(), bytes.size(), 0), static_cast<ssize_t>(bytes.size()));
+    close(fd);
+    const size_t keep_begin = (kEpoch0 + 3) * row_length;
+    for (size_t i = 0; i < bytes.size(); ++i) {
+        if (i >= keep_begin && i < keep_begin + row_length) continue;
+        ASSERT_EQ(bytes[i], '\0') << "byte " << i << ": a removed DB's row was replayed into the re-created DB";
+    }
+    EXPECT_TRUE(RowPresent(3)) << "the new DB's own row survives";
+}
+
+// RemoveDB must not hang or throw when the checkpoint cannot be taken (poisoned checkpointer).
+TEST_F(WalReplayTest, RemoveDbProceedsWhenTheCheckpointerIsPoisoned) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    for (uint64_t i = 0; i < 3; ++i) ASSERT_TRUE(InsertAt(store, i));
+    Ckpt().FailNextDataSyncsStickyForTests(1);
+    ASSERT_FALSE(Ckpt().RunCycle());
+    ASSERT_TRUE(Ckpt().Poisoned());
+    const auto rep = store.RemoveDB(db_name);
+    EXPECT_NE(rep.removestatus().find("Removed DB"), std::string::npos) << rep.removestatus();
+    EXPECT_FALSE(std::filesystem::exists(scratch->test_root / "DataStore" / db_name));
 }
 
 namespace {

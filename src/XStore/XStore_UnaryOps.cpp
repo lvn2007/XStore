@@ -1,4 +1,5 @@
 #include "include/XStore/XStore_Internal.h"
+#include "include/XStore/XStore_WalRing.h"
 #include "include/DataStructs/TimeStruct.h"
 #include "include/DataStructs/FileRangeLock.h"
 #include <spdlog/fmt/fmt.h>
@@ -259,7 +260,11 @@ XStore_Proto::UnaryDelete_REP XStore::UnaryDelete(unsigned long long int epoch_t
         FileRangeLockGuard guard(target_file_path, offset, cfg_struct.rowlength(), FileRangeLock::LockType::WRITE);
 
         // Deallocate data according to N bytes from rowLength
-        fallocate64(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfg_struct.rowlength());
+        if (fallocate64(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfg_struct.rowlength()) == 0) {
+            // The punch is a metadata change fdatasync must cover: mark the file so the next checkpoint cycle
+            // (and the final one at a clean stop) syncs it. No ring record carries it.
+            walring::Dirty().Note(nullptr, target_file_path, offset, offset + cfg_struct.rowlength(), 0);
+        }
     }
 
     std::string success_msg = fmt::format("[UNARY DELETE] [DB: {}] - Deleted {} in {}.XSTORE", db_name, epoch_time, curr_ts.year);
