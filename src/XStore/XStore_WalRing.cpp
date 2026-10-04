@@ -126,6 +126,8 @@ std::atomic<uint64_t> g_default_ring_bytes_override{0};
 std::atomic<unsigned> g_stall_timeout_override{0};
 std::atomic<int> g_fail_wal_syncs{0};
 std::atomic<bool> g_wal_sync_failure_sticky{false};   // read on the failure path only
+std::atomic<int> g_injected_wal_write_errno{0};   // read on the failure path only
+std::atomic<int> g_fail_zero_range_syncs{0};        // read on the failure path only
 std::atomic<int> g_fail_header_writes{0};
 std::atomic<int> g_fail_header_writes_sticky{0};
 bool ConsumeCounter(std::atomic<int> &c) {
@@ -151,6 +153,10 @@ void FailNextWalSyncsStickyForTests(int n) {
     g_wal_sync_failure_sticky.store(true, std::memory_order_relaxed);
     g_fail_wal_syncs.store(n, std::memory_order_relaxed);
 }
+void SetInjectedWalWriteErrnoForTests(int err) { g_injected_wal_write_errno.store(err, std::memory_order_relaxed); }
+int InjectedWalWriteErrno() { return g_injected_wal_write_errno.load(std::memory_order_relaxed); }
+void FailNextWalZeroRangeSyncsForTests(int n) { g_fail_zero_range_syncs.store(n, std::memory_order_relaxed); }
+bool ConsumeInjectedWalZeroRangeSyncFailure() { return ConsumeCounter(g_fail_zero_range_syncs); }
 bool InjectedWalSyncFailureIsSticky() { return g_wal_sync_failure_sticky.load(std::memory_order_relaxed); }
 void FailNextHeaderWritesForTests(int n) { g_fail_header_writes.store(n, std::memory_order_relaxed); }
 void FailNextHeaderWritesStickyForTests(int n) { g_fail_header_writes_sticky.store(n, std::memory_order_relaxed); }
@@ -352,6 +358,10 @@ void UnfenceWalFile(const std::string &wal_path) {
     g_fenced.erase(NormalizedKey(wal_path));
     g_fenced_count.store(g_fenced.size(), std::memory_order_relaxed);
 }
+bool IsFenced(const std::string &wal_path) {
+    std::lock_guard<std::mutex> lock(g_registry_mutex);
+    return g_fenced.count(NormalizedKey(wal_path)) != 0;
+}
 bool AnyFenced() { return g_fenced_count.load(std::memory_order_relaxed) != 0; }
 
 namespace {
@@ -468,9 +478,15 @@ void DirtyTracker::Note(const std::shared_ptr<Ring> &ring, const std::string &da
         bool found = false;
         for (RingMark &m : file.marks) {
             if (m.key != ring.get()) continue;
-            if (ring_lsn_end > m.last_lsn) m.last_lsn = ring_lsn_end;
-            // A recycled address must point at the live ring; same control block = no weak-count churn.
-            if (m.ring.owner_before(ring) || ring.owner_before(m.ring)) m.ring = ring;
+            if (m.ring.owner_before(ring) || ring.owner_before(m.ring)) {
+                // Recycled address: the old Ring is gone and this is a NEW one, whose LSNs have nothing to do
+                // with the old mark's -- start over instead of taking the max. (Same control block = no
+                // weak-count churn on the normal path below.)
+                m.ring = ring;
+                m.last_lsn = ring_lsn_end;
+            } else if (ring_lsn_end > m.last_lsn) {
+                m.last_lsn = ring_lsn_end;
+            }
             found = true;
             break;
         }

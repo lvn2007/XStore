@@ -149,7 +149,11 @@ std::shared_ptr<void> XStore::GetOrMapFile(const std::string &target_file, size_
         }
     }
 
-    void *base = mmap(NULL, file_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    // PROT_READ only: every write goes through pwrite() on an fd so the
+    // DirtyTracker sees it; a store through this mapping would bypass it
+    // (durability hole), so make that an immediate SIGSEGV. MAP_SHARED keeps
+    // concurrent pwrite()s visible (same page cache).
+    void *base = mmap(NULL, file_len, PROT_READ, MAP_SHARED, fd, 0);
     // Mapping stays valid after the fd is closed -- no need to keep it open.
     close(fd);
     if (base == MAP_FAILED) {

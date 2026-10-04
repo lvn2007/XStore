@@ -548,8 +548,8 @@ XStore_Proto::RemoveDB_REP XStore::RemoveDB(std::string_view db_name_view) {
     // Remove DB from cfgMap
     EraseCfg(db_name);
 
-    // Drop & unmap any cached UnaryInsert mappings under this DB -- otherwise
-    // a future insert (via GetOrMapFile) could keep writing into an orphaned,
+    // Drop & unmap any cached read mappings under this DB -- otherwise a
+    // future query (via GetOrMapFile) could keep reading an orphaned,
     // unlinked mapping instead of a freshly-recreated DB with the same name.
     EraseMappedFilesUnderPrefix(db_loc + "/");
     // Same reasoning for UnaryInsert's cached fds (see GetOrOpenFile).
@@ -606,7 +606,7 @@ XStore_Proto::RemoveDBFiles_REP XStore::RemoveDBFiles(XStore_Proto::RemoveDBFile
         }
         bool curr_remove = std::filesystem::remove(target_path);
         if (curr_remove) {
-            // Drop this file's cached UnaryInsert mapping, if any -- same
+            // Drop this file's cached read mapping, if any -- same
             // reasoning as RemoveDB, scoped to a single file.
             EraseMappedFile(target_path.string());
             EraseOpenFile(target_path.string());

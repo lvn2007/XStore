@@ -45,6 +45,27 @@ void AppendPod(std::string &out, T value) {
     out.append(reinterpret_cast<const char *>(&value), sizeof(value));
 }
 
+// Writer found its ring file fenced (failed replay): say so once per path per minute (error path only).
+// Heap-allocated and leaked on purpose: the writer threads may still log during static destruction.
+void LogFencedWalOncePerMinute(const std::string &wal_path) {
+    struct State { std::mutex mu; std::unordered_map<std::string, std::chrono::steady_clock::time_point> last; };
+    static State *state = new State;
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(state->mu);
+        auto [it, inserted] = state->last.try_emplace(wal_path, now);
+        if (!inserted) {
+            if (now - it->second < std::chrono::minutes(1)) return;
+            it->second = now;
+        }
+    }
+    spdlog::error("[WAL] - WAL file {} is fenced (failed replay); inserts to this shard fail until restart", wal_path);
+}
+
+// A writer pwritev/fdatasync errno that means the device may be dropping pages (anything but a retried
+// EINTR/EAGAIN) and therefore poisons the checkpointer.
+constexpr bool IsRealWalIoError(int err) { return err != 0 && err != EINTR && err != EAGAIN; }
+
 } // namespace
 
 // Wire format (native-endian -- WAL files aren't portable across
@@ -926,7 +947,10 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                     auto ring_it = rings.find(record_wal_path[i]);
                     if (ring_it == rings.end()) {
                         std::shared_ptr<walring::Ring> ring = walring::GetOrOpenRing(record_wal_path[i], static_cast<uint32_t>(shard_idx));
-                        if (!ring) {
+                        if (!ring && walring::IsFenced(record_wal_path[i])) {
+                            // Failed replay: the fence, not a legacy WAL, is why there is no ring. Never re-init it.
+                            LogFencedWalOncePerMinute(record_wal_path[i]);
+                        } else if (!ring) {
                             // Non-empty without a valid ring header: a legacy WAL.
                             // If InitDB's ReplayWal had run it would be a ring (or
                             // empty) by now; reaching the first append means no
@@ -1187,24 +1211,43 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                     const bool sync_ok = real_sync_ok && !walring::ConsumeInjectedWalSyncFailure();
                     if (!file_write_ok || !sync_ok) {
                         const int sync_errno = real_sync_ok ? 0 : errno;   // first thing: logging clobbers errno
+                        // Test hook: an injected sync failure may stand in for "the pwritev failed too".
+                        if (!sync_ok && real_sync_ok && file_write_ok) {
+                            if (const int injected_write_errno = walring::InjectedWalWriteErrno(); injected_write_errno != 0) {
+                                file_write_ok = false;
+                                write_errno = injected_write_errno;
+                            }
+                        }
                         spdlog::error("[WAL] - Failed to durably write/fdatasync {}", ring.path());
                         // A REAL ring pwritev/fdatasync error (anything but EINTR/EAGAIN, or a sticky injected one)
                         // means the device may be dropping this file's pages and the kernel reports a writeback error
                         // only once: the batch fails to its callers (below), and from now on the checkpointer must
-                        // not advance any ring over data files either (fsyncgate). Error path only.
-                        const int real_err = !file_write_ok ? write_errno : sync_errno;
-                        const bool injected_sticky = real_sync_ok && file_write_ok && walring::InjectedWalSyncFailureIsSticky();
-                        if (injected_sticky || (real_err != 0 && real_err != EINTR && real_err != EAGAIN)) {
+                        // not advance any ring over data files either (fsyncgate). EITHER the write or the sync
+                        // being real poisons (a write EINTR followed by a real EIO sync still counts). Error path only.
+                        const bool real_write = !file_write_ok && IsRealWalIoError(write_errno);
+                        const bool injected_sticky = real_sync_ok && !sync_ok && walring::InjectedWalSyncFailureIsSticky();
+                        if (real_write || injected_sticky || IsRealWalIoError(sync_errno)) {
                             walring::Checkpointer::Instance().ReportRealError(
-                                !file_write_ok ? "WAL ring pwritev" : "WAL ring fdatasync", ring.path(), injected_sticky ? EIO : real_err);
+                                real_write ? "WAL ring pwritev" : "WAL ring fdatasync", ring.path(),
+                                real_write ? write_errno : (injected_sticky ? EIO : sync_errno));
                         }
                         // head does not advance, so this range is free space again -- but its bytes may
                         // be intact on disk (a failed fdatasync does not undo the write). A later,
                         // shorter record at the same head would leave this record's tail beyond it,
                         // with LSNs that still match: an unacknowledged record that replay could apply
                         // after a later crash. Best effort: overwrite the range with zeros.
-                        if (!walring::ZeroRingRange(fd, file.start - file.pad, file.start + file.total, ring.ring_bytes()) ||
-                            fdatasync(fd) != 0) {
+                        const bool zeroed = walring::ZeroRingRange(fd, file.start - file.pad, file.start + file.total, ring.ring_bytes());
+                        bool zero_synced = false;
+                        if (zeroed) {
+                            zero_synced = fdatasync(fd) == 0;
+                            int zero_errno = zero_synced ? 0 : errno;
+                            if (walring::ConsumeInjectedWalZeroRangeSyncFailure()) { zero_synced = false; zero_errno = EIO; }
+                            // A real failure here is another writeback error the kernel reports only once.
+                            if (IsRealWalIoError(zero_errno)) {
+                                walring::Checkpointer::Instance().ReportRealError("WAL ring zero-range fdatasync", ring.path(), zero_errno);
+                            }
+                        }
+                        if (!zeroed || !zero_synced) {
                             spdlog::error("[WAL] - Could not zero the failed append range in {}", ring.path());
                         }
                         continue;

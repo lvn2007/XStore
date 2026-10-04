@@ -66,10 +66,14 @@ class XStore {
         static constexpr size_t CFG_SHARD_COUNT = XStoreTunables::CFG_SHARD_COUNT;
         static std::array<CfgShard, CFG_SHARD_COUNT> cfg_shards;
 
-        // Shared cache of PROT_WRITE mmap regions for .XSTORE data files, keyed
-        // by full path, so repeat UnaryInserts to the same (dbName, year) file
-        // skip open/ftruncate/mmap and become a single memcpy into an
-        // already-resident page. File size is fixed at creation (ftruncate'd
+        // Shared cache of read-only (PROT_READ, MAP_SHARED) mmap regions for
+        // .XSTORE data files, keyed by full path, used by the read paths
+        // (RangeQuery, aggregates, FindByValue/Pattern) to skip
+        // open/ftruncate/mmap on repeat queries. Writes NEVER go through the
+        // mapping -- they pwrite() on a cached fd (GetOrOpenFile) so the
+        // DirtyTracker sees them; a store through this mapping would SIGSEGV
+        // by design. MAP_SHARED keeps those pwrite()s visible here (shared
+        // page cache). File size is fixed at creation (ftruncate'd
         // up front to the year's full row count), so one mapping covers the
         // whole file for its lifetime -- no remap needed. Bounded
         // (MMAP_CACHE_CAP) to avoid unbounded address-space/FD growth.
@@ -94,9 +98,6 @@ class XStore {
         // threads racing on the same file (or a hash collision) still
         // serialize, same as before. Per-shard cap is MMAP_CACHE_CAP divided
         // across shards so total resident mapping count is unchanged.
-        // Distinct row offsets never overlap in memory so concurrent
-        // memcpy's to disjoint slots need no extra locking beyond this
-        // (FileRangeLockGuard still serializes same-slot writes).
         // Entries are shared_ptr<MappedFile>, not a bare MappedFile: eviction
         // (below, and EraseMappedFile/EraseMappedFilesUnderPrefix) used to
         // munmap() unconditionally as soon as a slot aged out or was
@@ -124,7 +125,7 @@ class XStore {
         static std::array<MmapShard, MMAP_SHARD_COUNT> mmap_shards;
 
         // Shared cache of open fds for .XSTORE data files, keyed by full path --
-        // used by UnaryInsert's pwrite() path. Unlike GetOrMapFile, writing
+        // used by the pwrite() write paths. Unlike a writable mapping, writing
         // through a plain fd never faults a page into the process's address
         // space: a pwrite() into a still-sparse region goes through the same
         // buffered write()/delayed-allocation path the file gets on every
@@ -1137,7 +1138,7 @@ class XStore {
         // Remove dbName's ConfigStruct from CfgMap under exclusive lock.
         void EraseCfg(const std::string &db_name);
 
-        // Fetch targetFile's cached PROT_WRITE mapping, creating (and
+        // Fetch targetFile's cached read-only mapping, creating (and
         // ftruncate'ing to totalRows*rowLength if new) the file and mapping it
         // on first use. Returns nullptr on open/mmap failure. The returned
         // shared_ptr<void>'s .get() is the mapping's base address (an alias

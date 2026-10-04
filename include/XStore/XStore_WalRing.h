@@ -150,6 +150,14 @@ void SetStallTimeoutMsForTests(unsigned ms);
 void FailNextWalSyncsForTests(int n);
 // Same, but behaves like a REAL fdatasync error: the batch fails AND the checkpointer is poisoned.
 void FailNextWalSyncsStickyForTests(int n);
+// Failure path only: while nonzero, a writer batch failed by an injected sync failure behaves as if its
+// pwritev had ALSO failed with this errno (e.g. EINTR followed by a real sync error). 0 clears.
+void SetInjectedWalWriteErrnoForTests(int err);
+int InjectedWalWriteErrno();
+// The next n zero-range fdatasyncs (the writer's best-effort zeroing after a failed append) behave as a REAL
+// failed fdatasync (EIO): the checkpointer is poisoned. n = 0 clears.
+void FailNextWalZeroRangeSyncsForTests(int n);
+bool ConsumeInjectedWalZeroRangeSyncFailure();
 // True (and counts the hook down) if this writer sync should be treated as failed.
 bool ConsumeInjectedWalSyncFailure();
 // Failure path only (never on the success path): was the injected failure just consumed a sticky one?
@@ -208,6 +216,8 @@ void UnfenceWalFile(const std::string &wal_path);
 // un-checkpointed records for data files, but replay applied them with no ring/dirty mark, so
 // Dirty().RingClear() cannot see them: the direct path must treat every file as NOT ring-clear then.
 bool AnyFenced();
+// Is this particular WAL file fenced? Takes the registry mutex: error paths only.
+[[nodiscard]] bool IsFenced(const std::string &wal_path);
 
 // Overwrites the ring bytes for LSNs [from_lsn, to_lsn) with zeros (wrap-aware, 1 MiB
 // writes). Does NOT sync; the caller fdatasyncs. false = a pwrite failed.

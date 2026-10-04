@@ -9,6 +9,8 @@
 #include "include/XStore/XStore_WalCheckpoint.h"
 #include "include/DataStructs/TimeStruct.h"
 #include <spdlog/fmt/fmt.h>
+#include <spdlog/sinks/ostream_sink.h>
+#include <spdlog/spdlog.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -17,9 +19,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <memory>
+#include <new>
 #include <random>
+#include <sstream>
 #include <string>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -230,6 +235,8 @@ protected:
         walring::SetRingBytesForTests(0);
         walring::SetStallTimeoutMsForTests(0);
         walring::FailNextWalSyncsForTests(0);
+        walring::SetInjectedWalWriteErrnoForTests(0);
+        walring::FailNextWalZeroRangeSyncsForTests(0);
         walring::FailNextHeaderWritesForTests(0);
         walring::FailNextHeaderWritesStickyForTests(0);
         ClearRegistries();
@@ -512,6 +519,32 @@ TEST_F(WalRingWriterTest, RingClearReflectsCheckpoint) {
     EXPECT_TRUE(t.RingClear("/g"));
 }
 
+// M4: a mark whose Ring died and whose ADDRESS was recycled by a new Ring must not carry the old ring's
+// (unrelated, possibly larger) LSN forward.
+TEST_F(WalRingWriterTest, RecycledRingAddressDoesNotInheritOldLastLsn) {
+    // Two Rings constructed at the SAME address with separate control blocks (what a recycled allocation
+    // looks like to the tracker: the old weak_ptr is expired, the key matches).
+    alignas(walring::Ring) unsigned char storage[sizeof(walring::Ring)];
+    const auto make_ring = [&] {
+        auto *raw = new (storage) walring::Ring(open("/dev/null", O_RDWR), open("/dev/null", O_RDWR), std::string("/dev/null"), 0u,
+                                                uint64_t{1} << 20, uint64_t{0});
+        return std::shared_ptr<walring::Ring>(raw, [](walring::Ring *r) { r->~Ring(); });
+    };
+    walring::DirtyTracker t;
+    auto old_ring = make_ring();
+    const walring::Ring *const address = old_ring.get();
+    t.Note(old_ring, "/f", 0, 8, 900);
+    EXPECT_FALSE(t.RingClear("/f")) << "sanity: ring A is at checkpoint 0, its mark at 900";
+    old_ring.reset();   // the Ring is destroyed; the mark's weak_ptr is now expired
+
+    auto new_ring = make_ring();
+    ASSERT_EQ(new_ring.get(), address) << "the allocator must recycle the address";
+    new_ring->ResetTo(500);   // checkpoint 500: a mark of 100 is clear, a stale mark of 900 is not
+    t.Note(new_ring, "/f", 8, 16, 100);
+    EXPECT_TRUE(t.RingClear("/f")) << "the new ring's mark must replace, not max with, the dead ring's";
+    new_ring.reset();
+}
+
 TEST_F(WalRingWriterTest, EveryDataWriteIsTracked) {
     constexpr uint16_t kRowLength = 64;
     constexpr uint64_t kYear2Epoch = 1740000000;   // a different year than kBaseEpoch
@@ -681,6 +714,46 @@ TEST_F(WalRingWriterTest, EveryDeleteMarksItsFileDirty) {
 
     EXPECT_NE(store.RangeDelete(kBaseEpoch + 6, kBaseEpoch + 8, db_name).deletestatus().find("Deleted 3 items"), std::string::npos);
     expect_marked("RangeDelete", 6, 3);
+}
+
+// The cached query mapping is PROT_READ|MAP_SHARED: a store through it would bypass the DirtyTracker (the
+// checkpointer would never sync that page), so it must fault; pwrite()s must still show up through it.
+TEST_F(WalRingWriterTest, QueryMappingIsReadOnlyButSeesPwrites) {
+    constexpr uint16_t kRowLength = 64;
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, kRowLength);
+    ASSERT_TRUE(InsertSync(store, 0));
+    // Populates the mapping cache.
+    // (A range query returns one entry per epoch; an unwritten row is an entry with no field data.)
+    {
+        const auto before = xstore_test::RangeQuery(store, kBaseEpoch, kBaseEpoch + 1, db_name);
+        ASSERT_EQ(before.queryresponse_size(), 2);
+        ASSERT_EQ(before.queryresponse(0).data().fielddata_size(), 1);
+        EXPECT_EQ(before.queryresponse(1).data().fielddata_size(), 0);
+    }
+
+    // pwrite-based insert into the already-mapped file must be visible through the cached mapping.
+    ASSERT_TRUE(InsertSync(store, 1));
+    const auto rep = xstore_test::RangeQuery(store, kBaseEpoch, kBaseEpoch + 1, db_name);
+    ASSERT_EQ(rep.queryresponse_size(), 2);
+    ASSERT_EQ(rep.queryresponse(1).data().fielddata_size(), 1);
+    EXPECT_EQ(rep.queryresponse(1).data().fielddata(0).doubledata(), 1.0);
+
+    const TimeStruct ts(kBaseEpoch, XStore_Proto::SECOND);
+    const std::string suffix = fmt::format("/{}/{}.XSTORE", db_name, ts.year);
+    std::ifstream maps("/proc/self/maps");
+    ASSERT_TRUE(maps.is_open());
+    std::string line;
+    size_t found = 0;
+    while (std::getline(maps, line)) {
+        if (line.find(scratch->test_root.string()) == std::string::npos || line.find(suffix) == std::string::npos) continue;
+        ++found;
+        std::istringstream fields(line);
+        std::string range, perms;
+        fields >> range >> perms;
+        EXPECT_EQ(perms, "r--s") << line;
+    }
+    EXPECT_GE(found, 1u) << "no .XSTORE mapping found for this test's data file";
 }
 
 namespace {
@@ -996,6 +1069,82 @@ TEST_F(WalCheckpointTest, WriterRingSyncInjectedErrorDoesNotPoison) {
     EXPECT_FALSE(Ckpt().Poisoned()) << "the plain injected WAL sync failure stays retryable";
     EXPECT_TRUE(InsertSync(store, 2));
     EXPECT_TRUE(Ckpt().RunCycle());
+}
+
+// A pwritev EINTR (retryable on its own) followed by a REAL fdatasync error must poison: either half being
+// real is enough.
+TEST_F(WalCheckpointTest, WriterEintrThenRealSyncErrorPoisons) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    ASSERT_TRUE(InsertSync(store, 0));
+    walring::SetInjectedWalWriteErrnoForTests(EINTR);
+    walring::FailNextWalSyncsStickyForTests(1);   // stands in for a real fdatasync EIO
+    EXPECT_FALSE(InsertSync(store, 1));
+    EXPECT_TRUE(Ckpt().Poisoned());
+}
+
+TEST_F(WalCheckpointTest, WriterEintrThenRetryableSyncErrorDoesNotPoison) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    ASSERT_TRUE(InsertSync(store, 0));
+    walring::SetInjectedWalWriteErrnoForTests(EINTR);
+    walring::FailNextWalSyncsForTests(1);
+    EXPECT_FALSE(InsertSync(store, 1));
+    EXPECT_FALSE(Ckpt().Poisoned()) << "EINTR + an injected retryable failure stays retryable";
+    walring::SetInjectedWalWriteErrnoForTests(0);
+    EXPECT_TRUE(InsertSync(store, 2));
+}
+
+TEST_F(WalCheckpointTest, WriterRealWriteErrorStillPoisons) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    ASSERT_TRUE(InsertSync(store, 0));
+    walring::SetInjectedWalWriteErrnoForTests(EIO);
+    walring::FailNextWalSyncsForTests(1);
+    EXPECT_FALSE(InsertSync(store, 1));
+    EXPECT_TRUE(Ckpt().Poisoned());
+}
+
+// The best-effort zeroing of a failed append range ends in its own fdatasync; a real failure there is another
+// writeback error the kernel reports only once, so it must poison too.
+TEST_F(WalCheckpointTest, ZeroRangeSyncRealErrorPoisons) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    ASSERT_TRUE(InsertSync(store, 0));
+    walring::FailNextWalSyncsForTests(1);               // retryable: alone it would not poison
+    walring::FailNextWalZeroRangeSyncsForTests(1);
+    EXPECT_FALSE(InsertSync(store, 1));
+    EXPECT_TRUE(Ckpt().Poisoned());
+}
+
+// M8: a fenced shard says it is fenced (once per minute per path), not "legacy WAL never replayed?".
+TEST_F(WalCheckpointTest, FencedShardLogsFenceNotLegacyInit) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    ASSERT_TRUE(InsertSync(store, 0));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    const std::string wal_path = ring->path();
+    ring.reset();
+
+    std::ostringstream captured;
+    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(captured);
+    auto previous = spdlog::default_logger();
+    spdlog::set_default_logger(std::make_shared<spdlog::logger>("capture", sink));
+    walring::FenceWalFile(wal_path);
+    const bool first = InsertSync(store, 1);
+    const bool second = InsertSync(store, 2);
+    spdlog::default_logger()->flush();
+    spdlog::set_default_logger(previous);
+
+    EXPECT_FALSE(first);
+    EXPECT_FALSE(second);
+    const std::string log = captured.str();
+    EXPECT_EQ(log.find("legacy WAL never replayed"), std::string::npos) << log;
+    const std::string needle = "WAL file " + wal_path + " is fenced (failed replay); inserts to this shard fail until restart";
+    const size_t at = log.find(needle);
+    ASSERT_NE(at, std::string::npos) << log;
+    EXPECT_EQ(log.find(needle, at + 1), std::string::npos) << "at most once per path per minute";
 }
 
 // M9: sync_file_range consumes ANY writeback error, so every errno poisons except the retried EINTR/EAGAIN and

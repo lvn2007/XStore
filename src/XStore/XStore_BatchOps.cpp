@@ -11,6 +11,7 @@
 #include <execution>
 #include <fcntl.h>
 #include <filesystem>
+#include <limits>
 #include <unistd.h>
 
 using namespace XStoreWireEncode;
@@ -538,17 +539,24 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
             // Lock prior to file OP
             FileRangeLockGuard guard(target_file, first_offset, region_length, FileRangeLock::LockType::WRITE);
 
+            // Union of the successful punches: ONE dirty note per year-group (one tracker lock) instead of one per
+            // row. Over-marks the unpunched gaps between rows, which only costs the checkpoint a slightly wider
+            // fdatasync range.
+            unsigned long long int punched_begin = std::numeric_limits<unsigned long long int>::max();
+            unsigned long long int punched_end = 0;
             for (unsigned long long int idx : indices) {
                 unsigned long long int offset = (proto_from_client->timestamp(idx) - this_ts.first_epoch) * cfg_struct.rowlength();
 
                 // Deallocate data according to N bytes from rowLength
                 if (fallocate64(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfg_struct.rowlength()) == 0) {
-                    // The punch is a metadata change fdatasync must cover: mark the file so the next checkpoint
-                    // cycle (and the final one at a clean stop) syncs it. No ring record carries it.
-                    walring::Dirty().Note(nullptr, target_file, offset, offset + cfg_struct.rowlength(), 0);
+                    punched_begin = std::min(punched_begin, offset);
+                    punched_end = std::max(punched_end, offset + cfg_struct.rowlength());
                 }
                 delete_count++;
             }
+            // The punches are a metadata change fdatasync must cover: mark the file so the next checkpoint cycle
+            // (and the final one at a clean stop) syncs it. No ring record carries it.
+            if (punched_end != 0) walring::Dirty().Note(nullptr, target_file, punched_begin, punched_end, 0);
         }
     }
     std::string info_msg = fmt::format("[BATCH DELETE] [DB: {}] - Deleted {} items", db_name, delete_count);

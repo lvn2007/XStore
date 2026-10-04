@@ -444,6 +444,31 @@ TEST_F(XStorePerfTest, BatchInsertThroughput) {
     ReportPerf({"BatchInsert", n, elapsed});
 }
 
+// Same as BatchInsertThroughput but SYNC: the call returns only once every row is WAL-durable AND applied, so this
+// (not the ASYNC one, which times enqueue only) is the meaningful durable-write number.
+TEST_F(XStorePerfTest, BatchInsertThroughput_Sync) {
+    XStore store;
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
+    const unsigned long long n = PerfOpCount(200'000);
+
+    XStore_Proto::BatchInsert_REQ req;
+    req.set_dbname("PERFDB");
+    req.set_durabilitymode(XStore_Proto::SYNC);
+    for (unsigned long long i = 0; i < n; i++) {
+        XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
+        entry->set_timestamp(BASE_TS + i);
+        *entry->mutable_data() = PerfRow(i);
+    }
+
+    XStore_Proto::BatchInsert_REP rep;
+    auto start = std::chrono::steady_clock::now();
+    store.BatchInsert(&req, &rep);
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+    EXPECT_NE(rep.insertstatus().find(fmt::format("Inserted {} elements", n)), std::string::npos) << rep.insertstatus();
+    ReportPerf({"BatchInsert[SYNC]", n, elapsed});
+}
+
 TEST_F(XStorePerfTest, BatchQueryThroughput) {
     XStore store;
     CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
@@ -451,6 +476,9 @@ TEST_F(XStorePerfTest, BatchQueryThroughput) {
 
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("PERFDB");
+    // SYNC: the default ASYNC returns before the rows are applied, so the query below would see none of them
+    // (and the late apply would race ScratchDir teardown).
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     for (unsigned long long i = 0; i < n; i++) {
         XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
         entry->set_timestamp(BASE_TS + i);
@@ -501,6 +529,30 @@ TEST_F(XStorePerfTest, RangeInsertThroughput) {
     ReportPerf({"RangeInsert", n, elapsed});
 }
 
+// Same as RangeInsertThroughput but SYNC (see BatchInsertThroughput_Sync).
+TEST_F(XStorePerfTest, RangeInsertThroughput_Sync) {
+    XStore store;
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
+    const unsigned long long n = PerfOpCount(200'000);
+
+    XStore_Proto::RangeInsert_REQ req;
+    req.set_dbname("PERFDB");
+    req.set_durabilitymode(XStore_Proto::SYNC);
+    for (unsigned long long i = 0; i < n; i++) {
+        XStore_Proto::RangeInsert_DATA *entry = req.add_rangeinsert_data();
+        entry->set_timestamp(BASE_TS + i);
+        *entry->mutable_data() = PerfRow(i);
+    }
+
+    XStore_Proto::RangeInsert_REP rep;
+    auto start = std::chrono::steady_clock::now();
+    store.RangeInsert(&req, &rep);
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+    EXPECT_NE(rep.insertstatus().find(fmt::format("Inserted {} elements", n)), std::string::npos) << rep.insertstatus();
+    ReportPerf({"RangeInsert[SYNC]", n, elapsed});
+}
+
 TEST_F(XStorePerfTest, RangeQueryThroughput) {
     XStore store;
     CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
@@ -508,6 +560,7 @@ TEST_F(XStorePerfTest, RangeQueryThroughput) {
 
     XStore_Proto::RangeInsert_REQ insert_req;
     insert_req.set_dbname("PERFDB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);   // see BatchQueryThroughput
     for (unsigned long long i = 0; i < n; i++) {
         XStore_Proto::RangeInsert_DATA *entry = insert_req.add_rangeinsert_data();
         entry->set_timestamp(BASE_TS + i);
