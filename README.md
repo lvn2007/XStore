@@ -65,6 +65,14 @@ Secured mode encrypts the ZMQ transport and authenticates clients against an all
 
 `--curve` defaults to `keys/server/server.key` + `keys/allowed/` (override with `--curve-secret-key` / `--curve-allowed-dir`); the allowlist is hot-reloaded, so `allow`/`revoke` take effect without a restart. Details: [Technical Reference](docs/XStore_Technical_Reference.md).
 
+### Operating Notes: Start, Stop, Durability
+
+* **First start.** Each WAL shard gets a pre-zeroed 64 MiB ring (`DataStore/WAL/shard_<N>.WAL`), created on first use; allow about a second per shard before the first insert is accepted. Indexes (`.zmap`/`.catidx`) that are stale or were left dirty by an unclean stop are rebuilt at startup (a full-year rebuild takes ~1 min at 700k rows); the server logs each rebuild.
+* **Stopping.** `SIGTERM` or `SIGINT` shuts down cleanly and exits 0: WAL writers stop, one final checkpoint syncs the data files, and the indexes are marked clean (about 0.3 s after 700k rows), so the next start does not replay or rebuild. `kill -9`, a crash or power loss is safe for acknowledged SYNC inserts (they are replayed from the WAL), but the indexes of replayed years are rebuilt on the next start.
+* **Durability.** SYNC inserts survive power loss once acknowledged; ASYNC inserts are acknowledged before the WAL sync and can lose a short window; BYPASS inserts are not WAL-covered. After a real disk write error the server logs a critical message and must be restarted. Details: [Technical Reference](docs/XStore_Technical_Reference.md) §4.18-4.19.
+* **Checkpoint tuning (optional).** `XSTORE_CKPT_IDLE_MS` (default 50: writer idle time that triggers a checkpoint) and `XSTORE_CKPT_MAX_AGE_MS` (default 5000: longest unsynced data is left). Digits only; `0`/unset = default; the effective values are logged at startup.
+* **Transparent huge pages.** The server's heap uses THP (+23% BatchInsert, +45% RangeInsert at about 2x steady-state memory); the host THP mode must be `madvise` or `always`. Build with `-DXSTORE_JEMALLOC_THP=OFF` to disable.
+
 ### Server Deployment Scripts
 [benchmark_artifact/scripts/XStore/](benchmark_artifact/scripts/XStore/) has scripts to provision and run an XStore server end-to-end:
 * `initXStoreServer.sh <working_dir>` — installs bootstrap dependencies, clones XStore, compiles XStore (CMake fetches & builds protobuf, libzmq and libsodium from source), opens firewall port 9497.
