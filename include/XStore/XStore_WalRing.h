@@ -192,6 +192,10 @@ size_t DirectMinBytes();
 size_t DirectPressureMinBytes();
 void SetDirectMinBytesForTests(size_t bytes);           // 0 restores the tunable
 void SetDirectPressureMinBytesForTests(size_t bytes);   // 0 restores the tunable
+// The next n writer sub-batches throw (std::runtime_error) after their ring append was committed and before any
+// record is applied (n = 0 clears): exercises the writer's exception path. Consumed only by the writer's apply step.
+void ThrowInNextWriterApplyForTests(int n);
+bool ConsumeInjectedWriterApplyThrow();
 // The next n direct-path sync steps fail retryably (n = 0 clears): the record is not acknowledged, nothing poisons.
 void FailNextDirectSyncsForTests(int n);
 bool ConsumeInjectedDirectSyncFailure();

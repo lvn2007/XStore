@@ -143,6 +143,7 @@ std::atomic<uint64_t> g_registry_epoch{0};
 std::atomic<size_t> g_direct_min_override{0};
 std::atomic<size_t> g_direct_pressure_min_override{0};
 std::atomic<int> g_fail_direct_syncs{0};
+std::atomic<int> g_throw_in_writer_apply{0};
 }  // namespace
 
 void SetRingBytesForTests(uint64_t ring_bytes) { g_ring_bytes_override.store(ring_bytes, std::memory_order_relaxed); }
@@ -188,6 +189,8 @@ size_t DirectPressureMinBytes() {
     const size_t o = g_direct_pressure_min_override.load(std::memory_order_relaxed);
     return o != 0 ? o : XStoreTunables::WAL_DIRECT_PRESSURE_MIN_BYTES;
 }
+void ThrowInNextWriterApplyForTests(int n) { g_throw_in_writer_apply.store(n, std::memory_order_relaxed); }
+bool ConsumeInjectedWriterApplyThrow() { return ConsumeCounter(g_throw_in_writer_apply); }
 void FailNextDirectSyncsForTests(int n) { g_fail_direct_syncs.store(n, std::memory_order_relaxed); }
 bool ConsumeInjectedDirectSyncFailure() {
     int n = g_fail_direct_syncs.load(std::memory_order_relaxed);

@@ -5,6 +5,7 @@
 #include "include/XStore/XStore_WalCheckpoint.h"
 #include "include/Networking/XStore_Curve.h"
 #include <argparse/argparse.hpp>
+#include <atomic>
 #include <csignal>
 #include <cerrno>
 #include <climits>
@@ -12,6 +13,7 @@
 #include <cstring>
 #include <filesystem>
 #include <mutex>
+#include <pthread.h>
 #include <thread>
 #include <unistd.h>
 
@@ -19,6 +21,26 @@ namespace {
 // Guards g_server against the signal thread racing main's teardown of it.
 std::mutex g_server_mutex;
 ZmqServer *g_server = nullptr;
+// Set once main is returning: the sigwait thread must then touch nothing (g_server_mutex / spdlog are about to be
+// destroyed by exit()). A REAL second signal during shutdown still _exit(1)s because this is not yet set.
+std::atomic<bool> g_exiting{false};
+
+// Declared right after the sigwait thread starts: on every way out of main it sets g_exiting, wakes the thread
+// (the stop signals are blocked process-wide, so a self-sent SIGTERM is only ever consumed by its sigwait) and joins it.
+class SignalThreadGuard {
+public:
+    explicit SignalThreadGuard(std::thread &thread) : thread_(thread) {}
+    ~SignalThreadGuard() {
+        g_exiting.store(true, std::memory_order_release);
+        pthread_kill(thread_.native_handle(), SIGTERM);
+        thread_.join();
+    }
+    SignalThreadGuard(const SignalThreadGuard &) = delete;
+    SignalThreadGuard &operator=(const SignalThreadGuard &) = delete;
+
+private:
+    std::thread &thread_;
+};
 }  // namespace
 
 int main(int argc, char *argv[]) {
@@ -158,9 +180,10 @@ int main(int argc, char *argv[]) {
     // shuts the context down and StartServer then returns immediately.
     ZmqServer x_store_zmq_server(thread_count);
     g_server = &x_store_zmq_server;
-    std::thread([stop_signals]() {
+    std::thread signal_thread([stop_signals]() {
         int sig = 0;
         sigwait(&stop_signals, &sig);
+        if (g_exiting.load(std::memory_order_acquire)) return;
         spdlog::warn("[SHUTDOWN] - Received signal {} ({}); stopping the server", sig, strsignal(sig));
         {
             std::lock_guard<std::mutex> lock(g_server_mutex);
@@ -169,9 +192,11 @@ int main(int argc, char *argv[]) {
         // A second signal while shutting down means "now": leave the indexes
         // dirty (the next start rebuilds them) rather than wait.
         sigwait(&stop_signals, &sig);
+        if (g_exiting.load(std::memory_order_acquire)) return;
         spdlog::default_logger()->flush();
         _exit(1);
-    }).detach();
+    });
+    SignalThreadGuard signal_thread_guard(signal_thread);
 
     // Host-metrics broadcast: independent background thread + its own PUB
     // socket, started before the ZMQ server so it's already publishing by

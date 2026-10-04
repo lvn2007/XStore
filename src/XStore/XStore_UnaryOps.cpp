@@ -101,8 +101,9 @@ void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::R
             spdlog::error(err_msg);
             return;
         }
-    } else if (!EnqueueWalRecord(std::move(record))) {
+    } else if (bool overloaded = false; !EnqueueWalRecord(std::move(record), &overloaded)) {
         std::string err_msg = fmt::format("[UNARY INSERT] [DB: {}] - Failed to enqueue WAL record", db_name);
+        if (overloaded) err_msg += std::string("; ") + kWalOverloadedText;
         SetTaggedStatus(return_data->mutable_insertstatus(), "[ERROR] ", err_msg);
         spdlog::error(err_msg);
         return;

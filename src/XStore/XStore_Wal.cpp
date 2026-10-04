@@ -237,6 +237,7 @@ struct SubBatchFile {
     size_t pad = 0;        // PAD record bytes to write at start - pad (0 = none)
     bool reserved = false;
     bool durable = false;
+    bool overloaded = false;   // Reserve timed out: its SYNC callers are told "overloaded"
 };
 
 // kRing: appended to the ring. kLarge: big enough that it MAY go direct -- ChooseRoute decides when the
@@ -349,7 +350,7 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
     return all_rows_ok;
 }
 
-bool XStore::EnqueueWalRecord(WalRecord record) {
+bool XStore::EnqueueWalRecord(WalRecord record, bool *overloaded) {
     // Writers are stopped after Shutdown(); a SYNC wait here would never wake.
     if (IsShutDown()) return false;
     // Per-DB hash, not round-robin: tried round-robin first (spreads a
@@ -425,7 +426,11 @@ bool XStore::EnqueueWalRecord(WalRecord record) {
         // failed apply) instead of unconditionally reporting success --
         // ASYNC skips this and only reports "enqueued", by design.
         completion->sem.wait();
-        bool result = completion->result;
+        const bool result = completion->result;
+        if (completion->overloaded) {   // failure only: the success path pays this one read
+            completion->overloaded = false;
+            if (overloaded != nullptr) *overloaded = true;
+        }
         completion_pool.enqueue(completion);
         return result;
     }
@@ -836,6 +841,17 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
         // (still resolving every caller's future, so nobody hangs forever
         // either) is the graceful-degradation behavior a durability layer
         // is expected to have.
+        // Exception path only: a sub-batch whose ring append was committed (head moved) but which never reached
+        // step (5) must still publish its applied position, or applied < head stays until some later batch
+        // publishes a larger value and the checkpointer (which advances only to applied) spins no-progress
+        // cycles once the ring is half full. Its callers are told "failed" below, so nothing acknowledged depends
+        // on those rows being applied; rows that did apply were already Note'd for the next checkpoint sync.
+        auto publish_committed = [&]() noexcept {
+            for (auto &entry : sub_batch_files) {
+                if (entry.second.durable) entry.second.ring->PublishApplied(entry.second.start + entry.second.total);
+            }
+            sub_batch_files.clear();
+        };
         try {
             // ClearRingRegistryForTests() (tests only) bumps the epoch: drop our
             // cached Rings so we reopen through the registry instead of pinning a
@@ -876,7 +892,7 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
             // A fenced WAL file (replay failed) still holds un-checkpointed records that replay applied
             // with no ring/dirty mark, so RingClear cannot see them: while ANY file is fenced nothing is
             // ring-clear (large records go to the ring; ones over ring/2 fail "overloaded" after the timeout).
-            enum class LargeRoute { kRing, kDirect, kFail };
+            enum class LargeRoute { kRing, kDirect, kFail, kFailOverloaded };
             auto decide_large = [&](size_t i) -> LargeRoute {
                 const WalRecord &record = batch[i];
                 const size_t ring_bytes = record_ring[i]->ring_bytes();
@@ -894,9 +910,10 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                 walring::Route route = walring::ChooseRoute(payload, /*is_bypass=*/false, /*is_unary=*/false, pressure, ring_clear, ring_bytes);
 
                 if (over_half && !ring_clear) {
-                    // Too big for the ring and the file is not clear: force checkpoint cycles (this thread
-                    // holds no ring lock; RunCycle serializes on its own cycle mutex) until it is, then go
-                    // direct. Bounded by the stall timeout; also leaves on shutdown.
+                    // Too big for the ring and the file is not clear: have the checkpointer thread run cycles
+                    // (RunForcedCycle: this thread never takes the cycle mutex, so one long in-flight cycle cannot
+                    // push the wait past the deadline) until it is, then go direct. Bounded by the stall timeout;
+                    // also leaves on shutdown.
                     walring::Checkpointer &ckpt = walring::Checkpointer::Instance();
                     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(walring::StallTimeoutMs());
                     while (!file_clear()) {
@@ -911,10 +928,15 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                                           record.db_name, payload, ring_bytes, path, walring::StallTimeoutMs(),
                                           ckpt.Poisoned() ? "; checkpointer poisoned by a sync error" : "",
                                           walring::AnyFenced() ? "; a WAL file is fenced (failed replay)" : "");
-                            return LargeRoute::kFail;
+                            // A poisoned checkpointer needs a restart: not a "retry later" condition for the client.
+                            return ckpt.Poisoned() ? LargeRoute::kFail : LargeRoute::kFailOverloaded;
                         }
-                        (void)ckpt.RunCycle();
-                        if (!file_clear()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                        const auto forced = ckpt.RunForcedCycle(deadline, shard.stop_flag);
+                        if (forced == walring::Checkpointer::ForcedCycle::kNotRunning) (void)ckpt.RunCycle();
+                        if ((forced == walring::Checkpointer::ForcedCycle::kDone || forced == walring::Checkpointer::ForcedCycle::kNotRunning) &&
+                            !file_clear()) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                        }
                     }
                     route = walring::Route::kDirect;
                 }
@@ -1010,7 +1032,8 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                             record_kind[run_end] = WalRecordKind::kRing;   // decided; do not decide again
                             break;
                         }
-                        if (decision == LargeRoute::kFail) {
+                        if (decision == LargeRoute::kFail || decision == LargeRoute::kFailOverloaded) {
+                            if (decision == LargeRoute::kFailOverloaded && batch[run_end].completion) batch[run_end].completion->overloaded = true;
                             complete(run_end, false);
                             ++run_end;
                             continue;
@@ -1066,8 +1089,8 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
 
                 wal_ring_records.fetch_add(end - pos, std::memory_order_relaxed);
 
-                // (1) Group by WAL file and reserve each file's ring space.
-                sub_batch_files.clear();
+                // (1) Group by WAL file and reserve each file's ring space. (sub_batch_files is empty here:
+                // cleared after step (5) or by the exception path.)
                 for (size_t i = pos; i < end; ++i) {
                     SubBatchFile &file = sub_batch_files[record_ring[i]];
                     file.ring = record_ring[i];
@@ -1084,6 +1107,7 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                         file.cursor = start;
                         file.pad = pad;
                     } else {
+                        file.overloaded = !walring::Checkpointer::Instance().Poisoned();
                         wal_ring_stalls.fetch_add(1, std::memory_order_relaxed);
                         spdlog::error("[WAL] - ring full ({}: {} bytes unflushed of {}, needs {} more): no checkpoint progress within {} ms; "
                                       "failing the batch (overloaded){}",
@@ -1273,6 +1297,7 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                 // be told, not silently given a success signal. A record whose
                 // ring space could not be reserved, or whose WAL write/sync
                 // failed, is not applied at all.
+                if (walring::ConsumeInjectedWriterApplyThrow()) throw std::runtime_error("injected writer apply exception");
                 for (size_t i = pos; i < end; ++i) {
                     const SubBatchFile &file = *record_file[i];
                     // Invariant: a data-file write only happens for a record whose
@@ -1281,6 +1306,7 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                     // neither applied nor acknowledged.
                     if (!file.reserved || !file.durable) {
                         record_ok[i] = false;
+                        if (file.overloaded && batch[i].completion) batch[i].completion->overloaded = true;
                         continue;
                     }
                     // record_wal_path[i] is always a key of `rings` for a kRing record.
@@ -1301,6 +1327,7 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                 }
                 for (size_t i = pos; i < end; ++i) complete(i, record_ok[i]);
                 pos = end;
+                sub_batch_files.clear();
             }
 
             // No per-commit checkpoint here: the checkpoint (Task 4) trails
@@ -1308,6 +1335,7 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
             // nothing to invalidate per batch.
         } catch (const std::exception &ex) {
             spdlog::error("[WAL] - Writer loop caught exception, failing this batch: {}", ex.what());
+            publish_committed();
             for (size_t i = 0; i < count; ++i) {
                 if (!resolved[i] && batch[i].completion) {
                     batch[i].completion->result = false;
@@ -1316,6 +1344,7 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
             }
         } catch (...) {
             spdlog::error("[WAL] - Writer loop caught unknown exception, failing this batch");
+            publish_committed();
             for (size_t i = 0; i < count; ++i) {
                 if (!resolved[i] && batch[i].completion) {
                     batch[i].completion->result = false;

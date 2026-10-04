@@ -239,6 +239,7 @@ protected:
         walring::FailNextHeaderWritesForTests(0);
         walring::FailNextHeaderWritesStickyForTests(0);
         walring::FailNextRingZeroWritesForTests(0, EIO);
+        walring::ThrowInNextWriterApplyForTests(0);
         ClearRegistries();
         scratch.reset();
     }
@@ -765,6 +766,7 @@ protected:
     static walring::Checkpointer &Ckpt() { return walring::Checkpointer::Instance(); }
 
     void TearDown() override {
+        Ckpt().SetCycleDelayMsForTests(0);   // before the pause: it waits for an in-flight (sleeping) cycle
         Ckpt().SetPausedForTests(true);
         Ckpt().FailNextDataSyncsForTests(0);
         Ckpt().FailNextDirSyncsForTests(0);
@@ -3519,5 +3521,112 @@ TEST_F(WalCrashSimTest, EveryInsertApiMarksItsFileDirty) {
         }
     }
 }
+
+// ---- Writer/shutdown hardening (TODO M2, M7, M12) --------------------------------------------------------------
+
+// M2: the writer asks the checkpointer THREAD for a forced cycle and waits with a deadline, so a long cycle (one
+// fdatasync under the cycle mutex) cannot push an oversized record's wait past the stall timeout.
+TEST_F(WalDirectPathTest, ForcedCheckpointWaitIsBoundedByTheDeadlineEvenDuringALongCycle) {
+    walring::SetRingBytesForTests(256 << 10);
+    walring::SetStallTimeoutMsForTests(200);
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    ASSERT_TRUE(InsertAt(store, 0));
+    const uint64_t direct0 = DirectRecords(), stalls0 = XStore::wal_ring_stalls.load();
+    Ckpt().SetCycleDelayMsForTests(2000);   // every cycle now takes >= 2 s
+
+    const auto t0 = std::chrono::steady_clock::now();
+    const std::string status = Batch(store, db_name, kEpoch0 + 10, 3000, 0.5);   // > ring/2, file not ring-clear
+    const auto took = std::chrono::steady_clock::now() - t0;
+    Ckpt().SetCycleDelayMsForTests(0);
+
+    EXPECT_TRUE(Failed(status)) << status;
+    EXPECT_NE(status.find(XStore::kWalOverloadedText), std::string::npos) << status;
+    EXPECT_GE(took, std::chrono::milliseconds(150));
+    EXPECT_LT(took, std::chrono::milliseconds(1000)) << "the in-flight 2 s cycle must not extend the 200 ms wait";
+    EXPECT_EQ(DirectRecords(), direct0);
+    EXPECT_GT(XStore::wal_ring_stalls.load(), stalls0);
+    EXPECT_TRUE(Ckpt().RunCycle()) << "waits out the still-sleeping forced cycle, then runs";
+}
+
+// M7: an exception between CommitAppended and PublishApplied must not leave applied < head.
+TEST_F(WalCheckpointTest, WriterExceptionAfterCommitStillPublishesApplied) {
+    constexpr uint16_t kRowLength = 64;
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, kRowLength);
+    ASSERT_TRUE(InsertSync(store, 0));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    const uint64_t head0 = ring->HeadLsn();
+
+    walring::ThrowInNextWriterApplyForTests(1);
+    EXPECT_FALSE(InsertSync(store, 1)) << "the caller of the failed sub-batch is told so";
+    EXPECT_GT(ring->HeadLsn(), head0) << "the ring append had been committed";
+    EXPECT_EQ(ring->AppliedLsn(), ring->HeadLsn()) << "applied must follow head even though the apply never ran";
+
+    EXPECT_TRUE(InsertSync(store, 2)) << "the writer survives and keeps serving";
+    ASSERT_TRUE(Ckpt().RunCycle());
+    EXPECT_EQ(ring->CheckpointLsn(), ring->HeadLsn()) << "the checkpoint reaches head";
+}
+
+// M12: SYNC callers see a distinct, stable text when the ring stays full; other failures do not carry it.
+TEST_F(WalRingWriterTest, RingFullFailureIsReportedAsOverloadedToUnaryAndBatchCallers) {
+    constexpr uint16_t kRowLength = 4096;
+    constexpr uint64_t kRing = 256 << 10;
+    walring::SetRingBytesForTests(kRing);
+    walring::SetStallTimeoutMsForTests(100);
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, kRowLength);
+    const auto overloaded = [](const std::string &status) { return status.find(XStore::kWalOverloadedText) != std::string::npos; };
+    const auto unary = [&](uint64_t i) {
+        XStore_Proto::RowData row;
+        row.add_fielddata()->set_doubledata(static_cast<double>(i));
+        XStore_Proto::UnaryInsert_REP rep;
+        store.UnaryInsert(kBaseEpoch + i, row, db_name, &rep, XStore_Proto::SYNC);
+        return rep.insertstatus();
+    };
+    const auto batch = [&](uint64_t first) {
+        XStore_Proto::BatchInsert_REQ req;
+        req.set_dbname(db_name);
+        req.set_durabilitymode(XStore_Proto::SYNC);
+        for (uint64_t i = 0; i < 2; ++i) {
+            XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
+            entry->set_timestamp(kBaseEpoch + first + i);
+            entry->mutable_data()->add_fielddata()->set_doubledata(1.0);
+        }
+        XStore_Proto::BatchInsert_REP rep;
+        store.BatchInsert(&req, &rep);
+        return rep.insertstatus();
+    };
+    const auto is_error = [](const std::string &status) { return status.rfind("[ERROR]", 0) == 0; };
+
+    // Fill the ring (checkpointer paused by the fixture) until the first stall failure.
+    std::string full_status;
+    for (uint64_t i = 0; i < 200 && !is_error(full_status = unary(i)); ++i) {}
+    ASSERT_TRUE(is_error(full_status)) << "200 x 4 KiB records must not fit a 256 KiB ring with no checkpoint";
+    EXPECT_TRUE(overloaded(full_status)) << full_status;
+    EXPECT_NE(full_status.find("[UNARY INSERT]"), std::string::npos) << "existing text and tag are kept: " << full_status;
+    EXPECT_TRUE(overloaded(unary(1000))) << "still full";
+
+    const std::string batch_status = batch(2000);
+    EXPECT_TRUE(is_error(batch_status)) << batch_status;
+    EXPECT_TRUE(overloaded(batch_status)) << batch_status;
+    EXPECT_NE(batch_status.find("[BATCH INSERT]"), std::string::npos) << batch_status;
+
+    // Free the ring: a failure that is NOT overload must not carry the text (and the pooled completion's flag was reset).
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    ring->AdvanceCheckpoint(ring->HeadLsn());
+    walring::FailNextWalSyncsForTests(1);
+    const std::string sync_fail = unary(3000);
+    EXPECT_TRUE(is_error(sync_fail)) << sync_fail;
+    EXPECT_FALSE(overloaded(sync_fail)) << sync_fail;
+    walring::FailNextWalSyncsForTests(1);
+    const std::string batch_sync_fail = batch(4000);
+    EXPECT_TRUE(is_error(batch_sync_fail)) << batch_sync_fail;
+    EXPECT_FALSE(overloaded(batch_sync_fail)) << batch_sync_fail;
+    EXPECT_FALSE(is_error(unary(5000))) << "recovered";
+}
+
 
 }  // namespace

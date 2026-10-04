@@ -241,6 +241,10 @@ class XStore {
         struct WalCompletion {
             moodycamel::LightweightSemaphore sem;
             bool result = false;
+            // Set by the writer (before the signal) when result is false because the ring stayed full for the
+            // stall timeout / a record over half the ring could not be checkpointed clear. Read and cleared by
+            // EnqueueWalRecord before the completion goes back to the pool.
+            bool overloaded = false;
         };
 
         // Self-sizing, process-lifetime pool of WalCompletion objects --
@@ -317,6 +321,8 @@ class XStore {
         static std::atomic<size_t> active_wal_shard_count;
         // Times a WAL writer gave up waiting for ring space (walring::Ring::Reserve
         // timed out) and failed a whole sub-batch as "overloaded". Process-wide.
+        // Appended to a SYNC insert's error status when the WAL ring stayed full (see EnqueueWalRecord's `overloaded`).
+        static constexpr const char *kWalOverloadedText = "server overloaded (WAL ring full), retry later";
         static std::atomic<uint64_t> wal_ring_stalls;
         // Records the WAL writer processed, by route (spec §3.3): applied + synced inline with no ring
         // record (wal_direct_records) vs appended to a ring (wal_ring_records). wal_direct_records is
@@ -1196,7 +1202,9 @@ class XStore {
         // including ASYNC, so a writer that can't keep up bounds
         // memory growth and the crash-loss window instead of accepting
         // unboundedly while still reporting "success".
-        static bool EnqueueWalRecord(WalRecord record);
+        // `overloaded` (optional) is set true, never cleared, when a SYNC record failed because the WAL ring
+        // stayed full (kWalOverloadedText for clients); ASYNC records have no completion, so never report it.
+        static bool EnqueueWalRecord(WalRecord record, bool *overloaded = nullptr);
 
         // Parses the on-disk WAL wire format (see XStore_Wal.cpp's
         // WalWriterLoop pwritev path and ParseWalRecord definition for the

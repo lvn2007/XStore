@@ -9,6 +9,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <thread>
+#include <utility>
 #include <filesystem>
 #include <limits>
 #include <vector>
@@ -146,6 +147,8 @@ void Checkpointer::Start() {
     {
         std::lock_guard<std::mutex> lock(wake_mutex_);
         stop_ = false;
+        force_pending_ = false;
+        running_ = true;
     }
     final_cycle_ok_.store(false, std::memory_order_release);
     thread_ = std::thread(&Checkpointer::Loop, this);
@@ -157,6 +160,7 @@ bool Checkpointer::StopAfterFinalCycle() {
         {
             std::lock_guard<std::mutex> lock(wake_mutex_);
             stop_ = true;
+            running_ = false;
         }
         wake_.notify_all();
         thread_.join();
@@ -276,6 +280,7 @@ void Checkpointer::StopWithoutFinalCycleForTests() {
         {
             std::lock_guard<std::mutex> lock(wake_mutex_);
             stop_ = true;
+            running_ = false;
         }
         wake_.notify_all();
         thread_.join();
@@ -290,7 +295,28 @@ bool Checkpointer::RunCycle() {
     return RunCycleLocked();
 }
 
+Checkpointer::ForcedCycle Checkpointer::RunForcedCycle(std::chrono::steady_clock::time_point deadline, const std::atomic<bool> &stop_flag) {
+    constexpr auto SLICE = std::chrono::milliseconds(10);
+    std::unique_lock<std::mutex> lock(wake_mutex_);
+    if (!running_) return ForcedCycle::kNotRunning;
+    force_pending_ = true;
+    const uint64_t target = cycles_started_ + 1;   // the first cycle the loop begins after this point
+    wake_.notify_all();
+    while (cycles_finished_ < target) {
+        if (stop_flag.load(std::memory_order_relaxed)) return ForcedCycle::kStopped;
+        if (poisoned_.load(std::memory_order_acquire)) return ForcedCycle::kPoisoned;
+        if (!running_) return ForcedCycle::kNotRunning;
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) return ForcedCycle::kTimedOut;
+        forced_done_.wait_until(lock, std::min(deadline, now + SLICE));
+    }
+    return ForcedCycle::kDone;
+}
+
 bool Checkpointer::RunCycleLocked() {
+    if (const unsigned delay_ms = cycle_delay_ms_.load(std::memory_order_relaxed); delay_ms != 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+    }
     if (poisoned_.load(std::memory_order_acquire)) return false;   // sticky: never advance again
     const std::vector<std::shared_ptr<Ring>> rings = AllRings();
 
@@ -421,15 +447,17 @@ void Checkpointer::Loop() {
     auto wait = TICK;
 
     for (;;) {
+        bool forced = false;   // a writer asked for a cycle (RunForcedCycle): run one now, whatever the triggers say
         {
             std::unique_lock<std::mutex> lock(wake_mutex_);
-            if (!back_to_back) wake_.wait_for(lock, wait, [&] { return stop_; });
+            if (!back_to_back) wake_.wait_for(lock, wait, [&] { return stop_ || force_pending_; });
             if (stop_) return;
+            forced = std::exchange(force_pending_, false);
         }
         wait = TICK;
         back_to_back = false;
-        if (paused_.load(std::memory_order_acquire)) continue;
-        if (poisoned_.load(std::memory_order_acquire)) { wait = RETRY_BACKOFF; continue; }   // no retry loop
+        if (paused_.load(std::memory_order_acquire) && !forced) continue;
+        if (poisoned_.load(std::memory_order_acquire)) { wait = RETRY_BACKOFF; continue; }   // no retry loop; a forced waiter sees Poisoned()
 
         double fill = 0.0;
         bool pending = false;   // an applied record the checkpoint has not passed yet
@@ -449,7 +477,7 @@ void Checkpointer::Loop() {
         const bool cycle_fill = fill >= XStoreTunables::WAL_CKPT_CYCLE_FILL;
 
         const bool booting = boot_holds_.load(std::memory_order_acquire) != 0;   // ReplayWal running: no idle trigger
-        if (retry || cycle_fill || age_ms >= age_limit || (!booting && dirty && idle_ms >= static_cast<int64_t>(idle_limit))) {
+        if (forced || retry || cycle_fill || age_ms >= age_limit || (!booting && dirty && idle_ms >= static_cast<int64_t>(idle_limit))) {
             if (cycle_fill && Due(last_fill_warn, std::chrono::seconds(60))) {
                 spdlog::warn("[WAL CKPT] - ring fill {:.0f}% >= {:.0f}%: checkpointing back-to-back; writers will stall near {:.0f}%",
                              fill * 100, XStoreTunables::WAL_CKPT_CYCLE_FILL * 100, XStoreTunables::WAL_STALL_FILL * 100);
@@ -458,10 +486,20 @@ void Checkpointer::Loop() {
             bool cycle_ok = false;
             {
                 // Re-check pause under the cycle mutex: SetPausedForTests(true) returns only
-                // once no cycle is in flight, and none may start after that.
+                // once no cycle is in flight, and no unforced cycle starts after that.
                 std::lock_guard<std::mutex> cycle(cycle_mutex_);
-                if (paused_.load(std::memory_order_acquire)) continue;
+                if (paused_.load(std::memory_order_acquire) && !forced) continue;
+                uint64_t mine;
+                {
+                    std::lock_guard<std::mutex> lock(wake_mutex_);
+                    mine = ++cycles_started_;
+                }
                 cycle_ok = RunCycleLocked();
+                {
+                    std::lock_guard<std::mutex> lock(wake_mutex_);
+                    cycles_finished_ = mine;
+                }
+                forced_done_.notify_all();
             }
             if (cycle_ok) {
                 retry = false;

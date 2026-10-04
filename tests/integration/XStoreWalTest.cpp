@@ -604,6 +604,10 @@ TEST_F(XStoreWalTest, ReplayStopsOnRecordDeclaringLengthOverSanityCeiling) {
     XStore_Proto::UnaryQuery_REP query_rep;
     store2.UnaryQuery(1700000007ULL, "WALBADLEN", &query_rep);
     EXPECT_FALSE(query_rep.has_data());
+
+    // The failed replay fenced this file; the fence is process-wide (AnyFenced) and would force every later
+    // test's oversized record onto the "not ring-clear" path.
+    walring::UnfenceWalFile(wal_file.string());
 }
 
 // Many threads inserting distinct keys through the WAL concurrently -- all

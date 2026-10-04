@@ -44,6 +44,7 @@
 // Hot path: the writer does ONE relaxed store of last_writer_activity_ns per
 // gathered batch; nothing per row.
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <map>
@@ -96,6 +97,15 @@ public:
     // checkpointer got poisoned (a real error), in which case it never advances again.
     bool RunCycle();
 
+    // Writer-side forced cycle (a record larger than half the ring on a file that is not ring-clear): asks the
+    // checkpointer THREAD to run one cycle that starts after this call and waits for it, so the wait is bounded
+    // by `deadline` even while a long cycle (fdatasync under cycle_mutex_) is in flight -- the writer never
+    // takes cycle_mutex_ itself. Bypasses the test pause like RunCycle(). Wakes every 10 ms to look at
+    // `stop_flag` and Poisoned(). kNotRunning: no loop thread (never started, or stopping): the caller may
+    // RunCycle() itself, nothing else is cycling then.
+    enum class ForcedCycle { kDone, kTimedOut, kStopped, kPoisoned, kNotRunning };
+    [[nodiscard]] ForcedCycle RunForcedCycle(std::chrono::steady_clock::time_point deadline, const std::atomic<bool> &stop_flag);
+
     // Boot hold: while at least one hold is taken (XStore::ReplayWal takes one for its whole duration)
     // the loop's IDLE trigger does not fire -- replay Notes files while last_writer_activity_ns is
     // still 0, which would otherwise look like "dirty and idle for decades" and cycle every
@@ -145,6 +155,8 @@ public:
     std::unordered_set<std::string> LastCycleSyncedDirsForTests() const;   // directories fsync'd by the last successful cycle
     // Simulated kill -9: joins the thread WITHOUT the final cycle and forgets carried/flushed state.
     void StopWithoutFinalCycleForTests();
+    // Every cycle sleeps `ms` (under the cycle mutex) before it starts; 0 = off. Lets a test hold a cycle in flight.
+    void SetCycleDelayMsForTests(unsigned ms) { cycle_delay_ms_.store(ms, std::memory_order_relaxed); }
     void SetPausedForTests(bool paused);          // waits for an in-flight cycle/flush; RunCycle() still works
     void FailNextDataSyncsForTests(int n);        // next n data-file fdatasyncs report failure
     void FailNextDirSyncsForTests(int n);         // next n directory fsyncs report failure
@@ -179,6 +191,11 @@ private:
     std::mutex wake_mutex_;                       // guards stop_ for the loop's timed wait
     std::condition_variable wake_;
     bool stop_ = false;
+    bool running_ = false;                        // loop thread alive and not stopping (guarded by wake_mutex_)
+    bool force_pending_ = false;                  // a writer wants a cycle that starts after its request (wake_mutex_)
+    uint64_t cycles_started_ = 0;                 // loop cycles begun / finished, for RunForcedCycle (wake_mutex_)
+    uint64_t cycles_finished_ = 0;
+    std::condition_variable forced_done_;
 
     std::atomic<bool> paused_{false};
     std::atomic<int> fail_data_syncs_{0};
@@ -200,6 +217,7 @@ private:
     std::atomic<uint64_t> data_syncs_{0};
     std::atomic<uint64_t> paced_bytes_{0};
     std::atomic<uint64_t> advances_{0};           // rings advanced, ever (progress detector for back-to-back cycles)
+    std::atomic<unsigned> cycle_delay_ms_{0};
     std::atomic<unsigned> idle_ms_override_{0};
     std::atomic<unsigned> max_age_override_{0};
 };

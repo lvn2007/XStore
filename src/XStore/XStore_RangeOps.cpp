@@ -75,6 +75,7 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client,
     // on RangeInsert_REQ in XStore.proto.
     const XStore_Proto::WalDurabilityMode durability_mode = proto_from_client->durabilitymode();
     bool any_sync_failed = false;
+    bool any_overloaded = false;   // a SYNC group failed because the WAL ring was full
 
     // Grow the index width to this request's widest row BEFORE any
     // WalRecord/zone-map file is created for it -- one pass over the whole
@@ -136,7 +137,7 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client,
 
         bool ok = (durability_mode == XStore_Proto::BYPASS)
             ? ApplyWalRecord(record)
-            : EnqueueWalRecord(std::move(record));
+            : EnqueueWalRecord(std::move(record), &any_overloaded);
         if (!ok) {
             any_sync_failed = true;
             spdlog::error("[RANGE INSERT] [DB: {}] - WAL write failed for {}.XSTORE", db_name, year_key);
@@ -151,6 +152,7 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client,
     if (any_sync_failed) {
         std::string err_msg = fmt::format("[RANGE INSERT] [DB: {}] - Inserted {} elements, but the write failed for at least one group",
                                            db_name, proto_from_client->rangeinsert_data_size());
+        if (any_overloaded) err_msg += std::string("; ") + kWalOverloadedText;
         SetTaggedStatus(return_data->mutable_insertstatus(), "[ERROR] ", err_msg);
         spdlog::error(err_msg);
         return;
