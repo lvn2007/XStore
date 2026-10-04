@@ -1168,6 +1168,7 @@ void XStore::ReplayRingShard(const std::string &wal_path, size_t shard_idx, int 
         const uint64_t head_end = std::min<uint64_t>(end_lsn + 4, zero_to);
         bool zeroed = wfd >= 0 && !walring::ConsumeInjectedReplayZeroingFailure() &&
                       walring::ZeroRingRange(wfd, head_end, zero_to, ring_bytes) && fdatasync(wfd) == 0 &&
+                      !walring::ReplayStopsAfterTailZeroing() &&   // test hook: "crash" between the two syncs
                       walring::ZeroRingRange(wfd, end_lsn, head_end, ring_bytes) && fdatasync(wfd) == 0;
         if (wfd >= 0) close(wfd);
         if (!zeroed) {

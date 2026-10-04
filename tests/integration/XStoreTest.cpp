@@ -748,9 +748,10 @@ TEST_F(XStoreTest, UnaryInsertAtFirstAndLastEpochOfYearRoundTrip) {
 
     // TS_2017_FIRST/TS_2016_LAST are exactly TimeStruct's FirstEpoch/LastEpoch
     // for their respective years (see TimeStruct::ExtractTimeComponents).
-    // LastEpoch is the risky case: GetOrMapFile pads the mapped file by one
-    // extra row specifically because this write lands at offset
-    // totalRows*rowLength, one row past (LastEpoch-FirstEpoch)*rowLength.
+    // LastEpoch is the risky case: this row lands at offset
+    // totalRows*rowLength, one row past (LastEpoch-FirstEpoch)*rowLength, so
+    // the pwrite must extend the file by that extra row (and GetOrMapFile
+    // pads its read mapping by one row for the same reason).
     XStore_Proto::UnaryInsert_REP first_rep, last_rep;
     store.UnaryInsert(TS_2017_FIRST, MakeRow({FString("first-epoch-2017")}), "TESTDB", &first_rep);
     store.UnaryInsert(TS_2016_LAST, MakeRow({FString("last-epoch-2016")}), "TESTDB", &last_rep);
@@ -1342,9 +1343,10 @@ TEST_F(XStoreTest, BatchInsertRepeatedCallsToSameYearFileAccumulateViaCachedMapp
     XStore store;
     CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
-    // First call creates+maps 2016.XSTORE via GetOrMapFile; every later call
-    // to the same year must hit that cached mapping instead of re-creating/
-    // re-truncating it, which would wipe out rows written by earlier calls.
+    // First call creates 2016.XSTORE; every later call to the same year must
+    // append into the existing file (and the read-only cached mapping the
+    // query below uses) instead of re-creating/re-truncating it, which would
+    // wipe out rows written by earlier calls.
     for (int i = 0; i < 20; i++) {
         XStore_Proto::BatchInsert_REQ req;
         req.set_dbname("TESTDB");
@@ -1956,10 +1958,11 @@ TEST_F(XStoreTest, RangeDeleteReclaimsDiskSpaceAndMmapCacheReflectsTheHole) {
     XStore_Proto::RangeInsert_REP insert_rep;
     store.RangeInsert(&insert_req, &insert_rep);
 
-    // RangeInsert (and the RangeQuery below) go through the shared mmap
-    // cache (GetOrMapFile); RangeDelete's fallocate64 punches the hole via a
-    // separate, freshly-opened fd -- confirms that hole is visible through
-    // an *already-mapped* MAP_SHARED region too, not just to fresh reads.
+    // RangeInsert writes via pwrite on an fd; the RangeQuery below reads
+    // through the shared read-only mmap cache (GetOrMapFile). RangeDelete's
+    // fallocate64 punches the hole via a separate, freshly-opened fd --
+    // confirms that hole is visible through an *already-mapped* MAP_SHARED
+    // region too, not just to fresh reads.
     XStore_Proto::RangeQuery_REP pre_delete_query;
     pre_delete_query = RangeQuery(store, TS_2024_MID, TS_2024_MID + k_row_count - 1, "TESTDB");
     ASSERT_EQ(pre_delete_query.queryresponse_size(), k_row_count);
@@ -2466,11 +2469,11 @@ TEST_F(XStoreTest, UnaryBatchAndRangeInsertQueryShareSameCachedMappingWithinAYea
     CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);
 
     // Write the same year's file through all three insert paths, then read
-    // every point back through all three query paths -- Unary, Batch and
-    // Range all go through the same GetOrMapFile cache now, so a write via
+    // every point back through all three query paths. All writes are pwrite
+    // on fds; reads may come through the PROT_READ|MAP_SHARED GetOrMapFile
+    // cache, which shares the page cache with those pwrites, so a write via
     // one path must be immediately visible via the others without a stale
-    // read (previously Batch/Range wrote via stdio underneath whatever
-    // mapping Unary might already have open for that same file).
+    // read.
     XStore_Proto::UnaryInsert_REP unary_rep;
     store.UnaryInsert(TS_2009_MID, MakeRow({FString("via-unary")}), "TESTDB", &unary_rep);
 
@@ -2524,9 +2527,9 @@ TEST_F(XStoreTest, UnaryBatchAndRangeInsertQueryShareSameCachedMappingWithinAYea
 }
 
 // ---------------------------------------------------------------------
-// Mmap LRU cache -- GetOrMapFile caches PROT_WRITE mappings capped at
-// XStore::MMAP_CACHE_CAP (256, see include/XStore/XStore.h); Unary/Batch/Range
-// insert+query all share it (confirmed above).
+// Mmap LRU cache -- GetOrMapFile caches read-only (PROT_READ|MAP_SHARED)
+// mappings capped at XStore::MMAP_CACHE_CAP (256, see include/XStore/XStore.h);
+// the Unary/Batch/Range query paths share it (writes are pwrite on fds).
 // ---------------------------------------------------------------------
 
 TEST_F(XStoreTest, GetOrMapFileEvictsBeyondCapAndEvictedFilesStillReadCorrectly) {

@@ -3,15 +3,21 @@
 
 #include <atomic>
 #include <cstdlib>
+#include <chrono>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <fcntl.h>
 #include <unistd.h>
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <spdlog/sinks/base_sink.h>
+#include <spdlog/spdlog.h>
 
 #include "include/XStore/XStore.h"
 #include "include/XStore/XStore_WalRing.h"
@@ -39,6 +45,52 @@ inline uint64_t TestDefaultRingBytes() {
     return kTestDefaultRingBytes;
 }
 inline const bool kTestDefaultRingInstalled = (walring::SetDefaultRingBytesForTests(TestDefaultRingBytes()), true);
+
+// Process-wide log capture for tests that assert on warnings/errors. It is attached to the default logger ONCE,
+// at static-init time (single-threaded, before any WAL-writer/checkpointer thread exists), so tests never swap or
+// mutate the logger -- spdlog::default_logger_raw() is unsynchronised, so swapping it while those long-lived
+// threads log is a data race. Tests Clear() it, act, then read it. warn+ only, so other tests pay almost nothing.
+class LogCaptureSink final : public spdlog::sinks::base_sink<std::mutex> {
+public:
+    void Clear() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        lines_.clear();
+    }
+    std::vector<std::string> Lines() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return lines_;
+    }
+    // Number of captured messages containing `needle`.
+    size_t Count(std::string_view needle) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        size_t n = 0;
+        for (const std::string &line : lines_) {
+            if (line.find(needle) != std::string::npos) ++n;
+        }
+        return n;
+    }
+    bool Contains(std::string_view needle) { return Count(needle) != 0; }
+
+protected:
+    void sink_it_(const spdlog::details::log_msg &msg) override {
+        spdlog::memory_buf_t formatted;
+        formatter_->format(msg, formatted);
+        lines_.emplace_back(formatted.data(), formatted.size());
+    }
+    void flush_() override {}
+
+private:
+    std::vector<std::string> lines_;
+};
+
+inline std::shared_ptr<LogCaptureSink> InstallLogCapture() {
+    auto sink = std::make_shared<LogCaptureSink>();
+    sink->set_level(spdlog::level::warn);
+    spdlog::default_logger()->sinks().push_back(sink);   // creates the default logger first if it does not exist yet
+    return sink;
+}
+// C++17 inline variable: runs once per process during static init (single-threaded, before any WAL thread).
+inline const std::shared_ptr<LogCaptureSink> kLogCapture = InstallLogCapture();
 
 // RAII: the background checkpointer takes no action while one of these is alive,
 // for tests that inspect or hand-drive ring heads/checkpoints. (RunCycle() still
@@ -150,6 +202,37 @@ public:
         fs::remove_all(test_root, ec);
     }
 };
+
+// Blocks until every WAL record enqueued so far for `db_name` (ASYNC ones included) has been written AND applied, so
+// a test that returns right after a timed ASYNC enqueue cannot have its ScratchDir removed under a still-applying
+// writer. A shard's writer thread handles its queue strictly FIFO and records from ONE calling thread for a DB land on one shard (EnqueueWalRecord salts the shard by calling
+// thread across up to WAL_SHARDS_PER_DB shards), so an ASYNC sentinel row enqueued last, from the same thread as the
+// records being drained, becoming visible proves everything that thread enqueued before it was applied (the ring's applied==head
+// alone cannot: a batch mid-write/fsync or a direct-path apply leaves the ring untouched). Then every ring must be
+// quiescent (AppliedLsn()==HeadLsn()), which also covers the post-apply index updates. `sentinel_epoch` must be a
+// timestamp of this DB the test does not otherwise rely on (one extra one-column row is written there). Fails the
+// test with a clear message on timeout.
+inline void WaitForWalDrained(XStore &store, std::string_view db_name, unsigned long long sentinel_epoch,
+                              std::chrono::seconds timeout = std::chrono::seconds(60)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    store.UnaryInsert(sentinel_epoch, MakeRow({FDouble(0.0)}), db_name, &insert_rep, XStore_Proto::ASYNC);
+    ASSERT_NE(insert_rep.insertstatus().find("[INFO]"), std::string::npos) << "WAL drain sentinel not enqueued: " << insert_rep.insertstatus();
+    const auto drained = [&] {
+        XStore_Proto::UnaryQuery_REP query_rep;
+        store.UnaryQuery(sentinel_epoch, db_name, &query_rep);
+        if (query_rep.data().fielddata_size() == 0) return false;
+        for (const std::shared_ptr<walring::Ring> &ring : walring::AllRings()) {
+            if (ring->AppliedLsn() != ring->HeadLsn()) return false;
+        }
+        return true;
+    };
+    while (!drained()) {
+        ASSERT_LT(std::chrono::steady_clock::now(), deadline)
+            << "WAL did not drain within " << timeout.count() << "s (sentinel row of DB " << db_name << " never applied, or a ring has applied != head)";
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+}
 
 }  // namespace xstore_test
 

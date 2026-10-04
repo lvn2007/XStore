@@ -128,6 +128,8 @@ std::atomic<int> g_fail_wal_syncs{0};
 std::atomic<bool> g_wal_sync_failure_sticky{false};   // read on the failure path only
 std::atomic<int> g_injected_wal_write_errno{0};   // read on the failure path only
 std::atomic<int> g_fail_zero_range_syncs{0};        // read on the failure path only
+std::atomic<int> g_fail_ring_zero_writes{0};        // read on the failure path only
+std::atomic<int> g_fail_ring_zero_write_errno{EIO};
 std::atomic<int> g_fail_header_writes{0};
 std::atomic<int> g_fail_header_writes_sticky{0};
 bool ConsumeCounter(std::atomic<int> &c) {
@@ -157,6 +159,15 @@ void SetInjectedWalWriteErrnoForTests(int err) { g_injected_wal_write_errno.stor
 int InjectedWalWriteErrno() { return g_injected_wal_write_errno.load(std::memory_order_relaxed); }
 void FailNextWalZeroRangeSyncsForTests(int n) { g_fail_zero_range_syncs.store(n, std::memory_order_relaxed); }
 bool ConsumeInjectedWalZeroRangeSyncFailure() { return ConsumeCounter(g_fail_zero_range_syncs); }
+void FailNextRingZeroWritesForTests(int n, int err) {
+    g_fail_ring_zero_write_errno.store(err, std::memory_order_relaxed);
+    g_fail_ring_zero_writes.store(n, std::memory_order_relaxed);
+}
+bool ConsumeInjectedRingZeroWriteFailure(int &err) {
+    if (!ConsumeCounter(g_fail_ring_zero_writes)) return false;
+    err = g_fail_ring_zero_write_errno.load(std::memory_order_relaxed);
+    return true;
+}
 bool InjectedWalSyncFailureIsSticky() { return g_wal_sync_failure_sticky.load(std::memory_order_relaxed); }
 void FailNextHeaderWritesForTests(int n) { g_fail_header_writes.store(n, std::memory_order_relaxed); }
 void FailNextHeaderWritesStickyForTests(int n) { g_fail_header_writes_sticky.store(n, std::memory_order_relaxed); }
@@ -370,15 +381,18 @@ std::atomic<uint64_t> g_replay_zeroed_bytes{0};
 namespace {
 std::atomic<int> g_fail_replay_reads{0};
 std::atomic<int> g_fail_replay_zeroings{0};
+std::atomic<bool> g_stop_replay_zeroing_after_tail{false};
 }  // namespace
 void FailNextReplayReadsForTests(int n) { g_fail_replay_reads.store(n, std::memory_order_relaxed); }
 bool ConsumeInjectedReplayReadFailure() { return ConsumeCounter(g_fail_replay_reads); }
 void FailNextReplayZeroingsForTests(int n) { g_fail_replay_zeroings.store(n, std::memory_order_relaxed); }
 bool ConsumeInjectedReplayZeroingFailure() { return ConsumeCounter(g_fail_replay_zeroings); }
+void StopReplayZeroingAfterTailForTests(bool stop) { g_stop_replay_zeroing_after_tail.store(stop, std::memory_order_relaxed); }
+bool ReplayStopsAfterTailZeroing() { return g_stop_replay_zeroing_after_tail.load(std::memory_order_relaxed); }
 uint64_t ReplayZeroedBytesForTests() { return g_replay_zeroed_bytes.load(std::memory_order_relaxed); }
 void CountReplayZeroedBytes(uint64_t bytes) { g_replay_zeroed_bytes.fetch_add(bytes, std::memory_order_relaxed); }
 
-bool ZeroRingRange(int fd, uint64_t from_lsn, uint64_t to_lsn, uint64_t ring_bytes) {
+bool ZeroRingRange(int fd, uint64_t from_lsn, uint64_t to_lsn, uint64_t ring_bytes, int *errno_out) {
     // Heap-allocated and leaked on purpose: a function-local static vector would be destroyed by exit()'s
     // static destructors before the atexit hook has joined the writers / checkpointer (same bug class as
     // XStorePreadPool's ticket queue).
@@ -386,7 +400,10 @@ bool ZeroRingRange(int fd, uint64_t from_lsn, uint64_t to_lsn, uint64_t ring_byt
     for (uint64_t lsn = from_lsn; lsn < to_lsn;) {
         const uint64_t lap_left = ring_bytes - lsn % ring_bytes;
         const size_t n = static_cast<size_t>(std::min<uint64_t>({zeros->size(), to_lsn - lsn, lap_left}));
-        if (!PwriteAll(fd, zeros->data(), n, static_cast<off_t>(RingOffset(lsn, ring_bytes)))) return false;
+        if (!PwriteAll(fd, zeros->data(), n, static_cast<off_t>(RingOffset(lsn, ring_bytes)))) {
+            if (errno_out != nullptr) *errno_out = errno;   // PwriteAll returns straight after the failed pwrite
+            return false;
+        }
         lsn += n;
     }
     return true;

@@ -147,7 +147,9 @@ TEST_F(XStorePerfTest, UnaryInsertThroughput) {
 TEST_F(XStorePerfTest, UnaryInsertThroughput_Sync) {
     XStore store;
     CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
-    const unsigned long long n = PerfOpCount(200'000);
+    // Smaller default than the other tests: one fdatasync per call (~320 ops/s single-client) would make the usual
+    // 200k take ~10 minutes. XSTORE_PERF_N still overrides.
+    const unsigned long long n = PerfOpCount(5'000);
 
     XStore_Proto::UnaryInsert_REP rep;
     auto start = std::chrono::steady_clock::now();
@@ -179,6 +181,8 @@ TEST_F(XStorePerfTest, UnaryInsertThroughput_Async) {
 
     ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << "last insert failed: " << rep.insertstatus();
     ReportPerf({"UnaryInsert[ASYNC]", n, elapsed});
+    // Outside the timed region: the writer is still applying; do not let ScratchDir teardown race it.
+    WaitForWalDrained(store, "PERFDB", BASE_TS - 1);
 }
 
 TEST_F(XStorePerfTest, UnaryQueryThroughput) {
@@ -442,6 +446,7 @@ TEST_F(XStorePerfTest, BatchInsertThroughput) {
 
     EXPECT_NE(rep.insertstatus().find(fmt::format("Inserted {} elements", n)), std::string::npos) << rep.insertstatus();
     ReportPerf({"BatchInsert", n, elapsed});
+    WaitForWalDrained(store, "PERFDB", BASE_TS - 1);   // ASYNC times the enqueue only; see UnaryInsertThroughput_Async
 }
 
 // Same as BatchInsertThroughput but SYNC: the call returns only once every row is WAL-durable AND applied, so this
@@ -527,6 +532,7 @@ TEST_F(XStorePerfTest, RangeInsertThroughput) {
 
     EXPECT_NE(rep.insertstatus().find(fmt::format("Inserted {} elements", n)), std::string::npos) << rep.insertstatus();
     ReportPerf({"RangeInsert", n, elapsed});
+    WaitForWalDrained(store, "PERFDB", BASE_TS - 1);   // ASYNC times the enqueue only; see UnaryInsertThroughput_Async
 }
 
 // Same as RangeInsertThroughput but SYNC (see BatchInsertThroughput_Sync).
@@ -595,6 +601,7 @@ TEST_F(XStorePerfTest, MinAggregateThroughput) {
 
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("PERFDB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);   // setup only: rows must be applied before the timed scan (see BatchQueryThroughput)
     for (unsigned long long i = 0; i < n; i++) {
         XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
         entry->set_timestamp(BASE_TS + i);
@@ -620,6 +627,7 @@ TEST_F(XStorePerfTest, MaxAggregateThroughput) {
 
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("PERFDB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);   // setup only: rows must be applied before the timed scan (see BatchQueryThroughput)
     for (unsigned long long i = 0; i < n; i++) {
         XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
         entry->set_timestamp(BASE_TS + i);
@@ -645,6 +653,7 @@ TEST_F(XStorePerfTest, SumAggregateThroughput) {
 
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("PERFDB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);   // setup only: rows must be applied before the timed scan (see BatchQueryThroughput)
     for (unsigned long long i = 0; i < n; i++) {
         XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
         entry->set_timestamp(BASE_TS + i);
@@ -669,6 +678,7 @@ TEST_F(XStorePerfTest, AvgAggregateThroughput) {
 
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("PERFDB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);   // setup only: rows must be applied before the timed scan (see BatchQueryThroughput)
     for (unsigned long long i = 0; i < n; i++) {
         XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
         entry->set_timestamp(BASE_TS + i);

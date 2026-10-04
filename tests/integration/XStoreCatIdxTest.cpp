@@ -537,8 +537,9 @@ TEST_F(XStoreCatIdxTestFixture, FindByValueUsesBitmapDirectoryNotRealScanAfterCo
     // Bound CompactOneYearCatIdx's row scan to block 0 only -- same
     // resize_file trick as CompactionThenBackfillIntoUntouchedBlockDoesNot
     // CorruptBitmapSection above, avoids walking the full ~31.5M-row sparse
-    // SECOND-resolution year. GetOrMapFile/UnaryInsert grow the file back
-    // via ftruncate as needed once queries/writes touch rows past this.
+    // SECOND-resolution year. GetOrMapFile (queries) grows the file back
+    // via ftruncate and UnaryInsert's pwrite extends it as needed once they
+    // touch rows past this.
     std::string xstore_path = DbPath("FINDBYVALUEBITMAP") + "/" + std::to_string(year) + ".XSTORE";
     std::error_code resize_ec;
     std::filesystem::resize_file(xstore_path, rows_per_block * kRowLength, resize_ec);

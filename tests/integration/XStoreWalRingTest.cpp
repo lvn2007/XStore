@@ -9,7 +9,6 @@
 #include "include/XStore/XStore_WalCheckpoint.h"
 #include "include/DataStructs/TimeStruct.h"
 #include <spdlog/fmt/fmt.h>
-#include <spdlog/sinks/ostream_sink.h>
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <atomic>
@@ -239,6 +238,7 @@ protected:
         walring::FailNextWalZeroRangeSyncsForTests(0);
         walring::FailNextHeaderWritesForTests(0);
         walring::FailNextHeaderWritesStickyForTests(0);
+        walring::FailNextRingZeroWritesForTests(0, EIO);
         ClearRegistries();
         scratch.reset();
     }
@@ -1117,6 +1117,29 @@ TEST_F(WalCheckpointTest, ZeroRangeSyncRealErrorPoisons) {
     EXPECT_TRUE(Ckpt().Poisoned());
 }
 
+// Task 7d: the zeroing WRITE (not just its fdatasync) after a failed append is classified: a real errno from
+// the device poisons like the writer's own pwritev errors; a transient one (EINTR/EAGAIN) does not.
+TEST_F(WalCheckpointTest, ZeroRangeWriteRealErrorPoisons) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    ASSERT_TRUE(InsertSync(store, 0));
+    walring::FailNextWalSyncsForTests(1);               // retryable: alone it would not poison
+    walring::FailNextRingZeroWritesForTests(1, EIO);
+    EXPECT_FALSE(InsertSync(store, 1));
+    EXPECT_TRUE(Ckpt().Poisoned());
+}
+
+TEST_F(WalCheckpointTest, ZeroRangeWriteTransientErrorDoesNotPoison) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    ASSERT_TRUE(InsertSync(store, 0));
+    walring::FailNextWalSyncsForTests(1);
+    walring::FailNextRingZeroWritesForTests(1, EINTR);
+    EXPECT_FALSE(InsertSync(store, 1));
+    EXPECT_FALSE(Ckpt().Poisoned());
+    EXPECT_TRUE(InsertSync(store, 2));
+}
+
 // M8: a fenced shard says it is fenced (once per minute per path), not "legacy WAL never replayed?".
 TEST_F(WalCheckpointTest, FencedShardLogsFenceNotLegacyInit) {
     XStore store;
@@ -1127,24 +1150,21 @@ TEST_F(WalCheckpointTest, FencedShardLogsFenceNotLegacyInit) {
     const std::string wal_path = ring->path();
     ring.reset();
 
-    std::ostringstream captured;
-    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(captured);
-    auto previous = spdlog::default_logger();
-    spdlog::set_default_logger(std::make_shared<spdlog::logger>("capture", sink));
+    xstore_test::kLogCapture->Clear();
     walring::FenceWalFile(wal_path);
     const bool first = InsertSync(store, 1);
     const bool second = InsertSync(store, 2);
-    spdlog::default_logger()->flush();
-    spdlog::set_default_logger(previous);
 
     EXPECT_FALSE(first);
     EXPECT_FALSE(second);
-    const std::string log = captured.str();
-    EXPECT_EQ(log.find("legacy WAL never replayed"), std::string::npos) << log;
+    const std::string joined = [] {
+        std::string all;
+        for (const std::string &line : xstore_test::kLogCapture->Lines()) all += line;
+        return all;
+    }();
+    EXPECT_FALSE(xstore_test::kLogCapture->Contains("legacy WAL never replayed")) << joined;
     const std::string needle = "WAL file " + wal_path + " is fenced (failed replay); inserts to this shard fail until restart";
-    const size_t at = log.find(needle);
-    ASSERT_NE(at, std::string::npos) << log;
-    EXPECT_EQ(log.find(needle, at + 1), std::string::npos) << "at most once per path per minute";
+    EXPECT_EQ(xstore_test::kLogCapture->Count(needle), 1u) << "exactly once per path per minute\n" << joined;
 }
 
 // M9: sync_file_range consumes ANY writeback error, so every errno poisons except the retried EINTR/EAGAIN and
@@ -1431,32 +1451,39 @@ TEST_F(WalCheckpointTest, ShutdownMarksCleanEvenForFilesSyncedInEarlierCycles) {
     }
 }
 
-// A filesystem that cannot fsync directories (EINVAL ...) is not a writeback error.
+// A filesystem that cannot fsync directories (EINVAL, ENOTSUP, EOPNOTSUPP, EROFS) is not a writeback error.
+// (ENOTSUP == EOPNOTSUPP on Linux; both are listed because the allowlist names both.)
 TEST_F(WalCheckpointTest, DirectoryFsyncUnsupportedDoesNotPoison) {
     XStore store;
     xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
-    Ckpt().SimulateDirSyncErrnoForTests(EINVAL);
     const uint64_t warnings = Ckpt().DirSyncUnsupportedWarningsForTests();
     const uint64_t dir_syncs = Ckpt().DirSyncsForTests();
 
-    for (uint64_t i = 0; i < 3; ++i) ASSERT_TRUE(InsertSync(store, i));
-    auto ring = BusyRing();
-    ASSERT_NE(ring, nullptr);
-    ASSERT_TRUE(Ckpt().RunCycle()) << "an unsupported directory fsync must not fail the cycle";
-    EXPECT_FALSE(Ckpt().Poisoned());
-    EXPECT_EQ(ring->CheckpointLsn(), ring->HeadLsn());
+    uint64_t next = 0;
+    uint64_t rearmed = 0;
+    auto ring = std::shared_ptr<walring::Ring>();
+    for (const int err : {EINVAL, ENOTSUP, EOPNOTSUPP, EROFS}) {
+        SCOPED_TRACE(testing::Message() << "errno " << err << " (" << std::strerror(err) << ")");
+        Ckpt().SimulateDirSyncErrnoForTests(err);   // re-arms the once-per-process warning
+        ++rearmed;
+        for (uint64_t i = 0; i < 3; ++i) ASSERT_TRUE(InsertSync(store, next++));
+        if (!ring) ring = BusyRing();
+        ASSERT_NE(ring, nullptr);
+        ASSERT_TRUE(Ckpt().RunCycle()) << "an unsupported directory fsync must not fail the cycle";
+        EXPECT_FALSE(Ckpt().Poisoned());
+        EXPECT_EQ(ring->CheckpointLsn(), ring->HeadLsn());
 
-    for (uint64_t i = 3; i < 6; ++i) ASSERT_TRUE(InsertSync(store, i));   // dirties the file again => a second dir sync attempt
-    ASSERT_TRUE(Ckpt().RunCycle());
-    EXPECT_FALSE(Ckpt().Poisoned());
-    EXPECT_EQ(ring->CheckpointLsn(), ring->HeadLsn());
-
-    EXPECT_EQ(Ckpt().DirSyncUnsupportedWarningsForTests(), warnings + 1) << "one warning per process, not per cycle";
+        for (uint64_t i = 0; i < 3; ++i) ASSERT_TRUE(InsertSync(store, next++));   // dirties the file again => a second dir sync attempt
+        ASSERT_TRUE(Ckpt().RunCycle());
+        EXPECT_FALSE(Ckpt().Poisoned());
+        EXPECT_EQ(ring->CheckpointLsn(), ring->HeadLsn());
+        EXPECT_EQ(Ckpt().DirSyncUnsupportedWarningsForTests(), warnings + rearmed) << "one warning per arming, not per cycle";
+    }
     EXPECT_EQ(Ckpt().DirSyncsForTests(), dir_syncs) << "no directory was actually made durable";
 
     // A genuine writeback error on the same path still poisons.
     Ckpt().SimulateDirSyncErrnoForTests(EIO);
-    for (uint64_t i = 6; i < 8; ++i) ASSERT_TRUE(InsertSync(store, i));
+    for (uint64_t i = 0; i < 2; ++i) ASSERT_TRUE(InsertSync(store, next++));
     EXPECT_FALSE(Ckpt().RunCycle());
     EXPECT_TRUE(Ckpt().Poisoned());
 }
@@ -1547,6 +1574,7 @@ protected:
     void TearDown() override {
         walring::FailNextReplayReadsForTests(0);
         walring::FailNextReplayZeroingsForTests(0);
+        walring::StopReplayZeroingAfterTailForTests(false);
         WalCheckpointTest::TearDown();
     }
 };
@@ -1758,6 +1786,34 @@ TEST_F(WalReplayTest, RemoveDbCheckpointsFirstSoReplayCannotCorruptARecreatedDb)
         ASSERT_EQ(bytes[i], '\0') << "byte " << i << ": a removed DB's row was replayed into the re-created DB";
     }
     EXPECT_TRUE(RowPresent(3)) << "the new DB's own row survives";
+}
+
+// RemoveDBFiles checkpoints before unlinking too: otherwise a restart would replay the removed year file's
+// un-checkpointed records and silently resurrect it. (Re-creating a DB under another row length is not reachable here:
+// RemoveDBFiles refuses to delete the .CFG, so only RemoveDB can free the name.)
+TEST_F(WalReplayTest, RemoveDbFilesCheckpointsFirstSoReplayCannotResurrectTheFile) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    for (uint64_t i = 0; i < 10; ++i) ASSERT_TRUE(InsertAt(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    ASSERT_EQ(ring->CheckpointLsn(), 0u) << "precondition: the DB's records are not checkpointed";
+    ASSERT_TRUE(std::filesystem::exists(YearFile()));
+
+    XStore_Proto::RemoveDBFiles_REQ req;
+    req.set_dbname(db_name);
+    req.add_filename(std::filesystem::path(YearFile()).filename().string());
+    const auto rep = store.RemoveDBFiles(&req, db_name);
+    ASSERT_EQ(rep.removestatus_size(), 1);
+    EXPECT_NE(rep.removestatus(0).find("Removed"), std::string::npos) << rep.removestatus(0);
+    EXPECT_FALSE(std::filesystem::exists(YearFile()));
+    EXPECT_EQ(ring->CheckpointLsn(), ring->HeadLsn()) << "RemoveDBFiles must checkpoint before unlinking";
+    EXPECT_EQ(ring->CheckpointLsn(), ring->AppliedLsn());
+
+    ring.reset();
+    Crash();
+    store.InitDB();
+    EXPECT_FALSE(std::filesystem::exists(YearFile())) << "replay re-created the removed year file from un-checkpointed records";
 }
 
 // RemoveDB must not hang or throw when the checkpoint cannot be taken (poisoned checkpointer).
@@ -2092,6 +2148,82 @@ TEST_F(WalReplayTest, ReplayZeroesBytesPastTornRecordSoStaleSameLapRecordCannotR
     EXPECT_EQ(tail, std::string(tail.size(), '\0')) << "the intact N+1 record must be gone";
 
     // A same-size record lands where N was; the checkpoint passes it (that also covers the old N+1's slot start).
+    ASSERT_TRUE(InsertAt(store, 3));
+    auto live = BusyRing();
+    ASSERT_NE(live, nullptr);
+    EXPECT_EQ(live->HeadLsn(), heads[2]);
+    ASSERT_TRUE(Ckpt().RunCycle());
+    ASSERT_EQ(live->CheckpointLsn(), heads[2]);
+    live.reset();
+    Crash();
+    store.InitDB();
+    EXPECT_FALSE(RowPresent(2)) << "N+1 was never acknowledged: it must not come back";
+    EXPECT_TRUE(RowPresent(3)) << "A was acknowledged";
+}
+
+// Replay's corrupt-end zeroing is everything behind the record's first 4 bytes (sync), THEN the 4-byte length field
+// (sync). A crash between the two leaves N's length field intact but its LSN field already zero, so the next start
+// reads N as a clean end with everything behind it ALREADY zeroed: nothing stale can come back. The reverse order would
+// leave zeros at N's length (a clean end) with an intact stale N+1 behind them.
+TEST_F(WalReplayTest, CrashBetweenReplayZeroingSyncsStillZeroesOnTheNextStart) {
+    constexpr uint64_t kRing = 256 << 10;
+    walring::SetRingBytesForTests(kRing);
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    std::vector<uint64_t> heads{0};
+    std::shared_ptr<walring::Ring> ring;
+    for (uint64_t i = 0; i < 3; ++i) {            // r0 = N-1, r1 = N, r2 = N+1 (identical sizes)
+        ASSERT_TRUE(InsertAt(store, i));
+        if (!ring) ring = BusyRing();
+        ASSERT_NE(ring, nullptr);
+        heads.push_back(ring->HeadLsn());
+    }
+    ASSERT_EQ(heads[2] - heads[1], heads[3] - heads[2]);
+    const std::string wal_path = ring->path();
+    ring.reset();
+    ShrinkDataFile(5);
+    Crash();
+    {   // tear N (LSN field intact => a corrupt end of this lap); N+1 stays intact
+        const int fd = open(wal_path.c_str(), O_RDWR);
+        ASSERT_GE(fd, 0);
+        char b;
+        const off_t at = static_cast<off_t>(walring::RingOffset(heads[1] + 20, kRing));
+        ASSERT_EQ(pread(fd, &b, 1, at), 1);
+        b ^= 0x5A;
+        ASSERT_EQ(pwrite(fd, &b, 1, at), 1);
+        close(fd);
+    }
+    ZeroRows(0, 5);
+    const std::string length_field = ReadRingBytes(wal_path, heads[1], 4, kRing);
+    ASSERT_NE(length_field, std::string(4, '\0'));
+
+    // First start "crashes" right after the tail sync.
+    walring::StopReplayZeroingAfterTailForTests(true);
+    store.InitDB();
+    walring::StopReplayZeroingAfterTailForTests(false);
+    EXPECT_EQ(ReadHeader(wal_path).checkpoint_lsn, 0u) << "the crash must leave the header alone";
+    EXPECT_EQ(ReadRingBytes(wal_path, heads[1], 4, kRing), length_field) << "N's length field must still be intact";
+    const std::string stale = ReadRingBytes(wal_path, heads[2], heads[3] - heads[2], kRing);
+    EXPECT_EQ(stale, std::string(stale.size(), '\0')) << "the tail was zeroed before the (simulated) crash";
+    EXPECT_FALSE(InsertAt(store, 4)) << "the shard stays fenced until the next start";
+
+    // N's LSN field (bytes [8,16)) was zeroed with the tail, so only its length field remains.
+    EXPECT_EQ(ReadRingBytes(wal_path, heads[1] + 8, 8, kRing), std::string(8, '\0'));
+
+    // Second start: a clean end now (LSN field gone) with everything behind it already zero: applies only the
+    // records before N, checkpoints there, and has nothing left to zero.
+    ZeroRows(0, 5);
+    const uint64_t zeroed_before = walring::ReplayZeroedBytesForTests();
+    store.InitDB();
+    EXPECT_TRUE(RowPresent(0));
+    EXPECT_FALSE(RowPresent(1));
+    EXPECT_FALSE(RowPresent(2));
+    EXPECT_EQ(ReadHeader(wal_path).checkpoint_lsn, heads[1]);
+    EXPECT_EQ(walring::ReplayZeroedBytesForTests(), zeroed_before) << "nothing left to zero: a clean end";
+    const std::string tail_after = ReadRingBytes(wal_path, heads[1] + 4, kRing - heads[1] - 4, kRing);
+    EXPECT_EQ(tail_after, std::string(tail_after.size(), '\0')) << "everything behind N's length field stays zero";
+
+    // A same-size record lands where N was; N+1 must not come back after a power loss.
     ASSERT_TRUE(InsertAt(store, 3));
     auto live = BusyRing();
     ASSERT_NE(live, nullptr);

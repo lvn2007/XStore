@@ -158,6 +158,10 @@ int InjectedWalWriteErrno();
 // failed fdatasync (EIO): the checkpointer is poisoned. n = 0 clears.
 void FailNextWalZeroRangeSyncsForTests(int n);
 bool ConsumeInjectedWalZeroRangeSyncFailure();
+// The next n zeroing WRITES by the writer after a failed append (not replay's) fail with errno `err` (n = 0
+// clears); a real one (anything but EINTR/EAGAIN) poisons the checkpointer like the writer's own pwritev errors.
+void FailNextRingZeroWritesForTests(int n, int err);
+bool ConsumeInjectedRingZeroWriteFailure(int &err);
 // True (and counts the hook down) if this writer sync should be treated as failed.
 bool ConsumeInjectedWalSyncFailure();
 // Failure path only (never on the success path): was the injected failure just consumed a sticky one?
@@ -220,8 +224,8 @@ bool AnyFenced();
 [[nodiscard]] bool IsFenced(const std::string &wal_path);
 
 // Overwrites the ring bytes for LSNs [from_lsn, to_lsn) with zeros (wrap-aware, 1 MiB
-// writes). Does NOT sync; the caller fdatasyncs. false = a pwrite failed.
-[[nodiscard]] bool ZeroRingRange(int fd, uint64_t from_lsn, uint64_t to_lsn, uint64_t ring_bytes);
+// writes). Does NOT sync; the caller fdatasyncs. false = a pwrite failed; *errno_out (if given) is its errno.
+[[nodiscard]] bool ZeroRingRange(int fd, uint64_t from_lsn, uint64_t to_lsn, uint64_t ring_bytes, int *errno_out = nullptr);
 // Total bytes ZeroRingRange has written by replay (not by the writer), for tests.
 uint64_t ReplayZeroedBytesForTests();
 // The next n replay ring reads / replay zeroing steps fail (n = 0 clears): lets tests reach the
@@ -230,6 +234,10 @@ void FailNextReplayReadsForTests(int n);
 bool ConsumeInjectedReplayReadFailure();
 void FailNextReplayZeroingsForTests(int n);
 bool ConsumeInjectedReplayZeroingFailure();
+// While set, replay's corrupt-end zeroing returns as if the process crashed right after the first
+// (tail) zeroing sync: the record's length field is still intact, the shard is fenced, the header unchanged.
+void StopReplayZeroingAfterTailForTests(bool stop);
+bool ReplayStopsAfterTailZeroing();
 void CountReplayZeroedBytes(uint64_t bytes);
 
 // Dirty-range tracking at the data-write choke point (XStore::ApplyWalRecord).

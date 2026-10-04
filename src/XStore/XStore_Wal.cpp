@@ -1175,10 +1175,11 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                         const uint64_t pad_lsn = file.start - file.pad;
                         pad_buf.resize(file.pad);
                         walring::BuildPad(pad_buf.data(), file.pad, pad_lsn);
-                        file_write_ok = pwrite(fd, pad_buf.data(), file.pad,
-                                               static_cast<off_t>(walring::RingOffset(pad_lsn, ring.ring_bytes())))
-                                        == static_cast<ssize_t>(file.pad);
-                        if (!file_write_ok) write_errno = errno != 0 ? errno : EIO;
+                        const ssize_t pad_written = pwrite(fd, pad_buf.data(), file.pad,
+                                                           static_cast<off_t>(walring::RingOffset(pad_lsn, ring.ring_bytes())));
+                        file_write_ok = pad_written == static_cast<ssize_t>(file.pad);
+                        // errno only on a failed call (a short write leaves it stale), captured before anything else runs.
+                        if (!file_write_ok) write_errno = pad_written < 0 ? errno : EIO;
                     }
 
                     // Chunk this file's iovecs into groups of at most
@@ -1236,7 +1237,14 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                         // shorter record at the same head would leave this record's tail beyond it,
                         // with LSNs that still match: an unacknowledged record that replay could apply
                         // after a later crash. Best effort: overwrite the range with zeros.
-                        const bool zeroed = walring::ZeroRingRange(fd, file.start - file.pad, file.start + file.total, ring.ring_bytes());
+                        int zero_write_errno = 0;
+                        const bool zeroed = !walring::ConsumeInjectedRingZeroWriteFailure(zero_write_errno) &&
+                                            walring::ZeroRingRange(fd, file.start - file.pad, file.start + file.total,
+                                                                   ring.ring_bytes(), &zero_write_errno);
+                        // A real pwrite failure here is a device write error on the WAL file, same as the writer's own.
+                        if (!zeroed && IsRealWalIoError(zero_write_errno)) {
+                            walring::Checkpointer::Instance().ReportRealError("WAL ring zero-range pwrite", ring.path(), zero_write_errno);
+                        }
                         bool zero_synced = false;
                         if (zeroed) {
                             zero_synced = fdatasync(fd) == 0;
