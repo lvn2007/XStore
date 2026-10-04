@@ -2,6 +2,7 @@
 #define XSTORE_TEST_SUPPORT_H
 
 #include <atomic>
+#include <cstdlib>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -27,7 +28,17 @@ namespace fs = std::filesystem;
 // XStoreGracefulShutdownTest is a separate process and keeps the production size.
 inline constexpr uint64_t kTestDefaultRingBytes = 8u << 20;
 // C++17 inline variable: initialized once per process, in every TU that includes this header.
-inline const bool kTestDefaultRingInstalled = (walring::SetDefaultRingBytesForTests(kTestDefaultRingBytes), true);
+// XSTORE_TEST_RING_BYTES (decimal bytes) overrides the 8 MiB test default -- the perf gate sets it to the
+// production 64 MiB so benchmarks do not run against an undersized ring that checkpoints constantly.
+inline uint64_t TestDefaultRingBytes() {
+    if (const char *v = std::getenv("XSTORE_TEST_RING_BYTES"); v != nullptr && *v >= '0' && *v <= '9') {
+        char *end = nullptr;
+        const unsigned long long parsed = std::strtoull(v, &end, 10);
+        if (end != v && *end == '\0' && parsed >= (1u << 20)) return static_cast<uint64_t>(parsed);
+    }
+    return kTestDefaultRingBytes;
+}
+inline const bool kTestDefaultRingInstalled = (walring::SetDefaultRingBytesForTests(TestDefaultRingBytes()), true);
 
 // RAII: the background checkpointer takes no action while one of these is alive,
 // for tests that inspect or hand-drive ring heads/checkpoints. (RunCycle() still
