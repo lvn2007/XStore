@@ -1130,6 +1130,47 @@ void XStore::ReplayRingShard(const std::string &wal_path, size_t shard_idx, int 
     }
     const uint64_t end_lsn = lsn;
 
+    // Scan-ahead (closes the "all-zero hole / lost LSN sector in front of an intact N+1" case): a clean end can hide a
+    // torn record whose bytes were lost, with an intact later record of THIS lap behind it (sectors persisted out of
+    // order). Such a record is CRC-valid and its LSN equals its own position, which no leftover of an older lap can be,
+    // and it cannot have been acknowledged (an ack needs an fdatasync covering everything before it). If one exists the
+    // log end is treated as a corrupt end, so everything after it is zeroed below. Byte-granular: ~one pass over the
+    // ring (~0.1 s per 64 MiB shard, page cache) on every start that stops cleanly.
+    if (!corrupt_end && !read_error && !apply_failed) {
+        const uint64_t limit = start_lsn + ring_bytes;
+        for (uint64_t p = end_lsn + 1; p < limit && !corrupt_end;) {
+            const uint64_t rem = ring_bytes - p % ring_bytes;
+            if (rem < walring::RECORD_FIXED_BYTES) { p += rem; continue; }
+            lsn = p;
+            if (!fill(walring::RECORD_FIXED_BYTES)) break;
+            const uint64_t win_end = window_lsn + buf.size();   // never crosses a ring end
+            uint64_t q = p;
+            for (; q + walring::RECORD_FIXED_BYTES <= win_end; ++q) {
+                uint64_t stored;
+                std::memcpy(&stored, buf.data() + (q - window_lsn) + 8, sizeof stored);
+                if (stored != q) continue;
+                uint32_t len;
+                std::memcpy(&len, buf.data() + (q - window_lsn), sizeof len);
+                const size_t needed = 4 + static_cast<size_t>(len);
+                ++q;   // resume after this candidate; the check below may move the window
+                if (len == 0 || len > XStoreTunables::WAL_REPLAY_MAX_RECORD_BYTES || needed < walring::RECORD_FIXED_BYTES ||
+                    needed > ring_bytes - (q - 1) % ring_bytes) break;
+                lsn = q - 1;
+                if (!fill(needed)) break;
+                size_t consumed = 0;
+                bool damaged = false;
+                if (ParseWalRecordV2(buf.data() + (lsn - window_lsn), needed, lsn, consumed, record, &damaged) == RingParse::kOk) {
+                    spdlog::warn("[WAL REPLAY] - Intact record at LSN {} lies beyond the end of the log at LSN {} in {}: a torn record "
+                                 "was lost in front of it; discarding everything after the end", lsn, end_lsn, wal_path);
+                    corrupt_end = true;
+                }
+                break;
+            }
+            p = std::max(p + 1, q);
+        }
+        lsn = end_lsn;
+    }
+
     if (read_error) {
         spdlog::error("[WAL REPLAY] - Read error in {}; leaving its checkpoint untouched (records replay again next start); "
                       "the shard is fenced until restart", wal_path);
