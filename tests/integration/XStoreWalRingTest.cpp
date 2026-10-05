@@ -3612,7 +3612,7 @@ TEST_F(WalCheckpointTest, WriterExceptionAfterCommitStillPublishesApplied) {
 }
 
 // M12: SYNC callers see a distinct, stable text when the ring stays full; other failures do not carry it.
-TEST_F(WalRingWriterTest, RingFullFailureIsReportedAsOverloadedToUnaryAndBatchCallers) {
+TEST_F(WalRingWriterTest, RingFullFailureIsReportedAsOverloadedToUnaryBatchAndRangeCallers) {
     constexpr uint16_t kRowLength = 4096;
     constexpr uint64_t kRing = 256 << 10;
     walring::SetRingBytesForTests(kRing);
@@ -3640,6 +3640,19 @@ TEST_F(WalRingWriterTest, RingFullFailureIsReportedAsOverloadedToUnaryAndBatchCa
         store.BatchInsert(&req, &rep);
         return rep.insertstatus();
     };
+    const auto range = [&](uint64_t first) {
+        XStore_Proto::RangeInsert_REQ req;
+        req.set_dbname(db_name);
+        req.set_durabilitymode(XStore_Proto::SYNC);
+        for (uint64_t i = 0; i < 2; ++i) {
+            XStore_Proto::RangeInsert_DATA *entry = req.add_rangeinsert_data();
+            entry->set_timestamp(kBaseEpoch + first + i);
+            entry->mutable_data()->add_fielddata()->set_doubledata(1.0);
+        }
+        XStore_Proto::RangeInsert_REP rep;
+        store.RangeInsert(&req, &rep);
+        return rep.insertstatus();
+    };
     const auto is_error = [](const std::string &status) { return status.rfind("[ERROR]", 0) == 0; };
 
     // Fill the ring (checkpointer paused by the fixture) until the first stall failure.
@@ -3655,6 +3668,11 @@ TEST_F(WalRingWriterTest, RingFullFailureIsReportedAsOverloadedToUnaryAndBatchCa
     EXPECT_TRUE(overloaded(batch_status)) << batch_status;
     EXPECT_NE(batch_status.find("[BATCH INSERT]"), std::string::npos) << batch_status;
 
+    const std::string range_status = range(2500);
+    EXPECT_TRUE(is_error(range_status)) << range_status;
+    EXPECT_TRUE(overloaded(range_status)) << range_status;
+    EXPECT_NE(range_status.find("[RANGE INSERT]"), std::string::npos) << range_status;
+
     // Free the ring: a failure that is NOT overload must not carry the text (and the pooled completion's flag was reset).
     auto ring = BusyRing();
     ASSERT_NE(ring, nullptr);
@@ -3667,6 +3685,10 @@ TEST_F(WalRingWriterTest, RingFullFailureIsReportedAsOverloadedToUnaryAndBatchCa
     const std::string batch_sync_fail = batch(4000);
     EXPECT_TRUE(is_error(batch_sync_fail)) << batch_sync_fail;
     EXPECT_FALSE(overloaded(batch_sync_fail)) << batch_sync_fail;
+    walring::FailNextWalSyncsForTests(1);
+    const std::string range_sync_fail = range(4500);
+    EXPECT_TRUE(is_error(range_sync_fail)) << range_sync_fail;
+    EXPECT_FALSE(overloaded(range_sync_fail)) << range_sync_fail;
     EXPECT_FALSE(is_error(unary(5000))) << "recovered";
 }
 
