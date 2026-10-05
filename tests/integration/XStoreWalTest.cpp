@@ -124,6 +124,8 @@ TEST_F(XStoreWalTest, AsyncEventuallyApplies) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     EXPECT_TRUE(became_visible);
+    // Row visible != writer finished (zone map/catidx update follows); drain before TearDown.
+    xstore_test::WaitForWalDrained(store, "WALASYNC", 1700000000ULL);
 }
 
 // BYPASS applies straight to the data file on the calling thread, same
@@ -272,6 +274,8 @@ TEST_F(XStoreWalTest, BatchInsertDurabilityModesAllApplyCorrectly) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     EXPECT_TRUE(became_visible);
+    // Row visible != writer finished (zone map/catidx update follows); drain before TearDown.
+    xstore_test::WaitForWalDrained(store, "WALBATCHDUR", 1700600010ULL);
 }
 
 // A single BatchInsert call spanning multiple rows in one year-group must
@@ -367,6 +371,8 @@ TEST_F(XStoreWalTest, RangeInsertDurabilityModesAllApplyCorrectly) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     EXPECT_TRUE(became_visible);
+    // Row visible != writer finished (zone map/catidx update follows); drain before TearDown.
+    xstore_test::WaitForWalDrained(store, "WALRANGEDUR", 1700700010ULL);
 }
 
 // Crash-recovery replay: writes directly into a shard's WAL file the same

@@ -1393,6 +1393,7 @@ TEST_F(XStoreTest, BatchInsertWithWidelySeparatedTimestampsLocksFullSpanAgainstC
         for (int i = 0; i < k_iterations; i++) {
             XStore_Proto::BatchInsert_REQ req;
             req.set_dbname("TESTDB");
+            req.set_durabilitymode(XStore_Proto::SYNC);
             XStore_Proto::BatchInsert_DATA *e0 = req.add_batchinsert_data();
             e0->set_timestamp(near);
             *e0->mutable_data() = MakeRow({FInt64(1'000'000LL + i)});
@@ -1574,6 +1575,7 @@ TEST_F(XStoreTest, BatchQueryStreamedMatchesBatchQueryForDenseMultiColumnRows) {
     std::vector<unsigned long long> timestamps = {TS_2031_MID, TS_1998_MID, TS_2016_MID, TS_2009_MID, TS_2003_MID};
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     for (size_t i = 0; i < timestamps.size(); i++) {
         XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
         entry->set_timestamp(timestamps[i]);
@@ -1728,6 +1730,7 @@ TEST_F(XStoreTest, BatchQueryStreamedPreservesMissingYearWarningMessage) {
 
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
     for (unsigned long long ts : {TS_1998_MID, TS_2009_MID}) {
         XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
         entry->set_timestamp(ts);
