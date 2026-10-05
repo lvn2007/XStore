@@ -1135,7 +1135,7 @@ void XStore::ReplayRingShard(const std::string &wal_path, size_t shard_idx, int 
     // order). Such a record is CRC-valid and its LSN equals its own position, which no leftover of an older lap can be,
     // and it cannot have been acknowledged (an ack needs an fdatasync covering everything before it). If one exists the
     // log end is treated as a corrupt end, so everything after it is zeroed below. Byte-granular: ~one pass over the
-    // ring (~0.1 s per 64 MiB shard, page cache) on every start that stops cleanly.
+    // ring (measured ~0.2-0.4 s per 64 MiB shard, page cache) on every start that stops cleanly.
     if (!corrupt_end && !read_error && !apply_failed) {
         const uint64_t limit = start_lsn + ring_bytes;
         for (uint64_t p = end_lsn + 1; p < limit && !corrupt_end;) {

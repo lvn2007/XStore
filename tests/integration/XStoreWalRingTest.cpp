@@ -2216,6 +2216,56 @@ TEST_F(WalReplayTest, ReplayScanAheadZeroesIntactRecordBehindAnAllZeroHole) {
     EXPECT_TRUE(RowPresent(3)) << "A was acknowledged";
 }
 
+// Same as above, but N keeps its length and payload and only its LSN sector is lost.
+TEST_F(WalReplayTest, ReplayScanAheadZeroesIntactRecordBehindALostLsnSector) {
+    constexpr uint64_t kRing = 256 << 10;
+    walring::SetRingBytesForTests(kRing);
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    std::vector<uint64_t> heads{0};
+    std::shared_ptr<walring::Ring> ring;
+    for (uint64_t i = 0; i < 3; ++i) {            // r0 = N-1, r1 = N, r2 = N+1 (identical sizes)
+        ASSERT_TRUE(InsertAt(store, i));
+        if (!ring) ring = BusyRing();
+        ASSERT_NE(ring, nullptr);
+        heads.push_back(ring->HeadLsn());
+    }
+    ASSERT_EQ(heads[2] - heads[1], heads[3] - heads[2]);
+    const std::string wal_path = ring->path();
+    ring.reset();
+    ShrinkDataFile(5);
+    Crash();
+    {   // N's LSN field (bytes [8,16)) is lost, the rest of N stays: N now looks damaged with a non-matching LSN, i.e. a clean end
+        const int fd = open(wal_path.c_str(), O_RDWR);
+        ASSERT_GE(fd, 0);
+        const std::string zeros(8, '\0');
+        ASSERT_EQ(pwrite(fd, zeros.data(), zeros.size(), static_cast<off_t>(walring::RingOffset(heads[1] + 8, kRing))), 8);
+        close(fd);
+    }
+    ZeroRows(0, 5);
+    const uint64_t zeroed_before = walring::ReplayZeroedBytesForTests();
+    store.InitDB();
+    EXPECT_TRUE(RowPresent(0));
+    EXPECT_FALSE(RowPresent(1));
+    EXPECT_FALSE(RowPresent(2));
+    EXPECT_EQ(ReadHeader(wal_path).checkpoint_lsn, heads[1]);
+    EXPECT_GT(walring::ReplayZeroedBytesForTests(), zeroed_before) << "the scan-ahead must have found the stale N+1";
+    const std::string tail = ReadRingBytes(wal_path, heads[2], heads[3] - heads[2], kRing);
+    EXPECT_EQ(tail, std::string(tail.size(), '\0')) << "the intact N+1 record must be gone";
+
+    ASSERT_TRUE(InsertAt(store, 3));
+    auto live = BusyRing();
+    ASSERT_NE(live, nullptr);
+    EXPECT_EQ(live->HeadLsn(), heads[2]);
+    ASSERT_TRUE(Ckpt().RunCycle());
+    ASSERT_EQ(live->CheckpointLsn(), heads[2]);
+    live.reset();
+    Crash();
+    store.InitDB();
+    EXPECT_FALSE(RowPresent(2)) << "N+1 was never acknowledged: it must not come back";
+    EXPECT_TRUE(RowPresent(3)) << "A was acknowledged";
+}
+
 // Replay's corrupt-end zeroing is everything behind the record's first 4 bytes (sync), THEN the 4-byte length field
 // (sync). A crash between the two leaves N's length field intact but its LSN field already zero, so the next start
 // reads N as a clean end with everything behind it ALREADY zeroed: nothing stale can come back. The reverse order would
