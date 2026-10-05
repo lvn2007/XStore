@@ -441,6 +441,7 @@ void Checkpointer::Loop() {
     using Clock = std::chrono::steady_clock;
     constexpr auto TICK = std::chrono::milliseconds(1);
     constexpr auto RETRY_BACKOFF = std::chrono::milliseconds(50);
+    constexpr auto QUIET_TICK = std::chrono::milliseconds(10);   // 1 kHz idle polling cost ~2.4% of a core on an empty server
     Clock::time_point last_fail_log{}, last_fill_warn{};
     bool retry = false;           // a cycle failed: try again (after the back-off) whatever the triggers say
     bool back_to_back = false;    // fill >= CYCLE_FILL and the last cycle made progress: do not sleep
@@ -511,6 +512,8 @@ void Checkpointer::Loop() {
             }
         } else if (fill >= XStoreTunables::WAL_CKPT_SOFT_FILL) {
             static_cast<void>(PacedFlushStep());
+        } else if (!dirty && age_ms == 0) {
+            wait = QUIET_TICK;   // nothing unflushed or pending: a new write is noticed within QUIET_TICK (fill is far below the soft mark)
         }
     }
 }
