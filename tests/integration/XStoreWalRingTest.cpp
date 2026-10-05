@@ -3083,9 +3083,10 @@ TEST_F(WalDirectPathTest, RingPressureLowersTheThresholdEndToEnd) {
 // returned) and loses the rest of the page cache. Process death alone (what WalSimulateRestartForTests does) keeps
 // the whole page cache, so on its own it cannot expose a missing data fdatasync. This fixture adds the loss:
 //   * images_[file] = the first ImageBytes() bytes of a data file "as of the last moment the SYSTEM guaranteed them
-//     durable". It is refreshed at exactly two kinds of moment:
+//     durable". It is refreshed at exactly three kinds of moment:
 //       (a) right after a successful Checkpointer::RunCycle() (the cycle fdatasyncs every dirty data file BEFORE it
-//           advances any checkpoint), for every tracked file; and
+//           advances any checkpoint), for the files it reports in LastCycleSyncedPaths() only (a file it did not sync
+//           keeps its older image); and
 //       (b) right after an acknowledged DIRECT-path write returned (it fdatasyncs the file before the ack), for that
 //           file only. The ring-clear ordering rule guarantees the file had no pending ring record then, so its whole
 //           content is durable (fdatasync flushes the whole file, not just the new range).
@@ -3138,6 +3139,39 @@ protected:
     }
     void Snapshot(const std::string &path) { images_[path] = ReadPrefix(path); }
     void SnapshotAll() { for (const auto &f : files_) Snapshot(f); }
+    // (a): run a cycle and image exactly the files it fdatasynced (a cycle that synced nothing refreshes nothing).
+    void CycleAndSnapshot() {
+        const uint64_t syncs0 = Ckpt().DataSyncsForTests();
+        ASSERT_TRUE(Ckpt().RunCycle());
+        const auto synced = Ckpt().LastCycleSyncedPaths();
+        EXPECT_EQ(Ckpt().DataSyncsForTests() > syncs0, !synced.empty()) << "sync counter and synced-path list must agree";
+        for (const auto &f : files_) {
+            if (synced.count(f) != 0) Snapshot(f);
+        }
+    }
+    // Rows lost by LosePageCache() before replay: acked but absent/stale right now.
+    size_t CountUnreplayedLosses(XStore &store, const std::map<uint64_t, double> &acked) {
+        size_t lost = 0;
+        for (const auto &kv : acked) {
+            double v = 0;
+            if (!Lookup(store, db_name, kv.first, v) || v != kv.second) ++lost;
+        }
+        return lost;
+    }
+    // Aggregates over a contiguous acked run (zone maps are rebuilt after a crash, so this checks their content).
+    void VerifyAggregates(XStore &store, const std::map<uint64_t, double> &acked, const std::string &when) {
+        const uint64_t lo = acked.begin()->first, hi = acked.rbegin()->first;
+        ASSERT_EQ(acked.size(), hi - lo + 1) << "VerifyAggregates needs a contiguous run";
+        double sum = 0, mn = acked.begin()->second, mx = mn;
+        for (const auto &kv : acked) { sum += kv.second; mn = std::min(mn, kv.second); mx = std::max(mx, kv.second); }
+        XStore_Proto::Sum_REP sum_rep; XStore_Proto::Min_REP min_rep; XStore_Proto::Max_REP max_rep;
+        store.SumAggregate(lo, hi, db_name, 0, &sum_rep);
+        store.MinAggregate(lo, hi, db_name, 0, &min_rep);
+        store.MaxAggregate(lo, hi, db_name, 0, &max_rep);
+        EXPECT_NEAR(sum_rep.opresult(), sum, std::abs(sum) * 1e-9) << when << ": " << sum_rep.opstatus();
+        EXPECT_EQ(min_rep.opresult().doubledata(), mn) << when << ": " << min_rep.opstatus();
+        EXPECT_EQ(max_rep.opresult().doubledata(), mx) << when << ": " << max_rep.opstatus();
+    }
 
     void LosePageCache() {
         Crash();
@@ -3148,9 +3182,11 @@ protected:
             const auto it = images_.find(f);
             const std::string zeros(it == images_.end() ? ImageBytes() : 0, '\0');
             const std::string &img = it == images_.end() ? zeros : it->second;
-            ASSERT_EQ(ftruncate(fd, static_cast<off_t>(ImageBytes())), 0);
-            ASSERT_EQ(pwrite(fd, img.data(), img.size(), 0), static_cast<ssize_t>(img.size()));
+            const int trunc_rc = ftruncate(fd, static_cast<off_t>(ImageBytes()));
+            const ssize_t written = trunc_rc == 0 ? pwrite(fd, img.data(), img.size(), 0) : -1;
             close(fd);
+            ASSERT_EQ(trunc_rc, 0);
+            ASSERT_EQ(written, static_cast<ssize_t>(img.size()));
         }
     }
     void Recover(XStore &store) {
@@ -3208,10 +3244,9 @@ protected:
         for (int round = 1; round <= 5; ++round) {
             put_batch(round, 200);
             ASSERT_FALSE(HasFailure());
-            const uint64_t syncs0 = Ckpt().DataSyncsForTests();
-            ASSERT_TRUE(Ckpt().RunCycle());
-            ASSERT_GT(Ckpt().DataSyncsForTests(), syncs0) << "the cycle must have fdatasynced the dirty year file";
-            SnapshotAll();                        // (a) durable image
+            CycleAndSnapshot();                   // (a) durable image
+            ASSERT_FALSE(HasFailure());
+            ASSERT_EQ(Ckpt().LastCycleSyncedPaths().count(YearFile()), 1u) << "the cycle must have fdatasynced the dirty year file";
             put_batch(round, 200);                // acked, but only in the WAL + page cache
             ASSERT_FALSE(HasFailure());
             LosePageCache();
@@ -3219,6 +3254,7 @@ protected:
             ASSERT_TRUE(RowPresent(next - 201)) << "...while the checkpointed batch is in the durable image";
             Recover(store);
             VerifyAll(store, acked, "after round " + std::to_string(round));
+            VerifyAggregates(store, acked, "after round " + std::to_string(round));
             if (HasFailure()) return;
         }
         if (ring_bytes < (1u << 20)) {
@@ -3277,12 +3313,15 @@ TEST_F(WalCrashSimTest, RepeatedOverwritesOfOneRowKeepTheNewestValueAfterLostPag
         last = 100.0 + k;
         ASSERT_TRUE(Put(store, kT, last)) << k;
         if (k % 10 == 0 && k < 50) {   // durable images hold 110, 120, 130, 140; 141..150 exist only in the WAL
-            ASSERT_TRUE(Ckpt().RunCycle());
-            SnapshotAll();
+            CycleAndSnapshot();
+            ASSERT_FALSE(HasFailure());
         }
     }
-    PowerLoss(store);
+    LosePageCache();
     double v = 0;
+    ASSERT_TRUE(Lookup(store, db_name, kT, v));
+    EXPECT_EQ(v, 140.0) << "the model must bite: before replay only the last durable image (140) is on disk";
+    Recover(store);
     ASSERT_TRUE(Lookup(store, db_name, kT, v));
     EXPECT_EQ(v, last) << "replay of records 141..150 in log order must leave the LAST acked value";
 }
@@ -3295,7 +3334,7 @@ TEST_F(WalCrashSimTest, CrashStormNeverLosesAnAckedRow) {
     std::mt19937_64 rng(0xC0FFEE);
     std::map<uint64_t, double> acked;
     double counter = 1.0;
-    size_t direct_batches = 0, ring_batches = 0, cycles = 0, small = 0;
+    size_t direct_batches = 0, ring_batches = 0, cycles = 0, small = 0, lost_before_replay = 0;
     const auto epoch_of = [](bool y71, uint64_t idx) { return (y71 ? kYear1971Start : uint64_t{0}) + kEpoch0 + idx; };
     for (int round = 1; round <= 30; ++round) {
         const unsigned ops = 5 + static_cast<unsigned>(rng() % 20);
@@ -3309,8 +3348,8 @@ TEST_F(WalCrashSimTest, CrashStormNeverLosesAnAckedRow) {
                 acked[epoch_of(y71, idx)] = v;
                 ++small;
             } else if (dice < 83) {
-                ASSERT_TRUE(Ckpt().RunCycle());
-                SnapshotAll();
+                CycleAndSnapshot();
+                ASSERT_FALSE(HasFailure());
                 ++cycles;
             } else {
                 const uint64_t direct0 = DirectRecords();
@@ -3327,10 +3366,13 @@ TEST_F(WalCrashSimTest, CrashStormNeverLosesAnAckedRow) {
                 }
             }
         }
-        PowerLoss(store);
+        LosePageCache();
+        lost_before_replay += CountUnreplayedLosses(store, acked);
+        Recover(store);
         VerifyAll(store, acked, "storm round " + std::to_string(round));
         if (HasFailure()) return;
     }
+    EXPECT_GT(lost_before_replay, 0u) << "the model must bite: some acked rows must be really gone before replay";
     EXPECT_GT(direct_batches, 0u);
     EXPECT_GT(ring_batches, 0u);
     EXPECT_GT(cycles, 0u);
