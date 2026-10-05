@@ -428,6 +428,7 @@ The insert deficit shrinks as the run lengthens (−7.9 % at ~0.15 s runs → �
 | `WAL_STALL_FILL` | 0.90 | writers wait for checkpoint progress |
 | `WAL_STALL_TIMEOUT_MS` | 5000 | max stall before the batch fails "overloaded" |
 | `WAL_CKPT_MAX_AGE_MS` | 5000 | oldest unsynced dirty range that forces a cycle (env `XSTORE_CKPT_MAX_AGE_MS`) |
+| `WAL_RING_BYTES` | 64 MiB | size of newly created rings (env `XSTORE_WAL_RING_MB`, 8..4096; an existing ring keeps its header size). 128 MiB measured no faster (2026-10-05: Batch1M -5% within the run spread, UnaryAsync +1%, Concurrent8 +1%), so the default stays 64 |
 | `WAL_CKPT_IDLE_MS` | 50 | writer idle time that triggers a cycle (env `XSTORE_CKPT_IDLE_MS`) |
 | `WAL_FLUSH_CHUNK_BYTES` | 4 MiB | paced flush granularity |
 

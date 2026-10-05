@@ -3,6 +3,7 @@
 #include "include/XStore/XStore_PreadPool.h"
 #include "include/XStore/XStore_SysStats.h"
 #include "include/XStore/XStore_WalCheckpoint.h"
+#include "include/XStore/XStore_WalRing.h"
 #include "include/Networking/XStore_Curve.h"
 #include <argparse/argparse.hpp>
 #include <atomic>
@@ -223,6 +224,19 @@ int main(int argc, char *argv[]) {
     };
     apply_ms_knob("XSTORE_CKPT_IDLE_MS", &walring::Checkpointer::SetIdleMs, XStoreTunables::WAL_CKPT_IDLE_MS);
     apply_ms_knob("XSTORE_CKPT_MAX_AGE_MS", &walring::Checkpointer::SetMaxAgeMs, XStoreTunables::WAL_CKPT_MAX_AGE_MS);
+
+    // XSTORE_WAL_RING_MB: size of newly created WAL rings (digits only, 8..4096 MiB; else a WARNING and the
+    // 64 MiB tunable stays). Only rings created afterwards use it: an existing ring keeps the size in its header.
+    if (const char *v = std::getenv("XSTORE_WAL_RING_MB"); v != nullptr) {
+        unsigned mb = 0;
+        if (!walring::ParseMsKnob(v, mb) || mb < 8 || mb > 4096) {
+            spdlog::warn("[CONFIG] - Ignoring XSTORE_WAL_RING_MB=\"{}\": expected an integer 8..4096 (MiB); keeping the default ({} MiB)",
+                         v, XStoreTunables::WAL_RING_BYTES >> 20);
+        } else {
+            walring::SetDefaultRingBytesForTests(static_cast<uint64_t>(mb) << 20);   // the process-wide default, despite the name
+            spdlog::info("[CONFIG] - XSTORE_WAL_RING_MB = {} MiB for newly created rings", mb);
+        }
+    }
 
     // Bootstrap XStore instance: its constructor is what actually starts
     // StartWalWriters (via a process-wide once_flag) and runs InitDB for
