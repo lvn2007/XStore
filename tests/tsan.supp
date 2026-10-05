@@ -1,0 +1,4 @@
+# ThreadSanitizer suppressions for xstore_tests. Use: TSAN_OPTIONS="suppressions=tests/tsan.supp" setarch -R ./tests/xstore_tests
+# moodycamel::ConcurrentQueue (vendored; used by XStorePreadPool) synchronises with fences, which TSan does not model:
+# the 2026-10-05 TSan pass reported only these (free in add_block_to_free_list vs enqueue), none in XStore's own code.
+race:moodycamel::

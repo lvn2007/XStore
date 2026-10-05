@@ -96,8 +96,8 @@ endif()
 add_executable(xstore_keys_cli_tests integration/XStoreKeysCliTest.cpp)
 target_include_directories(xstore_keys_cli_tests PRIVATE ${CMAKE_SOURCE_DIR})
 # moodycamel: XStoreTestSupport.h (shared with the other suites) pulls in
-# XStore.h, which includes <blockingconcurrentqueue.h>.
-target_link_libraries(xstore_keys_cli_tests PRIVATE GTest::gtest_main xstore_curve moodycamel)
+# XStore.h, which includes <blockingconcurrentqueue.h> and the generated protobuf headers (xstore_core supplies their include path).
+target_link_libraries(xstore_keys_cli_tests PRIVATE GTest::gtest_main xstore_core xstore_curve moodycamel)
 target_compile_definitions(xstore_keys_cli_tests PRIVATE XSTORE_KEYS_BIN="$<TARGET_FILE:xstore-keys>")
 add_dependencies(xstore_keys_cli_tests xstore-keys)
 

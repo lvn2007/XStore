@@ -121,7 +121,9 @@ class XStorePerfTest : public ::testing::Test {
 TEST_F(XStorePerfTest, UnaryInsertThroughput) {
     XStore store;
     CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
-    const unsigned long long n = PerfOpCount(200'000);
+    // UnaryInsert's implicit durability default is SYNC (one fdatasync per call, ~330 ops/s single-client), so
+    // 200k would take ~10 minutes: same smaller default as UnaryInsertThroughput_Sync. XSTORE_PERF_N overrides.
+    const unsigned long long n = PerfOpCount(5'000);
 
     XStore_Proto::UnaryInsert_REP rep;
     auto start = std::chrono::steady_clock::now();
