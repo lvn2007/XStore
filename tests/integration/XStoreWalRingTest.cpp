@@ -12,6 +12,7 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <fcntl.h>
 #include <cstdio>
@@ -23,6 +24,7 @@
 #include <memory>
 #include <new>
 #include <random>
+#include <set>
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
@@ -3276,6 +3278,95 @@ protected:
         EXPECT_EQ(max_rep.opresult().doubledata(), mx) << when << ": " << max_rep.opstatus();
     }
 
+    // Ring headroom. The small rings of these tests must stay clear of WAL_CKPT_CYCLE_FILL, where the ring counts as
+    // under pressure (batches go direct, writers ask for checkpoints) and the model "acked rows live only in the WAL
+    // until replay" stops being what is under test. The tests sample the largest fill (head - checkpoint over
+    // ring_bytes) they reach and then require kMinFillHeadroom x that fill to still be below the pressure fill, so a
+    // larger record format fails here with the numbers instead of as a mysterious later assertion.
+    static constexpr double kMinFillHeadroom = 1.25;
+    double MaxFill() const {
+        double fill = 0;
+        for (const auto &ring : MyRings()) fill = std::max(fill, ring->Fill());
+        return fill;
+    }
+    void ExpectFillHeadroom(double max_fill, const std::string &test) const {
+        EXPECT_LE(max_fill * kMinFillHeadroom, XStoreTunables::WAL_CKPT_CYCLE_FILL)
+            << test << ": ring fill reached " << max_fill << " but the ring-pressure fill is " << XStoreTunables::WAL_CKPT_CYCLE_FILL
+            << " (need >= " << kMinFillHeadroom << "x headroom, have " << XStoreTunables::WAL_CKPT_CYCLE_FILL / max_fill
+            << "x): enlarge the test ring or write less between checkpoints";
+    }
+
+    // Rows of the {double, symbol} layout used by the symbol-index test: epoch -> (value, symbol).
+    using SymRows = std::map<uint64_t, std::pair<double, std::string>>;
+    bool PutSym(XStore &store, uint64_t epoch, double v, const std::string &sym) {
+        XStore_Proto::UnaryInsert_REP rep;
+        store.UnaryInsert(epoch, xstore_test::MakeRow({xstore_test::FDouble(v), xstore_test::FString(sym)}), db_name, &rep, XStore_Proto::SYNC);
+        return !Failed(rep.insertstatus());
+    }
+    // Runs `query(base, emit)` over the 1970 and the 1971 row span and merges the streamed replies (both reply types
+    // share the queryResponse shape).
+    template <typename Rep, typename Query>
+    SymRows CollectBothYears(Query &&query, const std::string &what) {
+        SymRows found;
+        for (const uint64_t base : {kEpoch0, kYear1971Start + kEpoch0}) {
+            std::string wire;
+            query(base, [&](std::string &&chunk, bool) { wire += chunk; });
+            Rep rep;
+            if (!rep.ParseFromString(wire) || rep.has_querystatus()) {
+                ADD_FAILURE() << what << ": unparsable reply or error status: " << rep.querystatus();
+                continue;
+            }
+            for (const auto &entry : rep.queryresponse()) {
+                if (entry.data().fielddata_size() != 2) { ADD_FAILURE() << what << ": epoch " << entry.timestamp() << " has " << entry.data().fielddata_size() << " columns"; continue; }
+                EXPECT_TRUE(found.emplace(entry.timestamp(), std::make_pair(entry.data().fielddata(0).doubledata(), entry.data().fielddata(1).stringdata())).second)
+                    << what << ": epoch " << entry.timestamp() << " returned twice";
+            }
+        }
+        return found;
+    }
+    // After recovery the categorical index (FindByValue, bloom rebuilt from the replayed data) and the pattern scan
+    // (FindByPattern) must return EXACTLY the acked rows holding each symbol: none missing, no phantom (an overwritten
+    // row's old symbol must not match any more), and nothing for symbols that were never written.
+    void VerifySymbolIndexes(XStore &store, const SymRows &acked, const std::string &when) {
+        std::set<std::string> symbols{"ZZZZ"};   // never written: must come back empty
+        for (const auto &kv : acked) symbols.insert(kv.second.second);
+        const auto expect_sym = [&](const std::string &sym, char prefix) {
+            SymRows want;
+            for (const auto &kv : acked) {
+                if (prefix != '\0' ? kv.second.second.front() == prefix : kv.second.second == sym) want.insert(kv);
+            }
+            return want;
+        };
+        constexpr size_t kChunk = XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES;
+        size_t total_by_value = 0;
+        for (const std::string &sym : symbols) {
+            const std::string what = when + " symbol " + sym;
+            const XStore_Proto::FData target = xstore_test::FString(sym);
+            const SymRows by_value = CollectBothYears<XStore_Proto::RangeQuery_REP>(
+                [&](uint64_t base, const auto &emit) { store.FindByValue(base, base + kSpanRows, db_name, 1, target, kChunk, emit); }, what + " FindByValue");
+            EXPECT_EQ(by_value, expect_sym(sym, '\0')) << what << ": FindByValue result differs from the acked rows";
+            total_by_value += by_value.size();
+
+            std::string lower = sym;
+            std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            const std::pair<std::string, bool> variants[] = {{sym, false}, {lower, true}};
+            for (const auto &[pattern, ci] : variants) {
+                const SymRows by_pattern = CollectBothYears<XStore_Proto::FindByPattern_REP>(
+                    [&](uint64_t base, const auto &emit) { store.FindByPattern(base, base + kSpanRows, db_name, 1, pattern, XStore_Proto::PATTERN_LIKE, ci, kChunk, emit); },
+                    what + " FindByPattern");
+                EXPECT_EQ(by_pattern, expect_sym(sym, '\0')) << what << ": FindByPattern(" << pattern << (ci ? ", case-insensitive" : "") << ") differs from the acked rows";
+            }
+        }
+        EXPECT_EQ(total_by_value, acked.size()) << when << ": the per-symbol FindByValue results must partition the acked rows";
+        for (const char prefix : {'A', 'M', 'Z'}) {   // a wildcard pattern: the union of every symbol starting with `prefix`
+            const std::string pattern = std::string(1, prefix) + "%";
+            const SymRows by_pattern = CollectBothYears<XStore_Proto::FindByPattern_REP>(
+                [&](uint64_t base, const auto &emit) { store.FindByPattern(base, base + kSpanRows, db_name, 1, pattern, XStore_Proto::PATTERN_LIKE, false, kChunk, emit); },
+                when + " FindByPattern " + pattern);
+            EXPECT_EQ(by_pattern, expect_sym("", prefix)) << when << ": FindByPattern(" << pattern << ") differs from the acked rows";
+        }
+    }
+
     void LosePageCache() {
         Crash();
         Ckpt().ClearPoisonForTests();   // a restart is a fresh process: no sticky sync error
@@ -3344,14 +3435,17 @@ protected:
                 acked[kEpoch0 + next] = v;
             }
         };
+        double max_fill = 0;
         for (int round = 1; round <= 5; ++round) {
             put_batch(round, 200);
             ASSERT_FALSE(HasFailure());
+            max_fill = std::max(max_fill, MaxFill());
             CycleAndSnapshot();                   // (a) durable image
             ASSERT_FALSE(HasFailure());
             ASSERT_EQ(Ckpt().LastCycleSyncedPaths().count(YearFile()), 1u) << "the cycle must have fdatasynced the dirty year file";
             put_batch(round, 200);                // acked, but only in the WAL + page cache
             ASSERT_FALSE(HasFailure());
+            max_fill = std::max(max_fill, MaxFill());
             LosePageCache();
             ASSERT_FALSE(RowPresent(next - 1)) << "the model must bite: the last acked row exists only in the WAL until replay";
             ASSERT_TRUE(RowPresent(next - 201)) << "...while the checkpointed batch is in the durable image";
@@ -3360,6 +3454,7 @@ protected:
             VerifyAggregates(store, acked, "after round " + std::to_string(round));
             if (HasFailure()) return;
         }
+        ExpectFillHeadroom(max_fill, "RunAckedRounds(" + std::to_string(ring_bytes) + ")");
         if (ring_bytes < (1u << 20)) {
             EXPECT_GT(TotalHead(), 2 * ring_bytes) << "the small ring must have wrapped during the rounds";
         }
@@ -3429,6 +3524,65 @@ TEST_F(WalCrashSimTest, RepeatedOverwritesOfOneRowKeepTheNewestValueAfterLostPag
     EXPECT_EQ(v, last) << "replay of records 141..150 in log order must leave the LAST acked value";
 }
 
+// Rows with a string column (the categorical .catidx and the pattern scan work on it): ring puts, a direct-path batch,
+// and overwrites that change a checkpointed row's symbol, each round ended by a power loss.
+TEST_F(WalCrashSimTest, SymbolIndexAndPatternSearchMatchAckedRowsAfterLostPageCache) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    files_ = {YearFile(), Year1971File()};
+    static const char *const kSymbols[] = {"AAPL", "MSFT", "GOOG", "AMZN", "META", "NVDA"};
+    const auto sym_of = [](uint64_t k) { return std::string(kSymbols[k % 6]); };
+    const auto epoch_of = [](uint64_t n) { return (n & 1 ? kYear1971Start : uint64_t{0}) + kEpoch0 + n / 2; };   // alternate the two years
+    SymRows acked;
+    double counter = 1.0;
+    uint64_t puts = 0;
+    for (int round = 1; round <= 3; ++round) {
+        const uint64_t first = puts;
+        const auto put_rows = [&](uint64_t n) {
+            for (uint64_t i = 0; i < n; ++i, ++puts) {
+                const double v = counter++;
+                ASSERT_TRUE(PutSym(store, epoch_of(puts), v, sym_of(puts + static_cast<uint64_t>(round)))) << "insert " << puts;
+                acked[epoch_of(puts)] = {v, sym_of(puts + static_cast<uint64_t>(round))};
+            }
+        };
+        put_rows(60);
+        ASSERT_FALSE(HasFailure());
+        CycleAndSnapshot();                     // the 60 rows are now in the durable images
+        ASSERT_FALSE(HasFailure());
+
+        XStore_Proto::BatchInsert_REQ req;      // direct path: fdatasynced before the ack, no ring record
+        req.set_dbname(db_name);
+        req.set_durabilitymode(XStore_Proto::SYNC);
+        const uint64_t batch_first = kYear1971Start + kEpoch0 + 1000 + static_cast<uint64_t>(round - 1) * kSmallBatchRows;
+        for (uint64_t i = 0; i < kSmallBatchRows; ++i) {
+            auto *entry = req.add_batchinsert_data();
+            entry->set_timestamp(batch_first + i);
+            *entry->mutable_data() = xstore_test::MakeRow({xstore_test::FDouble(counter), xstore_test::FString(sym_of(i + static_cast<uint64_t>(round)))});
+            acked[batch_first + i] = {counter++, sym_of(i + static_cast<uint64_t>(round))};
+        }
+        const uint64_t direct0 = DirectRecords();
+        XStore_Proto::BatchInsert_REP batch_rep;
+        store.BatchInsert(&req, &batch_rep);
+        ASSERT_FALSE(Failed(batch_rep.insertstatus())) << batch_rep.insertstatus();
+        ASSERT_EQ(DirectRecords(), direct0 + 1) << "must be the direct path";
+        Snapshot(Year1971File());               // (b)
+
+        for (uint64_t n = first; n < first + 10; ++n) {   // durable image holds the old symbol; only the WAL has the new one
+            const double v = counter++;
+            ASSERT_TRUE(PutSym(store, epoch_of(n), v, sym_of(n + static_cast<uint64_t>(round) + 1)));
+            acked[epoch_of(n)] = {v, sym_of(n + static_cast<uint64_t>(round) + 1)};
+        }
+        put_rows(60);
+        ASSERT_FALSE(HasFailure());
+
+        LosePageCache();
+        ASSERT_FALSE(RowPresent((puts - 2) / 2)) << "the model must bite: the last 1970 row exists only in the WAL until replay";
+        Recover(store);
+        VerifySymbolIndexes(store, acked, "after round " + std::to_string(round));
+        if (HasFailure()) return;
+    }
+}
+
 TEST_F(WalCrashSimTest, CrashStormNeverLosesAnAckedRow) {
     walring::SetRingBytesForTests(2u << 20);
     XStore store;
@@ -3438,10 +3592,12 @@ TEST_F(WalCrashSimTest, CrashStormNeverLosesAnAckedRow) {
     std::map<uint64_t, double> acked;
     double counter = 1.0;
     size_t direct_batches = 0, ring_batches = 0, cycles = 0, small = 0, lost_before_replay = 0;
+    double max_fill = 0;
     const auto epoch_of = [](bool y71, uint64_t idx) { return (y71 ? kYear1971Start : uint64_t{0}) + kEpoch0 + idx; };
     for (int round = 1; round <= 30; ++round) {
         const unsigned ops = 5 + static_cast<unsigned>(rng() % 20);
         for (unsigned op = 0; op < ops; ++op) {
+            max_fill = std::max(max_fill, MaxFill());   // before the op: a cycle op would reset it
             const unsigned dice = static_cast<unsigned>(rng() % 100);
             const bool y71 = rng() & 1;
             const uint64_t idx = rng() % (kSpanRows - kSmallBatchRows);
@@ -3469,12 +3625,14 @@ TEST_F(WalCrashSimTest, CrashStormNeverLosesAnAckedRow) {
                 }
             }
         }
+        max_fill = std::max(max_fill, MaxFill());
         LosePageCache();
         lost_before_replay += CountUnreplayedLosses(store, acked);
         Recover(store);
         VerifyAll(store, acked, "storm round " + std::to_string(round));
         if (HasFailure()) return;
     }
+    ExpectFillHeadroom(max_fill, "CrashStorm");
     EXPECT_GT(lost_before_replay, 0u) << "the model must bite: some acked rows must be really gone before replay";
     EXPECT_GT(direct_batches, 0u);
     EXPECT_GT(ring_batches, 0u);

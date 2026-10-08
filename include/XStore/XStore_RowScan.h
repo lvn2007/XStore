@@ -28,7 +28,15 @@ namespace rowscan {
 inline constexpr size_t CHUNK_BYTES = 1u << 20;
 }
 
-template <class Fn>
+namespace rowscan {
+// Seek policy: lets tests force the SEEK_DATA-unsupported branch; production
+// uses the default, which inlines to a bare lseek.
+struct SystemSeek {
+    static off_t Seek(int fd, off_t offset, int whence) { return lseek(fd, offset, whence); }
+};
+} // namespace rowscan
+
+template <class Seek = rowscan::SystemSeek, class Fn>
 [[nodiscard]] bool ForEachDataRow(int fd, uint64_t total_rows, uint16_t row_length, Fn &&fn) {
     if (total_rows == 0) return true;
     if (row_length == 0) return false;
@@ -40,7 +48,7 @@ template <class Fn>
 
     // Rows past EOF can never be read (the per-row loop reported each as a
     // short read); flag the scan incomplete instead of silently ending early.
-    const off_t file_size = lseek(fd, 0, SEEK_END);
+    const off_t file_size = Seek::Seek(fd, 0, SEEK_END);
     if (file_size < 0) return false;
     bool complete = static_cast<uint64_t>(file_size) >= total_bytes;
     uint64_t cursor = 0; // first row not yet visited
@@ -48,10 +56,10 @@ template <class Fn>
         const uint64_t search_from = cursor * row_len;
         uint64_t data_off = search_from;
         uint64_t hole_off = total_bytes;
-        const off_t data = lseek(fd, static_cast<off_t>(search_from), SEEK_DATA);
+        const off_t data = Seek::Seek(fd, static_cast<off_t>(search_from), SEEK_DATA);
         if (data >= 0) {
             data_off = static_cast<uint64_t>(data);
-            const off_t hole = lseek(fd, data, SEEK_HOLE);
+            const off_t hole = Seek::Seek(fd, data, SEEK_HOLE);
             if (hole >= 0) hole_off = std::min<uint64_t>(static_cast<uint64_t>(hole), total_bytes);
         } else if (errno == ENXIO) {
             break;

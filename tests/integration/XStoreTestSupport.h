@@ -209,7 +209,9 @@ public:
 // thread across up to WAL_SHARDS_PER_DB shards), so an ASYNC sentinel row enqueued last, from the same thread as the
 // records being drained, becoming visible proves everything that thread enqueued before it was applied (the ring's applied==head
 // alone cannot: a batch mid-write/fsync or a direct-path apply leaves the ring untouched). Then every ring must be
-// quiescent (AppliedLsn()==HeadLsn()), which also covers the post-apply index updates. `sentinel_epoch` must be a
+// quiescent (AppliedLsn()==HeadLsn()), which also covers the post-apply index updates; only the rings under
+// `store.data_store_dir` count (the shard rings live in <data_store_dir>/WAL, shared by every DB of that store), so a
+// stale ring of another test's scratch dir cannot hold this one up. `sentinel_epoch` must be a
 // timestamp of this DB the test does not otherwise rely on (one extra one-column row is written there). Fails the
 // test with a clear message on timeout.
 inline void WaitForWalDrained(XStore &store, std::string_view db_name, unsigned long long sentinel_epoch,
@@ -218,11 +220,13 @@ inline void WaitForWalDrained(XStore &store, std::string_view db_name, unsigned 
     XStore_Proto::UnaryInsert_REP insert_rep;
     store.UnaryInsert(sentinel_epoch, MakeRow({FDouble(0.0)}), db_name, &insert_rep, XStore_Proto::ASYNC);
     ASSERT_NE(insert_rep.insertstatus().find("[INFO]"), std::string::npos) << "WAL drain sentinel not enqueued: " << insert_rep.insertstatus();
+    const std::string ring_prefix = store.data_store_dir + "/";
     const auto drained = [&] {
         XStore_Proto::UnaryQuery_REP query_rep;
         store.UnaryQuery(sentinel_epoch, db_name, &query_rep);
         if (query_rep.data().fielddata_size() == 0) return false;
         for (const std::shared_ptr<walring::Ring> &ring : walring::AllRings()) {
+            if (ring->path().rfind(ring_prefix, 0) != 0) continue;
             if (ring->AppliedLsn() != ring->HeadLsn()) return false;
         }
         return true;

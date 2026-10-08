@@ -6,8 +6,8 @@
 
 // Zone-map secondary index: per-block min/max/sum/count summary statistics
 // for numeric columns, used to prune blocks a range/aggregate query cannot
-// possibly need. See docs/superpowers/plans/2026-09-14-zone-map-secondary-
-// index.md for the full design and its rejected alternatives.
+// possibly need. See docs/XStore_Technical_Reference.md section 4.14 for the
+// full design and its rejected alternatives.
 
 inline uint64_t RowsPerBlock(uint16_t row_length) {
     if (row_length == 0) return 1;

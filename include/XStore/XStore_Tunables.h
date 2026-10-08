@@ -291,8 +291,8 @@ inline constexpr size_t      WAL_REPLAY_READ_CHUNK_BYTES  = 1u * 1024 * 1024;
 inline constexpr size_t      WAL_QUEUE_HIGH_WATERMARK    = WAL_BATCH_MAX_RECORDS * 4;
 inline constexpr unsigned    WAL_BACKPRESSURE_POLL_US    = 200;
 
-// Zone-map secondary index (see docs/superpowers/plans/2026-09-14-zone-map-
-// secondary-index.md). Target BYTE size per block, not a fixed row count --
+// Zone-map secondary index (see docs/XStore_Technical_Reference.md section
+// 4.14). Target BYTE size per block, not a fixed row count --
 // XStore's fixed-width rowLength varies 10-100x across differently-shaped
 // DBs, so a constant row count (e.g. ClickHouse's index_granularity=8192)
 // would produce wildly different block byte sizes per DB. 2MB lands near a

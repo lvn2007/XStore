@@ -19,8 +19,9 @@ add_executable(xstore_tests
         integration/XStoreDurabilityTest.cpp
         integration/XStoreWalRingTest.cpp
         integration/XStoreRowScanTest.cpp
+        integration/XStoreDeleteFaultTest.cpp
 )
-target_link_libraries(xstore_tests PRIVATE GTest::gtest_main xstore_core)
+target_link_libraries(xstore_tests PRIVATE GTest::gtest_main xstore_core ${CMAKE_DL_LIBS})
 
 include(GoogleTest)
 # Single test trigger per target (S7): gtest_discover_tests registers every

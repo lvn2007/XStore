@@ -2,6 +2,7 @@
 #include "XStore/XStore_RowScan.h"
 #include "XStoreTestSupport.h"
 #include <algorithm>
+#include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -43,6 +44,21 @@ protected:
     }
     bool Scan(uint64_t total_rows, uint16_t row_length, Visit &v) {
         return ForEachDataRow(fd, total_rows, row_length, [&](uint64_t idx, const char *ptr) {
+            v.order.push_back(idx);
+            v.bytes[idx].assign(ptr, row_length);
+        });
+    }
+    bool ScanWithoutSeekData(uint64_t total_rows, uint16_t row_length, Visit &v) {
+        struct NoSeekData {
+            static off_t Seek(int fd, off_t offset, int whence) {
+                if (whence == SEEK_DATA) {
+                    errno = EINVAL;
+                    return -1;
+                }
+                return lseek(fd, offset, whence);
+            }
+        };
+        return ForEachDataRow<NoSeekData>(fd, total_rows, row_length, [&](uint64_t idx, const char *ptr) {
             v.order.push_back(idx);
             v.bytes[idx].assign(ptr, row_length);
         });
@@ -140,6 +156,53 @@ TEST_F(RowScanTest, RowsPastEndOfFileMakeScanIncomplete) {
     EXPECT_FALSE(Scan(6, kRowLength, v)) << "caller claimed 3 rows more than the file holds";
     EXPECT_EQ(v.bytes[0], std::string(kRowLength, 'a'));
     EXPECT_EQ(v.bytes[2], std::string(kRowLength, 'c'));
+}
+
+TEST_F(RowScanTest, SeekDataUnsupportedTreatsRestOfFileAsOneExtent) {
+    constexpr uint16_t kRowLength = 100;
+    constexpr uint64_t kRows = 30000; // three chunks, and the middle is a hole SEEK_DATA would skip
+    SizeTo(kRows, kRowLength);
+    WriteRow(0, kRowLength, 'a');
+    WriteRow(kRows - 1, kRowLength, 'z');
+
+    Visit v;
+    ASSERT_TRUE(ScanWithoutSeekData(kRows, kRowLength, v));
+    ASSERT_EQ(v.order.size(), kRows);
+    for (uint64_t r = 0; r < kRows; ++r) ASSERT_EQ(v.order[r], r);
+    EXPECT_EQ(v.bytes[0], std::string(kRowLength, 'a'));
+    EXPECT_EQ(v.bytes[kRows - 1], std::string(kRowLength, 'z'));
+    EXPECT_EQ(v.bytes[kRows / 2], std::string(kRowLength, '\0'));
+}
+
+TEST_F(RowScanTest, PartialRowInsideTotalRowsIsSkippedAndScanIncomplete) {
+    constexpr uint16_t kRowLength = 100;
+    ASSERT_EQ(ftruncate(fd, 5 * kRowLength + 37), 0);
+    for (uint64_t r = 0; r < 5; ++r) WriteRow(r, kRowLength, static_cast<char>('a' + r));
+    char tail = 'z';
+    ASSERT_EQ(pwrite(fd, &tail, 1, 5 * kRowLength), 1);
+
+    Visit v;
+    EXPECT_FALSE(Scan(6, kRowLength, v));
+    EXPECT_EQ(v.order, (std::vector<uint64_t>{0, 1, 2, 3, 4}));
+    for (uint64_t r = 0; r < 5; ++r) EXPECT_EQ(v.bytes[r], std::string(kRowLength, static_cast<char>('a' + r)));
+}
+
+TEST_F(RowScanTest, FileTruncatedMidChunkVisitsOnlyFullRowsAndReturnsFalse) {
+    constexpr uint16_t kRowLength = 100;
+    constexpr uint64_t kRows = 30000;
+    constexpr uint64_t kKeptRows = 5000; // inside the first 1 MiB chunk (10485 rows)
+    std::string all(kRows * kRowLength, '\0');
+    for (uint64_t r = 0; r < kRows; ++r) all[r * kRowLength] = static_cast<char>(1 + r % 100);
+    ASSERT_EQ(pwrite(fd, all.data(), all.size(), 0), static_cast<ssize_t>(all.size()));
+    ASSERT_EQ(ftruncate(fd, kKeptRows * kRowLength + 40), 0);
+
+    Visit v;
+    EXPECT_FALSE(Scan(kRows, kRowLength, v));
+    ASSERT_EQ(v.order.size(), kKeptRows);
+    for (uint64_t r = 0; r < kKeptRows; ++r) {
+        ASSERT_EQ(v.order[r], r);
+        ASSERT_EQ(v.bytes[r][0], static_cast<char>(1 + r % 100));
+    }
 }
 
 TEST_F(RowScanTest, BadFdReturnsFalse) {

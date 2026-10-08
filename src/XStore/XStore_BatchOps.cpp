@@ -434,6 +434,8 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
     XStore_Proto::BatchDelete_REP to_return;
     std::string db_name = proto_from_client->dbname();
     int delete_count = 0;
+    int failed_count = 0;
+    int first_errno = 0;
 
     // Ensure dbName string is all capitalized
     ToUpperCase(db_name.begin(), db_name.end());
@@ -553,8 +555,10 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
                 if (fallocate64(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfg_struct.rowlength()) == 0) {
                     punched_begin = std::min(punched_begin, offset);
                     punched_end = std::max(punched_end, offset + cfg_struct.rowlength());
+                    delete_count++;
+                } else {
+                    if (failed_count++ == 0) first_errno = errno;
                 }
-                delete_count++;
             }
             // The punches are a metadata change fdatasync must cover: mark the file so the next checkpoint cycle
             // (and the final one at a clean stop) syncs it. No ring record carries it.
@@ -562,6 +566,14 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
         }
     }
     std::string info_msg = fmt::format("[BATCH DELETE] [DB: {}] - Deleted {} items", db_name, delete_count);
+    if (failed_count > 0) {
+        // SetTaggedStatus overwrites the single status string, so the failure is folded into the one message.
+        std::string warn_msg = fmt::format("{}; {} item(s) could not be deleted (fallocate failed: {})", info_msg,
+                                           failed_count, strerror(first_errno));
+        SetTaggedStatus(to_return.mutable_deletestatus(), "[WARNING] ", warn_msg);
+        spdlog::warn(warn_msg);
+        return to_return;
+    }
     SetTaggedStatus(to_return.mutable_deletestatus(), "[INFO] ", info_msg);
     spdlog::info(info_msg);
     return to_return;

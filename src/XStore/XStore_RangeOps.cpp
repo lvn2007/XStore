@@ -304,6 +304,8 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(unsigned long long int start_e
     // Protobuf obj to be returned
     XStore_Proto::RangeDelete_REP to_return;
     int delete_count = 0;
+    unsigned long long int failed_count = 0;
+    int first_errno = 0;
 
     // Ensure dbName string is all capitalized
     const std::string &db_name = UpperCaseInto(db_name_view);
@@ -389,14 +391,25 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(unsigned long long int start_e
             if (fallocate64(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfg_struct.rowlength() * range_count) == 0) {
                 // The punch is a metadata change fdatasync must cover (see BatchDelete).
                 walring::Dirty().Note(nullptr, target_file_path, offset, offset + cfg_struct.rowlength() * range_count, 0);
+                delete_count += range_count;
+            } else {
+                if (failed_count == 0) first_errno = errno;
+                failed_count += range_count;
             }
-            delete_count += range_count;
         }
 
         iter_epoch = segment_end + 1;
     }
 
     std::string info_msg = fmt::format("[RANGE DELETE] [DB: {}] - Deleted {} items", db_name, delete_count);
+    if (failed_count > 0) {
+        // SetTaggedStatus overwrites the single status string, so the failure is folded into the one message.
+        std::string warn_msg = fmt::format("{}; {} item(s) could not be deleted (fallocate failed: {})", info_msg,
+                                           failed_count, strerror(first_errno));
+        SetTaggedStatus(to_return.mutable_deletestatus(), "[WARNING] ", warn_msg);
+        spdlog::warn(warn_msg);
+        return to_return;
+    }
     SetTaggedStatus(to_return.mutable_deletestatus(), "[INFO] ", info_msg);
     spdlog::info(info_msg);
     return to_return;

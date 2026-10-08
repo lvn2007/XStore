@@ -185,7 +185,7 @@ else()
 endif()
 
 # --- jemalloc (pinned to the 5.4.0 release; process allocator for the
-# server + perf tests only -- see docs/superpowers/plans/2026-09-27-jemalloc-integration.md) ---
+# server + perf tests only -- see docs/XStore_Technical_Reference.md section 4.17) ---
 option(XSTORE_USE_JEMALLOC "Link jemalloc (fetched, pinned 5.4.0) as the process allocator for the server and perf tests" ON)
 option(XSTORE_JEMALLOC_THP "jemalloc heap on transparent huge pages (thp:always): +23% BatchInsert / +45% RangeInsert, ~2x steady-state RSS" ON)
 

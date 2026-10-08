@@ -1,5 +1,4 @@
-// Durability A (docs/superpowers/plans/2026-09-28-durability-a-dirty-index-
-// rebuild.md), Task 1: header format + version bumps. Only the on-disk
+// Durability A (docs/XStore_Technical_Reference.md section 4.18), Task 1: header format + version bumps. Only the on-disk
 // layout and version numbers are asserted here -- the `dirty` flag's actual
 // set/clear/rebuild behavior arrives in later tasks (2-4), which extend this
 // file.

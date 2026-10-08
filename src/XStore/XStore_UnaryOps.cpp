@@ -265,6 +265,13 @@ XStore_Proto::UnaryDelete_REP XStore::UnaryDelete(unsigned long long int epoch_t
             // The punch is a metadata change fdatasync must cover: mark the file so the next checkpoint cycle
             // (and the final one at a clean stop) syncs it. No ring record carries it.
             walring::Dirty().Note(nullptr, target_file_path, offset, offset + cfg_struct.rowlength(), 0);
+        } else {
+            const int punch_errno = errno;
+            std::string err_msg = fmt::format("[UNARY DELETE] [DB: {}] - Unable to delete {} in {}.XSTORE (fallocate failed: {})",
+                                              db_name, epoch_time, curr_ts.year, strerror(punch_errno));
+            SetTaggedStatus(to_return.mutable_deletestatus(), "[ERROR] ", err_msg);
+            spdlog::error(err_msg);
+            return to_return;
         }
     }
 
