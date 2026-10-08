@@ -18,6 +18,7 @@ add_executable(xstore_tests
         integration/XStoreMemoryTest.cpp
         integration/XStoreDurabilityTest.cpp
         integration/XStoreWalRingTest.cpp
+        integration/XStoreRowScanTest.cpp
 )
 target_link_libraries(xstore_tests PRIVATE GTest::gtest_main xstore_core)
 

@@ -1,5 +1,6 @@
 #include "XStore/XStore_CatIdx.h"
 #include "include/XStore/XStore.h"
+#include "include/XStore/XStore_RowScan.h"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -533,14 +534,7 @@ void XStore::RebuildOneYearCatIdxBloom(const std::string &db_base_path, unsigned
     fstat(fd, &st);
     uint64_t total_rows = row_length > 0 ? static_cast<uint64_t>(st.st_size) / row_length : 0;
 
-    std::vector<char> row_buf(row_length);
-    bool scan_complete = true;
-    for (uint64_t r = 0; r < total_rows; ++r) {
-        ssize_t read_bytes = pread(fd, row_buf.data(), row_length, static_cast<off_t>(r) * row_length);
-        if (read_bytes != static_cast<ssize_t>(row_length)) {
-            scan_complete = false;
-            continue;
-        }
+    bool scan_complete = ForEachDataRow(fd, total_rows, row_length, [&](uint64_t r, const char *row_buf) {
         // Never-written sparse hole -- same fast skip RebuildOneYearZoneMap/
         // ProcessFileRangeAccumulate use. Load-bearing for performance here
         // specifically (unlike CompactOneYearCatIdx, which only ever runs
@@ -550,20 +544,20 @@ void XStore::RebuildOneYearCatIdxBloom(const std::string &db_base_path, unsigned
         // calls per row for the vast majority-sparse rows in a real year
         // file is what keeps a restart from stalling for minutes per stale
         // year.
-        if (row_buf[0] == 0) continue;
+        if (row_buf[0] == 0) return;
 
         std::vector<CatIdxObservation> observations;
         observations.reserve(tracked_column_count);
         for (uint32_t c = 0; c < tracked_column_count; ++c) {
             XStore_Proto::FData f_data;
-            if (ExtractColumnByIndexSkipParse(row_buf.data(), row_length, static_cast<unsigned short>(c), f_data)) {
+            if (ExtractColumnByIndexSkipParse(row_buf, row_length, static_cast<unsigned short>(c), f_data)) {
                 observations.push_back({c, EncodeFDataForCatIdx(f_data), true});
             } else {
                 observations.push_back({c, std::string(), false});
             }
         }
         catidx.UpdateRow(r, observations);
-    }
+    });
     // Durability A (DD4): data file first, then clear the index's dirty flag
     // (see RebuildOneYearZoneMap). `catidx` is the registry-open instance.
     if (!scan_complete) {

@@ -390,6 +390,46 @@ TEST_F(DurabilityRebuildTest, DirtyIndexesOverYearWithNoRowsRebuildToCleanWithou
     EXPECT_EQ(std::filesystem::file_size(Path(".zmap")), sizeof(ZoneMapFileHeader)) << "no rows => header-only zmap";
 }
 
+// Rows at both ends and in the middle of the full (sparse) year, no ftruncate:
+// the hole-skipping rebuild scan must not lose an extent-edge row.
+TEST_F(DurabilityRebuildTest, RebuildOverSparseYearKeepsRowsAtBothEnds) {
+    const std::vector<uint64_t> epochs = {kBaseEpoch, kBaseEpoch + 63, kBaseEpoch + 64, 15000000, 31535999};
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, kRowLength);
+    for (size_t i = 0; i < epochs.size(); ++i) {
+        XStore_Proto::RowData row;
+        row.add_fielddata()->set_doubledata(10.0 * static_cast<double>(i + 1));
+        XStore_Proto::UnaryInsert_REP rep;
+        store.UnaryInsert(epochs[i], row, db_name, &rep, XStore_Proto::SYNC);
+    }
+    DropRegistriesAndZeroBody(Path(".zmap"), sizeof(ZoneMapFileHeader));
+    DropRegistriesAndZeroBody(Path(".catidx"), sizeof(CatIdxFileHeader));
+
+    store.InitDB();
+
+    XStore_Proto::Min_REP min_rep;
+    XStore_Proto::Max_REP max_rep;
+    XStore_Proto::Sum_REP sum_rep;
+    store.MinAggregate(0, 31535999, db_name, 0, &min_rep);
+    store.MaxAggregate(0, 31535999, db_name, 0, &max_rep);
+    store.SumAggregate(0, 31535999, db_name, 0, &sum_rep);
+    EXPECT_DOUBLE_EQ(min_rep.opresult().doubledata(), 10.0);
+    EXPECT_DOUBLE_EQ(max_rep.opresult().doubledata(), 50.0);
+    EXPECT_DOUBLE_EQ(sum_rep.opresult(), 150.0);
+    for (size_t i = 0; i < epochs.size(); ++i) {
+        std::string buf;
+        store.FindByValue(0, 31535999, db_name, 0, xstore_test::FDouble(10.0 * static_cast<double>(i + 1)),
+                          XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                          [&](std::string &&chunk, bool) { buf += chunk; });
+        XStore_Proto::RangeQuery_REP rep;
+        ASSERT_TRUE(rep.ParseFromString(buf));
+        ASSERT_EQ(rep.queryresponse_size(), 1) << "epoch " << epochs[i];
+        EXPECT_EQ(rep.queryresponse(0).timestamp(), epochs[i]);
+    }
+    EXPECT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), 0u);
+    EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), 0u);
+}
+
 // ---- Task 4: XStore::Shutdown() (DD7) --------------------------------------
 
 // Shutdown() stops the process-wide WAL writers; ResetShutdownForTests()

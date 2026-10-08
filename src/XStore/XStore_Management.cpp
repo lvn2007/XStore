@@ -2,6 +2,7 @@
 #include "include/DataStructs/FileRangeLock.h"
 #include "include/DataStructs/TimeStruct.h"
 #include "include/XStore/XStore_PreadPool.h"
+#include "include/XStore/XStore_RowScan.h"
 #include "include/XStore/XStore_WireEncode.h"
 #include "include/XStore/XStore_WalRing.h"
 #include "include/XStore/XStore_WalCheckpoint.h"
@@ -880,25 +881,19 @@ void XStore::RebuildOneYearZoneMap(const std::string &db_base_path, unsigned sho
         return;
     }
 
-    std::vector<char> row_buf(row_length);
-    bool scan_complete = true;
-    for (uint64_t row_index = 0; row_index < total_rows; ++row_index) {
-        ssize_t read_bytes = pread(fd, row_buf.data(), row_length, static_cast<off_t>(row_index) * row_length);
-        if (read_bytes != static_cast<ssize_t>(row_length)) {
-            spdlog::error("[ZONE MAP REBUILD] [{}/{}.XSTORE] - Short read at row {}", db_base_path, year, row_index);
-            scan_complete = false;
-            continue;
-        }
-        if (row_buf[0] == 0) continue; // never-written sparse hole -- same fast skip ProcessFileRangeAccumulate uses
+    // Hole-skipping chunked scan: a year file is mostly sparse holes, and a
+    // pread per row made this rebuild syscall-bound (see XStore_RowScan.h).
+    bool scan_complete = ForEachDataRow(fd, total_rows, row_length, [&](uint64_t row_index, const char *row_buf) {
+        if (row_buf[0] == 0) return; // never-written sparse hole -- same fast skip ProcessFileRangeAccumulate uses
 
-        size_t real_len = XStoreWireEncode::RealRowDataLength(row_buf.data(), row_length);
+        size_t real_len = XStoreWireEncode::RealRowDataLength(row_buf, row_length);
         XStore_Proto::RowData row;
         if (real_len > 0) {
-            row.ParseFromArray(row_buf.data(), static_cast<int>(real_len));
+            row.ParseFromArray(row_buf, static_cast<int>(real_len));
         }
         std::vector<ZoneMapObservation> observations = BuildZoneMapObservations(*this, row, tracked_column_count);
         zmap.UpdateRow(row_index, observations, tracked_column_count);
-    }
+    });
     // Durability A (DD4): data file first, then clear the index's dirty flag --
     // the index must never claim "clean" while the rows it summarizes could
     // still be lost. Any failure leaves it dirty, so the next start rebuilds.
