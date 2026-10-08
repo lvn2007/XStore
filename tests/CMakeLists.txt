@@ -22,21 +22,13 @@ add_executable(xstore_tests
 target_link_libraries(xstore_tests PRIVATE GTest::gtest_main xstore_core)
 
 include(GoogleTest)
+# Single test trigger per target (S7): gtest_discover_tests registers every
+# case with ctest, and the suite runs when YOU run ctest -- the build itself
+# no longer auto-runs it via a POST_BUILD ctest (that was a second execution
+# path, and the network one's unquoted `|` was a shell pipe in the generated
+# rule, so it never ran its full regex anyway). Run suites with
+# `ctest --test-dir build [-R <regex>]`.
 gtest_discover_tests(xstore_tests)
-
-# Run the suite automatically right after a successful build of this target,
-# so `cmake --build .` compiles and tests in one step. Scoped to THIS binary's
-# suites so building just this target doesn't report the other binaries' tests
-# as "_NOT_BUILT" if they haven't been built yet -- which means every suite
-# name declared in this target's sources must be listed here. It used to be
-# just "^XStoreTest\\.", silently skipping every zone-map and catidx suite
-# (worked around by a manual `ctest -R CatIdx` in each task instead).
-add_custom_command(TARGET xstore_tests POST_BUILD
-        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "^(XStoreTest|XStoreWalTest|XStorePreadPoolTest|XStorePreadPoolDeathTest|XStoreCrc32cTest|XStoreZoneMapTest|ZoneMapEntryLayoutTest|ZoneMapFileTest|ZoneMapFileVersionTest|ZoneMapMathTest|XStoreCatIdxTestFixture|CatIdxFileTest|GetOrOpenCatIdxTest|EncodeFDataForCatIdxTest|PatternMatcherTest|XStorePatternTestFixture|XStoreMemoryTest|DurabilityHeaderLayoutTest|DurabilityMarkDirtyTest|DurabilityRebuildTest|DurabilityShutdownTest|WalRingFormatTest|WalRingWriterTest|WalCheckpointTest|WalReplayTest|WalLegacyUpgradeTest|WalDirectPathTest|WalCrashSimTest)\\."
-        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-        COMMENT "Running xstore_tests via ctest"
-        VERBATIM # the regex contains ( | ) -- without this CMake emits it unquoted and /bin/sh chokes
-)
 
 # xstore_network_tests drives the same operations through the real ZMQ wire
 # protocol (ZMQ_Server + a REQ client), unlike xstore_tests above which calls
@@ -55,12 +47,6 @@ target_compile_definitions(xstore_network_tests PRIVATE XSTORE_BIN="$<TARGET_FIL
 add_dependencies(xstore_network_tests XStore)
 
 gtest_discover_tests(xstore_network_tests)
-
-add_custom_command(TARGET xstore_network_tests POST_BUILD
-        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "^XStoreZmqNetworkTest\\.\\|^XStoreZmqConcurrentTest\\.\\|^XStoreCurve\\|^XStoreGracefulShutdownTest\\."
-        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-        COMMENT "Running xstore_network_tests via ctest"
-)
 
 # xstore_client_tests exercises XStore_Client.h itself: XStoreClientTest.cpp
 # covers the warmupOnInit flag in isolation, XStoreClientLiveTest.cpp drives
@@ -81,12 +67,6 @@ if(TARGET XStoreClient)
 
     include(GoogleTest)
     gtest_discover_tests(xstore_client_tests)
-
-    add_custom_command(TARGET xstore_client_tests POST_BUILD
-            COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "^XStoreClientWarmupTest\\."
-            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-            COMMENT "Running xstore_client_tests via ctest"
-    )
 endif()
 
 # xstore_keys_cli_tests: black-box smoke tests for the xstore-keys binary
@@ -103,12 +83,6 @@ add_dependencies(xstore_keys_cli_tests xstore-keys)
 
 include(GoogleTest)
 gtest_discover_tests(xstore_keys_cli_tests)
-
-add_custom_command(TARGET xstore_keys_cli_tests POST_BUILD
-        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "^XStoreKeysCliTest\\."
-        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-        COMMENT "Running xstore_keys_cli_tests via ctest"
-)
 
 # xstore_perf_tests: throughput/latency micro-benchmarks for Unary/Batch
 # Insert+Query (see tests/perf/XStorePerfTest.cpp for why these report
