@@ -193,61 +193,61 @@ void XStoreZapHandler::Loop() {
     // ETERM = the owning context was shut down (ZmqServer::RequestStop):
     // leave quietly instead of letting the exception terminate the process.
     try {
-    while (!stop_flag_.load(std::memory_order_relaxed)) {
-        std::vector<zmq::message_t> request;
-        if (!zmq::recv_multipart(zap, std::back_inserter(request))) continue;  // timeout
-        if (request.size() < 6) {
-            // Pathological -- should never happen from a real libzmq ZAP client, but
-            // this REP socket's recv/send state machine must stay in sync regardless,
-            // or the NEXT (unrelated) ZAP request throws EFSM and crashes the process.
-            spdlog::warn("[CURVE] - Malformed ZAP request ({} frames), denying with best-effort reply",
-                         request.size());
-            zmq::multipart_t reply;
-            reply.addstr(request.size() > 0 ? request[0].to_string() : "1.0");
-            reply.addstr(request.size() > 1 ? request[1].to_string() : "");
-            reply.addstr("500");
-            reply.addstr("Malformed request");
-            reply.addstr("");
-            reply.addstr("");
-            reply.send(zap);
-            continue;
-        }
-
-        std::string version = request[0].to_string();
-        std::string sequence = request[1].to_string();
-        std::string mechanism = request[5].to_string();
-
-        std::string status_code = "400";
-        std::string status_text = "Denied";
-        std::string user_id;
-
-        if (mechanism == "CURVE" && request.size() >= 7 && request[6].size() == 32) {
-            std::array<uint8_t, 32> pubkey_raw{};
-            std::memcpy(pubkey_raw.data(), request[6].data(), 32);
-            std::string name;
-            if (store_->IsAllowed(pubkey_raw, &name)) {
-                status_code = "200";
-                status_text = "OK";
-                user_id = name;
-                spdlog::info("[CURVE] - ZAP allowed '{}'", name);
-            } else {
-                std::string fingerprint = Z85Encode(pubkey_raw);
-                spdlog::warn("[CURVE] - ZAP denied unknown CURVE key (fingerprint {}...{})",
-                             fingerprint.substr(0, 6), fingerprint.substr(34));
+        while (!stop_flag_.load(std::memory_order_relaxed)) {
+            std::vector<zmq::message_t> request;
+            if (!zmq::recv_multipart(zap, std::back_inserter(request))) continue;  // timeout
+            if (request.size() < 6) {
+                // Pathological -- should never happen from a real libzmq ZAP client, but
+                // this REP socket's recv/send state machine must stay in sync regardless,
+                // or the NEXT (unrelated) ZAP request throws EFSM and crashes the process.
+                spdlog::warn("[CURVE] - Malformed ZAP request ({} frames), denying with best-effort reply",
+                             request.size());
+                zmq::multipart_t reply;
+                reply.addstr(request.size() > 0 ? request[0].to_string() : "1.0");
+                reply.addstr(request.size() > 1 ? request[1].to_string() : "");
+                reply.addstr("500");
+                reply.addstr("Malformed request");
+                reply.addstr("");
+                reply.addstr("");
+                reply.send(zap);
+                continue;
             }
-        } else {
-            spdlog::warn("[CURVE] - ZAP request denied (mechanism={}, frames={})", mechanism, request.size());
-        }
 
-        zmq::multipart_t reply;
-        reply.addstr(version);
-        reply.addstr(sequence);
-        reply.addstr(status_code);
-        reply.addstr(status_text);
-        reply.addstr(user_id);
-        reply.addstr("");  // metadata, unused
-        reply.send(zap);
-    }
+            std::string version = request[0].to_string();
+            std::string sequence = request[1].to_string();
+            std::string mechanism = request[5].to_string();
+
+            std::string status_code = "400";
+            std::string status_text = "Denied";
+            std::string user_id;
+
+            if (mechanism == "CURVE" && request.size() >= 7 && request[6].size() == 32) {
+                std::array<uint8_t, 32> pubkey_raw{};
+                std::memcpy(pubkey_raw.data(), request[6].data(), 32);
+                std::string name;
+                if (store_->IsAllowed(pubkey_raw, &name)) {
+                    status_code = "200";
+                    status_text = "OK";
+                    user_id = name;
+                    spdlog::info("[CURVE] - ZAP allowed '{}'", name);
+                } else {
+                    std::string fingerprint = Z85Encode(pubkey_raw);
+                    spdlog::warn("[CURVE] - ZAP denied unknown CURVE key (fingerprint {}...{})",
+                                 fingerprint.substr(0, 6), fingerprint.substr(34));
+                }
+            } else {
+                spdlog::warn("[CURVE] - ZAP request denied (mechanism={}, frames={})", mechanism, request.size());
+            }
+
+            zmq::multipart_t reply;
+            reply.addstr(version);
+            reply.addstr(sequence);
+            reply.addstr(status_code);
+            reply.addstr(status_text);
+            reply.addstr(user_id);
+            reply.addstr("");  // metadata, unused
+            reply.send(zap);
+        }
     } catch (const zmq::error_t &e) {
         if (e.num() != ETERM) throw;
     }

@@ -799,6 +799,8 @@ class XStore {
         static bool IsShutDown() { return shutdown_flag_.load(std::memory_order_relaxed); }
         // Test-only: undoes Shutdown() (clears the flag, restarts the WAL
         // writer threads) so later tests in the same process can insert.
+        // Public and ungated by design: the "ForTests" suffix is the convention
+        // (same as ClearZoneMapRegistryForTests).
         static void ResetShutdownForTests();
         // Test-only: simulates kill -9 + restart inside one process. Stops the WAL
         // writers and the checkpointer WITHOUT a final cycle or

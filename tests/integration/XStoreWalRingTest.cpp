@@ -3,6 +3,7 @@
 // parser. Pure format tests -- nothing here touches the running WAL path.
 #include <gtest/gtest.h>
 #include "XStoreTestSupport.h"
+#include "XStoreSyscallFault.h"
 #include "include/XStore/XStore.h"
 #include "include/XStore/XStore_Crc32c.h"
 #include "include/XStore/XStore_WalRing.h"
@@ -13,6 +14,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <fcntl.h>
 #include <cstdio>
@@ -125,6 +127,25 @@ TEST(WalRingFormatTest, InitRingFileZeroFillsAndWritesCleanHeader) {
     walring::RingHeader h; ASSERT_TRUE(walring::ReadBestHeader(f.fd, h));
     EXPECT_EQ(h.ring_bytes, 8u << 20); EXPECT_EQ(h.checkpoint_lsn, 0u); EXPECT_EQ(h.shard_id, 2u);
     struct stat st; ASSERT_EQ(fstat(f.fd, &st), 0); EXPECT_GE(static_cast<size_t>(st.st_blocks) * 512, (8u << 20));  // really allocated
+}
+
+// st_blocks above only proves allocation (posix_fallocate gives that without writing). The ring must read back as
+// zeros even when the file held old bytes (a recycled or reused file), or stale records could parse as live ones.
+TEST(WalRingFormatTest, InitRingFileOverwritesPreexistingBytesWithZeros) {
+    constexpr uint64_t kRing = 8 << 20;
+    TempFile f;
+    const std::string garbage(1 << 20, '\xAB');
+    for (uint64_t off = 0; off < walring::HEADER_REGION_BYTES + kRing; off += garbage.size()) {
+        ASSERT_EQ(pwrite(f.fd, garbage.data(), garbage.size(), static_cast<off_t>(off)), static_cast<ssize_t>(garbage.size()));
+    }
+    ASSERT_TRUE(walring::InitRingFile(f.fd, 1, kRing));
+
+    std::string ring(kRing, '\x7F');
+    ASSERT_EQ(pread(f.fd, ring.data(), ring.size(), walring::HEADER_REGION_BYTES), static_cast<ssize_t>(ring.size()));
+    EXPECT_EQ(ring.find_first_not_of('\0'), std::string::npos) << "ring byte " << ring.find_first_not_of('\0') << " kept its old content";
+    walring::RingHeader h;
+    ASSERT_TRUE(walring::ReadBestHeader(f.fd, h));
+    EXPECT_EQ(h.ring_bytes, kRing);
 }
 
 
@@ -1853,6 +1874,28 @@ std::string BuildLegacyRecordForTest(const std::string &db, uint16_t row_length,
     Put<uint32_t>(rec, Crc32c(payload.data(), payload.size()));
     return rec + payload;
 }
+// One legacy record holding `rows` consecutive rows from first_epoch; row i holds the double value + i.
+std::string BuildLegacyMultiRowRecordForTest(const std::string &db, uint16_t row_length, uint64_t first_epoch, uint64_t rows,
+                                             double value) {
+    std::string payload;
+    Put<uint16_t>(payload, static_cast<uint16_t>(db.size()));
+    Put<uint16_t>(payload, row_length);
+    Put<int32_t>(payload, static_cast<int32_t>(XStore_Proto::SECOND));
+    Put<uint32_t>(payload, static_cast<uint32_t>(rows));
+    payload += db;
+    for (uint64_t i = 0; i < rows; ++i) {
+        XStore_Proto::RowData row;
+        row.add_fielddata()->set_doubledata(value + static_cast<double>(i));
+        std::string row_bytes(row_length, '\0');
+        (void)row.SerializeToArray(row_bytes.data(), static_cast<int>(row.ByteSizeLong()));
+        Put<uint64_t>(payload, first_epoch + i);
+        payload += row_bytes;
+    }
+    std::string rec;
+    Put<uint32_t>(rec, static_cast<uint32_t>(4 + payload.size()));
+    Put<uint32_t>(rec, Crc32c(payload.data(), payload.size()));
+    return rec + payload;
+}
 std::string ReadWholeFile(const std::string &path) {
     std::string out;
     const int fd = open(path.c_str(), O_RDONLY);
@@ -1879,7 +1922,8 @@ protected:
         WalReplayTest::SetUp();
         row_length = 16;
     }
-    void WriteLegacyFile(XStore &store) {
+    // `record` empty => the default single-row record at kLegacyEpoch.
+    void WriteLegacyFile(XStore &store, const std::string &record = std::string()) {
         xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
         // The first XStore of a process eagerly creates a ring file per active shard; start from a
         // clean registry and fresh writers so no Ring object survives over the file replaced below.
@@ -1894,7 +1938,7 @@ protected:
         wal_path = (wal_dir / ("shard_" + std::to_string(shard) + ".WAL")).string();
         std::filesystem::remove(wal_path);   // an eagerly created, unreferenced ring file
         legacy_shard = static_cast<uint32_t>(shard);
-        const std::string rec = BuildLegacyRecordForTest(db_name, row_length, kLegacyEpoch, 77.5);
+        const std::string rec = record.empty() ? BuildLegacyRecordForTest(db_name, row_length, kLegacyEpoch, 77.5) : record;
         const int fd = open(wal_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
         ASSERT_GE(fd, 0);
         ASSERT_EQ(write(fd, rec.data(), rec.size()), static_cast<ssize_t>(rec.size()));
@@ -1941,6 +1985,25 @@ TEST_F(WalLegacyUpgradeTest, LegacyWalIsReplayedOnceThenBecomesARing) {
     ASSERT_FALSE(LegacyRowPresent(store));
     store.InitDB();
     EXPECT_FALSE(LegacyRowPresent(store)) << "the legacy record must not be replayed twice";
+}
+
+// ReplayLegacyShard streams the file in WAL_REPLAY_READ_CHUNK_BYTES reads and grows its buffer to one record's
+// declared length: a record of ~2 chunks must come through intact, then the file becomes a ring.
+TEST_F(WalLegacyUpgradeTest, LegacyRecordLargerThanTheReadChunkIsReplayedInFull) {
+    constexpr size_t kChunk = XStoreTunables::WAL_REPLAY_READ_CHUNK_BYTES;
+    const uint64_t rows = 2 * kChunk / (8 + row_length) + 1;
+    const std::string record = BuildLegacyMultiRowRecordForTest(db_name, row_length, kLegacyEpoch, rows, 77.5);
+    ASSERT_GT(record.size(), 2 * kChunk);
+    XStore store;
+    ASSERT_NO_FATAL_FAILURE(WriteLegacyFile(store, record));
+    store.InitDB();
+    for (uint64_t i : {uint64_t{0}, uint64_t{1}, rows / 2, rows - 2, rows - 1}) {
+        XStore_Proto::UnaryQuery_REP q;
+        store.UnaryQuery(kLegacyEpoch + i, db_name, &q);
+        ASSERT_EQ(q.data().fielddata_size(), 1) << "row " << i << " was not replayed";
+        EXPECT_DOUBLE_EQ(q.data().fielddata(0).doubledata(), 77.5 + static_cast<double>(i)) << "row " << i;
+    }
+    EXPECT_EQ(ReadHeader(wal_path).checkpoint_lsn, 0u) << "converted to a ring after the replay";
 }
 
 TEST_F(WalLegacyUpgradeTest, LegacyWalNotConvertedWhenSyncFails) {
@@ -2405,7 +2468,6 @@ TEST_F(WalReplayTest, FailedWalWriteZeroesItsRange) {
 }
 
 TEST_F(WalReplayTest, ReplayApplyFailureDoesNotAdvanceCheckpointAndFencesTheShard) {
-    if (geteuid() == 0) GTEST_SKIP() << "root bypasses file modes";
     constexpr uint64_t kRing = 256 << 10;
     walring::SetRingBytesForTests(kRing);
     XStore store;
@@ -2420,12 +2482,16 @@ TEST_F(WalReplayTest, ReplayApplyFailureDoesNotAdvanceCheckpointAndFencesTheShar
     Crash();
 
     store.EvictFdForTests(YearFile());       // a new process has no cached fd
-    ASSERT_EQ(chmod(YearFile().c_str(), 0), 0);
-    store.InitDB();
-    EXPECT_EQ(ReadHeader(wal_path).checkpoint_lsn, 0u) << "a record that failed to apply must stay in the log";
-    EXPECT_FALSE(InsertAt(store, 5)) << "the fenced shard must refuse appends until the next start";
-
-    ASSERT_EQ(chmod(YearFile().c_str(), 0644), 0);
+    {
+        // EACCES when the year file is opened for writing, which is how chmod 0 made the apply fail (root is exempt
+        // from file modes). Read-only opens still work, so replay's later data-file sync cannot fence the shard by
+        // itself: only the apply-failure fence is under test.
+        xstore_fault::ScopedPathFault deny(YearFile(), /*subtree=*/false, EACCES, xstore_fault::kOpenWrite);
+        store.InitDB();
+        EXPECT_GT(deny.OpenHits(), 0u) << "the fault must have been what failed the apply";
+        EXPECT_EQ(ReadHeader(wal_path).checkpoint_lsn, 0u) << "a record that failed to apply must stay in the log";
+        EXPECT_FALSE(InsertAt(store, 5)) << "the fenced shard must refuse appends until the next start";
+    }
     Crash();                                  // restart: fence cleared
     store.WarmFdForTests(YearFile(), row_length, kEpoch0 + 4);   // keep the file small: a cold open regrows the year
     ZeroRows(0, 3);
@@ -2453,6 +2519,63 @@ TEST_F(WalReplayTest, ReplaySkipsRecordsForDeletedDbAndStillAdvances) {
     store.InitDB();
     EXPECT_EQ(ReadHeader(wal_path).checkpoint_lsn, head) << "records of a deleted DB are skipped, not retried forever";
     EXPECT_NE(walring::GetOrOpenRing(wal_path, 0), nullptr) << "and the shard is not fenced";
+}
+
+namespace {
+// ApplyWalRecord is private. An explicit instantiation is the one place C++ does not access-check its template
+// arguments, which lets a test reach the function replay itself calls without touching production code.
+using ApplyWalRecordFn = bool (*)(const XStore::WalRecord &, const std::shared_ptr<walring::Ring> &, uint64_t);
+ApplyWalRecordFn ApplyWalRecordPtr();
+template <ApplyWalRecordFn Fn>
+struct ExposeApplyWalRecord {
+    friend ApplyWalRecordFn ApplyWalRecordPtr() { return Fn; }
+};
+template struct ExposeApplyWalRecord<&XStore::ApplyWalRecord>;
+}  // namespace
+
+// A replayed row carries no observations and zone_map_pad_to == 0 (ParseWalRecordV2 default-constructs WalRow), so
+// applying it must change neither the zone-map block stats nor the catidx bloom: InitDB rebuilds replayed years
+// from the raw rows, and a replay that also folded them would double-count whenever that rebuild is skipped.
+TEST_F(WalReplayTest, ReplayedRowLeavesZoneMapAndCatIdxUntouched) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    ASSERT_TRUE(InsertAt(store, 0));   // an ordinary insert: folds the zone map and sets bloom bits (value 1.0)
+
+    const std::string db_base = (scratch->test_root / "DataStore" / db_name).string();
+    const TimeStruct ts(kEpoch0, XStore_Proto::SECOND);
+    ZoneMapFile &zmap = XStore::GetOrOpenZoneMap(db_base, ts.year, row_length);
+    CatIdxFile &catidx = XStore::GetOrOpenCatIdx(db_base, ts.year, row_length);
+    const uint64_t block = BlockIndexForRow(kEpoch0 - ts.first_epoch, zmap.RowsPerBlockValue());
+    ASSERT_EQ(block, BlockIndexForRow(kEpoch0 + 1 - ts.first_epoch, zmap.RowsPerBlockValue())) << "both rows must share one block";
+
+    constexpr double kReplayed = 4242.5;
+    const auto cat_key = [](double v) { return EncodeFDataForCatIdx(xstore_test::FDouble(v)); };
+    const auto before = zmap.TryGetBlockStats(block);
+    ASSERT_TRUE(before.has_value());
+    ASSERT_FALSE(before->empty());
+    ASSERT_EQ((*before)[0].valid_count, 1u);
+    ASSERT_TRUE(catidx.MightContain(block, 0, cat_key(1.0)));
+    ASSERT_FALSE(catidx.MightContain(block, 0, cat_key(kReplayed))) << "precondition (a bloom false positive would make this vacuous)";
+
+    XStore_Proto::RowData row;
+    row.add_fielddata()->set_doubledata(kReplayed);
+    std::string row_bytes(row_length, '\0');
+    ASSERT_TRUE(row.SerializeToArray(row_bytes.data(), static_cast<int>(row.ByteSizeLong())));
+    const std::string bytes = BuildRecordV2ForTest(/*lsn=*/0, db_name, row_length, {{kEpoch0 + 1, row_bytes}});
+    XStore::WalRecord record;
+    size_t used = 0;
+    ASSERT_EQ(XStore::ParseWalRecordV2(bytes.data(), bytes.size(), 0, used, record), XStore::RingParse::kOk);
+    record.db_base_path = db_base;
+    ASSERT_TRUE(ApplyWalRecordPtr()(record, nullptr, 0));
+
+    EXPECT_TRUE(RowPresent(1)) << "the row itself must reach the data file";
+    const auto after = zmap.TryGetBlockStats(block);
+    ASSERT_TRUE(after.has_value());
+    ASSERT_EQ(after->size(), before->size());
+    EXPECT_EQ(std::memcmp(after->data(), before->data(), before->size() * sizeof(ZoneMapEntry)), 0)
+        << "a replayed row must not touch the zone map";
+    EXPECT_TRUE(catidx.MightContain(block, 0, cat_key(1.0)));
+    EXPECT_FALSE(catidx.MightContain(block, 0, cat_key(kReplayed))) << "a replayed row must not set catidx bloom bits";
 }
 
 TEST_F(WalReplayTest, ReplayAdvancesCheckpointOnlyAfterDirectorySync) {
@@ -2537,17 +2660,18 @@ TEST_F(WalLegacyUpgradeTest, LegacyWalNotConvertedWhenCheckpointerIsPoisoned) {
 }
 
 TEST_F(WalLegacyUpgradeTest, LegacyApplyFailureDoesNotConvertAndFences) {
-    if (geteuid() == 0) GTEST_SKIP() << "root bypasses file modes";
     XStore store;
     ASSERT_NO_FATAL_FAILURE(WriteLegacyFile(store));
     const std::string original = ReadWholeFile(wal_path);
     store.EvictFdForTests(YearFile());
-    ASSERT_EQ(chmod(YearFile().c_str(), 0), 0);
-    store.InitDB();
-    EXPECT_EQ(ReadWholeFile(wal_path), original) << "a legacy record that failed to apply must stay in the file";
-    EXPECT_EQ(walring::GetOrOpenRing(wal_path, legacy_shard, /*reinit_legacy=*/true), nullptr);
+    {
+        xstore_fault::ScopedPathFault deny(YearFile(), /*subtree=*/false, EACCES, xstore_fault::kOpenWrite);   // as above
+        store.InitDB();
+        EXPECT_GT(deny.OpenHits(), 0u) << "the fault must have been what failed the apply";
+        EXPECT_EQ(ReadWholeFile(wal_path), original) << "a legacy record that failed to apply must stay in the file";
+        EXPECT_EQ(walring::GetOrOpenRing(wal_path, legacy_shard, /*reinit_legacy=*/true), nullptr);
+    }
 
-    ASSERT_EQ(chmod(YearFile().c_str(), 0644), 0);
     store.WarmFdForTests(YearFile(), row_length, kLegacyEpoch + 4);   // keep the file small: a cold open regrows the year
     store.InitDB();   // fence retried from scratch: now it applies and converts
     EXPECT_TRUE(LegacyRowPresent(store));
@@ -2555,15 +2679,6 @@ TEST_F(WalLegacyUpgradeTest, LegacyApplyFailureDoesNotConvertAndFences) {
 }
 
 // ---- Task 5 fix round 2 -------------------------------------------------------
-
-namespace {
-// Restores a directory's/file's mode on scope exit so a failing test cannot leave an unremovable scratch dir.
-struct ModeGuard {
-    std::string path;
-    mode_t restore;
-    ~ModeGuard() { chmod(path.c_str(), restore); }
-};
-}  // namespace
 
 // Every replay exit that does not commit must fence the ring: the writer's Ring (opened at startup with
 // head == checkpoint) would otherwise append on top of un-checkpointed records.
@@ -2628,6 +2743,127 @@ TEST_F(WalReplayTest, ReplayZeroingFailureFencesTheShard) {
     EXPECT_TRUE(InsertAt(store, 5));
 }
 
+// Replay's last gate before moving the checkpoint: the Ring registered for the file must have the size the header
+// on disk says. A Ring registered under another size (here: opened before the header was rewritten) must not be
+// handed the commit.
+TEST_F(WalReplayTest, ReplayFencesWhenTheRegisteredRingDisagreesWithTheHeader) {
+    constexpr uint64_t kRing = 256 << 10;
+    walring::SetRingBytesForTests(kRing);
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    for (uint64_t i = 0; i < 3; ++i) ASSERT_TRUE(InsertAt(store, i));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    const uint64_t head = ring->HeadLsn();
+    const std::string wal_path = ring->path();
+    const uint32_t shard = ring->ShardId();
+    ring.reset();
+    ShrinkDataFile(6);
+    Crash();
+
+    auto stale = walring::GetOrOpenRing(wal_path, shard);
+    ASSERT_NE(stale, nullptr);
+    ASSERT_EQ(stale->ring_bytes(), kRing);
+    {   // the header now claims a smaller ring; records below `head` sit at the same offsets under either size
+        ASSERT_LT(head, kRing / 2);
+        walring::RingHeader h = ReadHeader(wal_path);
+        h.slot_seq += 1;
+        h.ring_bytes = kRing / 2;
+        const int fd = open(wal_path.c_str(), O_RDWR);
+        ASSERT_GE(fd, 0);
+        ASSERT_TRUE(walring::WriteHeaderSlot(fd, h));
+        close(fd);
+    }
+    ZeroRows(0, 3);
+
+    xstore_test::kLogCapture->Clear();
+    store.InitDB();
+    EXPECT_TRUE(xstore_test::kLogCapture->Contains("No matching ring for " + wal_path));
+    EXPECT_EQ(ReadHeader(wal_path).checkpoint_lsn, 0u) << "the checkpoint must not move over a ring that does not match";
+    for (uint64_t i = 0; i < 3; ++i) EXPECT_TRUE(RowPresent(i)) << "replay applied the records, only the commit is refused: " << i;
+    EXPECT_FALSE(InsertAt(store, 5)) << "the fenced shard must refuse appends until the next start";
+
+    stale.reset();
+    Crash();   // restart: registry and fence cleared, the ring is reopened from the (smaller) header
+    ZeroRows(0, 3);
+    store.InitDB();
+    EXPECT_EQ(ReadHeader(wal_path).checkpoint_lsn, head);
+    for (uint64_t i = 0; i < 3; ++i) EXPECT_TRUE(RowPresent(i)) << i;
+    EXPECT_TRUE(InsertAt(store, 5)) << "no fence after a successful replay";
+}
+
+// The second of replay's two zeroing syncs (the 4-byte length field of the damaged record N) fails. The shard must
+// be fenced with the header untouched. What the page cache holds afterwards is unspecified, so the test puts back
+// what a crash leaves (length field intact, everything behind it zero) before restarting: nothing acknowledged is
+// lost and nothing stale returns.
+TEST_F(WalReplayTest, ReplaySecondZeroingSyncFailureFencesAndTheNextStartLosesNothing) {
+    constexpr uint64_t kRing = 256 << 10;
+    walring::SetRingBytesForTests(kRing);
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    std::vector<uint64_t> heads{0};
+    std::shared_ptr<walring::Ring> ring;
+    for (uint64_t i = 0; i < 3; ++i) {            // r0 = N-1, r1 = N, r2 = N+1 (identical sizes)
+        ASSERT_TRUE(InsertAt(store, i));
+        if (!ring) ring = BusyRing();
+        ASSERT_NE(ring, nullptr);
+        heads.push_back(ring->HeadLsn());
+    }
+    const std::string wal_path = ring->path();
+    ring.reset();
+    ShrinkDataFile(5);
+    Crash();
+    {   // tear N (LSN field intact => a corrupt end of this lap); N+1 stays intact
+        const int fd = open(wal_path.c_str(), O_RDWR);
+        ASSERT_GE(fd, 0);
+        char b;
+        const off_t at = static_cast<off_t>(walring::RingOffset(heads[1] + 20, kRing));
+        ASSERT_EQ(pread(fd, &b, 1, at), 1);
+        b ^= 0x5A;
+        ASSERT_EQ(pwrite(fd, &b, 1, at), 1);
+        close(fd);
+    }
+    ZeroRows(0, 5);
+    const std::string length_field = ReadRingBytes(wal_path, heads[1], 4, kRing);
+    ASSERT_NE(length_field, std::string(4, '\0'));
+
+    {   // sync #1 on the ring file is the tail zeroing, #2 the length field
+        xstore_fault::ScopedFdFault fail(xstore_fault::FdOp::kSync, wal_path, /*skip_calls=*/1, /*fail_calls=*/1, EIO);
+        store.InitDB();
+        EXPECT_GE(fail.Calls(), 2);
+        EXPECT_EQ(fail.Failures(), 1) << "the fault never reached the length-field sync";
+    }
+    EXPECT_EQ(ReadHeader(wal_path).checkpoint_lsn, 0u) << "the checkpoint must not move when the zeroing is not durable";
+    EXPECT_FALSE(InsertAt(store, 4)) << "a stale same-lap record could come back if appends resumed";
+    const std::string stale = ReadRingBytes(wal_path, heads[2], heads[3] - heads[2], kRing);
+    EXPECT_EQ(stale, std::string(stale.size(), '\0')) << "the tail was zeroed before the failing sync";
+
+    {   // the length-field write is what the crash lost
+        const int fd = open(wal_path.c_str(), O_WRONLY);
+        ASSERT_GE(fd, 0);
+        ASSERT_EQ(pwrite(fd, length_field.data(), length_field.size(), static_cast<off_t>(walring::RingOffset(heads[1], kRing))), 4);
+        close(fd);
+    }
+    ZeroRows(0, 5);
+    store.InitDB();
+    EXPECT_TRUE(RowPresent(0)) << "acknowledged, behind N: must be replayed";
+    EXPECT_FALSE(RowPresent(1));
+    EXPECT_FALSE(RowPresent(2));
+    EXPECT_EQ(ReadHeader(wal_path).checkpoint_lsn, heads[1]);
+
+    // A same-size record lands where N was; N+1 must not come back after a power loss.
+    ASSERT_TRUE(InsertAt(store, 3));
+    auto live = BusyRing();
+    ASSERT_NE(live, nullptr);
+    ASSERT_TRUE(Ckpt().RunCycle());
+    ASSERT_EQ(live->CheckpointLsn(), heads[2]);
+    live.reset();
+    Crash();
+    store.InitDB();
+    EXPECT_FALSE(RowPresent(2)) << "N+1 was never acknowledged: it must not come back";
+    EXPECT_TRUE(RowPresent(3)) << "was acknowledged";
+}
+
 TEST_F(WalReplayTest, ReplayReadErrorFencesTheShard) {
     XStore store;
     xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
@@ -2655,7 +2891,6 @@ TEST_F(WalReplayTest, ReplayReadErrorFencesTheShard) {
 
 // EACCES on the DB directory is "cannot tell", never "deleted": the record must not be skipped.
 TEST_F(WalReplayTest, ReplayApplyFailureOnUnsearchableDbDirFencesNotSkips) {
-    if (geteuid() == 0) GTEST_SKIP() << "root bypasses file modes";
     constexpr uint64_t kRing = 256 << 10;
     walring::SetRingBytesForTests(kRing);
     XStore store;
@@ -2670,13 +2905,20 @@ TEST_F(WalReplayTest, ReplayApplyFailureOnUnsearchableDbDirFencesNotSkips) {
     Crash();
 
     const std::string db_dir = (scratch->test_root / "DataStore" / db_name).string();
-    ModeGuard restore{db_dir, 0755};
     store.EvictFdForTests(YearFile());
-    ASSERT_EQ(chmod(db_dir.c_str(), 0), 0);
-    store.InitDB();
-    ASSERT_EQ(chmod(db_dir.c_str(), 0755), 0);
-    EXPECT_EQ(ReadHeader(wal_path).checkpoint_lsn, 0u) << "an unsearchable DB directory is not a deleted DB";
-    EXPECT_FALSE(InsertAt(store, 5));
+    {
+        // Inside the DB directory: write opens (the apply), fopen (InitDB's CFG read) and stat (DbStillExists) fail
+        // with EACCES, as under chmod 0 on the directory (root is exempt from the mode). Read-only opens still work
+        // so replay's data-file sync cannot fence the shard on its own. The stat() hits are the point: DbStillExists
+        // must read EACCES on <db>.CFG as "cannot tell", not as "gone".
+        xstore_fault::ScopedPathFault deny(db_dir, /*subtree=*/true, EACCES,
+                                           xstore_fault::kOpenWrite | xstore_fault::kFopen | xstore_fault::kStat);
+        store.InitDB();
+        EXPECT_GT(deny.OpenHits(), 0u);
+        EXPECT_GT(deny.StatHits(), 0u) << "DbStillExists never saw the EACCES: this would pass even if it read it as 'gone'";
+        EXPECT_EQ(ReadHeader(wal_path).checkpoint_lsn, 0u) << "an unsearchable DB directory is not a deleted DB";
+        EXPECT_FALSE(InsertAt(store, 5));
+    }
 
     store.WarmFdForTests(YearFile(), row_length, kEpoch0 + 4);
     ZeroRows(0, 3);
@@ -2991,6 +3233,44 @@ TEST_F(WalDirectPathTest, LargeBatchGoesThroughRingWhenSmallRecordPending) {
     ASSERT_FALSE(Failed(Batch(store, db_name, kEpoch0 + 2000, kBatchRows, 7.0)));
     EXPECT_EQ(DirectRecords(), direct0 + 1) << "after the checkpoint passed it, the file is clear";
     EXPECT_EQ(TotalHead(), head1);
+}
+
+// Replay reads the ring in WAL_REPLAY_READ_CHUNK_BYTES windows, growing one window to a record's own size when the
+// record is bigger (ReplayRingShard's fill()). A batch of at least the direct threshold only reaches the ring while
+// the file has a pending ring record, so one is planted first. The record is ~2 chunks and must replay in full.
+TEST_F(WalDirectPathTest, ReplayRecoversARingRecordLargerThanTheReadChunk) {
+    row_length = 256;
+    walring::SetDirectMinBytesForTests(0);   // production thresholds
+    walring::SetDirectPressureMinBytesForTests(0);
+    constexpr size_t kChunk = XStoreTunables::WAL_REPLAY_READ_CHUNK_BYTES;
+    constexpr uint64_t kFirstBatchRow = 10;
+    const uint64_t rows = 2 * kChunk / (8 + row_length) + 1;
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    ASSERT_TRUE(InsertAt(store, 0));
+    const uint64_t head0 = TotalHead();
+    const uint64_t direct0 = DirectRecords();
+    ASSERT_FALSE(Failed(Batch(store, db_name, kEpoch0 + kFirstBatchRow, rows, 1000.0)));
+    ASSERT_EQ(DirectRecords(), direct0) << "the batch must have gone through the ring";
+    const uint64_t head = TotalHead();
+    ASSERT_GT(head - head0, kChunk) << "the ring record must be larger than one read window";
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    const std::string wal_path = ring->path();
+    ring.reset();
+    ShrinkDataFile(kFirstBatchRow + rows);
+    Crash();
+    ZeroRows(0, kFirstBatchRow + rows);
+
+    store.InitDB();
+    EXPECT_TRUE(RowPresent(0));
+    for (uint64_t i : {uint64_t{0}, uint64_t{1}, rows / 2, rows - 2, rows - 1}) {
+        XStore_Proto::UnaryQuery_REP q;
+        store.UnaryQuery(kEpoch0 + kFirstBatchRow + i, db_name, &q);
+        ASSERT_EQ(q.data().fielddata_size(), 1) << "batch row " << i << " was not replayed";
+        EXPECT_DOUBLE_EQ(q.data().fielddata(0).doubledata(), 1000.0 + static_cast<double>(i)) << "batch row " << i;
+    }
+    EXPECT_EQ(ReadHeader(wal_path).checkpoint_lsn, head) << "replay must consume the whole large record";
 }
 
 // The hazard: SYNC insert T=v1 (ring), then a large batch overwriting T=v2. If the batch went direct, a

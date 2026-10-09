@@ -156,7 +156,7 @@ class XStoreZmqNetworkTest : public ::testing::Test {
 
       auto *server = new ZmqServer(1);  // single worker: client is a single REQ socket anyway
       std::thread server_thread([server, port]() {
-          server->StartServer("127.0.0.1", std::to_string(port));
+          (void)server->StartServer("127.0.0.1", std::to_string(port));  // never stopped, drain result irrelevant
       });
       server_thread.detach();
 
@@ -773,7 +773,7 @@ class XStoreZmqConcurrentTest : public ::testing::Test {
 
       auto *server = new ZmqServer(4);  // multi-worker pool, unlike XStoreZmqNetworkTest's single worker
       std::thread server_thread([server, port]() {
-          server->StartServer("127.0.0.1", std::to_string(port));
+          (void)server->StartServer("127.0.0.1", std::to_string(port));  // never stopped, drain result irrelevant
       });
       server_thread.detach();
 

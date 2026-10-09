@@ -272,7 +272,8 @@ struct CurveServerFixture {
 
         auto *server = new ZmqServer(1);
         std::thread server_thread([server, port, this]() {
-            server->StartServer("127.0.0.1", std::to_string(port), server_kp, store);
+            // Never stopped (leaked, detached), so the drain result is irrelevant.
+            (void)server->StartServer("127.0.0.1", std::to_string(port), server_kp, store);
         });
         server_thread.detach();
         std::this_thread::sleep_for(std::chrono::milliseconds(200));

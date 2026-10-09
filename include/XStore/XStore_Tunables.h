@@ -254,7 +254,8 @@ inline constexpr double      WAL_GATHER_ADAPT_EMA_SATURATE = 4.0;
 // Poll interval while waiting out the gather window above.
 inline constexpr unsigned    WAL_GATHER_POLL_US          = 50;
 
-// Fixed part of one serialized legacy WalRecord header (SerializeWalRecord).
+// Fixed part of one serialized legacy (v1) WalRecord header (SerializeWalRecord). Only a reserve() hint now:
+// the v2 ring record's fixed header is walring::RECORD_FIXED_BYTES (28), so the hint under-reserves slightly.
 inline constexpr size_t WAL_RECORD_HEADER_BYTES = 20; // recordLen(4)+crc32c(4)+dbNameLen(2)+rowLength(2)+timeResolution(4)+rowCount(4)
 
 // Sanity ceiling for the legacy-format ReplayWal streaming read

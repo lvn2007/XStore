@@ -49,7 +49,9 @@ int main(int argc, char *argv[]) {
     // before ANY thread exists (spdlog, ZMQ, WAL writers... all inherit the
     // mask), so they are only ever consumed by the sigwait thread started
     // below -- never by a default handler that would kill the process with
-    // the indexes still marked dirty.
+    // the indexes still marked dirty. The one exception is jemalloc's
+    // background thread, which may start before main(): that is safe because
+    // jemalloc blocks all signals in its own threads.
     sigset_t stop_signals;
     sigemptyset(&stop_signals);
     sigaddset(&stop_signals, SIGINT);

@@ -58,6 +58,7 @@ struct TempDir {
     }
 };
 
+// Inherently racy: the port is free only until close(); another process can take it before the server binds.
 int FreePort() {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in addr{};

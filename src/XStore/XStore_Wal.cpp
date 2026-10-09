@@ -995,6 +995,8 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                     record_kind[i] = WalRecordKind::kFail;
                 } else if (record.rows.size() == 1) {
                     // Unary-sized: never direct. Only a (test-sized) tiny ring can make one not fit.
+                    // WalRecord has no unary flag, so one row stands in for "unary"; rowLength is a u16, so
+                    // a single row is at most ~64 KiB and would not reach the direct threshold anyway.
                     record_kind[i] = record_total[i] > ring_half ? WalRecordKind::kFail : WalRecordKind::kRing;
                 } else {
                     const size_t payload = record.rows.size() * (sizeof(uint64_t) + record.row_length);
@@ -1052,6 +1054,8 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                         // fdatasync every touched data file + fsync its parent directory (a new year file's
                         // directory entry is not made durable by fdatasync of the file) through the
                         // checkpointer's shared helpers: same fault hooks, same sticky-poison rule.
+                        // ApplyWalRecord also noted these ranges dirty (no ring), so the next checkpointer cycle
+                        // fdatasyncs them a second time: harmless extra work, kept for simplicity.
                         // On failure the rows are ALREADY in the data file (like BYPASS) -- acceptable
                         // because the caller is told the write failed; the range stays in the dirty set so the
                         // checkpointer syncs it later. Never acknowledge what a fresh fd cannot vouch for.

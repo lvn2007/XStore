@@ -8,7 +8,9 @@
 #include "XStore/XStore_WalRing.h"
 #include "XStore/XStore_WalCheckpoint.h"
 #include "XStoreTestSupport.h"
+#include "XStoreSyscallFault.h"
 #include "include/DataStructs/TimeStruct.h"
+#include <cerrno>
 #include <cstddef>
 #include <filesystem>
 #include <memory>
@@ -427,6 +429,94 @@ TEST_F(DurabilityRebuildTest, RebuildOverSparseYearKeepsRowsAtBothEnds) {
     }
     EXPECT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), 0u);
     EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), 0u);
+}
+
+// ---- Rebuild completion failure branches -----------------------------------
+//
+// A rebuild may clear an index's dirty flag only after the data file and the index itself are synced. Each
+// failing step must leave the index marked dirty so the next start rebuilds it again. (Not covered here: the 10 s
+// drain-timeout _exit(1) and the second-signal _exit(1) of shutdown, which need a signal test.)
+
+class DurabilityRebuildFaultTest : public DurabilityRebuildTest {
+protected:
+    // Restart #1 with every fdatasync of `fault_ext`'s file failing; restart #2 without the fault, after the bodies
+    // of the indexes that were left dirty were lost again. Both restarts must end with correct, clean indexes
+    // wherever the fault could have touched them.
+    void RebuildUnderSyncFault(const char *fault_ext) {
+        const bool data_fault = std::string(fault_ext) == ".XSTORE";
+        const bool zmap_dirty_expected = data_fault || std::string(fault_ext) == ".zmap";
+        const bool catidx_dirty_expected = data_fault || std::string(fault_ext) == ".catidx";
+        XStore store;
+        InsertRows(store);
+        DropRegistriesAndZeroBody(Path(".zmap"), sizeof(ZoneMapFileHeader));
+        DropRegistriesAndZeroBody(Path(".catidx"), sizeof(CatIdxFileHeader));
+        {
+            xstore_fault::ScopedFdFault fail(xstore_fault::FdOp::kSync, Path(fault_ext), /*skip_calls=*/0, /*fail_calls=*/1000, EIO);
+            store.InitDB();
+            EXPECT_GT(fail.Failures(), 0) << "the fault never hit a " << fault_ext << " sync";
+        }
+        EXPECT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), zmap_dirty_expected ? 1u : 0u);
+        EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), catidx_dirty_expected ? 1u : 0u);
+
+        if (zmap_dirty_expected) DropRegistriesAndZeroBody(Path(".zmap"), sizeof(ZoneMapFileHeader));
+        if (catidx_dirty_expected) DropRegistriesAndZeroBody(Path(".catidx"), sizeof(CatIdxFileHeader));
+        store.InitDB();
+        EXPECT_EQ(ReadZmapEntry0().valid_count, kRows) << "the dirty zone map must have been rebuilt on the next start";
+        EXPECT_EQ(FindDouble(store, 137.0), (std::vector<uint64_t>{kBaseEpoch + 137}));
+        EXPECT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), 0u);
+        EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), 0u);
+    }
+};
+
+TEST_F(DurabilityRebuildFaultTest, FailedDataFdatasyncLeavesBothIndexesDirty) { RebuildUnderSyncFault(".XSTORE"); }
+TEST_F(DurabilityRebuildFaultTest, FailedZoneMapFdatasyncLeavesItDirty) { RebuildUnderSyncFault(".zmap"); }
+TEST_F(DurabilityRebuildFaultTest, FailedCatIdxFdatasyncLeavesItDirty) { RebuildUnderSyncFault(".catidx"); }
+
+// MarkClean's three steps one by one: index fdatasync, header pwrite, header fdatasync. Each failure reports false and
+// keeps the in-memory flag dirty so a retry writes the header again. (After a failed header fdatasync the page cache
+// may already hold the clean header: harmless, the index body was synced by the first step.)
+template <typename Header, typename IndexFile>
+void ExpectMarkCleanFailuresReportAndRetrySucceeds(IndexFile &index, const std::string &path) {
+    using xstore_fault::FdOp;
+    using xstore_fault::ScopedFdFault;
+    ASSERT_EQ(OnDiskDirty<Header>(path), 1u) << "precondition: an UpdateRow marked it dirty";
+    {
+        ScopedFdFault fail(FdOp::kSync, path, 0, 1, EIO);
+        EXPECT_FALSE(index.MarkClean()) << "index fdatasync";
+        EXPECT_EQ(fail.Failures(), 1);
+    }
+    EXPECT_EQ(OnDiskDirty<Header>(path), 1u);
+    {
+        ScopedFdFault fail(FdOp::kPwrite, path, 0, 1, EIO);
+        EXPECT_FALSE(index.MarkClean()) << "header pwrite";
+        EXPECT_EQ(fail.Failures(), 1);
+    }
+    EXPECT_EQ(OnDiskDirty<Header>(path), 1u);
+    {
+        ScopedFdFault fail(FdOp::kSync, path, 1, 1, EIO);
+        EXPECT_FALSE(index.MarkClean()) << "header fdatasync";
+        EXPECT_EQ(fail.Failures(), 1);
+    }
+    EXPECT_TRUE(index.MarkClean()) << "retry";
+    EXPECT_EQ(OnDiskDirty<Header>(path), 0u);
+}
+
+TEST(DurabilityMarkCleanFaultTest, ZoneMapMarkCleanFailuresKeepItDirtyUntilARetrySucceeds) {
+    ScratchDir scratch("durability_zmap_markclean_fault");
+    const std::string path = (scratch.test_root / "2024.zmap").string();
+    ZoneMapFile zmap;
+    ASSERT_TRUE(zmap.Open(path, 64, 4));
+    zmap.UpdateRow(0, ZmapObs(1.0), 1);
+    ExpectMarkCleanFailuresReportAndRetrySucceeds<ZoneMapFileHeader>(zmap, path);
+}
+
+TEST(DurabilityMarkCleanFaultTest, CatIdxMarkCleanFailuresKeepItDirtyUntilARetrySucceeds) {
+    ScratchDir scratch("durability_catidx_markclean_fault");
+    const std::string path = (scratch.test_root / "2024.catidx").string();
+    CatIdxFile catidx;
+    ASSERT_TRUE(catidx.Open(path, 64, 64));
+    catidx.UpdateRow(0, CatObs(1));
+    ExpectMarkCleanFailuresReportAndRetrySucceeds<CatIdxFileHeader>(catidx, path);
 }
 
 // ---- Task 4: XStore::Shutdown() (DD7) --------------------------------------
