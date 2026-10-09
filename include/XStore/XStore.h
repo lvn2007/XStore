@@ -1400,13 +1400,16 @@ class XStore {
         // resolves it, the same header-only open+pread+magic/version check
         // as ZoneMapNeedsRebuild -- deliberately never calls
         // GetOrOpenZoneMap, which would create/widen the file as a side
-        // effect of merely answering a query. For FindByValue specifically,
-        // the notice follows the .zmap file's width as a proxy for the
-        // .catidx file's width; the two can differ in mismatch states, but
-        // FindByValue's own real-scan fallback keeps results correct either way.
+        // effect of merely answering a query. FindByValue does NOT use this
+        // (it is about .zmap width): it decides from the width of the
+        // .catidx file its own scan consults, via UnindexedColumnNoticeText.
         static std::string UnindexedColumnNotice(std::string_view op, const std::string &db_name, const std::string &db_base_path,
                                                   const XStore_Proto::ConfigStruct &cfg, unsigned long long start_epoch,
                                                   unsigned long long end_epoch, int32_t column_idx);
+
+        // The one-line full-scan notice text shared by UnindexedColumnNotice and FindByValue.
+        static std::string UnindexedColumnNoticeText(std::string_view op, const std::string &db_name, int32_t column_idx,
+                                                      unsigned short year, uint32_t index_width);
 
         // Rescans one <YEAR>.XSTORE file row-by-row and folds every row
         // into a freshly-reinitialized zone map via the same UpdateRow

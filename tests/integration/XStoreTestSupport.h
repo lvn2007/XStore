@@ -1,6 +1,7 @@
 #ifndef XSTORE_TEST_SUPPORT_H
 #define XSTORE_TEST_SUPPORT_H
 
+#include <arpa/inet.h>
 #include <atomic>
 #include <cstdlib>
 #include <chrono>
@@ -12,6 +13,8 @@
 #include <string_view>
 #include <thread>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #include <vector>
 
@@ -236,6 +239,24 @@ inline void WaitForWalDrained(XStore &store, std::string_view db_name, unsigned 
             << "WAL did not drain within " << timeout.count() << "s (sentinel row of DB " << db_name << " never applied, or a ring has applied != head)";
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
+}
+
+// An OS-assigned loopback TCP port (-1 on failure). It is free only until close(): another process can take it
+// before the caller binds, so callers that must survive that retry on a fresh port.
+inline int FreePort() {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    int port = -1;
+    socklen_t len = sizeof(addr);
+    if (bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == 0 &&
+        getsockname(fd, reinterpret_cast<sockaddr *>(&addr), &len) == 0) {
+        port = ntohs(addr.sin_port);
+    }
+    close(fd);
+    return port;
 }
 
 }  // namespace xstore_test

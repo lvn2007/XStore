@@ -7,6 +7,7 @@
 #include "XStore/XStore_CatIdx.h"
 #include "XStore/XStore_WalRing.h"
 #include "XStore/XStore_WalCheckpoint.h"
+#include "XStore/XStore_RowScan.h"
 #include "XStoreTestSupport.h"
 #include "XStoreSyscallFault.h"
 #include "include/DataStructs/TimeStruct.h"
@@ -466,11 +467,100 @@ protected:
         EXPECT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), 0u);
         EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), 0u);
     }
+
+    // Incomplete scan: one data-file read fails part-way through a rebuild's row scan. The rows the scan never saw
+    // are missing from the index, so it must stay dirty. A zero row at kFarRow gives the file a second data extent,
+    // so each scan is two preads (rows near 0, then rows near kFarRow). The fault passes `skip_calls` preads and
+    // fails the next one: skip 1 hits the zone-map scan (it runs first), skip 3 the catidx scan. The failing scan
+    // has already folded the first extent. (The first-pread case, nothing folded, is
+    // FirstDataReadFailureLeavesBothIndexesDirty.) Restart #2, without the fault, must rebuild both correctly.
+    void RebuildWithOneFailedDataRead(int skip_calls, bool zmap_scan_fails) {
+        constexpr uint64_t kFarRow = 20000;
+        XStore store;
+        InsertRows(store);
+        {
+            const int fd = open(Path(".XSTORE").c_str(), O_WRONLY);
+            ASSERT_GE(fd, 0);
+            const std::vector<char> zero_row(kRowLength, 0);
+            ASSERT_EQ(pwrite(fd, zero_row.data(), zero_row.size(), static_cast<off_t>(kFarRow * kRowLength)),
+                      static_cast<ssize_t>(zero_row.size()));
+            close(fd);
+        }
+        DropRegistriesAndZeroBody(Path(".zmap"), sizeof(ZoneMapFileHeader));
+        DropRegistriesAndZeroBody(Path(".catidx"), sizeof(CatIdxFileHeader));
+        {
+            xstore_fault::ScopedFdFault fail(xstore_fault::FdOp::kPread, Path(".XSTORE"), skip_calls,
+                                             /*fail_calls=*/1, EIO);
+            store.InitDB();
+            ASSERT_EQ(fail.Failures(), 1) << "the fault never hit the data-file scan";
+        }
+        EXPECT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), zmap_scan_fails ? 1u : 0u);
+        EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), zmap_scan_fails ? 0u : 1u);
+
+        if (zmap_scan_fails) DropRegistriesAndZeroBody(Path(".zmap"), sizeof(ZoneMapFileHeader));
+        else DropRegistriesAndZeroBody(Path(".catidx"), sizeof(CatIdxFileHeader));
+        store.InitDB();
+        EXPECT_EQ(ReadZmapEntry0().valid_count, kRows);
+        EXPECT_EQ(FindDouble(store, 137.0), (std::vector<uint64_t>{kBaseEpoch + 137}));
+        EXPECT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), 0u);
+        EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), 0u);
+    }
 };
 
 TEST_F(DurabilityRebuildFaultTest, FailedDataFdatasyncLeavesBothIndexesDirty) { RebuildUnderSyncFault(".XSTORE"); }
 TEST_F(DurabilityRebuildFaultTest, FailedZoneMapFdatasyncLeavesItDirty) { RebuildUnderSyncFault(".zmap"); }
 TEST_F(DurabilityRebuildFaultTest, FailedCatIdxFdatasyncLeavesItDirty) { RebuildUnderSyncFault(".catidx"); }
+
+TEST_F(DurabilityRebuildFaultTest, IncompleteScanInTheZoneMapRebuildLeavesItDirty) {
+    RebuildWithOneFailedDataRead(/*skip_calls=*/1, /*zmap_scan_fails=*/true);
+}
+TEST_F(DurabilityRebuildFaultTest, IncompleteScanInTheCatIdxRebuildLeavesItDirty) {
+    RebuildWithOneFailedDataRead(/*skip_calls=*/3, /*zmap_scan_fails=*/false);
+}
+
+// Every data-file read fails from the first one, so neither rebuild folds a single row. The freshly created (empty)
+// indexes must still be dirty on disk: an empty index that reads clean would be trusted by the next start.
+TEST_F(DurabilityRebuildFaultTest, FirstDataReadFailureLeavesBothIndexesDirty) {
+    XStore store;
+    InsertRows(store);
+    DropRegistriesAndZeroBody(Path(".zmap"), sizeof(ZoneMapFileHeader));
+    DropRegistriesAndZeroBody(Path(".catidx"), sizeof(CatIdxFileHeader));
+    {
+        xstore_fault::ScopedFdFault fail(xstore_fault::FdOp::kPread, Path(".XSTORE"), /*skip_calls=*/0,
+                                         /*fail_calls=*/1000, EIO);
+        store.InitDB();
+        ASSERT_GT(fail.Failures(), 0) << "the fault never hit the data-file scan";
+    }
+    EXPECT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), 1u);
+    EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), 1u);
+
+    XStore::ClearZoneMapRegistryForTests();  // the files hold only a header: nothing to zero
+    XStore::ClearCatIdxRegistryForTests();
+    store.InitDB();
+    EXPECT_EQ(ReadZmapEntry0().valid_count, kRows);
+    EXPECT_EQ(FindDouble(store, 137.0), (std::vector<uint64_t>{kBaseEpoch + 137}));
+    EXPECT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), 0u);
+    EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), 0u);
+}
+
+TEST_F(DurabilityRebuildFaultTest, DataFileReadErrorMakesTheRowScanReportIncomplete) {
+    XStore store;
+    InsertRows(store);
+    const int fd = open(Path(".XSTORE").c_str(), O_RDONLY);
+    ASSERT_GE(fd, 0);
+    uint64_t visited = 0;
+    auto count_rows = [&](uint64_t, const char *) { ++visited; };
+    ASSERT_TRUE(ForEachDataRow(fd, kBaseEpoch + kRows, kRowLength, count_rows)) << "control: unfaulted scan";
+    EXPECT_GE(visited, kRows);
+    {
+        xstore_fault::ScopedFdFault fail(xstore_fault::FdOp::kPread, Path(".XSTORE"), 0, 1000, EIO);
+        visited = 0;
+        EXPECT_FALSE(ForEachDataRow(fd, kBaseEpoch + kRows, kRowLength, count_rows));
+        EXPECT_GT(fail.Failures(), 0);
+        EXPECT_EQ(visited, 0u);
+    }
+    close(fd);
+}
 
 // MarkClean's three steps one by one: index fdatasync, header pwrite, header fdatasync. Each failure reports false and
 // keeps the in-memory flag dirty so a retry writes the header again. (After a failed header fdatasync the page cache
@@ -493,6 +583,8 @@ void ExpectMarkCleanFailuresReportAndRetrySucceeds(IndexFile &index, const std::
     }
     EXPECT_EQ(OnDiskDirty<Header>(path), 1u);
     {
+        // No on-disk assertion: the clean header already reached the page cache (the pwrite succeeded), and a
+        // failed fdatasync does not undo it, so a read-back sees dirty == 0 here.
         ScopedFdFault fail(FdOp::kSync, path, 1, 1, EIO);
         EXPECT_FALSE(index.MarkClean()) << "header fdatasync";
         EXPECT_EQ(fail.Failures(), 1);

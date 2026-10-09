@@ -344,6 +344,11 @@ void CatIdxFile::MarkDirtyOnDisk() {
     spdlog::error("[CATIDX] - Failed to persist dirty flag");
 }
 
+void CatIdxFile::MarkDirty() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    EnsureDirtyOnDisk();
+}
+
 bool CatIdxFile::MarkClean() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (fdatasync(fd_) != 0) return false;
@@ -527,6 +532,8 @@ void XStore::RebuildOneYearCatIdxBloom(const std::string &db_base_path, unsigned
     // always takes CatIdxFile::Open's WriteFreshHeader (all-zero bloom)
     // branch -- the row scan below is what genuinely repopulates it.
     CatIdxFile &catidx = GetOrOpenCatIdx(db_base_path, year, row_length, tracked_column_count);
+    // Fresh file reads clean: mark it dirty before anything can fail (see RebuildOneYearZoneMap).
+    catidx.MarkDirty();
 
     struct stat st{};
     int fd = open(data_path.c_str(), O_RDONLY);

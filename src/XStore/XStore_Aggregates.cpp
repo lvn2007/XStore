@@ -1070,17 +1070,11 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
         return;
     }
 
-    // Task 4: notice-only, uses the same header-only .zmap peek every
-    // zone-map-pushdown aggregate above does -- FindByValue's own scan is
-    // always correct regardless of index width (real-scan fallback), the
-    // caller just deserves to know it paid for a full scan.
-    std::string unindexed_notice = UnindexedColumnNotice("FINDBYVALUE", db_name, db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t, column_idx);
-    if (!unindexed_notice.empty()) {
-        set_warning("", unindexed_notice);
-    }
-
     std::string encoded_target = EncodeFDataForCatIdx(value);
     uint32_t tracked_column_count = EffectiveTrackedColumnCount(cfg_struct);
+    // Notice-only: the scan is always correct (real-scan fallback), the caller just deserves to know it paid for
+    // one. Decided below from the width of the .catidx this query actually consults, once per query.
+    bool unindexed_notice_emitted = false;
 
     std::string chunk_buf;
     chunk_buf.reserve(chunk_size_bytes + 4096);
@@ -1140,6 +1134,11 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
         if (column_idx >= 0 && static_cast<uint32_t>(column_idx) < tracked_column_count) {
             CatIdxFile &catidx = GetOrOpenCatIdx(db_base_path_str, curr_ts.year,
                                                   static_cast<uint16_t>(cfg_struct.rowlength()), tracked_column_count);
+            if (!unindexed_notice_emitted && static_cast<uint32_t>(column_idx) >= catidx.TrackedColumnCount()) {
+                set_warning("", UnindexedColumnNoticeText("FINDBYVALUE", db_name, column_idx, curr_ts.year,
+                                                          catidx.TrackedColumnCount()));
+                unindexed_notice_emitted = true;
+            }
             block_might_contain.assign(static_cast<size_t>(last_block - first_block + 1), 0);
             for (uint64_t b = first_block; b <= last_block; ++b) {
                 block_might_contain[static_cast<size_t>(b - first_block)] =

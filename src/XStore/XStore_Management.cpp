@@ -727,6 +727,13 @@ bool XStore::ZoneMapNeedsRebuild(const std::string &zmap_path, uint32_t desired_
     return false;
 }
 
+std::string XStore::UnindexedColumnNoticeText(std::string_view op, const std::string &db_name, int32_t column_idx,
+                                               unsigned short year, uint32_t index_width) {
+    return fmt::format("[WARNING] [{}] [DB: {}] - column {} is not yet indexed in {} (index width {}); "
+                        "answered by full scan -- restart XStore to rebuild the index",
+                        op, db_name, column_idx, year, index_width);
+}
+
 std::string XStore::UnindexedColumnNotice(std::string_view op, const std::string &db_name, const std::string &db_base_path,
                                            const XStore_Proto::ConfigStruct &cfg, unsigned long long start_epoch,
                                            unsigned long long end_epoch, int32_t column_idx) {
@@ -754,9 +761,7 @@ std::string XStore::UnindexedColumnNotice(std::string_view op, const std::string
         std::optional<uint32_t> warm_width = PeekOpenZoneMapWidth(db_base_path, curr_ts.year);
         if (warm_width.has_value()) {
             if (static_cast<uint32_t>(column_idx) >= *warm_width) {
-                return fmt::format("[WARNING] [{}] [DB: {}] - column {} is not yet indexed in {} (index width {}); "
-                                    "answered by full scan -- restart XStore to rebuild the index",
-                                    op, db_name, column_idx, curr_ts.year, *warm_width);
+                return UnindexedColumnNoticeText(op, db_name, column_idx, curr_ts.year, *warm_width);
             }
             iter_epoch = end_of_current_year + 1;
             continue;
@@ -773,9 +778,7 @@ std::string XStore::UnindexedColumnNotice(std::string_view op, const std::string
                 header.magic == ZoneMapFileHeader{}.magic &&
                 header.version == ZONE_MAP_VERSION &&
                 static_cast<uint32_t>(column_idx) >= header.tracked_column_count) {
-                return fmt::format("[WARNING] [{}] [DB: {}] - column {} is not yet indexed in {} (index width {}); "
-                                    "answered by full scan -- restart XStore to rebuild the index",
-                                    op, db_name, column_idx, curr_ts.year, header.tracked_column_count);
+                return UnindexedColumnNoticeText(op, db_name, column_idx, curr_ts.year, header.tracked_column_count);
             }
         }
         // Missing/corrupt/stale-version file -- no information either way
@@ -871,6 +874,9 @@ void XStore::RebuildOneYearZoneMap(const std::string &db_base_path, unsigned sho
     // clean, correctly-sized baseline no matter which direction the old
     // header's width was wrong in.
     ZoneMapFile &zmap = GetOrOpenZoneMap(db_base_path, year, row_length, tracked_column_count);
+    // The truncate above wiped the old dirty flag. Mark the fresh (empty) index dirty before anything can fail, so
+    // every early exit below (data open, first read) leaves it dirty; only MarkClean at the end clears it.
+    zmap.MarkDirty();
 
     uintmax_t file_size = std::filesystem::file_size(data_path);
     uint64_t total_rows = file_size / row_length; // exact by construction -- data files are preallocated to whole-row multiples

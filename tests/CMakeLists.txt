@@ -1,9 +1,8 @@
 # xstore_tests exercises the XStore class directly against the filesystem
 # (InfoQuery, CreateDB, RemoveDB/RemoveDBFiles, Unary/Batch/Range
 # Insert+Query+Delete, the Min/Max/Sum/Avg aggregates, and concurrency),
-# bypassing the ZMQ networking layer entirely -- that layer is a thin proto
-# (de)serialization wrapper around these same methods, tested separately in
-# xstore_network_tests below via the real wire protocol.
+# bypassing the ZMQ networking layer entirely. Request/response logic is
+# covered here; xstore_network_tests below covers only the transport.
 # Core sources come from the xstore_core static lib (top-level CMakeLists)
 # -- never list them (or PROTO_SRCS/PROTO_HDRS) here: that reintroduces
 # duplicate per-target compiles and the cross-directory protoc codegen race
@@ -33,9 +32,10 @@ include(GoogleTest)
 # `ctest --test-dir build [-R <regex>]`.
 gtest_discover_tests(xstore_tests)
 
-# xstore_network_tests drives the same operations through the real ZMQ wire
-# protocol (ZMQ_Server + a REQ client), unlike xstore_tests above which calls
-# into the XStore class directly.
+# xstore_network_tests: transport only; request/response logic is covered in
+# xstore_tests. Drives the real ZMQ wire protocol (ZMQ_Server + a REQ client):
+# per-RPC-family dispatch/encoding round trips, error replies, CURVE/ZAP,
+# graceful shutdown/signals, and multi-client concurrency.
 add_executable(xstore_network_tests
         integration/XStoreZmqNetworkTest.cpp
         integration/XStoreCurveTest.cpp

@@ -1,9 +1,9 @@
-// Exercises the XStore API through the real ZMQ wire protocol (ROUTER <->
-// DEALER <-> in-proc REP worker threads, see ZMQ_Server.cpp) instead of
-// calling into the XStore class directly. This is deliberately a *separate*
-// test binary from xstore_core_tests/xstore_insertquery_tests (see
-// tests/CMakeLists.txt) since it links libzmq and spins up a real TCP server
-// thread for the whole suite.
+// Transport only; request/response logic is covered in xstore_tests. Drives the real ZMQ wire protocol
+// (ROUTER <-> DEALER <-> in-proc REP worker threads, see ZMQ_Server.cpp) to check what only a socket can:
+// the oneof dispatch and reply encoding of each RPC family (incl. the zero-object streamed encoder behind
+// Batch/Range query), error replies for an empty or unparseable envelope, and multi-client concurrency.
+// This is deliberately a *separate* test binary (see tests/CMakeLists.txt) since it links libzmq and spins up
+// a real TCP server thread for the whole suite.
 //
 // ZMQ_Server has no shutdown API (StartServer() blocks forever in
 // zmq::proxy()), so the server + its worker thread are started once in
@@ -197,6 +197,14 @@ class XStoreZmqNetworkTest : public ::testing::Test {
       rep.ParseFromArray(reply.data(), reply.size());
       return rep;
   }
+
+  // Sends raw bytes and returns the reply frame's size, or -1 if no reply arrived within the timeout.
+  long SendRawExpectReply(const std::string &payload) {
+      if (!client_socket->send(zmq::buffer(payload), zmq::send_flags::none)) return -1;
+      zmq::message_t reply;
+      if (!client_socket->recv(reply, zmq::recv_flags::none)) return -1;
+      return static_cast<long>(reply.size());
+  }
 };
 
 ScratchDir *XStoreZmqNetworkTest::scratch = nullptr;
@@ -238,16 +246,22 @@ TEST_F(XStoreZmqNetworkTest, PingOverWireReturnsEmptyAckWithoutTouchingDataStore
     (void)ping_rep;
 }
 
-TEST_F(XStoreZmqNetworkTest, CreateDBOverWireRejectsDuplicateName) {
-    XStore_Proto::CreateDB_REQ create_req;
-    create_req.set_rtype(XStore_Proto::CREATEDB);
-    create_req.set_dbname("ZMQ_DUP_DB");
-    create_req.set_timeresolution(XStore_Proto::SECOND);
-    create_req.set_rowlength(128);
-    SendRequest<XStore_Proto::CreateDB_REP>(Wrap(create_req));
+// The server answers a request it cannot act on with one empty frame, so the client's REQ socket never
+// hangs (ZMQ_Server.cpp: PAYLOAD_NOT_SET / parse-failure paths).
+TEST_F(XStoreZmqNetworkTest, EnvelopeWithNoPayloadGetsAnEmptyReply) {
+    EXPECT_EQ(SendRawExpectReply(XStore_Proto::Request().SerializeAsString()), 0);
+}
 
-    auto second_rep = SendRequest<XStore_Proto::CreateDB_REP>(Wrap(create_req));
-    EXPECT_EQ(second_rep.createdbstatus(), "[WARNING] [CREATE DB] [DB: ZMQ_DUP_DB] - Already existed");
+TEST_F(XStoreZmqNetworkTest, UnparseableBytesGetAnEmptyReplyAndServerKeepsServing) {
+    EXPECT_EQ(SendRawExpectReply("\xff\xff\xff\xff"), 0);
+
+    // Ping_REP serializes to zero bytes, so use a request with a non-empty reply to prove the worker survived.
+    XStore_Proto::UnaryQuery_REQ query_req;
+    query_req.set_rtype(XStore_Proto::UNARYQUERY);
+    query_req.set_dbname("ZMQ_NOPE_AFTER_GARBAGE_DB");
+    query_req.set_timestamp(TS_2005_MID);
+    auto query_rep = SendRequest<XStore_Proto::UnaryQuery_REP>(Wrap(query_req));
+    EXPECT_FALSE(query_rep.querystatus().empty());
 }
 
 // ---------------------------------------------------------------------
@@ -383,18 +397,6 @@ TEST_F(XStoreZmqNetworkTest, BatchInsertThenBatchQueryOverWireOmitsHoles) {
     ASSERT_EQ(by_ts[ts2].data().fielddata_size(), 2);
     EXPECT_EQ(by_ts[ts2].data().fielddata(0).uint64data(), 123456789ULL);
     EXPECT_EQ(by_ts[ts2].data().fielddata(1).bytesdata(), "two-cols");
-}
-
-TEST_F(XStoreZmqNetworkTest, BatchInsertOverWireToNonexistentDBReturnsError) {
-    XStore_Proto::BatchInsert_REQ insert_req;
-    insert_req.set_rtype(XStore_Proto::BATCHINSERT);
-    insert_req.set_dbname("ZMQ_NOPE_BATCH_DB");
-    XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
-    entry->set_timestamp(TS_2012_MID);
-    *entry->mutable_data() = MakeRow({FDouble(1.0)});
-
-    auto insert_rep = SendRequest<XStore_Proto::BatchInsert_REP>(Wrap(insert_req));
-    EXPECT_EQ(insert_rep.insertstatus(), "[WARNING] [BATCH INSERT] [DB: ZMQ_NOPE_BATCH_DB] - DB does not exist");
 }
 
 // ---------------------------------------------------------------------
@@ -726,27 +728,6 @@ TEST_F(XStoreZmqNetworkTest, FindByPatternRoundTripOverNetwork) {
         EXPECT_EQ((entry.timestamp() - TS_2020_MID) % 3, 1u);
         EXPECT_EQ(entry.data().fielddata(0).stringdata(), "MSFT");
     }
-}
-
-TEST_F(XStoreZmqNetworkTest, FindByPatternInvalidPatternReportsErrorOverNetwork) {
-    XStore_Proto::CreateDB_REQ create_req;
-    create_req.set_rtype(XStore_Proto::CREATEDB);
-    create_req.set_dbname("ZMQ_FINDBYPATTERN_BAD");
-    create_req.set_timeresolution(XStore_Proto::SECOND);
-    create_req.set_rowlength(64);
-    SendRequest<XStore_Proto::CreateDB_REP>(Wrap(create_req));
-
-    XStore_Proto::FindByPattern_REQ find_req;
-    find_req.set_rtype(XStore_Proto::FINDBYPATTERN);
-    find_req.set_dbname("ZMQ_FINDBYPATTERN_BAD");
-    find_req.set_starttime(TS_2020_MID);
-    find_req.set_endtime(TS_2020_MID + 1);
-    find_req.set_columnidx(0);
-    find_req.set_pattern("bad\\");
-
-    auto find_rep = SendRequest<XStore_Proto::FindByPattern_REP>(Wrap(find_req));
-    EXPECT_EQ(find_rep.queryresponse_size(), 0);
-    EXPECT_NE(find_rep.querystatus().find("Invalid pattern"), std::string::npos) << find_rep.querystatus();
 }
 
 // ---------------------------------------------------------------------

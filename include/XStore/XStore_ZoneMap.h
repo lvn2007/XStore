@@ -134,6 +134,11 @@ public:
     // FIRST -- this only makes the index itself durable.
     [[nodiscard]] bool MarkClean();
 
+    // Marks the index dirty on disk now. A rebuild calls this before it touches
+    // anything, so an early exit that folded no row cannot leave an empty index
+    // marked clean. A failure is logged; the next UpdateRow retries.
+    void MarkDirty();
+
     // Number of successful header dirty-mark writes (test-visible).
     [[nodiscard]] uint64_t DirtyMarkWritesForTests() const;
 

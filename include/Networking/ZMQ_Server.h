@@ -58,8 +58,8 @@ class ZmqServer {
         // exited (the server is quiescent: safe to XStore::Shutdown()), false
         // on timeout (a worker may still be mutating data: do not Shutdown).
         [[nodiscard]] bool StartServer(std::string listen_addr, std::string listen_port,
-                          std::optional<XStoreCurveKeyPair> curve_identity = std::nullopt,
-                          std::shared_ptr<KeyStore> curve_keystore = nullptr);
+                                      std::optional<XStoreCurveKeyPair> curve_identity = std::nullopt,
+                                      std::shared_ptr<KeyStore> curve_keystore = nullptr);
 
         // Thread-safe, idempotent, and valid at any time (even before
         // StartServer): shuts down the ZMQ context, so the proxy and every

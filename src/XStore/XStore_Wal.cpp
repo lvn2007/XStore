@@ -996,7 +996,8 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                 } else if (record.rows.size() == 1) {
                     // Unary-sized: never direct. Only a (test-sized) tiny ring can make one not fit.
                     // WalRecord has no unary flag, so one row stands in for "unary"; rowLength is a u16, so
-                    // a single row is at most ~64 KiB and would not reach the direct threshold anyway.
+                    // a single row is at most 8 + 65535 bytes: below WAL_DIRECT_MIN_BYTES, and kept off the
+                    // direct path regardless (it may still exceed WAL_DIRECT_PRESSURE_MIN_BYTES).
                     record_kind[i] = record_total[i] > ring_half ? WalRecordKind::kFail : WalRecordKind::kRing;
                 } else {
                     const size_t payload = record.rows.size() * (sizeof(uint64_t) + record.row_length);

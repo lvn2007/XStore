@@ -198,6 +198,11 @@ void ZoneMapFile::MarkDirtyOnDisk() {
     spdlog::error("[ZONE MAP] - Failed to persist dirty flag");
 }
 
+void ZoneMapFile::MarkDirty() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    EnsureDirtyOnDisk();
+}
+
 bool ZoneMapFile::MarkClean() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (fdatasync(fd_) != 0) return false;

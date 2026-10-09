@@ -187,11 +187,21 @@ public:
 
     uint64_t RowsPerBlockValue() const { return rows_per_block_; }
 
+    [[nodiscard]] uint32_t TrackedColumnCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return header_.tracked_column_count;
+    }
+
     // Clears the on-disk dirty flag: fdatasync(index content), then header
     // dirty=0 + fdatasync. Returns false on any failure, leaving the file
     // marked dirty. The caller must have fdatasync'd the .XSTORE data file
     // FIRST -- this only makes the index itself durable.
     [[nodiscard]] bool MarkClean();
+
+    // Marks the index dirty on disk now. A rebuild calls this before it touches
+    // anything, so an early exit that folded no row cannot leave an empty index
+    // marked clean. A failure is logged; the next UpdateRow retries.
+    void MarkDirty();
 
     // Number of successful header dirty-mark writes (test-visible).
     [[nodiscard]] uint64_t DirtyMarkWritesForTests() const;

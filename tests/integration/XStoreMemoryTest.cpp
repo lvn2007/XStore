@@ -4,13 +4,16 @@
 #include "XStore/XStore_CatIdx.h"
 #include "include/DataStructs/TimeStruct.h"
 #include "XStoreTestSupport.h"
+#include <filesystem>
 #include <malloc.h>
+#include <unistd.h>
 #include <memory>
 #include <string>
 #include <chrono>
 #include <thread>
 
 using xstore_test::CreateTestDb;
+using xstore_test::FDouble;
 using xstore_test::FString;
 using xstore_test::MakeRow;
 using xstore_test::ScratchDir;
@@ -171,6 +174,72 @@ TEST_F(XStoreMemoryTest, UnindexedColumnReportsFullScanNotice) {
     EXPECT_DOUBLE_EQ(rep.opresult().doubledata(), 42.5);
     EXPECT_NE(rep.opstatus().find("not yet indexed"), std::string::npos) << rep.opstatus();
     EXPECT_NE(rep.opstatus().find("restart XStore"), std::string::npos) << rep.opstatus();
+}
+
+// FindByValue's full-scan notice follows the .catidx width its own scan consults, not the .zmap width. Both tests
+// start from UnindexedColumnReportsFullScanNotice's state (year file born 64-wide, DB grown to 100 columns, column 80
+// holds 42.5 in one row), then give only one of the two index files the wider width.
+class FindByValueNoticeTest : public XStoreMemoryTest {
+protected:
+    static constexpr uint16_t kRowLength = 1400;
+    std::string db_path;
+    unsigned short year = 0;
+
+    void BuildNarrowIndexesWithWideDb(XStore &store, const std::string &db) {
+        CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+        XStore_Proto::UnaryInsert_REP urep;
+        store.UnaryInsert(7000, MakeRow({FString("narrow")}), db, &urep, XStore_Proto::SYNC);
+        XStore_Proto::RowData wide;
+        for (int c = 0; c < 100; ++c) wide.add_fielddata()->set_doubledata(c == 80 ? 42.5 : 1.0);
+        store.UnaryInsert(7001, wide, db, &urep, XStore_Proto::SYNC);
+        db_path = (scratch->test_root / "DataStore" / db).string();
+        year = TimeStruct(7000, XStore_Proto::SECOND).year;
+        XStore::ClearZoneMapRegistryForTests();
+        XStore::ClearCatIdxRegistryForTests();
+    }
+
+    // FindByValue(column 80 == 42.5) over both rows: asserts the one matching row, returns the query status.
+    std::string FindWideValue(XStore &store, const std::string &db) {
+        std::string buf;
+        store.FindByValue(7000, 7001, db, 80, FDouble(42.5), XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                          [&](std::string &&chunk, bool) { buf += chunk; });
+        XStore_Proto::FindByValue_REP rep;
+        EXPECT_TRUE(rep.ParseFromString(buf));
+        EXPECT_EQ(rep.queryresponse_size(), 1);
+        if (rep.queryresponse_size() == 1) EXPECT_EQ(rep.queryresponse(0).timestamp(), 7001u);
+        return rep.querystatus();
+    }
+};
+
+// .zmap 100 wide, .catidx still 64: the scan is a full scan for column 80, so the notice must appear (the old
+// .zmap-width proxy stayed silent here).
+TEST_F(FindByValueNoticeTest, NoticeAppearsWhenCatIdxIsNarrowerThanZoneMap) {
+    XStore store;
+    BuildNarrowIndexesWithWideDb(store, "FBVMISS");
+    ASSERT_TRUE(std::filesystem::remove(db_path + "/" + std::to_string(year) + ".zmap"));
+    ASSERT_EQ(XStore::GetOrOpenZoneMap(db_path, year, kRowLength, 100).TrackedColumnCount(), 100u);
+    ASSERT_EQ(XStore::GetOrOpenCatIdx(db_path, year, kRowLength).TrackedColumnCount(), 64u);
+
+    const std::string status = FindWideValue(store, "FBVMISS");
+    EXPECT_NE(status.find("not yet indexed in " + std::to_string(year) + " (index width 64)"), std::string::npos) << status;
+}
+
+// .catidx rebuilt 100 wide, .zmap still 64: column 80 is covered by the bloom, so no notice (the old proxy warned
+// spuriously here).
+TEST_F(FindByValueNoticeTest, NoNoticeWhenCatIdxCoversTheColumnEvenIfZoneMapIsNarrower) {
+    XStore store;
+    BuildNarrowIndexesWithWideDb(store, "FBVSPUR");
+    const std::string data_path = db_path + "/" + std::to_string(year) + ".XSTORE";
+    std::filesystem::resize_file(data_path, 7002ull * kRowLength);  // the rebuild scans every row: keep only the written ones
+    ASSERT_TRUE(std::filesystem::remove(db_path + "/" + std::to_string(year) + ".catidx"));
+    store.RebuildOneYearCatIdxBloom(db_path, year, kRowLength, 100);
+    XStore::ClearCatIdxRegistryForTests();
+    ASSERT_EQ(XStore::GetOrOpenCatIdx(db_path, year, kRowLength).TrackedColumnCount(), 100u);
+    ASSERT_EQ(XStore::GetOrOpenZoneMap(db_path, year, kRowLength).TrackedColumnCount(), 64u);
+    ASSERT_NE(XStore::PeekOpenZoneMapWidth(db_path, year), std::nullopt);  // warm: the old proxy answered from it
+
+    const std::string status = FindWideValue(store, "FBVSPUR");
+    EXPECT_EQ(status.find("not yet indexed"), std::string::npos) << status;
 }
 
 // Same DB/growth setup as UnindexedColumnReportsFullScanNotice, but querying
