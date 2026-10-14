@@ -73,13 +73,75 @@ fi
 echo "==> [2/4] Configuring with CMake (Release, tests off)"
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DXSTORE_BUILD_TESTS=OFF
 
-echo "==> [3/4] Building XStore (jobs: $(nproc))"
-cmake --build build -j "$(nproc)" --target XStore
+# Single-line progress bar for the build: parses the "[ NN%]" markers the
+# Makefile generator emits and the "[ N/M]" counters the Ninja generator
+# emits, shows the most recent output line as the current action, and tees
+# every line to the log. Non-TTY output (CI) passes through.
+PROGRESS_AWK='
+BEGIN {
+    tw = ENVIRON["COLUMNS"] + 0
+    if (tw < 40 || tw > 500) tw = 80
+    width = (tw >= 100) ? 40 : 24
+    pct = 0
+    action = "starting build..."
+}
+{
+    print >> LOG
+    line = $0
+    if (line ~ /^\[ *[0-9]+%\]/) {
+        p = line
+        sub(/^\[ */, "", p)
+        sub(/%\].*$/, "", p)
+        pct = p + 0
+        action = line
+        sub(/^\[ *[0-9]+%\] */, "", action)
+    } else if (line ~ /^\[ *[0-9]+\/ *[0-9]+ *\]/) {
+        p = line
+        sub(/^\[ */, "", p)
+        n = p + 0
+        sub(/^ *[0-9]+\/ */, "", p)
+        d = p + 0
+        if (d > 0) pct = int(n * 100 / d)
+        action = line
+        sub(/^\[ *[0-9]+\/ *[0-9]+ *\] */, "", action)
+    } else if (line ~ /[^ \t]/) {
+        action = line
+    }
+    maxa = tw - width - 12
+    if (maxa < 12) maxa = 12
+    if (length(action) > maxa) action = substr(action, 1, maxa - 2) ".."
+    filled = int(width * pct / 100)
+    bar = ""
+    for (i = 0; i < filled; i++) bar = bar "#"
+    for (i = filled; i < width; i++) bar = bar "."
+    out = sprintf("[%s] %3d%% %s", bar, pct, action)
+    pad = ""
+    for (i = length(out); i < tw; i++) pad = pad " "
+    printf "\r%s%s", out, pad
+}
+END { printf "\n" }
+'
+
+mkdir -p build/logs
+BUILD_LOG="build/logs/build.log"
+echo "==> [3/4] Building XStore (jobs: $(nproc)) -- full log: $BUILD_LOG"
+if [ -t 1 ]; then
+    if ! cmake --build build -j "$(nproc)" --target XStore 2>&1 | awk -v LOG="$BUILD_LOG" "$PROGRESS_AWK"; then
+        echo "Build FAILED. Last 30 lines of $BUILD_LOG:"
+        tail -n 30 "$BUILD_LOG"
+        exit 1
+    fi
+else
+    if ! cmake --build build -j "$(nproc)" --target XStore 2>&1 | tee "$BUILD_LOG"; then
+        echo "Build FAILED. See $BUILD_LOG"
+        exit 1
+    fi
+fi
 
 echo "==> [4/4] Staging runnable server dir (../XStore_Server)"
 # DataStore/WAL included explicitly: XStore also creates them on demand, but
 # the benchmark harness expects them to already exist here.
 mkdir -p ../XStore_Server/DataStore/WAL
-cp -r build ../XStore_Server
+cp -r --remove-destination build ../XStore_Server
 
 echo "Build complete: $(pwd)/build/XStore (server staged at ../XStore_Server)"
