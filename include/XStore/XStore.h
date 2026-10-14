@@ -14,6 +14,7 @@
 #include <map>
 #include <optional>
 #include <cstdio>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -31,6 +32,7 @@
 #include "include/XStore/XStore_Tunables.h"
 #include "include/XStore/XStore_ZoneMap.h"
 #include "include/XStore/XStore_CatIdx.h"
+#include "include/XStore/XStore_RebuildProgress.h"
 
 // Length of msg header
 #define TRACE_LEN 8
@@ -1096,6 +1098,29 @@ class XStore {
         };
         std::vector<LiveWidenPassEntry> RunLiveWidenPass(std::chrono::steady_clock::time_point now);
 
+        // Startup index rebuild engine (Tech Reference 4.14): rebuilds the selected index files of every listed year of
+        // ONE DB directory. Serially, year by year in list order, it begins each year (registry erase, pins,
+        // BeginRebuild, data file open); then `thread_count` threads (the caller plus thread_count - 1 dedicated
+        // std::threads, never more than there are groups) fold a flat, group-major round-robin list (group 0 of every year, then group 1 of every year, ...) of groups of consecutive
+        // REBUILD_CHUNK_BYTES chunks (`group_bytes` rounded up to whole chunks); then, serially again, each year
+        // finishes (FinishRebuild, data fdatasync, MarkClean, log lines). thread_count <= 1 runs everything on the
+        // calling thread. Each file's frontier only ever reaches the end of the CONTIGUOUS prefix of rows it has
+        // folded, so a group that finishes early never makes a slower, lower group's rows count as folded. Returns one
+        // entry per task: the exception that year's rebuild threw (nullptr if none); a throw never stops another year.
+        // While the threads run, one reporter thread shows progress (a bar on a terminal, spdlog lines elsewhere; see
+        // XStore_RebuildProgress.h): it only reads the years' rows_done counters and is joined before the years finish.
+        // Startup/tests only, same rules as RebuildYearIndexes. Public so tests can choose threads and group size.
+        struct RebuildYearTask {
+            unsigned short year = 0;
+            bool zmap = false;
+            bool catidx = false;
+        };
+        [[nodiscard]] std::vector<std::exception_ptr> RebuildYearsIndexes(
+            const std::string &db_base_path, const std::vector<RebuildYearTask> &tasks, uint16_t row_length,
+            uint32_t tracked_column_count, unsigned thread_count,
+            uint64_t group_bytes = XStoreTunables::REBUILD_PARALLEL_GROUP_BYTES,
+            const rebuildprogress::Options &progress = rebuildprogress::Options{});
+
         // Stops the background index thread's current work (the live builder and compaction check it): set by
         // StopCatIdxCompactionThread for good, and by RemoveDB / RemoveDBFiles for the time they wait for the thread
         // to let go of the DB/year they remove. Tests may set it to stop a running pass (and must reset it).
@@ -1542,7 +1567,9 @@ class XStore {
         // rebuild" for why this must never run on the request path. Finds every <YEAR>.XSTORE (the data files, not the
         // sidecars: a year with rows but no sidecar must be found), decides per year which index is stale with the two
         // unchanged predicates (ZoneMapNeedsRebuild for the .zmap; CatIdxNeedsRebuild for the .catidx), and rebuilds
-        // those years in parallel (XStorePreadPool::ParallelFor), each with ONE scan through RebuildYearIndexes.
+        // all those years with ONE RebuildYearsIndexes call on hardware_concurrency threads (one scan per year, split
+        // into groups that different threads fold). Not XStorePreadPool: the server reserves its request threads out of
+        // that pool, and nothing else runs before InitDB returns.
         //
         // force_rebuild_years is this DB's entry from ReplayWal's ReplayedYearMap: both indexes of those years are
         // rebuilt UNCONDITIONALLY, whatever the header checks say. See ReplayedYearMap for the bug that requires this.
@@ -1558,6 +1585,7 @@ class XStore {
         // data file, MarkClean. Any failure (unreadable row, failed index write, ...) leaves that file dirty and still
         // in rebuild, so blocks it never finished are scanned, not trusted, and the next start rebuilds it. Drops the
         // registry entries it rebuilds first and ignores pins: InitDB/tests only, never while a builder is alive.
+        // A one-year, one-thread RebuildYearsIndexes (everything on the calling thread); rethrows that year's exception.
         void RebuildYearIndexes(const std::string &db_base_path, unsigned short year, uint16_t row_length,
                                 uint32_t tracked_column_count, bool need_zmap, bool need_catidx);
 
@@ -1589,6 +1617,18 @@ class XStore {
         void AppendRebuildObservations(uint64_t row_index, const char *row, uint16_t row_length,
                                        uint32_t tracked_column_count, ZoneMapFoldBatch *zmap, CatIdxFoldBatch *catidx,
                                        RebuildScratch &scratch);
+
+        // One year of a RebuildYearsIndexes call (defined in XStore_Management.cpp): pins, data fd, group layout,
+        // per-file contiguous watermark, shared failure state.
+        struct YearRebuild;
+        // Serial setup of one year; leaves it inactive (nothing to scan or finish) when there is nothing to do.
+        void BeginYearRebuild(const std::string &db_base_path, uint16_t row_length, uint32_t tracked_column_count,
+                              uint64_t group_bytes, YearRebuild &y);
+        // Folds group g of y chunk by chunk; any thread, one scratch per thread.
+        void RunRebuildGroup(YearRebuild &y, size_t g, uint16_t row_length, uint32_t tracked_column_count,
+                             RebuildScratch &scratch);
+        // Serial teardown of one year: FinishRebuild, data fdatasync, MarkClean, log lines.
+        void FinishYearRebuild(const std::string &db_base_path, uint32_t tracked_column_count, YearRebuild &y);
 
         // Header-only staleness check of a .catidx: missing, unreadable, wrong magic/version, narrower than
         // desired_tracked_columns, or dirty (unclean shutdown). A wider file is kept.

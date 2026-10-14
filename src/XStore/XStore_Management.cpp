@@ -2,7 +2,6 @@
 #include "include/XStore/XStore_DirLock.h"
 #include "include/DataStructs/FileRangeLock.h"
 #include "include/DataStructs/TimeStruct.h"
-#include "include/XStore/XStore_PreadPool.h"
 #include "include/XStore/XStore_RowScan.h"
 #include "include/XStore/XStore_WireEncode.h"
 #include "include/XStore/XStore_WalRing.h"
@@ -11,6 +10,7 @@
 #include "include/Logger/Logger.h"
 #include <algorithm>
 #include <limits>
+#include <optional>
 #include <cerrno>
 #include <chrono>
 #include <exception>
@@ -22,6 +22,7 @@
 #include <sys/stat.h>
 #include <set>
 #include <stdexcept>
+#include <system_error>
 #include <thread>
 #include <type_traits>
 #include <unordered_set>
@@ -1140,10 +1141,60 @@ void EmptyUnusableZoneMap(const std::string &zmap_path, uint16_t row_length) {
 }
 } // namespace
 
-void XStore::RebuildYearIndexes(const std::string &db_base_path, unsigned short year, uint16_t row_length,
-                                uint32_t tracked_column_count, bool need_zmap, bool need_catidx) {
+struct XStore::YearRebuild {
+    unsigned short year = 0;
+    bool need_zmap = false;
+    bool need_catidx = false;
+    bool active = false; // begun: its groups are scanned and FinishYearRebuild runs
+    ZoneMapFile::Pin zmap;
+    CatIdxFile::Pin catidx;
+    int fd = -1;            // the year's own descriptor: fdatasync at the end only; groups read through their own
+    std::string data_path;
+    uint64_t total_rows = 0;
+    uint64_t chunk_rows = 0;
+    uint64_t group_rows = 0;
+    size_t group_count = 0;
+    // Shared by the workers on this year. scan_failed: a chunk could not be read (or a group threw); no worker
+    // starts another chunk of this year. *_written: that file's fold write failed; nobody folds into it any more.
+    std::atomic<bool> scan_failed{false};
+    // Rows covered by the chunks scanned so far (holes included), for the progress display only.
+    std::atomic<uint64_t> rows_done{0};
+    std::atomic<bool> zmap_written{true};
+    std::atomic<bool> catidx_written{true};
+    // Contiguous watermark, under `mutex`: *_end[g] is the end of the rows of group g folded into that file so far
+    // (it starts at the group's first row and grows chunk by chunk); *_prefix counts the leading groups fully folded.
+    std::mutex mutex;
+    std::vector<uint64_t> zmap_end;
+    std::vector<uint64_t> catidx_end;
+    size_t zmap_prefix = 0;
+    size_t catidx_prefix = 0;
+    std::exception_ptr failure; // the first exception of this year; under `mutex` while workers run
+
+    YearRebuild() = default;
+    YearRebuild(const YearRebuild &) = delete;
+    YearRebuild &operator=(const YearRebuild &) = delete;
+    ~YearRebuild() {
+        if (fd >= 0) close(fd);
+    }
+
+    [[nodiscard]] uint64_t GroupBegin(size_t g) const { return g * group_rows; }
+    [[nodiscard]] uint64_t GroupEnd(size_t g) const { return std::min(total_rows, (g + 1) * group_rows); }
+
+    // Caller holds `mutex`. ends only grow and prefix only moves forward, so the frontiers this produces are
+    // monotone, and none passes the first row a still-running (or stopped) group has not folded: RebuildFoldRows skips
+    // rows below the frontier as already folded, so a frontier past a hole would drop that hole's rows for good.
+    template <class File>
+    void AdvanceWatermark(File &file, const std::vector<uint64_t> &ends, size_t &prefix) const {
+        while (prefix < group_count && ends[prefix] == GroupEnd(prefix)) ++prefix;
+        file.AdvanceFrontier(prefix < group_count ? ends[prefix] : total_rows);
+    }
+};
+
+void XStore::BeginYearRebuild(const std::string &db_base_path, uint16_t row_length, uint32_t tracked_column_count,
+                              uint64_t group_bytes, YearRebuild &y) {
+    const unsigned short year = y.year;
     const std::string data_path = fmt::format("{}/{}.XSTORE", db_base_path, year);
-    if ((!need_zmap && !need_catidx) || !std::filesystem::exists(data_path)) return;
+    if ((!y.need_zmap && !y.need_catidx) || !std::filesystem::exists(data_path)) return;
     const std::string registry_key = fmt::format("{}/{}", db_base_path, year);
 
     // Startup only. A registry instance may already exist for this year (WAL replay opened it, possibly at another
@@ -1152,9 +1203,7 @@ void XStore::RebuildYearIndexes(const std::string &db_base_path, unsigned short 
     // The pins are held from before BeginRebuild until after MarkClean. If BeginRebuild fails, the file (the registry
     // entry just opened) is put in the untrusted rebuild state instead and its pin dropped: it stays in the registry
     // (a rebuilding entry is never evicted) and is scanned, never trusted, until the next start rebuilds it.
-    ZoneMapFile::Pin zmap;
-    CatIdxFile::Pin catidx;
-    if (need_zmap) {
+    if (y.need_zmap) {
         {
             std::lock_guard<std::mutex> registry_lock(zone_map_registry_mutex_);
             zone_map_registry_.erase(registry_key);
@@ -1163,18 +1212,18 @@ void XStore::RebuildYearIndexes(const std::string &db_base_path, unsigned short 
                 zone_map_registry_lru_.end());
         }
         EmptyUnusableZoneMap(fmt::format("{}/{}.zmap", db_base_path, year), row_length);
-        zmap = PinZoneMap(db_base_path, year, row_length, tracked_column_count);
+        y.zmap = PinZoneMap(db_base_path, year, row_length, tracked_column_count);
         // BeginRebuild empties the file whatever its width: an old file WIDER than tracked_column_count (a first
         // insert created it at the global default before MaybeGrowColumnCount persisted a narrower count) must not
-        // keep its stats, or the scan below would fold every row a second time on top of them.
-        if (!zmap->BeginRebuild(tracked_column_count)) {
+        // keep its stats, or the scan would fold every row a second time on top of them.
+        if (!y.zmap->BeginRebuild(tracked_column_count)) {
             spdlog::error("[ZONE MAP REBUILD] [{}/{}.zmap] - Cannot start the rebuild; the index is not trusted until "
                           "the next start", db_base_path, year);
-            zmap->EnterUntrustedRebuildState();
-            zmap = ZoneMapFile::Pin();
+            y.zmap->EnterUntrustedRebuildState();
+            y.zmap = ZoneMapFile::Pin();
         }
     }
-    if (need_catidx) {
+    if (y.need_catidx) {
         {
             std::lock_guard<std::mutex> registry_lock(catidx_registry_mutex_);
             catidx_registry_.erase(registry_key);
@@ -1182,64 +1231,132 @@ void XStore::RebuildYearIndexes(const std::string &db_base_path, unsigned short 
                 std::remove(catidx_registry_lru_.begin(), catidx_registry_lru_.end(), registry_key),
                 catidx_registry_lru_.end());
         }
-        catidx = PinCatIdx(db_base_path, year, row_length, tracked_column_count);
-        if (!catidx->BeginRebuild(tracked_column_count)) { // also drops the bitmap section; compaction rebuilds it
+        y.catidx = PinCatIdx(db_base_path, year, row_length, tracked_column_count);
+        if (!y.catidx->BeginRebuild(tracked_column_count)) { // also drops the bitmap section; compaction rebuilds it
             spdlog::error("[CATIDX REBUILD] [{}/{}.catidx] - Cannot start the rebuild; the index is not trusted until "
                           "the next start", db_base_path, year);
-            catidx->EnterUntrustedRebuildState();
-            catidx = CatIdxFile::Pin();
+            y.catidx->EnterUntrustedRebuildState();
+            y.catidx = CatIdxFile::Pin();
         }
     }
-    if (zmap.get() == nullptr && catidx.get() == nullptr) return;
+    if (y.zmap.get() == nullptr && y.catidx.get() == nullptr) return;
 
-    const int fd = open(data_path.c_str(), O_RDONLY);
-    if (fd < 0) {
+    y.data_path = data_path;
+    y.fd = open(data_path.c_str(), O_RDONLY);
+    if (y.fd < 0) {
         // Both files stay in rebuild at F = 0 (every block scanned, not trusted) and dirty: the next start retries.
         spdlog::error("[INDEX REBUILD] [{}] - Unable to open for rebuild scan", data_path);
+        y.zmap = ZoneMapFile::Pin();
+        y.catidx = CatIdxFile::Pin();
         return;
     }
     struct stat st{};
-    if (fstat(fd, &st) != 0 || row_length == 0) {
+    if (fstat(y.fd, &st) != 0 || row_length == 0) {
         // Same as a failed open: never scan "0 rows" and mark an empty index clean.
         spdlog::error("[INDEX REBUILD] [{}] - Cannot size the year file for the rebuild scan", data_path);
-        close(fd);
+        close(y.fd);
+        y.fd = -1;
+        y.zmap = ZoneMapFile::Pin();
+        y.catidx = CatIdxFile::Pin();
         return;
     }
-    const uint64_t total_rows = static_cast<uint64_t>(st.st_size) / row_length;
+    y.total_rows = static_cast<uint64_t>(st.st_size) / row_length;
 
-    // One scan of the year for both files, in chunks of whole zone-map blocks. Startup needs no FileRangeLock: no
-    // request can run before InitDB returns. (The live builder of stage 2b calls the same FoldChunk under the READ
-    // range lock of each chunk and advances the frontiers before unlocking.)
+    // Chunks of whole zone-map blocks, groups of whole chunks: two groups never share a block. Startup needs no
+    // FileRangeLock: no request can run before InitDB returns. (The live builder calls the same FoldChunk under the
+    // READ range lock of each chunk and advances the frontiers before unlocking.)
     const uint64_t block_bytes = RowsPerBlock(row_length) * row_length;
-    const uint64_t chunk_rows = std::max<uint64_t>(1, XStoreTunables::REBUILD_CHUNK_BYTES / block_bytes) * RowsPerBlock(row_length);
-    RebuildScratch scratch;
-    bool scan_complete = true;
-    bool zmap_written = zmap.get() != nullptr;
-    bool catidx_written = catidx.get() != nullptr;
-    for (uint64_t begin = 0; begin < total_rows && (zmap_written || catidx_written); begin += chunk_rows) {
-        const uint64_t end = std::min(total_rows, begin + chunk_rows);
-        const FoldResult result = FoldChunk(fd, begin, end, row_length, tracked_column_count,
-                                            zmap_written ? zmap.get() : nullptr, catidx_written ? catidx.get() : nullptr,
+    y.chunk_rows = std::max<uint64_t>(1, XStoreTunables::REBUILD_CHUNK_BYTES / block_bytes) * RowsPerBlock(row_length);
+    const uint64_t chunk_bytes = y.chunk_rows * row_length;
+    y.group_rows = std::max<uint64_t>(1, (group_bytes + chunk_bytes - 1) / chunk_bytes) * y.chunk_rows;
+    y.group_count = static_cast<size_t>((y.total_rows + y.group_rows - 1) / y.group_rows);
+    y.zmap_end.resize(y.group_count);
+    for (size_t g = 0; g < y.group_count; ++g) y.zmap_end[g] = y.GroupBegin(g);
+    y.catidx_end = y.zmap_end;
+    y.zmap_written.store(y.zmap.get() != nullptr, std::memory_order_relaxed);
+    y.catidx_written.store(y.catidx.get() != nullptr, std::memory_order_relaxed);
+    y.active = true;
+}
+
+void XStore::RunRebuildGroup(YearRebuild &y, size_t g, uint16_t row_length, uint32_t tracked_column_count,
+                             RebuildScratch &scratch) {
+    const uint64_t group_end = y.GroupEnd(g);
+    // Each group reads through a descriptor of its own (own readahead state) with a sequential hint. Measured on Mystic
+    // (cold cache, 11 years): this made NO difference (1026 s without, 1017 s with, year-major order); what fixed the
+    // slowdown was the round-robin group order below. Kept because the 441 s result was measured with it; an A/B
+    // without it would show whether it can go.
+    struct GroupFd {
+        int fd;
+        ~GroupFd() {
+            if (fd >= 0) close(fd);
+        }
+    } data{open(y.data_path.c_str(), O_RDONLY | O_CLOEXEC)};
+    if (data.fd < 0) {
+        spdlog::error("[INDEX REBUILD] [{}] - Unable to open for a rebuild group", y.data_path);
+        y.scan_failed.store(true, std::memory_order_relaxed);
+        return;
+    }
+    static_cast<void>(posix_fadvise(data.fd, static_cast<off_t>(y.GroupBegin(g) * row_length),
+                                    static_cast<off_t>((group_end - y.GroupBegin(g)) * row_length), POSIX_FADV_SEQUENTIAL));
+    bool zmap_ok = true;
+    bool catidx_ok = true;
+    for (uint64_t begin = y.GroupBegin(g); begin < group_end; begin += y.chunk_rows) {
+        // A file whose write failed (in any group) stops here, behind its frontier; the other one carries on.
+        zmap_ok = zmap_ok && y.zmap_written.load(std::memory_order_relaxed);
+        catidx_ok = catidx_ok && y.catidx_written.load(std::memory_order_relaxed);
+        if ((!zmap_ok && !catidx_ok) || y.scan_failed.load(std::memory_order_relaxed)) return;
+        const uint64_t end = std::min(group_end, begin + y.chunk_rows);
+        const FoldResult result = FoldChunk(data.fd, begin, end, row_length, tracked_column_count,
+                                            zmap_ok ? y.zmap.get() : nullptr, catidx_ok ? y.catidx.get() : nullptr,
                                             scratch);
         if (!result.scan_complete) {
-            scan_complete = false; // the frontiers stay below this chunk: its blocks are never trusted this session
-            break;
+            // Nothing of this chunk was folded: the frontiers stay below it, its blocks are never trusted this session.
+            y.scan_failed.store(true, std::memory_order_relaxed);
+            return;
         }
-        // A file whose write failed stops here, behind its frontier; the other one carries on.
-        zmap_written = zmap_written && result.zmap_written;
-        catidx_written = catidx_written && result.catidx_written;
-        if (zmap_written) zmap->AdvanceFrontier(end);
-        if (catidx_written) catidx->AdvanceFrontier(end);
+        y.rows_done.fetch_add(end - begin, std::memory_order_relaxed);
+        if (zmap_ok && !result.zmap_written) {
+            zmap_ok = false;
+            y.zmap_written.store(false, std::memory_order_relaxed);
+        }
+        if (catidx_ok && !result.catidx_written) {
+            catidx_ok = false;
+            y.catidx_written.store(false, std::memory_order_relaxed);
+        }
+        std::lock_guard<std::mutex> lock(y.mutex);
+        if (zmap_ok) {
+            y.zmap_end[g] = end;
+            y.AdvanceWatermark(*y.zmap, y.zmap_end, y.zmap_prefix);
+        }
+        if (catidx_ok) {
+            y.catidx_end[g] = end;
+            y.AdvanceWatermark(*y.catidx, y.catidx_end, y.catidx_prefix);
+        }
     }
+}
+
+void XStore::FinishYearRebuild(const std::string &db_base_path, uint32_t tracked_column_count, YearRebuild &y) {
+    if (!y.active) return;
+    const unsigned short year = y.year;
+    if (y.failure) {
+        // A group threw: like the old single-loop rebuild, nothing is finished, both files stay dirty in rebuild.
+        y.zmap = ZoneMapFile::Pin();
+        y.catidx = CatIdxFile::Pin();
+        return;
+    }
+    const bool scan_complete = !y.scan_failed.load(std::memory_order_relaxed);
+    const bool zmap_written = y.zmap.get() != nullptr && y.zmap_written.load(std::memory_order_relaxed);
+    const bool catidx_written = y.catidx.get() != nullptr && y.catidx_written.load(std::memory_order_relaxed);
 
     // Durability A (DD4): FinishRebuild (the dirty header is durable), then the data file, then MarkClean -- the index
     // must never claim "clean" while the rows it summarizes could still be lost. Every failure leaves it dirty.
-    const bool zmap_finished = scan_complete && zmap_written && zmap->FinishRebuild();
-    const bool catidx_finished = scan_complete && catidx_written && catidx->FinishRebuild();
-    const bool data_synced = (zmap_finished || catidx_finished) && fdatasync(fd) == 0;
-    close(fd);
+    const bool zmap_finished = scan_complete && zmap_written && y.zmap->FinishRebuild();
+    const bool catidx_finished = scan_complete && catidx_written && y.catidx->FinishRebuild();
+    const bool data_synced = (zmap_finished || catidx_finished) && fdatasync(y.fd) == 0;
+    close(y.fd);
+    y.fd = -1;
 
-    if (zmap.get() != nullptr) {
+    if (y.zmap.get() != nullptr) {
         if (!scan_complete) {
             spdlog::error("[ZONE MAP REBUILD] [{}/{}.XSTORE] - Incomplete scan; leaving zone map dirty", db_base_path, year);
         } else if (!zmap_written) {
@@ -1248,12 +1365,12 @@ void XStore::RebuildYearIndexes(const std::string &db_base_path, unsigned short 
             spdlog::error("[ZONE MAP REBUILD] [{}/{}.zmap] - No durable header; leaving zone map dirty", db_base_path, year);
         } else if (!data_synced) {
             spdlog::error("[ZONE MAP REBUILD] [{}/{}.XSTORE] - fdatasync of data file failed; leaving zone map dirty", db_base_path, year);
-        } else if (!zmap->MarkClean()) {
+        } else if (!y.zmap->MarkClean()) {
             spdlog::error("[ZONE MAP REBUILD] [{}/{}.zmap] - MarkClean failed; leaving zone map dirty", db_base_path, year);
         }
-        spdlog::info("[ZONE MAP REBUILD] [{}/{}.XSTORE] - Rebuilt {} rows", db_base_path, year, total_rows);
+        spdlog::info("[ZONE MAP REBUILD] [{}/{}.XSTORE] - Rebuilt {} rows", db_base_path, year, y.total_rows);
     }
-    if (catidx.get() != nullptr) {
+    if (y.catidx.get() != nullptr) {
         if (!scan_complete) {
             spdlog::error("[CATIDX REBUILD] [{}/{}.XSTORE] - Incomplete scan; leaving catidx dirty", db_base_path, year);
         } else if (!catidx_written) {
@@ -1262,12 +1379,122 @@ void XStore::RebuildYearIndexes(const std::string &db_base_path, unsigned short 
             spdlog::error("[CATIDX REBUILD] [{}/{}.catidx] - No durable header; leaving catidx dirty", db_base_path, year);
         } else if (!data_synced) {
             spdlog::error("[CATIDX REBUILD] [{}/{}.XSTORE] - fdatasync of data file failed; leaving catidx dirty", db_base_path, year);
-        } else if (!catidx->MarkClean()) {
+        } else if (!y.catidx->MarkClean()) {
             spdlog::error("[CATIDX REBUILD] [{}/{}.catidx] - MarkClean failed; leaving catidx dirty", db_base_path, year);
         }
         spdlog::info("[CATIDX REBUILD] [{}/{}.XSTORE] - Rebuilt bloom for {} rows at tracked_column_count {}",
-                     db_base_path, year, total_rows, tracked_column_count);
+                     db_base_path, year, y.total_rows, tracked_column_count);
     }
+    y.zmap = ZoneMapFile::Pin();
+    y.catidx = CatIdxFile::Pin();
+}
+
+std::vector<std::exception_ptr> XStore::RebuildYearsIndexes(const std::string &db_base_path,
+                                                            const std::vector<RebuildYearTask> &tasks,
+                                                            uint16_t row_length, uint32_t tracked_column_count,
+                                                            unsigned thread_count, uint64_t group_bytes,
+                                                            const rebuildprogress::Options &progress) {
+    std::vector<YearRebuild> years(tasks.size());
+    struct GroupRef {
+        size_t year;
+        size_t group;
+    };
+    std::vector<GroupRef> groups;
+    size_t max_groups = 0;
+    for (size_t i = 0; i < tasks.size(); ++i) {
+        YearRebuild &y = years[i];
+        y.year = tasks[i].year;
+        y.need_zmap = tasks[i].zmap;
+        y.need_catidx = tasks[i].catidx;
+        try {
+            BeginYearRebuild(db_base_path, row_length, tracked_column_count, group_bytes, y);
+        } catch (...) {
+            y.failure = std::current_exception();
+            y.active = false;
+            y.zmap = ZoneMapFile::Pin();
+            y.catidx = CatIdxFile::Pin();
+            continue;
+        }
+        if (!y.active) continue;
+        max_groups = std::max(max_groups, y.group_count);
+    }
+    // Group-major round robin (group 0 of every year, then group 1 of every year, ...), NOT year-major: the fold into a
+    // year's index files is serial under that file's mutex (about 16% of the work, Tech Reference 4.14), so threads
+    // spread over many files scale and threads piled onto one file do not. Year-major sent all threads to the first
+    // year or two and measured 1017 s on Mystic against 670 s for the old one-thread-per-year loop (same data, cold).
+    for (size_t g = 0; g < max_groups; ++g) {
+        for (size_t i = 0; i < years.size(); ++i) {
+            if (years[i].active && g < years[i].group_count) groups.push_back({i, g});
+        }
+    }
+
+    // An exception must not escape a thread (std::terminate): it is kept as its year's failure, that year stops, every
+    // other year carries on.
+    std::atomic<size_t> next{0};
+    const auto work = [&] {
+        RebuildScratch scratch;
+        for (size_t t = next.fetch_add(1, std::memory_order_relaxed); t < groups.size();
+             t = next.fetch_add(1, std::memory_order_relaxed)) {
+            YearRebuild &y = years[groups[t].year];
+            if (y.scan_failed.load(std::memory_order_relaxed)) continue;
+            try {
+                RunRebuildGroup(y, groups[t].group, row_length, tracked_column_count, scratch);
+            } catch (...) {
+                y.scan_failed.store(true, std::memory_order_relaxed);
+                std::lock_guard<std::mutex> lock(y.mutex);
+                if (!y.failure) y.failure = std::current_exception();
+            }
+        }
+    };
+    // Progress display: reads only the years' atomics; joined (reset) before any year finishes, and by its destructor
+    // on every other path.
+    std::optional<rebuildprogress::Reporter> reporter;
+    if (!groups.empty()) {
+        reporter.emplace(std::filesystem::path(db_base_path).filename().string(), [&years] {
+            rebuildprogress::Sample sample;
+            for (const YearRebuild &y : years) {
+                if (!y.active) continue;
+                const uint64_t done = std::min(y.rows_done.load(std::memory_order_relaxed), y.total_rows);
+                sample.rows_done += done;
+                sample.rows_total += y.total_rows;
+                ++sample.years_total;
+                if (done >= y.total_rows) ++sample.years_done;
+            }
+            return sample;
+        }, progress);
+    }
+    const size_t workers = std::min<size_t>(std::max(1u, thread_count), groups.size());
+    std::vector<std::thread> threads;
+    if (workers > 1) {
+        threads.reserve(workers - 1);
+        try {
+            while (threads.size() + 1 < workers) threads.emplace_back(work);
+        } catch (const std::exception &e) { // system_error (no more threads) or bad_alloc: carry on with those started
+            spdlog::warn("[INDEX REBUILD] [{}] - Started {} of {} rebuild threads: {}", db_base_path,
+                         threads.size() + 1, workers, e.what());
+        }
+    }
+    work();
+    for (std::thread &t : threads) t.join();
+    reporter.reset();
+
+    std::vector<std::exception_ptr> failures(tasks.size());
+    for (size_t i = 0; i < tasks.size(); ++i) {
+        try {
+            FinishYearRebuild(db_base_path, tracked_column_count, years[i]);
+        } catch (...) {
+            if (!years[i].failure) years[i].failure = std::current_exception();
+        }
+        failures[i] = years[i].failure;
+    }
+    return failures;
+}
+
+void XStore::RebuildYearIndexes(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                uint32_t tracked_column_count, bool need_zmap, bool need_catidx) {
+    const std::vector<std::exception_ptr> failures =
+        RebuildYearsIndexes(db_base_path, {{year, need_zmap, need_catidx}}, row_length, tracked_column_count, 1);
+    if (failures.front()) std::rethrow_exception(failures.front());
 }
 
 XStore::FoldResult XStore::FoldChunk(int data_fd, uint64_t chunk_begin, uint64_t chunk_end, uint16_t row_length,
@@ -1768,14 +1995,9 @@ void XStore::RebuildStaleIndexesForDb(const std::string &db_name, const std::str
     const uint32_t desired_tracked_columns = EffectiveTrackedColumnCount(cfg_struct);
     const uint16_t row_length = static_cast<uint16_t>(cfg_struct.rowlength());
 
-    struct YearWork {
-        unsigned short year;
-        bool zmap;
-        bool catidx;
-    };
     // Read-only pass first: the rebuilds below create and truncate files in this directory, which must not happen
     // while a directory_iterator over it is alive.
-    std::vector<YearWork> work;
+    std::vector<RebuildYearTask> work;
     for (auto &f : std::filesystem::directory_iterator(db_base_path)) {
         std::string filename = f.path().filename().string();
         if (filename.size() < 7 || filename.substr(filename.size() - 7) != ".XSTORE") continue;
@@ -1795,30 +2017,30 @@ void XStore::RebuildStaleIndexesForDb(const std::string &db_name, const std::str
     }
     if (work.empty()) return;
 
-    const size_t zmap_years = static_cast<size_t>(std::count_if(work.begin(), work.end(), [](const YearWork &w) { return w.zmap; }));
+    const size_t zmap_years = static_cast<size_t>(std::count_if(work.begin(), work.end(), [](const RebuildYearTask &w) { return w.zmap; }));
     if (zmap_years > 0) spdlog::info("[ZONE MAP REBUILD] [DB: {}] - {} year file(s) need rebuild", db_name, zmap_years);
-    for (const YearWork &w : work) {
+    for (const RebuildYearTask &w : work) {
         if (w.catidx) spdlog::info("[CATIDX REBUILD] [DB: {}] - rebuilding stale/missing {}.catidx", db_name, w.year);
     }
-    // Years in parallel, zone map and catidx together (one scan per year). An exception must not escape a pool worker
-    // (std::terminate): each is kept, every other year still finishes, then the lowest year's is rethrown, so InitDB (and
-    // the XStore constructor) fails loudly as before instead of serving an index this rebuild did not finish.
-    std::vector<std::exception_ptr> failures(work.size());
-    XStorePreadPool::ParallelFor(work.size(), [&](size_t i) {
-        try {
-            RebuildYearIndexes(db_base_path, work[i].year, row_length, desired_tracked_columns, work[i].zmap, work[i].catidx);
-        } catch (const std::exception &e) {
-            spdlog::error("[INDEX REBUILD] [DB: {}] - Rebuild of {} failed: {}", db_name, work[i].year, e.what());
-            failures[i] = std::current_exception();
-        } catch (...) {
-            spdlog::error("[INDEX REBUILD] [DB: {}] - Rebuild of {} failed", db_name, work[i].year);
-            failures[i] = std::current_exception();
-        }
-    });
-    // The lowest failed year's exception, so the error a failed start reports does not depend on directory order.
+    // All years at once on every core (no request can run before InitDB returns), zone map and catidx together (one
+    // scan per year). A year that throws does not stop the others; then the lowest year's exception is rethrown, so
+    // InitDB (and the XStore constructor) fails loudly instead of serving an index this rebuild did not finish.
+    const unsigned cores = std::thread::hardware_concurrency();
+    const std::vector<std::exception_ptr> failures = RebuildYearsIndexes(
+        db_base_path, work, row_length, desired_tracked_columns,
+        std::min<unsigned>(cores != 0 ? cores : 4, XStoreTunables::REBUILD_MAX_THREADS));
     size_t lowest = work.size();
     for (size_t i = 0; i < work.size(); ++i) {
-        if (failures[i] && (lowest == work.size() || work[i].year < work[lowest].year)) lowest = i;
+        if (!failures[i]) continue;
+        try {
+            std::rethrow_exception(failures[i]);
+        } catch (const std::exception &e) {
+            spdlog::error("[INDEX REBUILD] [DB: {}] - Rebuild of {} failed: {}", db_name, work[i].year, e.what());
+        } catch (...) {
+            spdlog::error("[INDEX REBUILD] [DB: {}] - Rebuild of {} failed", db_name, work[i].year);
+        }
+        // The lowest failed year's exception, so the error a failed start reports does not depend on directory order.
+        if (lowest == work.size() || work[i].year < work[lowest].year) lowest = i;
     }
     if (lowest < work.size()) std::rethrow_exception(failures[lowest]);
 }

@@ -20,6 +20,8 @@ add_executable(xstore_tests
         integration/XStoreRowScanTest.cpp
         integration/XStoreDeleteFaultTest.cpp
         integration/XStoreRebuildTest.cpp
+        integration/XStoreParallelRebuildTest.cpp
+        integration/XStoreRebuildProgressTest.cpp
         integration/XStoreLiveWidenTest.cpp
         integration/XStoreSyscallFault.cpp
 )
