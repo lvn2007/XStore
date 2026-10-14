@@ -77,6 +77,19 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(moodycamel_concurrentqueue)
 
+# indicators: header-only progress bars (p-ranav/indicators), for the server's index rebuild / live widen progress
+# display. Same pin and override as XBench. Pinned to a release; to upgrade on the fly bump the tag here or configure
+# with -DINDICATORS_GIT_TAG=<tag|branch> (e.g. master): FetchContent re-fetches and the headers are picked up on the
+# next build. NOTE: v2.3's termcolor.hpp uses uint8_t without including <cstdint>, which newer GCC no longer provides
+# transitively: `#include <cstdint>` before any <indicators/...> header (do it in one project wrapper header).
+set(INDICATORS_GIT_TAG "v2.3" CACHE STRING "Git tag/branch for p-ranav/indicators (bump to upgrade)")
+FetchContent_Declare(
+        indicators
+        GIT_REPOSITORY https://github.com/p-ranav/indicators.git
+        GIT_TAG ${INDICATORS_GIT_TAG}
+        GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(indicators)
+
 add_library(moodycamel INTERFACE)
 target_include_directories(moodycamel INTERFACE ${moodycamel_concurrentqueue_SOURCE_DIR})
 
@@ -408,6 +421,9 @@ include_directories(src)
 add_library(xstore_core STATIC
         include/XStore/XStore_Internal.h src/XStore/XStore_Internal.cpp
         src/XStore/XStore_Management.cpp
+        src/XStore/XStore_RebuildProgress.cpp
+        include/XStore/XStore_RebuildProgress.h
+        include/XStore/XStore_ProgressBar.h
         src/XStore/XStore_DirLock.cpp
         include/XStore/XStore_DirLock.h
         src/XStore/XStore_IO.cpp
@@ -440,7 +456,7 @@ add_library(xstore_core STATIC
         ${PROTO_SRCS} ${PROTO_HDRS})
 # zmq: XStore_SysStats.cpp (in this library) includes zmq.hpp -> <zmq.h>. Without this link the fetched libzmq's
 # include directory is not on xstore_core's path, and a machine without the system libzmq3-dev cannot compile it.
-target_link_libraries(xstore_core PUBLIC protobuf::libprotobuf moodycamel Threads::Threads "stdc++fs" zmq)
+target_link_libraries(xstore_core PUBLIC protobuf::libprotobuf moodycamel Threads::Threads "stdc++fs" zmq indicators::indicators)
 if(TARGET absl::log_internal_check_op)
     target_link_libraries(xstore_core PUBLIC absl::log_internal_check_op)
 endif()

@@ -397,6 +397,23 @@ inline constexpr size_t   CATIDX_HOT_CACHE_BLOCKS = 4;
 // per-chunk overhead (three lseeks and two mutex rounds per chunk).
 inline constexpr uint64_t REBUILD_CHUNK_BYTES = 4ull * 1024 * 1024;
 
+// Startup index rebuild across cores (XStore::RebuildYearsIndexes): every year
+// is split into groups of consecutive chunks of about this many bytes (rounded
+// UP to whole chunks, at least one), and dedicated threads fold different
+// groups at once, so one big year uses every core. A group is the unit of work
+// claimed; smaller groups balance better at the end of a year, larger ones
+// keep the frontier further behind a slow group (see the contiguous watermark
+// in Tech Reference 4.14).
+inline constexpr uint64_t REBUILD_PARALLEL_GROUP_BYTES = 64ull * 1024 * 1024;
+// Startup rebuild progress (XStore_RebuildProgress.h): on a terminal one progress bar, redrawn every
+// REBUILD_PROGRESS_BAR_INTERVAL_MS; anywhere else (nohup, a file, TERM=dumb) one spdlog info line every
+// REBUILD_PROGRESS_LOG_INTERVAL_SEC seconds. Both only read one relaxed atomic per rebuilt chunk.
+inline constexpr unsigned REBUILD_PROGRESS_LOG_INTERVAL_SEC = 10;
+inline constexpr unsigned REBUILD_PROGRESS_BAR_INTERVAL_MS = 500;
+// Upper bound on the startup rebuild threads (each holds a 1 MiB read buffer plus fold batches of about 15-18 MB, so
+// 64 threads is about 1.2 GB); the old shared pool was capped at 32.
+inline constexpr unsigned REBUILD_MAX_THREADS = 64;
+
 // Live index widening (XStore::LiveWidenOneYear, Tech Reference 4.18): the
 // builder rebuilds a year's .zmap/.catidx in place while the server serves,
 // one chunk of rows at a time under the data file's READ range lock (writers
