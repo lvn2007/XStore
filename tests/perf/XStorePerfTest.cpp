@@ -15,19 +15,24 @@
 // heavier run.
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <fcntl.h>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <string>
 #include <sys/resource.h>
 #include <thread>
 #include <unistd.h>
 #include <unordered_set>
+#include <vector>
 
 #include <spdlog/fmt/fmt.h>
 #include "include/Logger/Logger.h"
@@ -824,4 +829,392 @@ TEST_F(XStorePerfTest, FindByPatternScanThroughput) {
     getrusage(RUSAGE_SELF, &usage);
     std::cout << "[PERF] FindByPattern process peak RSS=" << usage.ru_maxrss << " KiB "
               << "(includes the fixture's inserts and the 64 MiB streamed-chunk reserve per query)" << std::endl;
+}
+
+// ---------------------------------------------------------------------
+// Startup index rebuild throughput (Tech Reference 4.14 / 4.19): a cold
+// InitDB() over a DB whose .zmap/.catidx sidecars were deleted rebuilds
+// both from the year files. Fixture: a 72-column row (60 doubles, 6
+// int64, 6 short categorical strings; the DB's tracked width is 72),
+// inserted dense, then a clean Shutdown(), then per mode the sidecars are
+// deleted and InitDB() is timed ("cold"), followed by a second InitDB()
+// over the now-clean indexes ("clean"). Modes: both indexes stale, only
+// the zone map, only the catidx -- so the two halves can be told apart.
+// Per phase it also reports process CPU time and /proc/self/io syscall
+// counts (no perf needed). Page cache is WARM (the data was just
+// written). XSTORE_PERF_N overrides the total row count (default 500k for
+// one year, 600k for four years); XSTORE_REBUILD_MODES (e.g. "both")
+// limits the modes.
+// ---------------------------------------------------------------------
+
+namespace {
+
+constexpr short kRebuildRowLength = 1024;
+constexpr int kRebuildColumns = 72;
+
+XStore_Proto::RowData RebuildWideRow(unsigned long long i) {
+    XStore_Proto::RowData row;
+    for (int c = 0; c < kRebuildColumns; ++c) {
+        XStore_Proto::FData *f = row.add_fielddata();
+        if (c % 12 == 11) {
+            f->set_stringdata("cat" + std::to_string((i + static_cast<unsigned long long>(c)) % 40));
+        } else if (c % 12 == 10) {
+            f->set_int64data(static_cast<int64_t>(i * 7 + static_cast<unsigned long long>(c)));
+        } else {
+            f->set_doubledata(static_cast<double>(i) * 0.25 + c);
+        }
+    }
+    return row;
+}
+
+struct ProcCounters {
+    double user_s = 0, sys_s = 0;
+    unsigned long long syscr = 0, syscw = 0, rchar = 0, wchar = 0;
+};
+
+ProcCounters ReadProcCounters() {
+    ProcCounters out;
+    rusage usage{};
+    getrusage(RUSAGE_SELF, &usage);
+    out.user_s = static_cast<double>(usage.ru_utime.tv_sec) + static_cast<double>(usage.ru_utime.tv_usec) / 1e6;
+    out.sys_s = static_cast<double>(usage.ru_stime.tv_sec) + static_cast<double>(usage.ru_stime.tv_usec) / 1e6;
+    std::ifstream io("/proc/self/io");
+    std::string key;
+    unsigned long long value = 0;
+    while (io >> key >> value) {
+        if (key == "rchar:") out.rchar = value;
+        else if (key == "wchar:") out.wchar = value;
+        else if (key == "syscr:") out.syscr = value;
+        else if (key == "syscw:") out.syscw = value;
+    }
+    return out;
+}
+
+bool RebuildModeEnabled(const std::string &mode) {
+    const char *env = std::getenv("XSTORE_REBUILD_MODES");
+    if (env == nullptr || *env == '\0') return true;
+    return std::string(env).find(mode) != std::string::npos;
+}
+
+// Inserts rows_per_year rows into each year starting at its epoch (SYNC batches), then a clean Shutdown.
+void SeedRebuildFixture(XStore &store, const std::string &db, const std::vector<unsigned long long> &year_epochs,
+                        unsigned long long rows_per_year) {
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRebuildRowLength);
+    constexpr unsigned long long kBatch = 20'000;
+    for (unsigned long long year_epoch : year_epochs) {
+        for (unsigned long long start = 0; start < rows_per_year; start += kBatch) {
+            const unsigned long long end = std::min(start + kBatch, rows_per_year);
+            XStore_Proto::BatchInsert_REQ req;
+            req.set_dbname(db);
+            req.set_durabilitymode(XStore_Proto::SYNC);
+            for (unsigned long long i = start; i < end; ++i) {
+                XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
+                entry->set_timestamp(year_epoch + i);
+                *entry->mutable_data() = RebuildWideRow(i);
+            }
+            XStore_Proto::BatchInsert_REP rep;
+            store.BatchInsert(&req, &rep);
+            ASSERT_NE(rep.insertstatus().find(fmt::format("Inserted {} elements successfully", end - start)), std::string::npos)
+                << rep.insertstatus();
+        }
+    }
+    XStore::Shutdown();            // final checkpoint + MarkClean: the next InitDB replays nothing
+    XStore::ResetShutdownForTests();
+}
+
+void RunRebuildThroughput(const std::string &label, const std::vector<unsigned long long> &year_epochs,
+                          unsigned long long rows_per_year) {
+    XStore store;
+    const std::string db = "REBUILDPERF";
+    SeedRebuildFixture(store, db, year_epochs, rows_per_year);
+    if (::testing::Test::HasFatalFailure()) return;
+    const fs::path db_dir = fs::current_path() / "DataStore" / db;
+    const unsigned long long total_rows = rows_per_year * year_epochs.size();
+
+    for (const std::string mode : {"both", "zmap", "catidx"}) {
+        if (!RebuildModeEnabled(mode)) continue;
+        // A fresh process has empty registries; the sidecars are then gone from disk.
+        XStore::ClearZoneMapRegistryForTests();
+        XStore::ClearCatIdxRegistryForTests();
+        for (const auto &entry : fs::directory_iterator(db_dir)) {
+            const std::string ext = entry.path().extension().string();
+            if ((ext == ".zmap" && mode != "catidx") || (ext == ".catidx" && mode != "zmap")) fs::remove(entry.path());
+        }
+        for (const char *phase : {"cold", "clean"}) {
+            const ProcCounters before = ReadProcCounters();
+            const auto start = std::chrono::steady_clock::now();
+            store.InitDB();
+            const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            const ProcCounters after = ReadProcCounters();
+            ReportPerf({fmt::format("RebuildThroughput[{} {} {}]", label, mode, phase), total_rows, elapsed});
+            std::cout << std::fixed << std::setprecision(2) << "[PERF]   cpu_user=" << after.user_s - before.user_s
+                      << "s cpu_sys=" << after.sys_s - before.sys_s << "s syscr=" << after.syscr - before.syscr
+                      << " syscw=" << after.syscw - before.syscw
+                      << " rchar_MiB=" << static_cast<double>(after.rchar - before.rchar) / (1 << 20)
+                      << " wchar_MiB=" << static_cast<double>(after.wchar - before.wchar) / (1 << 20) << std::endl;
+        }
+        // Sanity: the rebuilt indexes answer like the data (MIN of column 0 over the first year is 0).
+        XStore_Proto::Min_REP min_rep;
+        store.MinAggregate(year_epochs[0], year_epochs[0] + rows_per_year - 1, db, 0, &min_rep);
+        ASSERT_EQ(min_rep.opstatus(), "SUCCESS");
+        EXPECT_DOUBLE_EQ(min_rep.opresult().doubledata(), 0.0);
+    }
+    XStore::ClearZoneMapRegistryForTests();
+    XStore::ClearCatIdxRegistryForTests();
+}
+
+}  // namespace
+
+TEST_F(XStorePerfTest, RebuildThroughput_OneYear) {
+    RunRebuildThroughput("1 year", {BASE_TS}, PerfOpCount(500'000));
+}
+
+TEST_F(XStorePerfTest, RebuildThroughput_FourYears) {
+    // 2020..2023, one year file each, rows starting at Jan 1.
+    const std::vector<unsigned long long> years = {1577836800ULL, 1609459200ULL, 1640995200ULL, 1672531200ULL};
+    RunRebuildThroughput("4 years", years, PerfOpCount(600'000) / years.size());
+}
+
+// ---------------------------------------------------------------------
+// LiveWidenDuringInserts (M4 stage 2b): insert latency/throughput with and
+// without XStore::LiveWidenOneYear running on the same year, in interleaved
+// rounds (A B C, A B C, ...) so slow drift on the VM hits every arm alike.
+//   A (no builder):   the year's index is already 100 columns wide.
+//   B (widen):        the builder widens the index 64 -> 100, back to back
+//                     (an untimed 100 -> 64 rebuild before each widen; calls
+//                     made during those resets are not counted).
+//   C (control):      the builder rebuilds 100 -> 100, back to back.
+// C vs A is the builder's own overhead. B and C are nearly the same workload
+// by construction (BeginRebuild sets the new width at once, and in both rows
+// >= F skip the index), so "B ~ C" is NOT independent evidence that widening
+// is cheap. The builder runs back to back, so the throughput drop is a
+// conservative upper bound, not the cost of one widen. The loop is closed (4
+// threads, each waits for its call): a slower arm gets fewer samples, and p99
+// differences of a few tens of ms are not distinguishable from noise here.
+// For p99, prefer 5 rounds x 60 s pooled, with each round's min/max beside
+// the median, over longer phases.
+// The year holds XSTORE_PERF_N (default 300k) existing 100-column rows;
+// 4 writer threads make SYNC calls of 100 rows, alternating a BatchInsert of
+// random existing rows (overwrites, which contend with the builder's chunk
+// locks) and a "head RangeInsert" of 100 consecutive rows in a 100k-row window
+// past the existing rows, rewritten after its first pass so the year does not
+// keep growing (round 0 arm A also contains the window's first-pass appends).
+// The two kinds are reported separately.
+// OPT-IN: skipped unless XSTORE_LW_PHASE_S is set; each phase then lasts that
+// many seconds (60 recommended; B and C count only builder time), over
+// XSTORE_LW_ROUNDS rounds (default 3: about 12-14 minutes at 60 s).
+// ---------------------------------------------------------------------
+
+namespace {
+
+constexpr short kLiveWidenRowLength = 2048;
+constexpr int kLiveWidenColumns = 100;
+
+XStore_Proto::RowData LiveWidenRow(unsigned long long i, int columns) {
+    XStore_Proto::RowData row;
+    for (int c = 0; c < columns; ++c) {
+        XStore_Proto::FData *f = row.add_fielddata();
+        if (c % 12 == 11) {
+            f->set_stringdata("cat" + std::to_string((i + static_cast<unsigned long long>(c)) % 40));
+        } else {
+            f->set_doubledata(static_cast<double>(i) * 0.25 + c);
+        }
+    }
+    return row;
+}
+
+double Quantile(std::vector<double> v, double q) {
+    if (v.empty()) return 0;
+    std::sort(v.begin(), v.end());
+    return v[std::min(v.size() - 1, static_cast<size_t>(q * static_cast<double>(v.size())))];
+}
+
+struct ArmResult {
+    double seconds = 0;
+    unsigned long long rows = 0;
+    std::vector<double> overwrite_us, append_us;
+    std::vector<double> holds_us;
+    unsigned long long builder_runs = 0, timeouts = 0;
+};
+
+std::string LatencyText(const std::vector<double> &v) {
+    return fmt::format("n={} p50={:.1f} p99={:.1f} p99.9={:.1f} max={:.1f} ms", v.size(), Quantile(v, 0.5) / 1000,
+                       Quantile(v, 0.99) / 1000, Quantile(v, 0.999) / 1000,
+                       v.empty() ? 0.0 : *std::max_element(v.begin(), v.end()) / 1000);
+}
+
+std::string LoadAvg() {
+    std::ifstream in("/proc/loadavg");
+    std::string a, b, c;
+    in >> a >> b >> c;
+    return a + " " + b + " " + c;
+}
+
+int EnvInt(const char *name, int fallback) {
+    const char *v = std::getenv(name);
+    return v != nullptr && std::atoi(v) > 0 ? std::atoi(v) : fallback;
+}
+
+}  // namespace
+
+TEST_F(XStorePerfTest, LiveWidenDuringInserts) {
+    XStore store;
+    const std::string db = "LWPERF";
+    const unsigned long long year_start = 1704067200ULL; // 2024-01-01
+    const unsigned long long existing = PerfOpCount(300'000);
+    if (std::getenv("XSTORE_LW_PHASE_S") == nullptr) GTEST_SKIP() << "opt-in: set XSTORE_LW_PHASE_S (e.g. 60)";
+    const int phase_s = EnvInt("XSTORE_LW_PHASE_S", 60);
+    const int rounds = EnvInt("XSTORE_LW_ROUNDS", 3);
+    CreateTestDb(store, db, XStore_Proto::SECOND, kLiveWidenRowLength);
+    {
+        XStore_Proto::UnaryInsert_REP rep;
+        store.UnaryInsert(year_start, LiveWidenRow(0, 10), db, &rep, XStore_Proto::SYNC); // index files born 64 wide
+        constexpr unsigned long long kBatch = 20'000;
+        for (unsigned long long start = 1; start < existing; start += kBatch) {
+            XStore_Proto::BatchInsert_REQ req;
+            req.set_dbname(db);
+            req.set_durabilitymode(XStore_Proto::SYNC);
+            for (unsigned long long i = start; i < std::min(existing, start + kBatch); ++i) {
+                XStore_Proto::BatchInsert_DATA *e = req.add_batchinsert_data();
+                e->set_timestamp(year_start + i);
+                *e->mutable_data() = LiveWidenRow(i, kLiveWidenColumns);
+            }
+            XStore_Proto::BatchInsert_REP brep;
+            store.BatchInsert(&req, &brep);
+            ASSERT_NE(brep.insertstatus().find("successfully"), std::string::npos) << brep.insertstatus();
+        }
+    }
+    const std::string path = (fs::current_path() / "DataStore" / db).string();
+    const auto widen = [&](uint32_t width, XStore::LiveWidenStats *stats) {
+        XStore b;
+        return b.LiveWidenOneYear(path, 2024, kLiveWidenRowLength, width, true, true, nullptr, stats);
+    };
+    ASSERT_EQ(widen(kLiveWidenColumns, nullptr), XStore::LiveWidenResult::kDone); // arm A starts 100 wide
+
+    // Writers record into the arm `recording` names (-1: not counted).
+    std::atomic<int> recording{-1};
+    std::atomic<bool> stop{false};
+    std::atomic<unsigned long long> head{0};
+    std::mutex sink_mutex;
+    ArmResult *sink[3] = {nullptr, nullptr, nullptr};
+    std::vector<std::thread> writers;
+    for (int t = 0; t < 4; ++t) {
+        writers.emplace_back([&, t] {
+            XStore w;
+            std::mt19937_64 rng(99 + t);
+            unsigned long long n = 0;
+            while (!stop.load()) {
+                const int arm = recording.load();
+                const bool overwrite = n++ % 2 == 0;
+                const auto t0 = std::chrono::steady_clock::now();
+                if (overwrite) {
+                    XStore_Proto::BatchInsert_REQ req;
+                    req.set_dbname(db);
+                    req.set_durabilitymode(XStore_Proto::SYNC);
+                    for (int i = 0; i < 100; ++i) {
+                        XStore_Proto::BatchInsert_DATA *e = req.add_batchinsert_data();
+                        const unsigned long long r = 1 + rng() % (existing - 1);
+                        e->set_timestamp(year_start + r);
+                        *e->mutable_data() = LiveWidenRow(r + n, kLiveWidenColumns);
+                    }
+                    XStore_Proto::BatchInsert_REP rep;
+                    w.BatchInsert(&req, &rep);
+                } else {
+                    // A head window of 100k rows, rewritten after the first pass, so the year (and every builder run) does
+                    // not grow for the whole test.
+                    const unsigned long long first = existing + head.fetch_add(100) % 100'000;
+                    XStore_Proto::RangeInsert_REQ req;
+                    req.set_dbname(db);
+                    req.set_durabilitymode(XStore_Proto::SYNC);
+                    for (unsigned long long i = first; i < first + 100; ++i) {
+                        XStore_Proto::RangeInsert_DATA *e = req.add_rangeinsert_data();
+                        e->set_timestamp(year_start + i);
+                        *e->mutable_data() = LiveWidenRow(i, kLiveWidenColumns);
+                    }
+                    XStore_Proto::RangeInsert_REP rep;
+                    w.RangeInsert(&req, &rep);
+                }
+                const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+                if (arm >= 0 && recording.load() == arm) { // a call that straddles a switch is not counted
+                    std::lock_guard<std::mutex> lock(sink_mutex);
+                    ArmResult &r = *sink[arm];
+                    r.rows += 100;
+                    (overwrite ? r.overwrite_us : r.append_us).push_back(us);
+                }
+            }
+        });
+    }
+
+    const char *kArmNames[3] = {"A no builder (100 wide)", "B widen 64->100", "C control rebuild 100->100"};
+    std::vector<std::array<ArmResult, 3>> results(static_cast<size_t>(rounds));
+    std::vector<std::string> loads;
+    bool all_done = true;
+    for (int round = 0; round < rounds; ++round) {
+        loads.push_back(LoadAvg());
+        for (int arm = 0; arm < 3; ++arm) {
+            ArmResult &r = results[static_cast<size_t>(round)][static_cast<size_t>(arm)];
+            {
+                std::lock_guard<std::mutex> lock(sink_mutex);
+                sink[arm] = &r;
+            }
+            if (arm == 0) {
+                recording.store(0);
+                const auto t0 = std::chrono::steady_clock::now();
+                std::this_thread::sleep_for(std::chrono::seconds(phase_s));
+                recording.store(-1);
+                r.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+                continue;
+            }
+            while (r.seconds < phase_s) {
+                if (arm == 1) all_done = widen(64, nullptr) == XStore::LiveWidenResult::kDone && all_done; // untimed reset
+                XStore::LiveWidenStats stats;
+                recording.store(arm);
+                const auto t0 = std::chrono::steady_clock::now();
+                all_done = widen(kLiveWidenColumns, &stats) == XStore::LiveWidenResult::kDone && all_done;
+                recording.store(-1);
+                r.seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+                r.holds_us.insert(r.holds_us.end(), stats.lock_hold_us.begin(), stats.lock_hold_us.end());
+                ++r.builder_runs;
+                r.timeouts += stats.lock_timeouts;
+            }
+        }
+    }
+    stop.store(true);
+    for (std::thread &t : writers) t.join();
+    EXPECT_TRUE(all_done);
+
+    for (int round = 0; round < rounds; ++round) {
+        std::cout << "[PERF] LiveWidenDuringInserts round " << round << " | loadavg at start " << loads[static_cast<size_t>(round)] << std::endl;
+        for (int arm = 0; arm < 3; ++arm) {
+            const ArmResult &r = results[static_cast<size_t>(round)][static_cast<size_t>(arm)];
+            std::cout << fmt::format("[PERF] LiveWidenDuringInserts round {} {} | {:.0f} s | {:.0f} rows/s | overwrite {} | "
+                                     "head RangeInsert {}", round, kArmNames[arm], r.seconds,
+                                     r.seconds > 0 ? static_cast<double>(r.rows) / r.seconds : 0.0,
+                                     LatencyText(r.overwrite_us), LatencyText(r.append_us))
+                      << (arm == 0 ? std::string() : fmt::format(" | builder runs {} hold {} timeouts {}", r.builder_runs,
+                                                                 LatencyText(r.holds_us), r.timeouts))
+                      << std::endl;
+        }
+    }
+    for (int arm = 0; arm < 3; ++arm) {
+        std::vector<double> rate, ow50, ow99, ow999, ap50, ap99, ap999;
+        std::vector<double> holds;
+        for (const auto &round : results) {
+            const ArmResult &r = round[static_cast<size_t>(arm)];
+            rate.push_back(r.seconds > 0 ? static_cast<double>(r.rows) / r.seconds : 0.0);
+            ow50.push_back(Quantile(r.overwrite_us, 0.5));
+            ow99.push_back(Quantile(r.overwrite_us, 0.99));
+            ow999.push_back(Quantile(r.overwrite_us, 0.999));
+            ap50.push_back(Quantile(r.append_us, 0.5));
+            ap99.push_back(Quantile(r.append_us, 0.99));
+            ap999.push_back(Quantile(r.append_us, 0.999));
+            holds.insert(holds.end(), r.holds_us.begin(), r.holds_us.end());
+        }
+        std::cout << fmt::format("[PERF] LiveWidenDuringInserts MEDIAN over {} rounds | {} | {:.0f} rows/s | overwrite p50 {:.1f} "
+                                 "p99 {:.1f} p99.9 {:.1f} ms | head RangeInsert p50 {:.1f} p99 {:.1f} p99.9 {:.1f} ms", rounds,
+                                 kArmNames[arm], Quantile(rate, 0.5), Quantile(ow50, 0.5) / 1000, Quantile(ow99, 0.5) / 1000,
+                                 Quantile(ow999, 0.5) / 1000, Quantile(ap50, 0.5) / 1000, Quantile(ap99, 0.5) / 1000,
+                                 Quantile(ap999, 0.5) / 1000)
+                  << (arm == 0 ? std::string() : " | lock hold over all rounds " + LatencyText(holds)) << std::endl;
+    }
 }

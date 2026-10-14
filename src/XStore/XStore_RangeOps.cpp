@@ -15,7 +15,7 @@
 using namespace XStoreWireEncode;
 
 // RANGE INSERT
-void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client, XStore_Proto::RangeInsert_REP *return_data) {
+void XStore::RangeInsert(XStore_Proto::RangeInsert_REQ *proto_from_client, XStore_Proto::RangeInsert_REP *return_data) {
     if (RejectInsertIfShutDown(return_data->mutable_insertstatus(), "RANGE INSERT")) return;
     // Ensure DB Name string is all capitalized
     std::string db_name = proto_from_client->dbname();
@@ -41,7 +41,11 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client,
         return;
     }
 
-    // Assuming incoming data is sorted --> Skip sorting
+    // Incoming data is expected ascending, so the common case never sorts.
+    // The bucketing loop below notices the first inversion (one compare per
+    // row against a timestamp it already loads); only then are the request's
+    // rows sorted in place (same helper and parallel threshold as
+    // BatchInsert) and the bucketing redone from scratch.
     // Organize incoming data into year buckets -- flat vector + linear scan
     // (see AppendToYearBucket), not std::map: a single request realistically
     // touches only a handful of distinct years, and RangeInsert's response
@@ -53,23 +57,47 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client,
     // calc instead of gmtime_r (see BatchInsert for the same change and why:
     // gmtime_r always treated the raw timestamp as whole seconds regardless
     // of CfgStruct.timeresolution(), silently mis-bucketing MILLISECOND/
-    // MICROSECOND DBs). Data here is assumed pre-sorted ascending (see
-    // above), so consecutive rows usually share the same year: reuse the
-    // last TimeStruct's [FirstEpoch, LastEpoch] window via one comparison
+    // MICROSECOND DBs). Rows are ascending (checked, see above), so
+    // consecutive rows usually share the same year: reuse the last
+    // TimeStruct's [FirstEpoch, LastEpoch] window via one comparison
     // instead of rerunning the full calendar decomposition on every row.
-    bool have_window = false;
-    unsigned short int curr_year = 0;
-    int64_t window_last_epoch = 0;
-    for (int i = 0; i < proto_from_client->rangeinsert_data_size(); i++) {
-        unsigned long long int ts = proto_from_client->rangeinsert_data(i).timestamp();
-        if (!have_window || static_cast<int64_t>(ts) > window_last_epoch) {
-            TimeStruct row_ts(static_cast<time_t>(ts), cfg_struct.timeresolution());
-            curr_year = row_ts.year;
-            window_last_epoch = row_ts.last_epoch;
-            have_window = true;
+    // Returns false at the first row older than its predecessor.
+    const int row_count = proto_from_client->rangeinsert_data_size();
+    auto bucket_ascending_rows = [&]() -> bool {
+        bool have_window = false;
+        unsigned short int curr_year = 0;
+        int64_t window_last_epoch = 0;
+        unsigned long long int prev_ts = 0;
+        for (int i = 0; i < row_count; i++) {
+            unsigned long long int ts = proto_from_client->rangeinsert_data(i).timestamp();
+            if (ts < prev_ts) return false;   // cold: the C++17 build has no [[unlikely]]
+            prev_ts = ts;
+            if (!have_window || static_cast<int64_t>(ts) > window_last_epoch) {
+                TimeStruct row_ts(static_cast<time_t>(ts), cfg_struct.timeresolution());
+                curr_year = row_ts.year;
+                window_last_epoch = row_ts.last_epoch;
+                have_window = true;
+            }
+            AppendToYearBucket(data_map, curr_year, static_cast<unsigned long long int>(i));
         }
-        AppendToYearBucket(data_map, curr_year, static_cast<unsigned long long int>(i));
+        return true;
+    };
+    if (!bucket_ascending_rows()) {
+        // STABLE on purpose: for duplicate timestamps the last occurrence in the request must win (it is applied
+        // last, as a series of UnaryInserts would do; sorted input never reaches this branch and keeps that order).
+        // BatchInsert uses the unstable SortBatch, so there which duplicate wins is unspecified.
+        // Sorts the field's element pointers (no message copies); serial, because without TBB par_unseq is serial too.
+        auto *rows_field = proto_from_client->mutable_rangeinsert_data();
+        std::stable_sort(rows_field->pointer_begin(), rows_field->pointer_end(),
+                         [](const XStore_Proto::RangeInsert_DATA *a, const XStore_Proto::RangeInsert_DATA *b) {
+                             return a->timestamp() < b->timestamp();
+                         });
+        data_map.clear();
+        [[maybe_unused]] const bool ascending_now = bucket_ascending_rows();
     }
+    // Invariant: from here rows are ascending, so every bucket's rows share
+    // one year, so record.year (the bucket key, used to route the record to
+    // its shard) == the year ApplyWalRecord derives from rows.front().
 
     // durabilityMode now routes through the WAL -- see the field's comment
     // on RangeInsert_REQ in XStore.proto.
@@ -103,6 +131,7 @@ void XStore::RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client,
         record.db_base_path = db_base_path_str;
         record.time_resolution = cfg_struct.timeresolution();
         record.row_length = cfg_struct.rowlength();
+        record.year = year_key;  // routes the record to its (db, year) shard
         record.durability_mode = durability_mode;
         // One width for both the observations below and the zone map
         // ApplyWalRecord will open/create for them -- see
@@ -305,7 +334,7 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(unsigned long long int start_e
     XStore_Proto::RangeDelete_REP to_return;
     int delete_count = 0;
     unsigned long long int failed_count = 0;
-    int first_errno = 0;
+    std::string first_failure; // why the first failed segment was not deleted
 
     // Ensure dbName string is all capitalized
     const std::string &db_name = UpperCaseInto(db_name_view);
@@ -387,13 +416,25 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(unsigned long long int start_e
             // Lock file prior to deleting
             FileRangeLockGuard guard(target_file_path, offset, cfg_struct.rowlength() * range_count, FileRangeLock::LockType::WRITE);
 
-            // Deallocate data according to N bytes from rowLength
-            if (fallocate64(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfg_struct.rowlength() * range_count) == 0) {
+            // The zone map still counts these rows. DeleteRows flags the partly covered end blocks, punches, then
+            // resets the fully covered blocks to empty without reading them.
+            const unsigned long long int first_row = iter_epoch - curr_ts.first_epoch;
+            const ZoneMapFile::Pin zmap = OpenZoneMapForDelete(db_base_path_str, curr_ts.year, cfg_struct);
+            int punch_errno = 0;
+            const bool punched = zmap.get() != nullptr && zmap->DeleteRows(first_row, first_row + range_count - 1, [&] {
+                if (fallocate64(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfg_struct.rowlength() * range_count) == 0) return true;
+                punch_errno = errno;
+                return false;
+            });
+            if (punched) {
                 // The punch is a metadata change fdatasync must cover (see BatchDelete).
                 walring::Dirty().Note(nullptr, target_file_path, offset, offset + cfg_struct.rowlength() * range_count, 0);
                 delete_count += range_count;
             } else {
-                if (failed_count == 0) first_errno = errno;
+                if (failed_count == 0) {
+                    first_failure = zmap.get() == nullptr ? std::string("zone map could not be opened")
+                                                    : fmt::format("fallocate failed: {}", strerror(punch_errno));
+                }
                 failed_count += range_count;
             }
         }
@@ -404,8 +445,8 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(unsigned long long int start_e
     std::string info_msg = fmt::format("[RANGE DELETE] [DB: {}] - Deleted {} items", db_name, delete_count);
     if (failed_count > 0) {
         // SetTaggedStatus overwrites the single status string, so the failure is folded into the one message.
-        std::string warn_msg = fmt::format("{}; {} item(s) could not be deleted (fallocate failed: {})", info_msg,
-                                           failed_count, strerror(first_errno));
+        std::string warn_msg = fmt::format("{}; {} item(s) could not be deleted ({})", info_msg, failed_count,
+                                           first_failure);
         SetTaggedStatus(to_return.mutable_deletestatus(), "[WARNING] ", warn_msg);
         spdlog::warn(warn_msg);
         return to_return;

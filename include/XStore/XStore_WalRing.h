@@ -94,6 +94,11 @@ public:
     uint64_t HeadLsn() const { return head_.load(std::memory_order_acquire); }
     uint64_t AppliedLsn() const { return applied_.load(std::memory_order_acquire); }
     uint64_t CheckpointLsn() const { return checkpoint_.load(std::memory_order_acquire); }
+    // The writer's exception path only: records of this ring up to `lsn` are durable but may not have been
+    // applied or Note'd on ANY data file. DirtyTracker::RingClear() answers false for every file until the
+    // checkpoint reaches `lsn`. Allocation-free and noexcept (monotone max); it holds nothing back by itself.
+    void NoteUnattributedThrough(uint64_t lsn) noexcept;
+    uint64_t UnattributedThrough() const { return unattributed_.load(std::memory_order_acquire); }
     double Fill() const;                     // (head - checkpoint) / ring_bytes
     // Outcome of a header write: `failed` = nothing changed; `real` = a genuine pwrite/fdatasync error
     // (sticky: the kernel may have dropped the header page, so a retry proves nothing -- the caller must
@@ -103,7 +108,8 @@ public:
     // wake stalled Reserve()s. No-op if lsn <= current; refused (logged) if lsn > head;
     // unchanged if the header write fails (details in *status when given).
     void AdvanceCheckpoint(uint64_t lsn, HeaderWriteStatus *status = nullptr);
-    // head = applied = checkpoint = lsn, in memory only (replay re-seats the ring).
+    // head = applied = checkpoint = lsn and clears the unattributed mark, in memory only. Only caller:
+    // the legacy-WAL conversion (XStore_Management.cpp), which restarts a registered ring at LSN 0.
     void ResetTo(uint64_t lsn);
     // Replay finished at `end_lsn` with every touched data file synced: persist
     // checkpoint_lsn = end_lsn in the alternate header slot (slot_seq re-read from
@@ -134,6 +140,7 @@ private:
     alignas(64) std::atomic<uint64_t> head_;
     std::atomic<uint64_t> applied_;
     std::atomic<uint64_t> checkpoint_;
+    std::atomic<uint64_t> unattributed_{0};   // see NoteUnattributedThrough
     uint64_t slot_seq_;                      // guarded by mu_
     std::mutex mu_;                          // slow-path Reserve wait + AdvanceCheckpoint/ResetTo
     std::condition_variable cv_;
@@ -264,6 +271,10 @@ public:
     // One short lock; adjacent/overlapping ranges of a file merge in place.
     // ring_lsn_end = END lsn of the ring record that carries this write.
     void Note(const std::shared_ptr<Ring> &ring, const std::string &data_path, uint64_t begin, uint64_t end, uint64_t ring_lsn_end);
+    // Records ONLY the per-file ring-LSN mark (RingClear stays false until the ring is checkpointed past it) and
+    // adds no byte range, so Take() never returns the path and the checkpointer never opens or syncs it. For a
+    // record whose apply wrote nothing (data file could not be opened). No-op for a null ring / ring_lsn_end == 0.
+    void NoteRingMarkOnly(const std::shared_ptr<Ring> &ring, const std::string &data_path, uint64_t ring_lsn_end);
 
     struct Snapshot { std::unordered_map<std::string, std::vector<DirtyRange>> ranges; };
     // Swaps out and returns every file's merged ranges and resets the range
@@ -277,7 +288,8 @@ public:
     // True iff no un-checkpointed ring record touched `data_path`: for every
     // ring that recorded a write to it and is still alive,
     // last_ring_lsn <= ring->CheckpointLsn(). A destroyed ring, or no
-    // recorded ring, counts as clear.
+    // recorded ring, counts as clear. Also false (for every path) while a registered ring has an
+    // un-checkpointed Ring::NoteUnattributedThrough mark.
     bool RingClear(const std::string &data_path) const;
     // Memory hygiene only (RingClear queries the live ring): drops per-file
     // entries for `ring` whose last_ring_lsn <= checkpoint_lsn.
@@ -297,6 +309,7 @@ private:
         std::map<uint64_t, uint64_t> ranges;   // begin -> end, disjoint and non-adjacent
         std::vector<RingMark> marks;           // one per distinct ring that wrote here
     };
+    static void AddMark(FileState &file, const std::shared_ptr<Ring> &ring, uint64_t ring_lsn_end);
     mutable std::mutex mu_;
     std::unordered_map<std::string, FileState> files_;
     uint64_t bytes_ = 0;

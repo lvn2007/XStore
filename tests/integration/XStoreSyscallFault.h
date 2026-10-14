@@ -1,11 +1,12 @@
 #pragma once
 // Fault injection for libc calls WITHOUT any hook in production code: XStoreSyscallFault.cpp
-// defines open/openat/stat/lstat/fdatasync/fsync/pwrite/pread itself (link-time interposition,
+// defines open/openat/stat/lstat/fdatasync/fsync/pwrite/pread/lseek itself (link-time interposition,
 // same pattern as XStoreDeleteFaultTest.cpp) and forwards to the real function via
 // dlsym(RTLD_NEXT) unless one of these guards is alive. Unarmed, every interposed call is a single
 // relaxed atomic load plus the forward. At most one guard of each class (for ScopedFdFault: of
 // each FdOp) may be alive at a time; a second one aborts.
 #include <cstdint>
+#include <functional>
 #include <string>
 
 namespace xstore_fault {
@@ -45,6 +46,21 @@ public:
     int Failures() const;  // matching calls that were failed
 private:
     FdOp op_;
+};
+
+// Observes (never fails) calls on a descriptor that refers to `path`, made BY THE THREAD THAT
+// CONSTRUCTED THE OBSERVER (other threads are ignored): every pread (offset, byte count) and every
+// lseek(SEEK_DATA) (offset, 0) calls `fn` before the call is forwarded. `fn` runs while the
+// observer's (non-recursive) mutex is held, so it must not call pread or lseek on ANY descriptor
+// (the nested call would try to take that mutex again and deadlock); locking, atomics and
+// bookkeeping are fine. At most one observer alive at a time.
+enum class ObservedOp { kPread, kSeekData };
+class ScopedFdObserver {
+public:
+    ScopedFdObserver(const std::string &path, std::function<void(ObservedOp, uint64_t, uint64_t)> fn);
+    ~ScopedFdObserver();
+    ScopedFdObserver(const ScopedFdObserver &) = delete;
+    ScopedFdObserver &operator=(const ScopedFdObserver &) = delete;
 };
 
 }  // namespace xstore_fault

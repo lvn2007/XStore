@@ -37,9 +37,12 @@
 // means the filesystem cannot fsync directories at all: that neither poisons nor fails the cycle (one
 // WARNING per process; new-file directory entries just cannot be made durable there).
 //
-// Apply failure: if ApplyWalRecord fails for a record in a durable ring the
-// applied position still advances and the checkpoint may pass it (pre-existing
-// behaviour: replay used to invalidate the log unconditionally too).
+// Apply failure (decided 2026-10-10): if ApplyWalRecord fails for a record in a durable ring, the
+// checkpoint is NOT held: the applied position still advances and the checkpoint may pass the
+// record, so one failing file cannot wedge the shard. The caller was told "failed" and the rows may
+// be partly present; retrying converges because inserts overwrite by timestamp. The failed
+// record's data file is noted dirty anyway (ApplyWalRecord), so RingClear() is false for it until
+// the checkpoint has passed the record and the direct path cannot overtake it.
 //
 // Hot path: the writer does ONE relaxed store of last_writer_activity_ns per
 // gathered batch; nothing per row.
@@ -90,7 +93,7 @@ public:
     bool StopAfterFinalCycle();
     // Outcome of the last StopAfterFinalCycle(): true = the cycle succeeded (nothing dirty counts as
     // success); false = it failed, the checkpointer was poisoned, or no final cycle has run since Start().
-    // XStore::Shutdown() marks indexes clean only if this is true and !Poisoned().
+    // XStore::Shutdown() marks indexes clean only if this is true (a poisoned checkpointer never completes a cycle, so it makes this false).
     bool FinalCycleOk() const { return final_cycle_ok_.load(std::memory_order_acquire); }
     // Synchronous full cycle. false = a data/dir sync failed (or a header write
     // did not stick): nothing (or not everything) advanced; retry is safe -- unless the

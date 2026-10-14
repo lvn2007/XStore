@@ -1,5 +1,6 @@
 #include "include/Networking/ZMQ_Server.h"
 #include "include/XStore/XStore.h"
+#include "include/XStore/XStore_DirLock.h"
 #include "include/XStore/XStore_PreadPool.h"
 #include "include/XStore/XStore_SysStats.h"
 #include "include/XStore/XStore_WalCheckpoint.h"
@@ -14,6 +15,7 @@
 #include <cstring>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <pthread.h>
 #include <thread>
 #include <unistd.h>
@@ -61,9 +63,6 @@ int main(int argc, char *argv[]) {
     spdlog::level::level_enum console_level = spdlog::level::warn;
     spdlog::level::level_enum file_level = spdlog::level::trace;
     unsigned short int flush_interval = 10;
-    // Ctor only sets process-global spdlog state; temporary avoids -Wunused-but-set-variable.
-    Logger(console_level, file_level, flush_interval);
-
     argparse::ArgumentParser program("XStore");
     program.add_description(
         "XStore is a key-value/time-series store, served over ZMQ+protobuf");
@@ -106,6 +105,21 @@ int main(int argc, char *argv[]) {
         std::cerr << program;
         exit(1);
     }
+
+    // One XStore process per data directory. Taken after parse_args (--help and bad arguments exit inside it and must
+    // not touch the lock) but before the Logger, SysStats, ZMQ and the bootstrap XStore (InitDB's replay and index
+    // rebuilds): a second process must not truncate the running one's logs/server.log, so it appends instead. Same
+    // directory as the bootstrap XStore below (cwd/DataStore). Startup path, not hot.
+    const dirlock::Result dir_lock = dirlock::Acquire(std::filesystem::current_path() / "DataStore");
+
+    // Ctor only sets process-global spdlog state; temporary avoids -Wunused-but-set-variable.
+    Logger(console_level, file_level, flush_interval, /*truncate_log=*/dir_lock.ok);
+    if (!dir_lock.ok) {
+        spdlog::error("[BOOT] - {}", dir_lock.error);
+        spdlog::default_logger()->flush();
+        exit(1);
+    }
+    if (!dir_lock.warning.empty()) spdlog::warn("[BOOT] - {}", dir_lock.warning);
 
     // Arguments parsing
     std::string host = program.get<std::string>("--host");
@@ -248,8 +262,22 @@ int main(int argc, char *argv[]) {
     // authoritative data_store_dir and is a harmless no-op duplicate of the
     // work every later ZmqServer worker's own XStore instance would trigger
     // anyway (InitDB's own once-per-directory guard makes this idempotent).
-    XStore bootstrap_store;
-    XStore::StartCatIdxCompactionThread(bootstrap_store.data_store_dir);
+    // A failed InitDB (e.g. an index file of a year cannot be opened) throws out of the constructor: say why and exit 1
+    // instead of std::terminate. _exit, not return: the WAL writer threads are already running (same as the drain
+    // timeout below). No retry: a second XStore() in this process would skip InitDB (initialized_dirs).
+    std::optional<XStore> bootstrap_store;
+    try {
+        bootstrap_store.emplace();
+    } catch (const std::exception &e) {
+        spdlog::error("[BOOT] - Startup failed (InitDB): {}", e.what());
+        spdlog::default_logger()->flush();
+        _exit(1);
+    } catch (...) {
+        spdlog::error("[BOOT] - Startup failed (InitDB): unknown exception");
+        spdlog::default_logger()->flush();
+        _exit(1);
+    }
+    XStore::StartCatIdxCompactionThread(bootstrap_store->data_store_dir);
 
     // Spin ZMQ Server. Returns after a stop signal, once the workers have
     // drained (or the drain timeout hit).

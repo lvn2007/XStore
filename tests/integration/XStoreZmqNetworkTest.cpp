@@ -5,22 +5,25 @@
 // This is deliberately a *separate* test binary (see tests/CMakeLists.txt) since it links libzmq and spins up
 // a real TCP server thread for the whole suite.
 //
-// ZMQ_Server has no shutdown API (StartServer() blocks forever in
-// zmq::proxy()), so the server + its worker thread are started once in
-// SetUpTestSuite() and deliberately never torn down -- the OS reclaims the
-// socket/thread on process exit. Only the on-disk scratch_ directory is
-// cleaned up in TearDownTestSuite().
+// The servers of this file bind OS-assigned ports (StartZmqServerOnFreePort: bounded retry on a stolen port, a Ping
+// as the positive "this server is up" signal). They are started once in SetUpTestSuite() and deliberately never torn
+// down (their workers keep an XStore rooted in the scratch dir) -- the OS reclaims the socket/threads on process
+// exit. Only the on-disk scratch directory is cleaned up in TearDownTestSuite().
 #include <gtest/gtest.h>
+#include <google/protobuf/io/coded_stream.h>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstdlib>
+#include <map>
 #include <thread>
 #include <unistd.h>
 #include <vector>
 
 #include "include/Networking/ZMQ_Server.h"
 #include "XStoreTestSupport.h"
+#include "XStoreZmqTestSupport.h"
 
 using namespace xstore_test;
 
@@ -91,6 +94,36 @@ XStore_Proto::Request Wrap(const XStore_Proto::RangeQuery_REQ &req) {
     *w.mutable_rangequery() = req;
     return w;
 }
+XStore_Proto::Request Wrap(const XStore_Proto::BatchDelete_REQ &req) {
+    XStore_Proto::Request w;
+    *w.mutable_batchdelete() = req;
+    return w;
+}
+XStore_Proto::Request Wrap(const XStore_Proto::RangeDelete_REQ &req) {
+    XStore_Proto::Request w;
+    *w.mutable_rangedelete() = req;
+    return w;
+}
+XStore_Proto::Request Wrap(const XStore_Proto::Min_REQ &req) {
+    XStore_Proto::Request w;
+    *w.mutable_min() = req;
+    return w;
+}
+XStore_Proto::Request Wrap(const XStore_Proto::Max_REQ &req) {
+    XStore_Proto::Request w;
+    *w.mutable_max() = req;
+    return w;
+}
+XStore_Proto::Request Wrap(const XStore_Proto::Sum_REQ &req) {
+    XStore_Proto::Request w;
+    *w.mutable_sum() = req;
+    return w;
+}
+XStore_Proto::Request Wrap(const XStore_Proto::Avg_REQ &req) {
+    XStore_Proto::Request w;
+    *w.mutable_avg() = req;
+    return w;
+}
 XStore_Proto::Request Wrap(const XStore_Proto::Variance_REQ &req) {
     XStore_Proto::Request w;
     *w.mutable_variance() = req;
@@ -137,6 +170,35 @@ XStore_Proto::Request Wrap(const XStore_Proto::FindByPattern_REQ &req) {
     return w;
 }
 
+// Walks one reply frame of whole RangeQuery_REP.queryresponse entries (ts varint + data bytes) without building
+// protobuf objects: a 64 MiB frame of ~6.7M entries would cost hundreds of MB as a parsed message. Calls
+// visit(timestamp, data_bytes) per entry; false if the bytes are not a clean run of entries.
+template <typename Visit>
+bool ScanRangeFrame(const std::string &frame, Visit visit) {
+    namespace io = google::protobuf::io;
+    io::CodedInputStream in(reinterpret_cast<const uint8_t *>(frame.data()), static_cast<int>(frame.size()));
+    in.SetTotalBytesLimit(INT_MAX);
+    constexpr uint32_t ENTRY_TAG = 0x0A;      // queryresponse (1), length-delimited
+    constexpr uint32_t TIMESTAMP_TAG = 0x08;  // UnaryQuery_REP.timestamp (1), varint
+    constexpr uint32_t DATA_TAG = 0x12;       // UnaryQuery_REP.data (2), length-delimited
+    while (in.CurrentPosition() < static_cast<int>(frame.size())) {
+        uint32_t len = 0;
+        uint64_t ts = 0;
+        if (in.ReadTag() != ENTRY_TAG || !in.ReadVarint32(&len)) return false;
+        const auto limit = in.PushLimit(static_cast<int>(len));
+        if (in.ReadTag() != TIMESTAMP_TAG || !in.ReadVarint64(&ts)) return false;
+        std::string data;
+        if (in.BytesUntilLimit() > 0) {
+            uint32_t data_len = 0;
+            if (in.ReadTag() != DATA_TAG || !in.ReadVarint32(&data_len) || !in.ReadString(&data, static_cast<int>(data_len))) return false;
+        }
+        if (in.BytesUntilLimit() != 0) return false;
+        in.PopLimit(limit);
+        visit(ts, data);
+    }
+    return true;
+}
+
 }  // namespace
 
 class XStoreZmqNetworkTest : public ::testing::Test {
@@ -144,38 +206,33 @@ class XStoreZmqNetworkTest : public ::testing::Test {
   static ScratchDir *scratch;
   static zmq::context_t *client_ctx;
   static zmq::socket_t *client_socket;
+  static std::string server_addr;  // empty if no server came up
 
   static void SetUpTestSuite() {
+      server_addr.clear();   // under --gtest_repeat a failed start must not leave the previous run's address
       // Leaked deliberately (see file header comment): the worker's XStore
       // instance captures this cwd as its baseDir at thread-start time and
       // keeps writing there for the rest of the process's life.
       scratch = new ScratchDir("xstore_zmq_test");
 
-      int port = 25500 + static_cast<int>(getpid() % 4000);
-      std::string server_addr = "tcp://127.0.0.1:" + std::to_string(port);
-
-      auto *server = new ZmqServer(1);  // single worker: client is a single REQ socket anyway
-      std::thread server_thread([server, port]() {
-          (void)server->StartServer("127.0.0.1", std::to_string(port));  // never stopped, drain result irrelevant
-      });
-      server_thread.detach();
+      const int port = StartZmqServerOnFreePort(1);  // single worker: client is a single REQ socket anyway
+      if (port < 0) return;
+      server_addr = "tcp://127.0.0.1:" + std::to_string(port);
 
       client_ctx = new zmq::context_t(1);
       client_socket = new zmq::socket_t(*client_ctx, zmq::socket_type::req);
       client_socket->set(zmq::sockopt::rcvtimeo, 5000);
       client_socket->set(zmq::sockopt::linger, 0);
-      // ZeroMQ queues connects lazily/retries internally, so connecting
-      // before bind() completes on the server thread is safe.
       client_socket->connect(server_addr);
-
-      // Small head start so the first request in the first test doesn't pay
-      // for ZeroMQ's initial TCP connect/reconnect backoff.
-      std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
+
+  void SetUp() override { ASSERT_FALSE(server_addr.empty()) << "no ZMQ server came up on any of 5 OS-assigned ports"; }
 
   static void TearDownTestSuite() {
       delete client_socket;
       delete client_ctx;
+      client_socket = nullptr;
+      client_ctx = nullptr;
       delete scratch;  // removes the scratch_ DataStore dir; server thread is left dangling, harmless at process exit
   }
 
@@ -198,18 +255,42 @@ class XStoreZmqNetworkTest : public ::testing::Test {
       return rep;
   }
 
-  // Sends raw bytes and returns the reply frame's size, or -1 if no reply arrived within the timeout.
+  // Sends raw bytes and returns the reply frame's size, or -1 if no reply arrived within the timeout. Uses a fresh
+  // REQ socket: a missed reply must not leave the shared client_socket stuck in its send state for every later case.
   long SendRawExpectReply(const std::string &payload) {
-      if (!client_socket->send(zmq::buffer(payload), zmq::send_flags::none)) return -1;
+      zmq::socket_t sock(*client_ctx, zmq::socket_type::req);
+      sock.set(zmq::sockopt::rcvtimeo, 5000);
+      sock.set(zmq::sockopt::linger, 0);
+      sock.connect(server_addr);
+      if (!sock.send(zmq::buffer(payload), zmq::send_flags::none)) return -1;
       zmq::message_t reply;
-      if (!client_socket->recv(reply, zmq::recv_flags::none)) return -1;
+      if (!sock.recv(reply, zmq::recv_flags::none)) return -1;
       return static_cast<long>(reply.size());
+  }
+
+  // Sends a request and returns every frame of the (possibly multi-frame) reply, or false if a frame did not arrive in
+  // `timeout_ms`. Fresh REQ socket, same reason as SendRawExpectReply.
+  bool SendRequestMultipart(const XStore_Proto::Request &req, std::vector<std::string> &frames, int timeout_ms) {
+      zmq::socket_t sock(*client_ctx, zmq::socket_type::req);
+      sock.set(zmq::sockopt::rcvtimeo, timeout_ms);
+      sock.set(zmq::sockopt::linger, 0);
+      sock.connect(server_addr);
+      const std::string payload = req.SerializeAsString();
+      if (!sock.send(zmq::buffer(payload), zmq::send_flags::none)) return false;
+      frames.clear();
+      while (true) {
+          zmq::message_t frame;
+          if (!sock.recv(frame, zmq::recv_flags::none)) return false;
+          frames.emplace_back(static_cast<const char *>(frame.data()), frame.size());
+          if (!frame.more()) return true;
+      }
   }
 };
 
 ScratchDir *XStoreZmqNetworkTest::scratch = nullptr;
 zmq::context_t *XStoreZmqNetworkTest::client_ctx = nullptr;
 zmq::socket_t *XStoreZmqNetworkTest::client_socket = nullptr;
+std::string XStoreZmqNetworkTest::server_addr;
 
 // ---------------------------------------------------------------------
 // INFO / CREATEDB
@@ -439,6 +520,151 @@ TEST_F(XStoreZmqNetworkTest, RangeInsertThenRangeQueryOverWireIncludesHoleAsEmpt
 }
 
 // ---------------------------------------------------------------------
+// MIN / MAX / SUM / AVG -- dispatch + encoding of the four basic aggregates
+// ---------------------------------------------------------------------
+
+TEST_F(XStoreZmqNetworkTest, MinMaxSumAvgRoundTripOverNetwork) {
+    XStore_Proto::CreateDB_REQ create_req;
+    create_req.set_rtype(XStore_Proto::CREATEDB);
+    create_req.set_dbname("ZMQ_BASICAGG_DB");
+    create_req.set_timeresolution(XStore_Proto::SECOND);
+    create_req.set_rowlength(128);
+    SendRequest<XStore_Proto::CreateDB_REP>(Wrap(create_req));
+
+    const std::vector<double> values = {2, 9, 4, 1, 5};  // min 1, max 9, sum 21, avg 4.2
+    XStore_Proto::BatchInsert_REQ insert_req;
+    insert_req.set_rtype(XStore_Proto::BATCHINSERT);
+    insert_req.set_dbname("ZMQ_BASICAGG_DB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
+    for (size_t i = 0; i < values.size(); i++) {
+        XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
+        entry->set_timestamp(TS_2020_MID + i);
+        *entry->mutable_data() = MakeRow({FDouble(values[i])});
+    }
+    auto insert_rep = SendRequest<XStore_Proto::BatchInsert_REP>(Wrap(insert_req));
+    ASSERT_NE(insert_rep.insertstatus().find("Inserted 5 elements"), std::string::npos) << insert_rep.insertstatus();
+
+    const auto fill = [&](auto &req, XStore_Proto::RequestType type) {
+        req.set_rtype(type);
+        req.set_dbname("ZMQ_BASICAGG_DB");
+        req.set_starttime(TS_2020_MID);
+        req.set_endtime(TS_2020_MID + values.size() - 1);
+        req.set_columnidx(0);
+    };
+
+    XStore_Proto::Min_REQ min_req;
+    fill(min_req, XStore_Proto::MIN);
+    auto min_rep = SendRequest<XStore_Proto::Min_REP>(Wrap(min_req));
+    EXPECT_EQ(min_rep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(min_rep.opresult().doubledata(), 1.0);
+
+    XStore_Proto::Max_REQ max_req;
+    fill(max_req, XStore_Proto::MAX);
+    auto max_rep = SendRequest<XStore_Proto::Max_REP>(Wrap(max_req));
+    EXPECT_EQ(max_rep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(max_rep.opresult().doubledata(), 9.0);
+
+    XStore_Proto::Sum_REQ sum_req;
+    fill(sum_req, XStore_Proto::SUM);
+    auto sum_rep = SendRequest<XStore_Proto::Sum_REP>(Wrap(sum_req));
+    EXPECT_EQ(sum_rep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(sum_rep.opresult(), 21.0);
+
+    XStore_Proto::Avg_REQ avg_req;
+    fill(avg_req, XStore_Proto::AVG);
+    auto avg_rep = SendRequest<XStore_Proto::Avg_REP>(Wrap(avg_req));
+    EXPECT_EQ(avg_rep.opstatus(), "SUCCESS");
+    EXPECT_DOUBLE_EQ(avg_rep.opresult(), 4.2);
+}
+
+// ---------------------------------------------------------------------
+// BATCH DELETE / RANGE DELETE -- dispatch, each followed by a query proving the effect
+// ---------------------------------------------------------------------
+
+TEST_F(XStoreZmqNetworkTest, BatchDeleteOverWireRemovesOnlyTheListedRows) {
+    XStore_Proto::CreateDB_REQ create_req;
+    create_req.set_rtype(XStore_Proto::CREATEDB);
+    create_req.set_dbname("ZMQ_BATCHDEL_DB");
+    create_req.set_timeresolution(XStore_Proto::SECOND);
+    create_req.set_rowlength(128);
+    SendRequest<XStore_Proto::CreateDB_REP>(Wrap(create_req));
+
+    const unsigned long long ts_a = TS_2012_MID, ts_b = TS_2012_MID + 1, ts_c = TS_2020_MID;  // a, c deleted; two years
+    XStore_Proto::BatchInsert_REQ insert_req;
+    insert_req.set_rtype(XStore_Proto::BATCHINSERT);
+    insert_req.set_dbname("ZMQ_BATCHDEL_DB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
+    int64_t value = 1;
+    for (unsigned long long ts : {ts_a, ts_b, ts_c}) {
+        XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
+        entry->set_timestamp(ts);
+        *entry->mutable_data() = MakeRow({FInt64(value++)});
+    }
+    auto insert_rep = SendRequest<XStore_Proto::BatchInsert_REP>(Wrap(insert_req));
+    ASSERT_NE(insert_rep.insertstatus().find("Inserted 3 elements"), std::string::npos) << insert_rep.insertstatus();
+
+    XStore_Proto::BatchDelete_REQ delete_req;
+    delete_req.set_rtype(XStore_Proto::BATCHDELETE);
+    delete_req.set_dbname("ZMQ_BATCHDEL_DB");
+    delete_req.add_timestamp(ts_a);
+    delete_req.add_timestamp(ts_c);
+    auto delete_rep = SendRequest<XStore_Proto::BatchDelete_REP>(Wrap(delete_req));
+    EXPECT_EQ(delete_rep.deletestatus(), "[INFO] [BATCH DELETE] [DB: ZMQ_BATCHDEL_DB] - Deleted 2 items");
+
+    XStore_Proto::BatchQuery_REQ query_req;
+    query_req.set_rtype(XStore_Proto::BATCHQUERY);
+    query_req.set_dbname("ZMQ_BATCHDEL_DB");
+    query_req.add_timestamp(ts_a);
+    query_req.add_timestamp(ts_b);
+    query_req.add_timestamp(ts_c);
+    auto query_rep = SendRequest<XStore_Proto::BatchQuery_REP>(Wrap(query_req));
+    ASSERT_EQ(query_rep.queryresponse_size(), 1) << "batch query omits holes, so only the undeleted row remains";
+    EXPECT_EQ(query_rep.queryresponse(0).timestamp(), ts_b);
+    EXPECT_EQ(query_rep.queryresponse(0).data().fielddata(0).int64data(), 2);
+}
+
+TEST_F(XStoreZmqNetworkTest, RangeDeleteOverWireRemovesOnlyTheRange) {
+    XStore_Proto::CreateDB_REQ create_req;
+    create_req.set_rtype(XStore_Proto::CREATEDB);
+    create_req.set_dbname("ZMQ_RANGEDEL_DB");
+    create_req.set_timeresolution(XStore_Proto::SECOND);
+    create_req.set_rowlength(128);
+    SendRequest<XStore_Proto::CreateDB_REP>(Wrap(create_req));
+
+    XStore_Proto::BatchInsert_REQ insert_req;
+    insert_req.set_rtype(XStore_Proto::BATCHINSERT);
+    insert_req.set_dbname("ZMQ_RANGEDEL_DB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
+    for (int64_t i = 0; i < 4; i++) {
+        XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
+        entry->set_timestamp(TS_2028_MID + i);
+        *entry->mutable_data() = MakeRow({FInt64(100 + i)});
+    }
+    auto insert_rep = SendRequest<XStore_Proto::BatchInsert_REP>(Wrap(insert_req));
+    ASSERT_NE(insert_rep.insertstatus().find("Inserted 4 elements"), std::string::npos) << insert_rep.insertstatus();
+
+    XStore_Proto::RangeDelete_REQ delete_req;
+    delete_req.set_rtype(XStore_Proto::RANGEDELETE);
+    delete_req.set_dbname("ZMQ_RANGEDEL_DB");
+    delete_req.set_starttime(TS_2028_MID + 1);
+    delete_req.set_endtime(TS_2028_MID + 2);
+    auto delete_rep = SendRequest<XStore_Proto::RangeDelete_REP>(Wrap(delete_req));
+    EXPECT_EQ(delete_rep.deletestatus(), "[INFO] [RANGE DELETE] [DB: ZMQ_RANGEDEL_DB] - Deleted 2 items");
+
+    XStore_Proto::RangeQuery_REQ query_req;
+    query_req.set_rtype(XStore_Proto::RANGEQUERY);
+    query_req.set_dbname("ZMQ_RANGEDEL_DB");
+    query_req.set_starttime(TS_2028_MID);
+    query_req.set_endtime(TS_2028_MID + 3);
+    auto query_rep = SendRequest<XStore_Proto::RangeQuery_REP>(Wrap(query_req));
+    ASSERT_EQ(query_rep.queryresponse_size(), 4);
+    EXPECT_EQ(query_rep.queryresponse(0).data().fielddata(0).int64data(), 100);
+    EXPECT_EQ(query_rep.queryresponse(1).data().fielddata_size(), 0);
+    EXPECT_EQ(query_rep.queryresponse(2).data().fielddata_size(), 0);
+    EXPECT_EQ(query_rep.queryresponse(3).data().fielddata(0).int64data(), 103);
+}
+
+// ---------------------------------------------------------------------
 // REMOVE DB FILES / REMOVE DB -- cleanup path, over the wire
 // ---------------------------------------------------------------------
 
@@ -466,7 +692,7 @@ TEST_F(XStoreZmqNetworkTest, RemoveDBFilesThenRemoveDBOverWire) {
     remove_files_req.set_dbname("ZMQ_REMOVE_DB");
     remove_files_req.add_filename("2005.XSTORE");
     auto remove_files_rep = SendRequest<XStore_Proto::RemoveDBFiles_REP>(Wrap(remove_files_req));
-    ASSERT_EQ(remove_files_rep.removestatus_size(), 1);
+    ASSERT_EQ(remove_files_rep.removestatus_size(), 3); // 2005.XSTORE plus its .zmap and .catidx
     EXPECT_NE(remove_files_rep.removestatus(0).find("[INFO]"), std::string::npos);
 
     XStore_Proto::RemoveDB_REQ remove_db_req;
@@ -731,6 +957,91 @@ TEST_F(XStoreZmqNetworkTest, FindByPatternRoundTripOverNetwork) {
 }
 
 // ---------------------------------------------------------------------
+// Streamed reply past STREAMED_QUERY_CHUNK_SIZE_BYTES (64 MiB): one logical reply, several ZMQ frames
+// ---------------------------------------------------------------------
+
+// A RangeQuery emits one entry per timestamp, holes included, and a hole entry is exactly 10 bytes (4 tag/length bytes,
+// a 5-byte timestamp varint for 2020, a 1-byte empty data length). So a mostly-empty range with 16-byte rows (tiny
+// sparse year file, a few KB on disk) reaches the 64 MiB chunk limit after ~6.7M entries, with no big data written.
+// The server flushes a chunk right after the first entry that brings the buffer to >= the limit, so the cut index is
+// computable: rows are planted on both sides of it, and the test checks the frame split falls exactly there and that
+// timestamps run contiguously across it.
+TEST_F(XStoreZmqNetworkTest, RangeQueryReplyLargerThanOneChunkArrivesAsContiguousFrames) {
+    constexpr size_t CHUNK = XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES;
+    constexpr size_t HOLE_ENTRY_BYTES = 10;
+    constexpr unsigned long long T0 = TS_2020_MID;
+
+    XStore_Proto::CreateDB_REQ create_req;
+    create_req.set_rtype(XStore_Proto::CREATEDB);
+    create_req.set_dbname("ZMQ_BIGRANGE_DB");
+    create_req.set_timeresolution(XStore_Proto::SECOND);
+    create_req.set_rowlength(16);
+    SendRequest<XStore_Proto::CreateDB_REP>(Wrap(create_req));
+
+    const auto insert_rows = [&](const std::vector<std::pair<unsigned long long, int64_t>> &rows) {
+        XStore_Proto::BatchInsert_REQ insert_req;
+        insert_req.set_rtype(XStore_Proto::BATCHINSERT);
+        insert_req.set_dbname("ZMQ_BIGRANGE_DB");
+        insert_req.set_durabilitymode(XStore_Proto::SYNC);
+        for (const auto &[ts, value] : rows) {
+            XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
+            entry->set_timestamp(ts);
+            *entry->mutable_data() = MakeRow({FInt64(value)});
+        }
+        auto insert_rep = SendRequest<XStore_Proto::BatchInsert_REP>(Wrap(insert_req));
+        EXPECT_NE(insert_rep.insertstatus().find("Inserted"), std::string::npos) << insert_rep.insertstatus();
+    };
+    const auto range_request = [&](unsigned long long start, unsigned long long end) {
+        XStore_Proto::RangeQuery_REQ query_req;
+        query_req.set_rtype(XStore_Proto::RANGEQUERY);
+        query_req.set_dbname("ZMQ_BIGRANGE_DB");
+        query_req.set_starttime(start);
+        query_req.set_endtime(end);
+        return Wrap(query_req);
+    };
+
+    // Entry 0 (a real row) is the only one whose size is not HOLE_ENTRY_BYTES: measure it with a one-entry query.
+    insert_rows({{T0, 7}});
+    std::vector<std::string> frames;
+    ASSERT_TRUE(SendRequestMultipart(range_request(T0, T0), frames, 10000));
+    ASSERT_EQ(frames.size(), 1u);
+    const size_t first_entry_bytes = frames[0].size();
+    // Smallest j with first_entry_bytes + 10 * j >= CHUNK: the entry at offset j closes frame 0.
+    const unsigned long long cut = (CHUNK - first_entry_bytes + HOLE_ENTRY_BYTES - 1) / HOLE_ENTRY_BYTES;
+    const unsigned long long last = cut + 1000;
+    insert_rows({{T0 + cut, 8}, {T0 + cut + 1, 9}, {T0 + last, 10}});
+
+    const auto started = std::chrono::steady_clock::now();
+    ASSERT_TRUE(SendRequestMultipart(range_request(T0, T0 + last), frames, 60000)) << "a frame did not arrive in 60 s";
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+    RecordProperty("elapsed_ms", static_cast<int>(elapsed_ms));
+    ASSERT_EQ(frames.size(), 2u) << "total reply is just over one chunk: exactly two frames";
+    EXPECT_GE(frames[0].size(), CHUNK);
+
+    unsigned long long expected_ts = T0;
+    size_t entries[2] = {0, 0};
+    std::map<unsigned long long, int64_t> rows_seen;
+    bool contiguous = true;
+    for (int f = 0; f < 2; ++f) {
+        ASSERT_TRUE(ScanRangeFrame(frames[f], [&](uint64_t ts, const std::string &data) {
+            contiguous = contiguous && ts == expected_ts;
+            ++expected_ts;
+            ++entries[f];
+            if (!data.empty()) {
+                XStore_Proto::RowData row;
+                ASSERT_TRUE(row.ParseFromString(data));
+                rows_seen[ts] = row.fielddata(0).int64data();
+            }
+        })) << "frame " << f << " is not a clean run of whole entries";
+    }
+    EXPECT_TRUE(contiguous) << "timestamps must run T0..T0+last without a gap or repeat across the frame boundary";
+    EXPECT_EQ(entries[0] + entries[1], last + 1);
+    EXPECT_EQ(entries[0], cut + 1) << "frame 0 must end exactly at the entry that reached the chunk limit";
+    const std::map<unsigned long long, int64_t> expected_rows = {{T0, 7}, {T0 + cut, 8}, {T0 + cut + 1, 9}, {T0 + last, 10}};
+    EXPECT_EQ(rows_seen, expected_rows) << "rows on both sides of the frame boundary (8 closes frame 0, 9 opens frame 1)";
+}
+
+// ---------------------------------------------------------------------
 // Multi-worker concurrency -- XStoreZmqNetworkTest above always runs a
 // single-worker server against one sequential REQ client, so it never
 // exercises ZMQ_Server's actual thread pool (each worker owns its own
@@ -743,23 +1054,18 @@ TEST_F(XStoreZmqNetworkTest, FindByPatternRoundTripOverNetwork) {
 class XStoreZmqConcurrentTest : public ::testing::Test {
  protected:
   static ScratchDir *scratch;
-  static std::string server_addr;
+  static std::string server_addr;  // empty if no server came up
 
   static void SetUpTestSuite() {
+      server_addr.clear();
       // Leaked deliberately, same rationale as XStoreZmqNetworkTest.
       scratch = new ScratchDir("xstore_zmq_concurrent_test");
 
-      int port = 26500 + static_cast<int>(getpid() % 4000);
-      server_addr = "tcp://127.0.0.1:" + std::to_string(port);
-
-      auto *server = new ZmqServer(4);  // multi-worker pool, unlike XStoreZmqNetworkTest's single worker
-      std::thread server_thread([server, port]() {
-          (void)server->StartServer("127.0.0.1", std::to_string(port));  // never stopped, drain result irrelevant
-      });
-      server_thread.detach();
-
-      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      const int port = StartZmqServerOnFreePort(4);  // multi-worker pool, unlike XStoreZmqNetworkTest's single worker
+      if (port >= 0) server_addr = "tcp://127.0.0.1:" + std::to_string(port);
   }
+
+  void SetUp() override { ASSERT_FALSE(server_addr.empty()) << "no ZMQ server came up on any of 5 OS-assigned ports"; }
 
   static void TearDownTestSuite() {
       delete scratch;  // server thread pool left dangling, harmless at process exit

@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <condition_variable>
 #include <cerrno>
 #include <chrono>
 #include <fcntl.h>
@@ -22,8 +23,10 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <random>
 #include <set>
@@ -1829,7 +1832,7 @@ TEST_F(WalReplayTest, RemoveDbFilesCheckpointsFirstSoReplayCannotResurrectTheFil
     req.set_dbname(db_name);
     req.add_filename(std::filesystem::path(YearFile()).filename().string());
     const auto rep = store.RemoveDBFiles(&req, db_name);
-    ASSERT_EQ(rep.removestatus_size(), 1);
+    ASSERT_EQ(rep.removestatus_size(), 3); // the year file, then its .zmap and .catidx (the inserts created both)
     EXPECT_NE(rep.removestatus(0).find("Removed"), std::string::npos) << rep.removestatus(0);
     EXPECT_FALSE(std::filesystem::exists(YearFile()));
     EXPECT_EQ(ring->CheckpointLsn(), ring->HeadLsn()) << "RemoveDBFiles must checkpoint before unlinking";
@@ -3307,7 +3310,7 @@ TEST_F(WalDirectPathTest, OverwriteOrderingSurvivesLostPageCache) {
 TEST_F(WalDirectPathTest, FencedShardForcesLargeBatchesOntoTheRing) {
     XStore store;
     xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
-    ASSERT_TRUE(InsertAt(store, 0));   // un-checkpointed ring record on this thread's shard
+    ASSERT_TRUE(InsertAt(store, 0));   // un-checkpointed ring record on this (db, year)'s shard
     BusyRing().reset();
     ShrinkDataFile(kBatchRows);
     Crash();
@@ -3315,17 +3318,31 @@ TEST_F(WalDirectPathTest, FencedShardForcesLargeBatchesOntoTheRing) {
     store.InitDB();   // replay applies the record, its data sync fails => the shard is fenced
     ASSERT_TRUE(walring::AnyFenced());
 
-    // A DB whose writes land on a healthy shard. (The shard is the DB's name hash plus a per-thread salt, and
-    // thread ids hash alike here, so vary the DB.) Probe with a tiny batch; the fence is process-wide, so
-    // the large batch to that DB must still not go direct.
+    // A DB whose 1970 records (the year of the big batch) land on a shard other than the fenced one: the
+    // shard is WalShardFor(db_base_path, year), with the base path spelled exactly as records carry it. The
+    // fence is process-wide, so the large batch to that DB must still not go direct.
+    const size_t active = XStore::active_wal_shard_count.load();
+    ASSERT_GE(active, 2u);
+    const std::string &data_dir = store.data_store_dir;
+    auto base_path = [&](const std::string &name) {
+        return (!data_dir.empty() && data_dir.back() == '/') ? data_dir + name : data_dir + "/" + name;
+    };
+    constexpr unsigned kBigBatchYear = 1970;
+    const size_t fenced = XStore::WalShardFor(base_path(db_name), kBigBatchYear, active);
     const uint64_t direct0 = DirectRecords();
     std::string healthy;
     for (int n = 0; n < 32 && healthy.empty(); ++n) {
         const std::string candidate = fmt::format("WALDIRHEALTHY{}", n);
-        xstore_test::CreateTestDb(store, candidate, XStore_Proto::SECOND, row_length);
-        if (!Failed(Batch(store, candidate, kOtherYearEpoch, 2, 1.0))) healthy = candidate;   // other year: 1970 stays clear
+        if (XStore::WalShardFor(base_path(candidate), kBigBatchYear, active) != fenced) healthy = candidate;
     }
-    ASSERT_FALSE(healthy.empty()) << "no DB landed on a healthy shard";
+    ASSERT_FALSE(healthy.empty()) << "no DB maps to an unfenced shard in 1970";
+    xstore_test::CreateTestDb(store, healthy, XStore_Proto::SECOND, row_length);
+    // Sanity only: writes to the DB succeed (1971, when that shard is not the fenced one; with 2 shards it always
+    // is). Never probe 1970: a ring record there would send the big batch to the ring for another reason.
+    const bool probed = XStore::WalShardFor(base_path(healthy), kBigBatchYear + 1, active) != fenced;
+    if (probed) {
+        ASSERT_FALSE(Failed(Batch(store, healthy, kOtherYearEpoch, 2, 1.0)));
+    }
     const std::string big = Batch(store, healthy, kEpoch0 + 100, kBatchRows, 200.0);
     EXPECT_FALSE(Failed(big)) << big;
     EXPECT_EQ(DirectRecords(), direct0) << "a fenced WAL file anywhere disables the direct path";
@@ -3338,6 +3355,7 @@ TEST_F(WalDirectPathTest, FencedShardForcesLargeBatchesOntoTheRing) {
     // healthy DB's files first, as ShrinkDataFile does for the primary one.
     for (const auto &[year, rows] : {std::pair<const char *, uint64_t>{"1970", kEpoch0 + kBatchRows + 200},
                                      std::pair<const char *, uint64_t>{"1971", 1100}}) {
+        if (!probed && std::string(year) == "1971") continue;
         const std::string file = fmt::format("{}/{}.XSTORE", (scratch->test_root / "DataStore" / healthy).string(), year);
         ASSERT_EQ(truncate(file.c_str(), static_cast<off_t>(rows * row_length)), 0) << file;
     }
@@ -3416,6 +3434,120 @@ TEST_F(WalDirectPathTest, DirectSyncFailureFailsTheCaller) {
     EXPECT_FALSE(Ckpt().Poisoned());
     EXPECT_FALSE(Failed(BigBatch(store, 20.0)));
     EXPECT_DOUBLE_EQ(Read(store, kEpoch0 + 3), 23.0);
+}
+
+// wal_direct_records counts direct records that applied: a failed apply is not counted, a successful one is, once.
+TEST_F(WalDirectPathTest, DirectCounterSkipsFailedApplyAndCountsSuccess) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    const uint64_t direct0 = DirectRecords();
+    {
+        // The year file does not exist yet, so the apply's open(O_CREAT) is what fails.
+        xstore_fault::ScopedPathFault deny(YearFile(), /*subtree=*/false, EACCES, xstore_fault::kOpenWrite);
+        EXPECT_TRUE(Failed(BigBatch(store, 10.0)));
+        EXPECT_GT(deny.OpenHits(), 0u) << "the fault must have been what failed the apply";
+        EXPECT_EQ(DirectRecords(), direct0) << "a direct record that failed to apply is not counted";
+    }
+    ASSERT_FALSE(Failed(BigBatch(store, 10.0)));
+    EXPECT_EQ(DirectRecords(), direct0 + 1);
+}
+
+// A ring record that is durable but failed to apply is not held back by the checkpoint, so its file must stay
+// "not clear" for the direct path until the checkpoint has passed the record.
+TEST_F(WalDirectPathTest, RingApplyOpenFailureKeepsTheFileNotClearUntilCheckpointed) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    {
+        // The year file does not exist yet, so the apply's open(O_CREAT) is what fails.
+        xstore_fault::ScopedPathFault deny(YearFile(), /*subtree=*/false, EACCES, xstore_fault::kOpenWrite);
+        EXPECT_FALSE(InsertAt(store, 0));
+        EXPECT_GT(deny.OpenHits(), 0u) << "the fault must have been what failed the apply";
+    }
+    EXPECT_FALSE(walring::Dirty().RingClear(YearFile())) << "the failed record is still in the ring";
+    ASSERT_TRUE(Ckpt().RunCycle()) << "a file that was never created must not hold the checkpoint";
+    EXPECT_TRUE(walring::Dirty().RingClear(YearFile()));
+}
+
+// A failed pwrite (unlike a failed open) may have landed some bytes, so the file is noted with a byte range too and
+// the direct path must queue behind the record until the checkpoint passes it.
+TEST_F(WalDirectPathTest, RingApplyWriteFailureKeepsTheFileNotClearAndBlocksDirectUntilCheckpointed) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    ASSERT_TRUE(InsertAt(store, 0));
+    ASSERT_TRUE(Ckpt().RunCycle());
+    ASSERT_TRUE(walring::Dirty().RingClear(YearFile()));
+    {
+        xstore_fault::ScopedFdFault fail(xstore_fault::FdOp::kPwrite, YearFile(), /*skip_calls=*/0, /*fail_calls=*/1, EIO);
+        EXPECT_FALSE(InsertAt(store, 1));
+        EXPECT_EQ(fail.Failures(), 1) << "the fault must have been what failed the apply";
+    }
+    EXPECT_FALSE(walring::Dirty().RingClear(YearFile()));
+
+    // A direct-sized batch on the same file must queue behind the failed record, not overtake it.
+    const uint64_t direct0 = DirectRecords(), ring0 = RingRecords();
+    ASSERT_FALSE(Failed(Batch(store, db_name, kEpoch0 + 10, kBatchRows, 5.0)));
+    EXPECT_EQ(DirectRecords(), direct0);
+    EXPECT_EQ(RingRecords(), ring0 + 1);
+
+    ASSERT_TRUE(Ckpt().RunCycle());
+    EXPECT_TRUE(walring::Dirty().RingClear(YearFile()));
+    ASSERT_FALSE(Failed(Batch(store, db_name, kEpoch0 + 3000, kBatchRows, 7.0)));
+    EXPECT_EQ(DirectRecords(), direct0 + 1) << "once the checkpoint passed the record the file is clear again";
+}
+
+// An existing year file that cannot be opened at all (EACCES for the apply's write open AND the checkpointer's
+// read open) must not wedge the checkpoint: the failed record is noted with a ring mark only, so the checkpointer
+// never tries to open the file.
+TEST_F(WalDirectPathTest, RingApplyOpenFailureOnExistingUnreadableFileDoesNotWedgeTheCheckpoint) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    ASSERT_TRUE(InsertAt(store, 0));
+    ASSERT_TRUE(Ckpt().RunCycle());
+    ASSERT_TRUE(walring::Dirty().RingClear(YearFile()));
+    store.EvictFdForTests(YearFile());   // force the next apply to open the file again
+    {
+        xstore_fault::ScopedPathFault deny(YearFile(), /*subtree=*/false, EACCES, xstore_fault::kOpenRead | xstore_fault::kOpenWrite);
+        EXPECT_FALSE(InsertAt(store, 1));
+        EXPECT_GT(deny.OpenHits(), 0u) << "the fault must have been what failed the apply";
+        EXPECT_FALSE(walring::Dirty().RingClear(YearFile())) << "the failed record is still in the ring";
+        ASSERT_TRUE(Ckpt().RunCycle()) << "an unreadable file with no dirty range must not hold the checkpoint";
+    }
+    EXPECT_TRUE(walring::Dirty().RingClear(YearFile()));
+    uint64_t checkpoint = 0;
+    for (auto &r : MyRings()) checkpoint += r->CheckpointLsn();
+    EXPECT_EQ(checkpoint, TotalHead()) << "the checkpoint must have passed the failed record";
+    EXPECT_TRUE(InsertAt(store, 2)) << "once the file is readable again inserts work";
+}
+
+// A writer exception after the ring append was committed leaves records that were never applied or Note'd on a
+// data file. The writer cannot name their files without allocating, so the whole ring is marked: no file is
+// ring-clear (the direct path queues behind the ring) until the checkpoint passes the record.
+TEST_F(WalDirectPathTest, WriterExceptionKeepsEveryFileNotClearUntilCheckpointed) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    ASSERT_TRUE(InsertAt(store, 0));
+    ASSERT_TRUE(Ckpt().RunCycle());
+    const std::string other_file = fmt::format("{}/{}.XSTORE", (scratch->test_root / "DataStore" / db_name).string(),
+                                               TimeStruct(kOtherYearEpoch, XStore_Proto::SECOND).year);
+    ASSERT_TRUE(walring::Dirty().RingClear(YearFile()));
+    ASSERT_TRUE(walring::Dirty().RingClear(other_file));
+
+    walring::ThrowInNextWriterApplyForTests(1);
+    EXPECT_FALSE(InsertAt(store, 1)) << "the caller of the failed sub-batch is told so";
+    EXPECT_FALSE(walring::Dirty().RingClear(YearFile())) << "the unapplied durable record is still in the ring";
+    EXPECT_FALSE(walring::Dirty().RingClear(other_file)) << "the record's file is unknown, so every file waits";
+
+    // A direct-sized batch must queue behind the ring, not overtake the un-applied record.
+    const uint64_t direct0 = DirectRecords(), ring0 = RingRecords();
+    ASSERT_FALSE(Failed(Batch(store, db_name, kEpoch0 + 10, kBatchRows, 5.0)));
+    EXPECT_EQ(DirectRecords(), direct0);
+    EXPECT_EQ(RingRecords(), ring0 + 1);
+
+    ASSERT_TRUE(Ckpt().RunCycle());
+    EXPECT_TRUE(walring::Dirty().RingClear(YearFile()));
+    EXPECT_TRUE(walring::Dirty().RingClear(other_file));
+    ASSERT_FALSE(Failed(Batch(store, db_name, kEpoch0 + 3000, kBatchRows, 7.0)));
+    EXPECT_EQ(DirectRecords(), direct0 + 1) << "once the checkpoint passed the record the file is clear again";
 }
 
 TEST_F(WalDirectPathTest, DirectPathRefusesWhenPoisoned) {
@@ -4233,5 +4365,405 @@ TEST_F(WalRingWriterTest, RingFullFailureIsReportedAsOverloadedToUnaryBatchAndRa
     EXPECT_FALSE(is_error(unary(5000))) << "recovered";
 }
 
+
+// ---- M1: a record's shard comes from (db, year), never from the calling thread ----------------------
+
+TEST(WalShardRoutingTest, ShardIsAPureFunctionOfDbAndYearAndYearsSpread) {
+    const std::vector<std::string> dbs = {"/d/DataStore/A",   "/d/DataStore/BTC",  "/d/DataStore/ETH",      "/d/DataStore/SPX",
+                                          "/d/DataStore/X9",  "/d/DataStore/WALRINGW", "/d/DataStore/TICKS", "/d/DataStore/QUOTES",
+                                          "/d/DataStore/FX",  "/d/DataStore/BOOK"};
+    for (size_t active = 2; active <= 8; ++active) {
+        std::set<size_t> shards_used_by_dbs;
+        for (const std::string &db : dbs) {
+            const size_t shard = XStore::WalShardFor(db, 2023, active);
+            ASSERT_LT(shard, active);
+            for (int repeat = 0; repeat < 100; ++repeat) ASSERT_EQ(XStore::WalShardFor(db, 2023, active), shard);
+            shards_used_by_dbs.insert(shard);
+            for (const unsigned first_year : {1970u, 2023u, 2024u}) {   // any window of `active` consecutive years
+                std::set<size_t> year_shards;
+                for (unsigned year = first_year; year < first_year + active; ++year) year_shards.insert(XStore::WalShardFor(db, year, active));
+                EXPECT_EQ(year_shards.size(), active) << db << " active=" << active << " from " << first_year;
+            }
+        }
+        EXPECT_GT(shards_used_by_dbs.size(), 1u) << "ten different DBs must not all share one shard, active=" << active;
+    }
+}
+
+// Two phases over threads that all stay alive for the whole test: phase 1 every "first" thread acks A for its row, phase 2
+// every "second" thread (a different thread) acks B for the same row. Alive-at-once matters: a joined thread's id can be
+// reused by a later one, which would hide any dependence of the shard on the thread id.
+class TwoPhaseThreads {
+public:
+    TwoPhaseThreads(size_t pairs, std::function<void(size_t pair, bool second)> work) : pairs_(pairs), work_(std::move(work)) {
+        for (size_t t = 0; t < 2 * pairs; ++t) {
+            threads_.emplace_back([this, t] {
+                const bool second = (t % 2) != 0;
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait(lock, [&] { return phase_ > (second ? 1 : 0); });
+                lock.unlock();
+                work_(t / 2, second);
+                lock.lock();
+                ++done_;
+                cv_.notify_all();
+            });
+        }
+    }
+    void RunPhase(int phase) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        done_ = 0;
+        phase_ = phase;
+        cv_.notify_all();
+        cv_.wait(lock, [&] { return done_ == pairs_; });
+    }
+    ~TwoPhaseThreads() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            phase_ = 2;
+        }
+        cv_.notify_all();
+        for (std::thread &thread : threads_) thread.join();
+    }
+
+private:
+    size_t pairs_;
+    std::function<void(size_t pair, bool second)> work_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    int phase_ = 0;
+    size_t done_ = 0;
+    std::vector<std::thread> threads_;
+};
+
+TEST_F(WalRingWriterTest, ConcurrentThreadsWritingOneDbAndYearAllUseOneRing) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    constexpr size_t kThreads = 32;
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool go = false;
+    std::atomic<size_t> acked{0};
+    std::vector<std::thread> threads;   // all created (so all alive) before any of them writes
+    for (size_t t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&, t] {
+            std::unique_lock<std::mutex> lock(mutex);
+            cv.wait(lock, [&] { return go; });
+            lock.unlock();
+            if (InsertSync(store, t)) acked.fetch_add(1);
+        });
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        go = true;
+    }
+    cv.notify_all();
+    for (std::thread &thread : threads) thread.join();
+    ASSERT_EQ(acked.load(), kThreads);
+
+    const std::shared_ptr<walring::Ring> busy = BusyRing();   // fails if records landed on more than one ring
+    ASSERT_NE(busy, nullptr);
+    const RingWalk walk = WalkRing(*busy, 0, busy->HeadLsn());
+    EXPECT_EQ(walk.records, kThreads);
+    EXPECT_EQ(walk.rows, kThreads);
+    EXPECT_EQ(busy->ShardId(), XStore::WalShardFor(std::string(store.data_store_dir) + "/" + db_name,
+                                                   TimeStruct(kBaseEpoch, XStore_Proto::SECOND).year, XStore::active_wal_shard_count.load()));
+}
+
+// Every producer (Unary, Batch, Range) must set WalRecord::year: each consecutive year goes to the ring WalShardFor says,
+// and `active` consecutive years use `active` different rings. (Year 0 for a forgotten field would fail the shard check.)
+TEST_F(WalRingWriterTest, EachInsertApiRoutesItsRecordByDbAndYear) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+    const size_t active = XStore::active_wal_shard_count.load();
+    const std::string db_base_path = std::string(store.data_store_dir) + "/" + db_name;
+
+    // First epoch (+1000, a row near the start of the file) of `active` consecutive years from 1970.
+    std::vector<std::pair<unsigned, uint64_t>> years;   // (year, epoch)
+    for (uint64_t first = 0; years.size() < active; first = TimeStruct(first, XStore_Proto::SECOND).last_epoch + 1) {
+        years.emplace_back(TimeStruct(first, XStore_Proto::SECOND).year, first + 1000);
+    }
+    const auto heads = [&] {
+        std::map<uint32_t, uint64_t> by_shard;
+        for (const auto &ring : MyRings()) by_shard[ring->ShardId()] = ring->HeadLsn();
+        return by_shard;
+    };
+    // Which shard's ring head moved since `before` (exactly one must have).
+    const auto moved_shard = [&](const std::map<uint32_t, uint64_t> &before) {
+        std::vector<uint32_t> moved;
+        for (const auto &[shard, head] : heads()) {
+            const auto prev = before.find(shard);   // a ring may be registered lazily, on its first record
+            if (head != (prev == before.end() ? 0 : prev->second)) moved.push_back(shard);
+        }
+        EXPECT_EQ(moved.size(), 1u);
+        return moved.empty() ? UINT32_MAX : moved.front();
+    };
+    const auto row = [](double v) {
+        XStore_Proto::RowData data;
+        data.add_fielddata()->set_doubledata(v);
+        return data;
+    };
+    for (const char *api : {"unary", "batch", "range"}) {
+        std::set<uint32_t> shards_used;
+        for (const auto &[year, epoch] : years) {
+            const auto before = heads();
+            std::string status;
+            if (std::string(api) == "unary") {
+                XStore_Proto::UnaryInsert_REP rep;
+                store.UnaryInsert(epoch, row(1.0), db_name, &rep, XStore_Proto::SYNC);
+                status = rep.insertstatus();
+            } else if (std::string(api) == "batch") {
+                XStore_Proto::BatchInsert_REQ req;
+                req.set_dbname(db_name);
+                req.set_durabilitymode(XStore_Proto::SYNC);
+                XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
+                entry->set_timestamp(epoch);
+                *entry->mutable_data() = row(2.0);
+                XStore_Proto::BatchInsert_REP rep;
+                store.BatchInsert(&req, &rep);
+                status = rep.insertstatus();
+            } else {
+                XStore_Proto::RangeInsert_REQ req;
+                req.set_dbname(db_name);
+                req.set_durabilitymode(XStore_Proto::SYNC);
+                XStore_Proto::RangeInsert_DATA *entry = req.add_rangeinsert_data();
+                entry->set_timestamp(epoch);
+                *entry->mutable_data() = row(3.0);
+                XStore_Proto::RangeInsert_REP rep;
+                store.RangeInsert(&req, &rep);
+                status = rep.insertstatus();
+            }
+            ASSERT_NE(status.rfind("[ERROR]", 0), 0u) << api << " " << year << ": " << status;
+            const uint32_t shard = moved_shard(before);
+            EXPECT_EQ(shard, XStore::WalShardFor(db_base_path, year, active)) << api << " year " << year;
+            shards_used.insert(shard);
+        }
+        EXPECT_EQ(shards_used.size(), active) << api << ": " << active << " consecutive years must use " << active << " different rings";
+    }
+}
+
+// ---- RangeInsert/BatchInsert across a year boundary: bucketing, sort-on-inversion, routing -----------------------
+
+// B = first instant of 2024 (in the DB's own resolution), so B-1 is the last instant of 2023. Each test inserts rows
+// on both sides of B in a different order and then checks (1) every row reads back with its own value (a row filed
+// under the wrong year lands at a wrong offset of the wrong year file and reads back empty) and (2) the request became
+// exactly one record per year, each on the ring WalShardFor names, holding that year's rows.
+class WalYearBoundaryInsertTest : public WalRingWriterTest {
+protected:
+    static constexpr uint64_t kBoundarySeconds = 1704067200;   // 2024-01-01T00:00:00Z
+
+    uint64_t Boundary(XStore_Proto::TimeUnit unit) const { return kBoundarySeconds * (unit == XStore_Proto::MILLISECOND ? 1000 : 1); }
+    static double ValueOf(uint64_t ts) { return static_cast<double>(ts % 1000003); }
+    static XStore_Proto::RowData RowFor(uint64_t ts) {
+        XStore_Proto::RowData row;
+        row.add_fielddata()->set_doubledata(ValueOf(ts));
+        return row;
+    }
+    std::string RangeInsertRows(XStore &store, const std::vector<uint64_t> &timestamps) {
+        XStore_Proto::RangeInsert_REQ req;
+        req.set_dbname(db_name);
+        req.set_durabilitymode(XStore_Proto::SYNC);
+        for (uint64_t ts : timestamps) {
+            XStore_Proto::RangeInsert_DATA *entry = req.add_rangeinsert_data();
+            entry->set_timestamp(ts);
+            *entry->mutable_data() = RowFor(ts);
+        }
+        XStore_Proto::RangeInsert_REP rep;
+        store.RangeInsert(&req, &rep);
+        return rep.insertstatus();
+    }
+    std::string BatchInsertRows(XStore &store, const std::vector<uint64_t> &timestamps) {
+        XStore_Proto::BatchInsert_REQ req;
+        req.set_dbname(db_name);
+        req.set_durabilitymode(XStore_Proto::SYNC);
+        for (uint64_t ts : timestamps) {
+            XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
+            entry->set_timestamp(ts);
+            *entry->mutable_data() = RowFor(ts);
+        }
+        XStore_Proto::BatchInsert_REP rep;
+        store.BatchInsert(&req, &rep);
+        return rep.insertstatus();
+    }
+    void ExpectEveryRowReadsBackAndRoutesByYear(XStore &store, XStore_Proto::TimeUnit unit, const std::vector<uint64_t> &timestamps) {
+        for (uint64_t ts : timestamps) {
+            XStore_Proto::UnaryQuery_REP rep;
+            store.UnaryQuery(ts, db_name, &rep);
+            ASSERT_TRUE(rep.has_data()) << "row " << ts << " is missing from its year file";
+            ASSERT_EQ(rep.data().fielddata_size(), 1) << ts;
+            EXPECT_EQ(rep.data().fielddata(0).doubledata(), ValueOf(ts)) << ts;
+        }
+        const uint64_t boundary = Boundary(unit);
+        const unsigned year_before = TimeStruct(boundary - 1, unit).year;
+        const unsigned year_after = TimeStruct(boundary, unit).year;
+        ASSERT_EQ(year_after, year_before + 1);
+        size_t rows_before = 0, rows_after = 0;
+        for (uint64_t ts : timestamps) (ts < boundary ? rows_before : rows_after)++;
+
+        const size_t active = XStore::active_wal_shard_count.load();
+        const std::string db_base_path = std::string(store.data_store_dir) + "/" + db_name;
+        size_t rings_with_records = 0;
+        const std::pair<unsigned, size_t> per_year[] = {{year_before, rows_before}, {year_after, rows_after}};
+        for (const auto &[year, expected_rows] : per_year) {
+            const size_t shard = XStore::WalShardFor(db_base_path, year, active);
+            std::shared_ptr<walring::Ring> ring;
+            for (const auto &r : MyRings()) {
+                if (r->ShardId() == shard) ring = r;
+            }
+            ASSERT_NE(ring, nullptr) << "year " << year << ": no ring for shard " << shard;
+            const RingWalk walk = WalkRing(*ring, 0, ring->HeadLsn());
+            EXPECT_EQ(walk.records, 1u) << "year " << year << " must be one record on its own shard";
+            EXPECT_EQ(walk.rows, expected_rows) << "year " << year;
+        }
+        for (const auto &r : MyRings()) rings_with_records += r->HeadLsn() > 0 ? 1 : 0;
+        EXPECT_EQ(rings_with_records, 2u) << "one record per year, on two different rings";
+    }
+    void RunCase(XStore_Proto::TimeUnit unit, bool use_batch, const std::vector<int64_t> &offsets_from_boundary) {
+        XStore store;
+        xstore_test::CreateTestDb(store, db_name, unit, 64);
+        const uint64_t boundary = Boundary(unit);
+        std::vector<uint64_t> timestamps;
+        for (int64_t offset : offsets_from_boundary) timestamps.push_back(static_cast<uint64_t>(static_cast<int64_t>(boundary) + offset));
+        const std::string status = use_batch ? BatchInsertRows(store, timestamps) : RangeInsertRows(store, timestamps);
+        ASSERT_NE(status.rfind("[ERROR]", 0), 0u) << status;
+        ExpectEveryRowReadsBackAndRoutesByYear(store, unit, timestamps);
+    }
+};
+
+TEST_F(WalYearBoundaryInsertTest, RangeInsertAscendingAcrossYearBoundaryFilesEachRowUnderItsYear) {
+    RunCase(XStore_Proto::SECOND, false, {-3, -2, -1, 0, 1, 2});
+}
+
+// The pre-fix window check only moved forward, so a request going BACKWARD across a year boundary filed the earlier
+// year's rows under the later year (and ApplyWalRecord then wrote them at a wrong offset).
+TEST_F(WalYearBoundaryInsertTest, RangeInsertDescendingAcrossYearBoundaryFilesEachRowUnderItsYear) {
+    RunCase(XStore_Proto::SECOND, false, {2, 1, 0, -1, -2, -3});
+}
+
+// Not simply reversed: both years appear before and after the first inversion, with a repeat of the crossing.
+TEST_F(WalYearBoundaryInsertTest, RangeInsertShuffledAcrossYearBoundaryFilesEachRowUnderItsYear) {
+    RunCase(XStore_Proto::SECOND, false, {-5, 3, -4, 1, -1, 0, -3, 2, -2});
+}
+
+TEST_F(WalYearBoundaryInsertTest, RangeInsertDescendingAcrossYearBoundaryInMillisecondResolution) {
+    RunCase(XStore_Proto::MILLISECOND, false, {2, 1, 0, -1, -2, -3});
+}
+
+TEST_F(WalYearBoundaryInsertTest, BatchInsertSpanningTwoYearsFilesEachRowUnderItsYearAndRoutesByYear) {
+    RunCase(XStore_Proto::SECOND, true, {2, -3, 0, -1, 1, -2});
+}
+
+// Duplicate timestamps inside one RangeInsert request: the LAST occurrence in the request must win, for sorted and
+// unsorted input (an unsorted request is sorted STABLY on the cold path; an unstable std::sort would pick a winner at
+// random once there are more than 16 rows). 200 rows over 20 timestamps, every row carrying its own request index as
+// its value, so a duplicate that lost reads back a visibly wrong value.
+class WalRangeInsertDuplicatesTest : public WalYearBoundaryInsertTest {
+protected:
+    void RunDuplicates(bool sorted, bool cross_year, XStore_Proto::WalDurabilityMode mode) {
+        constexpr size_t kRows = 200, kDistinct = 20;
+        XStore store;
+        xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, 64);
+        const uint64_t boundary = Boundary(XStore_Proto::SECOND);
+        std::vector<uint64_t> distinct;   // 10 before + 10 after the year boundary, or 20 inside the later year
+        for (size_t k = 0; k < kDistinct; ++k) {
+            distinct.push_back(cross_year ? boundary - kDistinct / 2 + k : boundary + k);
+        }
+        std::vector<uint64_t> timestamps;
+        for (size_t i = 0; i < kRows; ++i) timestamps.push_back(distinct[i % kDistinct]);
+        std::mt19937 rng(12345);
+        std::shuffle(timestamps.begin(), timestamps.end(), rng);
+        if (sorted) std::stable_sort(timestamps.begin(), timestamps.end());
+        ASSERT_EQ(std::is_sorted(timestamps.begin(), timestamps.end()), sorted);
+
+        XStore_Proto::RangeInsert_REQ req;
+        req.set_dbname(db_name);
+        req.set_durabilitymode(mode);
+        std::map<uint64_t, double> last_value;
+        for (size_t i = 0; i < kRows; ++i) {
+            XStore_Proto::RangeInsert_DATA *entry = req.add_rangeinsert_data();
+            entry->set_timestamp(timestamps[i]);
+            entry->mutable_data()->add_fielddata()->set_doubledata(static_cast<double>(i));
+            last_value[timestamps[i]] = static_cast<double>(i);
+        }
+        XStore_Proto::RangeInsert_REP rep;
+        store.RangeInsert(&req, &rep);
+        ASSERT_NE(rep.insertstatus().rfind("[ERROR]", 0), 0u) << rep.insertstatus();
+        if (mode == XStore_Proto::ASYNC) {
+            // One sentinel per year (each year is its own shard queue); neither collides with a test timestamp.
+            if (cross_year) {
+                xstore_test::WaitForWalDrained(store, db_name, boundary - 1000);
+                ASSERT_FALSE(HasFatalFailure());
+            }
+            xstore_test::WaitForWalDrained(store, db_name, boundary + 1000);
+            ASSERT_FALSE(HasFatalFailure());
+        }
+        ASSERT_EQ(last_value.size(), kDistinct);
+        for (const auto &[ts, expected] : last_value) {
+            XStore_Proto::UnaryQuery_REP query_rep;
+            store.UnaryQuery(ts, db_name, &query_rep);
+            ASSERT_TRUE(query_rep.has_data()) << ts;
+            EXPECT_EQ(query_rep.data().fielddata(0).doubledata(), expected) << "timestamp " << ts << " must hold its last occurrence";
+        }
+    }
+};
+
+TEST_F(WalRangeInsertDuplicatesTest, UnsortedSingleYearLastOccurrenceWins) {
+    RunDuplicates(false, false, XStore_Proto::SYNC);
+}
+
+TEST_F(WalRangeInsertDuplicatesTest, UnsortedAcrossYearBoundaryLastOccurrenceWins) {
+    RunDuplicates(false, true, XStore_Proto::SYNC);
+}
+
+// Sorted input never sorts: the request order itself must reach the data file.
+TEST_F(WalRangeInsertDuplicatesTest, SortedSingleYearLastOccurrenceWins) {
+    RunDuplicates(true, false, XStore_Proto::SYNC);
+}
+
+TEST_F(WalRangeInsertDuplicatesTest, SortedAcrossYearBoundaryLastOccurrenceWins) {
+    RunDuplicates(true, true, XStore_Proto::SYNC);
+}
+
+TEST_F(WalRangeInsertDuplicatesTest, UnsortedSingleYearLastOccurrenceWinsAsync) {
+    RunDuplicates(false, false, XStore_Proto::ASYNC);
+}
+
+TEST_F(WalRangeInsertDuplicatesTest, UnsortedAcrossYearBoundaryLastOccurrenceWinsAsync) {
+    RunDuplicates(false, true, XStore_Proto::ASYNC);
+}
+
+// The M1 bug end to end. With the checkpointer paused, every row X is acked as A by one thread and then acked as B by a
+// DIFFERENT thread (>= 32 such pairs). All un-checkpointed records are replayed after the simulated crash; if the two
+// writes of a row had been on different shard rings, replay (one ring at a time, shard order) could apply A after B.
+TEST_F(WalReplayTest, OverwritesAckedByDifferentThreadsReplayInAckOrder) {
+    constexpr size_t kPairs = 32;
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    const auto put = [&](size_t pair, double v) {
+        XStore_Proto::RowData row;
+        row.add_fielddata()->set_doubledata(v);
+        XStore_Proto::UnaryInsert_REP rep;
+        store.UnaryInsert(kEpoch0 + pair, row, db_name, &rep, XStore_Proto::SYNC);
+        return rep.insertstatus().rfind("[ERROR]", 0) != 0;
+    };
+    std::atomic<size_t> failed{0};
+    {
+        TwoPhaseThreads threads(kPairs, [&](size_t pair, bool second) {
+            if (!put(pair, second ? 2000.0 + static_cast<double>(pair) : 1000.0 + static_cast<double>(pair))) failed.fetch_add(1);
+        });
+        threads.RunPhase(1);   // all A's acked ...
+        threads.RunPhase(2);   // ... then all B's, each by a different thread than its A
+    }
+    ASSERT_EQ(failed.load(), 0u);
+    ShrinkDataFile(kPairs);
+    ZeroRows(0, kPairs);   // lost page cache: a row can only read B again if replay wrote it
+
+    Crash();
+    store.InitDB();   // replays every un-checkpointed record in ring order
+    for (size_t pair = 0; pair < kPairs; ++pair) {
+        XStore_Proto::UnaryQuery_REP rep;
+        store.UnaryQuery(kEpoch0 + pair, db_name, &rep);
+        ASSERT_TRUE(rep.has_data()) << pair;
+        EXPECT_EQ(rep.data().fielddata(0).doubledata(), 2000.0 + static_cast<double>(pair)) << "row " << pair << ": replay must leave the LAST acked value";
+    }
+}
 
 }  // namespace

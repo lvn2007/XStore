@@ -1,4 +1,5 @@
 #include "include/XStore/XStore_Internal.h"
+#include "include/XStore/XStore_DirLock.h"
 #include "include/DataStructs/FileRangeLock.h"
 #include "include/DataStructs/TimeStruct.h"
 #include "include/XStore/XStore_PreadPool.h"
@@ -9,7 +10,10 @@
 #include <spdlog/fmt/fmt.h>
 #include "include/Logger/Logger.h"
 #include <algorithm>
+#include <limits>
 #include <cerrno>
+#include <chrono>
+#include <exception>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -18,19 +22,14 @@
 #include <sys/stat.h>
 #include <set>
 #include <stdexcept>
+#include <thread>
+#include <type_traits>
 #include <unordered_set>
 
 std::array<XStore::CfgShard, XStore::CFG_SHARD_COUNT> XStore::cfg_shards;
 
 // Initialization
 XStore::XStore() {
-    // WAL writer threads are process-wide static state (wal_shards is a
-    // static array, see XStore.h) -- started exactly once per process,
-    // independent of how many distinct data_store_dirs get initialized
-    // below (unlike InitDB, which is per-directory).
-    static std::once_flag wal_writers_once;
-    std::call_once(wal_writers_once, &XStore::StartWalWriters, data_store_dir);
-
     // One XStore instance is constructed per worker thread (see ZMQ_Server),
     // and in production every one of them shares the same data_store_dir for
     // the life of the process -- so creating it and scanning it into the
@@ -46,8 +45,26 @@ XStore::XStore() {
     static std::unordered_set<std::string> &initialized_dirs = *new std::unordered_set<std::string>();
 
     std::lock_guard<std::mutex> lock(init_mutex);
-    if (initialized_dirs.insert(data_store_dir).second) {
+    const bool new_dir = initialized_dirs.count(data_store_dir) == 0;
+    if (new_dir) {
         std::filesystem::create_directories(data_store_dir);
+        // Backstop of main.cpp's own early lock: no other process may use this directory. Taken before
+        // StartWalWriters (opens/zero-fills the WAL rings) and InitDB (replay, index rebuilds). A refusal
+        // leaves the directory out of initialized_dirs, so a retry tries again.
+        const dirlock::Result dir_lock = dirlock::Acquire(data_store_dir);
+        if (!dir_lock.warning.empty()) spdlog::warn("[BOOT] - {}", dir_lock.warning);
+        if (!dir_lock.ok) throw std::runtime_error(dir_lock.error);
+    }
+
+    // WAL writer threads are process-wide static state (wal_shards is a
+    // static array, see XStore.h) -- started exactly once per process,
+    // independent of how many distinct data_store_dirs get initialized
+    // (unlike InitDB, which is per-directory).
+    static std::once_flag wal_writers_once;
+    std::call_once(wal_writers_once, &XStore::StartWalWriters, data_store_dir);
+
+    if (new_dir) {
+        initialized_dirs.insert(data_store_dir);
         InitDB();
     }
 }
@@ -164,11 +181,30 @@ const std::string& XStore::CachedYearFilePath(const std::string &db_base_path, u
 std::mutex XStore::zone_map_registry_mutex_;
 std::unordered_map<std::string, std::unique_ptr<ZoneMapFile>> XStore::zone_map_registry_;
 std::vector<std::string> XStore::zone_map_registry_lru_;
+std::vector<std::unique_ptr<ZoneMapFile>> XStore::zone_map_registry_retired_;
+
+namespace {
+bool zone_map_over_cap_warned = false; // guarded by zone_map_registry_mutex_: one warning per over-cap episode
+} // namespace
 
 ZoneMapFile& XStore::GetOrOpenZoneMap(std::string_view db_base_path, unsigned short year, uint16_t row_length, uint32_t tracked_column_count) {
-    std::string key = fmt::format("{}/{}", db_base_path, year);
     std::lock_guard<std::mutex> lock(zone_map_registry_mutex_);
+    return GetOrOpenZoneMapLocked(db_base_path, year, row_length, tracked_column_count);
+}
 
+ZoneMapFile::Pin XStore::PinZoneMap(std::string_view db_base_path, unsigned short year, uint16_t row_length,
+                                    uint32_t tracked_column_count) {
+    std::lock_guard<std::mutex> lock(zone_map_registry_mutex_);
+    return ZoneMapFile::Pin(&GetOrOpenZoneMapLocked(db_base_path, year, row_length, tracked_column_count));
+}
+
+// Lock order is registry mutex -> file mutex, and nothing that holds a file mutex takes a registry mutex. The lookup/
+// open/evict path below (run per insert) must never take a file mutex: one can be held across fdatasync or fallocate,
+// and every insert would queue behind it. Evictable() is lock-free for that reason. (Only the rare
+// PeekOpenZoneMapWidth and Shutdown take a file mutex under the registry mutex.)
+ZoneMapFile& XStore::GetOrOpenZoneMapLocked(std::string_view db_base_path, unsigned short year, uint16_t row_length,
+                                            uint32_t tracked_column_count) {
+    std::string key = fmt::format("{}/{}", db_base_path, year);
     auto it = zone_map_registry_.find(key);
     if (it != zone_map_registry_.end()) {
         zone_map_registry_lru_.erase(
@@ -178,11 +214,26 @@ ZoneMapFile& XStore::GetOrOpenZoneMap(std::string_view db_base_path, unsigned sh
         return *it->second;
     }
 
-    if (zone_map_registry_.size() >= XStoreTunables::ZONE_MAP_REGISTRY_CAP && !zone_map_registry_lru_.empty()) {
-        std::string victim = zone_map_registry_lru_.front();
-        zone_map_registry_lru_.erase(zone_map_registry_lru_.begin());
-        zone_map_registry_.erase(victim); // ~ZoneMapFile() closes the fd -- no flush needed, already durable
+    if (!zone_map_registry_retired_.empty()) SweepRetired(zone_map_registry_retired_);
+
+    // Pinned and rebuilding entries are never evicted: their holder has a pointer, and a cold reopen of a half-built
+    // file would trust blocks the builder has not reached (the width clamp below would happily serve it). With every
+    // entry held the registry grows past the cap, and shrinks back once they are released.
+    while (zone_map_registry_.size() >= XStoreTunables::ZONE_MAP_REGISTRY_CAP) {
+        auto victim = std::find_if(zone_map_registry_lru_.begin(), zone_map_registry_lru_.end(),
+                                   [](const std::string &k) { return zone_map_registry_.at(k)->Evictable(); });
+        if (victim == zone_map_registry_lru_.end()) {
+            if (!zone_map_over_cap_warned) {
+                spdlog::warn("[ZONEMAP] - Every one of {} open zone maps is pinned or being rebuilt; growing past the cap",
+                             zone_map_registry_.size());
+                zone_map_over_cap_warned = true;
+            }
+            break;
+        }
+        zone_map_registry_.erase(*victim); // ~ZoneMapFile() closes the fd -- no flush needed, already durable
+        zone_map_registry_lru_.erase(victim);
     }
+    if (zone_map_registry_.size() < XStoreTunables::ZONE_MAP_REGISTRY_CAP) zone_map_over_cap_warned = false;
 
     auto zmap = std::make_unique<ZoneMapFile>();
     std::string path = fmt::format("{}/{}.zmap", db_base_path, year);
@@ -237,18 +288,108 @@ ZoneMapFile& XStore::GetOrOpenZoneMap(std::string_view db_base_path, unsigned sh
     return ref;
 }
 
-std::optional<uint32_t> XStore::PeekOpenZoneMapWidth(std::string_view db_base_path, unsigned short year) {
+ZoneMapFile::Pin XStore::OpenZoneMapForDelete(const std::string &db_base_path, unsigned short year,
+                                              const XStore_Proto::ConfigStruct &cfg_struct) {
+    try {
+        return PinZoneMap(db_base_path, year, static_cast<uint16_t>(cfg_struct.rowlength()),
+                          EffectiveTrackedColumnCount(cfg_struct));
+    } catch (const std::exception &e) {
+        spdlog::error("[ZONE MAP] [{}/{}] - Cannot open the zone map for a delete: {}", db_base_path, year, e.what());
+        return ZoneMapFile::Pin();
+    }
+}
+
+std::optional<uint32_t> XStore::PeekOpenZoneMapWidth(std::string_view db_base_path, unsigned short year, bool *rebuilding) {
     std::string key = fmt::format("{}/{}", db_base_path, year);
     std::lock_guard<std::mutex> lock(zone_map_registry_mutex_);
     auto it = zone_map_registry_.find(key);
+    if (rebuilding != nullptr) *rebuilding = it != zone_map_registry_.end() && it->second->Rebuilding();
     if (it == zone_map_registry_.end()) return std::nullopt;
     return it->second->TrackedColumnCount();
 }
 
+XStore::YearIndexWidths XStore::PeekYearIndexWidths(const std::string &db_base_path, unsigned short year) {
+    YearIndexWidths w;
+    const std::string key = fmt::format("{}/{}", db_base_path, year);
+    {
+        std::lock_guard<std::mutex> lock(zone_map_registry_mutex_);
+        auto it = zone_map_registry_.find(key);
+        if (it != zone_map_registry_.end()) {
+            w.zmap = it->second->TrackedColumnCount();
+            w.rebuilding = it->second->Rebuilding();
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(catidx_registry_mutex_);
+        auto it = catidx_registry_.find(key);
+        if (it != catidx_registry_.end()) {
+            w.catidx = it->second->TrackedColumnCount();
+            w.rebuilding = w.rebuilding || it->second->Rebuilding();
+        }
+    }
+    // Cold: the header. A rebuilding object is never evicted, so a cold file is not in rebuild in this process.
+    const auto read_header = [](const std::string &path, auto &header) {
+        const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd < 0) return false;
+        const bool ok = pread(fd, &header, sizeof(header), 0) == static_cast<ssize_t>(sizeof(header));
+        close(fd);
+        return ok;
+    };
+    if (!w.zmap.has_value()) {
+        ZoneMapFileHeader h{};
+        if (read_header(fmt::format("{}/{}.zmap", db_base_path, year), h) && h.magic == ZoneMapFileHeader{}.magic &&
+            h.version == ZONE_MAP_VERSION && h.tracked_column_count > 0) {
+            w.zmap = h.tracked_column_count;
+        }
+    }
+    if (!w.catidx.has_value()) {
+        CatIdxFileHeader h{};
+        if (read_header(fmt::format("{}/{}.catidx", db_base_path, year), h) && h.magic == CatIdxFileHeader{}.magic &&
+            h.version == XStoreTunables::CATIDX_VERSION) {
+            w.catidx = h.tracked_column_count;
+        }
+    }
+    return w;
+}
+
+// Ignores pins, like the explicit erase in RebuildYearIndexes: neither may run while a builder or another pin
+// holder is alive (today they run only in InitDB and in tests).
 void XStore::ClearZoneMapRegistryForTests() {
     std::lock_guard<std::mutex> lock(zone_map_registry_mutex_);
     zone_map_registry_.clear();
     zone_map_registry_lru_.clear();
+    zone_map_registry_retired_.clear();
+}
+
+template <typename Match>
+void XStore::RetireIndexesMatching(const Match &match) {
+    {
+        std::lock_guard<std::mutex> lock(zone_map_registry_mutex_);
+        RetireMatching(zone_map_registry_, zone_map_registry_lru_, zone_map_registry_retired_, match);
+    }
+    std::lock_guard<std::mutex> lock(catidx_registry_mutex_);
+    RetireMatching(catidx_registry_, catidx_registry_lru_, catidx_registry_retired_, match);
+}
+
+void XStore::RetireIndexesUnderPrefix(const std::string &db_dir_prefix) {
+    RetireIndexesMatching([&db_dir_prefix](const std::string &key) {
+        return key.compare(0, db_dir_prefix.size(), db_dir_prefix) == 0;
+    });
+}
+
+void XStore::RetireYearIndexes(std::string_view db_base_path, unsigned short year) {
+    const std::string year_key = fmt::format("{}/{}", db_base_path, year); // same format as GetOrOpen*Locked
+    RetireIndexesMatching([&year_key](const std::string &key) { return key == year_key; });
+}
+
+size_t XStore::RetiredIndexCountForTests() {
+    size_t count = 0;
+    {
+        std::lock_guard<std::mutex> lock(zone_map_registry_mutex_);
+        count += zone_map_registry_retired_.size();
+    }
+    std::lock_guard<std::mutex> lock(catidx_registry_mutex_);
+    return count + catidx_registry_retired_.size();
 }
 
 XStore_Proto::SysInfo_REP XStore::InfoQuery(std::string_view server_addr, int thread_count) {
@@ -382,6 +523,11 @@ void XStore::MaybeGrowColumnCount(const std::string &db_name, const std::string 
     uint32_t old_effective_tracked = EffectiveTrackedColumnCount(it->second);
     it->second.set_columncount(static_cast<uint32_t>(observed_column_count));
     XStore_Proto::ConfigStruct cfg_copy = it->second;
+    // Only worth anything when this growth actually raised the effective width (observed_column_count clamped to a
+    // value <= the global floor changes nothing and leaves no narrower index file behind). Recorded before the .CFG
+    // rewrite: the cached width already grew, and it is what the background widen reads. Leaf lock, nothing else.
+    const uint32_t new_effective_tracked = EffectiveTrackedColumnCount(cfg_copy);
+    if (new_effective_tracked > old_effective_tracked) RecordLiveWidenRequest(db_name, db_base_path);
 
     std::string cfg_path = JoinPath(db_base_path, db_name + ".CFG");
     FILE *b_file = std::fopen(cfg_path.c_str(), "wb+");
@@ -397,17 +543,115 @@ void XStore::MaybeGrowColumnCount(const std::string &db_name, const std::string 
 
     spdlog::info("[COLUMN COUNT GROWTH] [DB: {}] - columnCount grew to {}", db_name, observed_column_count);
 
-    // Task 4: only worth a notice when this growth actually raised the
-    // effective width past what it was before -- e.g. observed_column_count
-    // clamped to a value <= the global floor never changes
-    // EffectiveTrackedColumnCount and doesn't leave any existing .zmap file
-    // behind.
-    uint32_t new_effective_tracked = EffectiveTrackedColumnCount(cfg_copy);
+    // Task 4 / M4 stage 3: the "growth recorded" line.
     if (new_effective_tracked > old_effective_tracked) {
-        spdlog::warn("[ZONEMAP] [DB: {}] - tracked column width grows {} -> {}; existing year index files (if any) keep their width until restart "
-                     "(queries on the new columns full-scan meanwhile -- restart XStore to rebuild)",
-                     db_name, old_effective_tracked, new_effective_tracked);
+        spdlog::warn("[ZONEMAP] [DB: {}] - tracked column width grows {} -> {}; existing year index files (if any) are widened in "
+                     "the background once the width has not grown for {} s (queries on the new columns full-scan meanwhile)",
+                     db_name, old_effective_tracked, new_effective_tracked, XStoreTunables::LIVE_WIDEN_QUIET_PERIOD_SEC);
     }
+}
+
+std::mutex XStore::live_widen_mutex_;
+std::map<std::string, XStore::LiveWidenRequest> XStore::live_widen_requests_;
+std::set<std::string> XStore::live_widen_skip_logged_;
+std::atomic<bool> XStore::live_widen_pending_{false};
+std::atomic<bool> XStore::bg_cancel_{false};
+std::mutex XStore::bg_mutex_;
+std::condition_variable XStore::bg_cv_;
+std::string XStore::bg_active_key_;
+std::multiset<std::string> XStore::bg_removing_scopes_;
+
+void XStore::RecordLiveWidenRequest(const std::string &db_name, const std::string &db_base_path) {
+    std::lock_guard<std::mutex> lock(live_widen_mutex_);
+    LiveWidenRequest &request = live_widen_requests_[db_base_path];
+    request.db_name = db_name;
+    request.last_growth = std::chrono::steady_clock::now(); // every growth restarts the quiet period
+    ++request.growth_seq;
+    request.failed_attempts = 0; // a new growth also ends a give-up / retry wait
+    request.retry_after = {};
+    live_widen_pending_.store(true, std::memory_order_relaxed);
+}
+
+void XStore::DropLiveWidenRequest(const std::string &db_base_path) {
+    std::lock_guard<std::mutex> lock(live_widen_mutex_);
+    live_widen_requests_.erase(db_base_path);
+    if (live_widen_requests_.empty()) live_widen_pending_.store(false, std::memory_order_relaxed);
+}
+
+size_t XStore::LiveWidenRequestCountForTests() {
+    std::lock_guard<std::mutex> lock(live_widen_mutex_);
+    return live_widen_requests_.size();
+}
+
+std::optional<std::chrono::steady_clock::time_point> XStore::LiveWidenLastGrowthForTests(const std::string &db_base_path) {
+    std::lock_guard<std::mutex> lock(live_widen_mutex_);
+    auto it = live_widen_requests_.find(db_base_path);
+    if (it == live_widen_requests_.end()) return std::nullopt;
+    return it->second.last_growth;
+}
+
+void XStore::ClearLiveWidenRequestsForTests() {
+    std::lock_guard<std::mutex> lock(live_widen_mutex_);
+    live_widen_requests_.clear();
+    live_widen_skip_logged_.clear();
+    live_widen_pending_.store(false, std::memory_order_relaxed);
+}
+
+std::string XStore::BackgroundActiveKeyForTests() {
+    std::lock_guard<std::mutex> lock(bg_mutex_);
+    return bg_active_key_;
+}
+
+namespace {
+// A removal scope covers a year key "<db dir>/<year>": RemoveDB's scope is the DB directory with its trailing '/',
+// RemoveDBFiles' scope is the exact year key.
+bool ScopeCovers(const std::string &scope, const std::string &year_key) {
+    if (!scope.empty() && scope.back() == '/') return year_key.compare(0, scope.size(), scope) == 0;
+    return scope == year_key;
+}
+} // namespace
+
+XStore::BgEnter XStore::EnterBackgroundYear(const std::string &year_key) {
+    std::lock_guard<std::mutex> lock(bg_mutex_);
+    if (bg_cancel_.load(std::memory_order_relaxed)) return BgEnter::kCancelled;
+    for (const std::string &scope : bg_removing_scopes_) {
+        if (ScopeCovers(scope, year_key)) return BgEnter::kRemoving;
+    }
+    bg_active_key_ = year_key;
+    return BgEnter::kGo;
+}
+
+void XStore::LeaveBackgroundYear() {
+    {
+        std::lock_guard<std::mutex> lock(bg_mutex_);
+        bg_active_key_.clear();
+    }
+    bg_cv_.notify_all();
+}
+
+bool XStore::StopBackgroundWork(const std::string &scope) {
+    std::unique_lock<std::mutex> lock(bg_mutex_);
+    bg_removing_scopes_.insert(scope);
+    bool cancelled = false;
+    if (!bg_active_key_.empty() && ScopeCovers(scope, bg_active_key_)) {
+        bg_cancel_.store(true, std::memory_order_relaxed);
+        cancelled = true;
+    }
+    const auto released = [&] { return bg_active_key_.empty() || !ScopeCovers(scope, bg_active_key_); };
+    if (!bg_cv_.wait_for(lock, std::chrono::milliseconds(XStoreTunables::BACKGROUND_REMOVE_WAIT_MS), released)) {
+        spdlog::error("[REMOVE] [{}] - The background index thread did not let go of {} within {} ms; removing anyway",
+                      scope, bg_active_key_, XStoreTunables::BACKGROUND_REMOVE_WAIT_MS);
+    }
+    return cancelled;
+}
+
+void XStore::ResumeBackgroundWork(const std::string &scope, bool cancelled) {
+    std::lock_guard<std::mutex> lock(bg_mutex_);
+    auto it = bg_removing_scopes_.find(scope);
+    if (it != bg_removing_scopes_.end()) bg_removing_scopes_.erase(it);
+    // Back to "only a shutdown cancels": the thread never starts a year while bg_cancel_ is set, so nothing else of
+    // its work was begun under this cancel.
+    if (cancelled) bg_cancel_.store(catidx_compaction_stop_flag_.load(std::memory_order_relaxed), std::memory_order_relaxed);
 }
 
 XStore_Proto::CreateDB_REP XStore::CreateDB(std::string_view db_name_view, XStore_Proto::TimeUnit time_resolution, short int row_length, uint32_t column_count_seed,
@@ -543,6 +787,16 @@ XStore_Proto::RemoveDB_REP XStore::RemoveDB(std::string_view db_name_view) {
     // safe against the background checkpointer.
     CheckpointBeforeRemoval(db_name);
 
+    // The background index thread (live widen, compaction) must let go of this DB first: it is cancelled if it works
+    // on one of its years, and waited for (bounded). Until ResumeBackgroundWork it starts no year of this DB. A
+    // cancelled widen leaves its files in rebuild state (dirty, untrusted); they are deleted and retired below.
+    const std::string bg_scope = db_loc + "/";
+    struct ResumeOnExit {
+        const std::string &scope;
+        bool cancelled;
+        ~ResumeOnExit() { XStore::ResumeBackgroundWork(scope, cancelled); }
+    } resume{bg_scope, StopBackgroundWork(bg_scope)};
+
     // Recursively remove entire DB with given DB Name
     std::filesystem::remove_all(db_loc);
 
@@ -555,6 +809,10 @@ XStore_Proto::RemoveDB_REP XStore::RemoveDB(std::string_view db_name_view) {
     EraseMappedFilesUnderPrefix(db_loc + "/");
     // Same reasoning for UnaryInsert's cached fds (see GetOrOpenFile).
     EraseOpenFilesUnderPrefix(db_loc + "/");
+    // And for the warm index objects: a DB re-created under this name must not get the old stats and blooms back.
+    RetireIndexesUnderPrefix(db_loc + "/");
+    // A pending widen of the removed DB is dropped (a DB re-created under the name records its own growth).
+    DropLiveWidenRequest(db_loc);
 
     remove_status = fmt::format("[REMOVE DB] [DB: {}] - Removed DB with name: {}", db_name, db_name);
     SetTaggedStatus(to_return.mutable_removestatus(), "[INFO] ", remove_status);
@@ -585,41 +843,104 @@ XStore_Proto::RemoveDBFiles_REP XStore::RemoveDBFiles(XStore_Proto::RemoveDBFile
     // Same reason as RemoveDB: records for the files about to be unlinked must be checkpointed first.
     CheckpointBeforeRemoval(db_name);
 
+    // Removes one file directly inside the DB directory and drops its cached mapping/fd. Never throws. Reports the
+    // outcome when the file existed, when its removal failed, or (absent) when `report_missing` (a requested name is
+    // always reported; a year's index files only if present or not removable). Returns false only when the file
+    // exists and could not be removed.
+    auto remove_one = [&](const std::string &file_name, bool report_missing) {
+        const std::filesystem::path target_path = JoinPath(db_loc, file_name);
+        std::error_code ec;
+        if (std::filesystem::remove(target_path, ec)) {
+            // Drop this file's cached read mapping, if any -- same
+            // reasoning as RemoveDB, scoped to a single file.
+            EraseMappedFile(target_path.string());
+            EraseOpenFile(target_path.string());
+            std::string info_msg = fmt::format("[REMOVE DB FILES] [DB: {}] - Removed {}", db_name, file_name);
+            SetTaggedStatus(to_return.add_removestatus(), "[INFO] ", info_msg);
+            spdlog::info(info_msg);
+            return true;
+        }
+        if (ec) { // it is there (or cannot be checked) and the removal failed: EIO, EBUSY, a non-empty directory...
+            std::string err_msg = fmt::format("[REMOVE DB FILES] [DB: {}] - Unable to remove {} ({})", db_name, file_name, ec.message());
+            SetTaggedStatus(to_return.add_removestatus(), "[ERROR] ", err_msg);
+            spdlog::error(err_msg);
+            return false;
+        }
+        if (report_missing) {
+            std::string err_msg = fmt::format("[REMOVE DB FILES] [DB: {}] - Unable to remove {}", db_name, file_name);
+            SetTaggedStatus(to_return.add_removestatus(), "[ERROR] ", err_msg);
+            spdlog::error(err_msg);
+        }
+        return true;
+    };
+
     // Loop through each requested file name
     for (int i = 0; i < proto_from_client->filename_size(); i++) {
+        const std::string &file_name = proto_from_client->filename(i);
         // filename is client-controlled and must name a single entry directly
         // inside this DB's directory -- reject anything with a path separator
         // (e.g. "../other.CFG") so a crafted request can't escape DbLoc and
         // delete arbitrary files elsewhere on disk.
-        if (proto_from_client->filename(i).find('/') != std::string::npos) {
-            std::string err_msg = fmt::format("[REMOVE DB FILES] [DB: {}] - Invalid file name {}", db_name, proto_from_client->filename(i));
+        if (file_name.find('/') != std::string::npos) {
+            std::string err_msg = fmt::format("[REMOVE DB FILES] [DB: {}] - Invalid file name {}", db_name, file_name);
             SetTaggedStatus(to_return.add_removestatus(), "[WARNING] ", err_msg);
             spdlog::warn(err_msg);
             continue;
         }
 
-        std::filesystem::path target_path = JoinPath(db_loc, proto_from_client->filename(i));
-        if (proto_from_client->filename(i) == fmt::format("{}.CFG", db_name)) {
-            std::string warn_msg = fmt::format("[REMOVE DB FILES] [DB: {}] - {} is prohibited from remove", db_name, proto_from_client->filename(i));
+        if (file_name == fmt::format("{}.CFG", db_name)) {
+            std::string warn_msg = fmt::format("[REMOVE DB FILES] [DB: {}] - {} is prohibited from remove", db_name, file_name);
             SetTaggedStatus(to_return.add_removestatus(), "[WARNING] ", warn_msg);
             spdlog::warn(warn_msg);
             continue;
         }
-        bool curr_remove = std::filesystem::remove(target_path);
-        if (curr_remove) {
-            // Drop this file's cached read mapping, if any -- same
-            // reasoning as RemoveDB, scoped to a single file.
-            EraseMappedFile(target_path.string());
-            EraseOpenFile(target_path.string());
-
-            std::string info_msg = fmt::format("[REMOVE DB FILES] [DB: {}] - Removed {}", db_name, proto_from_client->filename(i));
-            SetTaggedStatus(to_return.add_removestatus(), "[INFO] ", info_msg);
-            spdlog::info(info_msg);
+        // An index file alone is refused: the next touch would create a fresh, empty index for a year whose data still
+        // exists, and every "no rows here" answer from it would be wrong. Removing the year's data file removes it.
+        const auto ends_with = [&file_name](std::string_view suffix) {
+            return file_name.size() >= suffix.size() &&
+                   file_name.compare(file_name.size() - suffix.size(), suffix.size(), suffix) == 0;
+        };
+        if (ends_with(".zmap") || ends_with(".catidx")) {
+            std::string warn_msg = fmt::format("[REMOVE DB FILES] [DB: {}] - {} is an index file and cannot be removed on "
+                                               "its own; remove the year's .XSTORE file instead", db_name, file_name);
+            SetTaggedStatus(to_return.add_removestatus(), "[WARNING] ", warn_msg);
+            spdlog::warn(warn_msg);
+            continue;
         }
-        else {
-            std::string err_msg = fmt::format("[REMOVE DB FILES] [DB: {}] - Unable to remove {}", db_name, proto_from_client->filename(i));
-            SetTaggedStatus(to_return.add_removestatus(), "[ERROR] ", err_msg);
-            spdlog::error(err_msg);
+
+        // "<year>.XSTORE" (canonical decimal year): its index files go too, then that one (db, year) registry key is
+        // retired. The other years' files stay on disk, so their entries must stay the live ones (a retired entry
+        // plus a cold-opened one on the same file would overwrite each other's blocks). Other names retire nothing.
+        std::optional<unsigned short> year;
+        if (ends_with(".XSTORE")) {
+            const std::string stem = file_name.substr(0, file_name.size() - std::string_view(".XSTORE").size());
+            if (!stem.empty() && stem.size() <= 5 && !(stem.size() > 1 && stem.front() == '0') &&
+                std::all_of(stem.begin(), stem.end(), [](char c) { return c >= '0' && c <= '9'; }) &&
+                std::stoul(stem) <= std::numeric_limits<unsigned short>::max()) {
+                year = static_cast<unsigned short>(std::stoul(stem));
+            }
+        }
+        if (!year.has_value()) {
+            remove_one(file_name, /*report_missing=*/true);
+            continue;
+        }
+
+        // The background index thread must let go of this year first (cancel + bounded wait, as in RemoveDB); a
+        // cancelled widen's half-built files are deleted and its entries retired below.
+        const std::string bg_scope = fmt::format("{}/{}", db_loc, *year); // the registry / thread key format
+        struct ResumeOnExit {
+            const std::string &scope;
+            bool cancelled;
+            ~ResumeOnExit() { XStore::ResumeBackgroundWork(scope, cancelled); }
+        } resume{bg_scope, StopBackgroundWork(bg_scope)};
+        // The data file still exists when its removal failed: then its index files and entries stay as they are (a
+        // fresh, empty index next to rows that are still there would answer "no rows here" wrongly).
+        if (remove_one(file_name, /*report_missing=*/true)) {
+            // A sidecar that cannot be removed is reported, and the entries are retired anyway: a live entry would
+            // let a later insert re-create the year through it with the deleted rows' stats.
+            remove_one(std::to_string(*year) + ".zmap", /*report_missing=*/false);
+            remove_one(std::to_string(*year) + ".catidx", /*report_missing=*/false);
+            RetireYearIndexes(db_loc, *year);
         }
     }
     return to_return;
@@ -678,32 +999,21 @@ void XStore::InitDB() {
         ClampPersistedColumnCount(curr_db_name, cfg_struct);
         PutCfg(curr_db_name, cfg_struct);
 
-        // Task 5: rebuild any stale/missing zone map for this DB before
-        // InitDB() returns -- i.e. before any worker thread sharing this
-        // data_store_dir can serve a request against it. Deliberately
-        // inside this loop (not deferred/backgrounded past InitDB()'s
-        // return) -- see RebuildStaleZoneMapsForDb's declaration comment
-        // in XStore.h for why this must never run on the request path
-        // instead.
+        // Task 5 / Task 11: rebuild every stale/missing zone map and catidx of
+        // this DB before InitDB() returns -- i.e. before any worker thread
+        // sharing this data_store_dir can serve a request against it (see
+        // RebuildStaleIndexesForDb's declaration comment in XStore.h for why
+        // this must never run on the request path). The WAL-replayed years of
+        // this DB are force-rebuilt (both indexes): a replayed row carries no
+        // observations, and the headers alone cannot show it.
         auto replayed_it = replayed_years.find(curr_db_name);
         const std::set<unsigned short> &force_rebuild_years_for_db =
             replayed_it == replayed_years.end() ? kNoForcedYears : replayed_it->second;
-        RebuildStaleZoneMapsForDb(curr_db_name, p.path().string(), cfg_struct, force_rebuild_years_for_db);
-
-        // Task 11 (+ review fix round): mirrors the zone-map rebuild above,
-        // but for .catidx -- same synchronous-during-InitDB() timing, so no
-        // worker thread can ever see a schema-grown/WAL-replayed/missing
-        // .catidx left able to silently under-return via FindByValue. Same
-        // force_rebuild_years_for_db as the zone-map call above -- a
-        // WAL-replayed year needs the identical unconditional-rebuild
-        // treatment here (see RebuildStaleCatIdxForDb's declaration comment
-        // in XStore.h for why the header-only staleness checks alone can't
-        // catch that case).
-        RebuildStaleCatIdxForDb(curr_db_name, p.path().string(), cfg_struct, force_rebuild_years_for_db);
+        RebuildStaleIndexesForDb(curr_db_name, p.path().string(), cfg_struct, force_rebuild_years_for_db);
     }
 }
 
-bool XStore::ZoneMapNeedsRebuild(const std::string &zmap_path, uint32_t desired_tracked_columns) {
+bool XStore::ZoneMapNeedsRebuild(const std::string &zmap_path, uint32_t desired_tracked_columns, uint16_t row_length) {
     if (!std::filesystem::exists(zmap_path)) return true;
 
     int fd = open(zmap_path.c_str(), O_RDONLY);
@@ -717,6 +1027,8 @@ bool XStore::ZoneMapNeedsRebuild(const std::string &zmap_path, uint32_t desired_
     if (header.magic != ZoneMapFileHeader{}.magic) return true;
     if (header.version != ZONE_MAP_VERSION) return true;
     if (header.tracked_column_count != desired_tracked_columns) return true;
+    // A corrupt block size (e.g. 0: the first aggregate would divide by it) or one this row length no longer gives.
+    if (header.rows_per_block != RowsPerBlock(row_length)) return true;
     if (header.dirty != 0) {
         // Durability A: the previous session never reached MarkClean (crash /
         // kill -9), so index writes may be lost or torn. The index is derived
@@ -730,8 +1042,16 @@ bool XStore::ZoneMapNeedsRebuild(const std::string &zmap_path, uint32_t desired_
 std::string XStore::UnindexedColumnNoticeText(std::string_view op, const std::string &db_name, int32_t column_idx,
                                                unsigned short year, uint32_t index_width) {
     return fmt::format("[WARNING] [{}] [DB: {}] - column {} is not yet indexed in {} (index width {}); "
-                        "answered by full scan -- restart XStore to rebuild the index",
-                        op, db_name, column_idx, year, index_width);
+                        "answered by full scan -- the index is widened in the background once the column count has "
+                        "not grown for {} s (or at the next start)",
+                        op, db_name, column_idx, year, index_width, XStoreTunables::LIVE_WIDEN_QUIET_PERIOD_SEC);
+}
+
+std::string XStore::RebuildingColumnNoticeText(std::string_view op, const std::string &db_name, int32_t column_idx,
+                                               unsigned short year) {
+    return fmt::format("[WARNING] [{}] [DB: {}] - column {} is being indexed in the background in {}; answered by full "
+                        "scan until it finishes (a rebuild that was interrupted finishes at the next start)",
+                        op, db_name, column_idx, year);
 }
 
 std::string XStore::UnindexedColumnNotice(std::string_view op, const std::string &db_name, const std::string &db_base_path,
@@ -758,8 +1078,11 @@ std::string XStore::UnindexedColumnNotice(std::string_view op, const std::string
         // answers from that live instance with one mutex + one map lookup,
         // no open()/pread() at all. Only a genuinely cold (db, year) falls
         // through to the header pread below.
-        std::optional<uint32_t> warm_width = PeekOpenZoneMapWidth(db_base_path, curr_ts.year);
+        bool rebuilding = false;
+        std::optional<uint32_t> warm_width = PeekOpenZoneMapWidth(db_base_path, curr_ts.year, &rebuilding);
         if (warm_width.has_value()) {
+            // During a rebuild the object already reports the new width, but blocks past the frontier are scanned.
+            if (rebuilding) return RebuildingColumnNoticeText(op, db_name, column_idx, curr_ts.year);
             if (static_cast<uint32_t>(column_idx) >= *warm_width) {
                 return UnindexedColumnNoticeText(op, db_name, column_idx, curr_ts.year, *warm_width);
             }
@@ -791,171 +1114,713 @@ std::string XStore::UnindexedColumnNotice(std::string_view op, const std::string
 }
 
 void XStore::RebuildOneYearZoneMap(const std::string &db_base_path, unsigned short year, uint16_t row_length, uint32_t tracked_column_count) {
-    std::string data_path = fmt::format("{}/{}.XSTORE", db_base_path, year);
-    if (!std::filesystem::exists(data_path)) return;
-
-    // Force a genuine cache miss for this (db_base_path, year) key before
-    // reopening -- Task 6 fix. GetOrOpenZoneMap's registry never re-Opens()
-    // an already-warm entry no matter what tracked_column_count is passed
-    // (see its comment in XStore.h), and this key is NOT guaranteed cold
-    // here even on a genuine server restart: InitDB()'s WAL replay (which
-    // runs before RebuildStaleZoneMapsForDb, per the loop above) applies
-    // any un-checkpointed record for this exact (db, year) first, via
-    // ApplyWalRecord's own GetOrOpenZoneMap call -- and that call always
-    // requests the global default, never this DB's real
-    // EffectiveTrackedColumnCount. Left alone, that first touch would warm
-    // the registry at the stale width, and this function's own (correctly
-    // wide) GetOrOpenZoneMap call below would then just hand back that
-    // stale cached instance without ever reaching ZoneMapFile::Open() --
-    // silently defeating Task 6's whole fix to Open() (widening only
-    // happens there) and leaving ZoneMapNeedsRebuild re-flagging this file
-    // as stale on every subsequent InitDB() run, forever. Erasing here
-    // guarantees GetOrOpenZoneMap below always does a real disk-backed
-    // Open() with the authoritative tracked_column_count, regardless of
-    // what touched this key first. Only closes an fd (write-through,
-    // Task 2) -- never loses durable data.
-    {
-        std::string registry_key = fmt::format("{}/{}", db_base_path, year);
-        std::lock_guard<std::mutex> registry_lock(zone_map_registry_mutex_);
-        zone_map_registry_.erase(registry_key);
-        zone_map_registry_lru_.erase(
-            std::remove(zone_map_registry_lru_.begin(), zone_map_registry_lru_.end(), registry_key),
-            zone_map_registry_lru_.end());
-    }
-
-    // Force a genuine cold start on disk too, regardless of which direction
-    // any existing header's tracked_column_count mismatches
-    // tracked_column_count (the caller here always passes the current,
-    // authoritative desired_tracked_columns -- freshly read from the .CFG
-    // this same InitDB() pass just loaded). ZoneMapFile::Open()'s own
-    // width-mismatch guard (`tracked_column_count > header_.
-    // tracked_column_count`) is deliberately asymmetric FOR THE ORDINARY
-    // INSERT PATH (XStore_UnaryOps.cpp et al.), which always opens with the
-    // global default width and must never truncate a file some earlier
-    // rebuild already widened past that default (Task 6) -- but that
-    // asymmetry is wrong for THIS caller. A too-WIDE existing file here is
-    // reachable with zero concurrency at all, not just under a racing
-    // insert: every insert path builds this row's ZoneMapObservations and
-    // calls GetOrOpenZoneMap/UpdateRow BEFORE calling MaybeGrowColumnCount
-    // (see the call order in XStore_UnaryOps.cpp/XStore_BatchOps.cpp/
-    // XStore_RangeOps.cpp) -- so a DB created without a column_count_seed
-    // has its very first insert's zone map created at the (wide) global
-    // default, and only AFTER that same insert does MaybeGrowColumnCount
-    // persist the DB's real, narrower columnCount. A plain restart right
-    // after that single insert then reaches this function with
-    // header.tracked_column_count > desired tracked_column_count, which
-    // Open()'s `>` check alone reads as "wide enough, keep it" and leaves
-    // the existing (already-correct) stats in place -- so the raw scan
-    // below would silently DOUBLE every row's stats by folding them again
-    // on top of what's already durably there, corrupting future pushdown-
-    // eligible queries against this exact block (a real-scan-fallback query
-    // would still read correct raw bytes and mask this, which is how this
-    // was found: via a zone-map-stats check, not an aggregate-result one).
-    // Truncating unconditionally here is always safe for this caller
-    // specifically -- RebuildOneYearZoneMap is already committed to a full
-    // raw-data rescan below regardless of what Open() would have done, so
-    // it never needs to preserve whatever was on disk before it runs.
-    {
-        std::string zmap_path_to_reset = fmt::format("{}/{}.zmap", db_base_path, year);
-        int reset_fd = open(zmap_path_to_reset.c_str(), O_WRONLY);
-        if (reset_fd >= 0) {
-            if (ftruncate(reset_fd, 0) != 0) {
-                spdlog::error("[ZONE MAP REBUILD] [{}] - Failed to truncate before rebuild", zmap_path_to_reset);
-            }
-            close(reset_fd);
-        }
-        // else: no pre-existing file to reset -- GetOrOpenZoneMap below
-        // creates it fresh, same as ever.
-    }
-
-    // GetOrOpenZoneMap -> ZoneMapFile::Open() -- guaranteed both a genuine
-    // cache miss (eviction above) AND a genuine empty-file cold start
-    // (truncate above), so every row folded below starts from a genuinely
-    // clean, correctly-sized baseline no matter which direction the old
-    // header's width was wrong in.
-    ZoneMapFile &zmap = GetOrOpenZoneMap(db_base_path, year, row_length, tracked_column_count);
-    // The truncate above wiped the old dirty flag. Mark the fresh (empty) index dirty before anything can fail, so
-    // every early exit below (data open, first read) leaves it dirty; only MarkClean at the end clears it.
-    zmap.MarkDirty();
-
-    uintmax_t file_size = std::filesystem::file_size(data_path);
-    uint64_t total_rows = file_size / row_length; // exact by construction -- data files are preallocated to whole-row multiples
-
-    int fd = open(data_path.c_str(), O_RDONLY);
-    if (fd < 0) {
-        spdlog::error("[ZONE MAP REBUILD] [{}/{}.XSTORE] - Unable to open for rebuild scan", db_base_path, year);
-        return;
-    }
-
-    // Hole-skipping chunked scan: a year file is mostly sparse holes, and a
-    // pread per row made this rebuild syscall-bound (see XStore_RowScan.h).
-    bool scan_complete = ForEachDataRow(fd, total_rows, row_length, [&](uint64_t row_index, const char *row_buf) {
-        if (row_buf[0] == 0) return; // never-written sparse hole -- same fast skip ProcessFileRangeAccumulate uses
-
-        size_t real_len = XStoreWireEncode::RealRowDataLength(row_buf, row_length);
-        XStore_Proto::RowData row;
-        if (real_len > 0) {
-            row.ParseFromArray(row_buf, static_cast<int>(real_len));
-        }
-        std::vector<ZoneMapObservation> observations = BuildZoneMapObservations(*this, row, tracked_column_count);
-        zmap.UpdateRow(row_index, observations, tracked_column_count);
-    });
-    // Durability A (DD4): data file first, then clear the index's dirty flag --
-    // the index must never claim "clean" while the rows it summarizes could
-    // still be lost. Any failure leaves it dirty, so the next start rebuilds.
-    // `zmap` is the registry-open instance, so its dirty_on_disk_ stays in
-    // step with the header it just cleared.
-    if (!scan_complete) {
-        spdlog::error("[ZONE MAP REBUILD] [{}/{}.XSTORE] - Incomplete scan; leaving zone map dirty", db_base_path, year);
-    } else if (fdatasync(fd) != 0) {
-        spdlog::error("[ZONE MAP REBUILD] [{}/{}.XSTORE] - fdatasync of data file failed; leaving zone map dirty", db_base_path, year);
-    } else if (!zmap.MarkClean()) {
-        spdlog::error("[ZONE MAP REBUILD] [{}/{}.zmap] - MarkClean failed; leaving zone map dirty", db_base_path, year);
-    }
-    close(fd);
-
-    spdlog::info("[ZONE MAP REBUILD] [{}/{}.XSTORE] - Rebuilt {} rows", db_base_path, year, total_rows);
+    RebuildYearIndexes(db_base_path, year, row_length, tracked_column_count, /*need_zmap=*/true, /*need_catidx=*/false);
 }
 
-void XStore::RebuildStaleZoneMapsForDb(const std::string &db_name, const std::string &db_base_path, const XStore_Proto::ConfigStruct &cfg_struct,
-                                        const std::set<unsigned short> &force_rebuild_years) {
-    uint32_t desired_tracked_columns = EffectiveTrackedColumnCount(cfg_struct);
-    uint16_t row_length = static_cast<uint16_t>(cfg_struct.rowlength());
+namespace {
+// ZoneMapFile::Open refuses a file of at least a header's length whose magic is not a zone map's, and BeginRebuild keeps
+// the header's rows_per_block. A file with no valid magic, or with a current-version header whose rows_per_block is not
+// the one this row length gives (corrupt, e.g. 0), holds no usable index, so it is emptied (a file too short for a header
+// reads as "rebuild" at every start, and Open gives it a fresh dirty header with the computed rows_per_block): the
+// rebuild then opens it like a new file. (An older version is emptied by Open itself.)
+void EmptyUnusableZoneMap(const std::string &zmap_path, uint16_t row_length) {
+    const int fd = open(zmap_path.c_str(), O_RDWR);
+    if (fd < 0) return;
+    struct stat st{};
+    ZoneMapFileHeader header{};
+    if (fstat(fd, &st) == 0 && st.st_size >= static_cast<off_t>(sizeof(header))) {
+        const bool readable = pread(fd, &header, sizeof(header), 0) == static_cast<ssize_t>(sizeof(header));
+        const bool unusable = !readable || header.magic != ZoneMapFileHeader{}.magic ||
+                              (header.version == ZONE_MAP_VERSION && header.rows_per_block != RowsPerBlock(row_length));
+        if (unusable && ftruncate(fd, 0) != 0) {
+            spdlog::error("[ZONE MAP REBUILD] [{}] - Cannot empty an unusable zone map", zmap_path);
+        }
+    }
+    close(fd);
+}
+} // namespace
 
-    std::vector<unsigned short> years_needing_rebuild;
+void XStore::RebuildYearIndexes(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                uint32_t tracked_column_count, bool need_zmap, bool need_catidx) {
+    const std::string data_path = fmt::format("{}/{}.XSTORE", db_base_path, year);
+    if ((!need_zmap && !need_catidx) || !std::filesystem::exists(data_path)) return;
+    const std::string registry_key = fmt::format("{}/{}", db_base_path, year);
+
+    // Startup only. A registry instance may already exist for this year (WAL replay opened it, possibly at another
+    // width; a test may have deleted its file under it): drop it, so the pin below opens the file that is on disk and
+    // the rebuilt index lands there. Ignores pins: never run while a builder or another pin holder is alive.
+    // The pins are held from before BeginRebuild until after MarkClean. If BeginRebuild fails, the file (the registry
+    // entry just opened) is put in the untrusted rebuild state instead and its pin dropped: it stays in the registry
+    // (a rebuilding entry is never evicted) and is scanned, never trusted, until the next start rebuilds it.
+    ZoneMapFile::Pin zmap;
+    CatIdxFile::Pin catidx;
+    if (need_zmap) {
+        {
+            std::lock_guard<std::mutex> registry_lock(zone_map_registry_mutex_);
+            zone_map_registry_.erase(registry_key);
+            zone_map_registry_lru_.erase(
+                std::remove(zone_map_registry_lru_.begin(), zone_map_registry_lru_.end(), registry_key),
+                zone_map_registry_lru_.end());
+        }
+        EmptyUnusableZoneMap(fmt::format("{}/{}.zmap", db_base_path, year), row_length);
+        zmap = PinZoneMap(db_base_path, year, row_length, tracked_column_count);
+        // BeginRebuild empties the file whatever its width: an old file WIDER than tracked_column_count (a first
+        // insert created it at the global default before MaybeGrowColumnCount persisted a narrower count) must not
+        // keep its stats, or the scan below would fold every row a second time on top of them.
+        if (!zmap->BeginRebuild(tracked_column_count)) {
+            spdlog::error("[ZONE MAP REBUILD] [{}/{}.zmap] - Cannot start the rebuild; the index is not trusted until "
+                          "the next start", db_base_path, year);
+            zmap->EnterUntrustedRebuildState();
+            zmap = ZoneMapFile::Pin();
+        }
+    }
+    if (need_catidx) {
+        {
+            std::lock_guard<std::mutex> registry_lock(catidx_registry_mutex_);
+            catidx_registry_.erase(registry_key);
+            catidx_registry_lru_.erase(
+                std::remove(catidx_registry_lru_.begin(), catidx_registry_lru_.end(), registry_key),
+                catidx_registry_lru_.end());
+        }
+        catidx = PinCatIdx(db_base_path, year, row_length, tracked_column_count);
+        if (!catidx->BeginRebuild(tracked_column_count)) { // also drops the bitmap section; compaction rebuilds it
+            spdlog::error("[CATIDX REBUILD] [{}/{}.catidx] - Cannot start the rebuild; the index is not trusted until "
+                          "the next start", db_base_path, year);
+            catidx->EnterUntrustedRebuildState();
+            catidx = CatIdxFile::Pin();
+        }
+    }
+    if (zmap.get() == nullptr && catidx.get() == nullptr) return;
+
+    const int fd = open(data_path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        // Both files stay in rebuild at F = 0 (every block scanned, not trusted) and dirty: the next start retries.
+        spdlog::error("[INDEX REBUILD] [{}] - Unable to open for rebuild scan", data_path);
+        return;
+    }
+    struct stat st{};
+    if (fstat(fd, &st) != 0 || row_length == 0) {
+        // Same as a failed open: never scan "0 rows" and mark an empty index clean.
+        spdlog::error("[INDEX REBUILD] [{}] - Cannot size the year file for the rebuild scan", data_path);
+        close(fd);
+        return;
+    }
+    const uint64_t total_rows = static_cast<uint64_t>(st.st_size) / row_length;
+
+    // One scan of the year for both files, in chunks of whole zone-map blocks. Startup needs no FileRangeLock: no
+    // request can run before InitDB returns. (The live builder of stage 2b calls the same FoldChunk under the READ
+    // range lock of each chunk and advances the frontiers before unlocking.)
+    const uint64_t block_bytes = RowsPerBlock(row_length) * row_length;
+    const uint64_t chunk_rows = std::max<uint64_t>(1, XStoreTunables::REBUILD_CHUNK_BYTES / block_bytes) * RowsPerBlock(row_length);
+    RebuildScratch scratch;
+    bool scan_complete = true;
+    bool zmap_written = zmap.get() != nullptr;
+    bool catidx_written = catidx.get() != nullptr;
+    for (uint64_t begin = 0; begin < total_rows && (zmap_written || catidx_written); begin += chunk_rows) {
+        const uint64_t end = std::min(total_rows, begin + chunk_rows);
+        const FoldResult result = FoldChunk(fd, begin, end, row_length, tracked_column_count,
+                                            zmap_written ? zmap.get() : nullptr, catidx_written ? catidx.get() : nullptr,
+                                            scratch);
+        if (!result.scan_complete) {
+            scan_complete = false; // the frontiers stay below this chunk: its blocks are never trusted this session
+            break;
+        }
+        // A file whose write failed stops here, behind its frontier; the other one carries on.
+        zmap_written = zmap_written && result.zmap_written;
+        catidx_written = catidx_written && result.catidx_written;
+        if (zmap_written) zmap->AdvanceFrontier(end);
+        if (catidx_written) catidx->AdvanceFrontier(end);
+    }
+
+    // Durability A (DD4): FinishRebuild (the dirty header is durable), then the data file, then MarkClean -- the index
+    // must never claim "clean" while the rows it summarizes could still be lost. Every failure leaves it dirty.
+    const bool zmap_finished = scan_complete && zmap_written && zmap->FinishRebuild();
+    const bool catidx_finished = scan_complete && catidx_written && catidx->FinishRebuild();
+    const bool data_synced = (zmap_finished || catidx_finished) && fdatasync(fd) == 0;
+    close(fd);
+
+    if (zmap.get() != nullptr) {
+        if (!scan_complete) {
+            spdlog::error("[ZONE MAP REBUILD] [{}/{}.XSTORE] - Incomplete scan; leaving zone map dirty", db_base_path, year);
+        } else if (!zmap_written) {
+            spdlog::error("[ZONE MAP REBUILD] [{}/{}.zmap] - Index write failed; leaving zone map dirty", db_base_path, year);
+        } else if (!zmap_finished) {
+            spdlog::error("[ZONE MAP REBUILD] [{}/{}.zmap] - No durable header; leaving zone map dirty", db_base_path, year);
+        } else if (!data_synced) {
+            spdlog::error("[ZONE MAP REBUILD] [{}/{}.XSTORE] - fdatasync of data file failed; leaving zone map dirty", db_base_path, year);
+        } else if (!zmap->MarkClean()) {
+            spdlog::error("[ZONE MAP REBUILD] [{}/{}.zmap] - MarkClean failed; leaving zone map dirty", db_base_path, year);
+        }
+        spdlog::info("[ZONE MAP REBUILD] [{}/{}.XSTORE] - Rebuilt {} rows", db_base_path, year, total_rows);
+    }
+    if (catidx.get() != nullptr) {
+        if (!scan_complete) {
+            spdlog::error("[CATIDX REBUILD] [{}/{}.XSTORE] - Incomplete scan; leaving catidx dirty", db_base_path, year);
+        } else if (!catidx_written) {
+            spdlog::error("[CATIDX REBUILD] [{}/{}.catidx] - Index write failed; leaving catidx dirty", db_base_path, year);
+        } else if (!catidx_finished) {
+            spdlog::error("[CATIDX REBUILD] [{}/{}.catidx] - No durable header; leaving catidx dirty", db_base_path, year);
+        } else if (!data_synced) {
+            spdlog::error("[CATIDX REBUILD] [{}/{}.XSTORE] - fdatasync of data file failed; leaving catidx dirty", db_base_path, year);
+        } else if (!catidx->MarkClean()) {
+            spdlog::error("[CATIDX REBUILD] [{}/{}.catidx] - MarkClean failed; leaving catidx dirty", db_base_path, year);
+        }
+        spdlog::info("[CATIDX REBUILD] [{}/{}.XSTORE] - Rebuilt bloom for {} rows at tracked_column_count {}",
+                     db_base_path, year, total_rows, tracked_column_count);
+    }
+}
+
+XStore::FoldResult XStore::FoldChunk(int data_fd, uint64_t chunk_begin, uint64_t chunk_end, uint16_t row_length,
+                                     uint32_t tracked_column_count, ZoneMapFile *zmap, CatIdxFile *catidx,
+                                     RebuildScratch &scratch) {
+    FoldResult result;
+    scratch.zmap.Clear();
+    scratch.zmap.pad_to = tracked_column_count;
+    scratch.catidx.Clear();
+    ZoneMapFoldBatch *zmap_batch = zmap != nullptr ? &scratch.zmap : nullptr;
+    CatIdxFoldBatch *catidx_batch = catidx != nullptr ? &scratch.catidx : nullptr;
+    result.scan_complete = ForEachDataRow(data_fd, chunk_end, row_length, [&](uint64_t row_index, const char *row) {
+        if (row[0] == 0) return; // never-written sparse hole -- same fast skip ProcessFileRangeAccumulate uses
+        AppendRebuildObservations(row_index, row, row_length, tracked_column_count, zmap_batch, catidx_batch, scratch);
+    }, chunk_begin, &scratch.scan_buffer);
+    if (!result.scan_complete) return result;
+    if (zmap != nullptr) result.zmap_written = zmap->RebuildFoldRows(scratch.zmap);
+    if (catidx != nullptr) result.catidx_written = catidx->RebuildFoldRows(scratch.catidx);
+    return result;
+}
+
+XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path, unsigned short year,
+                                                 uint16_t row_length, uint32_t tracked_column_count, bool widen_zmap,
+                                                 bool widen_catidx, const std::atomic<bool> *stop,
+                                                 LiveWidenStats *stats) try {
+    using Clock = std::chrono::steady_clock;
+    LiveWidenStats local_stats;
+    LiveWidenStats &st = stats != nullptr ? *stats : local_stats;
+    st = LiveWidenStats{};
+    // The writers' lock key, byte for byte (ApplyWalRecord and the deletes lock CachedYearFilePath): any other
+    // spelling of the path would be a different FileRangeLock and protect nothing.
+    const std::string data_path = CachedYearFilePath(db_base_path, year);
+    const auto stopped = [stop] { return stop != nullptr && stop->load(std::memory_order_relaxed); };
+    std::error_code exists_ec;
+    if ((!widen_zmap && !widen_catidx) || row_length == 0 || !std::filesystem::exists(data_path, exists_ec)) {
+        return LiveWidenResult::kNothingToDo;
+    }
+
+    // Pins before BeginRebuild, held until after MarkClean (they live in this frame): the registry never evicts these
+    // objects while the builder uses them. Registry entries are never erased here: in-flight queries hold references
+    // to these same objects (BeginRebuild works in place).
+    ZoneMapFile::Pin zmap;
+    CatIdxFile::Pin catidx;
+    if (widen_zmap) zmap = PinZoneMap(db_base_path, year, row_length, tracked_column_count);
+    if (widen_catidx) catidx = PinCatIdx(db_base_path, year, row_length, tracked_column_count);
+    // BeginLiveRebuild checks and begins in one step under the file mutex. A file another builder already rebuilds is
+    // left alone (nothing of it touched: the other builder owns it); resuming a rebuild is the trigger's business. A
+    // refused begin changes nothing: that file's old, narrower index stays in place and trusted (unlike startup, no
+    // EnterUntrustedRebuildState; BeginRebuild marks the old index dirty, durably, before it truncates anything). The
+    // other file still widens (kPartial).
+    bool refused = false;
+    bool busy = false;
+    const auto begin = [&](auto &pin, const char *ext, bool &began, bool &file_busy) {
+        if (pin.get() == nullptr) return;
+        const BeginRebuildResult r = pin->BeginLiveRebuild(tracked_column_count);
+        began = r == BeginRebuildResult::kStarted;
+        file_busy = r == BeginRebuildResult::kAlreadyRebuilding;
+        if (began) return;
+        if (file_busy) {
+            busy = true;
+        } else {
+            spdlog::error("[LIVE WIDEN] [{}/{}.{}] - Cannot start the rebuild; the old index stays in use", db_base_path, year, ext);
+            refused = true;
+        }
+        pin = std::remove_reference_t<decltype(pin)>();
+    };
+    begin(zmap, "zmap", st.zmap_began, st.zmap_busy);
+    if (busy) return LiveWidenResult::kAlreadyRebuilding; // one builder per year: the catidx is not touched either
+    begin(catidx, "catidx", st.catidx_began, st.catidx_busy); // busy here: a catidx-only builder owns it; finish the zone map (kPartial)
+    if (zmap.get() == nullptr && catidx.get() == nullptr) {
+        return busy ? LiveWidenResult::kAlreadyRebuilding : LiveWidenResult::kFailed;
+    }
+    refused = refused || busy;
+
+    // From here every early return leaves the files that began in rebuild at the frontier they reached: dirty on
+    // disk, blocks past F scanned (never trusted), MarkClean refusing, unevictable; the next start rebuilds them.
+    struct FdCloser {
+        int fd;
+        ~FdCloser() { if (fd >= 0) close(fd); }
+    } data{open(data_path.c_str(), O_RDONLY | O_CLOEXEC)};
+    struct stat data_st{};
+    if (data.fd < 0 || fstat(data.fd, &data_st) != 0) {
+        spdlog::error("[LIVE WIDEN] [{}] - Cannot open the year file for the scan; the index stays in rebuild until "
+                      "the next start", data_path);
+        return LiveWidenResult::kFailed;
+    }
+    // Read ONCE: the year file is preallocated to its full size. If it is cut or replaced meanwhile, the scan fails
+    // (short read) or the identity check below stops the build.
+    const uint64_t total_rows = static_cast<uint64_t>(data_st.st_size) / row_length;
+    const uint64_t row_len = row_length;
+    const uint64_t max_data_rows = std::max<uint64_t>(XStoreTunables::LIVE_WIDEN_MIN_CHUNK_ROWS,
+                                                      XStoreTunables::LIVE_WIDEN_MAX_CHUNK_BYTES / row_len);
+    uint64_t data_rows = std::clamp<uint64_t>(XStoreTunables::LIVE_WIDEN_INITIAL_CHUNK_ROWS,
+                                              XStoreTunables::LIVE_WIDEN_MIN_CHUNK_ROWS, max_data_rows);
+    uint64_t span_rows = data_rows; // rows locked per attempt (>= data_rows after a hole)
+    uint64_t pause_us = XStoreTunables::LIVE_WIDEN_PAUSE_US;
+    uint64_t consecutive_timeouts = 0;
+    bool timeout_warned = false;
+    bool zmap_ok = zmap.get() != nullptr;
+    bool catidx_ok = catidx.get() != nullptr;
+    uint64_t frontier = 0;
+    RebuildScratch scratch;
+    const Clock::time_point started = Clock::now();
+    const auto log_stopped = [&] {
+        spdlog::warn("[LIVE WIDEN] [{}] - Stopped at row {} of {}; the index stays in rebuild (dirty) until the next "
+                     "start rebuilds it", data_path, frontier, total_rows);
+    };
+
+    while (frontier < total_rows) {
+        if (stopped()) {
+            log_stopped();
+            return LiveWidenResult::kStopped;
+        }
+        struct stat now_st{};
+        if (stat(data_path.c_str(), &now_st) != 0 || now_st.st_ino != data_st.st_ino || now_st.st_dev != data_st.st_dev) {
+            spdlog::error("[LIVE WIDEN] [{}] - The year file was removed or replaced during the build; stopping", data_path);
+            return LiveWidenResult::kFailed;
+        }
+        const uint64_t lock_end = frontier + std::min(span_rows, total_rows - frontier);
+        bool locked = false;
+        bool hole_only = false;
+        bool tail_empty = false;
+        uint64_t hold_us = 0;
+        {
+            TimedFileRangeLockGuard lock(data_path, frontier * row_len, (lock_end - frontier) * row_len,
+                                         FileRangeLock::LockType::READ,
+                                         std::chrono::milliseconds(XStoreTunables::LIVE_WIDEN_LOCK_WAIT_MS));
+            if (lock.owns_lock()) {
+                locked = true;
+                const Clock::time_point t0 = Clock::now();
+                // Everything about rows >= F is decided under this lock: where data starts (a hole seen without the
+                // lock may be written the next instant, and writers skip the index for rows >= F), the reads, the
+                // fold into both files and the frontier move. Nothing outside [F, lock_end) is folded or passed.
+                uint64_t first_data_row = frontier;
+                const off_t data_off = lseek(data.fd, static_cast<off_t>(frontier * row_len), SEEK_DATA);
+                if (data_off < 0) {
+                    if (errno == ENXIO) {
+                        hole_only = true; // no data from F to the end of the file
+                        tail_empty = true;
+                    } else if (errno != EINVAL) { // EINVAL: no SEEK_DATA support, scan everything
+                        spdlog::error("[LIVE WIDEN] [{}] - lseek failed ({}); the index stays in rebuild until the "
+                                      "next start", data_path, strerror(errno));
+                        return LiveWidenResult::kFailed;
+                    }
+                } else {
+                    first_data_row = std::max(frontier, static_cast<uint64_t>(data_off) / row_len);
+                    hole_only = first_data_row >= lock_end;
+                }
+                uint64_t new_frontier = lock_end;
+                if (!hole_only) {
+                    new_frontier = std::min(lock_end, first_data_row + data_rows);
+                    const FoldResult result = FoldChunk(data.fd, frontier, new_frontier, row_length,
+                                                        tracked_column_count, zmap_ok ? zmap.get() : nullptr,
+                                                        catidx_ok ? catidx.get() : nullptr, scratch);
+                    if (!result.scan_complete) { // nothing of this chunk was folded: F stays below it
+                        spdlog::error("[LIVE WIDEN] [{}] - Cannot read rows [{}, {}); the index stays in rebuild until "
+                                      "the next start", data_path, frontier, new_frontier);
+                        return LiveWidenResult::kFailed;
+                    }
+                    st.rows_folded += zmap_ok ? scratch.zmap.row_index.size() : scratch.catidx.row_index.size();
+                    // A file whose write failed stops here, behind its frontier; the other one carries on.
+                    zmap_ok = zmap_ok && result.zmap_written;
+                    catidx_ok = catidx_ok && result.catidx_written;
+                    if (!zmap_ok && !catidx_ok) {
+                        spdlog::error("[LIVE WIDEN] [{}] - Index write failed; the index stays in rebuild until the "
+                                      "next start", data_path);
+                        return LiveWidenResult::kFailed;
+                    }
+                }
+                if (zmap_ok) zmap->AdvanceFrontier(new_frontier);
+                if (catidx_ok) catidx->AdvanceFrontier(new_frontier);
+                frontier = new_frontier;
+                hold_us = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t0).count());
+            }
+        }
+
+        if (locked) {
+            consecutive_timeouts = 0;
+            timeout_warned = false;
+            pause_us = XStoreTunables::LIVE_WIDEN_PAUSE_US;
+            ++st.chunks;
+            st.total_lock_hold_us += hold_us;
+            st.max_lock_hold_us = std::max(st.max_lock_hold_us, hold_us);
+            if (stats != nullptr) st.lock_hold_us.push_back(static_cast<uint32_t>(std::min<uint64_t>(hold_us, UINT32_MAX)));
+            if (hole_only) {
+                ++st.hole_chunks;
+                span_rows = tail_empty ? total_rows : std::min(XStoreTunables::LIVE_WIDEN_MAX_HOLE_SPAN_ROWS, span_rows * 4);
+                span_rows = std::max(span_rows, data_rows);
+                continue; // the lock was held for microseconds: no pause owed
+            }
+            const double factor = std::clamp(static_cast<double>(XStoreTunables::LIVE_WIDEN_LOCK_HOLD_TARGET_US) /
+                                                 static_cast<double>(std::max<uint64_t>(hold_us, 1)), 0.5, 2.0);
+            data_rows = std::clamp<uint64_t>(static_cast<uint64_t>(static_cast<double>(data_rows) * factor),
+                                             XStoreTunables::LIVE_WIDEN_MIN_CHUNK_ROWS, max_data_rows);
+            span_rows = data_rows;
+        } else {
+            // F is one contiguous frontier: a busy chunk cannot be skipped, only shrunk and retried after a longer
+            // pause. With a one-row minimum the builder never needs two neighbouring busy rows free at once.
+            ++st.lock_timeouts;
+            ++consecutive_timeouts;
+            st.max_consecutive_timeouts = std::max(st.max_consecutive_timeouts, consecutive_timeouts);
+            span_rows = std::max<uint64_t>(XStoreTunables::LIVE_WIDEN_MIN_CHUNK_ROWS, span_rows / 2);
+            data_rows = std::min(data_rows, span_rows);
+            pause_us = std::min<uint64_t>(XStoreTunables::LIVE_WIDEN_MAX_PAUSE_US, pause_us * 2);
+            if (span_rows == XStoreTunables::LIVE_WIDEN_MIN_CHUNK_ROWS && !timeout_warned &&
+                consecutive_timeouts >= XStoreTunables::LIVE_WIDEN_TIMEOUT_WARN_AFTER) {
+                spdlog::warn("[LIVE WIDEN] [{}] - {} lock waits in a row timed out at row {}; still retrying",
+                             data_path, consecutive_timeouts, frontier);
+                timeout_warned = true;
+            }
+        }
+        if (frontier >= total_rows) break;
+        if (stopped()) {
+            log_stopped();
+            return LiveWidenResult::kStopped;
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(pause_us));
+    }
+
+    // Durability A (DD4), as at startup: FinishRebuild (the dirty header is durable), then the data file, then
+    // MarkClean, pins still held. Every failure leaves the file dirty (the next start rebuilds it).
+    const bool zmap_finished = zmap_ok && zmap->FinishRebuild();
+    const bool catidx_finished = catidx_ok && catidx->FinishRebuild();
+    st.zmap_widened = zmap_finished;
+    st.catidx_widened = catidx_finished;
+    const bool data_synced = (zmap_finished || catidx_finished) && fdatasync(data.fd) == 0;
+    bool all_ok = (zmap.get() == nullptr || zmap_finished) && (catidx.get() == nullptr || catidx_finished) && data_synced;
+    if (zmap.get() != nullptr && !zmap_finished) {
+        spdlog::error("[LIVE WIDEN] [{}/{}.zmap] - {}; it stays in rebuild (dirty) until the next start", db_base_path, year,
+                      zmap_ok ? "Its rebuilt header could not be made durable" : "An index write failed during the build");
+    }
+    if (catidx.get() != nullptr && !catidx_finished) {
+        spdlog::error("[LIVE WIDEN] [{}/{}.catidx] - {}; it stays in rebuild (dirty) until the next start", db_base_path, year,
+                      catidx_ok ? "Its rebuilt header could not be made durable" : "An index write failed during the build");
+    }
+    if ((zmap_finished || catidx_finished) && !data_synced) {
+        spdlog::error("[LIVE WIDEN] [{}] - fdatasync of the data file failed; leaving the rebuilt index dirty", data_path);
+    }
+    if (zmap_finished && data_synced && !zmap->MarkClean()) {
+        spdlog::error("[LIVE WIDEN] [{}/{}.zmap] - MarkClean failed; leaving it dirty", db_base_path, year);
+        all_ok = false;
+    }
+    if (catidx_finished && data_synced && !catidx->MarkClean()) {
+        spdlog::error("[LIVE WIDEN] [{}/{}.catidx] - MarkClean failed; leaving it dirty", db_base_path, year);
+        all_ok = false;
+    }
+    spdlog::info("[LIVE WIDEN] [{}] - Rebuilt at {} columns (zone map: {}, catidx: {}): {} rows in {} chunks, {} lock "
+                 "timeouts, max lock hold {} us, {} ms", data_path, tracked_column_count, zmap_finished, catidx_finished,
+                 st.rows_folded, st.chunks, st.lock_timeouts, st.max_lock_hold_us,
+                 std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started).count());
+    if (!all_ok) return LiveWidenResult::kFailed;
+    return refused ? LiveWidenResult::kPartial : LiveWidenResult::kDone;
+} catch (const std::exception &e) {
+    spdlog::error("[LIVE WIDEN] [{}/{}] - Failed: {}", db_base_path, year, e.what());
+    return LiveWidenResult::kFailed;
+}
+
+std::vector<XStore::LiveWidenPassEntry> XStore::RunLiveWidenPass(std::chrono::steady_clock::time_point now) {
+    std::vector<LiveWidenPassEntry> processed;
+    if (!live_widen_pending_.load(std::memory_order_relaxed)) return processed; // the per-tick cost when idle
+    struct Due {
+        std::string db_base_path;
+        std::string db_name;
+        uint64_t growth_seq;
+    };
+    std::vector<Due> due;
+    {
+        std::lock_guard<std::mutex> lock(live_widen_mutex_);
+        for (const auto &[db_base_path, request] : live_widen_requests_) {
+            if (now - request.last_growth >= std::chrono::seconds(XStoreTunables::LIVE_WIDEN_QUIET_PERIOD_SEC) &&
+                now >= request.retry_after) {
+                due.push_back({db_base_path, request.db_name, request.growth_seq});
+            }
+        }
+    }
+    for (const Due &d : due) {
+        if (bg_cancel_.load(std::memory_order_relaxed)) break;
+        spdlog::info("[LIVE WIDEN] [DB: {}] - Width stable for {} s; widening its year index files, newest year first",
+                     d.db_name, XStoreTunables::LIVE_WIDEN_QUIET_PERIOD_SEC);
+        const LiveWidenDbOutcome outcome = LiveWidenDb(d.db_base_path, d.db_name, processed);
+        bool gave_up = false;
+        uint32_t attempts = 0;
+        uint64_t wait_sec = 0;
+        {
+            std::lock_guard<std::mutex> lock(live_widen_mutex_);
+            auto it = live_widen_requests_.find(d.db_base_path);
+            if (it != live_widen_requests_.end()) { // else dropped meanwhile (RemoveDB)
+                LiveWidenRequest &request = it->second;
+                if (outcome == LiveWidenDbOutcome::kGone) {
+                    live_widen_requests_.erase(it);
+                } else if (request.growth_seq != d.growth_seq) {
+                    // Grew while this pass ran: the record stays and runs again after its new quiet period, with
+                    // fresh widths (the growth already reset its retry state).
+                } else if (outcome == LiveWidenDbOutcome::kStopped) {
+                    // Kept: the next pass (after a removal, or never at shutdown) looks again.
+                } else if (outcome == LiveWidenDbOutcome::kRetry) {
+                    attempts = ++request.failed_attempts;
+                    if (attempts >= XStoreTunables::LIVE_WIDEN_MAX_ATTEMPTS) {
+                        gave_up = true;
+                        live_widen_requests_.erase(it);
+                    } else {
+                        wait_sec = XStoreTunables::LIVE_WIDEN_RETRY_BASE_SEC << (attempts - 1);
+                        request.retry_after = now + std::chrono::seconds(wait_sec);
+                    }
+                } else {
+                    live_widen_requests_.erase(it);
+                }
+            }
+            if (live_widen_requests_.empty()) live_widen_pending_.store(false, std::memory_order_relaxed);
+        }
+        if (gave_up) {
+            spdlog::error("[LIVE WIDEN] [DB: {}] - Could not start rebuilding some index files after {} attempts; giving up "
+                          "until its width grows again or the next start rebuilds them (the old, narrower indexes stay in "
+                          "use; queries on the new columns full-scan)", d.db_name, attempts);
+        } else if (wait_sec > 0) {
+            spdlog::warn("[LIVE WIDEN] [DB: {}] - Could not start rebuilding some index files (attempt {} of {}); retrying "
+                         "in {} s", d.db_name, attempts, XStoreTunables::LIVE_WIDEN_MAX_ATTEMPTS, wait_sec);
+        }
+        if (outcome == LiveWidenDbOutcome::kStopped) break;
+    }
+    return processed;
+}
+
+XStore::LiveWidenDbOutcome XStore::LiveWidenDb(const std::string &db_base_path, const std::string &db_name,
+                                               std::vector<LiveWidenPassEntry> &out) try {
+    XStore_Proto::ConfigStruct cfg;
+    if (!GetOrLoadCfg(db_name, db_base_path, cfg)) {
+        spdlog::info("[LIVE WIDEN] [DB: {}] - The DB no longer exists; nothing to widen", db_name);
+        return LiveWidenDbOutcome::kGone;
+    }
+    const uint32_t desired = EffectiveTrackedColumnCount(cfg);
+    const uint16_t row_length = static_cast<uint16_t>(cfg.rowlength());
+
+    std::vector<unsigned short> years;
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(db_base_path, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string filename = it->path().filename().string();
+        if (filename.size() < 7 || filename.compare(filename.size() - 7, 7, ".XSTORE") != 0) continue;
+        try {
+            years.push_back(static_cast<unsigned short>(std::stoi(filename.substr(0, filename.size() - 7))));
+        } catch (...) {
+            continue; // not a <YEAR>.XSTORE-shaped filename (same rule as the startup rebuild)
+        }
+    }
+    if (ec) {
+        if (ec == std::errc::no_such_file_or_directory) return LiveWidenDbOutcome::kGone;
+        spdlog::error("[LIVE WIDEN] [DB: {}] - Cannot list {}: {}", db_name, db_base_path, ec.message());
+        return LiveWidenDbOutcome::kRetry;
+    }
+    std::sort(years.begin(), years.end(), std::greater<>()); // newest (the current) year first
+
+    bool retry = false;
+    for (const unsigned short year : years) {
+        const std::string year_key = fmt::format("{}/{}", db_base_path, year);
+        const BgEnter enter = EnterBackgroundYear(year_key);
+        if (enter == BgEnter::kCancelled) return LiveWidenDbOutcome::kStopped;
+        if (enter == BgEnter::kRemoving) continue; // that year (or the whole DB) is being removed
+        struct Leave {
+            ~Leave() { XStore::LeaveBackgroundYear(); }
+        } leave;
+
+        LiveWidenPassEntry entry;
+        entry.db_name = db_name;
+        entry.year = year;
+        const YearIndexWidths widths = PeekYearIndexWidths(db_base_path, year);
+        if (widths.rebuilding) {
+            // A stopped or failed rebuild (or a startup rebuild that could not begin): untrusted until the next start
+            // rebuilds it. Never resumed here: its owner may still be alive.
+            entry.skipped_rebuilding = true;
+            entry.result = LiveWidenResult::kAlreadyRebuilding;
+            out.push_back(entry);
+            bool first = false;
+            {
+                std::lock_guard<std::mutex> lock(live_widen_mutex_);
+                first = live_widen_skip_logged_.insert(year_key).second;
+            }
+            if (first) {
+                spdlog::warn("[LIVE WIDEN] [DB: {}] - {} is already being rebuilt (or a rebuild stopped); not widened now, "
+                             "it is rebuilt at the next start", db_name, year);
+            }
+            continue;
+        }
+        // Widths only (mirrors ZoneMapNeedsRebuild / CatIdxNeedsRebuild): the dirty flag says nothing at runtime.
+        const bool widen_zmap = !widths.zmap.has_value() || *widths.zmap != desired;
+        const bool widen_catidx = !widths.catidx.has_value() || *widths.catidx < desired;
+        if (!widen_zmap && !widen_catidx) {
+            out.push_back(entry); // kNothingToDo
+            continue;
+        }
+        spdlog::info("[LIVE WIDEN] [DB: {}] - Widening year {} to {} columns (zone map: {}, catidx: {})", db_name, year,
+                     desired, widen_zmap, widen_catidx);
+        LiveWidenStats stats;
+        entry.result = LiveWidenOneYear(db_base_path, year, row_length, desired, widen_zmap, widen_catidx, &bg_cancel_, &stats);
+        out.push_back(entry);
+        if (entry.result == LiveWidenResult::kDone || entry.result == LiveWidenResult::kNothingToDo) continue;
+        if (entry.result == LiveWidenResult::kStopped) return LiveWidenDbOutcome::kStopped;
+        if (stats.zmap_busy || stats.catidx_busy) {
+            // Another rebuild owns a file: retrying in a loop would only meet it again.
+            spdlog::warn("[LIVE WIDEN] [DB: {}] - An index file of {} is owned by another rebuild; left to it", db_name, year);
+            continue;
+        }
+        const bool failed_begin = (widen_zmap && !stats.zmap_began) || (widen_catidx && !stats.catidx_began);
+        if (failed_begin) {
+            retry = true; // that file's old index is intact and trusted: worth another try later
+        } else {
+            spdlog::error("[LIVE WIDEN] [DB: {}] - Rebuilding {} failed midway; its index stays untrusted (scanned) until the "
+                          "next start rebuilds it", db_name, year);
+        }
+    }
+    return retry ? LiveWidenDbOutcome::kRetry : LiveWidenDbOutcome::kDone;
+} catch (const std::exception &e) {
+    spdlog::error("[LIVE WIDEN] [DB: {}] - Pass failed: {}", db_name, e.what());
+    return LiveWidenDbOutcome::kRetry;
+}
+
+void XStore::AppendRebuildObservations(uint64_t row_index, const char *row, uint16_t row_length,
+                                       uint32_t tracked_column_count, ZoneMapFoldBatch *zmap, CatIdxFoldBatch *catidx,
+                                       RebuildScratch &scratch) {
+    using google::protobuf::internal::WireFormatLite;
+    static const uint32_t kColumnTag =
+        WireFormatLite::MakeTag(XStore_Proto::RowData::kFieldDataFieldNumber, WireFormatLite::WIRETYPE_LENGTH_DELIMITED);
+    const size_t zmap_mark = zmap != nullptr ? zmap->observations.size() : 0;
+    const size_t catidx_mark = catidx != nullptr ? catidx->values.size() : 0;
+
+    // One pass: walk the tags as RealRowDataLength / ExtractColumnByIndexSkipParse do (ReadTag() == 0 ends the row) and
+    // decode each column once. Accepted only if every tag is a well-formed column (field 1, length-delimited, inside
+    // the slot) and every column decodes. Then the per-row rebuild got exactly these columns: RowData parse of
+    // [0, real_len) sees the same n columns in the same order (no unknown or mis-typed field to skip or keep), and
+    // ExtractColumnByIndexSkipParse(c) skips the same c columns and decodes column c from the same bytes (an
+    // empty, unset column included: it is present and encodes as its tag byte alone).
+    google::protobuf::io::CodedInputStream in(reinterpret_cast<const uint8_t *>(row), row_length);
+    bool one_pass = true;
+    uint32_t column = 0;
+    for (uint32_t tag = in.ReadTag(); tag != 0; tag = in.ReadTag(), ++column) {
+        int length = 0;
+        if (tag != kColumnTag || !in.ReadVarintSizeAsInt(&length) ||
+            length > static_cast<int>(row_length) - in.CurrentPosition() ||
+            !scratch.column.ParseFromArray(row + in.CurrentPosition(), length)) {
+            one_pass = false;
+            break;
+        }
+        if (column < tracked_column_count) {
+            if (zmap != nullptr) zmap->observations.push_back(ZoneMapObservationOf(*this, scratch.column, column));
+            if (catidx != nullptr) catidx->Add(column, EncodeFDataForCatIdx(scratch.column));
+        }
+        static_cast<void>(in.Skip(length)); // cannot fail: length was checked against the slot
+    }
+
+    if (!one_pass) {
+        // A damaged or unusual row: the per-row rebuild's own calls, so it gets exactly what that rebuild got.
+        if (zmap != nullptr) {
+            zmap->observations.resize(zmap_mark);
+            const size_t real_len = XStoreWireEncode::RealRowDataLength(row, row_length);
+            scratch.row.Clear();
+            if (real_len > 0) static_cast<void>(scratch.row.ParseFromArray(row, static_cast<int>(real_len)));
+            const int tracked = std::min(static_cast<int>(tracked_column_count), scratch.row.fielddata_size());
+            for (int c = 0; c < tracked; ++c) {
+                zmap->observations.push_back(ZoneMapObservationOf(*this, scratch.row.fielddata(c), static_cast<uint32_t>(c)));
+            }
+        }
+        if (catidx != nullptr) {
+            catidx->values.resize(catidx_mark);
+            for (uint32_t c = 0; c < tracked_column_count; ++c) {
+                scratch.column.Clear();
+                if (ExtractColumnByIndexSkipParse(row, row_length, static_cast<unsigned short>(c), scratch.column)) {
+                    catidx->Add(c, EncodeFDataForCatIdx(scratch.column));
+                }
+            }
+        }
+    }
+    if (zmap != nullptr) zmap->EndRow(row_index);
+    if (catidx != nullptr) catidx->EndRow(row_index);
+}
+
+bool XStore::CatIdxNeedsRebuild(const std::string &catidx_path, uint32_t desired_tracked_columns) {
+    if (!std::filesystem::exists(catidx_path)) return true; // no sidecar at all (pre-existing data)
+    const int fd = open(catidx_path.c_str(), O_RDONLY);
+    if (fd < 0) return true;
+    CatIdxFileHeader on_disk{};
+    const bool readable = pread(fd, &on_disk, sizeof(on_disk), 0) == static_cast<ssize_t>(sizeof(on_disk));
+    close(fd);
+    if (!readable || on_disk.magic != CatIdxFileHeader{}.magic || on_disk.version != XStoreTunables::CATIDX_VERSION ||
+        on_disk.tracked_column_count < desired_tracked_columns) {
+        return true;
+    }
+    if (on_disk.dirty != 0) {
+        // Durability A: unclean shutdown -- treat like a stale width.
+        spdlog::info("[CATIDX REBUILD] [{}] - marked dirty (unclean shutdown) -- rebuilding", catidx_path);
+        return true;
+    }
+    return false;
+}
+
+void XStore::RebuildStaleIndexesForDb(const std::string &db_name, const std::string &db_base_path,
+                                      const XStore_Proto::ConfigStruct &cfg_struct,
+                                      const std::set<unsigned short> &force_rebuild_years) {
+    const uint32_t desired_tracked_columns = EffectiveTrackedColumnCount(cfg_struct);
+    const uint16_t row_length = static_cast<uint16_t>(cfg_struct.rowlength());
+
+    struct YearWork {
+        unsigned short year;
+        bool zmap;
+        bool catidx;
+    };
+    // Read-only pass first: the rebuilds below create and truncate files in this directory, which must not happen
+    // while a directory_iterator over it is alive.
+    std::vector<YearWork> work;
     for (auto &f : std::filesystem::directory_iterator(db_base_path)) {
         std::string filename = f.path().filename().string();
         if (filename.size() < 7 || filename.substr(filename.size() - 7) != ".XSTORE") continue;
-
-        std::string year_str = filename.substr(0, filename.size() - 7);
         unsigned short year;
         try {
-            year = static_cast<unsigned short>(std::stoi(year_str));
+            year = static_cast<unsigned short>(std::stoi(filename.substr(0, filename.size() - 7)));
         } catch (...) {
             continue; // not a <YEAR>.XSTORE-shaped filename -- skip
         }
-
-        // force_rebuild_years short-circuits the header check entirely --
-        // a year WAL replay just wrote rows into has a zone map that is
-        // *structurally* fine (right version, right width, so
-        // ZoneMapNeedsRebuild says "no") and *semantically* short by
-        // exactly those rows, because a replayed row carries no
-        // observations. Only a full re-derivation from raw data can tell,
-        // and RebuildOneYearZoneMap is idempotent (truncate, then re-fold
-        // every row), so forcing it on an already-correct year costs time,
-        // never correctness. See ReplayedYearMap in XStore.h.
-        std::string zmap_path = fmt::format("{}/{}.zmap", db_base_path, year);
-        if (force_rebuild_years.count(year) > 0 || ZoneMapNeedsRebuild(zmap_path, desired_tracked_columns)) {
-            years_needing_rebuild.push_back(year);
-        }
+        // A WAL-replayed year: both indexes are structurally fine (right version, right width) and semantically short
+        // by exactly the replayed rows, which carry no observations. Only a full re-derivation from raw data can tell,
+        // and a rebuild is idempotent, so forcing it on an already-correct year costs time, never correctness.
+        const bool forced = force_rebuild_years.count(year) > 0;
+        const bool zmap = forced || ZoneMapNeedsRebuild(fmt::format("{}/{}.zmap", db_base_path, year), desired_tracked_columns, row_length);
+        const bool catidx = forced || CatIdxNeedsRebuild(fmt::format("{}/{}.catidx", db_base_path, year), desired_tracked_columns);
+        if (zmap || catidx) work.push_back({year, zmap, catidx});
     }
+    if (work.empty()) return;
 
-    if (years_needing_rebuild.empty()) return;
-
-    spdlog::info("[ZONE MAP REBUILD] [DB: {}] - {} year file(s) need rebuild", db_name, years_needing_rebuild.size());
-    XStorePreadPool::ParallelFor(years_needing_rebuild.size(), [&](size_t i) {
-        RebuildOneYearZoneMap(db_base_path, years_needing_rebuild[i], row_length, desired_tracked_columns);
+    const size_t zmap_years = static_cast<size_t>(std::count_if(work.begin(), work.end(), [](const YearWork &w) { return w.zmap; }));
+    if (zmap_years > 0) spdlog::info("[ZONE MAP REBUILD] [DB: {}] - {} year file(s) need rebuild", db_name, zmap_years);
+    for (const YearWork &w : work) {
+        if (w.catidx) spdlog::info("[CATIDX REBUILD] [DB: {}] - rebuilding stale/missing {}.catidx", db_name, w.year);
+    }
+    // Years in parallel, zone map and catidx together (one scan per year). An exception must not escape a pool worker
+    // (std::terminate): each is kept, every other year still finishes, then the lowest year's is rethrown, so InitDB (and
+    // the XStore constructor) fails loudly as before instead of serving an index this rebuild did not finish.
+    std::vector<std::exception_ptr> failures(work.size());
+    XStorePreadPool::ParallelFor(work.size(), [&](size_t i) {
+        try {
+            RebuildYearIndexes(db_base_path, work[i].year, row_length, desired_tracked_columns, work[i].zmap, work[i].catidx);
+        } catch (const std::exception &e) {
+            spdlog::error("[INDEX REBUILD] [DB: {}] - Rebuild of {} failed: {}", db_name, work[i].year, e.what());
+            failures[i] = std::current_exception();
+        } catch (...) {
+            spdlog::error("[INDEX REBUILD] [DB: {}] - Rebuild of {} failed", db_name, work[i].year);
+            failures[i] = std::current_exception();
+        }
     });
+    // The lowest failed year's exception, so the error a failed start reports does not depend on directory order.
+    size_t lowest = work.size();
+    for (size_t i = 0; i < work.size(); ++i) {
+        if (failures[i] && (lowest == work.size() || work[i].year < work[lowest].year)) lowest = i;
+    }
+    if (lowest < work.size()) std::rethrow_exception(failures[lowest]);
 }
 
 namespace {

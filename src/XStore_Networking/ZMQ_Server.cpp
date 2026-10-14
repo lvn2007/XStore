@@ -445,9 +445,9 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                     // this is the actual benefit for RangeInsert, since its own
                     // response (RangeInsert_REP) is just a status string with
                     // nothing to arena.
-                    const auto &req = client_request->rangeinsert();
+                    auto *req = client_request->mutable_rangeinsert();   // non-const: RangeInsert sorts an unsorted request in place
                     XStore_Proto::RangeInsert_REP rep;
-                    my_store.RangeInsert(&req, &rep);
+                    my_store.RangeInsert(req, &rep);
                     SendProto(socket, rep);
                     break;
                 }

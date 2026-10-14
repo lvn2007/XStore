@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <zmq.hpp>
 #include <zmq_addon.hpp>
 
@@ -14,6 +15,7 @@
 #include "include/Networking/ZMQ_Server.h"
 #include "include/XStore/XStore_SysStats.h"
 #include "XStoreTestSupport.h"
+#include "XStoreZmqTestSupport.h"
 
 using namespace xstore_test;
 
@@ -129,13 +131,18 @@ struct CurvePair {
         router.set(zmq::sockopt::rcvtimeo, 500);
         router.set(zmq::sockopt::linger, 0);
         zap_.Start();
-        // A fixed-but-spread port (same pattern XStoreZmqNetworkTest and the
-        // later ZmqServerCurveTest fixture use), not bind-to-port-0 --
-        // avoids depending on an unverified ephemeral-port/last_endpoint
-        // query API in this vendored cppzmq version.
-        int port = 25900 + static_cast<int>(getpid() % 500);
-        endpoint_ = "tcp://127.0.0.1:" + std::to_string(port);
-        router.bind(endpoint_);
+        // OS-assigned port (FreePort); a port taken between FreePort() and the bind makes bind() throw, so retry on
+        // a fresh one (bounded). Every test below needs a successful bind to say anything, so a final failure throws.
+        constexpr int MAX_ATTEMPTS = 5;
+        for (int attempt = 1;; ++attempt) {
+            endpoint_ = "tcp://127.0.0.1:" + std::to_string(FreePort());
+            try {
+                router.bind(endpoint_);
+                break;
+            } catch (const zmq::error_t &) {
+                if (attempt >= MAX_ATTEMPTS) throw;
+            }
+        }
     }
 
     zmq::socket_t MakeClient(const XStoreCurveKeyPair &client_kp) {
@@ -246,37 +253,25 @@ struct CurveServerFixture {
     ScratchDir scratch{"curve_zmq_server_test"};
     XStoreCurveKeyPair server_kp = XStoreCurveKeyPair::Generate();
     std::filesystem::path allowed_dir = scratch.test_root / "allowed";
+    XStoreCurveKeyPair probe_kp = XStoreCurveKeyPair::Generate();
     std::shared_ptr<FilesystemKeyStore> store;
     std::string server_addr;
 
     CurveServerFixture() {
         std::filesystem::create_directories(allowed_dir);
+        // probe_kp is the identity of the readiness ping; the key every test treats as "unlisted" or "revoked" is a
+        // different one, so listing it does not change what the cases assert.
+        Z85WriteFile(allowed_dir / "probe.pub", probe_kp.public_key_z85, false);
         store = std::make_shared<FilesystemKeyStore>(allowed_dir, std::chrono::milliseconds(0));
 
-        // Each fixture leaves its server socket bound forever (ZmqServer has
-        // no shutdown API -- StartServer() blocks in zmq::proxy(), same
-        // pattern documented at the top of XStoreZmqNetworkTest.cpp), and
-        // all 3 ZmqServerCurveTest cases below share one process when run
-        // via --gtest_filter (unlike plain `ctest`, which forks one process
-        // per test). A port keyed only on getpid() is therefore identical
-        // across all 3 fixture instances in that process, so the 2nd/3rd
-        // bind() hits EADDRINUSE -- uncaught out of the detached server
-        // thread, so it's a std::terminate() crash, not a test failure. A
-        // static per-process counter gives every instance a distinct port;
-        // the base is chosen clear of this suite's other fixed ranges
-        // (CurvePair: 25900-26399, XStoreZmqNetworkTest: 25500-29499,
-        // XStoreZmqConcurrentTest: 26500-30499).
-        static std::atomic<int> instance_counter{0};
-        int port = 31000 + static_cast<int>(getpid() % 1000) * 4 + instance_counter.fetch_add(1);
+        // Each fixture leaves its server socket bound forever (ZmqServer has no shutdown API -- StartServer() blocks in
+        // zmq::proxy()), and all 3 ZmqServerCurveTest cases share one process under --gtest_filter, so every instance
+        // needs its own port: OS-assigned, with the bounded retry and the CURVE ping that StartZmqServerOnFreePort
+        // provides. No server = nothing the case could assert, so throw (gtest reports it as the test's failure).
+        const ZmqCurveServerConfig config{server_kp, probe_kp, store};
+        const int port = StartZmqServerOnFreePort(1, &config);
+        if (port < 0) throw std::runtime_error("no CURVE ZMQ server came up on any of 5 OS-assigned ports");
         server_addr = "tcp://127.0.0.1:" + std::to_string(port);
-
-        auto *server = new ZmqServer(1);
-        std::thread server_thread([server, port, this]() {
-            // Never stopped (leaked, detached), so the drain result is irrelevant.
-            (void)server->StartServer("127.0.0.1", std::to_string(port), server_kp, store);
-        });
-        server_thread.detach();
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 
     zmq::socket_t MakeClient(zmq::context_t &ctx, const XStoreCurveKeyPair &client_kp) {
@@ -310,7 +305,7 @@ TEST(ZmqServerCurveTest, AllowedClientGetsPingReply) {
 }
 
 TEST(ZmqServerCurveTest, UnlistedClientTimesOut) {
-    CurveServerFixture fx;  // nobody allowed
+    CurveServerFixture fx;  // no test key listed (only the readiness probe)
     auto stranger_kp = XStoreCurveKeyPair::Generate();
 
     zmq::context_t ctx(1);
@@ -355,6 +350,40 @@ TEST(ZmqServerCurveTest, RevokedClientDeniedOnNextConnection) {
     EXPECT_FALSE(sock2.recv(reply2, zmq::recv_flags::none));
 }
 
+namespace {
+// True iff a CURVE SUB with `client_kp` receives one frame from the stats PUB on `port` within `timeout_ms`.
+bool ReceivesStatsFrame(int port, const XStoreCurveKeyPair &server_kp, const XStoreCurveKeyPair &client_kp, int timeout_ms) {
+    zmq::context_t ctx(1);
+    zmq::socket_t sub(ctx, zmq::socket_type::sub);
+    sub.set(zmq::sockopt::curve_serverkey, server_kp.public_key_z85);
+    sub.set(zmq::sockopt::curve_publickey, client_kp.public_key_z85);
+    sub.set(zmq::sockopt::curve_secretkey, client_kp.secret_key_z85);
+    sub.set(zmq::sockopt::subscribe, "");
+    sub.set(zmq::sockopt::rcvtimeo, timeout_ms);
+    sub.set(zmq::sockopt::linger, 0);
+    sub.connect("tcp://127.0.0.1:" + std::to_string(port));
+    zmq::message_t frame;
+    return sub.recv(frame, zmq::recv_flags::none).has_value();
+}
+
+// Starts the stats collector on an OS-assigned port (a fixed range, 35500+ included, overlaps the kernel's ephemeral
+// range and failed once with EADDRINUSE) and returns the port once `allowed_kp` receives a frame there, else -1. The
+// collector binds on its own thread and only logs a bind failure, so a stolen port shows up as no frame: retry on a
+// fresh port (5 attempts). Start() stops the previous collector before starting a new one.
+int StartCollectorAndConfirmFrame(const XStoreCurveKeyPair &server_kp, const std::shared_ptr<KeyStore> &store,
+                                  const XStoreCurveKeyPair &allowed_kp) {
+    constexpr int MAX_ATTEMPTS = 5;
+    for (int attempt = 0; attempt < MAX_ATTEMPTS; ++attempt) {
+        const int port = FreePort();
+        if (port < 0) continue;
+        SysStatsCollector::Start("127.0.0.1", port, server_kp, store);
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        if (ReceivesStatsFrame(port, server_kp, allowed_kp, 3000)) return port;
+    }
+    return -1;
+}
+}  // namespace
+
 TEST(SysStatsCurveTest, AllowedSubscriberReceivesAFrame) {
     ScratchDir scratch("sysstats_curve_allow_test");
     auto allowed_dir = scratch.test_root / "allowed";
@@ -364,57 +393,22 @@ TEST(SysStatsCurveTest, AllowedSubscriberReceivesAFrame) {
     Z85WriteFile(allowed_dir / "viewer.pub", client_kp.public_key_z85, false);
     auto store = std::make_shared<FilesystemKeyStore>(allowed_dir, std::chrono::milliseconds(0));
 
-    // OS-assigned port, not a fixed range: every fixed range (35500+ included) overlaps the kernel's ephemeral
-    // range and failed once with EADDRINUSE. The collector binds on its own thread and only logs a bind failure,
-    // so a stolen port shows up as no frame; retry on a fresh port (MAX_ATTEMPTS).
-    // Start() stops the previous collector before starting a new one.
-    constexpr int MAX_ATTEMPTS = 5;
-    bool got_frame = false;
-    for (int attempt = 0; attempt < MAX_ATTEMPTS && !got_frame; ++attempt) {
-        int port = FreePort();
-        ASSERT_GT(port, 0);
-        SysStatsCollector::Start("127.0.0.1", port, server_kp, store);
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-        zmq::context_t ctx(1);
-        zmq::socket_t sub(ctx, zmq::socket_type::sub);
-        sub.set(zmq::sockopt::curve_serverkey, server_kp.public_key_z85);
-        sub.set(zmq::sockopt::curve_publickey, client_kp.public_key_z85);
-        sub.set(zmq::sockopt::curve_secretkey, client_kp.secret_key_z85);
-        sub.set(zmq::sockopt::subscribe, "");
-        sub.set(zmq::sockopt::rcvtimeo, 3000);
-        sub.set(zmq::sockopt::linger, 0);
-        sub.connect("tcp://127.0.0.1:" + std::to_string(port));
-
-        zmq::message_t frame;
-        got_frame = sub.recv(frame, zmq::recv_flags::none).has_value();
-    }
-    EXPECT_TRUE(got_frame);
+    EXPECT_GT(StartCollectorAndConfirmFrame(server_kp, store, client_kp), 0);
 }
 
 TEST(SysStatsCurveTest, UnlistedSubscriberReceivesNothing) {
     ScratchDir scratch("sysstats_curve_deny_test");
     auto allowed_dir = scratch.test_root / "allowed";
-    std::filesystem::create_directories(allowed_dir);  // empty
+    std::filesystem::create_directories(allowed_dir);
     auto server_kp = XStoreCurveKeyPair::Generate();
+    auto allowed_kp = XStoreCurveKeyPair::Generate();
     auto stranger_kp = XStoreCurveKeyPair::Generate();
+    Z85WriteFile(allowed_dir / "viewer.pub", allowed_kp.public_key_z85, false);  // the stranger is not listed
     auto store = std::make_shared<FilesystemKeyStore>(allowed_dir, std::chrono::milliseconds(0));
 
-    // OS-assigned port, see AllowedSubscriberReceivesAFrame.
-    int port = FreePort();
-    ASSERT_GT(port, 0);
-    SysStatsCollector::Start("127.0.0.1", port, server_kp, store);
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-    zmq::context_t ctx(1);
-    zmq::socket_t sub(ctx, zmq::socket_type::sub);
-    sub.set(zmq::sockopt::curve_serverkey, server_kp.public_key_z85);
-    sub.set(zmq::sockopt::curve_publickey, stranger_kp.public_key_z85);
-    sub.set(zmq::sockopt::curve_secretkey, stranger_kp.secret_key_z85);
-    sub.set(zmq::sockopt::subscribe, "");
-    sub.set(zmq::sockopt::rcvtimeo, 1500);
-    sub.connect("tcp://127.0.0.1:" + std::to_string(port));
-
-    zmq::message_t frame;
-    EXPECT_FALSE(sub.recv(frame, zmq::recv_flags::none));
+    // Positive signal first: an allowed subscriber receives a frame on this very port, so the collector is really
+    // up there and "nothing" below cannot be a stolen port.
+    const int port = StartCollectorAndConfirmFrame(server_kp, store, allowed_kp);
+    ASSERT_GT(port, 0) << "collector never delivered a frame to the allowed subscriber";
+    EXPECT_FALSE(ReceivesStatsFrame(port, server_kp, stranger_kp, 1500));
 }

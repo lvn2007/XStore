@@ -8,14 +8,18 @@
 #include "XStore/XStore_WalRing.h"
 #include "XStore/XStore_WalCheckpoint.h"
 #include "XStore/XStore_RowScan.h"
+#include "XStore/XStore_DirLock.h"
 #include "XStoreTestSupport.h"
 #include "XStoreSyscallFault.h"
 #include "include/DataStructs/TimeStruct.h"
 #include <cerrno>
 #include <cstddef>
 #include <filesystem>
+#include <fstream>
 #include <memory>
+#include <string>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
@@ -26,7 +30,7 @@ using xstore_test::ScratchDir;
 TEST(DurabilityHeaderLayoutTest, ZoneMapHeaderLayout) {
     EXPECT_EQ(sizeof(ZoneMapFileHeader), 24u);
     EXPECT_EQ(offsetof(ZoneMapFileHeader, dirty), 12u);
-    EXPECT_EQ(ZONE_MAP_VERSION, 4u);
+    EXPECT_EQ(ZONE_MAP_VERSION, 5u);
 
     ScratchDir scratch("durability_zmap_header_layout");
     std::string path = (scratch.test_root / "2024.zmap").string();
@@ -40,8 +44,8 @@ TEST(DurabilityHeaderLayoutTest, ZoneMapHeaderLayout) {
     ASSERT_EQ(pread(fd, &on_disk, sizeof(on_disk), 0), static_cast<ssize_t>(sizeof(on_disk)));
     close(fd);
 
-    EXPECT_EQ(on_disk.dirty, 0u);
-    EXPECT_EQ(on_disk.version, 4u);
+    EXPECT_EQ(on_disk.dirty, 1u); // a new file opens dirty (Q2: indistinguishable from a crashed truncate)
+    EXPECT_EQ(on_disk.version, 5u);
 }
 
 TEST(DurabilityHeaderLayoutTest, CatIdxHeaderLayout) {
@@ -60,7 +64,7 @@ TEST(DurabilityHeaderLayoutTest, CatIdxHeaderLayout) {
     ASSERT_EQ(pread(fd, &on_disk, sizeof(on_disk), 0), static_cast<ssize_t>(sizeof(on_disk)));
     close(fd);
 
-    EXPECT_EQ(on_disk.dirty, 0u);
+    EXPECT_EQ(on_disk.dirty, 1u); // a new file opens dirty (Q2)
     EXPECT_EQ(on_disk.version, 2u);
 }
 
@@ -87,9 +91,20 @@ std::vector<CatIdxObservation> CatObs(int64_t v) {
     return {CatIdxObservation{0, EncodeFDataForCatIdx(val), true}};
 }
 
+// A new file is created dirty (it cannot be told from a rebuild's crashed truncate, see ZoneMapFile::Open) but
+// without a synced dirty mark (SF1: no fdatasync in Open); MarkClean still cleans it. A clean existing file reopened
+// without writes stays clean and costs no dirty mark.
 TEST(DurabilityMarkDirtyTest, ZoneMapCleanAfterOpenWithoutWrites) {
     ScratchDir scratch("durability_zmap_clean_open");
     std::string path = (scratch.test_root / "2024.zmap").string();
+    {
+        ZoneMapFile created;
+        ASSERT_TRUE(created.Open(path, 64, 4));
+        EXPECT_EQ(OnDiskDirty<ZoneMapFileHeader>(path), 1u);
+        EXPECT_EQ(created.DirtyMarkWritesForTests(), 0u);
+        ASSERT_TRUE(created.MarkClean());
+        EXPECT_EQ(OnDiskDirty<ZoneMapFileHeader>(path), 0u);
+    }
     ZoneMapFile zmap;
     ASSERT_TRUE(zmap.Open(path, 64, 4));
     EXPECT_EQ(OnDiskDirty<ZoneMapFileHeader>(path), 0u);
@@ -118,9 +133,18 @@ TEST(DurabilityMarkDirtyTest, ZoneMapMarksDirtyOnceAndMarkCleanResets) {
     EXPECT_EQ(zmap.DirtyMarkWritesForTests(), 2u);
 }
 
+// Same as the zone map: created dirty without a sync, a clean existing file reopens clean.
 TEST(DurabilityMarkDirtyTest, CatIdxCleanAfterOpenWithoutWrites) {
     ScratchDir scratch("durability_catidx_clean_open");
     std::string path = (scratch.test_root / "2024.catidx").string();
+    {
+        CatIdxFile created;
+        ASSERT_TRUE(created.Open(path, 64, 4));
+        EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(path), 1u);
+        EXPECT_EQ(created.DirtyMarkWritesForTests(), 0u);
+        ASSERT_TRUE(created.MarkClean());
+        EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(path), 0u);
+    }
     CatIdxFile catidx;
     ASSERT_TRUE(catidx.Open(path, 64, 4));
     EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(path), 0u);
@@ -147,6 +171,38 @@ TEST(DurabilityMarkDirtyTest, CatIdxMarksDirtyOnceAndMarkCleanResets) {
     catidx.UpdateRow(2000, CatObs(2));
     EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(path), 1u);
     EXPECT_EQ(catidx.DirtyMarkWritesForTests(), 2u);
+}
+
+// SF1: opening a NEW index file performs no fdatasync (Open runs under the global registry mutex); the dirty header is
+// made durable by the first write, under the file's own mutex.
+TEST(DurabilityMarkDirtyTest, NewFileOpenDoesNotSyncAndFirstWriteMakesTheDirtyHeaderDurable) {
+    ScratchDir scratch("durability_new_file_no_sync");
+    const std::string zpath = (scratch.test_root / "2024.zmap").string();
+    const std::string cpath = (scratch.test_root / "2024.catidx").string();
+    {
+        xstore_fault::ScopedFdFault syncs(xstore_fault::FdOp::kSync, zpath, 1000, 0, EIO); // counts, never fails
+        ZoneMapFile zmap;
+        ASSERT_TRUE(zmap.Open(zpath, 64, 4));
+        EXPECT_EQ(syncs.Calls(), 0) << "Open of a new .zmap must not fdatasync";
+        EXPECT_EQ(OnDiskDirty<ZoneMapFileHeader>(zpath), 1u);
+        zmap.UpdateRow(0, ZmapObs(1.0), 1);
+        EXPECT_EQ(syncs.Calls(), 1) << "the first write syncs the dirty header";
+        EXPECT_EQ(zmap.DirtyMarkWritesForTests(), 1u);
+        zmap.UpdateRow(1, ZmapObs(2.0), 1);
+        EXPECT_EQ(syncs.Calls(), 1);
+    }
+    {
+        xstore_fault::ScopedFdFault syncs(xstore_fault::FdOp::kSync, cpath, 1000, 0, EIO);
+        CatIdxFile catidx;
+        ASSERT_TRUE(catidx.Open(cpath, 64, 4));
+        EXPECT_EQ(syncs.Calls(), 0) << "Open of a new .catidx must not fdatasync";
+        EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(cpath), 1u);
+        catidx.UpdateRow(0, CatObs(1));
+        EXPECT_EQ(syncs.Calls(), 1) << "the first write syncs the dirty header";
+        EXPECT_EQ(catidx.DirtyMarkWritesForTests(), 1u);
+        catidx.UpdateRow(1, CatObs(2));
+        EXPECT_EQ(syncs.Calls(), 1);
+    }
 }
 
 TEST(DurabilityMarkDirtyTest, CatIdxBitmapAppendMarksDirtyAndCommitCarriesIt) {
@@ -468,13 +524,13 @@ protected:
         EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), 0u);
     }
 
-    // Incomplete scan: one data-file read fails part-way through a rebuild's row scan. The rows the scan never saw
-    // are missing from the index, so it must stay dirty. A zero row at kFarRow gives the file a second data extent,
-    // so each scan is two preads (rows near 0, then rows near kFarRow). The fault passes `skip_calls` preads and
-    // fails the next one: skip 1 hits the zone-map scan (it runs first), skip 3 the catidx scan. The failing scan
-    // has already folded the first extent. (The first-pread case, nothing folded, is
-    // FirstDataReadFailureLeavesBothIndexesDirty.) Restart #2, without the fault, must rebuild both correctly.
-    void RebuildWithOneFailedDataRead(int skip_calls, bool zmap_scan_fails) {
+    // Incomplete scan: one data-file read fails part-way through the rebuild's row scan (one scan serves both
+    // indexes since stage 2a). The rows the scan never saw are missing, so the index must stay dirty. Only the index
+    // under test is stale (its sidecar deleted after a clean stop); the other is clean and must not be touched. A zero
+    // row at kFarRow gives the file a second data extent, so the scan is two preads (rows near 0, then rows near
+    // kFarRow): skip 1 fails the second one, after the first extent was read. (The first-pread case is
+    // FirstDataReadFailureLeavesBothIndexesDirty.) Restart #2, without the fault, must rebuild it correctly.
+    void RebuildWithOneFailedDataRead(bool zmap_stale) {
         constexpr uint64_t kFarRow = 20000;
         XStore store;
         InsertRows(store);
@@ -486,19 +542,22 @@ protected:
                       static_cast<ssize_t>(zero_row.size()));
             close(fd);
         }
-        DropRegistriesAndZeroBody(Path(".zmap"), sizeof(ZoneMapFileHeader));
-        DropRegistriesAndZeroBody(Path(".catidx"), sizeof(CatIdxFileHeader));
+        CleanShutdown();
+        CheckpointWal();
+        XStore::ClearZoneMapRegistryForTests();
+        XStore::ClearCatIdxRegistryForTests();
+        std::filesystem::remove(Path(zmap_stale ? ".zmap" : ".catidx"));
         {
-            xstore_fault::ScopedFdFault fail(xstore_fault::FdOp::kPread, Path(".XSTORE"), skip_calls,
+            xstore_fault::ScopedFdFault fail(xstore_fault::FdOp::kPread, Path(".XSTORE"), /*skip_calls=*/1,
                                              /*fail_calls=*/1, EIO);
             store.InitDB();
             ASSERT_EQ(fail.Failures(), 1) << "the fault never hit the data-file scan";
         }
-        EXPECT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), zmap_scan_fails ? 1u : 0u);
-        EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), zmap_scan_fails ? 0u : 1u);
+        EXPECT_EQ(OnDiskDirty<ZoneMapFileHeader>(Path(".zmap")), zmap_stale ? 1u : 0u);
+        EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(Path(".catidx")), zmap_stale ? 0u : 1u);
 
-        if (zmap_scan_fails) DropRegistriesAndZeroBody(Path(".zmap"), sizeof(ZoneMapFileHeader));
-        else DropRegistriesAndZeroBody(Path(".catidx"), sizeof(CatIdxFileHeader));
+        XStore::ClearZoneMapRegistryForTests();
+        XStore::ClearCatIdxRegistryForTests();
         store.InitDB();
         EXPECT_EQ(ReadZmapEntry0().valid_count, kRows);
         EXPECT_EQ(FindDouble(store, 137.0), (std::vector<uint64_t>{kBaseEpoch + 137}));
@@ -512,10 +571,10 @@ TEST_F(DurabilityRebuildFaultTest, FailedZoneMapFdatasyncLeavesItDirty) { Rebuil
 TEST_F(DurabilityRebuildFaultTest, FailedCatIdxFdatasyncLeavesItDirty) { RebuildUnderSyncFault(".catidx"); }
 
 TEST_F(DurabilityRebuildFaultTest, IncompleteScanInTheZoneMapRebuildLeavesItDirty) {
-    RebuildWithOneFailedDataRead(/*skip_calls=*/1, /*zmap_scan_fails=*/true);
+    RebuildWithOneFailedDataRead(/*zmap_stale=*/true);
 }
 TEST_F(DurabilityRebuildFaultTest, IncompleteScanInTheCatIdxRebuildLeavesItDirty) {
-    RebuildWithOneFailedDataRead(/*skip_calls=*/3, /*zmap_scan_fails=*/false);
+    RebuildWithOneFailedDataRead(/*zmap_stale=*/false);
 }
 
 // Every data-file read fails from the first one, so neither rebuild folds a single row. The freshly created (empty)
@@ -763,6 +822,135 @@ TEST_F(DurabilityShutdownTest, InsertsAfterShutdownAreRejected) {
     XStore_Proto::RangeInsert_REP range_rep;
     store.RangeInsert(&range_req, &range_rep);
     EXPECT_EQ(range_rep.insertstatus().rfind("[ERROR]", 0), 0u) << range_rep.insertstatus();
+}
+
+// One XStore process per data directory (XStore_DirLock.h). A second process is simulated by taking the
+// flock on the lock file from a separate open file description, which conflicts exactly like another process.
+namespace fs = std::filesystem;
+
+class DirLockTest : public ::testing::Test {
+protected:
+    ScratchDir scratch{"dirlock"};
+    fs::path data_dir = scratch.test_root / "DataStore";
+
+    static size_t OpenFdCount() {
+        size_t n = 0;
+        for (const auto &entry : fs::directory_iterator("/proc/self/fd")) { (void)entry; ++n; }
+        return n;
+    }
+};
+
+TEST_F(DirLockTest, AcquireIsIdempotentPerProcessAndRecordsTheOwnerPid) {
+    const dirlock::Result first = dirlock::Acquire(data_dir);
+    ASSERT_TRUE(first.ok) << first.error;
+    EXPECT_TRUE(first.warning.empty()) << first.warning;
+    // Same directory, other spellings (trailing '/', a symlink): still held by this process, still a success.
+    EXPECT_TRUE(dirlock::Acquire(data_dir.string() + "/").ok);
+    const fs::path link = scratch.test_root / "alias";
+    fs::create_directory_symlink(data_dir, link);
+    EXPECT_TRUE(dirlock::Acquire(link).ok);
+    EXPECT_EQ(dirlock::LockPathFor(link), dirlock::LockPathFor(data_dir));
+
+    // Two instances in one process (one per worker thread in production) do not conflict with themselves.
+    EXPECT_NO_THROW({ XStore a; XStore b; });
+
+    // The lock is really held: another open file description cannot take it, and the file names the owner.
+    const fs::path lock_path = dirlock::LockPathFor(data_dir);
+    EXPECT_EQ(lock_path, fs::path(fs::weakly_canonical(data_dir).string() + ".lock"));
+    const int fd = open(lock_path.c_str(), O_RDWR | O_CLOEXEC);
+    ASSERT_GE(fd, 0);
+    EXPECT_NE(flock(fd, LOCK_EX | LOCK_NB), 0);
+    EXPECT_EQ(errno, EWOULDBLOCK);
+    close(fd);
+    std::ifstream in(lock_path);
+    long pid = 0;
+    in >> pid;
+    EXPECT_EQ(pid, static_cast<long>(getpid()));
+}
+
+TEST_F(DirLockTest, DirectoryOwnedByAnotherProcessIsRefusedWithoutSideEffects) {
+    const fs::path lock_path = dirlock::LockPathFor(data_dir);
+    const int other = open(lock_path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    ASSERT_GE(other, 0);
+    ASSERT_EQ(flock(other, LOCK_EX | LOCK_NB), 0);
+
+    const dirlock::Result refused = dirlock::Acquire(data_dir);
+    EXPECT_FALSE(refused.ok);
+    EXPECT_NE(refused.error.find(fs::weakly_canonical(data_dir).string()), std::string::npos) << refused.error;
+    EXPECT_NE(refused.error.find("another XStore process"), std::string::npos) << refused.error;
+
+    // The constructor throws the same message, and runs no startup work: no WAL directory, no rings.
+    try {
+        XStore store;
+        ADD_FAILURE() << "constructing XStore on a directory another process owns did not throw";
+    } catch (const std::runtime_error &e) {
+        EXPECT_NE(std::string(e.what()).find(fs::weakly_canonical(data_dir).string()), std::string::npos) << e.what();
+    }
+    EXPECT_TRUE(fs::is_empty(data_dir)) << "a refused start must not touch the data directory (no WAL, no rings)";
+    EXPECT_FALSE(dirlock::Acquire(data_dir).ok) << "a refusal must not be remembered as ownership";
+
+    // Once the other owner is gone the very same directory starts: the failed attempt left nothing behind
+    // (in particular it is not in the constructor's initialized-directories set).
+    close(other);
+    EXPECT_TRUE(dirlock::Acquire(data_dir).ok);
+    EXPECT_NO_THROW({ XStore store; });
+}
+
+// A lock file that cannot be opened read-write (left by another user, read-only mount) must not switch the rule off:
+// flock() works on a read-only descriptor. The fault interposer fails open(O_RDWR) with EACCES on that one path
+// whatever the uid (chmod would not bind root).
+TEST_F(DirLockTest, LockFileThatCannotBeOpenedReadWriteIsStillLockedReadOnly) {
+    const fs::path lock_path = dirlock::LockPathFor(data_dir);
+    const int other = open(lock_path.c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0444);
+    ASSERT_GE(other, 0);
+    ASSERT_EQ(flock(other, LOCK_EX | LOCK_NB), 0);
+    {
+        xstore_fault::ScopedPathFault fault(lock_path.string(), /*subtree=*/false, EACCES, xstore_fault::kOpenWrite);
+        const dirlock::Result refused = dirlock::Acquire(data_dir);
+        EXPECT_GT(fault.OpenHits(), 0u) << "the read-write open was not failed; the test proves nothing";
+        EXPECT_FALSE(refused.ok) << "an unopenable-read-write lock file must not disable the rule";
+        EXPECT_NE(refused.error.find("another XStore process"), std::string::npos) << refused.error;
+    }
+    close(other);
+
+    // Nobody else holds it: this process takes the lock through the read-only descriptor.
+    {
+        xstore_fault::ScopedPathFault fault(lock_path.string(), false, EACCES, xstore_fault::kOpenWrite);
+        const dirlock::Result taken = dirlock::Acquire(data_dir);
+        EXPECT_TRUE(taken.ok) << taken.error;
+        EXPECT_TRUE(taken.warning.empty()) << taken.warning;
+        const int probe = open(lock_path.c_str(), O_RDONLY | O_CLOEXEC);
+        ASSERT_GE(probe, 0);
+        EXPECT_NE(flock(probe, LOCK_EX | LOCK_NB), 0) << "the read-only fallback did not hold the lock";
+        close(probe);
+    }
+}
+
+// Not even a read-only open works: the old behaviour, one warning, the rule not enforced for this process.
+TEST_F(DirLockTest, LockFileThatCannotBeOpenedAtAllWarnsAndContinues) {
+    const fs::path lock_path = dirlock::LockPathFor(data_dir);
+    xstore_fault::ScopedPathFault fault(lock_path.string(), false, EACCES,
+                                        xstore_fault::kOpenWrite | xstore_fault::kOpenRead);
+    const dirlock::Result result = dirlock::Acquire(data_dir);
+    EXPECT_TRUE(result.ok);
+    EXPECT_NE(result.warning.find("is not enforced"), std::string::npos) << result.warning;
+}
+
+// The test binaries build hundreds of scratch directories in one process; a lock for a deleted one must not
+// keep its fd for the rest of the run (the default soft limit is often 1024).
+TEST_F(DirLockTest, LocksOfDeletedDirectoriesAreClosedOnTheNextAcquire) {
+    ASSERT_TRUE(dirlock::Acquire(data_dir).ok);
+    const size_t baseline = OpenFdCount();
+    for (int i = 0; i < 40; ++i) {
+        const fs::path dir = scratch.test_root / ("churn" + std::to_string(i));
+        fs::create_directories(dir);
+        ASSERT_TRUE(dirlock::Acquire(dir).ok);
+        // Both sweep rules: lock file unlinked (directory still there) / directory deleted.
+        if (i % 2 == 0) fs::remove(dirlock::LockPathFor(dir));
+        else fs::remove_all(dir);
+    }
+    ASSERT_TRUE(dirlock::Acquire(scratch.test_root / "last").ok);
+    EXPECT_LE(OpenFdCount(), baseline + 2) << "locks of deleted directories piled up";
 }
 
 } // namespace

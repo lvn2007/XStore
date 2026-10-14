@@ -1,5 +1,6 @@
 // tests/integration/XStoreWalTest.cpp
 #include <gtest/gtest.h>
+#include "include/DataStructs/TimeStruct.h"
 #include "include/XStore/XStore.h"
 #include "include/XStore/XStore_Crc32c.h"
 #include "include/XStore/XStore_WalRing.h"
@@ -168,17 +169,9 @@ TEST_F(XStoreWalTest, BypassWritesNoWalRecord) {
     store.UnaryInsert(1700000004ULL, MakeRow(5.0), "WALBYPASSNOWAL", &priming_rep, XStore_Proto::SYNC);
     ASSERT_NE(priming_rep.insertstatus().find("[INFO]"), std::string::npos);
 
-    // Which shard the priming record actually landed on can't be predicted
-    // by hash(db_base_path) % active alone anymore: EnqueueWalRecord salts
-    // by calling-thread-id whenever WAL_SHARDS_PER_DB > 1 (see its own
-    // comment), so the same DB can land on any of up to WAL_SHARDS_PER_DB
-    // shards depending on which thread happens to call it -- this test's
-    // calling thread's salt isn't known ahead of time. Discover the real
-    // shard by scanning every active shard's file for the one that's
-    // non-empty after the priming write, rather than recomputing (and
-    // duplicating) EnqueueWalRecord's own salting formula here. Both calls
-    // below are on this same test thread, so they're guaranteed to land on
-    // the same shard as each other regardless of which one that is.
+    // Find the shard file the priming record landed on by scanning for the non-empty one (robust to the routing
+    // formula, which is XStore::WalShardFor((db, year)) and independent of the calling thread). Both calls below
+    // are for the same (db, year), so they use the same shard.
     auto read_file = [](const std::filesystem::path &path) {
         std::ifstream in(path, std::ios::binary);
         return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
@@ -386,8 +379,8 @@ TEST_F(XStoreWalTest, ReplayRecoversUnappliedRecord) {
         CreateTestDb(store, "WALCRASH", XStore_Proto::SECOND, 64);
     }
 
-    // Locate this DB's WAL shard file the same way EnqueueWalRecord would
-    // (hash(dbBasePath) % WAL_SHARD_COUNT), then hand-write one record into
+    // Pick a WAL shard file by DB-name hash (replay scans every shard file, so which one does not matter;
+    // this is not EnqueueWalRecord's formula), then hand-write one record into
     // it directly -- standing in for "the writer thread fsync'd this batch
     // but the process crashed before the apply-to-data-file step ran".
     std::filesystem::path db_base_path = scratch->test_root / "DataStore" / "WALCRASH";
@@ -660,7 +653,8 @@ TEST_F(XStoreWalTest, WalStatsCountersReflectRealBatching) {
 
     std::filesystem::path db_base_path = scratch->test_root / "DataStore" / "WALSTATS";
     size_t active = XStore::active_wal_shard_count.load(std::memory_order_relaxed);
-    size_t shard_idx = std::hash<std::string>{}(db_base_path.string()) % active;
+    // Every insert below is in one year (2023), so they all go to one shard.
+    size_t shard_idx = XStore::WalShardFor(db_base_path.string(), TimeStruct(1700500000ULL, XStore_Proto::SECOND).year, active);
     XStore::WalShard &shard = XStore::wal_shards[shard_idx];
 
     uint64_t batches_before = shard.total_batches_processed.load(std::memory_order_relaxed);

@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
@@ -36,6 +37,17 @@ struct ZoneMapEntry {
     uint64_t first_row_index; // row_index first_value was folded from -- lets an out-of-order (backfill) insert correctly tell whether it's earlier than what's already recorded, not just first-observed-wins
     uint64_t last_row_index;  // row_index last_value was folded from -- same reasoning, for "later than what's recorded"
 };
+// Bit 63 of null_count marks a block "inexact": a row folded into it was later
+// overwritten or deleted, so sum/sum_sq/valid_count/null_count/first/last may
+// still count the old row. Set on every entry of the block; consumers must
+// then scan the data instead of trusting those fields (min/max stay usable for
+// pruning: they can only be too wide). Cleared only by a rebuild, or by a
+// RangeDelete that empties the whole block. Part of the v5 format (a real
+// null_count never comes near 2^63).
+inline constexpr uint64_t ZONE_MAP_INEXACT_BIT = 1ULL << 63;
+inline bool ZoneMapEntryInexact(const ZoneMapEntry &e) { return (e.null_count & ZONE_MAP_INEXACT_BIT) != 0; }
+inline uint64_t ZoneMapNullCount(const ZoneMapEntry &e) { return e.null_count & ~ZONE_MAP_INEXACT_BIT; }
+
 static_assert(std::is_trivially_copyable<ZoneMapEntry>::value,
               "ZoneMapEntry must be trivially copyable for raw pread/pwrite");
 static_assert(sizeof(ZoneMapEntry) == 80, "update size-dependent capacity-planning docs (docs/XStore_Technical_Reference.md §4.14) if this changes");
@@ -45,8 +57,10 @@ static_assert(sizeof(ZoneMapEntry) == 80, "update size-dependent capacity-planni
 // written under an older version is never migrated in place -- ZoneMapFile::
 // Open() truncates and reinitializes it instead (see Open's comment). Named
 // out so a future format change is a one-line bump + rebuild, not a magic-
-// number hunt across the codebase.
-inline constexpr uint32_t ZONE_MAP_VERSION = 4;
+// number hunt across the codebase. 4 -> 5: same layout, but v5 defines bit 63
+// of null_count as the inexact flag above; a v4 file may already count
+// overwritten or deleted rows with no flag, so it is discarded and rebuilt.
+inline constexpr uint32_t ZONE_MAP_VERSION = 5;
 
 struct ZoneMapFileHeader {
     uint32_t magic   = 0x5A4D4150; // 'ZMAP'
@@ -61,6 +75,7 @@ struct ZoneMapFileHeader {
 static_assert(sizeof(ZoneMapFileHeader) == 24);
 static_assert(offsetof(ZoneMapFileHeader, dirty) == 12);
 
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -78,6 +93,21 @@ struct ZoneMapObservation {
     double   value;
     bool     is_numeric;
 };
+
+// Rows for ZoneMapFile::RebuildFoldRows in a flat layout a caller reuses across chunks (no allocation per row once the
+// vectors have grown): row i is row_index[i], with observations [obs_end[i-1], obs_end[i]) (obs_end[-1] = 0), each row
+// folded exactly as UpdateRow(row_index[i], <its observations>, pad_to) would fold it.
+struct ZoneMapFoldBatch {
+    std::vector<uint64_t> row_index;
+    std::vector<size_t> obs_end;
+    std::vector<ZoneMapObservation> observations;
+    uint32_t pad_to = 0;
+    void Clear() { row_index.clear(); obs_end.clear(); observations.clear(); }
+    // Closes the row whose observations were appended since the previous EndRow.
+    void EndRow(uint64_t row) { row_index.push_back(row); obs_end.push_back(observations.size()); }
+};
+
+enum class BeginRebuildResult { kStarted, kFailed, kAlreadyRebuilding };
 
 class ZoneMapFile {
 public:
@@ -116,21 +146,138 @@ public:
     // wants no additional padding.
     void UpdateRow(uint64_t row_index, const std::vector<ZoneMapObservation> &observations, uint32_t pad_to);
 
+    // True when a write of rows [first_row, first_row + row_count) might replace a row already folded into an
+    // exact block, so the caller must read the old bytes and call MarkInexact for any it finds. False (no I/O
+    // needed) when every touched block is already inexact or provably holds no folded row at or after the run's
+    // first row in that block. Caller holds the write range lock for the rows.
+    [[nodiscard]] bool NeedsOverwriteCheck(uint64_t first_row, uint64_t row_count);
+
+    // Sets the inexact bit on every block holding a row in [first_row, last_row] that has anything folded into
+    // it, and pwrites those blocks (after the dirty mark, like UpdateRow). Call BEFORE changing the rows.
+    void MarkInexact(uint64_t first_row, uint64_t last_row);
+
+    // RangeDelete of rows [first_row, last_row]: under mutex_, marks the index dirty, flags the (at most two)
+    // partly covered end blocks, runs punch_data (the data-file punch), then resets every fully covered block to
+    // the empty, exact state with one fallocate(PUNCH_HOLE) on this file (a hole reads as zeros = a block with no
+    // rows), without loading those blocks. If the data punch fails the full blocks are flagged instead; if only
+    // this file's punch fails they are flagged too. Returns punch_data's result.
+    bool DeleteRows(uint64_t first_row, uint64_t last_row, const std::function<bool()> &punch_data);
+
+    // Live widening, stage 1 mechanics (see docs/XStore_Technical_Reference.md, "Live widening"). While a rebuild runs,
+    // rows below the frontier F are folded in this file; rows at or above F are not yet, and the builder will fold
+    // them from the data file. Readers trust only blocks that end at or below F; writers (UpdateRow,
+    // NeedsOverwriteCheck, MarkInexact, DeleteRows) leave rows at or above F alone. F == kNoRebuild when no rebuild
+    // runs, which makes every check above a single compare that is always false.
+    static constexpr uint64_t kNoRebuild = UINT64_MAX;
+
+    // Empties this file in place at width new_tracked_column_count and starts a rebuild at F = 0. Order: the old
+    // header is marked dirty and fdatasync'd (on failure: returns false, nothing changed); then ftruncate to 0; then a
+    // fresh header (new width, dirty=1) + fdatasync; then the block cache is dropped. A crash at any point leaves a
+    // file the next start rebuilds (dirty, or too short to hold a header). Same object, same fd: references held by
+    // in-flight queries stay valid. False also if the truncate fails (the old index is then still whole and served).
+    [[nodiscard]] bool BeginRebuild(uint32_t new_tracked_column_count);
+    // Live builder only: BeginRebuild, unless a rebuild already runs on this file -- then kAlreadyRebuilding with nothing
+    // touched. The check and the begin are one step under the file mutex, so two builders on one file cannot both begin
+    // (the second would truncate the first's work while the first keeps advancing F).
+    [[nodiscard]] BeginRebuildResult BeginLiveRebuild(uint32_t new_tracked_column_count);
+
+    // Startup only, after BeginRebuild failed on a file that must not be trusted (missing, dirty, wrong width or
+    // WAL-forced): enters the rebuild state at F = 0 WITHOUT truncating or writing anything. Readers then scan every
+    // block, writers skip the index, MarkClean refuses (so it is never cleaned in this session) and the registry never
+    // evicts it. Nothing is folded and FinishRebuild is never called, so it stays untrusted until the next start
+    // rebuilds it. No-op if a rebuild already runs.
+    void EnterUntrustedRebuildState();
+
+    // Builder only, for a row at or above F, while it holds the data-file READ range lock on that row: folds it like
+    // UpdateRow does. Ignored for a row below F or when no rebuild runs.
+    void RebuildFoldRow(uint64_t row_index, const std::vector<ZoneMapObservation> &observations, uint32_t pad_to);
+
+    // Builder only: RebuildFoldRow for every row of the batch, in order, under ONE hold of the mutex. A row below F is
+    // skipped exactly as RebuildFoldRow skips it. Each block is written once per run of consecutive rows that fall in
+    // it (once per chunk when rows ascend), not once per row, with no LRU work per row; the bytes on disk are identical
+    // to folding the same rows one by one through RebuildFoldRow. Returns false if a block write failed: that block on
+    // disk is then behind the fold, so the caller must not end the rebuild. No-op (true) when no rebuild runs.
+    [[nodiscard]] bool RebuildFoldRows(const ZoneMapFoldBatch &batch);
+
+    // Builder only: rows below new_frontier are now folded. Call while still holding the data-file READ range lock
+    // over the rows just folded, so no writer can sit on a row F moves across. Never moves F back.
+    void AdvanceFrontier(uint64_t new_frontier);
+
+    // Ends the rebuild (F = kNoRebuild) once the dirty header is durable: it retries the header first, and if that
+    // still fails returns false with nothing changed (still rebuilding, still pinned, MarkClean still refuses), so a
+    // header-less file can never be cleaned and later reopened as an empty, clean index. Retry later. On success the
+    // file stays dirty until a later MarkClean, as after any write.
+    [[nodiscard]] bool FinishRebuild();
+
+    // Lock-free (the registry calls it under its own mutex, which must never wait on this file's mutex).
+    [[nodiscard]] bool Rebuilding() const { return rebuilding_.load(std::memory_order_acquire); }
+
+    // Test-visible: the rebuild frontier F (kNoRebuild when no rebuild runs).
+    [[nodiscard]] uint64_t FrontierForTests() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return frontier_;
+    }
+
+    // Registry pin: while one is alive the registry never evicts this file, so the pointer stays valid. Taken only by
+    // XStore::PinZoneMap under the registry mutex; released from any thread.
+    class Pin {
+    public:
+        Pin() = default;
+        Pin(Pin &&other) noexcept : file_(other.file_) { other.file_ = nullptr; }
+        Pin &operator=(Pin &&other) noexcept {
+            if (this != &other) { Release(); file_ = other.file_; other.file_ = nullptr; }
+            return *this;
+        }
+        Pin(const Pin &) = delete;
+        Pin &operator=(const Pin &) = delete;
+        ~Pin() { Release(); }
+        ZoneMapFile &operator*() const { return *file_; }
+        ZoneMapFile *operator->() const { return file_; }
+        ZoneMapFile *get() const { return file_; }
+    private:
+        // Only XStore::Pin* create a pin, under the registry mutex (eviction and retire read the count under it).
+        friend class XStore;
+        explicit Pin(ZoneMapFile *file) : file_(file) { if (file_ != nullptr) file_->pins_.fetch_add(1, std::memory_order_relaxed); }
+        void Release() { if (file_ != nullptr) file_->pins_.fetch_sub(1, std::memory_order_release); file_ = nullptr; }
+        ZoneMapFile *file_ = nullptr;
+    };
+
+    // Registry eviction skips a pinned or rebuilding file. Lock-free, like Rebuilding().
+    [[nodiscard]] bool Evictable() const {
+        return pins_.load(std::memory_order_acquire) == 0 && !rebuilding_.load(std::memory_order_acquire);
+    }
+
+    // A live Pin exists. Pins are taken only under the registry mutex, so a caller holding it that sees false knows
+    // nobody holds the file and nobody can start to.
+    [[nodiscard]] bool Pinned() const { return pins_.load(std::memory_order_acquire) != 0; }
+
+    // Test-visible: block pwrites made by MarkInexact/DeleteRows, plus one per successful DeleteRows reset punch.
+    [[nodiscard]] uint64_t MarkWritesForTests() const;
+
+    // Test-visible: whether block_index carries the inexact bit.
+    [[nodiscard]] bool BlockInexact(uint64_t block_index);
+
     // Always returns real, safe stats for block_index -- a never-touched
     // block simply has valid_count==0 everywhere, which is the true and
     // correct answer for "no rows landed here yet," not a placeholder for
-    // "unknown." nullopt is reserved for an actual I/O failure on the read.
+    // "unknown." nullopt means an I/O failure on the read, or a block a
+    // running rebuild has not finished yet (callers scan it).
     std::optional<std::vector<ZoneMapEntry>> TryGetBlockStats(uint64_t block_index);
 
     ~ZoneMapFile();
 
     uint64_t RowsPerBlockValue() const { return header_.rows_per_block; }
 
-    [[nodiscard]] uint32_t TrackedColumnCount() const { return header_.tracked_column_count; }
+    // Locked: BeginRebuild changes the width of a live object.
+    [[nodiscard]] uint32_t TrackedColumnCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return header_.tracked_column_count;
+    }
 
     // Clears the on-disk dirty flag: fdatasync(index content), then header
     // dirty=0 + fdatasync. Returns false on any failure, leaving the file
-    // marked dirty. The caller must have fdatasync'd the .XSTORE data file
+    // marked dirty, and while a rebuild runs (a half-built index must stay
+    // dirty). The caller must have fdatasync'd the .XSTORE data file
     // FIRST -- this only makes the index itself durable.
     [[nodiscard]] bool MarkClean();
 
@@ -143,15 +290,32 @@ public:
     [[nodiscard]] uint64_t DirtyMarkWritesForTests() const;
 
 private:
+    struct CachedBlock {
+        std::vector<ZoneMapEntry> entries;
+        // One past the highest row folded into this block; valid only when fold_end_known. Known for a block
+        // loaded with nothing folded, or whose column 0 has no nulls (every folded row counts once in column 0,
+        // so its last_row_index is then the highest folded row). Otherwise unknown, also after a reload while column 0
+        // still counts a null.
+        uint64_t fold_end = 0;
+        bool fold_end_known = false;
+    };
     // Every method that writes index content calls this first (mutex_ held):
     // one predictable branch once the flag is on disk.
     void EnsureDirtyOnDisk() { if (!dirty_on_disk_) MarkDirtyOnDisk(); }
+    bool BeginRebuildLocked(uint32_t new_tracked_column_count); // mutex_ held
     void MarkDirtyOnDisk();
 
-    void EnsureBlockLoaded(uint64_t block_index);
+    CachedBlock &EnsureBlockLoaded(uint64_t block_index);
+    void UpdateRowLocked(uint64_t row_index, const std::vector<ZoneMapObservation> &observations, uint32_t pad_to);
+    // The fold of one row into its (loaded) block, shared by UpdateRowLocked and RebuildFoldRows.
+    void FoldRowIntoBlock(CachedBlock &block, uint64_t row_index, const ZoneMapObservation *observations, size_t count,
+                          uint32_t pad_to);
+    [[nodiscard]] bool WriteBlock(uint64_t block_index, const CachedBlock &block);
+    void TouchLru(uint64_t block_index);
+    void MarkInexactLocked(uint64_t first_row, uint64_t last_row);
     void EvictIfOverCapacity();
     off_t BlockFileOffset(uint64_t block_index) const;
-    // Resets header_ to a fresh, empty v2 header and writes it to offset 0
+    // Resets header_ to a fresh, empty header marked dirty (one pwrite, no fdatasync) and writes it to offset 0
     // -- shared by first-time file creation and by Open()'s stale-version
     // discard path, so there's exactly one place that constructs a valid
     // fresh header.
@@ -159,9 +323,13 @@ private:
 
     int fd_ = -1;
     ZoneMapFileHeader header_;
-    bool dirty_on_disk_ = false; // header_.dirty == 1 is durable on disk
+    bool dirty_on_disk_ = false; // header_.dirty == 1 is durable on disk (header_.dirty may be 1 without it)
     uint64_t dirty_mark_writes_ = 0;
-    std::unordered_map<uint64_t, std::vector<ZoneMapEntry>> cache_; // pure read-cache, always disk-coherent
+    uint64_t mark_writes_ = 0;
+    uint64_t frontier_ = kNoRebuild; // rebuild frontier F, see kNoRebuild
+    std::atomic<bool> rebuilding_{false}; // frontier_ != kNoRebuild; written under mutex_, read without it
+    std::atomic<uint32_t> pins_{0};       // live Pin objects
+    std::unordered_map<uint64_t, CachedBlock> cache_; // pure read-cache, always disk-coherent
     std::vector<uint64_t> lru_order_; // most-recently-touched at the back
     // GetOrOpenZoneMap hands out a ZoneMapFile& to one shared, process-wide
     // instance per (db,year) -- every server worker thread touching the

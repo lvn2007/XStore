@@ -16,27 +16,6 @@
 
 using namespace XStoreWireEncode;
 
-namespace {
-
-// std::execution::par_unseq dispatches work across a thread pool -- worth it
-// once a batch is big enough that sorting it in parallel outweighs that
-// dispatch/join overhead, but for a small batch (the common case for most
-// callers) the overhead alone can cost more than a plain sequential sort
-// would take to run the whole thing. Used by Batch Insert/Query/Delete's
-// "sort incoming timestamps first" step.
-constexpr std::ptrdiff_t PARALLEL_SORT_THRESHOLD = 10'000;
-
-template <typename Iterator, typename Compare>
-void SortBatch(Iterator begin, Iterator end, Compare comp) {
-    if (std::distance(begin, end) >= PARALLEL_SORT_THRESHOLD) {
-        std::sort(std::execution::par_unseq, begin, end, comp);
-    } else {
-        std::sort(begin, end, comp);
-    }
-}
-
-}  // namespace
-
 // BATCH INSERT
 void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStore_Proto::BatchInsert_REP *return_data) {
     if (RejectInsertIfShutDown(return_data->mutable_insertstatus(), "BATCH INSERT")) return;
@@ -141,6 +120,7 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStor
         record.db_base_path = db_base_path_str;
         record.time_resolution = cfg_struct.timeresolution();
         record.row_length = cfg_struct.rowlength();
+        record.year = year_key;  // routes the record to its (db, year) shard
         record.durability_mode = durability_mode;
         // One width for both the observations below and the zone map
         // ApplyWalRecord will open/create for them -- see
@@ -435,7 +415,7 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
     std::string db_name = proto_from_client->dbname();
     int delete_count = 0;
     int failed_count = 0;
-    int first_errno = 0;
+    std::string first_failure; // why the first failed row was not deleted
 
     // Ensure dbName string is all capitalized
     ToUpperCase(db_name.begin(), db_name.end());
@@ -548,8 +528,25 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
             // fdatasync range.
             unsigned long long int punched_begin = std::numeric_limits<unsigned long long int>::max();
             unsigned long long int punched_end = 0;
+            // The zone map still counts these rows: flag each distinct block once, before its rows go. Rows are
+            // sorted, so a block's rows are adjacent.
+            const ZoneMapFile::Pin zmap = OpenZoneMapForDelete(db_base_path_str, year_key, cfg_struct);
+            if (zmap.get() == nullptr) {
+                if (failed_count == 0) first_failure = "zone map could not be opened";
+                failed_count += static_cast<int>(indices.size());
+                continue;
+            }
+            const uint64_t rows_per_block = zmap->RowsPerBlockValue();
+            uint64_t marked_block = std::numeric_limits<uint64_t>::max();
             for (unsigned long long int idx : indices) {
-                unsigned long long int offset = (proto_from_client->timestamp(idx) - this_ts.first_epoch) * cfg_struct.rowlength();
+                const unsigned long long int row = proto_from_client->timestamp(idx) - this_ts.first_epoch;
+                unsigned long long int offset = row * cfg_struct.rowlength();
+
+                const uint64_t block = BlockIndexForRow(row, rows_per_block);
+                if (block != marked_block) {
+                    zmap->MarkInexact(row, row);
+                    marked_block = block;
+                }
 
                 // Deallocate data according to N bytes from rowLength
                 if (fallocate64(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfg_struct.rowlength()) == 0) {
@@ -557,7 +554,7 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
                     punched_end = std::max(punched_end, offset + cfg_struct.rowlength());
                     delete_count++;
                 } else {
-                    if (failed_count++ == 0) first_errno = errno;
+                    if (failed_count++ == 0) first_failure = fmt::format("fallocate failed: {}", strerror(errno));
                 }
             }
             // The punches are a metadata change fdatasync must cover: mark the file so the next checkpoint cycle
@@ -568,8 +565,8 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
     std::string info_msg = fmt::format("[BATCH DELETE] [DB: {}] - Deleted {} items", db_name, delete_count);
     if (failed_count > 0) {
         // SetTaggedStatus overwrites the single status string, so the failure is folded into the one message.
-        std::string warn_msg = fmt::format("{}; {} item(s) could not be deleted (fallocate failed: {})", info_msg,
-                                           failed_count, strerror(first_errno));
+        std::string warn_msg = fmt::format("{}; {} item(s) could not be deleted ({})", info_msg, failed_count,
+                                           first_failure);
         SetTaggedStatus(to_return.mutable_deletestatus(), "[WARNING] ", warn_msg);
         spdlog::warn(warn_msg);
         return to_return;

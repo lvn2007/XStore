@@ -208,9 +208,11 @@ public:
 
 // Blocks until every WAL record enqueued so far for `db_name` (ASYNC ones included) has been written AND applied, so
 // a test that returns right after a timed ASYNC enqueue cannot have its ScratchDir removed under a still-applying
-// writer. A shard's writer thread handles its queue strictly FIFO and records from ONE calling thread for a DB land on one shard (EnqueueWalRecord salts the shard by calling
-// thread across up to WAL_SHARDS_PER_DB shards), so an ASYNC sentinel row enqueued last, from the same thread as the
-// records being drained, becoming visible proves everything that thread enqueued before it was applied (the ring's applied==head
+// writer. A shard's writer thread handles its queue in order, but the queue is FIFO only per enqueuing thread, and every record of
+// one (db, year) goes to the same shard (EnqueueWalRecord routes by (db, year)). So an ASYNC sentinel row enqueued
+// last FROM THE SAME THREAD as the records being drained, in the same year, becoming visible proves everything that
+// thread enqueued before it for that (db, year) was applied (other threads' records have no order against it, and
+// records of another year may sit on another shard: call once per year; the ring's applied==head
 // alone cannot: a batch mid-write/fsync or a direct-path apply leaves the ring untouched). Then every ring must be
 // quiescent (AppliedLsn()==HeadLsn()), which also covers the post-apply index updates; only the rings under
 // `store.data_store_dir` count (the shard rings live in <data_store_dir>/WAL, shared by every DB of that store), so a

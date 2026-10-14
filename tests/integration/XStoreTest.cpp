@@ -502,11 +502,16 @@ TEST_F(XStoreTest, RemoveDBFilesRemovesDataFileButProtectsConfig) {
 
     XStore_Proto::RemoveDBFiles_REP rep = store.RemoveDBFiles(&req, "TESTDB");
 
-    ASSERT_EQ(rep.removestatus_size(), 2);
+    // A year's data file takes its index files with it (each reported).
+    ASSERT_EQ(rep.removestatus_size(), 4);
     EXPECT_EQ(rep.removestatus(0), "[INFO] [REMOVE DB FILES] [DB: TESTDB] - Removed 2016.XSTORE");
-    EXPECT_EQ(rep.removestatus(1), "[WARNING] [REMOVE DB FILES] [DB: TESTDB] - TESTDB.CFG is prohibited from remove");
+    EXPECT_EQ(rep.removestatus(1), "[INFO] [REMOVE DB FILES] [DB: TESTDB] - Removed 2016.zmap");
+    EXPECT_EQ(rep.removestatus(2), "[INFO] [REMOVE DB FILES] [DB: TESTDB] - Removed 2016.catidx");
+    EXPECT_EQ(rep.removestatus(3), "[WARNING] [REMOVE DB FILES] [DB: TESTDB] - TESTDB.CFG is prohibited from remove");
 
     EXPECT_FALSE(fs::exists(scratch->test_root / "DataStore" / "TESTDB" / "2016.XSTORE"));
+    EXPECT_FALSE(fs::exists(scratch->test_root / "DataStore" / "TESTDB" / "2016.zmap"));
+    EXPECT_FALSE(fs::exists(scratch->test_root / "DataStore" / "TESTDB" / "2016.catidx"));
     EXPECT_TRUE(fs::exists(scratch->test_root / "DataStore" / "TESTDB" / "TESTDB.CFG"));
 }
 

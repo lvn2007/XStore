@@ -14,6 +14,9 @@
 #include <string>
 
 #include "XStoreTestSupport.h"
+#include "include/DataStructs/TimeStruct.h"
+#include "include/XStore/XStore_ZoneMap.h"
+#include <unistd.h>
 
 using namespace xstore_test;
 
@@ -185,6 +188,56 @@ TEST_F(XStoreDeleteFaultTest, UnaryDeleteFailingPunchReportsErrorAndKeepsRow) {
     EXPECT_NE(status.find("Unable to delete"), std::string::npos) << status;
     EXPECT_NE(status.find(std::strerror(EOPNOTSUPP)), std::string::npos) << status;
     EXPECT_TRUE(RowPresent(0));
+}
+
+// RangeDelete over a whole zone-map block: the data punch succeeds, the zone map's own punch (which resets the block
+// to empty) fails. The block must then be flagged instead, so it is never trusted with the deleted row's value.
+TEST_F(XStoreDeleteFaultTest, RangeDeleteFallsBackToFlagWhenZoneMapResetFails) {
+    InsertRows(1);
+    const TimeStruct ts(static_cast<time_t>(TS_BASE), XStore_Proto::SECOND);
+    const uint64_t rpb = RowsPerBlock(128);
+    const uint64_t block = BlockIndexForRow(TS_BASE - ts.first_epoch, rpb);
+    const unsigned long long block_start = ts.first_epoch + block * rpb;
+    XStore_Proto::RangeDelete_REP rep;
+    {
+        ScopedFallocatePunchFailure fail(EOPNOTSUPP, 2); // punch 1 = data file, punch 2 = zone map reset
+        rep = store->RangeDelete(block_start, block_start + rpb - 1, "TESTDB");
+        EXPECT_EQ(g_punch_calls.load(), 2);
+    }
+    EXPECT_EQ(rep.deletestatus().rfind("[INFO] ", 0), 0U) << rep.deletestatus();
+    EXPECT_FALSE(RowPresent(0));
+    const std::string db_path = (scratch->test_root / "DataStore" / "TESTDB").string();
+    EXPECT_TRUE(XStore::GetOrOpenZoneMap(db_path, ts.year, 128).BlockInexact(block));
+}
+
+// A zone map that cannot be opened refuses the delete, and the status says why (not "fallocate failed").
+TEST_F(XStoreDeleteFaultTest, DeleteRefusedWhenZoneMapCannotBeOpenedSaysSo) {
+    InsertRows(3);
+    const TimeStruct ts(static_cast<time_t>(TS_BASE), XStore_Proto::SECOND);
+    XStore::ClearZoneMapRegistryForTests();
+    const std::string zmap_path = (scratch->test_root / "DataStore" / "TESTDB" / (std::to_string(ts.year) + ".zmap")).string();
+    {
+        int fd = open(zmap_path.c_str(), O_WRONLY);
+        ASSERT_GE(fd, 0);
+        const uint32_t bad_magic = 0;
+        ASSERT_EQ(pwrite(fd, &bad_magic, sizeof(bad_magic), 0), static_cast<ssize_t>(sizeof(bad_magic)));
+        close(fd);
+    }
+    const std::string unary = store->UnaryDelete(TS_BASE, "TESTDB").deletestatus();
+    EXPECT_EQ(unary.rfind("[ERROR] ", 0), 0U) << unary;
+    EXPECT_NE(unary.find("zone map could not be opened"), std::string::npos) << unary;
+
+    XStore_Proto::BatchDelete_REQ req;
+    req.set_dbname("TESTDB");
+    req.add_timestamp(TS_BASE + 1);
+    const std::string batch = store->BatchDelete(&req).deletestatus();
+    EXPECT_NE(batch.find("Deleted 0 items; 1 item(s) could not be deleted (zone map could not be opened)"), std::string::npos)
+        << batch;
+
+    const std::string range = store->RangeDelete(TS_BASE + 2, TS_BASE + 2, "TESTDB").deletestatus();
+    EXPECT_NE(range.find("Deleted 0 items; 1 item(s) could not be deleted (zone map could not be opened)"), std::string::npos)
+        << range;
+    for (int i = 0; i < 3; i++) EXPECT_TRUE(RowPresent(i)) << i;
 }
 
 }  // namespace

@@ -3,11 +3,14 @@
 #include "XStore/XStore.h"
 #include "include/DataStructs/TimeStruct.h"
 #include "XStore.pb.h"
+#include "XStoreSyscallFault.h"
 #include "XStoreTestSupport.h"
 #include <algorithm>
 #include <filesystem>
+#include <optional>
 #include <vector>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <spdlog/fmt/fmt.h>
 
@@ -817,6 +820,268 @@ TEST_F(XStoreCatIdxTestFixture, MissingCatIdxFileForYearWithRealDataGetsRealRebu
     ASSERT_TRUE(find_rep.ParseFromString(reassembled));
     ASSERT_EQ(find_rep.queryresponse_size(), 1);
     EXPECT_EQ(find_rep.queryresponse(0).timestamp(), 1000u);
+}
+
+} // namespace
+
+// M4 stage 1: live widening mechanics in CatIdxFile (same frontier protocol as ZoneMapFile; see
+// XStoreZoneMapTest.cpp for the crash-image and concurrent-writer tests, which cover both files together).
+namespace {
+
+constexpr uint16_t kLwRowLength = 16384; // -> RowsPerBlock == 128
+constexpr uint64_t kLwRpb = 128;
+
+std::string Enc(int64_t v) {
+    XStore_Proto::FData f;
+    f.set_int64data(v);
+    return EncodeFDataForCatIdx(f);
+}
+
+std::vector<CatIdxObservation> CatObs(uint32_t col, int64_t v) { return {{col, Enc(v), true}}; }
+
+CatIdxFileHeader ReadCatIdxHeader(const std::string &path) {
+    CatIdxFileHeader h{};
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd >= 0) {
+        if (pread(fd, &h, sizeof(h), 0) != static_cast<ssize_t>(sizeof(h))) h.magic = 0;
+        close(fd);
+    }
+    return h;
+}
+
+off_t CatIdxFileSize(const std::string &path) {
+    struct stat st{};
+    return stat(path.c_str(), &st) == 0 ? st.st_size : -1;
+}
+
+class CatIdxLiveWidenTest : public ::testing::Test {
+protected:
+    std::string path;
+    CatIdxFile f;
+
+    // Width 2; value 100+b in column 0 of one row of each of blocks 0..3; a bitmap section; marked clean.
+    void SetUp() override {
+        path = TempCatIdxPath("live_widen.catidx");
+        std::filesystem::remove(path);
+        ASSERT_TRUE(f.Open(path, kLwRowLength, 2));
+        for (uint64_t b = 0; b < 4; ++b) f.UpdateRow(b * kLwRpb + 1, CatObs(0, 100 + static_cast<int64_t>(b)));
+        f.AppendBitmapSection({{0, {{Enc(100), {1}}}}});
+        ASSERT_TRUE(f.HasBitmapSection());
+        ASSERT_TRUE(f.MarkClean());
+    }
+};
+
+TEST_F(CatIdxLiveWidenTest, BeginRebuildWidensInPlaceAndAnswersMaybeUntilBlocksAreComplete) {
+    ASSERT_FALSE(f.MightContain(0, 0, Enc(777)));
+    ASSERT_TRUE(f.BeginRebuild(4));
+    EXPECT_TRUE(f.Rebuilding());
+    EXPECT_EQ(f.TrackedColumnCount(), 4u);
+    EXPECT_FALSE(f.HasBitmapSection()) << "the bitmap section goes with the old content";
+    EXPECT_FALSE(f.LookupExact(0, Enc(100)).has_value());
+    const CatIdxFileHeader h = ReadCatIdxHeader(path);
+    EXPECT_EQ(h.tracked_column_count, 4u);
+    EXPECT_EQ(h.dirty, 1u);
+    EXPECT_EQ(h.block_count, 0u);
+    EXPECT_EQ(h.bitmap_section_offset, 0u);
+    EXPECT_EQ(CatIdxFileSize(path), static_cast<off_t>(sizeof(CatIdxFileHeader)));
+    for (uint64_t b = 0; b < 4; ++b) EXPECT_TRUE(f.MightContain(b, 0, Enc(777))) << "block " << b << " not rebuilt yet";
+
+    // Builder folds block 0 and half of block 1 (column 3 is new).
+    f.RebuildFoldRow(5, CatObs(3, 33));
+    f.RebuildFoldRow(kLwRpb + 2, CatObs(0, 101));
+    f.AdvanceFrontier(kLwRpb + 64);
+    EXPECT_FALSE(f.MightContain(0, 0, Enc(777))) << "complete block: the bloom answers";
+    EXPECT_FALSE(f.MightContain(0, 0, Enc(100))) << "old content is gone";
+    EXPECT_TRUE(f.MightContain(0, 3, Enc(33)));
+    EXPECT_TRUE(f.MightContain(1, 0, Enc(777))) << "straddles F";
+    EXPECT_TRUE(f.MightContain(0, 9, Enc(777))) << "past the width";
+
+    // Writers: below F folded, at/above F left to the builder; the builder ignores rows below F.
+    f.UpdateRow(10, CatObs(1, 11));
+    f.UpdateRow(kLwRpb + 64, CatObs(1, 12));
+    f.UpdateRow(3 * kLwRpb, CatObs(1, 13));
+    f.RebuildFoldRow(20, CatObs(1, 14));
+    f.AdvanceFrontier(4 * kLwRpb);
+    EXPECT_TRUE(f.MightContain(0, 1, Enc(11)));
+    EXPECT_FALSE(f.MightContain(0, 1, Enc(14)));
+    EXPECT_FALSE(f.MightContain(1, 1, Enc(12))) << "a write at F was folded although the builder owns it";
+    EXPECT_FALSE(f.MightContain(3, 1, Enc(13)));
+    EXPECT_TRUE(f.MightContain(1, 0, Enc(101)));
+
+    // Compaction is refused while rebuilding; MarkClean too.
+    f.AppendBitmapSection({{0, {{Enc(101), {kLwRpb + 2}}}}});
+    EXPECT_FALSE(f.HasBitmapSection());
+    EXPECT_FALSE(f.MarkClean());
+    EXPECT_EQ(ReadCatIdxHeader(path).dirty, 1u);
+
+    EXPECT_TRUE(f.FinishRebuild());
+    EXPECT_FALSE(f.Rebuilding());
+    EXPECT_EQ(ReadCatIdxHeader(path).dirty, 1u);
+    EXPECT_FALSE(f.MightContain(7, 0, Enc(777))) << "no rebuild: an untouched block is empty, not unknown";
+    f.AppendBitmapSection({{0, {{Enc(101), {kLwRpb + 2}}}}});
+    EXPECT_TRUE(f.HasBitmapSection());
+    EXPECT_TRUE(f.MarkClean());
+    EXPECT_EQ(ReadCatIdxHeader(path).dirty, 0u);
+
+    CatIdxFile reopened;
+    ASSERT_TRUE(reopened.Open(path, kLwRowLength, 4));
+    EXPECT_EQ(reopened.TrackedColumnCount(), 4u);
+    EXPECT_TRUE(reopened.MightContain(0, 3, Enc(33)));
+    EXPECT_TRUE(reopened.MightContain(1, 0, Enc(101)));
+}
+
+TEST_F(CatIdxLiveWidenTest, FailedDirtyMarkSyncLeavesTheOldIndexInPlace) {
+    const off_t size_before = CatIdxFileSize(path);
+    {
+        xstore_fault::ScopedFdFault fault(xstore_fault::FdOp::kSync, path, 0, 1, EIO);
+        EXPECT_FALSE(f.BeginRebuild(4));
+        EXPECT_EQ(fault.Failures(), 1);
+    }
+    EXPECT_FALSE(f.Rebuilding());
+    EXPECT_EQ(CatIdxFileSize(path), size_before) << "not truncated";
+    EXPECT_EQ(f.TrackedColumnCount(), 2u);
+    EXPECT_EQ(ReadCatIdxHeader(path).tracked_column_count, 2u);
+    EXPECT_TRUE(f.HasBitmapSection());
+    EXPECT_TRUE(f.MightContain(2, 0, Enc(102)));
+    EXPECT_FALSE(f.MightContain(2, 0, Enc(777)));
+    EXPECT_TRUE(f.BeginRebuild(4));
+    EXPECT_TRUE(f.FinishRebuild());
+}
+
+// S1 (sync flavour): the fresh header was written but its fdatasync failed, and so does every retry. FinishRebuild
+// keeps the rebuild (and the pin) until the header is durable.
+TEST_F(CatIdxLiveWidenTest, FinishRebuildRefusesWhileTheHeaderIsNotDurable) {
+    {
+        // sync 1 (the old header's dirty mark) passes; the fresh header's sync and every retry fail.
+        xstore_fault::ScopedFdFault fault(xstore_fault::FdOp::kSync, path, 1, 1000, EIO);
+        ASSERT_TRUE(f.BeginRebuild(4));
+        f.AdvanceFrontier(4 * kLwRpb);
+        EXPECT_FALSE(f.FinishRebuild());
+        EXPECT_TRUE(f.Rebuilding());
+        EXPECT_FALSE(f.MarkClean());
+        EXPECT_TRUE(f.MightContain(4, 0, Enc(777))) << "frontier unchanged (F = 4 blocks)";
+        EXPECT_GE(fault.Failures(), 2);
+    }
+    EXPECT_TRUE(f.FinishRebuild());
+    EXPECT_FALSE(f.Rebuilding());
+    EXPECT_EQ(ReadCatIdxHeader(path).dirty, 1u);
+    EXPECT_EQ(ReadCatIdxHeader(path).tracked_column_count, 4u);
+    EXPECT_TRUE(f.MarkClean());
+    EXPECT_EQ(ReadCatIdxHeader(path).dirty, 0u);
+}
+
+// Q2: any invalid header (too short, wrong magic) is replaced by a fresh header marked DIRTY.
+TEST(CatIdxFileTest, ColdOpenOfAnInvalidFileWritesADirtyHeader) {
+    for (const off_t size : {off_t{0}, off_t{10}, off_t{64}}) {
+        SCOPED_TRACE(size);
+        const std::string p = TempCatIdxPath("invalid" + std::to_string(size) + ".catidx");
+        std::filesystem::remove(p);
+        int fd = open(p.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+        ASSERT_GE(fd, 0);
+        ASSERT_EQ(ftruncate(fd, size), 0); // 64 zero bytes: long enough, magic 0
+        close(fd);
+        CatIdxFile c;
+        ASSERT_TRUE(c.Open(p, 64, 4));
+        const CatIdxFileHeader h = ReadCatIdxHeader(p);
+        EXPECT_EQ(h.magic, CatIdxFileHeader{}.magic);
+        EXPECT_EQ(h.dirty, 1u);
+        EXPECT_EQ(c.DirtyMarkWritesForTests(), 0u) << "written dirty in one pwrite, not synced (SF1)";
+    }
+}
+
+// S3: a pinned entry survives registry pressure and is evictable again once the pin is released.
+TEST(GetOrOpenCatIdxTest, RegistryNeverEvictsAPinnedIndex) {
+    XStore::ClearCatIdxRegistryForTests();
+    std::string base = TempCatIdxPath("registry_pin");
+    std::filesystem::remove_all(base);
+    std::filesystem::create_directories(base);
+    // A fresh file plus one synced dirty mark counts 1; a cold reopen (header already dirty on disk) would count 0.
+    std::optional<CatIdxFile::Pin> pin(XStore::PinCatIdx(base, 2000, 64, 4));
+    CatIdxFile *pinned = pin->get();
+    pinned->MarkDirty();
+    ASSERT_EQ(pinned->DirtyMarkWritesForTests(), 1u);
+    for (unsigned short year = 2001; year < 2001 + XStoreTunables::CATIDX_REGISTRY_CAP + 10; ++year) {
+        XStore::GetOrOpenCatIdx(base, year, 64, 4);
+    }
+    CatIdxFile &again = XStore::GetOrOpenCatIdx(base, 2000, 64, 4);
+    EXPECT_EQ(&again, pinned);
+    EXPECT_EQ(again.DirtyMarkWritesForTests(), 1u) << "the pinned entry was evicted and reopened cold";
+
+    pin.reset();
+    for (unsigned short year = 2400; year < 2400 + XStoreTunables::CATIDX_REGISTRY_CAP; ++year) {
+        XStore::GetOrOpenCatIdx(base, year, 64, 4);
+    }
+    EXPECT_EQ(XStore::GetOrOpenCatIdx(base, 2000, 64, 4).DirtyMarkWritesForTests(), 0u) << "released: evicted and reopened";
+    XStore::ClearCatIdxRegistryForTests();
+    std::filesystem::remove_all(base);
+}
+
+TEST(GetOrOpenCatIdxTest, RegistryNeverEvictsARebuildingIndex) {
+    XStore::ClearCatIdxRegistryForTests();
+    std::string base = TempCatIdxPath("registry_live_widen");
+    std::filesystem::remove_all(base);
+    std::filesystem::create_directories(base);
+
+    CatIdxFile &pinned = XStore::GetOrOpenCatIdx(base, 2000, 64, 4);
+    ASSERT_TRUE(pinned.BeginRebuild(4));
+    for (unsigned short year = 2001; year < 2001 + XStoreTunables::CATIDX_REGISTRY_CAP + 10; ++year) {
+        XStore::GetOrOpenCatIdx(base, year, 64, 4);
+    }
+    CatIdxFile &again = XStore::GetOrOpenCatIdx(base, 2000, 64, 4);
+    EXPECT_TRUE(again.Rebuilding()) << "the rebuilding entry was evicted and reopened cold";
+    EXPECT_EQ(&again, &pinned);
+
+    xstore_test::kLogCapture->Clear(); // the one over-cap warning may come from the loop below already
+    std::vector<CatIdxFile *> all;
+    for (unsigned short year = 2001; year < 2001 + XStoreTunables::CATIDX_REGISTRY_CAP; ++year) {
+        CatIdxFile &c = XStore::GetOrOpenCatIdx(base, year, 64, 4);
+        if (!c.Rebuilding()) {
+            ASSERT_TRUE(c.BeginRebuild(4));
+        }
+        all.push_back(&c);
+    }
+    XStore::GetOrOpenCatIdx(base, 1999, 64, 4);
+    EXPECT_TRUE(xstore_test::kLogCapture->Contains("growing past the cap"));
+    EXPECT_TRUE(pinned.Rebuilding());
+    EXPECT_TRUE(pinned.FinishRebuild());
+    for (CatIdxFile *c : all) EXPECT_TRUE(c->FinishRebuild());
+    XStore::ClearCatIdxRegistryForTests();
+    std::filesystem::remove_all(base);
+}
+
+} // namespace
+
+namespace {
+
+using xstore_test::CreateTestDb;
+
+// Compaction must not run on a year whose .catidx is being rebuilt (stage 3 serialises the two on the compaction
+// thread; this is the backstop).
+TEST_F(XStoreCatIdxTestFixture, CompactionSkipsAnIndexBeingRebuilt) {
+    XStore store;
+    CreateTestDb(store, "CATIDXLWCOMPACT", XStore_Proto::SECOND, 64);
+    XStore_Proto::RowData row;
+    row.add_fielddata()->set_int64data(137);
+    XStore_Proto::UnaryInsert_REP rep;
+    store.UnaryInsert(1000, row, "CATIDXLWCOMPACT", &rep, XStore_Proto::SYNC);
+    ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+    const unsigned short year = TimeStruct(1000, XStore_Proto::SECOND).year;
+    const std::string db = DbPath("CATIDXLWCOMPACT");
+    // Bound the compaction scan (same resize trick as FindByValueUsesBitmapDirectoryNotRealScanAfterCompaction).
+    std::error_code resize_ec;
+    std::filesystem::resize_file(db + "/" + std::to_string(year) + ".XSTORE", 4096 * 64, resize_ec);
+    ASSERT_FALSE(resize_ec) << resize_ec.message();
+
+    CatIdxFile &catidx = XStore::GetOrOpenCatIdx(db, year, 64);
+    ASSERT_TRUE(catidx.BeginRebuild(64));
+    xstore_test::kLogCapture->Clear();
+    store.CompactOneYearCatIdx(db, year, 64, 64);
+    EXPECT_FALSE(catidx.HasBitmapSection());
+    // The early guard stopped it before the scan: AppendBitmapSection's own refusal (which logs this) never ran.
+    EXPECT_FALSE(xstore_test::kLogCapture->Contains("Not appending a bitmap section"));
+    EXPECT_TRUE(catidx.FinishRebuild());
+    store.CompactOneYearCatIdx(db, year, 64, 64);
+    EXPECT_TRUE(catidx.HasBitmapSection());
 }
 
 } // namespace

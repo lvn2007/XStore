@@ -1,11 +1,24 @@
 #include <gtest/gtest.h>
 #include "include/XStore/XStore.h"
 #include "include/XStore/XStore_ZoneMap.h"
+#include "include/XStore/XStore_CatIdx.h"
+#include "include/XStore/XStore_RowScan.h"
+#include "include/XStore/XStore_WireEncode.h"
 #include "include/XStore/XStore_WalRing.h"
+#include "include/XStore/XStore_WalCheckpoint.h"
+#include "include/DataStructs/FileRangeLock.h"
 #include "include/DataStructs/TimeStruct.h"
+#include "XStoreSyscallFault.h"
 #include "XStoreTestSupport.h"
+#include <cstdio>
+#include <optional>
+#include <random>
+#include <mutex>
+#include <unordered_set>
 #include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <limits>
 #include <filesystem>
 #include <thread>
 #include <type_traits>
@@ -576,7 +589,7 @@ TEST_F(ZoneMapFileVersionTest, OpenDiscardsStaleVersionFileInsteadOfMisreadingIt
     // entirely) to simulate a file written before sum_sq_value existed.
     {
         ZoneMapFileHeader old_header;
-        old_header.version = 1; // stale -- current ZONE_MAP_VERSION is 2
+        old_header.version = 1; // stale -- current ZONE_MAP_VERSION is 5
         old_header.tracked_column_count = 64;
         old_header.rows_per_block = 100;
         int fd = open(path.c_str(), O_RDWR | O_CREAT, 0644);
@@ -614,7 +627,7 @@ TEST_F(ZoneMapFileVersionTest, OpenDiscardsV2FileInsteadOfMisreadingIntoV3Layout
 
     {
         ZoneMapFileHeader old_header;
-        old_header.version = 2; // stale -- current ZONE_MAP_VERSION is 4
+        old_header.version = 2; // stale -- current ZONE_MAP_VERSION is 5
         old_header.tracked_column_count = 64;
         old_header.rows_per_block = 100;
         int fd = open(path.c_str(), O_RDWR | O_CREAT, 0644);
@@ -651,7 +664,7 @@ TEST_F(ZoneMapFileVersionTest, OpenDiscardsV3FileInsteadOfMisreadingIntoV4Layout
 
     {
         ZoneMapFileHeader old_header;
-        old_header.version = 3; // stale -- current ZONE_MAP_VERSION is 4
+        old_header.version = 3; // stale -- current ZONE_MAP_VERSION is 5
         old_header.tracked_column_count = 64;
         old_header.rows_per_block = 100;
         int fd = open(path.c_str(), O_RDWR | O_CREAT, 0644);
@@ -681,6 +694,46 @@ TEST_F(ZoneMapFileVersionTest, OpenDiscardsV3FileInsteadOfMisreadingIntoV4Layout
     close(fd);
     EXPECT_EQ(on_disk.version, ZONE_MAP_VERSION);
     EXPECT_EQ(on_disk.dirty, 1u); // a write happened this session (Durability A Task 2)
+}
+
+// v4 -> v5 keeps the layout; v5 adds the inexact flag. A v4 file may count overwritten rows with no flag, so it is
+// discarded like any older version, and the empty replacement is left marked dirty: if it is not rebuilt in this
+// run (a crash before InitDB's rebuild), the next start rebuilds it instead of trusting an empty, clean-looking map.
+TEST_F(ZoneMapFileVersionTest, OpenDiscardsV4FileAndLeavesItDirty) {
+    std::string path = TestFilePath("v4_stale.zmap");
+    {
+        ZoneMapFileHeader old_header;
+        old_header.version = 4;
+        old_header.tracked_column_count = 64;
+        old_header.rows_per_block = 100;
+        old_header.dirty = 0;
+        std::vector<ZoneMapEntry> block(64, ZoneMapEntry{});
+        block[0].valid_count = 3;
+        block[0].sum_value = 42.0;
+        int fd = open(path.c_str(), O_RDWR | O_CREAT, 0644);
+        ASSERT_GE(fd, 0);
+        ASSERT_EQ(pwrite(fd, &old_header, sizeof(old_header), 0), static_cast<ssize_t>(sizeof(old_header)));
+        const ssize_t block_bytes = static_cast<ssize_t>(block.size() * sizeof(ZoneMapEntry));
+        ASSERT_EQ(pwrite(fd, block.data(), block_bytes, sizeof(old_header)), block_bytes);
+        close(fd);
+    }
+
+    ZoneMapFile zmap;
+    ASSERT_TRUE(zmap.Open(path, /*row_length=*/64));
+    auto stats = zmap.TryGetBlockStats(0);
+    ASSERT_TRUE(stats.has_value());
+    EXPECT_EQ((*stats)[0].valid_count, 0u);
+
+    ZoneMapFileHeader on_disk{};
+    int fd = open(path.c_str(), O_RDONLY);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(pread(fd, &on_disk, sizeof(on_disk), 0), static_cast<ssize_t>(sizeof(on_disk)));
+    struct stat st{};
+    ASSERT_EQ(fstat(fd, &st), 0);
+    close(fd);
+    EXPECT_EQ(on_disk.version, ZONE_MAP_VERSION);
+    EXPECT_EQ(on_disk.dirty, 1u); // no write yet: the discard itself marks it
+    EXPECT_EQ(st.st_size, static_cast<off_t>(sizeof(ZoneMapFileHeader)));
 }
 
 } // namespace
@@ -1516,6 +1569,1449 @@ TEST_F(XStoreZoneMapTest, InitDbFoldsWalReplayedRowsWhenSidecarIsMissing) {
     store.SumAggregate(start, end, db_name, 0, &sum_rep);
     EXPECT_EQ(sum_rep.opstatus(), "SUCCESS");
     EXPECT_DOUBLE_EQ(sum_rep.opresult(), 42.0);
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// Overwritten rows vs the zone map (TODO.md item "Zone map double-counts
+// overwritten rows"). Every insert path overwrites a row by timestamp, but
+// ZoneMapFile::UpdateRow only ADDS an observation to its block's entry. These
+// tests overwrite rows inside two COMPLETE blocks through each insert API and
+// compare every zone-map-backed aggregate with the value computed here from the
+// FINAL row values, over (a) a range covering both blocks fully (zone-map
+// pushdown) and (b) a range cutting both blocks (row scan).
+// ---------------------------------------------------------------------------
+namespace {
+
+constexpr unsigned long long kOverwriteBase = 1700000000ULL; // block-aligned: (base - 2023 start) % 128 == 0 for kWideRowLength
+
+// {row offset from kOverwriteBase, new value}. Spread over both blocks. Row 0 held the old minimum (10) and row 255 the
+// old maximum (265) and both get a middle value, so the true min/max after the overwrites (11 and 264) are LESS
+// extreme than the old ones. Rows 0 and 255 are also the first and last row of the queried range.
+const std::vector<std::pair<size_t, double>> &OverwriteSet() {
+    static const std::vector<std::pair<size_t, double>> kSet = {
+        {0, 200.0}, {7, 55.0}, {100, 90.0}, {128, 40.0}, {200, 17.0}, {255, 100.0}};
+    return kSet;
+}
+
+double OriginalValue(size_t i) { return 10.0 + static_cast<double>(i); }
+
+XStore_Proto::RowData NumericRow(double v) {
+    XStore_Proto::RowData row;
+    row.add_fielddata()->set_doubledata(v);
+    return row;
+}
+
+// Row values after the overwrites above.
+std::vector<double> FinalValues(size_t rows) {
+    std::vector<double> values(rows);
+    for (size_t i = 0; i < rows; ++i) values[i] = OriginalValue(i);
+    for (const auto &[idx, v] : OverwriteSet()) values[idx] = v;
+    return values;
+}
+
+// Two complete blocks of originals, written with one SYNC RangeInsert.
+void SeedTwoBlocks(XStore &store, const std::string &db, uint64_t rows) {
+    XStore_Proto::RangeInsert_REQ req;
+    req.set_dbname(db);
+    req.set_durabilitymode(XStore_Proto::SYNC);
+    for (uint64_t i = 0; i < rows; ++i) {
+        XStore_Proto::RangeInsert_DATA *entry = req.add_rangeinsert_data();
+        entry->set_timestamp(kOverwriteBase + i);
+        *entry->mutable_data() = NumericRow(OriginalValue(i));
+    }
+    XStore_Proto::RangeInsert_REP rep;
+    store.RangeInsert(&req, &rep);
+    ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+}
+
+constexpr double kDeleted = std::numeric_limits<double>::quiet_NaN(); // marks a deleted row in a final-values vector
+
+// The data file must hold the winning value for every row (this is the part that is already correct), and nothing for
+// a deleted row.
+void ExpectDataFileHoldsFinalValues(XStore &store, const std::string &db, const std::vector<double> &final_values) {
+    for (size_t i = 0; i < final_values.size(); ++i) {
+        XStore_Proto::UnaryQuery_REP q;
+        store.UnaryQuery(kOverwriteBase + i, db, &q);
+        if (std::isnan(final_values[i])) {
+            EXPECT_EQ(q.data().fielddata_size(), 0) << "deleted row " << i;
+            continue;
+        }
+        ASSERT_TRUE(q.has_data()) << "row " << i;
+        EXPECT_DOUBLE_EQ(q.data().fielddata(0).doubledata(), final_values[i]) << "row " << i;
+    }
+}
+
+// Every zone-map-backed aggregate over rows [lo, hi] (inclusive offsets from kOverwriteBase) against the value
+// computed from final_values (kDeleted rows skipped). `label` names the path (pushdown / scan) in failure output.
+void ExpectAggregatesMatch(XStore &store, const std::string &db, const std::vector<double> &final_values,
+                           size_t lo, size_t hi, const char *label) {
+    SCOPED_TRACE(label);
+    double sum = 0.0, sum_sq = 0.0, n = 0.0;
+    double min_v = std::numeric_limits<double>::infinity(), max_v = -std::numeric_limits<double>::infinity();
+    double open_v = 0.0, close_v = 0.0;
+    for (size_t i = lo; i <= hi; ++i) {
+        const double v = final_values[i];
+        if (std::isnan(v)) continue;
+        if (n == 0.0) open_v = v;
+        close_v = v;
+        sum += v;
+        sum_sq += v * v;
+        n += 1.0;
+        min_v = std::min(min_v, v);
+        max_v = std::max(max_v, v);
+    }
+    ASSERT_GT(n, 1.0) << "test setup error: too few rows left";
+    const double variance = (sum_sq - sum * sum / n) / (n - 1.0);
+    const unsigned long long start = kOverwriteBase + lo;
+    const unsigned long long end = kOverwriteBase + hi;
+
+    XStore_Proto::Min_REP min_rep;
+    store.MinAggregate(start, end, db, 0, &min_rep);
+    EXPECT_DOUBLE_EQ(min_rep.opresult().doubledata(), min_v) << "MIN";
+
+    XStore_Proto::Max_REP max_rep;
+    store.MaxAggregate(start, end, db, 0, &max_rep);
+    EXPECT_DOUBLE_EQ(max_rep.opresult().doubledata(), max_v) << "MAX";
+
+    XStore_Proto::Sum_REP sum_rep;
+    store.SumAggregate(start, end, db, 0, &sum_rep);
+    EXPECT_DOUBLE_EQ(sum_rep.opresult(), sum) << "SUM";
+
+    XStore_Proto::Avg_REP avg_rep;
+    store.AvgAggregate(start, end, db, 0, &avg_rep);
+    EXPECT_DOUBLE_EQ(avg_rep.opresult(), sum / n) << "AVG";
+
+    XStore_Proto::Variance_REP var_rep;
+    store.VarianceAggregate(start, end, db, 0, &var_rep);
+    EXPECT_NEAR(var_rep.opresult(), variance, 1e-6) << "VARIANCE";
+
+    XStore_Proto::Stddev_REP sd_rep;
+    store.StddevAggregate(start, end, db, 0, &sd_rep);
+    EXPECT_NEAR(sd_rep.opresult(), std::sqrt(variance), 1e-6) << "STDDEV";
+
+    XStore_Proto::Ohlc_REP ohlc;
+    store.OhlcAggregate(start, end, db, 0, &ohlc);
+    EXPECT_DOUBLE_EQ(ohlc.open(), open_v) << "OHLC open";
+    EXPECT_DOUBLE_EQ(ohlc.high(), max_v) << "OHLC high";
+    EXPECT_DOUBLE_EQ(ohlc.low(), min_v) << "OHLC low";
+    EXPECT_DOUBLE_EQ(ohlc.close(), close_v) << "OHLC close";
+}
+
+// Inexact bit of each block from kOverwriteBase's block on. The zone map's own sum/valid_count are NOT checked: an
+// inexact block keeps counting the replaced rows by design; the aggregates above prove it is not trusted.
+void ExpectBlockFlags(const std::string &db_path, const std::vector<bool> &expected_inexact) {
+    ZoneMapFile &zmap = XStore::GetOrOpenZoneMap(db_path, 2023, kWideRowLength);
+    const uint64_t first_block = BlockIndexForRow(kOverwriteBase - kYear2023StartEpoch, zmap.RowsPerBlockValue());
+    for (size_t b = 0; b < expected_inexact.size(); ++b) {
+        EXPECT_EQ(zmap.BlockInexact(first_block + b), expected_inexact[b]) << "block " << b;
+    }
+}
+
+// Seeded rows: the two checked blocks plus a third, untouched one that must stay exact.
+uint64_t SeededRows() { return 3 * RowsPerBlock(kWideRowLength); }
+
+void CheckAfterChange(XStore &store, const std::string &db, const std::string &db_path,
+                      const std::vector<double> &final_values, const std::vector<bool> &expected_inexact) {
+    const size_t rows = final_values.size();
+    ExpectDataFileHoldsFinalValues(store, db, final_values);
+    ExpectBlockFlags(db_path, expected_inexact);
+    ExpectAggregatesMatch(store, db, final_values, 0, rows - 1, "pushdown: both blocks fully covered");
+    ExpectAggregatesMatch(store, db, final_values, 1, rows - 2, "scan: both blocks cut");
+}
+
+void CheckAfterOverwrite(XStore &store, const std::string &db, const std::string &db_path, uint64_t rows) {
+    CheckAfterChange(store, db, db_path, FinalValues(rows), {true, true, false});
+}
+
+std::vector<double> ValuesWith(size_t rows, const std::vector<std::pair<size_t, double>> &changes) {
+    std::vector<double> values(rows);
+    for (size_t i = 0; i < rows; ++i) values[i] = OriginalValue(i);
+    for (const auto &[idx, v] : changes) values[idx] = v;
+    return values;
+}
+
+void UnaryOverwrite(XStore &store, const std::string &db, XStore_Proto::WalDurabilityMode mode) {
+    for (const auto &[idx, v] : OverwriteSet()) {
+        XStore_Proto::UnaryInsert_REP rep;
+        store.UnaryInsert(kOverwriteBase + idx, NumericRow(v), db, &rep, mode);
+        ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+    }
+}
+
+TEST_F(XStoreZoneMapTest, OverwriteByUnaryInsertKeepsAggregatesEqualToFinalValues) {
+    XStore store;
+    CreateTestDb(store, "ZMOVRUNARY", XStore_Proto::SECOND, kWideRowLength);
+    const uint64_t rows = 2 * RowsPerBlock(kWideRowLength);
+    ASSERT_EQ(rows, 256u);
+    SeedTwoBlocks(store, "ZMOVRUNARY", SeededRows());
+    ExpectBlockFlags(DbPath("ZMOVRUNARY"), {false, false, false}); // sorted fresh append: exact
+    UnaryOverwrite(store, "ZMOVRUNARY", XStore_Proto::SYNC);
+    CheckAfterOverwrite(store, "ZMOVRUNARY", DbPath("ZMOVRUNARY"), rows);
+}
+
+TEST_F(XStoreZoneMapTest, OverwriteByBatchInsertKeepsAggregatesEqualToFinalValues) {
+    XStore store;
+    CreateTestDb(store, "ZMOVRBATCH", XStore_Proto::SECOND, kWideRowLength);
+    const uint64_t rows = 2 * RowsPerBlock(kWideRowLength);
+    ASSERT_EQ(rows, 256u);
+    SeedTwoBlocks(store, "ZMOVRBATCH", SeededRows());
+    XStore_Proto::BatchInsert_REQ req;
+    req.set_dbname("ZMOVRBATCH");
+    req.set_durabilitymode(XStore_Proto::SYNC);
+    for (const auto &[idx, v] : OverwriteSet()) {
+        XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
+        entry->set_timestamp(kOverwriteBase + idx);
+        *entry->mutable_data() = NumericRow(v);
+    }
+    XStore_Proto::BatchInsert_REP rep;
+    store.BatchInsert(&req, &rep);
+    ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+    CheckAfterOverwrite(store, "ZMOVRBATCH", DbPath("ZMOVRBATCH"), rows);
+}
+
+TEST_F(XStoreZoneMapTest, OverwriteByRangeInsertDuplicateTimestampKeepsAggregatesEqualToFinalValues) {
+    XStore store;
+    CreateTestDb(store, "ZMOVRRANGE", XStore_Proto::SECOND, kWideRowLength);
+    const uint64_t rows = 2 * RowsPerBlock(kWideRowLength);
+    ASSERT_EQ(rows, 256u);
+    SeedTwoBlocks(store, "ZMOVRRANGE", SeededRows());
+    // Each target timestamp appears twice in ONE request: a losing value first, the winning value (the last
+    // occurrence) right after, so the row is also overwritten inside the request itself.
+    XStore_Proto::RangeInsert_REQ req;
+    req.set_dbname("ZMOVRRANGE");
+    req.set_durabilitymode(XStore_Proto::SYNC);
+    for (const auto &[idx, v] : OverwriteSet()) {
+        XStore_Proto::RangeInsert_DATA *loser = req.add_rangeinsert_data();
+        loser->set_timestamp(kOverwriteBase + idx);
+        *loser->mutable_data() = NumericRow(123456.0);
+        XStore_Proto::RangeInsert_DATA *winner = req.add_rangeinsert_data();
+        winner->set_timestamp(kOverwriteBase + idx);
+        *winner->mutable_data() = NumericRow(v);
+    }
+    XStore_Proto::RangeInsert_REP rep;
+    store.RangeInsert(&req, &rep);
+    ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+    CheckAfterOverwrite(store, "ZMOVRRANGE", DbPath("ZMOVRRANGE"), rows);
+}
+
+// Duplicates inside ONE fresh request (no seeded data): the second copy's pre-read sees the first copy's bytes.
+TEST_F(XStoreZoneMapTest, DuplicateTimestampInsideOneFreshRequestMarksBlockInexact) {
+    XStore store;
+    CreateTestDb(store, "ZMDUPFRESH", XStore_Proto::SECOND, kWideRowLength);
+    XStore_Proto::RangeInsert_REQ req;
+    req.set_dbname("ZMDUPFRESH");
+    req.set_durabilitymode(XStore_Proto::SYNC);
+    std::vector<double> final_values(RowsPerBlock(kWideRowLength));
+    for (size_t i = 0; i < final_values.size(); ++i) {
+        final_values[i] = OriginalValue(i);
+        if (i == 5) {
+            XStore_Proto::RangeInsert_DATA *loser = req.add_rangeinsert_data();
+            loser->set_timestamp(kOverwriteBase + i);
+            *loser->mutable_data() = NumericRow(99999.0);
+        }
+        XStore_Proto::RangeInsert_DATA *entry = req.add_rangeinsert_data();
+        entry->set_timestamp(kOverwriteBase + i);
+        *entry->mutable_data() = NumericRow(final_values[i]);
+    }
+    XStore_Proto::RangeInsert_REP rep;
+    store.RangeInsert(&req, &rep);
+    ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+    ExpectDataFileHoldsFinalValues(store, "ZMDUPFRESH", final_values);
+    ExpectBlockFlags(DbPath("ZMDUPFRESH"), {true, false});
+    ExpectAggregatesMatch(store, "ZMDUPFRESH", final_values, 0, final_values.size() - 1, "pushdown");
+}
+
+// One contiguous run (rows 126..129) crossing the block boundary at 128: both blocks must be flagged.
+TEST_F(XStoreZoneMapTest, OverwriteRunSpanningBlockBoundaryMarksBothBlocks) {
+    XStore store;
+    CreateTestDb(store, "ZMOVRSPAN", XStore_Proto::SECOND, kWideRowLength);
+    const uint64_t rows = 2 * RowsPerBlock(kWideRowLength);
+    SeedTwoBlocks(store, "ZMOVRSPAN", SeededRows());
+    const std::vector<std::pair<size_t, double>> changes = {{126, 1.0}, {127, 2.0}, {128, 3.0}, {129, 4.0}};
+    XStore_Proto::RangeInsert_REQ req;
+    req.set_dbname("ZMOVRSPAN");
+    req.set_durabilitymode(XStore_Proto::SYNC);
+    for (const auto &[idx, v] : changes) {
+        XStore_Proto::RangeInsert_DATA *entry = req.add_rangeinsert_data();
+        entry->set_timestamp(kOverwriteBase + idx);
+        *entry->mutable_data() = NumericRow(v);
+    }
+    XStore_Proto::RangeInsert_REP rep;
+    store.RangeInsert(&req, &rep);
+    ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+    CheckAfterChange(store, "ZMOVRSPAN", DbPath("ZMOVRSPAN"), ValuesWith(rows, changes), {true, true, false});
+}
+
+// Two UnaryInserts on the last row of block 0 and the first row of block 1.
+TEST_F(XStoreZoneMapTest, UnaryOverwriteAtBlockBoundaryMarksBothBlocks) {
+    XStore store;
+    CreateTestDb(store, "ZMOVRUNB", XStore_Proto::SECOND, kWideRowLength);
+    const uint64_t rows = 2 * RowsPerBlock(kWideRowLength);
+    SeedTwoBlocks(store, "ZMOVRUNB", SeededRows());
+    const std::vector<std::pair<size_t, double>> changes = {{127, 500.0}, {128, 1.0}};
+    for (const auto &[idx, v] : changes) {
+        XStore_Proto::UnaryInsert_REP rep;
+        store.UnaryInsert(kOverwriteBase + idx, NumericRow(v), "ZMOVRUNB", &rep, XStore_Proto::SYNC);
+        ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+    }
+    CheckAfterChange(store, "ZMOVRUNB", DbPath("ZMOVRUNB"), ValuesWith(rows, changes), {true, true, false});
+}
+
+TEST_F(XStoreZoneMapTest, OverwriteInAsyncModeKeepsAggregatesEqualToFinalValues) {
+    XStore store;
+    CreateTestDb(store, "ZMOVRASYNC", XStore_Proto::SECOND, kWideRowLength);
+    const uint64_t rows = 2 * RowsPerBlock(kWideRowLength);
+    SeedTwoBlocks(store, "ZMOVRASYNC", SeededRows());
+    UnaryOverwrite(store, "ZMOVRASYNC", XStore_Proto::ASYNC);
+    // Sentinel in a later block of the same year: same shard, applied after every overwrite above.
+    xstore_test::WaitForWalDrained(store, "ZMOVRASYNC", kOverwriteBase + 10 * RowsPerBlock(kWideRowLength));
+    CheckAfterOverwrite(store, "ZMOVRASYNC", DbPath("ZMOVRASYNC"), rows);
+}
+
+TEST_F(XStoreZoneMapTest, OverwriteInBypassModeKeepsAggregatesEqualToFinalValues) {
+    XStore store;
+    CreateTestDb(store, "ZMOVRBYPASS", XStore_Proto::SECOND, kWideRowLength);
+    const uint64_t rows = 2 * RowsPerBlock(kWideRowLength);
+    SeedTwoBlocks(store, "ZMOVRBYPASS", SeededRows());
+    UnaryOverwrite(store, "ZMOVRBYPASS", XStore_Proto::BYPASS);
+    CheckAfterOverwrite(store, "ZMOVRBYPASS", DbPath("ZMOVRBYPASS"), rows);
+}
+
+// The flag is on disk: a cold registry reopens the file and still sees it.
+TEST_F(XStoreZoneMapTest, InexactFlagSurvivesZoneMapReopen) {
+    XStore store;
+    CreateTestDb(store, "ZMOVRREOPEN", XStore_Proto::SECOND, kWideRowLength);
+    const uint64_t rows = 2 * RowsPerBlock(kWideRowLength);
+    SeedTwoBlocks(store, "ZMOVRREOPEN", SeededRows());
+    UnaryOverwrite(store, "ZMOVRREOPEN", XStore_Proto::SYNC);
+    XStore::ClearZoneMapRegistryForTests();
+    CheckAfterOverwrite(store, "ZMOVRREOPEN", DbPath("ZMOVRREOPEN"), rows);
+}
+
+// Sorted fresh append keeps blocks exact AND pushdown in use: a row punched straight out of the data file (behind
+// the zone map's back) is still counted by SUM over the fully covered blocks, proving the map answered, not a scan.
+TEST_F(XStoreZoneMapTest, SortedFreshAppendLeavesBlocksExactAndUsesPushdown) {
+    XStore store;
+    CreateTestDb(store, "ZMFRESHSORT", XStore_Proto::SECOND, kWideRowLength);
+    const uint64_t rows = 2 * RowsPerBlock(kWideRowLength);
+    SeedTwoBlocks(store, "ZMFRESHSORT", SeededRows());
+    ExpectBlockFlags(DbPath("ZMFRESHSORT"), {false, false, false});
+    const std::vector<double> values = ValuesWith(rows, {});
+    ExpectAggregatesMatch(store, "ZMFRESHSORT", values, 0, rows - 1, "pushdown");
+
+    const std::string data_path = fmt::format("{}/2023.XSTORE", DbPath("ZMFRESHSORT"));
+    int fd = open(data_path.c_str(), O_RDWR);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                        static_cast<off_t>((kOverwriteBase - kYear2023StartEpoch + 3) * kWideRowLength), kWideRowLength), 0);
+    close(fd);
+    store.EvictMappedFilesUnderPrefixForTests(DbPath("ZMFRESHSORT"));
+    double sum = 0.0;
+    for (double v : values) sum += v;
+    XStore_Proto::Sum_REP sum_rep;
+    store.SumAggregate(kOverwriteBase, kOverwriteBase + rows - 1, "ZMFRESHSORT", 0, &sum_rep);
+    EXPECT_DOUBLE_EQ(sum_rep.opresult(), sum) << "SUM over exact blocks must come from the zone map";
+}
+
+// Out-of-order fresh inserts (no row written twice), also across a zone-map reopen that forces the read path for a
+// partly filled block, must not flag anything.
+TEST_F(XStoreZoneMapTest, RandomOrderFreshInsertsLeaveBlocksExact) {
+    XStore store;
+    CreateTestDb(store, "ZMFRESHRAND", XStore_Proto::SECOND, kWideRowLength);
+    const uint64_t rows = 2 * RowsPerBlock(kWideRowLength);
+    std::vector<size_t> order(rows);
+    for (size_t i = 0; i < rows; ++i) order[i] = (i * 97) % rows; // 97 is coprime with 256: a permutation
+    for (size_t k = 0; k < rows; ++k) {
+        if (k == rows / 2) XStore::ClearZoneMapRegistryForTests();
+        XStore_Proto::UnaryInsert_REP rep;
+        store.UnaryInsert(kOverwriteBase + order[k], NumericRow(OriginalValue(order[k])), "ZMFRESHRAND", &rep,
+                          XStore_Proto::SYNC);
+        ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+    }
+    CheckAfterChange(store, "ZMFRESHRAND", DbPath("ZMFRESHRAND"), ValuesWith(rows, {}), {false, false});
+}
+
+// After a reopen, a block whose column 0 holds a null (here a string) has no known "highest counted row", so the
+// insert path must read the old bytes instead of assuming fresh.
+TEST_F(XStoreZoneMapTest, OverwriteAfterReopenOfBlockWithNullsIsDetected) {
+    XStore store;
+    CreateTestDb(store, "ZMOVRNULL", XStore_Proto::SECOND, kWideRowLength);
+    const uint64_t rows = 2 * RowsPerBlock(kWideRowLength);
+    XStore_Proto::RangeInsert_REQ req;
+    req.set_dbname("ZMOVRNULL");
+    req.set_durabilitymode(XStore_Proto::SYNC);
+    std::vector<double> values = ValuesWith(rows, {});
+    for (uint64_t i = 0; i < rows; ++i) {
+        XStore_Proto::RangeInsert_DATA *entry = req.add_rangeinsert_data();
+        entry->set_timestamp(kOverwriteBase + i);
+        if (i == 3) {
+            entry->mutable_data()->add_fielddata()->set_stringdata("not a number");
+            values[i] = kDeleted; // no numeric value: aggregates skip it
+        } else {
+            *entry->mutable_data() = NumericRow(values[i]);
+        }
+    }
+    XStore_Proto::RangeInsert_REP rep;
+    store.RangeInsert(&req, &rep);
+    ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+    ExpectBlockFlags(DbPath("ZMOVRNULL"), {false, false});
+
+    XStore::ClearZoneMapRegistryForTests();
+    XStore_Proto::UnaryInsert_REP urep;
+    store.UnaryInsert(kOverwriteBase + 7, NumericRow(5000.0), "ZMOVRNULL", &urep, XStore_Proto::SYNC);
+    ASSERT_NE(urep.insertstatus().find("[INFO]"), std::string::npos) << urep.insertstatus();
+    values[7] = 5000.0;
+    ExpectBlockFlags(DbPath("ZMOVRNULL"), {true, false});
+    ExpectAggregatesMatch(store, "ZMOVRNULL", values, 0, rows - 1, "pushdown");
+}
+
+std::vector<double> AfterDeletes(size_t rows, const std::vector<size_t> &deleted) {
+    std::vector<double> values = ValuesWith(rows, {});
+    for (size_t i : deleted) values[i] = kDeleted;
+    return values;
+}
+
+TEST_F(XStoreZoneMapTest, UnaryDeleteKeepsAggregatesEqualToRemainingValues) {
+    XStore store;
+    CreateTestDb(store, "ZMDELUNARY", XStore_Proto::SECOND, kWideRowLength);
+    const uint64_t rows = 2 * RowsPerBlock(kWideRowLength);
+    SeedTwoBlocks(store, "ZMDELUNARY", SeededRows());
+    const std::vector<size_t> deleted = {0, 200};
+    for (size_t i : deleted) {
+        XStore_Proto::UnaryDelete_REP rep = store.UnaryDelete(kOverwriteBase + i, "ZMDELUNARY");
+        ASSERT_NE(rep.deletestatus().find("[INFO]"), std::string::npos) << rep.deletestatus();
+    }
+    CheckAfterChange(store, "ZMDELUNARY", DbPath("ZMDELUNARY"), AfterDeletes(rows, deleted), {true, true, false});
+}
+
+TEST_F(XStoreZoneMapTest, BatchDeleteKeepsAggregatesEqualToRemainingValues) {
+    XStore store;
+    CreateTestDb(store, "ZMDELBATCH", XStore_Proto::SECOND, kWideRowLength);
+    const uint64_t rows = 2 * RowsPerBlock(kWideRowLength);
+    SeedTwoBlocks(store, "ZMDELBATCH", SeededRows());
+    const std::vector<size_t> deleted = {7, 255};
+    XStore_Proto::BatchDelete_REQ req;
+    req.set_dbname("ZMDELBATCH");
+    for (size_t i : deleted) req.add_timestamp(kOverwriteBase + i);
+    XStore_Proto::BatchDelete_REP rep = store.BatchDelete(&req);
+    ASSERT_NE(rep.deletestatus().find("[INFO]"), std::string::npos) << rep.deletestatus();
+    CheckAfterChange(store, "ZMDELBATCH", DbPath("ZMDELBATCH"), AfterDeletes(rows, deleted), {true, true, false});
+}
+
+TEST_F(XStoreZoneMapTest, RangeDeleteKeepsAggregatesEqualToRemainingValues) {
+    XStore store;
+    CreateTestDb(store, "ZMDELRANGE", XStore_Proto::SECOND, kWideRowLength);
+    const uint64_t rows = 2 * RowsPerBlock(kWideRowLength);
+    SeedTwoBlocks(store, "ZMDELRANGE", SeededRows());
+    std::vector<size_t> deleted;
+    for (size_t i = 100; i <= 130; ++i) deleted.push_back(i);
+    XStore_Proto::RangeDelete_REP rep = store.RangeDelete(kOverwriteBase + 100, kOverwriteBase + 130, "ZMDELRANGE");
+    ASSERT_NE(rep.deletestatus().find("[INFO]"), std::string::npos) << rep.deletestatus();
+    CheckAfterChange(store, "ZMDELRANGE", DbPath("ZMDELRANGE"), AfterDeletes(rows, deleted), {true, true, false});
+}
+
+TEST_F(XStoreZoneMapTest, DeleteThenReinsertKeepsAggregatesEqualToFinalValues) {
+    XStore store;
+    CreateTestDb(store, "ZMDELREINS", XStore_Proto::SECOND, kWideRowLength);
+    const uint64_t rows = 2 * RowsPerBlock(kWideRowLength);
+    SeedTwoBlocks(store, "ZMDELREINS", SeededRows());
+    XStore_Proto::RangeDelete_REP del = store.RangeDelete(kOverwriteBase + 10, kOverwriteBase + 20, "ZMDELREINS");
+    ASSERT_NE(del.deletestatus().find("[INFO]"), std::string::npos) << del.deletestatus();
+    std::vector<std::pair<size_t, double>> changes;
+    for (size_t i = 10; i <= 20; ++i) changes.push_back({i, 1000.0 + static_cast<double>(i)});
+    for (const auto &[idx, v] : changes) {
+        XStore_Proto::UnaryInsert_REP rep;
+        store.UnaryInsert(kOverwriteBase + idx, NumericRow(v), "ZMDELREINS", &rep, XStore_Proto::SYNC);
+        ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+    }
+    CheckAfterChange(store, "ZMDELREINS", DbPath("ZMDELREINS"), ValuesWith(rows, changes), {true, false, false});
+}
+
+// A rebuild (here: InitDB with the sidecar gone) re-derives the blocks from the data file: flags cleared, pushdown
+// back, answers still right.
+TEST_F(XStoreZoneMapTest, RebuildClearsInexactFlag) {
+    XStore store;
+    CreateTestDb(store, "ZMOVRREBUILD", XStore_Proto::SECOND, kWideRowLength);
+    const uint64_t rows = 2 * RowsPerBlock(kWideRowLength);
+    SeedTwoBlocks(store, "ZMOVRREBUILD", SeededRows());
+    UnaryOverwrite(store, "ZMOVRREBUILD", XStore_Proto::SYNC);
+    ExpectBlockFlags(DbPath("ZMOVRREBUILD"), {true, true, false});
+
+    XStore::ClearZoneMapRegistryForTests();
+    ASSERT_TRUE(std::filesystem::remove(fmt::format("{}/2023.zmap", DbPath("ZMOVRREBUILD"))));
+    store.InitDB();
+    CheckAfterChange(store, "ZMOVRREBUILD", DbPath("ZMOVRREBUILD"), FinalValues(rows), {false, false, false});
+
+    // Exact again: the zone map's own totals now equal the final values.
+    ZoneMapFile &zmap = XStore::GetOrOpenZoneMap(DbPath("ZMOVRREBUILD"), 2023, kWideRowLength);
+    const uint64_t first_block = BlockIndexForRow(kOverwriteBase - kYear2023StartEpoch, zmap.RowsPerBlockValue());
+    uint64_t valid = 0;
+    double sum = 0.0, expected_sum = 0.0;
+    for (uint64_t b = 0; b < 2; ++b) {
+        auto stats = zmap.TryGetBlockStats(first_block + b);
+        ASSERT_TRUE(stats.has_value());
+        valid += (*stats)[0].valid_count;
+        sum += (*stats)[0].sum_value;
+    }
+    for (double v : FinalValues(rows)) expected_sum += v;
+    EXPECT_EQ(valid, rows);
+    EXPECT_DOUBLE_EQ(sum, expected_sum);
+}
+
+// A v4 zone map whose totals double count an overwritten row (no flag: v4 had none) is rebuilt at InitDB and then
+// gives the right totals. The same bytes stamped v5 are trusted, which proves the corruption is one pushdown reads.
+TEST_F(XStoreZoneMapTest, V4ZoneMapWithWrongTotalsIsRebuiltAtInitDb) {
+    XStore store;
+    CreateTestDb(store, "ZMV4REBUILD", XStore_Proto::SECOND, kWideRowLength);
+    const uint64_t rows = 2 * RowsPerBlock(kWideRowLength);
+    SeedTwoBlocks(store, "ZMV4REBUILD", SeededRows());
+    const std::vector<double> values = ValuesWith(rows, {});
+    double expected_sum = 0.0;
+    for (double v : values) expected_sum += v;
+
+    XStore::ClearZoneMapRegistryForTests();
+    const std::string zmap_path = fmt::format("{}/2023.zmap", DbPath("ZMV4REBUILD"));
+    auto rewrite = [&](uint32_t version, bool add_overwritten_row) {
+        int fd = open(zmap_path.c_str(), O_RDWR);
+        ASSERT_GE(fd, 0);
+        ZoneMapFileHeader header{};
+        ASSERT_EQ(pread(fd, &header, sizeof(header), 0), static_cast<ssize_t>(sizeof(header)));
+        header.version = version;
+        header.dirty = 0;
+        ASSERT_EQ(pwrite(fd, &header, sizeof(header), 0), static_cast<ssize_t>(sizeof(header)));
+        if (add_overwritten_row) {
+            // Row 7 (value 17) was overwritten by 50 and both were counted: what a v4 binary left behind.
+            const uint64_t block = BlockIndexForRow(kOverwriteBase - kYear2023StartEpoch, header.rows_per_block);
+            const off_t off = static_cast<off_t>(sizeof(header) + block * header.tracked_column_count * sizeof(ZoneMapEntry));
+            ZoneMapEntry e0{};
+            ASSERT_EQ(pread(fd, &e0, sizeof(e0), off), static_cast<ssize_t>(sizeof(e0)));
+            e0.sum_value += 50.0;
+            e0.sum_sq_value += 2500.0;
+            e0.valid_count += 1;
+            ASSERT_EQ(pwrite(fd, &e0, sizeof(e0), off), static_cast<ssize_t>(sizeof(e0)));
+        }
+        close(fd);
+    };
+    rewrite(ZONE_MAP_VERSION, true);
+    XStore_Proto::Sum_REP trusted;
+    store.SumAggregate(kOverwriteBase, kOverwriteBase + rows - 1, "ZMV4REBUILD", 0, &trusted);
+    EXPECT_DOUBLE_EQ(trusted.opresult(), expected_sum + 50.0) << "test setup: the bad totals must be what pushdown reads";
+
+    XStore::ClearZoneMapRegistryForTests();
+    rewrite(4, false);
+    store.InitDB();
+
+    ZoneMapFileHeader on_disk{};
+    int fd = open(zmap_path.c_str(), O_RDONLY);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(pread(fd, &on_disk, sizeof(on_disk), 0), static_cast<ssize_t>(sizeof(on_disk)));
+    close(fd);
+    EXPECT_EQ(on_disk.version, ZONE_MAP_VERSION);
+    EXPECT_EQ(on_disk.dirty, 0u);
+    CheckAfterChange(store, "ZMV4REBUILD", DbPath("ZMV4REBUILD"), values, {false, false, false});
+    ZoneMapFile &zmap = XStore::GetOrOpenZoneMap(DbPath("ZMV4REBUILD"), 2023, kWideRowLength);
+    const uint64_t first_block = BlockIndexForRow(kOverwriteBase - kYear2023StartEpoch, zmap.RowsPerBlockValue());
+    double zmap_sum = 0.0;
+    for (uint64_t b = 0; b < 2; ++b) {
+        auto stats = zmap.TryGetBlockStats(first_block + b);
+        ASSERT_TRUE(stats.has_value());
+        zmap_sum += (*stats)[0].sum_value;
+    }
+    EXPECT_DOUBLE_EQ(zmap_sum, expected_sum);
+}
+
+// Pins the column-0-null guard of the "highest counted row" derivation. The block's LAST row has a string in column
+// 0, so column 0's last_row_index is the row before it. Without the guard a reloaded block would claim rows from that
+// last row on are fresh, and overwriting the last row would count both its old and new column-1 value.
+TEST_F(XStoreZoneMapTest, OverwriteOfLastRowWithNullColumnZeroAfterReloadIsDetected) {
+    XStore store;
+    CreateTestDb(store, "ZMNULLGUARD", XStore_Proto::SECOND, kWideRowLength);
+    const uint64_t rows = RowsPerBlock(kWideRowLength);
+    XStore_Proto::RangeInsert_REQ req;
+    req.set_dbname("ZMNULLGUARD");
+    req.set_durabilitymode(XStore_Proto::SYNC);
+    for (uint64_t i = 0; i < rows; ++i) {
+        XStore_Proto::RangeInsert_DATA *entry = req.add_rangeinsert_data();
+        entry->set_timestamp(kOverwriteBase + i);
+        const double v = static_cast<double>(i);
+        *entry->mutable_data() = i + 1 == rows ? xstore_test::MakeRow({xstore_test::FString("x"), xstore_test::FDouble(50.0)})
+                                               : xstore_test::MakeRow({xstore_test::FDouble(v), xstore_test::FDouble(v)});
+    }
+    XStore_Proto::RangeInsert_REP rep;
+    store.RangeInsert(&req, &rep);
+    ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+    ExpectBlockFlags(DbPath("ZMNULLGUARD"), {false});
+
+    XStore::ClearZoneMapRegistryForTests();
+    XStore_Proto::UnaryInsert_REP urep;
+    store.UnaryInsert(kOverwriteBase + rows - 1, xstore_test::MakeRow({xstore_test::FDouble(1.0), xstore_test::FDouble(60.0)}),
+                      "ZMNULLGUARD", &urep, XStore_Proto::SYNC);
+    ASSERT_NE(urep.insertstatus().find("[INFO]"), std::string::npos) << urep.insertstatus();
+
+    ExpectBlockFlags(DbPath("ZMNULLGUARD"), {true});
+    const double base = static_cast<double>((rows - 1) * (rows - 2) / 2); // 0 + 1 + ... + (rows - 2)
+    XStore_Proto::Sum_REP col1;
+    store.SumAggregate(kOverwriteBase, kOverwriteBase + rows - 1, "ZMNULLGUARD", 1, &col1);
+    EXPECT_DOUBLE_EQ(col1.opresult(), base + 60.0) << "the replaced 50 must not be counted";
+    XStore_Proto::Sum_REP col0;
+    store.SumAggregate(kOverwriteBase, kOverwriteBase + rows - 1, "ZMNULLGUARD", 0, &col0);
+    EXPECT_DOUBLE_EQ(col0.opresult(), base + 1.0);
+}
+
+uint64_t SeedBlocks(XStore &store, const std::string &db, uint64_t blocks) {
+    const uint64_t rows = blocks * RowsPerBlock(kWideRowLength);
+    SeedTwoBlocks(store, db, rows);
+    return rows;
+}
+
+std::vector<double> AfterRangeDelete(size_t rows, size_t lo, size_t hi) {
+    std::vector<double> values = ValuesWith(rows, {});
+    for (size_t i = lo; i <= hi; ++i) values[i] = kDeleted;
+    return values;
+}
+
+void ExpectBlocksEmpty(const std::string &db_path, uint64_t first, uint64_t last) {
+    ZoneMapFile &zmap = XStore::GetOrOpenZoneMap(db_path, 2023, kWideRowLength);
+    const uint64_t base_block = BlockIndexForRow(kOverwriteBase - kYear2023StartEpoch, zmap.RowsPerBlockValue());
+    for (uint64_t b = first; b <= last; ++b) {
+        auto stats = zmap.TryGetBlockStats(base_block + b);
+        ASSERT_TRUE(stats.has_value());
+        EXPECT_EQ((*stats)[0].valid_count, 0u) << "block " << b;
+        EXPECT_EQ((*stats)[0].null_count, 0u) << "block " << b;
+    }
+}
+
+// A RangeDelete covering whole blocks resets them to empty and exact: pushdown stays on for them (not flagged) and
+// every aggregate still matches the remaining rows.
+TEST_F(XStoreZoneMapTest, RangeDeleteOfWholeBlocksResetsThemToEmptyAndExact) {
+    XStore store;
+    CreateTestDb(store, "ZMDELWHOLE", XStore_Proto::SECOND, kWideRowLength);
+    const uint64_t rpb = RowsPerBlock(kWideRowLength);
+    const uint64_t rows = SeedBlocks(store, "ZMDELWHOLE", 5);
+    XStore_Proto::RangeDelete_REP rep = store.RangeDelete(kOverwriteBase + rpb, kOverwriteBase + 4 * rpb - 1, "ZMDELWHOLE");
+    ASSERT_NE(rep.deletestatus().find("[INFO]"), std::string::npos) << rep.deletestatus();
+    CheckAfterChange(store, "ZMDELWHOLE", DbPath("ZMDELWHOLE"), AfterRangeDelete(rows, rpb, 4 * rpb - 1),
+                     {false, false, false, false, false});
+    ExpectBlocksEmpty(DbPath("ZMDELWHOLE"), 1, 3);
+    XStore::ClearZoneMapRegistryForTests(); // the reset is on disk, not only in the cache
+    ExpectBlockFlags(DbPath("ZMDELWHOLE"), {false, false, false, false, false});
+    ExpectBlocksEmpty(DbPath("ZMDELWHOLE"), 1, 3);
+}
+
+// Partly covered end blocks are flagged; the whole blocks between them are reset.
+TEST_F(XStoreZoneMapTest, RangeDeleteFlagsPartialEndBlocksAndResetsWholeOnes) {
+    XStore store;
+    CreateTestDb(store, "ZMDELPART", XStore_Proto::SECOND, kWideRowLength);
+    const uint64_t rows = SeedBlocks(store, "ZMDELPART", 5);
+    XStore_Proto::RangeDelete_REP rep = store.RangeDelete(kOverwriteBase + 100, kOverwriteBase + 400, "ZMDELPART");
+    ASSERT_NE(rep.deletestatus().find("[INFO]"), std::string::npos) << rep.deletestatus();
+    CheckAfterChange(store, "ZMDELPART", DbPath("ZMDELPART"), AfterRangeDelete(rows, 100, 400),
+                     {true, false, false, true, false});
+    ExpectBlocksEmpty(DbPath("ZMDELPART"), 1, 2);
+}
+
+// Re-inserting into a reset block is a fresh write: the block stays exact, both from the cached copy and after a
+// reload from disk.
+TEST_F(XStoreZoneMapTest, ReinsertIntoResetBlockKeepsItExact) {
+    XStore store;
+    CreateTestDb(store, "ZMDELRESETINS", XStore_Proto::SECOND, kWideRowLength);
+    const uint64_t rpb = RowsPerBlock(kWideRowLength);
+    const uint64_t rows = SeedBlocks(store, "ZMDELRESETINS", 3);
+    XStore_Proto::RangeDelete_REP del = store.RangeDelete(kOverwriteBase + rpb, kOverwriteBase + 2 * rpb - 1, "ZMDELRESETINS");
+    ASSERT_NE(del.deletestatus().find("[INFO]"), std::string::npos) << del.deletestatus();
+    std::vector<double> values = AfterRangeDelete(rows, rpb, 2 * rpb - 1);
+    for (size_t i = rpb + 1; i <= rpb + 12; ++i) {
+        if (i == rpb + 6) XStore::ClearZoneMapRegistryForTests();
+        values[i] = 1000.0 + static_cast<double>(i);
+        XStore_Proto::UnaryInsert_REP rep;
+        store.UnaryInsert(kOverwriteBase + i, NumericRow(values[i]), "ZMDELRESETINS", &rep, XStore_Proto::SYNC);
+        ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+    }
+    CheckAfterChange(store, "ZMDELRESETINS", DbPath("ZMDELRESETINS"), values, {false, false, false});
+}
+
+// A RangeDelete over a few hundred blocks costs one zone-map write for all the whole blocks (a single hole punch)
+// plus one per partly covered end block, instead of reading and rewriting every block.
+TEST_F(XStoreZoneMapTest, RangeDeleteOverManyBlocksWritesOnlyTheEndBlocks) {
+    XStore store;
+    CreateTestDb(store, "ZMDELMANY", XStore_Proto::SECOND, kWideRowLength);
+    const uint64_t rpb = RowsPerBlock(kWideRowLength);
+    constexpr uint64_t kBlocks = 320;
+    // One row per block (row 5 of each), so every block has something counted without writing 640 MiB.
+    XStore_Proto::RangeInsert_REQ req;
+    req.set_dbname("ZMDELMANY");
+    req.set_durabilitymode(XStore_Proto::SYNC);
+    for (uint64_t b = 0; b < kBlocks; ++b) {
+        XStore_Proto::RangeInsert_DATA *entry = req.add_rangeinsert_data();
+        entry->set_timestamp(kOverwriteBase + b * rpb + 5);
+        *entry->mutable_data() = NumericRow(OriginalValue(b));
+    }
+    XStore_Proto::RangeInsert_REP ins;
+    store.RangeInsert(&req, &ins);
+    ASSERT_NE(ins.insertstatus().find("[INFO]"), std::string::npos) << ins.insertstatus();
+
+    ZoneMapFile &zmap = XStore::GetOrOpenZoneMap(DbPath("ZMDELMANY"), 2023, kWideRowLength);
+    const uint64_t writes_before = zmap.MarkWritesForTests();
+    // From row 3 of block 9 to row 50 of block 310: blocks 9 and 310 partly covered (their row 5 goes), 10..309 whole.
+    XStore_Proto::RangeDelete_REP del =
+        store.RangeDelete(kOverwriteBase + 9 * rpb + 3, kOverwriteBase + 310 * rpb + 50, "ZMDELMANY");
+    ASSERT_NE(del.deletestatus().find("[INFO]"), std::string::npos) << del.deletestatus();
+    EXPECT_EQ(zmap.MarkWritesForTests() - writes_before, 3u);
+
+    std::vector<bool> flags(kBlocks, false);
+    flags[9] = flags[310] = true;
+    ExpectBlockFlags(DbPath("ZMDELMANY"), flags);
+    ExpectBlocksEmpty(DbPath("ZMDELMANY"), 10, 309);
+
+    double sum = 0.0, n = 0.0;
+    for (uint64_t b = 0; b < kBlocks; ++b) {
+        if (b >= 9 && b <= 310) continue;
+        sum += OriginalValue(b);
+        n += 1.0;
+    }
+    const unsigned long long end = kOverwriteBase + kBlocks * rpb - 1;
+    XStore_Proto::Sum_REP sum_rep;
+    store.SumAggregate(kOverwriteBase, end, "ZMDELMANY", 0, &sum_rep);
+    EXPECT_DOUBLE_EQ(sum_rep.opresult(), sum);
+    XStore_Proto::Avg_REP avg_rep;
+    store.AvgAggregate(kOverwriteBase, end, "ZMDELMANY", 0, &avg_rep);
+    EXPECT_DOUBLE_EQ(avg_rep.opresult(), sum / n);
+    XStore_Proto::Ohlc_REP ohlc;
+    store.OhlcAggregate(kOverwriteBase, end, "ZMDELMANY", 0, &ohlc);
+    EXPECT_DOUBLE_EQ(ohlc.open(), OriginalValue(0));
+    EXPECT_DOUBLE_EQ(ohlc.close(), OriginalValue(kBlocks - 1));
+
+    // A fresh row in a reset block: no flag, no extra mark write, counted once.
+    XStore_Proto::UnaryInsert_REP urep;
+    store.UnaryInsert(kOverwriteBase + 100 * rpb + 7, NumericRow(1000.0), "ZMDELMANY", &urep, XStore_Proto::SYNC);
+    ASSERT_NE(urep.insertstatus().find("[INFO]"), std::string::npos) << urep.insertstatus();
+    EXPECT_EQ(zmap.MarkWritesForTests() - writes_before, 3u);
+    EXPECT_FALSE(zmap.BlockInexact(BlockIndexForRow(kOverwriteBase - kYear2023StartEpoch, rpb) + 100));
+    store.SumAggregate(kOverwriteBase, end, "ZMDELMANY", 0, &sum_rep);
+    EXPECT_DOUBLE_EQ(sum_rep.opresult(), sum + 1000.0);
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M4 stage 1: live widening mechanics (rebuild frontier F inside ZoneMapFile and CatIdxFile). Nothing in production
+// starts a rebuild yet; these tests drive the methods directly, with a test stand-in for the stage-2 builder.
+// ---------------------------------------------------------------------------------------------------------------------
+namespace {
+
+using xstore_test::ScratchDir;
+using xstore_test::CreateTestDb;
+namespace fs = std::filesystem;
+
+constexpr uint64_t kLwRpb = 128; // RowsPerBlock(kWideRowLength)
+
+ZoneMapFileHeader ReadZmapHeader(const std::string &path) {
+    ZoneMapFileHeader h{};
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd >= 0) {
+        if (pread(fd, &h, sizeof(h), 0) != static_cast<ssize_t>(sizeof(h))) h = ZoneMapFileHeader{0, 0, 0, 0, 0};
+        close(fd);
+    }
+    return h;
+}
+
+off_t FileSize(const std::string &path) {
+    struct stat st{};
+    return stat(path.c_str(), &st) == 0 ? st.st_size : -1;
+}
+
+// Copies only the data extents of a (very sparse) year file, keeping its size.
+void SparseCopy(const std::string &from, const std::string &to) {
+    int in = open(from.c_str(), O_RDONLY);
+    ASSERT_GE(in, 0);
+    int out = open(to.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    ASSERT_GE(out, 0);
+    const off_t size = lseek(in, 0, SEEK_END);
+    ASSERT_EQ(ftruncate(out, size), 0);
+    std::vector<char> buf(1 << 20);
+    off_t pos = 0;
+    while (pos < size) {
+        const off_t data = lseek(in, pos, SEEK_DATA);
+        if (data < 0) break;
+        const off_t hole = lseek(in, data, SEEK_HOLE);
+        for (off_t p = data; p < hole;) {
+            const ssize_t n = pread(in, buf.data(), static_cast<size_t>(std::min<off_t>(hole - p, static_cast<off_t>(buf.size()))), p);
+            ASSERT_GT(n, 0);
+            ASSERT_EQ(pwrite(out, buf.data(), static_cast<size_t>(n), p), n);
+            p += n;
+        }
+        pos = hole;
+    }
+    close(in);
+    close(out);
+}
+
+// Stand-in for the stage-2 builder over rows [from, to): READ range lock on the data file, fold every present row
+// into both indexes, advance F while still holding the lock.
+void LwBuildRows(ZoneMapFile &zmap, CatIdxFile *catidx, int fd, const std::string &data_path, uint16_t row_length,
+                 uint32_t width, uint64_t from, uint64_t to) {
+    if (to <= from) return; // a zero-length range lock would mean "rest of file"
+    FileRangeLockGuard guard(data_path, from * row_length, (to - from) * row_length, FileRangeLock::LockType::READ);
+    const bool complete = ForEachDataRow(fd, to, row_length, [&](uint64_t r, const char *row_buf) {
+        if (row_buf[0] == 0) return;
+        XStore_Proto::RowData row;
+        const size_t real_len = XStoreWireEncode::RealRowDataLength(row_buf, row_length);
+        if (real_len > 0) (void)row.ParseFromArray(row_buf, static_cast<int>(real_len));
+        std::vector<ZoneMapObservation> zobs;
+        std::vector<CatIdxObservation> cobs;
+        const int n = std::min(static_cast<int>(width), row.fielddata_size());
+        for (int c = 0; c < n; ++c) {
+            const XStore_Proto::FData &f = row.fielddata(c);
+            const bool numeric = f.oneOfData_case() == XStore_Proto::FData::kDoubleData;
+            zobs.push_back({static_cast<uint32_t>(c), numeric ? f.doubledata() : 0.0, numeric});
+            if (f.oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
+                cobs.push_back({static_cast<uint32_t>(c), EncodeFDataForCatIdx(f), true});
+            }
+        }
+        zmap.RebuildFoldRow(r, zobs, width);
+        if (catidx != nullptr) catidx->RebuildFoldRow(r, cobs);
+    }, from);
+    EXPECT_TRUE(complete);
+    zmap.AdvanceFrontier(to);
+    if (catidx != nullptr) catidx->AdvanceFrontier(to);
+}
+
+uint64_t DataRows(const std::string &data_path, uint16_t row_length) {
+    return static_cast<uint64_t>(FileSize(data_path)) / row_length;
+}
+
+// One numeric observation in column 0 (a 4-column file: columns 1..3 count as nulls).
+std::vector<ZoneMapObservation> Obs(double v) { return {{0, v, true}}; }
+
+class ZoneMapLiveWidenTest : public ::testing::Test {
+protected:
+    std::unique_ptr<ScratchDir> scratch;
+    std::string path;
+    ZoneMapFile zmap;
+
+    // 4 blocks of kLwRpb rows, column 0 = row index, at width 4, marked clean.
+    void SetUp() override {
+        scratch = std::make_unique<ScratchDir>("zone_map_live_widen");
+        path = (scratch->test_root / "2023.zmap").string();
+        ASSERT_TRUE(zmap.Open(path, kWideRowLength, 4));
+        for (uint64_t r = 0; r < 4 * kLwRpb; ++r) zmap.UpdateRow(r, Obs(static_cast<double>(r)), 4);
+        ASSERT_TRUE(zmap.MarkClean());
+    }
+
+    // Builder folds rows [from, to) with value 1000 + row (padded to the file's width), then advances F to `to`.
+    void Fold(uint64_t from, uint64_t to) {
+        const uint32_t pad_to = zmap.TrackedColumnCount();
+        for (uint64_t r = from; r < to; ++r) zmap.RebuildFoldRow(r, Obs(1000.0 + static_cast<double>(r)), pad_to);
+        zmap.AdvanceFrontier(to);
+    }
+};
+
+TEST_F(ZoneMapLiveWidenTest, BeginRebuildWidensInPlaceAndServesOnlyCompleteBlocks) {
+    ASSERT_TRUE(zmap.TryGetBlockStats(2).has_value());
+    ASSERT_TRUE(zmap.BeginRebuild(8));
+    EXPECT_TRUE(zmap.Rebuilding());
+    EXPECT_EQ(zmap.TrackedColumnCount(), 8u);
+    const ZoneMapFileHeader on_disk = ReadZmapHeader(path);
+    EXPECT_EQ(on_disk.tracked_column_count, 8u);
+    EXPECT_EQ(on_disk.dirty, 1u);
+    EXPECT_EQ(on_disk.rows_per_block, kLwRpb);
+    EXPECT_EQ(FileSize(path), static_cast<off_t>(sizeof(ZoneMapFileHeader))) << "old blocks must be gone";
+    for (uint64_t b = 0; b < 4; ++b) {
+        EXPECT_FALSE(zmap.TryGetBlockStats(b).has_value()) << "block " << b << " is not rebuilt yet";
+        EXPECT_FALSE(zmap.BlockInexact(b));
+    }
+
+    Fold(0, kLwRpb + 64); // block 0 complete, block 1 half
+    auto b0 = zmap.TryGetBlockStats(0);
+    ASSERT_TRUE(b0.has_value());
+    ASSERT_EQ(b0->size(), 8u);
+    EXPECT_EQ((*b0)[0].valid_count, kLwRpb);
+    EXPECT_DOUBLE_EQ((*b0)[0].min_value, 1000.0);
+    EXPECT_DOUBLE_EQ((*b0)[0].max_value, 1000.0 + kLwRpb - 1);
+    EXPECT_EQ(ZoneMapNullCount((*b0)[7]), kLwRpb) << "the new columns are tracked";
+    EXPECT_FALSE(zmap.TryGetBlockStats(1).has_value()) << "straddles F";
+
+    zmap.AdvanceFrontier(10); // never moves back
+    EXPECT_TRUE(zmap.TryGetBlockStats(0).has_value());
+    EXPECT_FALSE(zmap.TryGetBlockStats(1).has_value());
+
+    Fold(kLwRpb + 64, 4 * kLwRpb);
+    for (uint64_t b = 0; b < 4; ++b) {
+        auto st = zmap.TryGetBlockStats(b);
+        ASSERT_TRUE(st.has_value()) << "block " << b;
+        EXPECT_EQ((*st)[0].valid_count, kLwRpb) << "block " << b;
+        EXPECT_DOUBLE_EQ((*st)[0].first_value, 1000.0 + static_cast<double>(b * kLwRpb)) << "block " << b;
+    }
+    EXPECT_FALSE(zmap.TryGetBlockStats(4).has_value()) << "F = 4 blocks: block 4 is not complete yet";
+
+    EXPECT_FALSE(zmap.MarkClean()) << "a half-built index must stay dirty";
+    EXPECT_EQ(ReadZmapHeader(path).dirty, 1u);
+    EXPECT_TRUE(zmap.FinishRebuild());
+    EXPECT_FALSE(zmap.Rebuilding());
+    EXPECT_EQ(ReadZmapHeader(path).dirty, 1u) << "FinishRebuild does not clean the file";
+    auto b9 = zmap.TryGetBlockStats(9);
+    ASSERT_TRUE(b9.has_value());
+    EXPECT_EQ((*b9)[0].valid_count, 0u);
+    EXPECT_TRUE(zmap.MarkClean());
+    EXPECT_EQ(ReadZmapHeader(path).dirty, 0u);
+    EXPECT_EQ(ReadZmapHeader(path).tracked_column_count, 8u);
+
+    // Survives a cold reopen.
+    ZoneMapFile reopened;
+    ASSERT_TRUE(reopened.Open(path, kWideRowLength, 8));
+    auto r3 = reopened.TryGetBlockStats(3);
+    ASSERT_TRUE(r3.has_value());
+    EXPECT_EQ((*r3)[0].valid_count, kLwRpb);
+    EXPECT_DOUBLE_EQ((*r3)[0].sum_value, kLwRpb * 1000.0 + static_cast<double>((3 * kLwRpb + 4 * kLwRpb - 1) * kLwRpb / 2));
+}
+
+TEST_F(ZoneMapLiveWidenTest, UpdateRowAndRebuildFoldRowAreClippedAtTheFrontier) {
+    ASSERT_TRUE(zmap.BeginRebuild(4));
+    Fold(0, 100);
+    zmap.UpdateRow(50, Obs(-5.0), 4);   // below F: folded now
+    zmap.UpdateRow(100, Obs(-7.0), 4);  // at F: left to the builder
+    zmap.UpdateRow(300, Obs(-9.0), 4);  // far above F
+    zmap.RebuildFoldRow(10, Obs(-11.0), 4); // already folded: ignored
+    Fold(100, 4 * kLwRpb);
+    EXPECT_TRUE(zmap.FinishRebuild());
+    zmap.RebuildFoldRow(5, Obs(-13.0), 4); // no rebuild running: ignored
+
+    auto b0 = zmap.TryGetBlockStats(0);
+    ASSERT_TRUE(b0.has_value());
+    EXPECT_EQ((*b0)[0].valid_count, kLwRpb + 1);
+    EXPECT_DOUBLE_EQ((*b0)[0].min_value, -5.0);
+    auto b2 = zmap.TryGetBlockStats(2);
+    ASSERT_TRUE(b2.has_value());
+    EXPECT_EQ((*b2)[0].valid_count, kLwRpb);
+    EXPECT_DOUBLE_EQ((*b2)[0].min_value, 1000.0 + 2 * kLwRpb) << "the write above F was not folded";
+}
+
+TEST_F(ZoneMapLiveWidenTest, OverwriteCheckAndInexactMarkAreClippedAtTheFrontier) {
+    ASSERT_TRUE(zmap.BeginRebuild(4));
+    Fold(0, 200); // block 0 complete, block 1 rows 128..199 folded
+    EXPECT_FALSE(zmap.NeedsOverwriteCheck(200, 10)) << "nothing is folded at or above F";
+    EXPECT_FALSE(zmap.NeedsOverwriteCheck(300, 50));
+    EXPECT_TRUE(zmap.NeedsOverwriteCheck(150, 10));
+    EXPECT_TRUE(zmap.NeedsOverwriteCheck(195, 20)) << "the part below F is folded";
+
+    const uint64_t marks = zmap.MarkWritesForTests();
+    zmap.MarkInexact(300, 310);
+    zmap.MarkInexact(200, 255);
+    EXPECT_EQ(zmap.MarkWritesForTests(), marks) << "rows at or above F: nothing to flag";
+    zmap.MarkInexact(260, 270); // block 2: not folded at all
+    EXPECT_EQ(zmap.MarkWritesForTests(), marks);
+    zmap.MarkInexact(190, 210); // straddles F: flags block 1 for its folded part
+    EXPECT_EQ(zmap.MarkWritesForTests(), marks + 1);
+
+    Fold(200, 4 * kLwRpb);
+    EXPECT_TRUE(zmap.FinishRebuild());
+    EXPECT_FALSE(zmap.BlockInexact(0));
+    EXPECT_TRUE(zmap.BlockInexact(1));
+    EXPECT_FALSE(zmap.BlockInexact(2)) << "a mark above F must not reach the block the builder fills later";
+    EXPECT_FALSE(zmap.BlockInexact(3));
+}
+
+TEST_F(ZoneMapLiveWidenTest, DeleteRowsStraddlingTheFrontierResetsOnlyCompleteBlocks) {
+    ASSERT_TRUE(zmap.BeginRebuild(4));
+    Fold(0, 200); // F = 200: block 0 complete, block 1 partly folded, blocks 2.. untouched
+    int punches = 0;
+    // Rows 0..511 cover blocks 0..3 entirely.
+    EXPECT_TRUE(zmap.DeleteRows(0, 4 * kLwRpb - 1, [&] { ++punches; return true; }));
+    EXPECT_EQ(punches, 1);
+    auto b0 = zmap.TryGetBlockStats(0);
+    ASSERT_TRUE(b0.has_value());
+    EXPECT_EQ((*b0)[0].valid_count, 0u) << "complete block below F: reset to empty";
+    EXPECT_FALSE(ZoneMapEntryInexact((*b0)[0]));
+
+    // The builder now finds the rows deleted (holes) and folds nothing more; block 1 keeps its folded part, flagged.
+    zmap.AdvanceFrontier(4 * kLwRpb);
+    EXPECT_TRUE(zmap.FinishRebuild());
+    EXPECT_FALSE(zmap.BlockInexact(0));
+    EXPECT_TRUE(zmap.BlockInexact(1)) << "the block straddling F is flagged, never reset";
+    for (uint64_t b = 2; b < 4; ++b) {
+        auto st = zmap.TryGetBlockStats(b);
+        ASSERT_TRUE(st.has_value());
+        EXPECT_EQ((*st)[0].valid_count, 0u) << "block " << b;
+        EXPECT_FALSE(ZoneMapEntryInexact((*st)[0])) << "block " << b << " above F: untouched";
+    }
+}
+
+TEST_F(ZoneMapLiveWidenTest, DeleteRowsWhollyAboveTheFrontierLeavesTheIndexAlone) {
+    ASSERT_TRUE(zmap.BeginRebuild(4));
+    Fold(0, kLwRpb);
+    const uint64_t marks = zmap.MarkWritesForTests();
+    EXPECT_TRUE(zmap.DeleteRows(2 * kLwRpb, 4 * kLwRpb - 1, [] { return true; }));
+    EXPECT_TRUE(zmap.DeleteRows(kLwRpb + 3, kLwRpb + 9, [] { return true; }));
+    EXPECT_EQ(zmap.MarkWritesForTests(), marks);
+    EXPECT_FALSE(zmap.DeleteRows(2 * kLwRpb, 3 * kLwRpb - 1, [] { return false; })) << "punch result is passed through";
+    EXPECT_EQ(zmap.MarkWritesForTests(), marks);
+}
+
+// Owner rule: the index is dirty on disk before it is truncated. A failed fdatasync of the dirty mark aborts the
+// rebuild with the old index intact and still served.
+TEST_F(ZoneMapLiveWidenTest, FailedDirtyMarkSyncLeavesTheOldIndexInPlace) {
+    const off_t size_before = FileSize(path);
+    {
+        xstore_fault::ScopedFdFault fault(xstore_fault::FdOp::kSync, path, 0, 1, EIO);
+        EXPECT_FALSE(zmap.BeginRebuild(8));
+        EXPECT_EQ(fault.Failures(), 1);
+    }
+    EXPECT_FALSE(zmap.Rebuilding());
+    EXPECT_EQ(FileSize(path), size_before) << "not truncated";
+    EXPECT_EQ(zmap.TrackedColumnCount(), 4u);
+    EXPECT_EQ(ReadZmapHeader(path).tracked_column_count, 4u);
+    auto b3 = zmap.TryGetBlockStats(3);
+    ASSERT_TRUE(b3.has_value());
+    EXPECT_EQ((*b3)[0].valid_count, kLwRpb);
+    EXPECT_DOUBLE_EQ((*b3)[0].min_value, static_cast<double>(3 * kLwRpb));
+    // A retry without the fault goes through.
+    EXPECT_TRUE(zmap.BeginRebuild(8));
+    EXPECT_EQ(zmap.TrackedColumnCount(), 8u);
+    EXPECT_TRUE(zmap.FinishRebuild());
+}
+
+// S1: the rebuild's fresh header never reached the disk (the file is 0 bytes). FinishRebuild must not end the rebuild
+// then, or MarkClean would "clean" a header-less file that a later cold open serves as an empty, clean index.
+TEST_F(ZoneMapLiveWidenTest, FinishRebuildRefusesWhileTheHeaderIsNotDurable) {
+    {
+        // pwrite 1 (the old header's dirty mark) passes; the fresh header and every retry fail.
+        xstore_fault::ScopedFdFault fault(xstore_fault::FdOp::kPwrite, path, 1, 1000, ENOSPC);
+        ASSERT_TRUE(zmap.BeginRebuild(8));
+        EXPECT_EQ(FileSize(path), 0);
+        zmap.AdvanceFrontier(4 * kLwRpb);
+        EXPECT_FALSE(zmap.FinishRebuild());
+        EXPECT_TRUE(zmap.Rebuilding()) << "still rebuilding, so still pinned";
+        EXPECT_FALSE(zmap.MarkClean());
+        EXPECT_FALSE(zmap.TryGetBlockStats(4).has_value()) << "frontier unchanged (F = 4 blocks)";
+        EXPECT_GE(fault.Failures(), 2);
+    }
+    EXPECT_EQ(FileSize(path), 0);
+    EXPECT_TRUE(zmap.FinishRebuild()) << "the retry writes the header";
+    EXPECT_FALSE(zmap.Rebuilding());
+    EXPECT_EQ(ReadZmapHeader(path).dirty, 1u);
+    EXPECT_EQ(ReadZmapHeader(path).tracked_column_count, 8u);
+    EXPECT_TRUE(zmap.MarkClean());
+    EXPECT_EQ(ReadZmapHeader(path).dirty, 0u);
+}
+
+// Q2: a file too short for a header (new, or a crash between a rebuild's truncate and its header write) is opened with
+// a fresh header marked DIRTY, never clean.
+TEST_F(XStoreZoneMapTest, ColdOpenOfAShortFileWritesADirtyHeader) {
+    for (const off_t size : {off_t{0}, off_t{10}}) {
+        SCOPED_TRACE(size);
+        const std::string p = (scratch->test_root / ("short" + std::to_string(size) + ".zmap")).string();
+        int fd = open(p.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+        ASSERT_GE(fd, 0);
+        ASSERT_EQ(ftruncate(fd, size), 0);
+        close(fd);
+        ZoneMapFile z;
+        ASSERT_TRUE(z.Open(p, kWideRowLength, 4));
+        const ZoneMapFileHeader h = ReadZmapHeader(p);
+        EXPECT_EQ(h.magic, ZoneMapFileHeader{}.magic);
+        EXPECT_EQ(h.dirty, 1u);
+        EXPECT_EQ(z.DirtyMarkWritesForTests(), 0u) << "written dirty in one pwrite, not synced (SF1)";
+    }
+}
+
+// S3: a pinned entry survives registry pressure and is evictable again once the pin is released.
+TEST_F(XStoreZoneMapTest, RegistryNeverEvictsAPinnedZoneMap) {
+    XStore::ClearZoneMapRegistryForTests();
+    XStore store;
+    CreateTestDb(store, "ZMPIN", XStore_Proto::SECOND, 64);
+    const std::string db = DbPath("ZMPIN");
+    // A fresh file plus one synced dirty mark counts 1. A cold reopen of it (header already dirty on disk) would count
+    // 0 marks: that tells the two apart.
+    std::optional<ZoneMapFile::Pin> pin(XStore::PinZoneMap(db, 2000, 64));
+    ZoneMapFile *pinned = pin->get();
+    pinned->MarkDirty();
+    ASSERT_EQ(pinned->DirtyMarkWritesForTests(), 1u);
+    for (unsigned short year = 2001; year < 2001 + XStoreTunables::ZONE_MAP_REGISTRY_CAP + 10; ++year) {
+        XStore::GetOrOpenZoneMap(db, year, 64);
+    }
+    EXPECT_LE(XStore::ZoneMapRegistrySize(), XStoreTunables::ZONE_MAP_REGISTRY_CAP);
+    ZoneMapFile &again = XStore::GetOrOpenZoneMap(db, 2000, 64);
+    EXPECT_EQ(&again, pinned);
+    EXPECT_EQ(again.DirtyMarkWritesForTests(), 1u) << "the pinned entry was evicted and reopened cold";
+
+    pin.reset();
+    for (unsigned short year = 2400; year < 2400 + XStoreTunables::ZONE_MAP_REGISTRY_CAP; ++year) {
+        XStore::GetOrOpenZoneMap(db, year, 64);
+    }
+    EXPECT_EQ(XStore::GetOrOpenZoneMap(db, 2000, 64).DirtyMarkWritesForTests(), 0u) << "released: evicted and reopened";
+    XStore::ClearZoneMapRegistryForTests();
+}
+
+// Nits: with every entry held the registry grows past the cap, warns once per episode, and shrinks back to the cap
+// once the entries are released.
+TEST_F(XStoreZoneMapTest, RegistryOverCapWarnsOnceAndShrinksBackAfterRelease) {
+    XStore::ClearZoneMapRegistryForTests();
+    XStore store;
+    CreateTestDb(store, "ZMOVERCAP", XStore_Proto::SECOND, 64);
+    const std::string db = DbPath("ZMOVERCAP");
+    std::vector<ZoneMapFile::Pin> pins;
+    for (unsigned short year = 2001; year < 2001 + XStoreTunables::ZONE_MAP_REGISTRY_CAP; ++year) {
+        pins.push_back(XStore::PinZoneMap(db, year, 64));
+    }
+    xstore_test::kLogCapture->Clear();
+    pins.push_back(XStore::PinZoneMap(db, 1999, 64));
+    EXPECT_EQ(XStore::ZoneMapRegistrySize(), XStoreTunables::ZONE_MAP_REGISTRY_CAP + 1);
+    EXPECT_TRUE(xstore_test::kLogCapture->Contains("growing past the cap"));
+    xstore_test::kLogCapture->Clear();
+    pins.push_back(XStore::PinZoneMap(db, 1998, 64));
+    EXPECT_EQ(XStore::ZoneMapRegistrySize(), XStoreTunables::ZONE_MAP_REGISTRY_CAP + 2);
+    EXPECT_FALSE(xstore_test::kLogCapture->Contains("growing past the cap")) << "one warning per episode";
+
+    pins.clear();
+    XStore::GetOrOpenZoneMap(db, 1997, 64);
+    EXPECT_EQ(XStore::ZoneMapRegistrySize(), XStoreTunables::ZONE_MAP_REGISTRY_CAP) << "shrinks back to the cap";
+    XStore::ClearZoneMapRegistryForTests();
+}
+
+// The registry never evicts an index that is being rebuilt (its builder holds a reference, and a cold reopen of the
+// half-built file would trust blocks the builder has not reached). With every entry pinned it grows past the cap.
+TEST_F(XStoreZoneMapTest, RegistryNeverEvictsARebuildingZoneMap) {
+    XStore::ClearZoneMapRegistryForTests();
+    XStore store;
+    CreateTestDb(store, "ZMLWPIN", XStore_Proto::SECOND, 64);
+    const std::string db = DbPath("ZMLWPIN");
+    ZoneMapFile &pinned = XStore::GetOrOpenZoneMap(db, 2000, 64);
+    ASSERT_TRUE(pinned.BeginRebuild(64));
+    for (unsigned short year = 2001; year < 2001 + XStoreTunables::ZONE_MAP_REGISTRY_CAP + 10; ++year) {
+        XStore::GetOrOpenZoneMap(db, year, 64);
+    }
+    EXPECT_LE(XStore::ZoneMapRegistrySize(), XStoreTunables::ZONE_MAP_REGISTRY_CAP);
+    ZoneMapFile &again = XStore::GetOrOpenZoneMap(db, 2000, 64);
+    EXPECT_TRUE(again.Rebuilding()) << "the rebuilding entry was evicted and reopened cold";
+    EXPECT_EQ(&again, &pinned);
+
+    // Every entry pinned: the next open grows the registry instead of evicting (and warns, once per episode: the
+    // warning may come from the loop below already).
+    xstore_test::kLogCapture->Clear();
+    std::vector<ZoneMapFile *> all;
+    for (unsigned short year = 2001; year < 2001 + XStoreTunables::ZONE_MAP_REGISTRY_CAP; ++year) {
+        ZoneMapFile &z = XStore::GetOrOpenZoneMap(db, year, 64);
+        if (!z.Rebuilding()) {
+            ASSERT_TRUE(z.BeginRebuild(64));
+        }
+        all.push_back(&z);
+    }
+    XStore::GetOrOpenZoneMap(db, 1999, 64);
+    EXPECT_GT(XStore::ZoneMapRegistrySize(), XStoreTunables::ZONE_MAP_REGISTRY_CAP);
+    EXPECT_TRUE(xstore_test::kLogCapture->Contains("growing past the cap"));
+    EXPECT_TRUE(pinned.Rebuilding());
+    EXPECT_TRUE(pinned.FinishRebuild());
+    for (ZoneMapFile *z : all) EXPECT_TRUE(z->FinishRebuild());
+    XStore::ClearZoneMapRegistryForTests();
+}
+
+// Crash images: the .zmap and .catidx copied after each BeginRebuild step and mid-build must make the next start
+// rebuild (or, once the build completed and was marked clean, be correct as they stand). Checkpointing first keeps WAL
+// replay out of it: replay would force the year's rebuild whatever the files say.
+TEST_F(XStoreZoneMapTest, LiveWidenCrashImagesAreRebuiltAtTheNextStart) {
+    XStore store;
+    const std::string name = "ZMLWCRASH";
+    CreateTestDb(store, name, XStore_Proto::SECOND, kWideRowLength);
+    const std::string db = DbPath(name);
+    const uint64_t rpb = RowsPerBlock(kWideRowLength);
+    SeedTwoBlocks(store, name, 2 * rpb);
+    // One 70-column row in a third block grows the DB's tracked width to 70; the index files stay 64 wide.
+    std::vector<XStore_Proto::FData> wide;
+    for (int c = 0; c < 70; ++c) wide.push_back(xstore_test::FDouble(static_cast<double>(c + 1)));
+    XStore_Proto::UnaryInsert_REP urep;
+    store.UnaryInsert(kOverwriteBase + 2 * rpb + 3, xstore_test::MakeRow(wide), name, &urep, XStore_Proto::SYNC);
+    ASSERT_NE(urep.insertstatus().find("[INFO]"), std::string::npos) << urep.insertstatus();
+
+    const std::string zmap_path = db + "/2023.zmap";
+    const std::string catidx_path = db + "/2023.catidx";
+    const std::string data_path = db + "/2023.XSTORE";
+    ZoneMapFile &zmap = XStore::GetOrOpenZoneMap(db, 2023, kWideRowLength);
+    CatIdxFile &catidx = XStore::GetOrOpenCatIdx(db, 2023, kWideRowLength);
+    ASSERT_EQ(zmap.TrackedColumnCount(), 64u);
+    ASSERT_EQ(catidx.TrackedColumnCount(), 64u);
+    ASSERT_TRUE(zmap.MarkClean());
+    ASSERT_TRUE(catidx.MarkClean());
+    const fs::path images = scratch->test_root / "images";
+    fs::create_directories(images);
+    auto save = [&](const std::string &tag) {
+        SparseCopy(zmap_path, (images / (tag + ".zmap")).string());
+        SparseCopy(catidx_path, (images / (tag + ".catidx")).string());
+    };
+
+    // A: dirty mark written but its fdatasync failed -> rebuild refused, old content, header dirty.
+    {
+        xstore_fault::ScopedFdFault fault(xstore_fault::FdOp::kSync, zmap_path, 0, 1, EIO);
+        EXPECT_FALSE(zmap.BeginRebuild(70));
+    }
+    {
+        xstore_fault::ScopedFdFault fault(xstore_fault::FdOp::kSync, catidx_path, 0, 1, EIO);
+        EXPECT_FALSE(catidx.BeginRebuild(70));
+    }
+    EXPECT_EQ(ReadZmapHeader(zmap_path).dirty, 1u);
+    EXPECT_GT(FileSize(zmap_path), static_cast<off_t>(sizeof(ZoneMapFileHeader)));
+    save("a");
+
+    // B: truncated, the fresh header's pwrite failed -> files too short to hold a header.
+    {
+        xstore_fault::ScopedFdFault fault(xstore_fault::FdOp::kPwrite, zmap_path, 1, 1, EIO);
+        EXPECT_TRUE(zmap.BeginRebuild(70));
+    }
+    {
+        xstore_fault::ScopedFdFault fault(xstore_fault::FdOp::kPwrite, catidx_path, 1, 1, EIO);
+        EXPECT_TRUE(catidx.BeginRebuild(70));
+    }
+    EXPECT_EQ(FileSize(zmap_path), 0);
+    EXPECT_EQ(FileSize(catidx_path), 0);
+    save("b");
+
+    // C: mid-build -- first data block folded (the first fold rewrites the missing header, dirty).
+    int fd = open(data_path.c_str(), O_RDONLY);
+    ASSERT_GE(fd, 0);
+    const uint64_t first_row = kOverwriteBase - kYear2023StartEpoch;
+    const uint64_t total_rows = DataRows(data_path, kWideRowLength);
+    LwBuildRows(zmap, &catidx, fd, data_path, kWideRowLength, 70, 0, first_row + rpb);
+    EXPECT_EQ(ReadZmapHeader(zmap_path).tracked_column_count, 70u);
+    EXPECT_EQ(ReadZmapHeader(zmap_path).dirty, 1u);
+    save("c");
+
+    // D: build complete and marked clean -> trusted as is.
+    LwBuildRows(zmap, &catidx, fd, data_path, kWideRowLength, 70, first_row + rpb, total_rows);
+    close(fd);
+    EXPECT_TRUE(zmap.FinishRebuild());
+    EXPECT_TRUE(catidx.FinishRebuild());
+    ASSERT_TRUE(zmap.MarkClean());
+    ASSERT_TRUE(catidx.MarkClean());
+    save("d");
+
+    const uint64_t first_block = BlockIndexForRow(first_row, rpb);
+    double block_sum[2] = {0.0, 0.0};
+    for (uint64_t i = 0; i < 2 * rpb; ++i) block_sum[i / rpb] += OriginalValue(i);
+    for (const char *tag : {"a", "b", "c", "d"}) {
+        SCOPED_TRACE(std::string("image ") + tag);
+        XStore::ClearZoneMapRegistryForTests();
+        XStore::ClearCatIdxRegistryForTests();
+        SparseCopy((images / (std::string(tag) + ".zmap")).string(), zmap_path);
+        SparseCopy((images / (std::string(tag) + ".catidx")).string(), catidx_path);
+        ASSERT_TRUE(walring::Checkpointer::Instance().RunCycle());
+        store.InitDB();
+
+        const ZoneMapFileHeader h = ReadZmapHeader(zmap_path);
+        EXPECT_EQ(h.tracked_column_count, 70u);
+        EXPECT_EQ(h.dirty, 0u);
+        ZoneMapFile &z = XStore::GetOrOpenZoneMap(db, 2023, kWideRowLength);
+        for (uint64_t b = 0; b < 2; ++b) {
+            auto st = z.TryGetBlockStats(first_block + b);
+            ASSERT_TRUE(st.has_value());
+            EXPECT_EQ((*st)[0].valid_count, rpb) << "block " << b;
+            EXPECT_DOUBLE_EQ((*st)[0].sum_value, block_sum[b]) << "block " << b;
+            EXPECT_FALSE(ZoneMapEntryInexact((*st)[0]));
+        }
+        auto wide_block = z.TryGetBlockStats(first_block + 2);
+        ASSERT_TRUE(wide_block.has_value());
+        ASSERT_EQ(wide_block->size(), 70u);
+        EXPECT_EQ((*wide_block)[69].valid_count, 1u);
+        EXPECT_DOUBLE_EQ((*wide_block)[69].max_value, 70.0);
+
+        CatIdxFile &c = XStore::GetOrOpenCatIdx(db, 2023, kWideRowLength);
+        EXPECT_EQ(c.TrackedColumnCount(), 70u);
+        EXPECT_TRUE(c.MightContain(first_block, 0, EncodeFDataForCatIdx(xstore_test::FDouble(OriginalValue(5)))));
+        EXPECT_TRUE(c.MightContain(first_block + 1, 0, EncodeFDataForCatIdx(xstore_test::FDouble(OriginalValue(rpb + 7)))));
+        EXPECT_TRUE(c.MightContain(first_block + 2, 69, EncodeFDataForCatIdx(xstore_test::FDouble(70.0))));
+        CatIdxFileHeader ch{};
+        int cfd = open(catidx_path.c_str(), O_RDONLY);
+        ASSERT_GE(cfd, 0);
+        ASSERT_EQ(pread(cfd, &ch, sizeof(ch), 0), static_cast<ssize_t>(sizeof(ch)));
+        close(cfd);
+        EXPECT_EQ(ch.dirty, 0u);
+        EXPECT_EQ(ch.tracked_column_count, 70u);
+    }
+}
+
+// Writers (overwrites, fresh rows, all three deletes; SYNC and BYPASS) race the real builder (LiveWidenOneYear),
+// inside and above its moving frontier. Afterwards every exact block must equal a fresh rebuild of the final data (InitDB on a sparse copy
+// of the data file), and the bloom must hold every value present in the final data.
+TEST_F(XStoreZoneMapTest, LiveWidenUnderConcurrentWritesMatchesAFreshRebuild) {
+    XStore store;
+    const std::string name = "ZMLWLIVE";
+    CreateTestDb(store, name, XStore_Proto::SECOND, kWideRowLength);
+    const std::string db = DbPath(name);
+    const uint64_t rpb = RowsPerBlock(kWideRowLength);
+    constexpr uint64_t kBlocks = 40;
+    const uint64_t rows = kBlocks * rpb;
+    // Even rows only: most writer traffic below is fresh rows in the odd holes, which keeps blocks exact (an
+    // overwrite or delete flags its block and takes it out of the comparison).
+    {
+        XStore_Proto::RangeInsert_REQ req;
+        req.set_dbname(name);
+        req.set_durabilitymode(XStore_Proto::SYNC);
+        for (uint64_t i = 0; i < rows; i += 2) {
+            XStore_Proto::RangeInsert_DATA *entry = req.add_rangeinsert_data();
+            entry->set_timestamp(kOverwriteBase + i);
+            *entry->mutable_data() = NumericRow(OriginalValue(i));
+        }
+        XStore_Proto::RangeInsert_REP rep;
+        store.RangeInsert(&req, &rep);
+        ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+    }
+
+    const std::string data_path = db + "/2023.XSTORE";
+    const uint64_t first_row = kOverwriteBase - kYear2023StartEpoch;
+    const uint64_t first_block = BlockIndexForRow(first_row, rpb);
+    ZoneMapFile &zmap = XStore::GetOrOpenZoneMap(db, 2023, kWideRowLength);
+    CatIdxFile &catidx = XStore::GetOrOpenCatIdx(db, 2023, kWideRowLength);
+    const uint32_t width = zmap.TrackedColumnCount();
+
+    std::atomic<uint64_t> frontier_offset{0}; // F - first_row, clamped to [0, rows]
+    std::atomic<bool> building{true};
+    std::atomic<int> writes{0};
+    std::mutex fresh_mutex;
+    std::unordered_set<uint64_t> fresh_used; // odd rows already written once: a second write would flag the block
+    std::vector<std::thread> writers;
+    for (int t = 0; t < 4; ++t) {
+        writers.emplace_back([&, t] {
+            XStore w;
+            std::mt19937_64 rng(1234 + t);
+            while (building.load()) {
+                const int64_t f = static_cast<int64_t>(frontier_offset.load());
+                auto clamp = [&](int64_t r) {
+                    return static_cast<uint64_t>(std::max<int64_t>(0, std::min<int64_t>(r, static_cast<int64_t>(rows) - 1)));
+                };
+                const uint64_t near = clamp(f + static_cast<int64_t>(rng() % 193) - 64); // mostly at or above F
+                const uint64_t anywhere = rng() % rows;
+                const XStore_Proto::WalDurabilityMode mode = (rng() % 3 == 0) ? XStore_Proto::BYPASS : XStore_Proto::SYNC;
+                const double v = static_cast<double>(rng() % 100000) / 7.0;
+                const unsigned op = static_cast<unsigned>(rng() % 40);
+                if (op < 30) { // a fresh row in an odd hole near F (keeps its block exact)
+                    const uint64_t row = near | 1;
+                    bool fresh = false;
+                    {
+                        std::lock_guard<std::mutex> lock(fresh_mutex);
+                        fresh = row < rows && fresh_used.insert(row).second;
+                    }
+                    if (!fresh) continue;
+                    XStore_Proto::UnaryInsert_REP rep;
+                    w.UnaryInsert(kOverwriteBase + row, NumericRow(v), name, &rep, mode);
+                } else if (op < 32) { // overwrite near F (seeded even row, or an odd one written before)
+                    XStore_Proto::UnaryInsert_REP rep;
+                    w.UnaryInsert(kOverwriteBase + near, NumericRow(v), name, &rep, mode);
+                } else if (op < 34) { // a run of consecutive rows near F (one record, may span blocks)
+                    XStore_Proto::RangeInsert_REQ req;
+                    req.set_dbname(name);
+                    req.set_durabilitymode(mode);
+                    const uint64_t n = 1 + rng() % 40;
+                    for (uint64_t i = 0; i < n && near + i < rows; ++i) {
+                        XStore_Proto::RangeInsert_DATA *e = req.add_rangeinsert_data();
+                        e->set_timestamp(kOverwriteBase + near + i);
+                        *e->mutable_data() = NumericRow(v + static_cast<double>(i));
+                    }
+                    XStore_Proto::RangeInsert_REP rep;
+                    w.RangeInsert(&req, &rep);
+                } else if (op < 35) {
+                    (void)w.UnaryDelete(kOverwriteBase + (rng() % 2 ? near : anywhere), name);
+                } else if (op < 36) { // a few scattered rows
+                    XStore_Proto::BatchDelete_REQ req;
+                    req.set_dbname(name);
+                    const uint64_t row = rng() % 2 ? near : anywhere;
+                    for (uint64_t i = 0; i < 3 && row + i * 50 < rows; ++i) req.add_timestamp(kOverwriteBase + row + i * 50);
+                    (void)w.BatchDelete(&req);
+                } else { // a range near F: mostly exactly one whole block (the reset path), sometimes cut
+                    uint64_t lo = near / rpb * rpb, hi = lo + rpb - 1;
+                    if (op == 39) {
+                        lo = near;
+                        hi = std::min(rows - 1, near + rng() % 200);
+                    }
+                    (void)w.RangeDelete(kOverwriteBase + lo, kOverwriteBase + hi, name);
+                }
+                ++writes;
+            }
+        });
+    }
+
+    // The builder: the real one (XStore::LiveWidenOneYear, stage 2b) at the current width; a poller publishes its
+    // frontier so the writers aim at and around it.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    std::atomic<bool> widening{true};
+    std::thread poller([&] {
+        while (widening.load()) {
+            const uint64_t f = zmap.FrontierForTests();
+            if (f != ZoneMapFile::kNoRebuild) frontier_offset.store(f > first_row ? std::min(f - first_row, rows) : 0);
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+    });
+    XStore builder;
+    EXPECT_EQ(builder.LiveWidenOneYear(db, 2023, kWideRowLength, width, true, true, nullptr, nullptr),
+              XStore::LiveWidenResult::kDone);
+    widening.store(false);
+    poller.join();
+    // A little more traffic on finished blocks, then stop.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    building.store(false);
+    for (std::thread &t : writers) t.join();
+    EXPECT_GT(writes.load(), 100) << "too little concurrent traffic to mean anything";
+
+    // Capture the live index before InitDB (which rebuilds every dirty index, this one included).
+    std::vector<std::vector<ZoneMapEntry>> live(kBlocks + 2);
+    for (uint64_t b = 0; b < kBlocks + 2; ++b) {
+        auto st = zmap.TryGetBlockStats(first_block + b);
+        ASSERT_TRUE(st.has_value()) << "block " << b;
+        live[b] = *st;
+    }
+    // Bloom: every value present in the final data.
+    {
+        int dfd = open(data_path.c_str(), O_RDONLY);
+        ASSERT_GE(dfd, 0);
+        uint64_t present = 0;
+        ASSERT_TRUE(ForEachDataRow(dfd, first_row + rows, kWideRowLength, [&](uint64_t r, const char *row_buf) {
+            if (row_buf[0] == 0) return;
+            XStore_Proto::RowData row;
+            (void)row.ParseFromArray(row_buf, static_cast<int>(XStoreWireEncode::RealRowDataLength(row_buf, kWideRowLength)));
+            ASSERT_GT(row.fielddata_size(), 0);
+            ++present;
+            EXPECT_TRUE(catidx.MightContain(BlockIndexForRow(r, rpb), 0, EncodeFDataForCatIdx(row.fielddata(0))))
+                << "row " << r;
+        }, first_row));
+        close(dfd);
+        EXPECT_GT(present, 100u);
+    }
+    EXPECT_FALSE(zmap.Rebuilding());
+    EXPECT_FALSE(catidx.Rebuilding());
+
+    // Oracle: a fresh rebuild of the final data, through InitDB's own RebuildOneYearZoneMap, on a copy.
+    const std::string oracle_name = "ZMLWORACLE";
+    CreateTestDb(store, oracle_name, XStore_Proto::SECOND, kWideRowLength);
+    SparseCopy(data_path, DbPath(oracle_name) + "/2023.XSTORE");
+    XStore::ClearZoneMapRegistryForTests();
+    store.InitDB();
+    ZoneMapFile &oracle = XStore::GetOrOpenZoneMap(DbPath(oracle_name), 2023, kWideRowLength);
+    int exact_blocks = 0;
+    for (uint64_t b = 0; b < kBlocks + 2; ++b) {
+        SCOPED_TRACE("block " + std::to_string(b));
+        auto o = oracle.TryGetBlockStats(first_block + b);
+        ASSERT_TRUE(o.has_value());
+        const ZoneMapEntry &oe = (*o)[0];
+        const ZoneMapEntry &le = live[b][0];
+        ASSERT_FALSE(ZoneMapEntryInexact(oe));
+        if (ZoneMapEntryInexact(le)) {
+            // Only min/max are still used for pruning: they may be too wide, never too narrow.
+            if (oe.valid_count > 0) {
+                EXPECT_LE(le.min_value, oe.min_value);
+                EXPECT_GE(le.max_value, oe.max_value);
+            }
+            continue;
+        }
+        ++exact_blocks;
+        EXPECT_EQ(le.valid_count, oe.valid_count);
+        if (oe.valid_count == 0) continue;
+        EXPECT_DOUBLE_EQ(le.min_value, oe.min_value);
+        EXPECT_DOUBLE_EQ(le.max_value, oe.max_value);
+        EXPECT_NEAR(le.sum_value, oe.sum_value, 1e-6 * std::max(1.0, std::fabs(oe.sum_value)));
+        EXPECT_DOUBLE_EQ(le.first_value, oe.first_value);
+        EXPECT_DOUBLE_EQ(le.last_value, oe.last_value);
+    }
+    EXPECT_GT(exact_blocks, 2) << "test too weak: almost every block ended inexact";
+    std::printf("[live widen oracle] %d writes, %d of %llu compared blocks exact\n", writes.load(), exact_blocks,
+                static_cast<unsigned long long>(kBlocks + 2));
 }
 
 } // namespace

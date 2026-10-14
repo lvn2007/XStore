@@ -19,6 +19,7 @@
 #include <string>
 #include <sys/stat.h>
 #include <system_error>
+#include <thread>
 #include <unistd.h>
 
 namespace xstore_fault {
@@ -98,6 +99,37 @@ int FdFaultErrno(FdOp op, int fd) {
     return s.err;
 }
 
+struct ObserverSlot {
+    std::mutex mu;
+    std::string path;
+    std::thread::id thread;
+    std::function<void(ObservedOp, uint64_t, uint64_t)> fn;
+};
+ObserverSlot &ObserverState() {
+    static ObserverSlot *s = new ObserverSlot;
+    return *s;
+}
+std::atomic<bool> g_observer_armed{false};
+std::atomic<bool> g_observer_guard_active{false};
+
+bool FdRefersTo(int fd, const std::string &path) {
+    char link[64];
+    std::snprintf(link, sizeof link, "/proc/self/fd/%d", fd);
+    char target[4096];
+    const ssize_t n = readlink(link, target, sizeof target - 1);
+    if (n <= 0) return false;
+    target[n] = '\0';
+    return path == target;
+}
+
+void Observe(ObservedOp op, int fd, uint64_t offset, uint64_t length) {
+    if (!g_observer_armed.load(std::memory_order_relaxed)) return;
+    ObserverSlot &s = ObserverState();
+    std::lock_guard<std::mutex> lock(s.mu);
+    if (!s.fn || s.thread != std::this_thread::get_id() || !FdRefersTo(fd, s.path)) return;
+    s.fn(op, offset, length);
+}
+
 std::string Canonical(const std::string &path) {
     std::error_code ec;
     const std::filesystem::path canonical = std::filesystem::weakly_canonical(path, ec);
@@ -167,6 +199,26 @@ int ScopedFdFault::Failures() const {
     return s.failures;
 }
 
+ScopedFdObserver::ScopedFdObserver(const std::string &path,
+                                   std::function<void(ObservedOp, uint64_t, uint64_t)> fn) {
+    ClaimOrAbort(g_observer_guard_active, "ScopedFdObserver");
+    ObserverSlot &s = ObserverState();
+    std::lock_guard<std::mutex> lock(s.mu);
+    s.path = Canonical(path);
+    s.thread = std::this_thread::get_id();
+    s.fn = std::move(fn);
+    g_observer_armed.store(true);
+}
+ScopedFdObserver::~ScopedFdObserver() {
+    g_observer_armed.store(false);
+    {
+        ObserverSlot &s = ObserverState();
+        std::lock_guard<std::mutex> lock(s.mu);
+        s.fn = nullptr;
+    }
+    g_observer_guard_active.store(false);
+}
+
 }  // namespace xstore_fault
 
 namespace {
@@ -191,6 +243,8 @@ using xstore_fault::g_stat_hits;
 using xstore_fault::PathFaultErrno;
 using xstore_fault::FdFaultErrno;
 using xstore_fault::FdOp;
+using xstore_fault::Observe;
+using xstore_fault::ObservedOp;
 using xstore_fault::kFopen;
 using xstore_fault::kStat;
 
@@ -294,9 +348,20 @@ XSTORE_FAULT_PWRITE(pwrite64, off64_t)
             errno = err;                                                                           \
             return -1;                                                                             \
         }                                                                                          \
+        Observe(ObservedOp::kPread, fd, static_cast<uint64_t>(offset), count);                     \
         return real(fd, buf, count, offset);                                                       \
     }
 XSTORE_FAULT_PREAD(pread, off_t)
 XSTORE_FAULT_PREAD(pread64, off64_t)
+
+#define XSTORE_FAULT_LSEEK(NAME, OFF_T)                                                            \
+    OFF_T NAME(int fd, OFF_T offset, int whence) noexcept {                                        \
+        using Fn = OFF_T (*)(int, OFF_T, int);                                                     \
+        static const Fn real = RealSymbol<Fn>(#NAME);                                              \
+        if (whence == SEEK_DATA) Observe(ObservedOp::kSeekData, fd, static_cast<uint64_t>(offset), 0); \
+        return real(fd, offset, whence);                                                           \
+    }
+XSTORE_FAULT_LSEEK(lseek, off_t)
+XSTORE_FAULT_LSEEK(lseek64, off64_t)
 
 }  // extern "C"

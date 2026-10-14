@@ -21,6 +21,12 @@
 // never revisited). If SEEK_DATA is unsupported (EINVAL) the remainder is
 // treated as one data extent. row_ptr is valid only during the call.
 //
+// Only rows in [first_row, total_rows) are visited (first_row > 0 scans one
+// chunk of a year; the EOF check below still covers all of [0, total_rows)).
+// A caller scanning a year in chunks passes total_rows = the chunk's end and a
+// `scratch` vector it keeps: the read buffer then lives there (grown to
+// CHUNK_BYTES once) instead of being allocated on every call.
+//
 // Returns true only if every visited row was read in full and every lseek
 // succeeded. A row that cannot be read is skipped (scan continues with the
 // next row) and the result becomes false.
@@ -37,21 +43,24 @@ struct SystemSeek {
 } // namespace rowscan
 
 template <class Seek = rowscan::SystemSeek, class Fn>
-[[nodiscard]] bool ForEachDataRow(int fd, uint64_t total_rows, uint16_t row_length, Fn &&fn) {
-    if (total_rows == 0) return true;
+[[nodiscard]] bool ForEachDataRow(int fd, uint64_t total_rows, uint16_t row_length, Fn &&fn, uint64_t first_row = 0,
+                                  std::vector<char> *scratch = nullptr) {
+    if (total_rows <= first_row) return true;
     if (row_length == 0) return false;
 
     const uint64_t row_len = row_length;
     const uint64_t total_bytes = total_rows * row_len;
     const uint64_t chunk_rows = std::max<uint64_t>(1, rowscan::CHUNK_BYTES / row_len);
-    std::vector<char> buf(static_cast<size_t>(chunk_rows * row_len));
+    std::vector<char> local;
+    std::vector<char> &buf = scratch != nullptr ? *scratch : local;
+    if (buf.size() < chunk_rows * row_len) buf.resize(static_cast<size_t>(chunk_rows * row_len));
 
     // Rows past EOF can never be read (the per-row loop reported each as a
     // short read); flag the scan incomplete instead of silently ending early.
     const off_t file_size = Seek::Seek(fd, 0, SEEK_END);
     if (file_size < 0) return false;
     bool complete = static_cast<uint64_t>(file_size) >= total_bytes;
-    uint64_t cursor = 0; // first row not yet visited
+    uint64_t cursor = first_row; // first row not yet visited
     while (cursor < total_rows) {
         const uint64_t search_from = cursor * row_len;
         uint64_t data_off = search_from;

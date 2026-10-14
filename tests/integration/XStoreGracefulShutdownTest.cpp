@@ -11,7 +11,6 @@
 // that cannot finish its request, with no production hook: see StallOneWorker.
 #include <gtest/gtest.h>
 #include <algorithm>
-#include <arpa/inet.h>
 #include <chrono>
 #include <cmath>
 #include <csignal>
@@ -20,11 +19,11 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <memory>
-#include <netinet/in.h>
 #include <sstream>
 #include <string>
-#include <sys/socket.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <thread>
@@ -295,7 +294,7 @@ bool AnyThreadWaitsOnFifoOpen(pid_t pid, bool &readable) {
     for (auto &task : std::filesystem::directory_iterator("/proc/" + std::to_string(pid) + "/task", ec)) {
         std::ifstream in(task.path() / "wchan");
         std::string wchan;
-        if (!in || !(in >> wchan)) continue;
+        if (!in || !(in >> wchan) || wchan == "0") continue;  // some kernels hide wchan as "0"
         readable = true;
         if (wchan == "wait_for_partner" || wchan == "fifo_open") return true;
     }
@@ -526,4 +525,125 @@ TEST_F(XStoreGracefulShutdownTest, SecondSignalDuringShutdownExitsOneImmediately
     const std::string log = ReadLog(dir.path);
     EXPECT_NE(log.find("Received signal"), std::string::npos) << log;
     EXPECT_EQ(log.find("Workers did not drain in time"), std::string::npos) << "exited via the drain timeout, not the second signal";
+}
+
+// size + mtime of every WAL ring and year data file under <dir>/DataStore: a second process that got as far as
+// WAL replay or the index rebuild would change at least one of them.
+std::map<std::string, std::pair<off_t, long long>> DataFileStamps(const std::filesystem::path &dir) {
+    std::map<std::string, std::pair<off_t, long long>> stamps;
+    for (auto &entry : std::filesystem::recursive_directory_iterator(dir / "DataStore")) {
+        const std::string ext = entry.path().extension().string();
+        if (ext != ".WAL" && ext != ".XSTORE") continue;
+        struct stat st{};
+        if (stat(entry.path().c_str(), &st) != 0) continue;
+        stamps[entry.path().string()] = {st.st_size, static_cast<long long>(st.st_mtim.tv_sec) * 1000000000LL + st.st_mtim.tv_nsec};
+    }
+    return stamps;
+}
+
+// One XStore process per data directory: a second server on the same directory exits 1 at once with a message
+// naming the directory, and leaves the first one (and its WAL rings / data files) alone. The lock is released by
+// the kernel on any exit, graceful or SIGKILL, so the next start is fine both times.
+TEST_F(XStoreGracefulShutdownTest, SecondServerOnTheSameDirectoryIsRefusedAndTheLockIsReleasedOnAnyExit) {
+    auto a_ptr = StartReadyServer(dir.path, chrono::seconds(60), /*hold_checkpoints=*/true);
+    ASSERT_NE(a_ptr, nullptr) << "server A did not come up";
+    ServerProcess &a = *a_ptr;
+    ASSERT_NO_FATAL_FAILURE(InsertRows(a));
+    const auto stamps_before = DataFileStamps(dir.path);
+    ASSERT_FALSE(stamps_before.empty());
+
+    int b_port = FreePort(), b_stats_port = FreePort();
+    ASSERT_TRUE(b_port > 0 && b_stats_port > 0 && b_port != b_stats_port);
+    ServerProcess b(dir.path, b_port, b_stats_port);
+    ASSERT_TRUE(b.Started());
+    const int b_status = b.WaitExit(chrono::seconds(10));
+    ASSERT_NE(b_status, -1) << "server B kept running on a directory server A owns";
+    ASSERT_TRUE(WIFEXITED(b_status)) << "server B was killed by signal " << (WIFSIGNALED(b_status) ? WTERMSIG(b_status) : 0);
+    EXPECT_EQ(WEXITSTATUS(b_status), 1);
+
+    // B reads the lock file for A's PID and logs it next to the directory.
+    const std::string expected_dir = std::filesystem::weakly_canonical(dir.path / "DataStore").string();
+    const std::string log = ReadLog(dir.path);
+    EXPECT_NE(log.find("another XStore process (PID " + std::to_string(a.pid()) + ") is already using the data directory " + expected_dir),
+              std::string::npos) << "log:\n" << log;
+
+    EXPECT_DOUBLE_EQ(QueryMin(a), 10.0) << "server A stopped answering after B's attempt";
+    EXPECT_EQ(DataFileStamps(dir.path), stamps_before) << "server B touched the WAL rings or data files";
+
+    a.Signal(SIGTERM);
+    ASSERT_NO_FATAL_FAILURE(ExpectCleanExit(a.WaitExit(chrono::seconds(15))));
+
+    auto c_ptr = StartReadyServer(dir.path, chrono::seconds(60), /*hold_checkpoints=*/true);
+    ASSERT_NE(c_ptr, nullptr) << "server C did not start after A exited gracefully";
+    EXPECT_DOUBLE_EQ(QueryMin(*c_ptr), 10.0);
+    c_ptr->Signal(SIGKILL);
+    const int c_status = c_ptr->WaitExit(chrono::seconds(15));
+    ASSERT_NE(c_status, -1);
+    ASSERT_TRUE(WIFSIGNALED(c_status));
+
+    auto d_ptr = StartReadyServer(dir.path, chrono::seconds(240), /*hold_checkpoints=*/true);
+    ASSERT_NE(d_ptr, nullptr) << "server D did not start after C was SIGKILLed (the kernel must release the lock)";
+    EXPECT_DOUBLE_EQ(QueryMin(*d_ptr), 10.0);
+    d_ptr->Signal(SIGTERM);
+    ASSERT_NO_FATAL_FAILURE(ExpectCleanExit(d_ptr->WaitExit(chrono::seconds(15))));
+}
+
+// main.cpp: a failed InitDB (here a year's .catidx path is a directory, so the rebuild cannot open it and the XStore
+// constructor throws) ends the start with a logged reason and exit code 1, not std::terminate (SIGABRT).
+TEST_F(XStoreGracefulShutdownTest, AFailedInitDbExitsOneWithItsReasonLogged) {
+    {
+        auto server_ptr = StartReadyServer(dir.path, chrono::seconds(60));
+        ASSERT_NE(server_ptr, nullptr) << "server did not come up";
+        ASSERT_NO_FATAL_FAILURE(InsertRows(*server_ptr));
+        server_ptr->Signal(SIGTERM);
+        ASSERT_NO_FATAL_FAILURE(ExpectCleanExit(server_ptr->WaitExit(chrono::seconds(15))));
+    }
+    const std::filesystem::path catidx = dir.path / "DataStore" / DB_NAME / "1970.catidx";
+    ASSERT_TRUE(std::filesystem::remove(catidx));
+    ASSERT_TRUE(std::filesystem::create_directory(catidx));
+    TrimYearFile(dir.path);
+    int port = FreePort(), stats_port = FreePort();
+    ASSERT_TRUE(port > 0 && stats_port > 0 && port != stats_port);
+    ServerProcess server(dir.path, port, stats_port);
+    ASSERT_TRUE(server.Started());
+    const int status = server.WaitExit(chrono::seconds(60));
+    ASSERT_NE(status, -1) << "the server kept running after a failed InitDB";
+    ASSERT_TRUE(WIFEXITED(status)) << "killed by signal " << (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+    EXPECT_EQ(WEXITSTATUS(status), 1);
+    const std::string log = ReadLog(dir.path);
+    EXPECT_NE(log.find("[BOOT] - Startup failed (InitDB)"), std::string::npos) << "log tail:\n"
+        << log.substr(log.size() > 3000 ? log.size() - 3000 : 0);
+}
+
+// --help exits inside argparse, before the data-directory lock: it neither creates DataStore.lock nor is it
+// refused when another process holds the lock.
+TEST_F(XStoreGracefulShutdownTest, HelpExitsZeroWithoutTakingTheDirectoryLock) {
+    const auto run_help = [&]() {
+        const std::string dir_s = dir.path.string();
+        const pid_t pid = fork();
+        if (pid == 0) {
+            if (chdir(dir_s.c_str()) != 0) _exit(127);
+            int devnull = open("/dev/null", O_RDWR);
+            if (devnull >= 0) { dup2(devnull, 0); dup2(devnull, 1); dup2(devnull, 2); }
+            execl(XSTORE_BIN, XSTORE_BIN, "--help", static_cast<char *>(nullptr));
+            _exit(127);
+        }
+        int status = -1;
+        if (pid > 0) waitpid(pid, &status, 0);
+        return status;
+    };
+    const std::filesystem::path lock_path = dir.path / "DataStore.lock";
+
+    int status = run_help();
+    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), 0);
+    EXPECT_FALSE(std::filesystem::exists(lock_path)) << "--help must not create the lock file";
+
+    const int other = open(lock_path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    ASSERT_GE(other, 0);
+    ASSERT_EQ(flock(other, LOCK_EX | LOCK_NB), 0);
+    status = run_help();
+    close(other);
+    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), 0) << "--help must not be refused by a live owner of the directory";
 }

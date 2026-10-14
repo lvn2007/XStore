@@ -10,14 +10,15 @@
 
 class Logger {
     public:
-        Logger(spdlog::level::level_enum console_level, spdlog::level::level_enum file_level, unsigned short int flush_interval = 5) {
+        Logger(spdlog::level::level_enum console_level, spdlog::level::level_enum file_level, unsigned short int flush_interval = 5,
+               bool truncate_log = true) {
             // Console outputs
             std::shared_ptr<spdlog::sinks::sink> console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
             console_sink->set_level(console_level);
 
             // File outputs
             std::filesystem::create_directories("logs");
-            std::shared_ptr<spdlog::sinks::sink> file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>("logs/server.log", true);
+            std::shared_ptr<spdlog::sinks::sink> file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>("logs/server.log", truncate_log);
             file_sink->set_level(file_level);
 
             // Group multi-sinks into one entity

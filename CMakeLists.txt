@@ -408,6 +408,8 @@ include_directories(src)
 add_library(xstore_core STATIC
         include/XStore/XStore_Internal.h src/XStore/XStore_Internal.cpp
         src/XStore/XStore_Management.cpp
+        src/XStore/XStore_DirLock.cpp
+        include/XStore/XStore_DirLock.h
         src/XStore/XStore_IO.cpp
         src/XStore/XStore_Wal.cpp
         src/XStore/XStore_WalRing.cpp
@@ -436,7 +438,9 @@ add_library(xstore_core STATIC
         include/DataStructs/FileRangeLock.h
         include/Logger/Logger.h
         ${PROTO_SRCS} ${PROTO_HDRS})
-target_link_libraries(xstore_core PUBLIC protobuf::libprotobuf moodycamel Threads::Threads "stdc++fs")
+# zmq: XStore_SysStats.cpp (in this library) includes zmq.hpp -> <zmq.h>. Without this link the fetched libzmq's
+# include directory is not on xstore_core's path, and a machine without the system libzmq3-dev cannot compile it.
+target_link_libraries(xstore_core PUBLIC protobuf::libprotobuf moodycamel Threads::Threads "stdc++fs" zmq)
 if(TARGET absl::log_internal_check_op)
     target_link_libraries(xstore_core PUBLIC absl::log_internal_check_op)
 endif()

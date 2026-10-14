@@ -265,6 +265,12 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
                                                     first_ts.last_epoch - first_ts.first_epoch);
     if (!fd_handle) {
         spdlog::error("[WAL APPLY] [DB: {}] - Unable to open {}.XSTORE", record_to_apply.db_name, first_ts.year);
+        // A failed apply of a ring record that is already durable must still register its file: RingClear must not
+        // call the file clean, or a later direct write could be overwritten by this record's replay after a crash.
+        // Nothing was written here, so only the ring mark is recorded and no byte range: the checkpointer must not
+        // try to fdatasync a file we could not open (an unreadable file would hold every cycle). The checkpoint is
+        // NOT held. Replay and BYPASS pass no ring and keep their old behaviour (NoteRingMarkOnly ignores them).
+        walring::Dirty().NoteRingMarkOnly(ring, target_file, ring_lsn_end);
         return false;
     }
     int fd = *fd_handle;
@@ -287,13 +293,18 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
     // at (captured alongside them at enqueue time, before the .CFG's
     // columnCount could move underneath), so the file this creates can
     // never claim to track more columns than were actually folded into it.
-    ZoneMapFile &zmap = GetOrOpenZoneMap(record_to_apply.db_base_path, first_ts.year, record_to_apply.row_length,
-                                          record_to_apply.tracked_column_count);
+    //
+    // Both files are pinned until this record is applied: the registry may not evict (destroy) a file this apply
+    // still writes. The pin is one atomic increment inside the registry lookup and one decrement at return.
+    const ZoneMapFile::Pin zmap_pin = PinZoneMap(record_to_apply.db_base_path, first_ts.year, record_to_apply.row_length,
+                                                 record_to_apply.tracked_column_count);
+    ZoneMapFile &zmap = *zmap_pin;
     // Same reasoning as zmap above, same (db, year, row_length,
     // tracked_column_count) key -- the bloom filter is only ever updated
     // here, alongside zmap, after a row's real pwrite is confirmed durable.
-    CatIdxFile &catidx = GetOrOpenCatIdx(record_to_apply.db_base_path, first_ts.year, record_to_apply.row_length,
-                                         record_to_apply.tracked_column_count);
+    const CatIdxFile::Pin catidx_pin = PinCatIdx(record_to_apply.db_base_path, first_ts.year, record_to_apply.row_length,
+                                                 record_to_apply.tracked_column_count);
+    CatIdxFile &catidx = *catidx_pin;
 
     std::vector<unsigned long long> offsets(record_to_apply.rows.size());
     for (size_t i = 0; i < record_to_apply.rows.size(); ++i) {
@@ -328,6 +339,27 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
             std::memcpy(run_buf.data() + (i - run_start) * record_to_apply.row_length, row_bytes.data(), record_to_apply.row_length);
         }
 
+        // Overwrite detection: UpdateRow below only ADDS, so a run replacing a row already folded into its zone-map
+        // block must mark that block inexact (aggregates then scan it) BEFORE the new bytes land. The range lock
+        // above keeps every other writer off these rows. A sorted append into fresh blocks never reads; otherwise
+        // read the old bytes (a never-written or deleted row has first byte 0, the same hole test the scans use).
+        // An empty RowData also serializes to a zero first byte, so replacing one is not detected; it only leaves
+        // that row's null_count counted twice (no aggregate reads null_count).
+        const uint64_t run_first_row = record_to_apply.rows[run_start].epoch_time - first_ts.first_epoch;
+        if (zmap.NeedsOverwriteCheck(run_first_row, run_rows)) {
+            thread_local std::vector<char> old_buf;
+            if (old_buf.size() < run_bytes) old_buf.resize(run_bytes);
+            uint64_t lo = run_rows, hi = 0;
+            if (pread(fd, old_buf.data(), run_bytes, static_cast<off_t>(offsets[run_start])) != static_cast<ssize_t>(run_bytes)) {
+                lo = 0; hi = run_rows - 1; // unknown old contents: assume all were folded
+            } else {
+                for (size_t r = 0; r < run_rows; ++r) {
+                    if (old_buf[r * record_to_apply.row_length] != 0) { lo = std::min<uint64_t>(lo, r); hi = r; }
+                }
+            }
+            if (lo <= hi) zmap.MarkInexact(run_first_row + lo, run_first_row + hi);
+        }
+
         ssize_t written = pwrite(fd, run_buf.data(), run_bytes, static_cast<off_t>(offsets[run_start]));
         if (written != static_cast<ssize_t>(run_bytes)) {
             spdlog::error("[WAL APPLY] [DB: {}] - Short/failed write to {}.XSTORE", record_to_apply.db_name, first_ts.year);
@@ -347,44 +379,26 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
         }
         run_start = run_end;
     }
+    if (!all_rows_ok && ring && ring_lsn_end != 0) {
+        // Some bytes of the failed runs may have landed: note the record's whole row span (the ring mark is what
+        // RingClear needs, the range makes the checkpointer sync it). The checkpoint is NOT held.
+        walring::Dirty().Note(ring, target_file, offsets.front(), offsets.back() + record_to_apply.row_length, ring_lsn_end);
+    }
     return all_rows_ok;
 }
 
 bool XStore::EnqueueWalRecord(WalRecord record, bool *overloaded) {
     // Writers are stopped after Shutdown(); a SYNC wait here would never wake.
     if (IsShutDown()) return false;
-    // Per-DB hash, not round-robin: tried round-robin first (spreads a
-    // single hot DB across every active shard), but on a single physical
-    // storage device that backfires -- it splits what could be one shard's
-    // large, well-amortized batch into N shards' worth of smaller batches,
-    // each paying its own fsync, when the device likely can't actually
-    // fsync those N streams in parallel anyway. Per-DB hashing keeps one
-    // DB's writers funneled through one shard, which lets the group-commit
-    // gather window (see WalWriterLoop) batch them into fewer, bigger
-    // fsyncs -- the thing that actually amortizes cost on one device.
-    // Multiple DBs still parallelize naturally across shards, same as
-    // before either version of this code existed. WAL_SHARDS_PER_DB (see
-    // its comment in XStore_Tunables.h) is the escape hatch for actually
-    // testing that "device can't fsync N streams in parallel anyway"
-    // assumption instead of just asserting it -- now set to 4 (see that
-    // tunable's own comment for the benchmarked regression this fixed),
-    // so this function no longer behaves bit-for-bit identically to the
-    // paragraph above; set it back to 1 to restore that.
-    size_t active = active_wal_shard_count.load(std::memory_order_relaxed);
-    size_t base_shard_idx = std::hash<std::string>{}(record.db_base_path) % active;
-    size_t shard_idx = base_shard_idx;
-    if constexpr (XStoreTunables::WAL_SHARDS_PER_DB > 1) {
-        // Low-cardinality salt (which calling thread, not full round-robin)
-        // spreads one DB's writes across up to WAL_SHARDS_PER_DB of the
-        // active shards, capped at `active` itself -- can never exceed the
-        // box's real shard count no matter how high the tunable is set.
-        // Salting by thread-id (not a per-record random/atomic counter)
-        // keeps one thread's own sequential commits landing on the same
-        // shard, only spreading DIFFERENT concurrent callers apart.
-        size_t db_shard_span = std::min(active, XStoreTunables::WAL_SHARDS_PER_DB);
-        size_t salt = std::hash<std::thread::id>{}(std::this_thread::get_id()) % db_shard_span;
-        shard_idx = (base_shard_idx + salt) % active;
-    }
+    // Shard = f(db, year) only, never the calling thread: every write to a given row (one (db, year) file) goes
+    // through one shard's queue and one writer thread. For SYNC inserts that makes ring order == acknowledgment order
+    // (an acknowledged record is already dequeued before a later one starts), so replay (one ring at a time)
+    // cannot re-apply an older write over a newer one. ASYNC is acknowledged before the record is queued and the
+    // queue is FIFO only per enqueuing thread, so ASYNC writes to one row from two threads have no defined order. Different DBs and different years
+    // spread across shards; one hot DB+year funnels through one shard, which is also what lets the group-commit
+    // gather window (see WalWriterLoop) amortize fsyncs on a single device.
+    const size_t active = active_wal_shard_count.load(std::memory_order_relaxed);
+    const size_t shard_idx = WalShardFor(record.db_base_path, record.year, active);
     WalShard &shard = wal_shards[shard_idx];
 
     // Backpressure: wait (never reject) for this shard's queue to drain
@@ -543,12 +557,12 @@ void XStore::Shutdown() {
 
     // An index may only be marked clean once every data file it describes is durable.
     // Earlier cycles synced the files that were clean by the final one, so the gate is
-    // the final cycle's outcome plus "never poisoned" (after a real writeback error the
-    // kernel may have dropped pages that later syncs report as fine) -- not per-path
-    // membership in the last cycle's synced set. Nothing is re-synced here: a fresh fd
-    // would not see a prior writeback error.
-    walring::Checkpointer &checkpointer = walring::Checkpointer::Instance();
-    if (!checkpointer.FinalCycleOk() || checkpointer.Poisoned()) {
+    // the final cycle's outcome (a poisoned checkpointer never completes a cycle, so that
+    // also covers "never poisoned": after a real writeback error the kernel may have
+    // dropped pages that later syncs report as fine) -- not per-path membership in the
+    // last cycle's synced set. Nothing is re-synced here: a fresh fd would not see a
+    // prior writeback error.
+    if (!walring::Checkpointer::Instance().FinalCycleOk()) {
         spdlog::error("[SHUTDOWN] - indexes left dirty (final checkpoint did not complete / checkpointer poisoned); "
                       "next start will rebuild them");
         return;
@@ -561,6 +575,11 @@ void XStore::Shutdown() {
     auto mark_registry_clean = [](std::mutex &registry_mutex, auto &registry, const char *what) {
         std::lock_guard<std::mutex> lock(registry_mutex);
         for (const auto &entry : registry) {
+            if (entry.second->Rebuilding()) { // MarkClean refuses it by design: not an error
+                spdlog::warn("[SHUTDOWN] - {} {}: an index was still being rebuilt; left dirty, rebuilt at the next start",
+                             what, entry.first);
+                continue;
+            }
             if (!entry.second->MarkClean()) {
                 spdlog::error("[SHUTDOWN] - MarkClean failed for {} {}; leaving it dirty", what, entry.first);
             }
@@ -693,7 +712,7 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
     // (filesystem::path construction + string concat, no syscalls) but
     // still real allocation work, and most records in one shard's batch
     // share the same db_base_path (they landed on this shard together
-    // precisely because EnqueueWalRecord hashes by db_base_path) -- no
+    // precisely because EnqueueWalRecord routes by (db, year)) -- no
     // reason to recompute the identical path once per record when it's
     // usually the same 1-2 distinct paths for the whole batch.
     std::unordered_map<std::string, std::string> wal_path_cache;
@@ -783,8 +802,8 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
         // the moment the batch fills or the window elapses -- same
         // dual-trigger shape as Kafka's linger.ms + batch.size. This DOES
         // cost a lone SYNC writer real added latency (up to the window,
-        // every commit) in exchange for real batching once per-DB hashing
-        // (see EnqueueWalRecord) funnels concurrent writers of the same DB
+        // every commit) in exchange for real batching once (db, year) routing
+        // (see EnqueueWalRecord) funnels concurrent writers of the same (db, year)
         // onto this one shard -- but a shard whose recent batches show no
         // real grouping self-tunes that window down toward MIN instead of
         // assuming MAX, so a lone writer pays close to nothing.
@@ -845,10 +864,15 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
         // step (5) must still publish its applied position, or applied < head stays until some later batch
         // publishes a larger value and the checkpointer (which advances only to applied) spins no-progress
         // cycles once the ring is half full. Its callers are told "failed" below, so nothing acknowledged depends
-        // on those rows being applied; rows that did apply were already Note'd for the next checkpoint sync.
+        // on those rows being applied; rows that did apply were already Note'd for the next checkpoint sync. The
+        // records that did NOT apply were never Note'd on a data file, and finding their files could allocate, so the
+        // whole ring is marked instead (allocation-free): RingClear is false for every file until the checkpoint
+        // passes this sub-batch.
         auto publish_committed = [&]() noexcept {
             for (auto &entry : sub_batch_files) {
-                if (entry.second.durable) entry.second.ring->PublishApplied(entry.second.start + entry.second.total);
+                if (!entry.second.durable) continue;
+                entry.second.ring->NoteUnattributedThrough(entry.second.start + entry.second.total);
+                entry.second.ring->PublishApplied(entry.second.start + entry.second.total);
             }
             sub_batch_files.clear();
         };
@@ -882,12 +906,10 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
             // submitted has already been Note'd on its file (Note precedes PublishApplied precedes the ack)
             // and RingClear walks every ring mark of the file, whichever shard/ring it came from -- so a
             // direct write is never undone by replaying one of those. NOT covered: CONCURRENT un-acked
-            // writes to the same row (EnqueueWalRecord salts one DB across WAL_SHARDS_PER_DB shards by
-            // calling thread, so a file can have ring records from several writer threads); they have no
-            // defined order. Pre-existing property, unchanged here: replay processes rings one shard at a
-            // time in shard-index order, so two un-checkpointed ring writes to one row from different
-            // shards can replay in a different order than they were acked (also true of the old WAL).
-            // Follow-up, not part of this task.
+            // writes to the same row: every record of one (db, year) file is routed to one shard by
+            // EnqueueWalRecord, so ring order == ack order for SEQUENTIAL writes, but two writes in flight at
+            // the same time have no defined order. Replay processes rings one shard at a time, which is fine
+            // because a file's ring records all live in one ring.
             //
             // A fenced WAL file (replay failed) still holds un-checkpointed records that replay applied
             // with no ring/dirty mark, so RingClear cannot see them: while ANY file is fenced nothing is
@@ -955,8 +977,8 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
             for (size_t i = 0; i < count; ++i) {
                 const WalRecord &record = batch[i];
                 if (i > 0 && record.db_base_path == batch[i - 1].db_base_path) {
-                    // Same DB as the previous record (the usual case: they hashed
-                    // to this shard together): same file, same ring.
+                    // Same DB as the previous record (the usual case: they were routed
+                    // to this shard together by (db, year)): same file, same ring.
                     record_wal_path[i] = record_wal_path[i - 1];
                     record_ring[i] = record_ring[i - 1];
                 } else {
@@ -1041,8 +1063,8 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                             ++run_end;
                             continue;
                         }
-                        wal_direct_records.fetch_add(1, std::memory_order_relaxed);
                         if (ApplyWalRecord(batch[run_end])) {
+                            wal_direct_records.fetch_add(1, std::memory_order_relaxed);
                             direct_paths.insert(record_data_path[run_end]);
                             direct_idx.push_back(run_end);
                         } else {

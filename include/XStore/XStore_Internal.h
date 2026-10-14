@@ -3,6 +3,8 @@
 
 #include "include/XStore/XStore.h"
 #include <algorithm>
+#include <execution>
+#include <iterator>
 #include <string_view>
 #include <vector>
 
@@ -72,6 +74,24 @@ inline void AppendToYearBucket(YearBucketMap &buckets, unsigned short int year, 
     buckets.emplace_back(year, std::vector<unsigned long long int>{idx});
 }
 
+// std::execution::par_unseq dispatches work across a thread pool -- worth it
+// once a batch is big enough that sorting it in parallel outweighs that
+// dispatch/join overhead, but for a small batch (the common case for most
+// callers) the overhead alone can cost more than a plain sequential sort
+// would take to run the whole thing. Used by Batch Insert/Query/Delete's
+// "sort incoming timestamps first" step. NOT stable (equal timestamps may swap);
+// RangeInsert's sort-on-inversion fallback uses std::stable_sort instead.
+inline constexpr std::ptrdiff_t PARALLEL_SORT_THRESHOLD = 10'000;
+
+template <typename Iterator, typename Compare>
+void SortBatch(Iterator begin, Iterator end, Compare comp) {
+    if (std::distance(begin, end) >= PARALLEL_SORT_THRESHOLD) {
+        std::sort(std::execution::par_unseq, begin, end, comp);
+    } else {
+        std::sort(begin, end, comp);
+    }
+}
+
 // Definition of XStore::BuildZoneMapObservations (declared in XStore.h,
 // private static). Built once at WAL enqueue time (row_bytes --
 // already-serialized wire bytes -- is all ApplyWalRecord has later, not the
@@ -91,18 +111,21 @@ inline void AppendToYearBucket(YearBucketMap &buckets, unsigned short int year, 
 // ProcessFileRangeAccumulate's own oneOfData_case() guard (XStore_IO.cpp) --
 // same "1..12 is numeric" rule the aggregate kernels already use, so a
 // bool/string/bytes column is a hole here too, not a crash or a silently-wrong 0.
+inline ZoneMapObservation XStore::ZoneMapObservationOf(XStore &store, const XStore_Proto::FData &f_data, uint32_t column_idx) {
+    bool is_numeric = f_data.oneOfData_case() > 0 && f_data.oneOfData_case() <= 12;
+    ValueStruct vs{};
+    if (is_numeric) {
+        store.GetFDataValue(&f_data, &vs);
+    }
+    return {column_idx, static_cast<double>(vs.value), is_numeric};
+}
+
 inline std::vector<ZoneMapObservation> XStore::BuildZoneMapObservations(XStore &store, const XStore_Proto::RowData &row, uint32_t tracked_column_count) {
     const int tracked = std::min(static_cast<int>(tracked_column_count), row.fielddata_size());
     std::vector<ZoneMapObservation> observations;
     observations.reserve(static_cast<size_t>(std::max(tracked, 0)));
     for (int col = 0; col < tracked; ++col) {
-        const XStore_Proto::FData &f_data = row.fielddata(col);
-        bool is_numeric = f_data.oneOfData_case() > 0 && f_data.oneOfData_case() <= 12;
-        ValueStruct vs{};
-        if (is_numeric) {
-            store.GetFDataValue(&f_data, &vs);
-        }
-        observations.push_back({static_cast<uint32_t>(col), static_cast<double>(vs.value), is_numeric});
+        observations.push_back(ZoneMapObservationOf(store, row.fielddata(col), static_cast<uint32_t>(col)));
     }
     return observations;
 }

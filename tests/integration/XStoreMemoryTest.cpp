@@ -173,7 +173,7 @@ TEST_F(XStoreMemoryTest, UnindexedColumnReportsFullScanNotice) {
     store.MinAggregate(7000, 7001, "MEMNOTE", 80, &rep);
     EXPECT_DOUBLE_EQ(rep.opresult().doubledata(), 42.5);
     EXPECT_NE(rep.opstatus().find("not yet indexed"), std::string::npos) << rep.opstatus();
-    EXPECT_NE(rep.opstatus().find("restart XStore"), std::string::npos) << rep.opstatus();
+    EXPECT_NE(rep.opstatus().find("widened in the background"), std::string::npos) << rep.opstatus(); // M4 stage 3: no restart needed
 }
 
 // FindByValue's full-scan notice follows the .catidx width its own scan consults, not the .zmap width. Both tests

@@ -6,8 +6,13 @@
 // method body -- filesystem, sys/mman.h, fcntl.h, algorithm, execution,
 // TimeStruct, fmt, spdlog, etc. -- is included by that .cpp directly rather
 // than leaking into every translation unit that includes this class.
+#include <algorithm>
 #include <array>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
+#include <map>
+#include <optional>
 #include <cstdio>
 #include <memory>
 #include <mutex>
@@ -180,8 +185,8 @@ class XStore {
         static std::array<FdShard, FD_SHARD_COUNT> fd_shards;
 
         // ---- Write-Ahead Log --------------------------------------------
-        // One append-only WAL file per shard (hash(dbBasePath) %
-        // WAL_SHARD_COUNT), each drained by its own dedicated, process-
+        // One append-only WAL file per shard (shard = WalShardFor(db_base_path,
+        // year, active)), each drained by its own dedicated, process-
         // lifetime writer thread. UnaryInsert/BatchInsert/RangeInsert all
         // enqueue here instead of writing the data file directly -- see
         // src/XStore/XStore_Wal.cpp for the durability/group-commit
@@ -270,6 +275,10 @@ class XStore {
             std::string db_base_path;          // full path -- locates this DB's WAL subdir and, at apply time, its .XSTORE file
             XStore_Proto::TimeUnit time_resolution = XStore_Proto::SECOND;
             unsigned short row_length = 0;
+            // The year of this record's rows (TimeStruct(rows.front().epoch_time, time_resolution).year; a record is
+            // always one (db, year)). Set by every producer; EnqueueWalRecord routes by (db_base_path, year) only.
+            // Sits in what was struct padding after row_length, so sizeof(WalRecord) is unchanged.
+            unsigned short year = 0;
             // max(the DB's EffectiveTrackedColumnCount, this record's widest
             // accepted row) as of the moment this record's rows were turned
             // into ZoneMapObservations -- carried
@@ -296,6 +305,11 @@ class XStore {
             // on its own record's flag.
             WalCompletion *completion = nullptr;
         };
+#if defined(__GLIBCXX__) && defined(__x86_64__) && (!defined(_GLIBCXX_USE_CXX11_ABI) || _GLIBCXX_USE_CXX11_ABI)
+        // std::string is 32 bytes only in libstdc++ with the C++11 ABI; guard so a layout change is noticed. WalRecord::year must keep
+        // fitting in the padding after row_length (record stays 120 bytes, two cache lines).
+        static_assert(sizeof(WalRecord) == 120, "WalRecord grew: WalRecord::year must fit in existing padding");
+#endif
 
         struct WalShard {
             moodycamel::BlockingConcurrentQueue<WalRecord> queue;
@@ -319,14 +333,26 @@ class XStore {
         // so any (theoretical) use before StartWalWriters runs still stays
         // in-bounds rather than modulo-by-zero.
         static std::atomic<size_t> active_wal_shard_count;
+
+        // The WAL shard (0..active-1) every record for (db_base_path, year) goes to, whatever thread enqueues it. One
+        // shard = one FIFO queue + one writer thread + one ring. For SYNC inserts that makes the ring order of writes
+        // to one row (one (db, year) file) their acknowledgment order (an acknowledged SYNC record is already out of
+        // the queue before a later one starts), so replay cannot reorder them. ASYNC is acknowledged when the record
+        // is queued, and the queue is FIFO only per enqueuing thread, so ASYNC writes to one row from two threads have
+        // no defined order (they still replay in the order they were applied). `active` consecutive years of one DB
+        // map to `active` distinct shards. Pure and allocation-free; public so tests can call it.
+        [[nodiscard]] static size_t WalShardFor(const std::string &db_base_path, unsigned year, size_t active) {
+            return (std::hash<std::string>{}(db_base_path) + year) % active;
+        }
+
         // Times a WAL writer gave up waiting for ring space (walring::Ring::Reserve
         // timed out) and failed a whole sub-batch as "overloaded". Process-wide.
         // Appended to a SYNC insert's error status when the WAL ring stayed full (see EnqueueWalRecord's `overloaded`).
         static constexpr const char *kWalOverloadedText = "server overloaded (WAL ring full), retry later";
         static std::atomic<uint64_t> wal_ring_stalls;
         // Records the WAL writer processed, by route (spec §3.3): applied + synced inline with no ring
-        // record (wal_direct_records) vs appended to a ring (wal_ring_records). wal_direct_records is
-        // counted when the record is ROUTED direct, so it includes ones whose apply or sync later failed.
+        // record (wal_direct_records) vs appended to a ring (wal_ring_records). wal_direct_records counts
+        // direct records applied successfully (a record whose apply failed is not counted; a later sync failure still is).
         // Relaxed, process-wide.
         static std::atomic<uint64_t> wal_direct_records;
         static std::atomic<uint64_t> wal_ring_records;
@@ -439,8 +465,9 @@ class XStore {
         // BATCH DELETE
         [[nodiscard]] XStore_Proto::BatchDelete_REP BatchDelete(XStore_Proto::BatchDelete_REQ *proto_from_client);
 
-        // RANGE INSERT
-        void RangeInsert(const XStore_Proto::RangeInsert_REQ *proto_from_client, XStore_Proto::RangeInsert_REP *return_data);
+        // RANGE INSERT. Takes the request non-const because input that is not
+        // ascending is sorted in place (only then; sorted input is never sorted).
+        void RangeInsert(XStore_Proto::RangeInsert_REQ *proto_from_client, XStore_Proto::RangeInsert_REP *return_data);
 
         // RANGE QUERY (streamed, wire-format encode -- the only RangeQuery
         // path; the network server is the only production caller. Never
@@ -764,7 +791,7 @@ class XStore {
 
         // Initialize DB. Loads every DB's ConfigStruct into the shared CfgMap,
         // then (Task 5) rebuilds any stale/missing zone map for that DB
-        // before returning -- see RebuildStaleZoneMapsForDb below. Guarded
+        // before returning -- see RebuildStaleIndexesForDb below. Guarded
         // (at the single call site inside XStore::XStore()) by a function-
         // local std::once-per-directory mechanism so concurrent worker
         // threads' first XStore construction against the same
@@ -855,6 +882,22 @@ class XStore {
         // worker anyway.
         static ZoneMapFile& GetOrOpenZoneMap(std::string_view db_base_path, unsigned short year, uint16_t row_length, uint32_t tracked_column_count = XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS);
 
+        // Same lookup/open as GetOrOpenZoneMap, plus a pin taken under the registry mutex: the registry never evicts
+        // or destroys the file while the returned Pin lives. Every production caller that uses the file after the
+        // lookup returns takes one (inserts, deletes, aggregates, FindByValue, compaction, the builders); the plain
+        // GetOrOpen* above are for tests and single-threaded setup only, where nothing can evict concurrently.
+        // Explicit erases (RebuildYearIndexes at startup, Clear*RegistryForTests) ignore pins: never while a pin
+        // holder is alive. RemoveDB/RemoveDBFiles retire a pinned entry instead of destroying it (see
+        // RetireIndexesUnderPrefix).
+        [[nodiscard]] static ZoneMapFile::Pin PinZoneMap(std::string_view db_base_path, unsigned short year, uint16_t row_length,
+                                                         uint32_t tracked_column_count = XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS);
+
+        // Delete paths: the (db, year) zone map, which must flag (or, for RangeDelete, reset) the blocks of the rows
+        // before they are punched, pinned for the delete. An empty Pin (logged) when it cannot be opened; the caller must
+        // then not delete.
+        [[nodiscard]] static ZoneMapFile::Pin OpenZoneMapForDelete(const std::string &db_base_path, unsigned short year,
+                                                               const XStore_Proto::ConfigStruct &cfg_struct);
+
         // Lookup-only peek at the same process-wide registry GetOrOpenZoneMap
         // uses (same key, same mutex) -- never opens, creates, or touches LRU
         // order. Returns the warm instance's TrackedColumnCount() if this
@@ -863,7 +906,10 @@ class XStore {
         // registry just to answer a peek). Exists so UnindexedColumnNotice
         // can check an already-open zone map for free before ever touching
         // disk -- see its call site for why that matters on the hot path.
-        static std::optional<uint32_t> PeekOpenZoneMapWidth(std::string_view db_base_path, unsigned short year);
+        // `rebuilding` (optional): set to the warm instance's Rebuilding() (a live widen running, or a stopped/failed
+        // one left untrusted until the next start); false when nothing is cached.
+        static std::optional<uint32_t> PeekOpenZoneMapWidth(std::string_view db_base_path, unsigned short year,
+                                                            bool *rebuilding = nullptr);
 
         // Test-only introspection -- not part of the public API surface any
         // real caller needs, same as this codebase's other test-only
@@ -881,6 +927,22 @@ class XStore {
         // instance still holding an fd to the unlinked sidecar and hides it.
         static void ClearZoneMapRegistryForTests();
 
+        // RemoveDB: drop every zone-map and catidx registry entry whose key starts with db_dir_prefix (the DB
+        // directory WITH its trailing '/', so DB1 never matches DB10). An unpinned entry is destroyed (its files are
+        // being deleted, and nobody uses a registry file without a pin); a pinned one moves to the registry's retired
+        // list, which lookups never search, and keeps writing to its unlinked inode until its last pin drops. Retired
+        // entries are freed by the next retire or the next cold open, once unpinned. Takes only the registry mutexes
+        // and reads only the pin atomics (never a file mutex). Only for files that are being deleted: retiring an entry
+        // whose files stay on disk lets a cold open create a second object on the same file.
+        static void RetireIndexesUnderPrefix(const std::string &db_dir_prefix);
+
+        // RemoveDBFiles of "<year>.XSTORE" (which also deletes that year's index files): the same, for the one exact
+        // key "<db_base_path>/<year>" (year 2020 never matches 20201).
+        static void RetireYearIndexes(std::string_view db_base_path, unsigned short year);
+
+        // Test-only: retired zone-map plus catidx entries not yet freed.
+        static size_t RetiredIndexCountForTests();
+
         // Categorical bloom-index registry: one CatIdxFile per (db, year)
         // pair, same process-wide/static shape and LRU-eviction-is-always-
         // safe reasoning as GetOrOpenZoneMap above (CatIdxFile::UpdateRow is
@@ -889,6 +951,10 @@ class XStore {
         // that guard lands in a later task once schema growth is wired up
         // for .catidx.
         static CatIdxFile& GetOrOpenCatIdx(std::string_view db_base_path, unsigned short year, uint16_t row_length, uint32_t tracked_column_count = XStoreTunables::CATIDX_MAX_TRACKED_COLUMNS);
+
+        // GetOrOpenCatIdx plus a registry pin; same contract as PinZoneMap.
+        [[nodiscard]] static CatIdxFile::Pin PinCatIdx(std::string_view db_base_path, unsigned short year, uint16_t row_length,
+                                                       uint32_t tracked_column_count = XStoreTunables::CATIDX_MAX_TRACKED_COLUMNS);
 
         // Test-only: mirrors ClearZoneMapRegistryForTests -- drops every
         // warm CatIdxFile instance so the next GetOrOpenCatIdx reopens from
@@ -951,68 +1017,95 @@ class XStore {
         void CompactOneYearCatIdx(const std::string &db_base_path, unsigned short year, uint16_t row_length,
                                    uint32_t tracked_column_count);
 
-        // Task 11: rescans one <YEAR>.XSTORE file row-by-row and folds every
-        // row into the (freshly-recreated, all-zero) bloom section of this
-        // year's .catidx via the same write-through UpdateRow path a live
-        // insert uses -- same "reuse UpdateRow instead of a bespoke bulk
-        // writer" precedent as RebuildOneYearZoneMap. Unlike zone-map's
-        // min/max/sum stats, a bloom bit is idempotent to re-set, so (unlike
-        // RebuildOneYearZoneMap) this never needs to truncate/guard against
-        // double-folding -- the caller (RebuildStaleCatIdxForDb) has already
-        // unlinked the stale file, so GetOrOpenCatIdx below always creates a
-        // genuinely fresh, all-zero file for this call to populate for real.
-        //
-        // A correctness requirement, not an optimization: the bloom filter
-        // must never produce a false negative (this feature's own stated
-        // invariant), and a discarded/narrow file cannot self-heal from
-        // future writes alone when historical rows that receive no further
-        // insert need to remain findable. Non-static, like CompactOneYearCatIdx
-        // above -- needs the non-static ExtractColumnByIndexSkipParse.
+        // Scans every DB directory under data_store_dir and compacts every
+        // cold (year < current calendar year) .XSTORE file that doesn't
+        // already have a bitmap section. Called once per poll interval by
+        // the background thread started from StartCatIdxCompactionThread.
+        // Public since M4 stage 3 so tests can run it next to RunLiveWidenPass
+        // (it takes part in the RemoveDB handshake, see bg_mutex_).
+        void CompactColdCatIdxForAllDbs(const std::string &data_store_dir);
+
+        // Rebuilds this year's .catidx bloom from the year file (Task 11): a thin wrapper over RebuildYearIndexes with
+        // only the catidx selected, so it takes the same path InitDB does (the .zmap is not touched). A correctness
+        // requirement, not an optimization: the bloom must never produce a false negative, and a discarded/narrow file
+        // cannot self-heal from future writes alone. Startup/tests only (see RebuildYearIndexes).
         void RebuildOneYearCatIdxBloom(const std::string &db_base_path, unsigned short year, uint16_t row_length,
                                         uint32_t tracked_column_count);
 
-        // Task 11 (+ review fix round): scans db_base_path for every
-        // <YEAR>.XSTORE data file (NOT <YEAR>.catidx -- iterating the
-        // sidecar itself would silently skip any year that has real row
-        // data but no .catidx at all, which is exactly the state every
-        // pre-existing year is in the first time this feature is deployed
-        // onto old data; GetOrOpenCatIdx would then lazily create an
-        // all-zero .catidx the first time FindByValue happened to touch
-        // that year, and every block in it would be a permanent bloom
-        // false negative) and discards+resynchronously-rebuilds (via
-        // RebuildOneYearCatIdxBloom) any year whose .catidx is missing
-        // entirely, whose header is unreadable/corrupt/wrong-version, whose
-        // on-disk tracked_column_count is narrower than this DB's current
-        // EffectiveTrackedColumnCount, or whose year is in
-        // force_rebuild_years (this DB's entry from ReplayWal's
-        // ReplayedYearMap -- a WAL-replayed row carries no
-        // catidx_observations, so UpdateRow sets zero bloom bits for it,
-        // and the .catidx header stays structurally fine, so the other
-        // checks alone would never catch it; see ReplayedYearMap in this
-        // header for the identical zone-map-side bug this mirrors) --
-        // called from InitDB(), before any worker thread sharing this
-        // data_store_dir can serve a request, same synchronous-during-
-        // startup timing as RebuildStaleZoneMapsForDb.
-        //
-        // Two-pass: collects every year needing rebuild via a read-only
-        // directory_iterator pass first, THEN does the remove+rescan work
-        // in a second, plain sequential pass after that iterator has gone
-        // out of scope -- mutating db_base_path while a
-        // directory_iterator over it is still live is unspecified
-        // behavior, same reason RebuildStaleZoneMapsForDb collects into
-        // years_needing_rebuild before its own rebuild pass.
-        //
-        // Deliberately narrower in scope than its zone-map sibling: only
-        // the bloom section gets this synchronous treatment (see
-        // RebuildOneYearCatIdxBloom above for why); the bitmap section's
-        // absence after a rebuild only costs performance (Task 10's
-        // real-scan fallback stays correct when LookupExact finds no
-        // directory), so it's left for the next scheduled
-        // CompactColdCatIdxForAllDbs pass rather than rebuilt here.
-        // Non-static, matching RebuildStaleZoneMapsForDb's real shape.
-        void RebuildStaleCatIdxForDb(const std::string &db_name, const std::string &db_base_path,
-                                      const XStore_Proto::ConfigStruct &cfg_struct,
-                                      const std::set<unsigned short> &force_rebuild_years);
+        // Live index widening, M4 stage 2 (Tech Reference 4.18 "Live widening"). Called by RunLiveWidenPass (stage 3).
+        enum class LiveWidenResult {
+            kDone,              // every selected file rebuilt at the new width, durable and clean
+            kNothingToDo,       // nothing selected, or the year has no data file
+            kAlreadyRebuilding, // nothing began and a selected file is already being rebuilt (busy): the zone map is
+                                // busy (then the catidx is not touched either), or the catidx is busy and the zone map
+                                // was not selected or failed to begin. Nothing touched. See LiveWidenStats::*_busy.
+            kPartial,           // the build completed for the files that began; another selected file could not begin:
+                                // BeginRebuild failed (old index intact and trusted) or it was busy (a catidx-only
+                                // builder owns it; left alone). See LiveWidenStats::*_began / *_busy.
+            kStopped,           // *stop was set: the files stay in rebuild at their frontier, dirty
+            kFailed,            // nothing could start, or a read/write/sync failed: see the log; files that began stay
+                                // in rebuild (dirty, untrusted past their frontier) until the next start rebuilds them
+        };
+        struct LiveWidenStats {
+            uint64_t chunks = 0;                   // locked ranges processed
+            uint64_t hole_chunks = 0;              // ... of which held no data row
+            uint64_t rows_folded = 0;
+            uint64_t lock_timeouts = 0;
+            uint64_t max_consecutive_timeouts = 0;
+            uint64_t total_lock_hold_us = 0;
+            uint64_t max_lock_hold_us = 0;
+            std::vector<uint32_t> lock_hold_us;    // one entry per chunk
+            bool zmap_widened = false;             // finished (FinishRebuild succeeded) at the new width
+            bool catidx_widened = false;
+            // How each selected file's begin went. began: this call rebuilt (or tried to rebuild) it. busy: another
+            // rebuild owned it, so it was not touched: it is in rebuild state and untrusted past its frontier until
+            // that rebuild ends or the next start rebuilds it (do not retry in a loop). Neither: BeginRebuild failed,
+            // the old (narrower) index is intact and trusted, and a retry with backoff is reasonable.
+            bool zmap_began = false;
+            bool catidx_began = false;
+            bool zmap_busy = false;
+            bool catidx_busy = false;
+        };
+        // Rebuilds this year's .zmap (widen_zmap) and/or .catidx (widen_catidx) IN PLACE at tracked_column_count while
+        // requests keep running, with ONE scan of the year file. db_base_path must be the exact string the writers use
+        // (CachedDbBasePath): the data-file lock key is CachedYearFilePath(db_base_path, year). The caller decides
+        // which files need it (a selected file is rebuilt whatever its width). Protocol per chunk [F, F+C): timed
+        // READ range lock on exactly those bytes; under it the hole probe, the reads, the fold into both files and
+        // AdvanceFrontier on both; then unlock and pause. Pins are held from before BeginRebuild until after
+        // MarkClean; registry entries are never erased. Completion: FinishRebuild, fdatasync of the data file,
+        // MarkClean. A BeginRebuild that fails leaves that file's old index as it was (still trusted). Never throws.
+        // `stop` (may be nullptr) is checked before every lock attempt and every pause.
+        LiveWidenResult LiveWidenOneYear(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                         uint32_t tracked_column_count, bool widen_zmap, bool widen_catidx,
+                                         const std::atomic<bool> *stop, LiveWidenStats *stats = nullptr);
+
+        // Live widening trigger, M4 stage 3 (Tech Reference 4.18 "Live widening, stage 3"). MaybeGrowColumnCount's
+        // rare path records a DB whose effective tracked width rose; the background index thread
+        // (StartCatIdxCompactionThread) calls RunLiveWidenPass once per LIVE_WIDEN_TICK_SEC with the current time.
+        // A pass takes every recorded DB whose last growth is at least LIVE_WIDEN_QUIET_PERIOD_SEC before `now` (and
+        // whose retry wait, if any, has passed), and widens its year files one at a time, NEWEST year first, to the
+        // DB's exact effective width: the zone map when its width differs, the catidx when it is narrower (widths
+        // only: a file is normally dirty at runtime). A year whose index is already in rebuild state is skipped (one
+        // log line per year file per process). Tests call it directly with a fake `now`. Returns one entry per year
+        // looked at, in processing order.
+        struct LiveWidenPassEntry {
+            std::string db_name;
+            unsigned short year = 0;
+            LiveWidenResult result = LiveWidenResult::kNothingToDo; // kNothingToDo also when both widths were right
+            bool skipped_rebuilding = false;                        // left alone: already in rebuild state
+        };
+        std::vector<LiveWidenPassEntry> RunLiveWidenPass(std::chrono::steady_clock::time_point now);
+
+        // Stops the background index thread's current work (the live builder and compaction check it): set by
+        // StopCatIdxCompactionThread for good, and by RemoveDB / RemoveDBFiles for the time they wait for the thread
+        // to let go of the DB/year they remove. Tests may set it to stop a running pass (and must reset it).
+        static std::atomic<bool> bg_cancel_;
+
+        // Test-only views of the trigger state.
+        static size_t LiveWidenRequestCountForTests();
+        static std::optional<std::chrono::steady_clock::time_point> LiveWidenLastGrowthForTests(const std::string &db_base_path);
+        static void ClearLiveWidenRequestsForTests();
+        static std::string BackgroundActiveKeyForTests(); // "<db_base_path>/<year>" the thread works on, or ""
 
         // Ring-format (record v2: ParseWalRecord's layout plus a u64 LSN after
         // the CRC; see XStore_WalRing.h) parser. kOk = real record (out_record
@@ -1091,6 +1184,90 @@ class XStore {
         static std::unordered_map<std::string, std::unique_ptr<CatIdxFile>> catidx_registry_;
         static std::vector<std::string> catidx_registry_lru_; // most-recently-touched at the back
 
+        // Entries RetireIndexesUnderPrefix took out of the registries while pinned; guarded by the registry mutex.
+        static std::vector<std::unique_ptr<ZoneMapFile>> zone_map_registry_retired_;
+        static std::vector<std::unique_ptr<CatIdxFile>> catidx_registry_retired_;
+
+        // Frees the retired entries nobody pins any more. Caller holds that registry's mutex.
+        template <typename File>
+        static void SweepRetired(std::vector<std::unique_ptr<File>> &retired) {
+            retired.erase(std::remove_if(retired.begin(), retired.end(),
+                                         [](const std::unique_ptr<File> &f) { return !f->Pinned(); }),
+                          retired.end());
+        }
+
+        // Retires every entry of one registry whose key `match`es. Caller holds that registry's mutex.
+        template <typename File, typename Match>
+        static void RetireMatching(std::unordered_map<std::string, std::unique_ptr<File>> &registry,
+                                   std::vector<std::string> &lru, std::vector<std::unique_ptr<File>> &retired,
+                                   const Match &match) {
+            SweepRetired(retired);
+            for (auto it = registry.begin(); it != registry.end();) {
+                if (!match(it->first)) { ++it; continue; }
+                if (it->second->Pinned()) retired.push_back(std::move(it->second));
+                it = registry.erase(it);
+            }
+            lru.erase(std::remove_if(lru.begin(), lru.end(), match), lru.end());
+        }
+
+        // Both registries, each under its own mutex (never nested).
+        template <typename Match>
+        static void RetireIndexesMatching(const Match &match);
+
+        // ---- Live widening trigger (M4 stage 3) and the background index thread handshake ----
+        // One recorded DB, keyed by its db_base_path (the CachedDbBasePath spelling: it is the writers' lock key
+        // prefix). growth_seq counts growths, so a pass can tell whether one arrived while it ran.
+        struct LiveWidenRequest {
+            std::string db_name;
+            std::chrono::steady_clock::time_point last_growth{};
+            std::chrono::steady_clock::time_point retry_after{};
+            uint64_t growth_seq = 0;
+            uint32_t failed_attempts = 0;
+        };
+        // Leaf lock: taken briefly (MaybeGrowColumnCount holds a cfg shard mutex then); nothing is called while it is
+        // held. Also guards live_widen_skip_logged_.
+        static std::mutex live_widen_mutex_;
+        static std::map<std::string, LiveWidenRequest> live_widen_requests_;
+        static std::set<std::string> live_widen_skip_logged_; // year keys whose "already rebuilding" skip was logged
+        static std::atomic<bool> live_widen_pending_;         // live_widen_requests_ is not empty
+        static void RecordLiveWidenRequest(const std::string &db_name, const std::string &db_base_path);
+        static void DropLiveWidenRequest(const std::string &db_base_path);
+
+        enum class LiveWidenDbOutcome { kDone, kRetry, kStopped, kGone };
+        LiveWidenDbOutcome LiveWidenDb(const std::string &db_base_path, const std::string &db_name,
+                                       std::vector<LiveWidenPassEntry> &out);
+
+        // Width of a year's .zmap / .catidx: the warm registry object's when there is one, else the file header's;
+        // nullopt for a missing or unreadable file. `rebuilding`: a warm object of the year is in rebuild state.
+        struct YearIndexWidths {
+            std::optional<uint32_t> zmap;
+            std::optional<uint32_t> catidx;
+            bool rebuilding = false;
+        };
+        static YearIndexWidths PeekYearIndexWidths(const std::string &db_base_path, unsigned short year);
+
+        // Background index thread vs RemoveDB / RemoveDBFiles. The thread publishes the year key it works on
+        // ("<db_base_path>/<year>", the registry key format) in bg_active_key_ before it starts a year (widen or
+        // compaction) and clears it after; it refuses to start a year that a removal scope covers, or any year while
+        // bg_cancel_ is set. A removal adds its scope ("<db dir>/" for RemoveDB, "<db dir>/<year>" for RemoveDBFiles),
+        // sets bg_cancel_ if the active key is covered, and waits (bounded) until it is not. Lock order: bg_mutex_ is a
+        // leaf (nothing else is taken while it is held).
+        static std::mutex bg_mutex_;
+        static std::condition_variable bg_cv_;
+        static std::string bg_active_key_;
+        static std::multiset<std::string> bg_removing_scopes_;
+        enum class BgEnter { kGo, kRemoving, kCancelled };
+        static BgEnter EnterBackgroundYear(const std::string &year_key);
+        static void LeaveBackgroundYear();
+        [[nodiscard]] static bool StopBackgroundWork(const std::string &scope); // true: it set bg_cancel_
+        static void ResumeBackgroundWork(const std::string &scope, bool cancelled);
+
+        // Bodies of GetOrOpenZoneMap/GetOrOpenCatIdx and the Pin* calls; the caller holds the registry mutex.
+        static ZoneMapFile& GetOrOpenZoneMapLocked(std::string_view db_base_path, unsigned short year, uint16_t row_length,
+                                                   uint32_t tracked_column_count);
+        static CatIdxFile& GetOrOpenCatIdxLocked(std::string_view db_base_path, unsigned short year, uint16_t row_length,
+                                                 uint32_t tracked_column_count);
+
         // Turns one row's proto fields into the zone map's per-column
         // observations -- shared by Unary/Batch/RangeInsert (all three
         // build a WalRow, see XStore_Internal.h for the definition and full
@@ -1098,6 +1275,8 @@ class XStore {
         // GetFDataValue overload below; touches no instance state of its
         // own.
         static std::vector<ZoneMapObservation> BuildZoneMapObservations(XStore &store, const XStore_Proto::RowData &row, uint32_t tracked_column_count);
+        // One column's observation as BuildZoneMapObservations builds it; shared with the rebuild's one-pass decoder.
+        static ZoneMapObservation ZoneMapObservationOf(XStore &store, const XStore_Proto::FData &f_data, uint32_t column_idx);
 
         // Same purpose as BuildZoneMapObservations above but for the CatIdx
         // bloom filter -- covers ALL FData oneof cases (no numeric-only
@@ -1119,12 +1298,11 @@ class XStore {
         // RebuildOneYearZoneMap, where BuildZoneMapObservations' reserve()
         // and ZoneMapFile::EnsureBlockLoaded's std::vector<ZoneMapEntry>(n)
         // are both sized from it and an absurd n throws std::length_error.
-        // That throw escapes on an XStorePreadPool worker (see
-        // RebuildStaleZoneMapsForDb's ParallelFor) with no handler above it,
-        // so it is a std::terminate, not a catchable error -- and the whole
-        // chain hangs off InitDB(), which runs from the XStore constructor,
-        // i.e. at ZmqServer worker CONSTRUCTION, outside the dispatch-loop
-        // try/catch. Clamped rather than rejected: this is data that
+        // That throw used to escape on an XStorePreadPool worker as a
+        // std::terminate (RebuildStaleIndexesForDb now catches and logs it,
+        // leaving that year stale) -- and the whole chain hangs off InitDB(),
+        // which runs from the XStore constructor, i.e. at ZmqServer worker
+        // CONSTRUCTION, outside the dispatch-loop try/catch. Clamped rather than rejected: this is data that
         // already exists on disk, there is no request to fail here, and a
         // clamped width only costs zone-map acceleration for columns past
         // the cap (they fall back to a real scan), never correctness.
@@ -1183,13 +1361,14 @@ class XStore {
         // active count is still fully recovered.
         static void StartWalWriters(const std::string &data_store_dir);
 
-        // Hashes recordToEnqueue.db_base_path onto one of the active WAL
-        // shards (tried round-robin first -- spreads one hot DB across
-        // every shard, but on a single physical device that fragments what
-        // could be one shard's large, well-amortized batch into many
-        // smaller ones, each paying its own fsync; per-DB hashing keeps one
-        // DB's writes funneled through one shard so the group-commit
-        // gather window can actually batch them). Pushes it onto that
+        // Routes recordToEnqueue by (db_base_path, year) onto one of the
+        // active WAL shards (see WalShardFor; tried round-robin first --
+        // spreads one hot DB across every shard, but on a single physical
+        // device that fragments what could be one shard's large,
+        // well-amortized batch into many smaller ones, each paying its own
+        // fsync; routing by (db, year) keeps one (db, year)'s writes
+        // funneled through one shard so the group-commit gather window can
+        // actually batch them). Pushes it onto that
         // shard's queue, and -- unless durability_mode is ASYNC --
         // blocks until that shard's writer thread has fsync'd and applied
         // it, returning whether it was actually durable (false on a WAL
@@ -1345,7 +1524,7 @@ class XStore {
         // (already upper-cased) dbName -- keyed by dbName rather than
         // db_base_path so it can't be defeated by two spellings of the same
         // directory. InitDB() feeds this straight into
-        // RebuildStaleZoneMapsForDb as a FORCED rebuild list; see
+        // RebuildStaleIndexesForDb as a FORCED rebuild list; see
         // ReplayedYearMap above for why that is a correctness requirement
         // and not an optimization.
         [[nodiscard]] ReplayedYearMap ReplayWal();
@@ -1358,28 +1537,68 @@ class XStore {
                              uint64_t checkpoint_lsn, ReplayedYearMap &replayed_years);
         void ReplayLegacyShard(const std::string &wal_path, size_t shard_idx, ReplayedYearMap &replayed_years);
 
-        // Called once from InitDB(), after that DB's ConfigStruct is
-        // loaded -- rescans every <YEAR>.XSTORE file under db_base_path
-        // whose .zmap sidecar is missing, stale-version, or sized for a
-        // different tracked-column count than EffectiveTrackedColumnCount
-        // now reports, and rebuilds each one from raw data. Runs before
-        // InitDB() returns, i.e. before any worker thread sharing this
-        // data_store_dir can serve a request -- see design doc
-        // "Startup-time zone-map rebuild" for why this must never run on
-        // the request path.
+        // Called once per DB from InitDB() (after WAL replay and after the DB's ConfigStruct is loaded), before any
+        // worker thread sharing this data_store_dir can serve a request -- see design doc "Startup-time zone-map
+        // rebuild" for why this must never run on the request path. Finds every <YEAR>.XSTORE (the data files, not the
+        // sidecars: a year with rows but no sidecar must be found), decides per year which index is stale with the two
+        // unchanged predicates (ZoneMapNeedsRebuild for the .zmap; CatIdxNeedsRebuild for the .catidx), and rebuilds
+        // those years in parallel (XStorePreadPool::ParallelFor), each with ONE scan through RebuildYearIndexes.
         //
-        // force_rebuild_years is this DB's entry from ReplayWal's
-        // ReplayedYearMap: those years are rebuilt UNCONDITIONALLY, i.e.
-        // whatever ZoneMapNeedsRebuild's version/width check says about
-        // them. See ReplayedYearMap for the bug that requires this.
-        void RebuildStaleZoneMapsForDb(const std::string &db_name, const std::string &db_base_path, const XStore_Proto::ConfigStruct &cfg_struct,
-                                        const std::set<unsigned short> &force_rebuild_years);
+        // force_rebuild_years is this DB's entry from ReplayWal's ReplayedYearMap: both indexes of those years are
+        // rebuilt UNCONDITIONALLY, whatever the header checks say. See ReplayedYearMap for the bug that requires this.
+        void RebuildStaleIndexesForDb(const std::string &db_name, const std::string &db_base_path,
+                                      const XStore_Proto::ConfigStruct &cfg_struct,
+                                      const std::set<unsigned short> &force_rebuild_years);
+
+        // Startup rebuild of one year (Tech Reference 4.19): pins the selected index files (need_zmap / need_catidx; a
+        // healthy one is never opened, so a compacted catidx keeps its bitmap section), BeginRebuild()s them at
+        // tracked_column_count (dirty on disk before the truncate; a wider or narrower old file is emptied either way),
+        // reads total_rows once, scans the year file ONCE in REBUILD_CHUNK_BYTES chunks of whole blocks through
+        // FoldChunk, advancing each file's frontier after every chunk. A complete build: FinishRebuild, fdatasync of the
+        // data file, MarkClean. Any failure (unreadable row, failed index write, ...) leaves that file dirty and still
+        // in rebuild, so blocks it never finished are scanned, not trusted, and the next start rebuilds it. Drops the
+        // registry entries it rebuilds first and ignores pins: InitDB/tests only, never while a builder is alive.
+        void RebuildYearIndexes(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+                                uint32_t tracked_column_count, bool need_zmap, bool need_catidx);
+
+        // Reused across the chunks of one year's rebuild: no allocation per row once warm.
+        struct RebuildScratch {
+            std::vector<char> scan_buffer;
+            ZoneMapFoldBatch zmap;
+            CatIdxFoldBatch catidx;
+            XStore_Proto::FData column;
+            XStore_Proto::RowData row; // only for a row the one-pass decoder declines (see AppendRebuildObservations)
+        };
+        struct FoldResult {
+            bool scan_complete = true;
+            bool zmap_written = true;
+            bool catidx_written = true;
+        };
+        // Reads rows [chunk_begin, chunk_end) of an open year file (hole-skipping) and folds them into zmap and/or
+        // catidx (nullptr = skip that index) through RebuildFoldRows. If a row cannot be read nothing is folded and
+        // scan_complete is false, so a retry of the chunk cannot fold a row twice. Takes no lock: at startup nothing
+        // else runs; a live builder (stage 2b) must hold the data-file READ range lock (key: CachedYearFilePath) over
+        // [chunk_begin, chunk_end) around this call and both AdvanceFrontier calls.
+        FoldResult FoldChunk(int data_fd, uint64_t chunk_begin, uint64_t chunk_end, uint16_t row_length,
+                             uint32_t tracked_column_count, ZoneMapFile *zmap, CatIdxFile *catidx, RebuildScratch &scratch);
+        // Appends one row's zone-map observations and catidx values to the batches (either may be nullptr), parsing
+        // the row once: one tag walk, each column decoded once. The result is the same as the per-row rebuild's
+        // (RowData parse + BuildZoneMapObservations for the zone map; ExtractColumnByIndexSkipParse +
+        // EncodeFDataForCatIdx per column for the catidx); a row whose bytes are not a plain run of well-formed
+        // columns falls back to exactly those calls.
+        void AppendRebuildObservations(uint64_t row_index, const char *row, uint16_t row_length,
+                                       uint32_t tracked_column_count, ZoneMapFoldBatch *zmap, CatIdxFoldBatch *catidx,
+                                       RebuildScratch &scratch);
+
+        // Header-only staleness check of a .catidx: missing, unreadable, wrong magic/version, narrower than
+        // desired_tracked_columns, or dirty (unclean shutdown). A wider file is kept.
+        static bool CatIdxNeedsRebuild(const std::string &catidx_path, uint32_t desired_tracked_columns);
 
         // Cheap header-only peek at path's .zmap sidecar (no full
         // ZoneMapFile::Open, no registry involvement) -- true if the file
         // is missing, wrong version, or tracked for a different column
-        // count than desired_tracked_columns.
-        static bool ZoneMapNeedsRebuild(const std::string &zmap_path, uint32_t desired_tracked_columns);
+        // count than desired_tracked_columns, or whose rows_per_block is not RowsPerBlock(row_length).
+        static bool ZoneMapNeedsRebuild(const std::string &zmap_path, uint32_t desired_tracked_columns, uint16_t row_length);
 
         // Task 4 (insert-path memory plan): a query's column can be inside
         // EffectiveTrackedColumnCount(cfg) (so the caller expects zone-map
@@ -1410,19 +1629,16 @@ class XStore {
         // The one-line full-scan notice text shared by UnindexedColumnNotice and FindByValue.
         static std::string UnindexedColumnNoticeText(std::string_view op, const std::string &db_name, int32_t column_idx,
                                                       unsigned short year, uint32_t index_width);
+        // The same, for a column >= ZONE_MAP_MAX_TRACKED_COLUMNS of a year whose index is being rebuilt (Rebuilding()).
+        // Columns below that are also scanned in the blocks the rebuild has not reached yet, with correct results and
+        // no notice (they are indexed again as it passes).
+        static std::string RebuildingColumnNoticeText(std::string_view op, const std::string &db_name, int32_t column_idx,
+                                                       unsigned short year);
 
-        // Rescans one <YEAR>.XSTORE file row-by-row and folds every row
-        // into a freshly-reinitialized zone map via the same UpdateRow
-        // path a live insert uses -- see Task 5 of the implementation
-        // plan for why reusing UpdateRow here (instead of a bespoke bulk
-        // writer) is the deliberate, simplicity-first choice.
+        // Rebuilds this year's .zmap from the year file: a thin wrapper over RebuildYearIndexes with only the zone map
+        // selected (the .catidx is not touched). Startup/tests only.
         void RebuildOneYearZoneMap(const std::string &db_base_path, unsigned short year, uint16_t row_length, uint32_t tracked_column_count);
 
-        // Scans every DB directory under data_store_dir and compacts every
-        // cold (year < current calendar year) .XSTORE file that doesn't
-        // already have a bitmap section. Called once per poll interval by
-        // the background thread started from StartCatIdxCompactionThread.
-        void CompactColdCatIdxForAllDbs(const std::string &data_store_dir);
 
         // Fetch targetFile's cached fd, creating (and ftruncate'ing to
         // totalRows*rowLength if new) the file on first use. Returns -1 on

@@ -314,8 +314,24 @@ void Ring::AdvanceCheckpoint(uint64_t lsn, HeaderWriteStatus *status) {
     cv_.notify_all();
 }
 
+namespace {
+// Set by the first NoteUnattributedThrough in the process and never cleared (except by
+// ClearRingRegistryForTests): RingClear only pays for the registry-mutex walk after a writer exception.
+// Release/acquire (stored before the per-ring mark): the writer's own later RingClear is same-thread, and the
+// mark is set before PublishApplied, so the checkpoint cannot pass a marked record before the gate is visible
+// to the checkpoint-acquiring side; other shards need no mutex to read it.
+std::atomic<bool> g_any_unattributed_marked{false};
+}  // namespace
+
+void Ring::NoteUnattributedThrough(uint64_t lsn) noexcept {
+    g_any_unattributed_marked.store(true, std::memory_order_release);
+    uint64_t cur = unattributed_.load(std::memory_order_relaxed);
+    while (cur < lsn && !unattributed_.compare_exchange_weak(cur, lsn, std::memory_order_release, std::memory_order_relaxed)) {}
+}
+
 void Ring::ResetTo(uint64_t lsn) {
     std::lock_guard<std::mutex> lock(mu_);
+    unattributed_.store(0, std::memory_order_release);
     head_.store(lsn, std::memory_order_release);
     applied_.store(lsn, std::memory_order_release);
     checkpoint_.store(lsn, std::memory_order_release);
@@ -356,6 +372,16 @@ std::atomic<size_t> g_fenced_count{0};      // == g_fenced.size(), republished u
 
 std::string NormalizedKey(const std::string &wal_path) {
     return std::filesystem::path(wal_path).lexically_normal().string();
+}
+
+// Walks the registry in place (no copy, no allocation); the registry mutex is never held with the tracker's.
+bool AnyUnattributedMark() {
+    if (!g_any_unattributed_marked.load(std::memory_order_acquire)) return false;
+    std::lock_guard<std::mutex> lock(g_registry_mutex);
+    for (const auto &entry : g_rings) {
+        if (entry.second->UnattributedThrough() > entry.second->CheckpointLsn()) return true;
+    }
+    return false;
 }
 }  // namespace
 
@@ -480,10 +506,36 @@ void ClearRingRegistryForTests() {
     g_rings.clear();
     g_fenced.clear();
     g_fenced_count.store(0, std::memory_order_relaxed);
+    g_any_unattributed_marked.store(false, std::memory_order_relaxed);
     g_registry_epoch.fetch_add(1, std::memory_order_relaxed);
 }
 
 // ---- Dirty tracking ---------------------------------------------------------
+
+void DirtyTracker::AddMark(FileState &file, const std::shared_ptr<Ring> &ring, uint64_t ring_lsn_end) {
+    bool found = false;
+    for (RingMark &m : file.marks) {
+        if (m.key != ring.get()) continue;
+        if (m.ring.owner_before(ring) || ring.owner_before(m.ring)) {
+            // Recycled address: the old Ring is gone and this is a NEW one, whose LSNs have nothing to do
+            // with the old mark's -- start over instead of taking the max. (Same control block = no
+            // weak-count churn on the normal path below.)
+            m.ring = ring;
+            m.last_lsn = ring_lsn_end;
+        } else if (ring_lsn_end > m.last_lsn) {
+            m.last_lsn = ring_lsn_end;
+        }
+        found = true;
+        break;
+    }
+    if (!found) file.marks.push_back(RingMark{ring.get(), ring, ring_lsn_end});
+}
+
+void DirtyTracker::NoteRingMarkOnly(const std::shared_ptr<Ring> &ring, const std::string &data_path, uint64_t ring_lsn_end) {
+    if (!ring || ring_lsn_end == 0) return;
+    std::lock_guard<std::mutex> lock(mu_);
+    AddMark(files_[data_path], ring, ring_lsn_end);
+}
 
 void DirtyTracker::Note(const std::shared_ptr<Ring> &ring, const std::string &data_path, uint64_t begin, uint64_t end, uint64_t ring_lsn_end) {
     if (end <= begin) return;
@@ -494,24 +546,7 @@ void DirtyTracker::Note(const std::shared_ptr<Ring> &ring, const std::string &da
     }
     FileState &file = files_[data_path];   // allocates only the first time a path is seen
 
-    if (ring && ring_lsn_end != 0) {
-        bool found = false;
-        for (RingMark &m : file.marks) {
-            if (m.key != ring.get()) continue;
-            if (m.ring.owner_before(ring) || ring.owner_before(m.ring)) {
-                // Recycled address: the old Ring is gone and this is a NEW one, whose LSNs have nothing to do
-                // with the old mark's -- start over instead of taking the max. (Same control block = no
-                // weak-count churn on the normal path below.)
-                m.ring = ring;
-                m.last_lsn = ring_lsn_end;
-            } else if (ring_lsn_end > m.last_lsn) {
-                m.last_lsn = ring_lsn_end;
-            }
-            found = true;
-            break;
-        }
-        if (!found) file.marks.push_back(RingMark{ring.get(), ring, ring_lsn_end});
-    }
+    if (ring && ring_lsn_end != 0) AddMark(file, ring, ring_lsn_end);
 
     // Merge [begin, end) into the sorted disjoint map. The common cases
     // (extend the previous range / fall inside it) edit a node in place.
@@ -572,6 +607,7 @@ DirtyTracker::Snapshot DirtyTracker::PeekRanges() const {
 }
 
 bool DirtyTracker::RingClear(const std::string &data_path) const {
+    if (AnyUnattributedMark()) return false;
     std::lock_guard<std::mutex> lock(mu_);
     const auto it = files_.find(data_path);
     if (it == files_.end()) return true;

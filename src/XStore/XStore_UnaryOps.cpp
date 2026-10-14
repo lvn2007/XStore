@@ -67,6 +67,9 @@ void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::R
     record.time_resolution = cfg_struct.timeresolution();
     record.row_length = cfg_struct.rowlength();
     record.durability_mode = durability_mode;
+    // Built here (not after the enqueue) so the year can route the record; the success message below reuses it.
+    const TimeStruct curr_ts(unix_time, cfg_struct.timeresolution());
+    record.year = curr_ts.year;
     // Grow the index width to this row's width BEFORE any WalRecord/zone-map
     // file is created for it, so a fresh DB's first insert is born at its
     // true width instead of staying at the floor until a restart picks up
@@ -109,7 +112,6 @@ void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::R
         return;
     }
 
-    TimeStruct curr_ts(unix_time, cfg_struct.timeresolution());
     std::string success_msg = fmt::format("[UNARY INSERT] [DB: {}] - Inserted {} to {}.XSTORE", db_name, unix_time, curr_ts.year);
     SetTaggedStatus(return_data->mutable_insertstatus(), "[INFO] ", success_msg);
 }
@@ -259,6 +261,17 @@ XStore_Proto::UnaryDelete_REP XStore::UnaryDelete(unsigned long long int epoch_t
     {
         // Lock prior to file OP
         FileRangeLockGuard guard(target_file_path, offset, cfg_struct.rowlength(), FileRangeLock::LockType::WRITE);
+
+        // The zone map still counts this row: flag its block before the row goes.
+        const ZoneMapFile::Pin zmap = OpenZoneMapForDelete(db_base_path_str, curr_ts.year, cfg_struct);
+        if (zmap.get() == nullptr) {
+            std::string err_msg = fmt::format("[UNARY DELETE] [DB: {}] - Unable to delete {} in {}.XSTORE (zone map could not be opened)",
+                                              db_name, epoch_time, curr_ts.year);
+            SetTaggedStatus(to_return.mutable_deletestatus(), "[ERROR] ", err_msg);
+            spdlog::error(err_msg);
+            return to_return;
+        }
+        zmap->MarkInexact(diff, diff);
 
         // Deallocate data according to N bytes from rowLength
         if (fallocate64(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, cfg_struct.rowlength()) == 0) {

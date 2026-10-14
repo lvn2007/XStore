@@ -79,43 +79,14 @@ inline constexpr const char* WAL_DIR_NAME                = "WAL";
 inline constexpr size_t      WAL_ACTIVE_SHARDS_CORE_DIVISOR = 4;
 inline constexpr size_t      WAL_MIN_ACTIVE_SHARDS       = 2;
 
-// Experiment knob, default was 1 (= today's exact per-DB-hash behavior,
-// unchanged): how many of the active shards ONE DB's writes are allowed to
-// spread across (see EnqueueWalRecord). Raising this does NOT create new
-// writer-thread capacity -- active shard count is fixed by hardware
-// (above), independent of DB count or this value; `min(active, this)` is
-// the real cap. Helps only when there are few hot DBs relative to active
-// shard count (a value of 1 funnels each DB onto exactly 1 of possibly
-// many idle shards). Actively HURTS when DB count already meets/exceeds
-// active shard count: those DBs already share shards by pigeonhole even
-// at 1, and spreading each one across MORE of that same small pool just
-// makes assignment less sticky -- more batches end up mixing records
-// from different DBs, which pays a separate pwrite+fdatasync per
-// distinct file within one batch anyway, not a shared one, for no
-// benefit. Whether raising this helps AT ALL is also storage-device-
-// dependent (deep-queue NVMe vs. a device that can't actually flush
-// multiple streams in parallel) -- benchmark before committing to a
-// non-default value, don't assume. Compile-time, not runtime-mutable: a
-// mid-run change would need to reconcile with the process-wide-static
-// wal_shards array and any in-flight records already hashed under the
-// old span.
-//
-// Set to 4 (from 1) to address a measured INSERT_BATCH_RAND regression at
-// high client concurrency (+8.3% at 32 clients, +25.4% at 64 clients vs.
-// main): BatchInsert's per-call-thread salting means many concurrent
-// client threads funneling one hot DB's writes onto a single shard was
-// the contention point, not per-record imbalance within a call. 4 (not
-// WAL_SHARD_COUNT=8) is a deliberate middle ground -- spreads enough to
-// relieve that single-shard contention while still keeping each DB's
-// writes concentrated on a handful of shards, preserving most of the
-// fsync-amortization benefit described above. See async-batch-range-wal
-// task-10 report for the benchmarked comparison across shard counts.
-//
-// NOTE: This value applies only to the current single-node system. When
-// the distributed design (docs/XStore_Distributed_Architecture.md) is
-// implemented, this MUST revert to 1 -- per-slot LSN ordering depends on
-// all records for a slot passing through a single WAL writer thread.
-inline constexpr size_t      WAL_SHARDS_PER_DB           = 4;
+// There is no "shards per DB" knob any more. EnqueueWalRecord picks the shard from the record's (db, year) alone
+// (XStore::WalShardFor), never from the calling thread, so every write to one row goes through one shard and replay
+// keeps acknowledgment order for SYNC inserts (ASYNC writes to one row from two threads have no defined order: the
+// caller is acknowledged before the record is queued).
+// History: this used to be WAL_SHARDS_PER_DB, which was 1, then set to 4 (salting the shard by calling thread) to
+// fix a measured INSERT_BATCH_RAND regression at 32/64 clients. Now different DBs and different years spread
+// across shards; a hot single-DB single-year workload funnels through ONE shard, like WAL_SHARDS_PER_DB=1 did.
+// That is the accepted trade-off; measure it (INSERT_BATCH_RAND/SEQ at 32/64 clients).
 
 // Adaptive WAL writer polling. After a batch is dequeued, the writer stays
 // in a tight try_dequeue_bulk spin (bypasses wait_dequeue_bulk_timed's
@@ -133,8 +104,7 @@ inline constexpr size_t      WAL_SHARDS_PER_DB           = 4;
 // investigation notes), this only spends CPU right after real activity,
 // not on shards nobody is using. Default 0 disables adaptive polling
 // entirely (falls straight to wait_dequeue_bulk_timed every iteration,
-// today's exact behavior) -- opt in after benchmarking, same as
-// WAL_SHARDS_PER_DB.
+// today's exact behavior) -- opt in after benchmarking, like any knob here.
 //
 // Measured on torusnode15 (real client machines, real network, SYNC --
 // GROUP_COMMIT at the time of this measurement, since merged into SYNC):
@@ -254,8 +224,8 @@ inline constexpr double      WAL_GATHER_ADAPT_EMA_SATURATE = 4.0;
 // Poll interval while waiting out the gather window above.
 inline constexpr unsigned    WAL_GATHER_POLL_US          = 50;
 
-// Fixed part of one serialized legacy (v1) WalRecord header (SerializeWalRecord). Only a reserve() hint now:
-// the v2 ring record's fixed header is walring::RECORD_FIXED_BYTES (28), so the hint under-reserves slightly.
+// recordLen+crc (8) + fixed fields (12) = 20; the hdr.reserve() in WalWriterLoop adds the 8-byte LSN, the name and the
+// 8-byte first epoch, so the reserve equals the built header size exactly.
 inline constexpr size_t WAL_RECORD_HEADER_BYTES = 20; // recordLen(4)+crc32c(4)+dbNameLen(2)+rowLength(2)+timeResolution(4)+rowCount(4)
 
 // Sanity ceiling for the legacy-format ReplayWal streaming read
@@ -416,6 +386,77 @@ inline constexpr size_t   CATIDX_REGISTRY_CAP = 256;
 // Per-(db,year) bloom-block LRU cache size -- same reasoning as ZONE_MAP_HOT_CACHE_BLOCKS.
 inline constexpr size_t   CATIDX_HOT_CACHE_BLOCKS = 4;
 
+// Startup index rebuild (XStore::RebuildYearIndexes): a year file is scanned
+// once, in chunks of whole zone-map blocks of about this many bytes (at least
+// one block). Each chunk's rows are parsed once into reusable observation
+// batches, then folded into each stale index with one mutex hold and one
+// write per block (ZoneMapFile/CatIdxFile::RebuildFoldRows). The batches cost
+// about 48 bytes per present column per row, i.e. roughly 3-4x this value for
+// a dense numeric row (worst case 24x: every column a 2-byte empty field), per
+// year rebuilt concurrently, plus the 1 MiB scan buffer. Smaller only adds
+// per-chunk overhead (three lseeks and two mutex rounds per chunk).
+inline constexpr uint64_t REBUILD_CHUNK_BYTES = 4ull * 1024 * 1024;
+
+// Live index widening (XStore::LiveWidenOneYear, Tech Reference 4.18): the
+// builder rebuilds a year's .zmap/.catidx in place while the server serves,
+// one chunk of rows at a time under the data file's READ range lock (writers
+// of those rows wait while it is held). Owner-approved defaults: about 5 ms
+// of lock hold per chunk, about 1 ms pause between chunks. The chunk size
+// adapts: after each chunk that read rows, rows *= target / observed hold
+// (the factor clamped to [0.5, 2] so one slow chunk cannot swing it).
+inline constexpr uint64_t LIVE_WIDEN_LOCK_HOLD_TARGET_US = 5000;
+inline constexpr uint64_t LIVE_WIDEN_PAUSE_US = 1000;
+// The lock is taken with a timed wait (FileRangeLock::TryLockRangeFor), so a
+// hot writer never makes the builder queue behind it indefinitely. On a
+// timeout the chunk is halved (down to the minimum) and the SAME chunk is
+// retried after a pause that doubles on each consecutive timeout, up to the
+// max pause (F is one contiguous frontier: a busy chunk cannot be skipped).
+inline constexpr uint64_t LIVE_WIDEN_LOCK_WAIT_MS = 50;
+inline constexpr uint64_t LIVE_WIDEN_MAX_PAUSE_US = 50000;
+// After this many consecutive timeouts at the minimum chunk the builder logs
+// a warning once (per stretch of timeouts) and keeps retrying.
+inline constexpr uint64_t LIVE_WIDEN_TIMEOUT_WARN_AFTER = 100;
+// Chunk bounds in rows. The minimum is ONE row: under a hot writer the
+// builder must be able to lock a range that ends between two busy rows, so
+// it never needs neighbouring hot rows free at the same instant. The first
+// chunk is small; the maximum is LIVE_WIDEN_MAX_CHUNK_BYTES worth of rows.
+inline constexpr uint64_t LIVE_WIDEN_MIN_CHUNK_ROWS = 1;
+inline constexpr uint64_t LIVE_WIDEN_INITIAL_CHUNK_ROWS = 256;
+// Cap on the rows read under one lock hold: 1 MiB worth of rows (512 rows of
+// 2 KiB, about 6-7 ms of decode and fold at the ~13 us/row measured for 100
+// double columns), so the row count alone cannot stretch a hold to tens of
+// ms (the startup chunk, REBUILD_CHUNK_BYTES, is 4x that). A single hold can
+// still run long on a stall (preemption, a cold page-cache read, waiting for
+// an index file's mutex); see Tech Reference 4.18.
+inline constexpr uint64_t LIVE_WIDEN_MAX_CHUNK_BYTES = 1ull * 1024 * 1024;
+// A locked range with no data rows (a sparse hole) costs one lseek under the
+// lock, microseconds: each consecutive hole-only range is 4x the previous one,
+// up to this many rows. When no data is left from F to the end of the year,
+// the next attempt locks [F, end) once and finishes.
+inline constexpr uint64_t LIVE_WIDEN_MAX_HOLE_SPAN_ROWS = 1ull << 20;
+
+// Live widening trigger (M4 stage 3, XStore::RunLiveWidenPass). When an insert
+// raises a DB's effective tracked width, the DB is recorded; once its width
+// has not grown for this long (every further growth restarts the wait), the
+// background index thread widens all of its year files, newest year first.
+// Owner-approved: 30 s.
+inline constexpr uint64_t LIVE_WIDEN_QUIET_PERIOD_SEC = 30;
+// How often the background index thread looks for due widening work (and
+// checks whether compaction is due). One second: a recorded DB is picked up
+// at most about a second after its quiet period ends.
+inline constexpr uint64_t LIVE_WIDEN_TICK_SEC = 1;
+// A year whose rebuild could not even begin (BeginRebuild failed: the old,
+// narrower index is intact and still used) is retried: at most this many
+// attempts in all for one growth, the n-th retry waiting
+// LIVE_WIDEN_RETRY_BASE_SEC * 2^(n-1) after the failed attempt. Then the DB is
+// given up until its width grows again or the next start rebuilds it.
+inline constexpr uint32_t LIVE_WIDEN_MAX_ATTEMPTS = 3;
+inline constexpr uint64_t LIVE_WIDEN_RETRY_BASE_SEC = 60;
+// RemoveDB / RemoveDBFiles of a year file stop the background index thread's
+// work on that DB/year (widening or compaction) and wait at most this long for
+// it to let go, then remove anyway (with an error in the log).
+inline constexpr uint64_t BACKGROUND_REMOVE_WAIT_MS = 10000;
+
 // Cardinality cap for the compaction-built bitmap section: a column whose
 // distinct-value count in a given year crosses this threshold never gets a
 // bitmap for that year (stays bloom+real-scan forever) -- this is what lets
@@ -510,7 +551,7 @@ inline constexpr unsigned CURVE_ALLOWLIST_MIN_CHECK_INTERVAL_MS = 1000;
 // reader at a time -- never worse than the pre-optimization pread-per-row
 // loop, since a 1-worker pool degenerates to exactly that). Benchmark
 // before trusting the default on unfamiliar storage -- don't assume, same
-// rule as WAL_SHARDS_PER_DB above.
+// rule as the other benchmark-first knobs above.
 //
 // THE ACTUAL POOL SIZE IS NOT THIS CONSTANT -- it's computed at runtime
 // (XStorePreadPool::PoolSize, XStore_PreadPool.cpp) as hardware_concurrency()

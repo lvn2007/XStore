@@ -26,6 +26,16 @@ void FileRangeLock::LockRange(unsigned long long start, unsigned long long lengt
     active_locks.push_back({start, end, type});
 }
 
+bool FileRangeLock::TryLockRangeFor(unsigned long long start, unsigned long long length, LockType type,
+                                    std::chrono::milliseconds timeout) {
+    unsigned long long end = (length == 0) ? std::numeric_limits<unsigned long long>::max() : start + length;
+
+    std::unique_lock<std::mutex> lk(mtx);
+    if (!cv.wait_for(lk, timeout, [&] { return !Conflicts(start, end, type); })) return false;
+    active_locks.push_back({start, end, type});
+    return true;
+}
+
 void FileRangeLock::UnlockRange(unsigned long long start, unsigned long long length, LockType type) {
     unsigned long long end = (length == 0) ? std::numeric_limits<unsigned long long>::max() : start + length;
 
@@ -81,4 +91,14 @@ FileRangeLockGuard::FileRangeLockGuard(const std::string &file_path, unsigned lo
 
 FileRangeLockGuard::~FileRangeLockGuard() {
     lock.UnlockRange(start, length, type);
+}
+
+TimedFileRangeLockGuard::TimedFileRangeLockGuard(const std::string &file_path, unsigned long long start,
+                                                 unsigned long long length, FileRangeLock::LockType type,
+                                                 std::chrono::milliseconds timeout)
+    : lock(FileLockRegistry::Get(file_path)), start(start), length(length), type(type),
+      owns(lock.TryLockRangeFor(start, length, type, timeout)) {}
+
+TimedFileRangeLockGuard::~TimedFileRangeLockGuard() {
+    if (owns) lock.UnlockRange(start, length, type);
 }

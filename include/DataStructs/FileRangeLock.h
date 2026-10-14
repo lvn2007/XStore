@@ -2,6 +2,7 @@
 #define XSTORE_FILERANGELOCK_H
 
 #include <array>
+#include <chrono>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -18,12 +19,20 @@
 // Replaces fcntl() record locks, which are scoped to the process (not the
 // thread or fd) and therefore provide no mutual exclusion between the
 // worker threads that make up XStore's concurrency model.
+//
+// It is in-process only by design: two processes on one data directory are
+// refused at startup instead (XStore_DirLock.h, one flock per directory).
 class FileRangeLock {
     public:
         enum class LockType { READ, WRITE };
 
         void LockRange(unsigned long long start, unsigned long long length, LockType type);
         void UnlockRange(unsigned long long start, unsigned long long length, LockType type);
+        // LockRange that gives up after `timeout`: same semantics and length == 0 convention, waits on the same
+        // condition variable. Returns false (nothing registered, nothing to unlock) if the range did not become free
+        // in time. For a background job (the live index widener) that must not queue behind hot writers forever.
+        [[nodiscard]] bool TryLockRangeFor(unsigned long long start, unsigned long long length, LockType type,
+                                           std::chrono::milliseconds timeout);
 
     private:
         struct ActiveLock {
@@ -93,6 +102,26 @@ class FileRangeLockGuard {
         unsigned long long start;
         unsigned long long length;
         FileRangeLock::LockType type;
+};
+
+// RAII guard over TryLockRangeFor: unlocks on destruction only if the timed acquire succeeded (owns_lock()).
+class TimedFileRangeLockGuard {
+    public:
+        TimedFileRangeLockGuard(const std::string &file_path, unsigned long long start, unsigned long long length,
+                                FileRangeLock::LockType type, std::chrono::milliseconds timeout);
+        ~TimedFileRangeLockGuard();
+
+        TimedFileRangeLockGuard(const TimedFileRangeLockGuard&) = delete;
+        TimedFileRangeLockGuard& operator=(const TimedFileRangeLockGuard&) = delete;
+
+        [[nodiscard]] bool owns_lock() const { return owns; }
+
+    private:
+        FileRangeLock &lock;
+        unsigned long long start;
+        unsigned long long length;
+        FileRangeLock::LockType type;
+        bool owns;
 };
 
 #endif //XSTORE_FILERANGELOCK_H

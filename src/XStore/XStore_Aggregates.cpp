@@ -215,7 +215,8 @@ void XStore::ScanSegmentWithZoneMapPruning(const std::string &db_base_path, unsi
                                             PruneCheck &&should_skip_block) {
     if (rows_to_process == 0) return;
 
-    ZoneMapFile &zmap = GetOrOpenZoneMap(db_base_path, year, row_length, tracked_column_count);
+    const ZoneMapFile::Pin zmap_pin = PinZoneMap(db_base_path, year, row_length, tracked_column_count);
+    ZoneMapFile &zmap = *zmap_pin;
     uint64_t rows_per_block = zmap.RowsPerBlockValue();
     uint64_t first_row = first_row_index;
     uint64_t last_row = first_row_index + rows_to_process - 1;
@@ -249,7 +250,8 @@ void XStore::AccumulateSegmentWithZoneMapPushdown(const std::string &db_base_pat
                                                    double *sum_sq_out) {
     if (rows_to_process == 0) return;
 
-    ZoneMapFile &zmap = GetOrOpenZoneMap(db_base_path, year, row_length, tracked_column_count);
+    const ZoneMapFile::Pin zmap_pin = PinZoneMap(db_base_path, year, row_length, tracked_column_count);
+    ZoneMapFile &zmap = *zmap_pin;
     uint64_t rows_per_block = zmap.RowsPerBlockValue();
     uint64_t first_row = first_row_index;
     uint64_t last_row = first_row_index + rows_to_process - 1;
@@ -267,8 +269,9 @@ void XStore::AccumulateSegmentWithZoneMapPushdown(const std::string &db_base_pat
         // whole block including rows outside what was actually asked for.
         bool block_fully_in_range = (block_own_first_row >= first_row && block_own_last_row <= last_row);
 
+        // An inexact block (a folded row was overwritten or deleted) still counts the old row: scan it.
         auto stats = zmap.TryGetBlockStats(block);
-        if (block_fully_in_range && stats.has_value() && column_idx < stats->size()) {
+        if (block_fully_in_range && stats.has_value() && column_idx < stats->size() && !ZoneMapEntryInexact((*stats)[column_idx])) {
             const ZoneMapEntry &e = (*stats)[column_idx];
             sum_out += e.sum_value;
             valid_count_out += e.valid_count;
@@ -291,7 +294,8 @@ void XStore::ScanSegmentForExistence(const std::string &db_base_path, unsigned s
                                       bool &found_out) {
     if (rows_to_process == 0 || found_out) return;
 
-    ZoneMapFile &zmap = GetOrOpenZoneMap(db_base_path, year, row_length, tracked_column_count);
+    const ZoneMapFile::Pin zmap_pin = PinZoneMap(db_base_path, year, row_length, tracked_column_count);
+    ZoneMapFile &zmap = *zmap_pin;
     uint64_t rows_per_block = zmap.RowsPerBlockValue();
     uint64_t first_row = first_row_index;
     uint64_t last_row = first_row_index + rows_to_process - 1;
@@ -325,8 +329,9 @@ void XStore::ScanSegmentForExistence(const std::string &db_base_path, unsigned s
             // "fully covered" requirement AccumulateSegmentWithZoneMapPushdown
             // uses for Sum/Avg, caught here the same way by a test that
             // queried a sub-range of a block containing an out-of-range value.
+            // An inexact block's valid_count may still count an overwritten or deleted value: no proof.
             bool block_fully_in_range = (block_own_first_row >= first_row && block_own_last_row <= last_row);
-            if (block_fully_in_range) {
+            if (block_fully_in_range && !ZoneMapEntryInexact(e)) {
                 found_out = true;
                 return;
             }
@@ -356,7 +361,8 @@ void XStore::ScanSegmentForOhlc(const std::string &db_base_path, unsigned short 
                                  double &close_out, bool &close_set_out) {
     if (rows_to_process == 0) return;
 
-    ZoneMapFile &zmap = GetOrOpenZoneMap(db_base_path, year, row_length, tracked_column_count);
+    const ZoneMapFile::Pin zmap_pin = PinZoneMap(db_base_path, year, row_length, tracked_column_count);
+    ZoneMapFile &zmap = *zmap_pin;
     uint64_t rows_per_block = zmap.RowsPerBlockValue();
     uint64_t first_row = first_row_index;
     uint64_t last_row = first_row_index + rows_to_process - 1;
@@ -374,8 +380,9 @@ void XStore::ScanSegmentForOhlc(const std::string &db_base_path, unsigned short 
         // of just the queried sub-range.
         bool block_fully_in_range = (block_own_first_row >= first_row && block_own_last_row <= last_row);
 
+        // An inexact block's first/last/min/max may describe overwritten or deleted rows: scan it.
         auto stats = zmap.TryGetBlockStats(block);
-        if (block_fully_in_range && stats.has_value() && column_idx < stats->size()) {
+        if (block_fully_in_range && stats.has_value() && column_idx < stats->size() && !ZoneMapEntryInexact((*stats)[column_idx])) {
             const ZoneMapEntry &e = (*stats)[column_idx];
             if (e.valid_count == 0) continue; // no numeric data anywhere in this block -- skip
 
@@ -1116,25 +1123,26 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
         uint64_t rows_per_block = RowsPerBlock(static_cast<uint16_t>(cfg_struct.rowlength()));
 
         // Everything that needs the CatIdxFile is pulled out HERE, in one
-        // scoped acquisition per year segment, and the reference is dropped
-        // before the per-block scan below ever runs. GetOrOpenCatIdx's
-        // registry evicts and DESTROYS instances under CATIDX_REGISTRY_CAP
-        // pressure (which this feature's own hourly compaction sweep over
-        // every (db, year) pair creates for real), so holding a
-        // CatIdxFile*/& across a loop that can span ~961 blocks at SECOND
-        // resolution is a genuine use-after-free window -- the same hazard
-        // CompactOneYearCatIdx was already fixed for. Pre-fetching also makes
-        // LookupExact run ONCE per segment instead of once per "maybe" block,
-        // which is where it used to re-scan the whole year's directory.
+        // scoped, pinned acquisition per year segment, and the pin is dropped
+        // before the per-block scan below ever runs (a pin held across the
+        // row scan would keep the entry out of eviction for the whole query).
+        // Pre-fetching also makes LookupExact run ONCE per segment instead of
+        // once per "maybe" block, which is where it used to re-scan the whole
+        // year's directory.
         const uint64_t first_block = BlockIndexForRow(iter_epoch - curr_ts.first_epoch, rows_per_block);
         const uint64_t last_block = BlockIndexForRow(segment_end - curr_ts.first_epoch, rows_per_block);
         std::vector<char> block_might_contain;       // empty == no bloom for this column, every block must scan
         std::vector<uint64_t> bitmap_candidate_rows; // sorted year-relative row indices, only if compacted
         bool have_bitmap_candidates = false;
         if (column_idx >= 0 && static_cast<uint32_t>(column_idx) < tracked_column_count) {
-            CatIdxFile &catidx = GetOrOpenCatIdx(db_base_path_str, curr_ts.year,
-                                                  static_cast<uint16_t>(cfg_struct.rowlength()), tracked_column_count);
-            if (!unindexed_notice_emitted && static_cast<uint32_t>(column_idx) >= catidx.TrackedColumnCount()) {
+            const CatIdxFile::Pin catidx_pin = PinCatIdx(db_base_path_str, curr_ts.year,
+                                                         static_cast<uint16_t>(cfg_struct.rowlength()), tracked_column_count);
+            CatIdxFile &catidx = *catidx_pin;
+            if (!unindexed_notice_emitted &&
+                static_cast<uint32_t>(column_idx) >= XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS && catidx.Rebuilding()) {
+                set_warning("", RebuildingColumnNoticeText("FINDBYVALUE", db_name, column_idx, curr_ts.year));
+                unindexed_notice_emitted = true;
+            } else if (!unindexed_notice_emitted && static_cast<uint32_t>(column_idx) >= catidx.TrackedColumnCount()) {
                 set_warning("", UnindexedColumnNoticeText("FINDBYVALUE", db_name, column_idx, curr_ts.year,
                                                           catidx.TrackedColumnCount()));
                 unindexed_notice_emitted = true;
