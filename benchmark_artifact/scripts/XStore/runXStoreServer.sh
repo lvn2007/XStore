@@ -8,6 +8,14 @@ killTmuxIfRunning 5
 # Go to proper working dir
 cd ${WORKING_DIR}
 
+# The old server holds an exclusive lock on DataStore.lock (one XStore process per data directory) until the
+# kernel has finished tearing it down, which can outlast the fixed sleep above for a large server. Wait for it
+# (bounded) instead of letting the new server exit with "another XStore process is already using ...".
+xstore_lock_file="XStore_Server/build/DataStore.lock"
+if [ -e "${xstore_lock_file}" ]; then
+    flock -w 120 "${xstore_lock_file}" true || { echo "ERROR: previous XStore still holds ${xstore_lock_file} after 120s" >&2; exit 1; }
+fi
+
 # Intialize tmux
 tmux new-session -d -s XStore -n Server
 
