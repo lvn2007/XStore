@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -34,15 +35,39 @@ class FileRangeLock {
         [[nodiscard]] bool TryLockRangeFor(unsigned long long start, unsigned long long length, LockType type,
                                            std::chrono::milliseconds timeout);
 
+        // What a yielding READ attempt spent on waiting writers: set if it waited for one at least once.
+        struct WriterYield {
+            bool yielded = false;
+            uint64_t us = 0;
+        };
+        // The live widen builder's READ lock (Tech Reference 4.18, "Writers first"): TryLockRangeFor(READ) that ALSO
+        // waits while a WRITE waiting in LockRange overlaps the range, for at most `yield_max` from the start of this
+        // call; after that only held locks count, as in TryLockRangeFor. Time spent yielding does not use up
+        // `timeout` (the attempt waits at most timeout + yield_max). Every other lock call ignores waiting writers.
+        [[nodiscard]] bool TryReadLockYieldingFor(unsigned long long start, unsigned long long length,
+                                                  std::chrono::milliseconds timeout, std::chrono::milliseconds yield_max,
+                                                  WriterYield &yield);
+        // Writers currently registered as waiting (slots plus overflow).
+        [[nodiscard]] uint32_t WaitingWritersForTests();
+
     private:
+        using Clock = std::chrono::steady_clock;
         struct ActiveLock {
             unsigned long long start;
             unsigned long long end;    // exclusive
             LockType type;
         };
+        struct Range {
+            unsigned long long start;
+            unsigned long long end;    // exclusive
+        };
 
         // Caller must hold mtx.
         bool Conflicts(unsigned long long start, unsigned long long end, LockType type) const;
+        bool WaitingWriterOverlaps(unsigned long long start, unsigned long long end) const;
+        bool TimedLock(unsigned long long start, unsigned long long end, LockType type, std::chrono::milliseconds timeout,
+                       std::chrono::milliseconds yield_max, WriterYield *yield);
+        void LockRangeSlow(std::unique_lock<std::mutex> &lk, unsigned long long start, unsigned long long end, LockType type);
 
         std::mutex mtx;
         std::condition_variable cv;
@@ -50,6 +75,15 @@ class FileRangeLock {
         // count, so a flat vector + linear scan is cheaper than a node-based
         // container: no per-lock heap allocation and better cache locality.
         std::vector<ActiveLock> active_locks;
+        // WRITEs blocked in LockRange, for TryReadLockYieldingFor only. Registered only once a writer has to wait, so
+        // the uncontended path never touches them. Fixed slots, never allocated: waiting writers per file are bounded
+        // by the worker threads; one that finds every slot taken counts in waiting_writer_overflow, which yielding
+        // readers treat as a writer waiting on the whole file (conservative, and only a yield, never a correctness
+        // matter).
+        static constexpr uint32_t MAX_WAITING_WRITERS = 32;
+        uint32_t waiting_writer_count = 0;
+        uint32_t waiting_writer_overflow = 0;
+        std::array<Range, MAX_WAITING_WRITERS> waiting_writers{};
 };
 
 // Process-wide registry: one FileRangeLock per file path, shared across
@@ -109,6 +143,10 @@ class TimedFileRangeLockGuard {
     public:
         TimedFileRangeLockGuard(const std::string &file_path, unsigned long long start, unsigned long long length,
                                 FileRangeLock::LockType type, std::chrono::milliseconds timeout);
+        // READ over TryReadLockYieldingFor (the live widen builder).
+        TimedFileRangeLockGuard(const std::string &file_path, unsigned long long start, unsigned long long length,
+                                std::chrono::milliseconds timeout, std::chrono::milliseconds yield_max,
+                                FileRangeLock::WriterYield &yield);
         ~TimedFileRangeLockGuard();
 
         TimedFileRangeLockGuard(const TimedFileRangeLockGuard&) = delete;

@@ -1635,10 +1635,17 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
                     bool hole_only = false;
                     bool tail_empty = false;
                     uint64_t hold_us = 0;
+                    FileRangeLock::WriterYield yield;
                     {
+                        // Yields to waiting writers (at most LIVE_WIDEN_YIELD_MAX_MS): see the tunable.
                         TimedFileRangeLockGuard lock(data_path, pos * row_len, (lock_end - pos) * row_len,
-                                                     FileRangeLock::LockType::READ,
-                                                     std::chrono::milliseconds(XStoreTunables::LIVE_WIDEN_LOCK_WAIT_MS));
+                                                     std::chrono::milliseconds(XStoreTunables::LIVE_WIDEN_LOCK_WAIT_MS),
+                                                     std::chrono::milliseconds(XStoreTunables::LIVE_WIDEN_YIELD_MAX_MS),
+                                                     yield);
+                        if (yield.yielded) {
+                            ++ws.writer_yields;
+                            ws.writer_yield_us += yield.us;
+                        }
                         if (lock.owns_lock()) {
                             locked = true;
                             const Clock::time_point t0 = Clock::now();
@@ -1778,6 +1785,8 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
         st.max_consecutive_timeouts = std::max(st.max_consecutive_timeouts, ws.max_consecutive_timeouts);
         st.total_lock_hold_us += ws.total_lock_hold_us;
         st.max_lock_hold_us = std::max(st.max_lock_hold_us, ws.max_lock_hold_us);
+        st.writer_yields += ws.writer_yields;
+        st.writer_yield_us += ws.writer_yield_us;
         st.lock_hold_us.insert(st.lock_hold_us.end(), ws.lock_hold_us.begin(), ws.lock_hold_us.end());
     }
     // Every early end leaves the files that began in rebuild at the contiguous watermark they reached: dirty on disk,
@@ -1818,9 +1827,10 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
         all_ok = false;
     }
     spdlog::info("[LIVE WIDEN] [{}] - Rebuilt at {} columns (zone map: {}, catidx: {}): {} rows in {} chunks, {} lock "
-                 "timeouts, max lock hold {} us, {} ms", data_path, tracked_column_count, zmap_finished, catidx_finished,
-                 st.rows_folded, st.chunks, st.lock_timeouts, st.max_lock_hold_us,
-                 std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started).count());
+                 "timeouts, max lock hold {} us, {} ms, {} writer yields ({} ms)", data_path, tracked_column_count,
+                 zmap_finished, catidx_finished, st.rows_folded, st.chunks, st.lock_timeouts, st.max_lock_hold_us,
+                 std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started).count(), st.writer_yields,
+                 st.writer_yield_us / 1000);
     if (!all_ok) return LiveWidenResult::kFailed;
     return refused ? LiveWidenResult::kPartial : LiveWidenResult::kDone;
 } catch (const std::exception &e) {

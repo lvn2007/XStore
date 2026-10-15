@@ -13,6 +13,7 @@
 #include "XStoreTestSupport.h"
 #include "XStoreSyscallFault.h"
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -141,6 +142,245 @@ TEST(FileRangeLockTimedTest, ATimeoutLeavesNoRegistrationBehind) {
     }
     TimedFileRangeLockGuard whole(key, 0, 0, kWrite, milliseconds(0));
     EXPECT_TRUE(whole.owns_lock()) << "a guard leaked its range";
+}
+
+// ---- FileRangeLock: the builder's READ yields to waiting writers (S3b-1) ---------------------------------------------
+
+using WriterYield = FileRangeLock::WriterYield;
+
+// Polls (5 s bound) until `n` writers are registered as waiting.
+void WaitForWaitingWriters(FileRangeLock &lock, uint32_t n) {
+    const Clock::time_point deadline = Clock::now() + std::chrono::seconds(5);
+    while (lock.WaitingWritersForTests() != n) {
+        ASSERT_LT(Clock::now(), deadline) << "waiting writers never reached " << n;
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+}
+
+// A WRITE on [start, start + len) taken (blocking) on its own thread, held for hold_ms, then released.
+std::thread WriterThread(FileRangeLock &lock, unsigned long long start, unsigned long long len, int hold_ms = 5) {
+    return std::thread([&lock, start, len, hold_ms] {
+        lock.LockRange(start, len, kWrite);
+        std::this_thread::sleep_for(milliseconds(hold_ms));
+        lock.UnlockRange(start, len, kWrite);
+    });
+}
+
+TEST(FileRangeLockYieldTest, AWaitingOverlappingWriteMakesTheYieldingReadWaitUntilTheWriterIsDone) {
+    FileRangeLock lock;
+    lock.LockRange(0, 100, kRead);
+    std::thread writer = WriterThread(lock, 0, 100, 30);
+    WaitForWaitingWriters(lock, 1);
+    WriterYield yield;
+    auto reader = std::async(std::launch::async, [&] { return lock.TryReadLockYieldingFor(50, 10, milliseconds(50), milliseconds(5000), yield); });
+    EXPECT_EQ(reader.wait_for(milliseconds(200)), std::future_status::timeout)
+        << "a READ the held READ does not block was granted past a waiting writer";
+    lock.UnlockRange(0, 100, kRead); // the writer gets in, holds 30 ms, leaves; then the reader
+    writer.join();
+    ASSERT_EQ(reader.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_TRUE(reader.get());
+    EXPECT_TRUE(yield.yielded);
+    EXPECT_GE(yield.us, 150000u);
+    EXPECT_LT(yield.us, 2'000'000u) << "released only by the 5 s cap: the unregister of a waiting writer lost a wakeup";
+    EXPECT_EQ(lock.WaitingWritersForTests(), 0u) << "the writer's entry stayed behind after it acquired";
+    lock.UnlockRange(50, 10, kRead);
+    EXPECT_TRUE(lock.TryLockRangeFor(0, 0, kWrite, milliseconds(0))) << "a range leaked";
+    lock.UnlockRange(0, 0, kWrite);
+}
+
+TEST(FileRangeLockYieldTest, ANonOverlappingWaitingWriteDoesNotDelayTheYieldingRead) {
+    FileRangeLock lock;
+    lock.LockRange(0, 100, kRead);
+    std::thread writer = WriterThread(lock, 0, 100);
+    WaitForWaitingWriters(lock, 1);
+    WriterYield yield;
+    EXPECT_TRUE(lock.TryReadLockYieldingFor(100, 50, milliseconds(0), milliseconds(5000), yield));
+    EXPECT_FALSE(yield.yielded);
+    lock.UnlockRange(100, 50, kRead);
+    lock.UnlockRange(0, 100, kRead);
+    writer.join();
+}
+
+// Only the builder's call yields: LockRange(READ) and TryLockRangeFor(READ) are granted past a waiting writer as before.
+TEST(FileRangeLockYieldTest, NormalReadsIgnoreWaitingWriters) {
+    FileRangeLock lock;
+    lock.LockRange(0, 100, kRead);
+    std::thread writer = WriterThread(lock, 0, 100);
+    WaitForWaitingWriters(lock, 1);
+    auto reader = std::async(std::launch::async, [&] {
+        lock.LockRange(50, 10, kRead);
+        return lock.TryLockRangeFor(60, 10, kRead, milliseconds(0));
+    });
+    const bool ready = reader.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    EXPECT_TRUE(ready) << "LockRange(READ) waited for a waiting writer";
+    if (!ready) lock.UnlockRange(0, 100, kRead);
+    EXPECT_TRUE(reader.get());
+    lock.UnlockRange(50, 10, kRead);
+    lock.UnlockRange(60, 10, kRead);
+    if (ready) lock.UnlockRange(0, 100, kRead);
+    writer.join();
+    EXPECT_EQ(lock.WaitingWritersForTests(), 0u);
+}
+
+// Progress: a writer that waits forever (it waits on a READ held throughout) delays the yielding READ by the cap only,
+// and the yield does not use up the (shorter) timeout.
+TEST(FileRangeLockYieldTest, PastTheCapTheYieldingReadProceedsAsBefore) {
+    FileRangeLock lock;
+    lock.LockRange(0, 100, kRead);
+    std::thread writer = WriterThread(lock, 0, 0);
+    WaitForWaitingWriters(lock, 1);
+    WriterYield yield;
+    const Clock::time_point t0 = Clock::now();
+    auto reader = std::async(std::launch::async, [&] { return lock.TryReadLockYieldingFor(500, 10, milliseconds(50), milliseconds(300), yield); });
+    const bool ready = reader.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    const int64_t elapsed_ms = MsSince(t0);
+    lock.UnlockRange(0, 100, kRead);
+    ASSERT_TRUE(ready) << "the yield ignored its cap";
+    ASSERT_TRUE(reader.get()) << "the yield used up the timeout";
+    EXPECT_GE(elapsed_ms, 290);
+    EXPECT_LT(elapsed_ms, 2500);
+    EXPECT_TRUE(yield.yielded);
+    EXPECT_GE(yield.us, 290000u);
+    // The writer still waits on the yielding reader's own (now held) READ.
+    EXPECT_EQ(lock.WaitingWritersForTests(), 1u);
+    lock.UnlockRange(500, 10, kRead);
+    writer.join();
+    EXPECT_EQ(lock.WaitingWritersForTests(), 0u);
+}
+
+TEST(FileRangeLockYieldTest, AHeldConflictStillTimesOutAfterTheYield) {
+    FileRangeLock lock;
+    lock.LockRange(0, 100, kRead);
+    std::thread writer = WriterThread(lock, 0, 100);
+    WaitForWaitingWriters(lock, 1);
+    lock.LockRange(200, 10, kWrite);
+    WriterYield yield;
+    EXPECT_FALSE(lock.TryReadLockYieldingFor(50, 200, milliseconds(30), milliseconds(5000), yield));
+    EXPECT_FALSE(yield.yielded) << "the held WRITE conflicts first: no yield counted";
+    lock.UnlockRange(200, 10, kWrite);
+    lock.UnlockRange(0, 100, kRead);
+    writer.join();
+    EXPECT_TRUE(lock.TryLockRangeFor(0, 0, kWrite, milliseconds(0)));
+    lock.UnlockRange(0, 0, kWrite);
+}
+
+TEST(FileRangeLockYieldTest, SeveralWaitingWritersEachHoldTheReadBack) {
+    FileRangeLock lock;
+    lock.LockRange(0, 1000, kRead);
+    std::vector<std::thread> writers;
+    writers.push_back(WriterThread(lock, 0, 100, 20));
+    writers.push_back(WriterThread(lock, 0, 100, 20)); // same range twice
+    writers.push_back(WriterThread(lock, 500, 100, 20));
+    WaitForWaitingWriters(lock, 3);
+    WriterYield free_yield;
+    EXPECT_TRUE(lock.TryReadLockYieldingFor(200, 100, milliseconds(0), milliseconds(5000), free_yield));
+    EXPECT_FALSE(free_yield.yielded);
+    lock.UnlockRange(200, 100, kRead);
+    WriterYield yield;
+    auto reader = std::async(std::launch::async, [&] { return lock.TryReadLockYieldingFor(50, 520, milliseconds(50), milliseconds(5000), yield); });
+    EXPECT_EQ(reader.wait_for(milliseconds(100)), std::future_status::timeout);
+    lock.UnlockRange(0, 1000, kRead);
+    for (std::thread &t : writers) t.join();
+    ASSERT_EQ(reader.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_TRUE(reader.get());
+    EXPECT_TRUE(yield.yielded);
+    EXPECT_LT(yield.us, 2'000'000u) << "released only by the 5 s cap: a wakeup was lost";
+    EXPECT_EQ(lock.WaitingWritersForTests(), 0u);
+    lock.UnlockRange(50, 520, kRead);
+}
+
+// More waiting writers than slots: the overflow counts as a writer waiting on the whole file (a yielding READ anywhere
+// waits), and every entry, slot or overflow, is gone once the writers got in.
+TEST(FileRangeLockYieldTest, OverflowingTheSlotsYieldsEverywhereAndLeavesNothingBehind) {
+    FileRangeLock lock;
+    constexpr int kWriters = 40;
+    lock.LockRange(0, 1000, kRead);
+    std::vector<std::thread> writers;
+    for (int i = 0; i < kWriters; ++i) writers.push_back(WriterThread(lock, static_cast<unsigned long long>(i) * 10, 10, 1));
+    WaitForWaitingWriters(lock, kWriters);
+    WriterYield yield;
+    const Clock::time_point t0 = Clock::now();
+    EXPECT_TRUE(lock.TryReadLockYieldingFor(5000, 10, milliseconds(0), milliseconds(50), yield));
+    EXPECT_GE(MsSince(t0), 45);
+    EXPECT_TRUE(yield.yielded) << "overflow did not count as a waiting writer";
+    lock.UnlockRange(5000, 10, kRead);
+    lock.UnlockRange(0, 1000, kRead);
+    for (std::thread &t : writers) t.join();
+    EXPECT_EQ(lock.WaitingWritersForTests(), 0u);
+    WriterYield after;
+    EXPECT_TRUE(lock.TryReadLockYieldingFor(5000, 10, milliseconds(0), milliseconds(5000), after));
+    EXPECT_FALSE(after.yielded);
+    lock.UnlockRange(5000, 10, kRead);
+}
+
+// Many threads, every lock flavour, small file: no deadlock, no lost wakeup (a watchdog), mutual exclusion holds
+// (per-cell occupancy counters), and nothing is left registered.
+TEST(FileRangeLockYieldTest, StressNoDeadlockNoLostWakeupExclusionHolds) {
+    FileRangeLock lock;
+    constexpr unsigned kCells = 16;
+    std::array<std::atomic<int>, kCells> readers{};
+    std::array<std::atomic<int>, kCells> writers_in{};
+    std::atomic<bool> stop{false};
+    std::atomic<uint64_t> violations{0}, ops{0}, yields{0};
+    const auto enter = [&](unsigned lo, unsigned hi, bool write) {
+        for (unsigned c = lo; c < hi; ++c) {
+            if (write) {
+                if (writers_in[c].fetch_add(1) != 0 || readers[c].load() != 0) ++violations;
+            } else {
+                readers[c].fetch_add(1);
+                if (writers_in[c].load() != 0) ++violations;
+            }
+        }
+    };
+    const auto leave = [&](unsigned lo, unsigned hi, bool write) {
+        for (unsigned c = lo; c < hi; ++c) (write ? writers_in[c] : readers[c]).fetch_sub(1);
+    };
+    std::vector<std::thread> threads;
+    for (unsigned t = 0; t < 12; ++t) {
+        threads.emplace_back([&, t] {
+            std::mt19937 rng(t * 7919u + 1);
+            while (!stop.load()) {
+                const unsigned lo = rng() % kCells;
+                const unsigned hi = lo + 1 + rng() % (kCells - lo);
+                const unsigned long long off = lo * 100ULL, len = (hi - lo) * 100ULL;
+                const unsigned kind = t % 4; // 0,1: WRITE (blocking); 2: READ (blocking); 3: yielding READ
+                if (kind < 2) {
+                    lock.LockRange(off, len, kWrite);
+                    enter(lo, hi, true);
+                    std::this_thread::sleep_for(std::chrono::microseconds(rng() % 200));
+                    leave(lo, hi, true);
+                    lock.UnlockRange(off, len, kWrite);
+                } else if (kind == 2) {
+                    lock.LockRange(off, len, kRead);
+                    enter(lo, hi, false);
+                    std::this_thread::sleep_for(std::chrono::microseconds(rng() % 200));
+                    leave(lo, hi, false);
+                    lock.UnlockRange(off, len, kRead);
+                } else {
+                    WriterYield y;
+                    if (lock.TryReadLockYieldingFor(off, len, milliseconds(rng() % 5), milliseconds(rng() % 20), y)) {
+                        enter(lo, hi, false);
+                        std::this_thread::sleep_for(std::chrono::microseconds(rng() % 200));
+                        leave(lo, hi, false);
+                        lock.UnlockRange(off, len, kRead);
+                    }
+                    if (y.yielded) ++yields;
+                }
+                ++ops;
+            }
+        });
+    }
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    stop.store(true);
+    auto joined = std::async(std::launch::async, [&] { for (std::thread &t : threads) t.join(); });
+    ASSERT_EQ(joined.wait_for(std::chrono::seconds(30)), std::future_status::ready) << "deadlock or lost wakeup";
+    EXPECT_EQ(violations.load(), 0u);
+    EXPECT_GT(yields.load(), 0u) << "no yield happened: the test proves little";
+    EXPECT_EQ(lock.WaitingWritersForTests(), 0u);
+    EXPECT_TRUE(lock.TryLockRangeFor(0, 0, kWrite, milliseconds(0))) << "a range leaked";
+    lock.UnlockRange(0, 0, kWrite);
+    std::printf("[file range lock stress] %llu ops, %llu yielding attempts\n", static_cast<unsigned long long>(ops.load()),
+                static_cast<unsigned long long>(yields.load()));
 }
 
 // ---- Helpers --------------------------------------------------------------------------------------------------------
@@ -3021,5 +3261,91 @@ TEST_F(XStoreParallelLiveWidenTest, ACancelStopsEveryWorkerWithinAChunk) {
     ExpectSameFilesAs(db, db + "REF");
 }
 
+
+// ---- 12. Writers first (S3b-1): the builder's READ yields to a waiting writer ---------------------------------------
+
+// Four workers widen while a writer takes a WRITE over the whole year again and again: its waits stay bounded by the
+// yield cap plus a chunk's hold (without the yield, back-to-back worker READs could keep it out for over a second), the
+// widen completes, and the files equal the startup rebuild.
+TEST_F(XStoreParallelLiveWidenTest, AWholeYearWriterWaitsBoundedWhileFourWorkersWiden) {
+    XStore store;
+    const std::string db = "LWPYIELD";
+    const uint64_t rows = 24 * Rpb();
+    SeedNarrowIndexWideRows(store, db, rows, 70);
+    const std::string path = DbPath(db);
+    FileRangeLock &lock = FileLockRegistry::Get(YearPath(db, ".XSTORE"));
+    std::atomic<bool> running{true};
+    std::atomic<int64_t> max_wait_us{0};
+    std::atomic<uint64_t> takes{0};
+    std::thread writer([&] {
+        while (running.load()) {
+            const Clock::time_point t0 = Clock::now();
+            lock.LockRange(0, 0, kWrite);
+            const int64_t waited = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t0).count();
+            if (waited > max_wait_us.load()) max_wait_us.store(waited);
+            ++takes;
+            std::this_thread::sleep_for(milliseconds(1));
+            lock.UnlockRange(0, 0, kWrite);
+            std::this_thread::sleep_for(milliseconds(2));
+        }
+    });
+    XStore::LiveWidenStats stats;
+    auto builder = std::async(std::launch::async, [&] {
+        XStore b;
+        return b.LiveWidenOneYear(path, kYear, kRowLength, 70, true, true, nullptr, &stats, 4, Rpb() * kRowLength);
+    });
+    const bool in_time = builder.wait_for(std::chrono::seconds(60)) == std::future_status::ready;
+    running.store(false);
+    writer.join();
+    ASSERT_TRUE(in_time) << "the widen did not finish within 60 s";
+    EXPECT_EQ(builder.get(), Result::kDone);
+    EXPECT_GT(takes.load(), 0u);
+    EXPECT_GT(stats.writer_yields, 0u) << "the builder never yielded: the test proves little";
+    EXPECT_LT(max_wait_us.load(), static_cast<int64_t>(XStoreTunables::LIVE_WIDEN_YIELD_MAX_MS + 300) * 1000)
+        << "a waiting writer was kept out past the yield cap";
+    std::printf("[live widen yield] writer: %llu takes, max wait %lld us; builder: %llu chunks, %llu yields (%llu ms), "
+                "%llu timeouts\n", static_cast<unsigned long long>(takes.load()), static_cast<long long>(max_wait_us.load()),
+                static_cast<unsigned long long>(stats.chunks), static_cast<unsigned long long>(stats.writer_yields),
+                static_cast<unsigned long long>(stats.writer_yield_us / 1000), static_cast<unsigned long long>(stats.lock_timeouts));
+    BuildStartupReference(store, db, db + "REF", 70);
+    ExpectSameFilesAs(db, db + "REF");
+}
+
+// Progress guarantee: a writer that waits for the whole run (it waits on a READ the test holds) makes every chunk
+// attempt yield for the full cap, never time out, and the widen still completes and equals the startup rebuild.
+TEST_F(XStoreLiveWidenTest, AWriterWaitingForeverDelaysEachChunkByTheCapButTheWidenCompletes) {
+    XStore store;
+    const std::string db = "LWYIELDCAP";
+    SeedNarrowIndexWideRows(store, db, 3000, 70);
+    const std::string path = DbPath(db);
+    FileRangeLock &lock = FileLockRegistry::Get(YearPath(db, ".XSTORE"));
+    lock.LockRange(0, kRowLength, kRead);
+    std::thread writer([&] {
+        lock.LockRange(0, 0, kWrite);
+        lock.UnlockRange(0, 0, kWrite);
+    });
+    WaitForWaitingWriters(lock, 1);
+    XStore::LiveWidenStats stats;
+    auto builder = std::async(std::launch::async, [&] {
+        XStore b;
+        return b.LiveWidenOneYear(path, kYear, kRowLength, 70, true, true, nullptr, &stats);
+    });
+    const Clock::time_point t0 = Clock::now();
+    const bool in_time = builder.wait_for(std::chrono::seconds(60)) == std::future_status::ready;
+    const int64_t elapsed_ms = MsSince(t0);
+    EXPECT_EQ(lock.WaitingWritersForTests(), 1u) << "the writer stopped waiting: the test proves little";
+    lock.UnlockRange(0, kRowLength, kRead);
+    writer.join();
+    ASSERT_TRUE(in_time) << "a standing waiting writer stalled the widen";
+    EXPECT_EQ(builder.get(), Result::kDone);
+    EXPECT_EQ(stats.writer_yields, stats.chunks) << "every chunk attempt yields to the standing writer";
+    EXPECT_EQ(stats.lock_timeouts, 0u) << "a yield used up the lock timeout";
+    EXPECT_GE(stats.writer_yield_us, stats.chunks * (XStoreTunables::LIVE_WIDEN_YIELD_MAX_MS - 10) * 1000);
+    EXPECT_GE(elapsed_ms, static_cast<int64_t>(stats.chunks * (XStoreTunables::LIVE_WIDEN_YIELD_MAX_MS - 10)));
+    std::printf("[live widen yield cap] %lld ms, %llu chunks, %llu yields\n", static_cast<long long>(elapsed_ms),
+                static_cast<unsigned long long>(stats.chunks), static_cast<unsigned long long>(stats.writer_yields));
+    BuildStartupReference(store, db, db + "REF", 70);
+    ExpectSameFilesAs(db, db + "REF");
+}
 
 } // namespace

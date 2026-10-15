@@ -430,6 +430,13 @@ inline constexpr uint64_t LIVE_WIDEN_PAUSE_US = 1000;
 // max pause (F is one contiguous frontier: a busy chunk cannot be skipped).
 inline constexpr uint64_t LIVE_WIDEN_LOCK_WAIT_MS = 50;
 inline constexpr uint64_t LIVE_WIDEN_MAX_PAUSE_US = 50000;
+// Writers first (FileRangeLock::TryReadLockYieldingFor): a chunk's READ lock
+// also waits while an overlapping WRITE is waiting, so back-to-back builder
+// READs cannot starve a wide writer. Capped per lock attempt (from its start)
+// so a steady stream of waiting writers cannot stall the widen forever; past
+// the cap the attempt waits for held locks only. Yield time does not count
+// against LIVE_WIDEN_LOCK_WAIT_MS.
+inline constexpr uint64_t LIVE_WIDEN_YIELD_MAX_MS = 200;
 // After this many consecutive timeouts at the minimum chunk the builder logs
 // a warning once (per stretch of timeouts) and keeps retrying.
 inline constexpr uint64_t LIVE_WIDEN_TIMEOUT_WARN_AFTER = 100;

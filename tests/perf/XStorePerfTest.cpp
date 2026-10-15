@@ -1035,7 +1035,7 @@ struct ArmResult {
     unsigned long long rows = 0;
     std::vector<double> overwrite_us, append_us;
     std::vector<double> holds_us;
-    unsigned long long builder_runs = 0, timeouts = 0;
+    unsigned long long builder_runs = 0, timeouts = 0, yields = 0, yield_us = 0;
 };
 
 std::string LatencyText(const std::vector<double> &v) {
@@ -1179,6 +1179,8 @@ TEST_F(XStorePerfTest, LiveWidenDuringInserts) {
                 r.holds_us.insert(r.holds_us.end(), stats.lock_hold_us.begin(), stats.lock_hold_us.end());
                 ++r.builder_runs;
                 r.timeouts += stats.lock_timeouts;
+                r.yields += stats.writer_yields;
+                r.yield_us += stats.writer_yield_us;
             }
         }
     }
@@ -1194,8 +1196,9 @@ TEST_F(XStorePerfTest, LiveWidenDuringInserts) {
                                      "head RangeInsert {}", round, kArmNames[arm], r.seconds,
                                      r.seconds > 0 ? static_cast<double>(r.rows) / r.seconds : 0.0,
                                      LatencyText(r.overwrite_us), LatencyText(r.append_us))
-                      << (arm == 0 ? std::string() : fmt::format(" | builder runs {} hold {} timeouts {}", r.builder_runs,
-                                                                 LatencyText(r.holds_us), r.timeouts))
+                      << (arm == 0 ? std::string() : fmt::format(" | builder runs {} hold {} timeouts {} writer yields {} ({} ms)",
+                                                                 r.builder_runs, LatencyText(r.holds_us), r.timeouts,
+                                                                 r.yields, r.yield_us / 1000))
                       << std::endl;
         }
     }

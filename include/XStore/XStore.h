@@ -1069,6 +1069,8 @@ class XStore {
             uint64_t max_consecutive_timeouts = 0;
             uint64_t total_lock_hold_us = 0;
             uint64_t max_lock_hold_us = 0;
+            uint64_t writer_yields = 0;            // lock attempts that waited for a waiting writer at least once
+            uint64_t writer_yield_us = 0;          // total time those attempts spent yielding
             std::vector<uint32_t> lock_hold_us;    // one entry per chunk
             bool zmap_widened = false;             // finished (FinishRebuild succeeded) at the new width
             bool catidx_widened = false;
