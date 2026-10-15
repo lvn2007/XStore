@@ -1161,13 +1161,12 @@ struct XStore::YearRebuild {
     std::atomic<uint64_t> rows_done{0};
     std::atomic<bool> zmap_written{true};
     std::atomic<bool> catidx_written{true};
-    // Contiguous watermark, under `mutex`: *_end[g] is the end of the rows of group g folded into that file so far
-    // (it starts at the group's first row and grows chunk by chunk); *_prefix counts the leading groups fully folded.
+    // Contiguous watermark of each file, under `mutex` (see RebuildWatermark). Frontiers taken from it are monotone and
+    // never pass the first row a still-running (or stopped) group has not folded: RebuildFoldRows skips rows below the
+    // frontier as already folded, so a frontier past a hole would drop that hole's rows for good.
     std::mutex mutex;
-    std::vector<uint64_t> zmap_end;
-    std::vector<uint64_t> catidx_end;
-    size_t zmap_prefix = 0;
-    size_t catidx_prefix = 0;
+    RebuildWatermark zmap_fold;
+    RebuildWatermark catidx_fold;
     std::exception_ptr failure; // the first exception of this year; under `mutex` while workers run
 
     YearRebuild() = default;
@@ -1179,15 +1178,6 @@ struct XStore::YearRebuild {
 
     [[nodiscard]] uint64_t GroupBegin(size_t g) const { return g * group_rows; }
     [[nodiscard]] uint64_t GroupEnd(size_t g) const { return std::min(total_rows, (g + 1) * group_rows); }
-
-    // Caller holds `mutex`. ends only grow and prefix only moves forward, so the frontiers this produces are
-    // monotone, and none passes the first row a still-running (or stopped) group has not folded: RebuildFoldRows skips
-    // rows below the frontier as already folded, so a frontier past a hole would drop that hole's rows for good.
-    template <class File>
-    void AdvanceWatermark(File &file, const std::vector<uint64_t> &ends, size_t &prefix) const {
-        while (prefix < group_count && ends[prefix] == GroupEnd(prefix)) ++prefix;
-        file.AdvanceFrontier(prefix < group_count ? ends[prefix] : total_rows);
-    }
 };
 
 void XStore::BeginYearRebuild(const std::string &db_base_path, uint16_t row_length, uint32_t tracked_column_count,
@@ -1270,9 +1260,8 @@ void XStore::BeginYearRebuild(const std::string &db_base_path, uint16_t row_leng
     const uint64_t chunk_bytes = y.chunk_rows * row_length;
     y.group_rows = std::max<uint64_t>(1, (group_bytes + chunk_bytes - 1) / chunk_bytes) * y.chunk_rows;
     y.group_count = static_cast<size_t>((y.total_rows + y.group_rows - 1) / y.group_rows);
-    y.zmap_end.resize(y.group_count);
-    for (size_t g = 0; g < y.group_count; ++g) y.zmap_end[g] = y.GroupBegin(g);
-    y.catidx_end = y.zmap_end;
+    y.zmap_fold.Reset(y.group_rows, y.total_rows);
+    y.catidx_fold.Reset(y.group_rows, y.total_rows);
     y.zmap_written.store(y.zmap.get() != nullptr, std::memory_order_relaxed);
     y.catidx_written.store(y.catidx.get() != nullptr, std::memory_order_relaxed);
     y.active = true;
@@ -1324,14 +1313,8 @@ void XStore::RunRebuildGroup(YearRebuild &y, size_t g, uint16_t row_length, uint
             y.catidx_written.store(false, std::memory_order_relaxed);
         }
         std::lock_guard<std::mutex> lock(y.mutex);
-        if (zmap_ok) {
-            y.zmap_end[g] = end;
-            y.AdvanceWatermark(*y.zmap, y.zmap_end, y.zmap_prefix);
-        }
-        if (catidx_ok) {
-            y.catidx_end[g] = end;
-            y.AdvanceWatermark(*y.catidx, y.catidx_end, y.catidx_prefix);
-        }
+        if (zmap_ok) y.zmap->AdvanceFrontier(y.zmap_fold.MarkFolded(begin, end));
+        if (catidx_ok) y.catidx->AdvanceFrontier(y.catidx_fold.MarkFolded(begin, end));
     }
 }
 
@@ -1519,7 +1502,7 @@ XStore::FoldResult XStore::FoldChunk(int data_fd, uint64_t chunk_begin, uint64_t
 XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path, unsigned short year,
                                                  uint16_t row_length, uint32_t tracked_column_count, bool widen_zmap,
                                                  bool widen_catidx, const std::atomic<bool> *stop,
-                                                 LiveWidenStats *stats) try {
+                                                 LiveWidenStats *stats, unsigned workers, uint64_t group_bytes) try {
     using Clock = std::chrono::steady_clock;
     LiveWidenStats local_stats;
     LiveWidenStats &st = stats != nullptr ? *stats : local_stats;
@@ -1587,149 +1570,241 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
     const uint64_t row_len = row_length;
     const uint64_t max_data_rows = std::max<uint64_t>(XStoreTunables::LIVE_WIDEN_MIN_CHUNK_ROWS,
                                                       XStoreTunables::LIVE_WIDEN_MAX_CHUNK_BYTES / row_len);
-    uint64_t data_rows = std::clamp<uint64_t>(XStoreTunables::LIVE_WIDEN_INITIAL_CHUNK_ROWS,
-                                              XStoreTunables::LIVE_WIDEN_MIN_CHUNK_ROWS, max_data_rows);
-    uint64_t span_rows = data_rows; // rows locked per attempt (>= data_rows after a hole)
-    uint64_t pause_us = XStoreTunables::LIVE_WIDEN_PAUSE_US;
-    uint64_t consecutive_timeouts = 0;
-    bool timeout_warned = false;
-    bool zmap_ok = zmap.get() != nullptr;
-    bool catidx_ok = catidx.get() != nullptr;
-    uint64_t frontier = 0;
-    RebuildScratch scratch;
+    // Groups of whole zone-map blocks (two groups never share a block, so folds of different groups touch different
+    // blocks, each in row order: the bytes equal the sequential build's). One worker: one group, the whole year, which
+    // is exactly the sequential builder (same chunks, same frontier sequence, same stats).
+    unsigned want_workers = std::max(1u, workers);
+    // The groups are block-aligned only if the files' own block size is the one computed here (always so today: a file
+    // with another block size is rebuilt at startup). If it ever differs, a block could span two groups and the writer
+    // checks (rows owned by writers form a prefix of every block) would no longer hold: use one group instead.
+    if (want_workers > 1 && ((zmap.get() != nullptr && zmap->RowsPerBlockValue() != RowsPerBlock(row_length)) ||
+                             (catidx.get() != nullptr && catidx->RowsPerBlockValue() != RowsPerBlock(row_length)))) {
+        spdlog::warn("[LIVE WIDEN] [{}] - Index block size differs from the computed one; widening with one worker", data_path);
+        want_workers = 1;
+    }
+    const uint64_t block_bytes = RowsPerBlock(row_length) * row_len;
+    const uint64_t group_rows = want_workers == 1
+                                    ? std::max<uint64_t>(1, total_rows)
+                                    : std::max<uint64_t>(1, (group_bytes + block_bytes - 1) / block_bytes) * RowsPerBlock(row_length);
+    const uint64_t group_count = (total_rows + group_rows - 1) / group_rows;
+    // Before any fold. From here the frontier moves only through MarkFolded, which also records the folded group
+    // prefixes the writers check (a group above F may be folded already: see ZoneMapFile::kNoRebuild).
+    if (zmap.get() != nullptr) zmap->SetLiveFoldGroups(group_rows, total_rows);
+    if (catidx.get() != nullptr) catidx->SetLiveFoldGroups(group_rows, total_rows);
+
+    std::atomic<uint64_t> next_group{0};
+    std::atomic<bool> zmap_ok{zmap.get() != nullptr};
+    std::atomic<bool> catidx_ok{catidx.get() != nullptr};
+    std::atomic<bool> failed{false};
+    std::atomic<bool> was_stopped{false};
+    std::atomic<uint64_t> watermark{0}; // for the log only
     const Clock::time_point started = Clock::now();
-    const auto log_stopped = [&] {
-        spdlog::warn("[LIVE WIDEN] [{}] - Stopped at row {} of {}; the index stays in rebuild (dirty) until the next "
-                     "start rebuilds it", data_path, frontier, total_rows);
+
+    // One worker: claims groups in order and walks each chunk by chunk. Never throws (an exception is a failure).
+    const auto work = [&](LiveWidenStats &ws) noexcept {
+        try {
+            uint64_t data_rows = std::clamp<uint64_t>(XStoreTunables::LIVE_WIDEN_INITIAL_CHUNK_ROWS,
+                                                      XStoreTunables::LIVE_WIDEN_MIN_CHUNK_ROWS, max_data_rows);
+            uint64_t span_rows = data_rows; // rows locked per attempt (>= data_rows after a hole)
+            uint64_t pause_us = XStoreTunables::LIVE_WIDEN_PAUSE_US;
+            uint64_t consecutive_timeouts = 0;
+            bool timeout_warned = false;
+            RebuildScratch scratch; // per worker, never shared
+            const auto halt = [&] {
+                if (failed.load(std::memory_order_relaxed) || was_stopped.load(std::memory_order_relaxed)) return true;
+                if (!stopped()) return false;
+                was_stopped.store(true, std::memory_order_relaxed);
+                return true;
+            };
+            const auto fail = [&] { failed.store(true, std::memory_order_relaxed); };
+            for (uint64_t g = next_group.fetch_add(1, std::memory_order_relaxed); g < group_count;
+                 g = next_group.fetch_add(1, std::memory_order_relaxed)) {
+                uint64_t pos = g * group_rows; // this group's folded end: rows below it are folded
+                const uint64_t end = std::min(total_rows, pos + group_rows);
+                while (pos < end) {
+                    if (halt()) return;
+                    struct stat now_st{};
+                    if (stat(data_path.c_str(), &now_st) != 0 || now_st.st_ino != data_st.st_ino ||
+                        now_st.st_dev != data_st.st_dev) {
+                        spdlog::error("[LIVE WIDEN] [{}] - The year file was removed or replaced during the build; stopping",
+                                      data_path);
+                        return fail();
+                    }
+                    const uint64_t lock_end = pos + std::min(span_rows, end - pos);
+                    bool locked = false;
+                    bool hole_only = false;
+                    bool tail_empty = false;
+                    uint64_t hold_us = 0;
+                    {
+                        TimedFileRangeLockGuard lock(data_path, pos * row_len, (lock_end - pos) * row_len,
+                                                     FileRangeLock::LockType::READ,
+                                                     std::chrono::milliseconds(XStoreTunables::LIVE_WIDEN_LOCK_WAIT_MS));
+                        if (lock.owns_lock()) {
+                            locked = true;
+                            const Clock::time_point t0 = Clock::now();
+                            // Everything about rows [pos, lock_end) is decided under this lock: where data starts (a
+                            // hole seen without the lock may be written the next instant, and writers skip the index
+                            // for unfolded rows >= F), the reads, the fold into both files and MarkFolded. Nothing
+                            // outside [pos, lock_end) is folded or marked.
+                            uint64_t first_data_row = pos;
+                            const off_t data_off = lseek(data.fd, static_cast<off_t>(pos * row_len), SEEK_DATA);
+                            if (data_off < 0) {
+                                if (errno == ENXIO) {
+                                    hole_only = true; // no data from pos to the end of the file
+                                    tail_empty = true;
+                                } else if (errno != EINVAL) { // EINVAL: no SEEK_DATA support, scan everything
+                                    spdlog::error("[LIVE WIDEN] [{}] - lseek failed ({}); the index stays in rebuild until "
+                                                  "the next start", data_path, strerror(errno));
+                                    return fail();
+                                }
+                            } else {
+                                first_data_row = std::max(pos, static_cast<uint64_t>(data_off) / row_len);
+                                hole_only = first_data_row >= lock_end;
+                            }
+                            uint64_t new_pos = lock_end;
+                            // A file whose write failed (in any worker) stops here, behind its frontier; the other one
+                            // carries on.
+                            bool z = zmap_ok.load(std::memory_order_relaxed);
+                            bool c = catidx_ok.load(std::memory_order_relaxed);
+                            if (!hole_only) {
+                                new_pos = std::min(lock_end, first_data_row + data_rows);
+                                const FoldResult result = FoldChunk(data.fd, pos, new_pos, row_length, tracked_column_count,
+                                                                    z ? zmap.get() : nullptr, c ? catidx.get() : nullptr,
+                                                                    scratch);
+                                if (!result.scan_complete) { // nothing of this chunk was folded: F stays below it
+                                    spdlog::error("[LIVE WIDEN] [{}] - Cannot read rows [{}, {}); the index stays in rebuild "
+                                                  "until the next start", data_path, pos, new_pos);
+                                    return fail();
+                                }
+                                ws.rows_folded += z ? scratch.zmap.row_index.size() : scratch.catidx.row_index.size();
+                                if (z && !result.zmap_written) {
+                                    z = false;
+                                    zmap_ok.store(false, std::memory_order_relaxed);
+                                }
+                                if (c && !result.catidx_written) {
+                                    c = false;
+                                    catidx_ok.store(false, std::memory_order_relaxed);
+                                }
+                                if (!zmap_ok.load(std::memory_order_relaxed) && !catidx_ok.load(std::memory_order_relaxed)) {
+                                    spdlog::error("[LIVE WIDEN] [{}] - Index write failed; the index stays in rebuild until "
+                                                  "the next start", data_path);
+                                    return fail();
+                                }
+                            }
+                            // After the fold, before the unlock: no writer can sit on a row that changes side here.
+                            uint64_t w = 0;
+                            if (z) w = zmap->MarkFolded(pos, new_pos);
+                            if (c) w = std::max(w, catidx->MarkFolded(pos, new_pos));
+                            for (uint64_t seen = watermark.load(std::memory_order_relaxed);
+                                 w > seen && !watermark.compare_exchange_weak(seen, w, std::memory_order_relaxed);) {
+                            }
+                            pos = new_pos;
+                            hold_us = static_cast<uint64_t>(
+                                std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t0).count());
+                        }
+                    }
+
+                    if (locked) {
+                        consecutive_timeouts = 0;
+                        timeout_warned = false;
+                        pause_us = XStoreTunables::LIVE_WIDEN_PAUSE_US;
+                        ++ws.chunks;
+                        ws.total_lock_hold_us += hold_us;
+                        ws.max_lock_hold_us = std::max(ws.max_lock_hold_us, hold_us);
+                        if (stats != nullptr) {
+                            ws.lock_hold_us.push_back(static_cast<uint32_t>(std::min<uint64_t>(hold_us, UINT32_MAX)));
+                        }
+                        if (hole_only) {
+                            ++ws.hole_chunks;
+                            span_rows = tail_empty ? total_rows
+                                                   : std::min(XStoreTunables::LIVE_WIDEN_MAX_HOLE_SPAN_ROWS, span_rows * 4);
+                            span_rows = std::max(span_rows, data_rows);
+                            continue; // the lock was held for microseconds: no pause owed
+                        }
+                        const double factor = std::clamp(static_cast<double>(XStoreTunables::LIVE_WIDEN_LOCK_HOLD_TARGET_US) /
+                                                             static_cast<double>(std::max<uint64_t>(hold_us, 1)), 0.5, 2.0);
+                        data_rows = std::clamp<uint64_t>(static_cast<uint64_t>(static_cast<double>(data_rows) * factor),
+                                                         XStoreTunables::LIVE_WIDEN_MIN_CHUNK_ROWS, max_data_rows);
+                        span_rows = data_rows;
+                    } else {
+                        // A group's folded part is one contiguous prefix: a busy chunk cannot be skipped, only shrunk
+                        // and retried after a longer pause (other workers carry on with their own groups). With a
+                        // one-row minimum the worker never needs two neighbouring busy rows free at once.
+                        ++ws.lock_timeouts;
+                        ++consecutive_timeouts;
+                        ws.max_consecutive_timeouts = std::max(ws.max_consecutive_timeouts, consecutive_timeouts);
+                        span_rows = std::max<uint64_t>(XStoreTunables::LIVE_WIDEN_MIN_CHUNK_ROWS, span_rows / 2);
+                        data_rows = std::min(data_rows, span_rows);
+                        pause_us = std::min<uint64_t>(XStoreTunables::LIVE_WIDEN_MAX_PAUSE_US, pause_us * 2);
+                        if (span_rows == XStoreTunables::LIVE_WIDEN_MIN_CHUNK_ROWS && !timeout_warned &&
+                            consecutive_timeouts >= XStoreTunables::LIVE_WIDEN_TIMEOUT_WARN_AFTER) {
+                            spdlog::warn("[LIVE WIDEN] [{}] - {} lock waits in a row timed out at row {}; still retrying",
+                                         data_path, consecutive_timeouts, pos);
+                            timeout_warned = true;
+                        }
+                    }
+                    if (pos >= end) break;
+                    if (halt()) return;
+                    std::this_thread::sleep_for(std::chrono::microseconds(pause_us));
+                }
+            }
+        } catch (const std::exception &e) {
+            spdlog::error("[LIVE WIDEN] [{}] - A build worker failed: {}", data_path, e.what());
+            failed.store(true, std::memory_order_relaxed);
+        } catch (...) {
+            failed.store(true, std::memory_order_relaxed);
+        }
     };
 
-    while (frontier < total_rows) {
-        if (stopped()) {
-            log_stopped();
-            return LiveWidenResult::kStopped;
-        }
-        struct stat now_st{};
-        if (stat(data_path.c_str(), &now_st) != 0 || now_st.st_ino != data_st.st_ino || now_st.st_dev != data_st.st_dev) {
-            spdlog::error("[LIVE WIDEN] [{}] - The year file was removed or replaced during the build; stopping", data_path);
-            return LiveWidenResult::kFailed;
-        }
-        const uint64_t lock_end = frontier + std::min(span_rows, total_rows - frontier);
-        bool locked = false;
-        bool hole_only = false;
-        bool tail_empty = false;
-        uint64_t hold_us = 0;
-        {
-            TimedFileRangeLockGuard lock(data_path, frontier * row_len, (lock_end - frontier) * row_len,
-                                         FileRangeLock::LockType::READ,
-                                         std::chrono::milliseconds(XStoreTunables::LIVE_WIDEN_LOCK_WAIT_MS));
-            if (lock.owns_lock()) {
-                locked = true;
-                const Clock::time_point t0 = Clock::now();
-                // Everything about rows >= F is decided under this lock: where data starts (a hole seen without the
-                // lock may be written the next instant, and writers skip the index for rows >= F), the reads, the
-                // fold into both files and the frontier move. Nothing outside [F, lock_end) is folded or passed.
-                uint64_t first_data_row = frontier;
-                const off_t data_off = lseek(data.fd, static_cast<off_t>(frontier * row_len), SEEK_DATA);
-                if (data_off < 0) {
-                    if (errno == ENXIO) {
-                        hole_only = true; // no data from F to the end of the file
-                        tail_empty = true;
-                    } else if (errno != EINVAL) { // EINVAL: no SEEK_DATA support, scan everything
-                        spdlog::error("[LIVE WIDEN] [{}] - lseek failed ({}); the index stays in rebuild until the "
-                                      "next start", data_path, strerror(errno));
-                        return LiveWidenResult::kFailed;
-                    }
-                } else {
-                    first_data_row = std::max(frontier, static_cast<uint64_t>(data_off) / row_len);
-                    hole_only = first_data_row >= lock_end;
-                }
-                uint64_t new_frontier = lock_end;
-                if (!hole_only) {
-                    new_frontier = std::min(lock_end, first_data_row + data_rows);
-                    const FoldResult result = FoldChunk(data.fd, frontier, new_frontier, row_length,
-                                                        tracked_column_count, zmap_ok ? zmap.get() : nullptr,
-                                                        catidx_ok ? catidx.get() : nullptr, scratch);
-                    if (!result.scan_complete) { // nothing of this chunk was folded: F stays below it
-                        spdlog::error("[LIVE WIDEN] [{}] - Cannot read rows [{}, {}); the index stays in rebuild until "
-                                      "the next start", data_path, frontier, new_frontier);
-                        return LiveWidenResult::kFailed;
-                    }
-                    st.rows_folded += zmap_ok ? scratch.zmap.row_index.size() : scratch.catidx.row_index.size();
-                    // A file whose write failed stops here, behind its frontier; the other one carries on.
-                    zmap_ok = zmap_ok && result.zmap_written;
-                    catidx_ok = catidx_ok && result.catidx_written;
-                    if (!zmap_ok && !catidx_ok) {
-                        spdlog::error("[LIVE WIDEN] [{}] - Index write failed; the index stays in rebuild until the "
-                                      "next start", data_path);
-                        return LiveWidenResult::kFailed;
-                    }
-                }
-                if (zmap_ok) zmap->AdvanceFrontier(new_frontier);
-                if (catidx_ok) catidx->AdvanceFrontier(new_frontier);
-                frontier = new_frontier;
-                hold_us = static_cast<uint64_t>(
-                    std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t0).count());
-            }
-        }
-
-        if (locked) {
-            consecutive_timeouts = 0;
-            timeout_warned = false;
-            pause_us = XStoreTunables::LIVE_WIDEN_PAUSE_US;
-            ++st.chunks;
-            st.total_lock_hold_us += hold_us;
-            st.max_lock_hold_us = std::max(st.max_lock_hold_us, hold_us);
-            if (stats != nullptr) st.lock_hold_us.push_back(static_cast<uint32_t>(std::min<uint64_t>(hold_us, UINT32_MAX)));
-            if (hole_only) {
-                ++st.hole_chunks;
-                span_rows = tail_empty ? total_rows : std::min(XStoreTunables::LIVE_WIDEN_MAX_HOLE_SPAN_ROWS, span_rows * 4);
-                span_rows = std::max(span_rows, data_rows);
-                continue; // the lock was held for microseconds: no pause owed
-            }
-            const double factor = std::clamp(static_cast<double>(XStoreTunables::LIVE_WIDEN_LOCK_HOLD_TARGET_US) /
-                                                 static_cast<double>(std::max<uint64_t>(hold_us, 1)), 0.5, 2.0);
-            data_rows = std::clamp<uint64_t>(static_cast<uint64_t>(static_cast<double>(data_rows) * factor),
-                                             XStoreTunables::LIVE_WIDEN_MIN_CHUNK_ROWS, max_data_rows);
-            span_rows = data_rows;
-        } else {
-            // F is one contiguous frontier: a busy chunk cannot be skipped, only shrunk and retried after a longer
-            // pause. With a one-row minimum the builder never needs two neighbouring busy rows free at once.
-            ++st.lock_timeouts;
-            ++consecutive_timeouts;
-            st.max_consecutive_timeouts = std::max(st.max_consecutive_timeouts, consecutive_timeouts);
-            span_rows = std::max<uint64_t>(XStoreTunables::LIVE_WIDEN_MIN_CHUNK_ROWS, span_rows / 2);
-            data_rows = std::min(data_rows, span_rows);
-            pause_us = std::min<uint64_t>(XStoreTunables::LIVE_WIDEN_MAX_PAUSE_US, pause_us * 2);
-            if (span_rows == XStoreTunables::LIVE_WIDEN_MIN_CHUNK_ROWS && !timeout_warned &&
-                consecutive_timeouts >= XStoreTunables::LIVE_WIDEN_TIMEOUT_WARN_AFTER) {
-                spdlog::warn("[LIVE WIDEN] [{}] - {} lock waits in a row timed out at row {}; still retrying",
-                             data_path, consecutive_timeouts, frontier);
-                timeout_warned = true;
-            }
-        }
-        if (frontier >= total_rows) break;
-        if (stopped()) {
-            log_stopped();
-            return LiveWidenResult::kStopped;
-        }
-        std::this_thread::sleep_for(std::chrono::microseconds(pause_us));
+    // The calling (background index) thread is worker 0; workers - 1 dedicated short-lived threads join it, all joined
+    // before this returns. A thread that cannot be started only means fewer workers.
+    const size_t worker_count = static_cast<size_t>(std::min<uint64_t>(want_workers, std::max<uint64_t>(1, group_count)));
+    std::vector<LiveWidenStats> per_worker(worker_count);
+    std::vector<std::thread> threads;
+    try {
+        threads.reserve(worker_count - 1);
+        for (size_t i = 1; i < worker_count; ++i) threads.emplace_back(work, std::ref(per_worker[i]));
+    } catch (const std::exception &e) { // system_error (no more threads) or bad_alloc: carry on with those started
+        spdlog::warn("[LIVE WIDEN] [{}] - Started {} of {} build workers: {}", data_path, threads.size() + 1,
+                     worker_count, e.what());
     }
-
+    work(per_worker[0]);
+    for (std::thread &t : threads) t.join();
+    for (const LiveWidenStats &ws : per_worker) {
+        st.chunks += ws.chunks;
+        st.hole_chunks += ws.hole_chunks;
+        st.rows_folded += ws.rows_folded;
+        st.lock_timeouts += ws.lock_timeouts;
+        st.max_consecutive_timeouts = std::max(st.max_consecutive_timeouts, ws.max_consecutive_timeouts);
+        st.total_lock_hold_us += ws.total_lock_hold_us;
+        st.max_lock_hold_us = std::max(st.max_lock_hold_us, ws.max_lock_hold_us);
+        st.lock_hold_us.insert(st.lock_hold_us.end(), ws.lock_hold_us.begin(), ws.lock_hold_us.end());
+    }
+    // Every early end leaves the files that began in rebuild at the contiguous watermark they reached: dirty on disk,
+    // blocks past F scanned (never trusted), MarkClean refusing, unevictable; the next start rebuilds them.
+    if (failed.load(std::memory_order_relaxed)) return LiveWidenResult::kFailed;
+    if (was_stopped.load(std::memory_order_relaxed)) {
+        spdlog::warn("[LIVE WIDEN] [{}] - Stopped at row {} of {}; the index stays in rebuild (dirty) until the next "
+                     "start rebuilds it", data_path, watermark.load(std::memory_order_relaxed), total_rows);
+        return LiveWidenResult::kStopped;
+    }
+    const bool zmap_good = zmap_ok.load(std::memory_order_relaxed);
+    const bool catidx_good = catidx_ok.load(std::memory_order_relaxed);
     // Durability A (DD4), as at startup: FinishRebuild (the dirty header is durable), then the data file, then
     // MarkClean, pins still held. Every failure leaves the file dirty (the next start rebuilds it).
-    const bool zmap_finished = zmap_ok && zmap->FinishRebuild();
-    const bool catidx_finished = catidx_ok && catidx->FinishRebuild();
+    const bool zmap_finished = zmap_good && zmap->FinishRebuild();
+    const bool catidx_finished = catidx_good && catidx->FinishRebuild();
     st.zmap_widened = zmap_finished;
     st.catidx_widened = catidx_finished;
     const bool data_synced = (zmap_finished || catidx_finished) && fdatasync(data.fd) == 0;
     bool all_ok = (zmap.get() == nullptr || zmap_finished) && (catidx.get() == nullptr || catidx_finished) && data_synced;
     if (zmap.get() != nullptr && !zmap_finished) {
         spdlog::error("[LIVE WIDEN] [{}/{}.zmap] - {}; it stays in rebuild (dirty) until the next start", db_base_path, year,
-                      zmap_ok ? "Its rebuilt header could not be made durable" : "An index write failed during the build");
+                      zmap_good ? "Its rebuilt header could not be made durable" : "An index write failed during the build");
     }
     if (catidx.get() != nullptr && !catidx_finished) {
         spdlog::error("[LIVE WIDEN] [{}/{}.catidx] - {}; it stays in rebuild (dirty) until the next start", db_base_path, year,
-                      catidx_ok ? "Its rebuilt header could not be made durable" : "An index write failed during the build");
+                      catidx_good ? "Its rebuilt header could not be made durable" : "An index write failed during the build");
     }
     if ((zmap_finished || catidx_finished) && !data_synced) {
         spdlog::error("[LIVE WIDEN] [{}] - fdatasync of the data file failed; leaving the rebuilt index dirty", data_path);
@@ -1753,7 +1828,8 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
     return LiveWidenResult::kFailed;
 }
 
-std::vector<XStore::LiveWidenPassEntry> XStore::RunLiveWidenPass(std::chrono::steady_clock::time_point now) {
+std::vector<XStore::LiveWidenPassEntry> XStore::RunLiveWidenPass(std::chrono::steady_clock::time_point now,
+                                                                 unsigned workers) {
     std::vector<LiveWidenPassEntry> processed;
     if (!live_widen_pending_.load(std::memory_order_relaxed)) return processed; // the per-tick cost when idle
     struct Due {
@@ -1775,7 +1851,7 @@ std::vector<XStore::LiveWidenPassEntry> XStore::RunLiveWidenPass(std::chrono::st
         if (bg_cancel_.load(std::memory_order_relaxed)) break;
         spdlog::info("[LIVE WIDEN] [DB: {}] - Width stable for {} s; widening its year index files, newest year first",
                      d.db_name, XStoreTunables::LIVE_WIDEN_QUIET_PERIOD_SEC);
-        const LiveWidenDbOutcome outcome = LiveWidenDb(d.db_base_path, d.db_name, processed);
+        const LiveWidenDbOutcome outcome = LiveWidenDb(d.db_base_path, d.db_name, processed, workers);
         bool gave_up = false;
         uint32_t attempts = 0;
         uint64_t wait_sec = 0;
@@ -1820,7 +1896,7 @@ std::vector<XStore::LiveWidenPassEntry> XStore::RunLiveWidenPass(std::chrono::st
 }
 
 XStore::LiveWidenDbOutcome XStore::LiveWidenDb(const std::string &db_base_path, const std::string &db_name,
-                                               std::vector<LiveWidenPassEntry> &out) try {
+                                               std::vector<LiveWidenPassEntry> &out, unsigned workers) try {
     XStore_Proto::ConfigStruct cfg;
     if (!GetOrLoadCfg(db_name, db_base_path, cfg)) {
         spdlog::info("[LIVE WIDEN] [DB: {}] - The DB no longer exists; nothing to widen", db_name);
@@ -1888,7 +1964,8 @@ XStore::LiveWidenDbOutcome XStore::LiveWidenDb(const std::string &db_base_path, 
         spdlog::info("[LIVE WIDEN] [DB: {}] - Widening year {} to {} columns (zone map: {}, catidx: {})", db_name, year,
                      desired, widen_zmap, widen_catidx);
         LiveWidenStats stats;
-        entry.result = LiveWidenOneYear(db_base_path, year, row_length, desired, widen_zmap, widen_catidx, &bg_cancel_, &stats);
+        entry.result = LiveWidenOneYear(db_base_path, year, row_length, desired, widen_zmap, widen_catidx, &bg_cancel_, &stats,
+                                        workers);
         out.push_back(entry);
         if (entry.result == LiveWidenResult::kDone || entry.result == LiveWidenResult::kNothingToDo) continue;
         if (entry.result == LiveWidenResult::kStopped) return LiveWidenDbOutcome::kStopped;

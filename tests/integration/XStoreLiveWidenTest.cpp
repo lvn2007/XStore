@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <future>
 #include <filesystem>
@@ -362,6 +363,8 @@ protected:
     }
 
     void RunIdleWiden(XStore &store, int width, const std::string &db, const std::string &ref_db);
+    // The concurrent oracle of section 2, with the builder's worker count and group size.
+    void RunConcurrentOracle(const std::string &db, unsigned workers, uint64_t group_bytes);
 
     // Answers on [lo, hi] for every listed column, against a scan of the data file (no concurrent writers here).
     void ExpectAnswersMatchTheData(XStore &store, const std::string &db, uint64_t lo, uint64_t hi,
@@ -489,9 +492,8 @@ TEST_F(XStoreLiveWidenTest, IdleWidenTo100IsByteIdenticalToTheStartupRebuild) {
 // the data file is the exact answer the store must give at that instant: before, during and after the widen. At the
 // end every tracked column of every exact block equals a startup rebuild of the final data, and the bloom holds every
 // present value.
-TEST_F(XStoreLiveWidenTest, AnswersStayExactUnderConcurrentWritesAndTheResultMatchesAStartupRebuild) {
+void XStoreLiveWidenTest::RunConcurrentOracle(const std::string &db, unsigned workers, uint64_t group_bytes) {
     XStore store;
-    const std::string db = "LWLIVE";
     constexpr int kWidth = 70;
     const uint64_t rpb = Rpb();
     constexpr uint64_t kBlocks = 96;
@@ -742,7 +744,8 @@ TEST_F(XStoreLiveWidenTest, AnswersStayExactUnderConcurrentWritesAndTheResultMat
     const int queries_before = queries.load();
     XStore::LiveWidenStats stats;
     const Clock::time_point widen_start = Clock::now();
-    const Result result = store.LiveWidenOneYear(path, kYear, kRowLength, kWidth, true, true, nullptr, &stats);
+    const Result result = store.LiveWidenOneYear(path, kYear, kRowLength, kWidth, true, true, nullptr, &stats, workers,
+                                                 group_bytes);
     const int64_t widen_ms = MsSince(widen_start);
     const int queries_during = queries.load() - queries_before;
     const int writes_at_end_of_widen = writes.load();
@@ -753,8 +756,8 @@ TEST_F(XStoreLiveWidenTest, AnswersStayExactUnderConcurrentWritesAndTheResultMat
     EXPECT_EQ(mismatches.load(), 0);
     EXPECT_GT(writes_at_end_of_widen, 200) << "too little concurrent traffic to mean anything";
     EXPECT_GT(queries_during, 10) << "too few queries during the widen";
-    std::printf("[live widen oracle] widen %lld ms, %llu chunks, %llu rows, %llu timeouts, max hold %llu us; %d writes, "
-                "%d queries (%d during)\n", static_cast<long long>(widen_ms), static_cast<unsigned long long>(stats.chunks),
+    std::printf("[live widen oracle] %u workers: widen %lld ms, %llu chunks, %llu rows, %llu timeouts, max hold %llu us; %d writes, "
+                "%d queries (%d during)\n", workers, static_cast<long long>(widen_ms), static_cast<unsigned long long>(stats.chunks),
                 static_cast<unsigned long long>(stats.rows_folded), static_cast<unsigned long long>(stats.lock_timeouts),
                 static_cast<unsigned long long>(stats.max_lock_hold_us), writes.load(), queries.load(), queries_during);
 
@@ -784,8 +787,8 @@ TEST_F(XStoreLiveWidenTest, AnswersStayExactUnderConcurrentWritesAndTheResultMat
         EXPECT_GT(checked, 1000000u);
     }
 
-    BuildStartupReference(store, db, "LWLIVEREF", kWidth);
-    ZoneMapFile &oracle = XStore::GetOrOpenZoneMap(DbPath("LWLIVEREF"), kYear, kRowLength);
+    BuildStartupReference(store, db, db + "REF", kWidth);
+    ZoneMapFile &oracle = XStore::GetOrOpenZoneMap(DbPath(db + "REF"), kYear, kRowLength);
     uint64_t exact = 0, inexact = 0;
     for (uint64_t b = 0; b < kBlocks; ++b) {
         auto o = oracle.TryGetBlockStats(b);
@@ -817,6 +820,10 @@ TEST_F(XStoreLiveWidenTest, AnswersStayExactUnderConcurrentWritesAndTheResultMat
     EXPECT_GT(exact, static_cast<uint64_t>(kWidth) * 10) << "test too weak: almost every block ended inexact";
     std::printf("[live widen oracle] %llu exact and %llu inexact (block, column) entries compared\n",
                 static_cast<unsigned long long>(exact), static_cast<unsigned long long>(inexact));
+}
+
+TEST_F(XStoreLiveWidenTest, AnswersStayExactUnderConcurrentWritesAndTheResultMatchesAStartupRebuild) {
+    RunConcurrentOracle("LWLIVE", 1, XStoreTunables::LIVE_WIDEN_GROUP_BYTES);
 }
 
 // ---- 3. Starvation: a hot head must not stop the builder ------------------------------------------------------------
@@ -2234,5 +2241,501 @@ TEST_F(XStoreLiveWidenTest, InsertsAtAnUnchangedWidthRecordNothing) {
     }
     EXPECT_EQ(XStore::LiveWidenRequestCountForTests(), 0u);
 }
+
+// ---- 11. Parallel live widen (S2): N workers inside one year ---------------------------------------------------------
+
+// Waits (polling, 20 s bound) until pred() holds.
+template <class Pred>
+void WaitUntil(Pred pred, const char *what) {
+    const Clock::time_point deadline = Clock::now() + std::chrono::seconds(20);
+    while (!pred()) {
+        ASSERT_LT(Clock::now(), deadline) << "timed out waiting: " << what;
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+}
+
+// Releases a WRITE lock the test holds on data-file bytes, on every exit path.
+struct HeldWrite {
+    FileRangeLock &lock;
+    uint64_t offset, length;
+    bool held = true;
+    HeldWrite(FileRangeLock &l, uint64_t off, uint64_t len) : lock(l), offset(off), length(len) { lock.LockRange(offset, length, kWrite); }
+    void Release() {
+        if (held) lock.UnlockRange(offset, length, kWrite);
+        held = false;
+    }
+    ~HeldWrite() { Release(); }
+};
+
+// MIN/MAX/SUM/AVG/EXISTS and FindByValue (of the largest value) of column c on rows [lo, hi], against a scan of the data
+// file; an empty range must answer "no data" (EXISTS false).
+void ExpectExactAnswers(XStore &store, const std::string &db, const std::string &data_path, uint64_t lo, uint64_t hi, int c,
+                        unsigned long long (*at)(uint64_t)) {
+    SCOPED_TRACE("rows [" + std::to_string(lo) + ", " + std::to_string(hi) + "] column " + std::to_string(c));
+    const int fd = open(data_path.c_str(), O_RDONLY);
+    ASSERT_GE(fd, 0);
+    std::vector<std::pair<uint64_t, double>> values;
+    for (const auto &[r, row] : ReadRows(fd, lo, hi, 2048)) {
+        double v = 0;
+        if (c < row.fielddata_size() && NumericOf(row.fielddata(c), v)) values.emplace_back(r, v);
+    }
+    close(fd);
+    double mn = INFINITY, mx = -INFINITY, sum = 0;
+    for (const auto &[r, v] : values) {
+        mn = std::min(mn, v);
+        mx = std::max(mx, v);
+        sum += v;
+    }
+    const bool any = !values.empty();
+    const unsigned short col = static_cast<unsigned short>(c);
+    const auto success = [](const std::string &status) { return status.rfind("SUCCESS", 0) == 0; };
+    XStore_Proto::Min_REP min_rep;
+    store.MinAggregate(at(lo), at(hi), db, col, &min_rep);
+    EXPECT_EQ(success(min_rep.opstatus()), any) << min_rep.opstatus();
+    if (any) EXPECT_EQ(min_rep.opresult().doubledata(), mn);
+    XStore_Proto::Max_REP max_rep;
+    store.MaxAggregate(at(lo), at(hi), db, col, &max_rep);
+    EXPECT_EQ(success(max_rep.opstatus()), any) << max_rep.opstatus();
+    if (any) EXPECT_EQ(max_rep.opresult().doubledata(), mx);
+    XStore_Proto::Sum_REP sum_rep;
+    store.SumAggregate(at(lo), at(hi), db, col, &sum_rep);
+    EXPECT_EQ(success(sum_rep.opstatus()), any) << sum_rep.opstatus();
+    if (any) EXPECT_EQ(sum_rep.opresult(), sum);
+    XStore_Proto::Avg_REP avg_rep;
+    store.AvgAggregate(at(lo), at(hi), db, col, &avg_rep);
+    EXPECT_EQ(success(avg_rep.opstatus()), any) << avg_rep.opstatus();
+    if (any) EXPECT_NEAR(avg_rep.opresult(), sum / static_cast<double>(values.size()), 1e-9 * std::max(1.0, std::fabs(sum)));
+    XStore_Proto::Exists_REP exists_rep;
+    store.ExistsAggregate(at(lo), at(hi), db, col, &exists_rep);
+    EXPECT_TRUE(success(exists_rep.opstatus())) << exists_rep.opstatus();
+    EXPECT_EQ(exists_rep.exists(), any);
+    if (!any) return;
+    std::set<unsigned long long> want;
+    for (const auto &[r, v] : values) {
+        if (v == mx) want.insert(at(r));
+    }
+    std::string buf;
+    store.FindByValue(at(lo), at(hi), db, c, FDouble(mx), XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                      [&](std::string &&chunk, bool) { buf += chunk; });
+    XStore_Proto::RangeQuery_REP rep;
+    std::set<unsigned long long> got;
+    if (rep.ParseFromString(buf)) {
+        for (const auto &e : rep.queryresponse()) got.insert(e.timestamp());
+    }
+    EXPECT_EQ(got, want) << "FindByValue " << mx;
+}
+
+unsigned long long EpochOfRow(uint64_t row) { return Jan1(1980) + row; }
+
+// Byte-identical: the widened .zmap/.catidx equal the startup rebuild of a copy of the same year for 1, 2, 4 and 8
+// workers, with one zone-map block per group (so dense data has many groups and the year's empty tail thousands).
+class XStoreParallelLiveWidenTest : public XStoreLiveWidenTest {
+protected:
+    void ExpectEveryWorkerCountMatchesTheStartupRebuild(const std::string &db, int width, const Rows &rows) {
+        XStore store;
+        CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+        Insert(store, db, {{Epoch(0), MixedRow(0, 10)}}); // index files born 64 wide
+        Insert(store, db, rows);
+        BuildStartupReference(store, db, db + "REF", width);
+        const std::string path = DbPath(db);
+        uint64_t rows_folded = 0;
+        for (unsigned workers : {1u, 2u, 4u, 8u}) {
+            SCOPED_TRACE(std::to_string(workers) + " workers");
+            XStore::LiveWidenStats stats;
+            ASSERT_EQ(store.LiveWidenOneYear(path, kYear, kRowLength, static_cast<uint32_t>(width), true, true, nullptr,
+                                             &stats, workers, Rpb() * kRowLength), Result::kDone);
+            EXPECT_TRUE(stats.zmap_widened && stats.catidx_widened);
+            if (workers == 1) rows_folded = stats.rows_folded;
+            EXPECT_EQ(stats.rows_folded, rows_folded) << "every present row folded exactly once";
+            EXPECT_EQ(stats.lock_hold_us.size(), stats.chunks);
+            ExpectSameFilesAs(db, db + "REF");
+            EXPECT_EQ(ReadHeader<ZoneMapFileHeader>(YearPath(db, ".zmap")).dirty, 0u);
+        }
+        ExpectAnswersMatchTheData(store, db, 0, 2 * Rpb() - 1, {0, 2, 64, width - 4});
+    }
+};
+
+TEST_F(XStoreParallelLiveWidenTest, DenseRowsAreByteIdenticalForEveryWorkerCount) {
+    Rows rows;
+    for (uint64_t i = 1; i < 20 * Rpb() + 300; ++i) rows.emplace_back(Epoch(i), MixedRow(i, i % 10 == 0 ? 70 : 40 + static_cast<int>(i % 9)));
+    ExpectEveryWorkerCountMatchesTheStartupRebuild("LWPDENSE", 70, rows);
+}
+
+TEST_F(XStoreParallelLiveWidenTest, SparseRowsAreByteIdenticalForEveryWorkerCount) {
+    Rows rows;
+    for (uint64_t i = 37; i < 30 * Rpb(); i += 37) rows.emplace_back(Epoch(i), MixedRow(i, 70));
+    for (uint64_t r : {200000ULL, 200001ULL, 1000000ULL, 3000000ULL, 30000000ULL}) rows.emplace_back(Epoch(r), MixedRow(r, 70));
+    ExpectEveryWorkerCountMatchesTheStartupRebuild("LWPSPARSE", 70, rows);
+}
+
+TEST_F(XStoreParallelLiveWidenTest, WideRowsAreByteIdenticalForEveryWorkerCount) {
+    Rows rows;
+    for (uint64_t i = 1; i < 12 * Rpb(); ++i) rows.emplace_back(Epoch(i), MixedRow(i, 100));
+    ExpectEveryWorkerCountMatchesTheStartupRebuild("LWPWIDE", 100, rows);
+}
+
+// THE lost update. The worker that claims group 0 stalls on row 0 (the test holds a WRITE lock on it), so the frontier
+// stays at 0 while the other workers fold groups 1..15. Then writes land in those folded groups ABOVE the frontier:
+// fresh rows (Unary, Batch), a Range insert and a Unary overwrite, all three deletes (one resets a whole block). Each
+// must update the index (or flag/reset its block): the fold already read the old rows. With the old check (skip every
+// row >= F) the index keeps the old rows and answers wrong. Then row 0 is released and the widen finishes.
+TEST_F(XStoreParallelLiveWidenTest, WritesIntoAFoldedGroupAboveTheFrontierAreNotLost) {
+    XStore store;
+    const std::string db = "LWPFOLDED";
+    constexpr int kWidth = 70;
+    const uint64_t rpb = Rpb();
+    constexpr uint64_t kBlocks = 16;
+    const uint64_t rows = kBlocks * rpb;
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    Insert(store, db, {{Epoch(0), ValueRow(0, 10)}});
+    {
+        Rows seed; // even rows: the odd ones are holes for fresh inserts
+        for (uint64_t r = 2; r < rows; r += 2) seed.emplace_back(Epoch(r), ValueRow(r * 7 % 100000, kWidth));
+        Insert(store, db, seed);
+    }
+    const std::string path = DbPath(db);
+    const std::string data_path = YearPath(db, ".XSTORE");
+    ZoneMapFile &zmap = XStore::GetOrOpenZoneMap(path, kYear, kRowLength);
+    CatIdxFile &catidx = XStore::GetOrOpenCatIdx(path, kYear, kRowLength);
+    XStore::LiveWidenStats stats;
+    std::future<Result> builder; // destroyed (waited for) after the held lock below is released
+    HeldWrite row0(FileLockRegistry::Get(data_path), 0, kRowLength);
+    builder = std::async(std::launch::async, [&] {
+        XStore b;
+        return b.LiveWidenOneYear(path, kYear, kRowLength, kWidth, true, true, nullptr, &stats, 4, rpb * kRowLength);
+    });
+    WaitUntil([&] {
+        if (!zmap.Rebuilding()) return false;
+        for (uint64_t b = 1; b < kBlocks; ++b) {
+            if (!zmap.WriterUpdatesRowForTests((b + 1) * rpb - 1)) return false;
+        }
+        return true;
+    }, "groups 1..15 folded");
+    ASSERT_EQ(zmap.FrontierForTests(), 0u) << "the frontier passed the stalled group 0";
+    ASSERT_EQ(catidx.FrontierForTests(), 0u);
+    ASSERT_FALSE(zmap.WriterUpdatesRowForTests(5)) << "group 0 is not folded: its writers must leave it to the builder";
+
+    const auto ok = [](const std::string &status) { return status.rfind("[INFO]", 0) == 0; };
+    {
+        XStore_Proto::UnaryInsert_REP rep; // unfolded group 0: left to the builder
+        store.UnaryInsert(Epoch(5), ValueRow(400000, kWidth), db, &rep, XStore_Proto::SYNC);
+        ASSERT_TRUE(ok(rep.insertstatus())) << rep.insertstatus();
+    }
+    {
+        XStore_Proto::RangeInsert_REQ req; // crosses from the unfolded group 0 into the folded group 1 (not row 0: it is held)
+        req.set_dbname(db);
+        req.set_durabilitymode(XStore_Proto::SYNC);
+        for (uint64_t r = rpb - rpb / 4; r < rpb + rpb / 4; ++r) {
+            XStore_Proto::RangeInsert_DATA *e = req.add_rangeinsert_data();
+            e->set_timestamp(Epoch(r));
+            *e->mutable_data() = ValueRow(1000000 + r, kWidth);
+        }
+        XStore_Proto::RangeInsert_REP rep;
+        store.RangeInsert(&req, &rep);
+        ASSERT_TRUE(ok(rep.insertstatus())) << rep.insertstatus();
+    }
+    ASSERT_NE(store.RangeDelete(Epoch(rpb / 2), Epoch(rpb + rpb / 2 - 1), db).deletestatus().find("[INFO]"),
+              std::string::npos) << "a range delete crossing from the unfolded group 0 into the folded group 1";
+    {
+        XStore_Proto::UnaryInsert_REP rep; // fresh row, block 3: the new maximum of its block
+        store.UnaryInsert(Epoch(3 * rpb + 1), ValueRow(500000, kWidth), db, &rep, XStore_Proto::SYNC);
+        ASSERT_TRUE(ok(rep.insertstatus())) << rep.insertstatus();
+    }
+    {
+        XStore_Proto::BatchInsert_REQ req; // fresh rows, blocks 4 and 5
+        req.set_dbname(db);
+        req.set_durabilitymode(XStore_Proto::SYNC);
+        for (const auto &[r, v] : std::vector<std::pair<uint64_t, uint64_t>>{{4 * rpb + 3, 600000}, {5 * rpb + 5, 700000}}) {
+            XStore_Proto::BatchInsert_DATA *e = req.add_batchinsert_data();
+            e->set_timestamp(Epoch(r));
+            *e->mutable_data() = ValueRow(v, kWidth);
+        }
+        XStore_Proto::BatchInsert_REP rep;
+        store.BatchInsert(&req, &rep);
+        ASSERT_TRUE(ok(rep.insertstatus())) << rep.insertstatus();
+    }
+    {
+        XStore_Proto::RangeInsert_REQ req; // 20 consecutive rows of block 6: fresh odd rows and overwritten even rows
+        req.set_dbname(db);
+        req.set_durabilitymode(XStore_Proto::SYNC);
+        for (uint64_t i = 0; i < 20; ++i) {
+            XStore_Proto::RangeInsert_DATA *e = req.add_rangeinsert_data();
+            e->set_timestamp(Epoch(6 * rpb + 10 + i));
+            *e->mutable_data() = ValueRow(800000 + i, kWidth);
+        }
+        XStore_Proto::RangeInsert_REP rep;
+        store.RangeInsert(&req, &rep);
+        ASSERT_TRUE(ok(rep.insertstatus())) << rep.insertstatus();
+    }
+    {
+        XStore_Proto::UnaryInsert_REP rep; // overwrite, block 7
+        store.UnaryInsert(Epoch(7 * rpb + 2), ValueRow(900000, kWidth), db, &rep, XStore_Proto::SYNC);
+        ASSERT_TRUE(ok(rep.insertstatus())) << rep.insertstatus();
+    }
+    // Deletes of the largest values of blocks 8, 9 (and a cut range in 11), and all of block 10 (the reset path).
+    const auto max_row_of_block = [&](uint64_t b) {
+        uint64_t best = b * rpb + 2;
+        for (uint64_t r = b * rpb + 2; r < (b + 1) * rpb; r += 2) {
+            if (r * 7 % 100000 > best * 7 % 100000) best = r;
+        }
+        return best;
+    };
+    ASSERT_NE(store.UnaryDelete(Epoch(max_row_of_block(8)), db).deletestatus().find("[INFO]"), std::string::npos);
+    {
+        XStore_Proto::BatchDelete_REQ req;
+        req.set_dbname(db);
+        req.add_timestamp(Epoch(9 * rpb + 6));
+        req.add_timestamp(Epoch(max_row_of_block(9)));
+        ASSERT_NE(store.BatchDelete(&req).deletestatus().find("[INFO]"), std::string::npos);
+    }
+    ASSERT_NE(store.RangeDelete(Epoch(10 * rpb), Epoch(11 * rpb - 1), db).deletestatus().find("[INFO]"), std::string::npos);
+    ASSERT_NE(store.RangeDelete(Epoch(11 * rpb + 100), Epoch(11 * rpb + 300), db).deletestatus().find("[INFO]"),
+              std::string::npos);
+    EXPECT_EQ(zmap.FrontierForTests(), 0u) << "the writes must have landed above the frontier";
+
+    row0.Release();
+    ASSERT_EQ(builder.wait_for(std::chrono::seconds(30)), std::future_status::ready) << "the widen did not finish";
+    ASSERT_EQ(builder.get(), Result::kDone);
+    EXPECT_FALSE(zmap.Rebuilding());
+
+    for (uint64_t b = 0; b < kBlocks; ++b) {
+        for (int c : {0, 33, 65, 69}) ExpectExactAnswers(store, db, data_path, b * rpb, (b + 1) * rpb - 1, c, EpochOfRow);
+    }
+    ExpectExactAnswers(store, db, data_path, 0, rows - 1, 65, EpochOfRow);
+
+    // The live index against a startup rebuild of the final data: blocks the writes kept exact (fresh rows, the reset)
+    // are identical entry for entry; flagged ones only bound min/max.
+    std::vector<std::vector<ZoneMapEntry>> live(kBlocks);
+    for (uint64_t b = 0; b < kBlocks; ++b) {
+        auto st = zmap.TryGetBlockStats(b);
+        ASSERT_TRUE(st.has_value()) << "block " << b;
+        live[b] = *st;
+    }
+    {   // Bloom: every present value of every tracked column.
+        const int fd = open(data_path.c_str(), O_RDONLY);
+        ASSERT_GE(fd, 0);
+        uint64_t misses = 0;
+        for (const auto &[r, row] : ReadRows(fd, 0, rows - 1, kRowLength)) {
+            for (int c = 0; c < std::min(kWidth, row.fielddata_size()); ++c) {
+                if (row.fielddata(c).oneOfData_case() == XStore_Proto::FData::ONEOFDATA_NOT_SET) continue;
+                if (!catidx.MightContain(BlockIndexForRow(r, rpb), static_cast<uint32_t>(c), EncodeFDataForCatIdx(row.fielddata(c)))) {
+                    if (++misses < 5) ADD_FAILURE() << "bloom misses row " << r << " column " << c;
+                }
+            }
+        }
+        close(fd);
+        EXPECT_EQ(misses, 0u);
+    }
+    BuildStartupReference(store, db, db + "REF", kWidth);
+    ZoneMapFile &oracle = XStore::GetOrOpenZoneMap(DbPath(db + "REF"), kYear, kRowLength);
+    for (uint64_t b = 0; b < kBlocks; ++b) {
+        SCOPED_TRACE("block " + std::to_string(b));
+        auto o = oracle.TryGetBlockStats(b);
+        ASSERT_TRUE(o.has_value());
+        ASSERT_EQ(o->size(), live[b].size());
+        const bool flagged = ZoneMapEntryInexact(live[b][0]);
+        const bool expect_flagged = (b >= 6 && b <= 11 && b != 10) || b == 1; // block 1: the crossing range overwrite and delete
+        EXPECT_EQ(flagged, expect_flagged) << "overwrites and deletes flag their block; fresh rows and the reset do not";
+        if (!flagged) {
+            EXPECT_EQ(std::memcmp(live[b].data(), o->data(), o->size() * sizeof(ZoneMapEntry)), 0) << "differs from the startup rebuild";
+            continue;
+        }
+        for (size_t c = 0; c < o->size(); ++c) {
+            if ((*o)[c].valid_count == 0) continue;
+            EXPECT_LE(live[b][c].min_value, (*o)[c].min_value) << "column " << c;
+            EXPECT_GE(live[b][c].max_value, (*o)[c].max_value) << "column " << c;
+        }
+    }
+}
+
+// Section 2's oracle with four workers and one block per group: writers race many folded groups above the frontier.
+TEST_F(XStoreParallelLiveWidenTest, AnswersStayExactUnderConcurrentWritesWithFourWorkers) {
+    RunConcurrentOracle("LWPLIVE", 4, Rpb() * kRowLength);
+}
+
+// Stop with four workers: the files stay dirty at the contiguous watermark (a held row in the last data block keeps
+// the build from finishing first), never trusted past it, and the next start rebuilds them.
+TEST_F(XStoreParallelLiveWidenTest, StopMidBuildLeavesTheContiguousWatermarkAndTheNextStartRebuilds) {
+    XStore store;
+    const std::string db = "LWPSTOP";
+    constexpr uint64_t kRows = 60000;
+    SeedNarrowIndexWideRows(store, db, kRows, 70);
+    const std::string path = DbPath(db);
+    ZoneMapFile &zmap = XStore::GetOrOpenZoneMap(path, kYear, kRowLength);
+    CatIdxFile &catidx = XStore::GetOrOpenCatIdx(path, kYear, kRowLength);
+    std::atomic<bool> stop{false};
+    XStore::LiveWidenStats stats;
+    std::future<Result> builder;
+    HeldWrite last(FileLockRegistry::Get(YearPath(db, ".XSTORE")), (kRows - 1) * kRowLength, kRowLength);
+    builder = std::async(std::launch::async, [&] {
+        XStore b;
+        return b.LiveWidenOneYear(path, kYear, kRowLength, 70, true, true, &stop, &stats, 4, Rpb() * kRowLength);
+    });
+    WaitForFrontierPast(zmap, 3 * Rpb());
+    stop.store(true);
+    ASSERT_EQ(builder.wait_for(std::chrono::seconds(10)), std::future_status::ready) << "the stop was not honoured";
+    ASSERT_EQ(builder.get(), Result::kStopped);
+    last.Release();
+
+    const uint64_t f = zmap.FrontierForTests();
+    ASSERT_NE(f, ZoneMapFile::kNoRebuild);
+    EXPECT_LT(f, kRows);
+    EXPECT_EQ(catidx.FrontierForTests(), f) << "both files mark the same chunks";
+    EXPECT_TRUE(zmap.Rebuilding());
+    EXPECT_TRUE(catidx.Rebuilding());
+    EXPECT_EQ(ReadHeader<ZoneMapFileHeader>(YearPath(db, ".zmap")).dirty, 1u);
+    EXPECT_EQ(ReadHeader<CatIdxFileHeader>(YearPath(db, ".catidx")).dirty, 1u);
+    const uint64_t complete_blocks = f / Rpb();
+    ASSERT_GT(complete_blocks, 0u);
+    EXPECT_TRUE(zmap.TryGetBlockStats(complete_blocks - 1).has_value());
+    EXPECT_FALSE(zmap.TryGetBlockStats(complete_blocks).has_value()) << "a block past F must not be trusted";
+    EXPECT_TRUE(catidx.MightContain(complete_blocks, 0, EncodeFDataForCatIdx(FDouble(-1.0))));
+    ExpectAnswersMatchTheData(store, db, 0, kRows - 1, {0, 65});
+    EXPECT_FALSE(zmap.MarkClean());
+    EXPECT_FALSE(catidx.MarkClean());
+
+    XStore::Shutdown();
+    EXPECT_EQ(ReadHeader<ZoneMapFileHeader>(YearPath(db, ".zmap")).dirty, 1u);
+    XStore::ResetShutdownForTests();
+    XStore::ClearZoneMapRegistryForTests();
+    XStore::ClearCatIdxRegistryForTests();
+    BuildStartupReference(store, db, db + "REF", 70); // its InitDB also rebuilds LWPSTOP's dirty index
+    ExpectSameFilesAs(db, db + "REF");
+    ExpectAnswersMatchTheData(store, db, 0, kRows - 1, {0, 65});
+}
+
+// A read failure with four workers: kFailed, both files in rebuild and dirty behind the failed chunk, answers right,
+// the next start rebuilds.
+TEST_F(XStoreParallelLiveWidenTest, AReadFailureLeavesTheIndexInRebuildBehindTheFailedChunk) {
+    XStore store;
+    const std::string db = "LWPPREAD";
+    constexpr uint64_t kRows = 20000;
+    SeedNarrowIndexWideRows(store, db, kRows, 70);
+    const std::string path = DbPath(db);
+    ZoneMapFile &zmap = XStore::GetOrOpenZoneMap(path, kYear, kRowLength);
+    CatIdxFile &catidx = XStore::GetOrOpenCatIdx(path, kYear, kRowLength);
+    {
+        xstore_fault::ScopedFdFault fail(xstore_fault::FdOp::kPread, YearPath(db, ".XSTORE"), 2, 1, EIO);
+        EXPECT_EQ(store.LiveWidenOneYear(path, kYear, kRowLength, 70, true, true, nullptr, nullptr, 4, Rpb() * kRowLength),
+                  Result::kFailed);
+        ASSERT_EQ(fail.Failures(), 1);
+    }
+    const uint64_t f = zmap.FrontierForTests();
+    EXPECT_LT(f, kRows) << "the frontier passed the failed chunk";
+    EXPECT_EQ(catidx.FrontierForTests(), f);
+    EXPECT_TRUE(zmap.Rebuilding());
+    EXPECT_TRUE(catidx.Rebuilding());
+    EXPECT_EQ(ReadHeader<ZoneMapFileHeader>(YearPath(db, ".zmap")).dirty, 1u);
+    EXPECT_EQ(ReadHeader<CatIdxFileHeader>(YearPath(db, ".catidx")).dirty, 1u);
+    ExpectAnswersMatchTheData(store, db, 0, kRows - 1, {0, 65});
+    CleanRestartState();
+    BuildStartupReference(store, db, db + "REF", 70);
+    ExpectSameFilesAs(db, db + "REF");
+}
+
+// A .zmap block write fails with four workers: the zone map stops behind its frontier (dirty, in rebuild), the catidx
+// carries on and finishes clean; kFailed.
+TEST_F(XStoreParallelLiveWidenTest, AZoneMapWriteFailureStopsOnlyTheZoneMap) {
+    XStore store;
+    const std::string db = "LWPPWRITE";
+    constexpr uint64_t kRows = 20000;
+    SeedNarrowIndexWideRows(store, db, kRows, 70);
+    CleanRestartState();
+    const std::string path = DbPath(db);
+    XStore::LiveWidenStats stats;
+    {
+        xstore_fault::ScopedFdFault fail(xstore_fault::FdOp::kPwrite, YearPath(db, ".zmap"), 5, 1, EIO);
+        EXPECT_EQ(store.LiveWidenOneYear(path, kYear, kRowLength, 70, true, true, nullptr, &stats, 4, Rpb() * kRowLength),
+                  Result::kFailed);
+        ASSERT_EQ(fail.Failures(), 1);
+    }
+    ZoneMapFile &zmap = XStore::GetOrOpenZoneMap(path, kYear, kRowLength);
+    CatIdxFile &catidx = XStore::GetOrOpenCatIdx(path, kYear, kRowLength);
+    EXPECT_FALSE(stats.zmap_widened);
+    EXPECT_TRUE(stats.catidx_widened);
+    EXPECT_TRUE(zmap.Rebuilding());
+    EXPECT_LT(zmap.FrontierForTests(), kRows);
+    EXPECT_FALSE(catidx.Rebuilding());
+    EXPECT_EQ(ReadHeader<ZoneMapFileHeader>(YearPath(db, ".zmap")).dirty, 1u);
+    EXPECT_EQ(ReadHeader<CatIdxFileHeader>(YearPath(db, ".catidx")).dirty, 0u);
+    ExpectAnswersMatchTheData(store, db, 0, kRows - 1, {0, 65});
+    CleanRestartState();
+    BuildStartupReference(store, db, db + "REF", 70);
+    ExpectSameFilesAs(db, db + "REF");
+}
+
+// A WRITE lock held on one data row of group 5: that worker retries (lock timeouts) while the others fold every later
+// group; the frontier never passes the held row; once it is released the widen completes within a bounded wait.
+TEST_F(XStoreParallelLiveWidenTest, AHeldRowStallsOnlyItsGroup) {
+    XStore store;
+    const std::string db = "LWPHELD";
+    const uint64_t rpb = Rpb();
+    const uint64_t rows = 16 * rpb;
+    SeedNarrowIndexWideRows(store, db, rows, 70);
+    const std::string path = DbPath(db);
+    ZoneMapFile &zmap = XStore::GetOrOpenZoneMap(path, kYear, kRowLength);
+    const uint64_t held_row = 5 * rpb + 3;
+    XStore::LiveWidenStats stats;
+    std::future<Result> builder;
+    HeldWrite held(FileLockRegistry::Get(YearPath(db, ".XSTORE")), held_row * kRowLength, kRowLength);
+    builder = std::async(std::launch::async, [&] {
+        XStore b;
+        return b.LiveWidenOneYear(path, kYear, kRowLength, 70, true, true, nullptr, &stats, 4, rpb * kRowLength);
+    });
+    WaitUntil([&] {
+        if (!zmap.Rebuilding()) return false;
+        for (uint64_t b = 6; b < 16; ++b) {
+            if (!zmap.WriterUpdatesRowForTests((b + 1) * rpb - 1)) return false;
+        }
+        return true;
+    }, "the groups after the held one folded");
+    // Longer than one lock wait (LIVE_WIDEN_LOCK_WAIT_MS): the stalled worker has timed out at least once.
+    std::this_thread::sleep_for(milliseconds(3 * XStoreTunables::LIVE_WIDEN_LOCK_WAIT_MS));
+    const uint64_t f = zmap.FrontierForTests();
+    EXPECT_LE(f, held_row) << "the frontier passed a row a writer holds";
+    EXPECT_GE(f, 5 * rpb) << "groups 0..4 should be folded";
+    EXPECT_NE(builder.wait_for(milliseconds(0)), std::future_status::ready) << "finished while the row was held";
+    held.Release();
+    ASSERT_EQ(builder.wait_for(std::chrono::seconds(30)), std::future_status::ready);
+    EXPECT_EQ(builder.get(), Result::kDone);
+    EXPECT_GT(stats.lock_timeouts, 0u);
+    ExpectAnswersMatchTheData(store, db, 0, rows - 1, {0, 65});
+}
+
+// The trigger with four workers: bg_cancel_ (shutdown, RemoveDB) is honoured within about one chunk (a lock wait plus
+// a pause, each at most 50 ms), not after the year; the files stay dirty and the next start rebuilds them.
+TEST_F(XStoreParallelLiveWidenTest, ACancelStopsEveryWorkerWithinAChunk) {
+    XStore store;
+    const std::string db = "LWPCANCEL";
+    constexpr uint64_t kRows = 20000;
+    SeedNarrowIndexWideRows(store, db, kRows, 70);
+    const std::string path = DbPath(db);
+    const Clock::time_point g = *XStore::LiveWidenLastGrowthForTests(path);
+    ZoneMapFile &zmap = XStore::GetOrOpenZoneMap(path, kYear, kRowLength);
+    std::future<std::vector<XStore::LiveWidenPassEntry>> pass;
+    HeldWrite after_data(FileLockRegistry::Get(YearPath(db, ".XSTORE")), kRows * kRowLength, kRowLength);
+    pass = std::async(std::launch::async, [&] {
+        XStore b;
+        return b.RunLiveWidenPass(g + seconds(30), 4);
+    });
+    WaitForFrontierPast(zmap, Rpb());
+    const Clock::time_point cancelled = Clock::now();
+    XStore::bg_cancel_.store(true);
+    const bool ended = pass.wait_for(seconds(30)) == std::future_status::ready;
+    const int64_t stop_ms = MsSince(cancelled);
+    after_data.Release();
+    ASSERT_TRUE(ended) << "the pass ignored the cancel flag";
+    EXPECT_LT(stop_ms, 1000) << "the workers took " << stop_ms << " ms to stop";
+    EXPECT_EQ(YearsAndResults(pass.get()), (PassResult{{kYear, Result::kStopped}}));
+    XStore::bg_cancel_.store(false);
+    EXPECT_TRUE(zmap.Rebuilding());
+    EXPECT_LE(zmap.FrontierForTests(), kRows);
+    EXPECT_EQ(ReadHeader<ZoneMapFileHeader>(YearPath(db, ".zmap")).dirty, 1u);
+    ExpectAnswersMatchTheData(store, db, 0, kRows - 1, {0, 65});
+    CleanRestartState();
+    BuildStartupReference(store, db, db + "REF", 70);
+    ExpectSameFilesAs(db, db + "REF");
+}
+
 
 } // namespace

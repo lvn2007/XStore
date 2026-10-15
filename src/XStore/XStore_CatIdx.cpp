@@ -202,7 +202,8 @@ bool CatIdxFile::FlushBlock(uint64_t block_index) {
 
 void CatIdxFile::UpdateRow(uint64_t row_index, const std::vector<CatIdxObservation> &observations) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (row_index >= frontier_) return; // a running rebuild folds this row later, from the data file
+    // A running rebuild folds this row later, from the data file, unless a parallel group already folded it.
+    if (row_index >= frontier_ && fold_.FoldedEnd(row_index) <= row_index) return;
     UpdateRowLocked(row_index, observations);
 }
 
@@ -458,6 +459,7 @@ bool CatIdxFile::BeginRebuildLocked(uint32_t new_tracked_column_count) {
     cache_.clear();
     lru_order_.clear();
     frontier_ = 0;
+    fold_.Reset(0, 0);
     rebuilding_.store(true, std::memory_order_release);
     return true;
 }
@@ -474,6 +476,19 @@ void CatIdxFile::AdvanceFrontier(uint64_t new_frontier) {
     if (frontier_ != kNoRebuild && new_frontier > frontier_) frontier_ = new_frontier;
 }
 
+void CatIdxFile::SetLiveFoldGroups(uint64_t group_rows, uint64_t total_rows) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (frontier_ != kNoRebuild) fold_.Reset(group_rows, total_rows);
+}
+
+uint64_t CatIdxFile::MarkFolded(uint64_t begin, uint64_t end) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (frontier_ == kNoRebuild || !fold_.Active()) return frontier_;
+    const uint64_t watermark = fold_.MarkFolded(begin, end);
+    if (watermark > frontier_) frontier_ = watermark;
+    return frontier_;
+}
+
 bool CatIdxFile::FinishRebuild() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (frontier_ == kNoRebuild) return true;
@@ -483,6 +498,7 @@ bool CatIdxFile::FinishRebuild() {
         return false;
     }
     frontier_ = kNoRebuild;
+    fold_.Reset(0, 0);
     rebuilding_.store(false, std::memory_order_release);
     return true;
 }

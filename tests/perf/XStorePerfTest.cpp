@@ -1003,6 +1003,7 @@ TEST_F(XStorePerfTest, RebuildThroughput_FourYears) {
 // OPT-IN: skipped unless XSTORE_LW_PHASE_S is set; each phase then lasts that
 // many seconds (60 recommended; B and C count only builder time), over
 // XSTORE_LW_ROUNDS rounds (default 3: about 12-14 minutes at 60 s).
+// XSTORE_LW_WORKERS (default 1) sets the builder's worker count (parallel live widen).
 // ---------------------------------------------------------------------
 
 namespace {
@@ -1085,9 +1086,11 @@ TEST_F(XStorePerfTest, LiveWidenDuringInserts) {
         }
     }
     const std::string path = (fs::current_path() / "DataStore" / db).string();
+    const unsigned workers = static_cast<unsigned>(EnvInt("XSTORE_LW_WORKERS", 1)); // live widen workers (default 1)
+    std::cout << "[PERF] LiveWidenDuringInserts workers " << workers << std::endl;
     const auto widen = [&](uint32_t width, XStore::LiveWidenStats *stats) {
         XStore b;
-        return b.LiveWidenOneYear(path, 2024, kLiveWidenRowLength, width, true, true, nullptr, stats);
+        return b.LiveWidenOneYear(path, 2024, kLiveWidenRowLength, width, true, true, nullptr, stats, workers);
     };
     ASSERT_EQ(widen(kLiveWidenColumns, nullptr), XStore::LiveWidenResult::kDone); // arm A starts 100 wide
 

@@ -75,6 +75,7 @@ struct ZoneMapFileHeader {
 static_assert(sizeof(ZoneMapFileHeader) == 24);
 static_assert(offsetof(ZoneMapFileHeader, dirty) == 12);
 
+#include <algorithm>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -108,6 +109,49 @@ struct ZoneMapFoldBatch {
 };
 
 enum class BeginRebuildResult { kStarted, kFailed, kAlreadyRebuilding };
+
+// A rebuild cut into groups of consecutive rows that are folded in parallel, each group in row order: end(g) is the end
+// of the prefix of group g folded so far, Watermark() the contiguous frontier (every row below it folded). Shared by
+// the startup engine (one per year file, under YearRebuild::mutex) and the live builder (inside each index file, under
+// the file mutex, where the writers read it too). Not thread-safe by itself.
+class RebuildWatermark {
+public:
+    // group_rows == 0 empties it (Active() false).
+    void Reset(uint64_t group_rows, uint64_t total_rows) {
+        group_rows_ = group_rows;
+        total_rows_ = total_rows;
+        prefix_ = 0;
+        end_.clear();
+        if (group_rows == 0) return;
+        for (uint64_t g = 0; g * group_rows < total_rows; ++g) end_.push_back(g * group_rows);
+    }
+    [[nodiscard]] bool Active() const { return !end_.empty(); }
+    // Rows [begin, end) of one group are folded; begin is that group's folded end so far (folds are in row order).
+    // Returns the watermark, which never passes the first unfolded row of a group still running (or stopped).
+    uint64_t MarkFolded(uint64_t begin, uint64_t end) {
+        const size_t g = static_cast<size_t>(begin / group_rows_);
+        end_[g] = std::max(end_[g], end);
+        while (prefix_ < end_.size() && end_[prefix_] == GroupEnd(prefix_)) ++prefix_;
+        return Watermark();
+    }
+    [[nodiscard]] uint64_t Watermark() const { return prefix_ < end_.size() ? end_[prefix_] : total_rows_; }
+    // End of the folded prefix of row's group when row lies in it (> row), else row itself.
+    [[nodiscard]] uint64_t FoldedEnd(uint64_t row) const {
+        if (end_.empty()) return row;
+        const uint64_t g = row / group_rows_;
+        return g < end_.size() && row < end_[g] ? end_[g] : row;
+    }
+    // First row of the group after row's (rows of a group past its folded prefix are not folded).
+    [[nodiscard]] uint64_t NextGroupBegin(uint64_t row) const { return (row / group_rows_ + 1) * group_rows_; }
+    [[nodiscard]] uint64_t TotalRows() const { return total_rows_; }
+
+private:
+    [[nodiscard]] uint64_t GroupEnd(size_t g) const { return std::min(total_rows_, (g + 1) * group_rows_); }
+    uint64_t group_rows_ = 0;
+    uint64_t total_rows_ = 0;
+    size_t prefix_ = 0;
+    std::vector<uint64_t> end_;
+};
 
 class ZoneMapFile {
 public:
@@ -168,6 +212,10 @@ public:
     // them from the data file. Readers trust only blocks that end at or below F; writers (UpdateRow,
     // NeedsOverwriteCheck, MarkInexact, DeleteRows) leave rows at or above F alone. F == kNoRebuild when no rebuild
     // runs, which makes every check above a single compare that is always false.
+    // Parallel live builder (SetLiveFoldGroups): groups above F may already be folded (partly, a prefix of each group).
+    // F stays the contiguous watermark that readers trust, but writers treat a row in a folded prefix like a row
+    // below F (the fold already read the old row; skipping it would lose the update). Checked only after the F
+    // compare, so the not-rebuilding path is unchanged.
     static constexpr uint64_t kNoRebuild = UINT64_MAX;
 
     // Empties this file in place at width new_tracked_column_count and starts a rebuild at F = 0. Order: the old
@@ -202,6 +250,21 @@ public:
     // Builder only: rows below new_frontier are now folded. Call while still holding the data-file READ range lock
     // over the rows just folded, so no writer can sit on a row F moves across. Never moves F back.
     void AdvanceFrontier(uint64_t new_frontier);
+
+    // Live builder only, right after BeginLiveRebuild and before any fold: the year's total_rows rows are folded in
+    // groups of group_rows (whole blocks), possibly in parallel, each group in row order. From now on F moves only
+    // through MarkFolded. Cleared by FinishRebuild and by the next BeginRebuild.
+    void SetLiveFoldGroups(uint64_t group_rows, uint64_t total_rows);
+    // Live builder only, while it still holds the data-file READ range lock over [begin, end) and AFTER folding those
+    // rows (or finding them all holes): records them folded (begin is the group's folded end so far) and moves F to
+    // the contiguous watermark. Returns F.
+    uint64_t MarkFolded(uint64_t begin, uint64_t end);
+
+    // Test-visible: whether a writer of row_index updates this index (below F, or in a folded group prefix).
+    [[nodiscard]] bool WriterUpdatesRowForTests(uint64_t row_index) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return row_index < frontier_ || fold_.FoldedEnd(row_index) > row_index;
+    }
 
     // Ends the rebuild (F = kNoRebuild) once the dirty header is durable: it retries the header first, and if that
     // still fails returns false with nothing changed (still rebuilding, still pinned, MarkClean still refuses), so a
@@ -313,6 +376,12 @@ private:
     [[nodiscard]] bool WriteBlock(uint64_t block_index, const CachedBlock &block);
     void TouchLru(uint64_t block_index);
     void MarkInexactLocked(uint64_t first_row, uint64_t last_row);
+    void MarkInexactRunLocked(uint64_t first_row, uint64_t last_row); // rows all below F or folded
+    [[nodiscard]] bool BlocksNeedOverwriteCheck(uint64_t first_row, uint64_t last_row); // rows all below F or folded
+    // Calls fn(first, last) for each maximal run of [first_row, last_row] whose rows a writer must update (below F, or
+    // in a folded group prefix), in ascending order. mutex_ held.
+    template <class Fn>
+    void ForEachWriterRun(uint64_t first_row, uint64_t last_row, Fn &&fn) const;
     void EvictIfOverCapacity();
     off_t BlockFileOffset(uint64_t block_index) const;
     // Resets header_ to a fresh, empty header marked dirty (one pwrite, no fdatasync) and writes it to offset 0
@@ -327,6 +396,7 @@ private:
     uint64_t dirty_mark_writes_ = 0;
     uint64_t mark_writes_ = 0;
     uint64_t frontier_ = kNoRebuild; // rebuild frontier F, see kNoRebuild
+    RebuildWatermark fold_;          // folded group prefixes of a parallel live rebuild (inactive otherwise)
     std::atomic<bool> rebuilding_{false}; // frontier_ != kNoRebuild; written under mutex_, read without it
     std::atomic<uint32_t> pins_{0};       // live Pin objects
     std::unordered_map<uint64_t, CachedBlock> cache_; // pure read-cache, always disk-coherent

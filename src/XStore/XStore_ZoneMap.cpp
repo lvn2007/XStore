@@ -129,7 +129,8 @@ void ZoneMapFile::EvictIfOverCapacity() {
 
 void ZoneMapFile::UpdateRow(uint64_t row_index, const std::vector<ZoneMapObservation> &observations, uint32_t pad_to) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (row_index >= frontier_) return; // a running rebuild folds this row later, from the data file
+    // A running rebuild folds this row later, from the data file, unless a parallel group already folded it.
+    if (row_index >= frontier_ && fold_.FoldedEnd(row_index) <= row_index) return;
     UpdateRowLocked(row_index, observations, pad_to);
 }
 
@@ -250,17 +251,42 @@ bool ZoneMapFile::NeedsOverwriteCheck(uint64_t first_row, uint64_t row_count) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (header_.tracked_column_count == 0) return false; // nothing is ever folded
     if (first_row + row_count > frontier_) {
+        if (fold_.Active()) {
+            bool needs = false;
+            ForEachWriterRun(first_row, first_row + row_count - 1,
+                             [&](uint64_t first, uint64_t last) { needs = needs || BlocksNeedOverwriteCheck(first, last); });
+            return needs;
+        }
         if (first_row >= frontier_) return false; // a running rebuild has not folded these rows
         row_count = frontier_ - first_row;
     }
+    return BlocksNeedOverwriteCheck(first_row, first_row + row_count - 1);
+}
+
+bool ZoneMapFile::BlocksNeedOverwriteCheck(uint64_t first_row, uint64_t last_row) {
     const uint64_t rpb = header_.rows_per_block;
-    const uint64_t last_row = first_row + row_count - 1;
     for (uint64_t b = BlockIndexForRow(first_row, rpb); b <= BlockIndexForRow(last_row, rpb); ++b) {
         const CachedBlock &block = EnsureBlockLoaded(b);
         if (ZoneMapEntryInexact(block.entries[0])) continue;
         if (!block.fold_end_known || std::max(first_row, b * rpb) < block.fold_end) return true;
     }
     return false;
+}
+
+template <class Fn>
+void ZoneMapFile::ForEachWriterRun(uint64_t first_row, uint64_t last_row, Fn &&fn) const {
+    uint64_t row = first_row;
+    while (row <= last_row) {
+        const uint64_t end = row < frontier_ ? frontier_ : fold_.FoldedEnd(row);
+        if (end > row) {
+            const uint64_t run_last = std::min(last_row, end - 1);
+            fn(row, run_last);
+            row = run_last + 1;
+        } else {
+            if (!fold_.Active() || row >= fold_.TotalRows()) return;
+            row = fold_.NextGroupBegin(row);
+        }
+    }
 }
 
 void ZoneMapFile::MarkInexact(uint64_t first_row, uint64_t last_row) {
@@ -271,9 +297,17 @@ void ZoneMapFile::MarkInexact(uint64_t first_row, uint64_t last_row) {
 void ZoneMapFile::MarkInexactLocked(uint64_t first_row, uint64_t last_row) {
     if (header_.tracked_column_count == 0) return;
     if (last_row >= frontier_) {
+        if (fold_.Active()) {
+            ForEachWriterRun(first_row, last_row, [this](uint64_t first, uint64_t last) { MarkInexactRunLocked(first, last); });
+            return;
+        }
         if (first_row >= frontier_) return; // a running rebuild has not folded these rows
         last_row = frontier_ - 1;
     }
+    MarkInexactRunLocked(first_row, last_row);
+}
+
+void ZoneMapFile::MarkInexactRunLocked(uint64_t first_row, uint64_t last_row) {
     const uint64_t rpb = header_.rows_per_block;
     const size_t block_bytes = header_.tracked_column_count * sizeof(ZoneMapEntry);
     // Blocks past the end of the file were never written, so nothing is folded there: this bounds a huge
@@ -309,8 +343,13 @@ bool ZoneMapFile::DeleteRows(uint64_t first_row, uint64_t last_row, const std::f
     const uint64_t full_begin = (first_row + rpb - 1) / rpb;
     uint64_t full_end = (last_row + 1) / rpb;
     // A running rebuild owns every block not yet complete: never reset one (the builder may have folded part of it, or
-    // be about to). Such a block falls to the partial-end path below, which flags only what lies under F.
-    if (full_end * rpb > frontier_) full_end = std::max(full_begin, frontier_ / rpb);
+    // be about to). Such a block falls to the partial-end path below, which flags only what lies under F (or in a
+    // folded group prefix). Fully folded blocks of the first such run are reset like blocks below F.
+    if (full_end * rpb > frontier_) {
+        const uint64_t first = full_begin * rpb;
+        const uint64_t owned_end = first < frontier_ ? frontier_ : fold_.FoldedEnd(first);
+        full_end = std::max(full_begin, std::min(full_end, owned_end / rpb));
+    }
     if (full_begin >= full_end) {
         MarkInexactLocked(first_row, last_row);
         return punch_data();
@@ -439,6 +478,7 @@ bool ZoneMapFile::BeginRebuildLocked(uint32_t new_tracked_column_count) {
     cache_.clear();
     lru_order_.clear();
     frontier_ = 0;
+    fold_.Reset(0, 0);
     rebuilding_.store(true, std::memory_order_release);
     return true;
 }
@@ -455,6 +495,19 @@ void ZoneMapFile::AdvanceFrontier(uint64_t new_frontier) {
     if (frontier_ != kNoRebuild && new_frontier > frontier_) frontier_ = new_frontier;
 }
 
+void ZoneMapFile::SetLiveFoldGroups(uint64_t group_rows, uint64_t total_rows) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (frontier_ != kNoRebuild) fold_.Reset(group_rows, total_rows);
+}
+
+uint64_t ZoneMapFile::MarkFolded(uint64_t begin, uint64_t end) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (frontier_ == kNoRebuild || !fold_.Active()) return frontier_;
+    const uint64_t watermark = fold_.MarkFolded(begin, end);
+    if (watermark > frontier_) frontier_ = watermark;
+    return frontier_;
+}
+
 bool ZoneMapFile::FinishRebuild() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (frontier_ == kNoRebuild) return true;
@@ -464,6 +517,7 @@ bool ZoneMapFile::FinishRebuild() {
         return false;
     }
     frontier_ = kNoRebuild;
+    fold_.Reset(0, 0);
     rebuilding_.store(false, std::memory_order_release);
     return true;
 }

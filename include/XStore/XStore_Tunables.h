@@ -451,6 +451,12 @@ inline constexpr uint64_t LIVE_WIDEN_MAX_CHUNK_BYTES = 1ull * 1024 * 1024;
 // up to this many rows. When no data is left from F to the end of the year,
 // the next attempt locks [F, end) once and finishes.
 inline constexpr uint64_t LIVE_WIDEN_MAX_HOLE_SPAN_ROWS = 1ull << 20;
+// Workers folding ONE year of a live widen at once (Tech Reference 4.18, "Parallel live widen"). 1 = the single
+// sequential builder, unchanged. With N > 1 the year is cut into groups of about LIVE_WIDEN_GROUP_BYTES (rounded up
+// to whole zone-map blocks; 8 maximum-size chunks), claimed in order by N dedicated threads, each chunk still under
+// its own timed READ range lock. The load governor (S3) is meant to raise N when the machine is idle.
+inline constexpr unsigned LIVE_WIDEN_WORKERS = 1;
+inline constexpr uint64_t LIVE_WIDEN_GROUP_BYTES = 8 * LIVE_WIDEN_MAX_CHUNK_BYTES;
 
 // Live widening trigger (M4 stage 3, XStore::RunLiveWidenPass). When an insert
 // raises a DB's effective tracked width, the DB is recorded; once its width

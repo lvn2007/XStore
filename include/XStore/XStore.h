@@ -1077,9 +1077,16 @@ class XStore {
         // MarkClean; registry entries are never erased. Completion: FinishRebuild, fdatasync of the data file,
         // MarkClean. A BeginRebuild that fails leaves that file's old index as it was (still trusted). Never throws.
         // `stop` (may be nullptr) is checked before every lock attempt and every pause.
+        // Workers (Tech Reference 4.18 "Parallel live widen"): with workers > 1 the year is cut into groups of about
+        // group_bytes (whole zone-map blocks), claimed in order by `workers` threads (the caller plus dedicated
+        // std::threads, joined before return); each chunk keeps the protocol above, MarkFolded replacing
+        // AdvanceFrontier, so F is the contiguous watermark and writers also update rows of folded groups above it.
+        // workers == 1 is the sequential builder. Stats are summed over the workers (lock_hold_us: worker by worker).
         LiveWidenResult LiveWidenOneYear(const std::string &db_base_path, unsigned short year, uint16_t row_length,
                                          uint32_t tracked_column_count, bool widen_zmap, bool widen_catidx,
-                                         const std::atomic<bool> *stop, LiveWidenStats *stats = nullptr);
+                                         const std::atomic<bool> *stop, LiveWidenStats *stats = nullptr,
+                                         unsigned workers = XStoreTunables::LIVE_WIDEN_WORKERS,
+                                         uint64_t group_bytes = XStoreTunables::LIVE_WIDEN_GROUP_BYTES);
 
         // Live widening trigger, M4 stage 3 (Tech Reference 4.18 "Live widening, stage 3"). MaybeGrowColumnCount's
         // rare path records a DB whose effective tracked width rose; the background index thread
@@ -1096,7 +1103,8 @@ class XStore {
             LiveWidenResult result = LiveWidenResult::kNothingToDo; // kNothingToDo also when both widths were right
             bool skipped_rebuilding = false;                        // left alone: already in rebuild state
         };
-        std::vector<LiveWidenPassEntry> RunLiveWidenPass(std::chrono::steady_clock::time_point now);
+        std::vector<LiveWidenPassEntry> RunLiveWidenPass(std::chrono::steady_clock::time_point now,
+                                                         unsigned workers = XStoreTunables::LIVE_WIDEN_WORKERS);
 
         // Startup index rebuild engine (Tech Reference 4.14): rebuilds the selected index files of every listed year of
         // ONE DB directory. Serially, year by year in list order, it begins each year (registry erase, pins,
@@ -1260,7 +1268,7 @@ class XStore {
 
         enum class LiveWidenDbOutcome { kDone, kRetry, kStopped, kGone };
         LiveWidenDbOutcome LiveWidenDb(const std::string &db_base_path, const std::string &db_name,
-                                       std::vector<LiveWidenPassEntry> &out);
+                                       std::vector<LiveWidenPassEntry> &out, unsigned workers);
 
         // Width of a year's .zmap / .catidx: the warm registry object's when there is one, else the file header's;
         // nullopt for a missing or unreadable file. `rebuilding`: a warm object of the year is in rebuild state.

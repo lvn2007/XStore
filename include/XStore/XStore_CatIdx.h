@@ -215,6 +215,11 @@ public:
     // Builder only, while still holding the READ range lock over the rows just folded. Never moves F back.
     void AdvanceFrontier(uint64_t new_frontier);
 
+    // Parallel live builder: same contract as ZoneMapFile::SetLiveFoldGroups / MarkFolded. UpdateRow then also
+    // updates a row at or above F that lies in a folded group prefix.
+    void SetLiveFoldGroups(uint64_t group_rows, uint64_t total_rows);
+    uint64_t MarkFolded(uint64_t begin, uint64_t end);
+
     // F = kNoRebuild once the dirty header is durable; otherwise false with nothing changed (see
     // ZoneMapFile::FinishRebuild). The file stays dirty until a later MarkClean.
     [[nodiscard]] bool FinishRebuild();
@@ -337,6 +342,7 @@ private:
     bool dirty_on_disk_ = false; // header_.dirty == 1 is durable on disk
     uint64_t dirty_mark_writes_ = 0;
     uint64_t frontier_ = kNoRebuild; // rebuild frontier F, see kNoRebuild
+    RebuildWatermark fold_;          // folded group prefixes of a parallel live rebuild (inactive otherwise)
     std::atomic<bool> rebuilding_{false}; // frontier_ != kNoRebuild; written under mutex_, read without it
     std::atomic<uint32_t> pins_{0};       // live Pin objects
     std::unordered_map<uint64_t, std::vector<BloomEntry>> cache_; // block_index -> per-column bloom bytes
