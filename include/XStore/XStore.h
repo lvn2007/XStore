@@ -43,6 +43,7 @@
 #define CRITICAL_LEN 11
 
 namespace walring { class Ring; }
+namespace livewiden { class LiveWidenGovernor; class LiveWidenLoadSource; }
 
 class XStore {
     public:
@@ -1082,6 +1083,15 @@ class XStore {
             bool catidx_began = false;
             bool zmap_busy = false;
             bool catidx_busy = false;
+            // Only with a governor (all zero otherwise). allowed_min/max: the range the governor allowed over its life
+            // so far (it can span the years of a pass); grants and brakes: during this year; parked_s: time this
+            // year's workers spent parked, summed over the workers.
+            bool governed = false;
+            unsigned governor_allowed_min = 0;
+            unsigned governor_allowed_max = 0;
+            uint64_t governor_grants = 0;
+            uint64_t governor_brakes = 0;
+            double governor_parked_s = 0;
         };
         // Rebuilds this year's .zmap (widen_zmap) and/or .catidx (widen_catidx) IN PLACE at tracked_column_count while
         // requests keep running, with ONE scan of the year file. db_base_path must be the exact string the writers use
@@ -1097,11 +1107,17 @@ class XStore {
         // std::threads, joined before return); each chunk keeps the protocol above, MarkFolded replacing
         // AdvanceFrontier, so F is the contiguous watermark and writers also update rows of folded groups above it.
         // workers == 1 is the sequential builder. Stats are summed over the workers (lock_hold_us: worker by worker).
+        // Governor (Tech Reference 4.18 "Governor"; nullptr = everything above, unchanged): `workers` is ignored, the
+        // year is always cut into groups and governor->MaxWorkers() workers are started; each asks Permit(i) before
+        // claiming a group and parks (50 ms slices, still checking `stop`) while denied, so parking happens only
+        // between groups. `load` (may be nullptr: tests with a fake sampler) is pointed at this year's data-file lock.
         LiveWidenResult LiveWidenOneYear(const std::string &db_base_path, unsigned short year, uint16_t row_length,
                                          uint32_t tracked_column_count, bool widen_zmap, bool widen_catidx,
                                          const std::atomic<bool> *stop, LiveWidenStats *stats = nullptr,
                                          unsigned workers = XStoreTunables::LIVE_WIDEN_WORKERS,
-                                         uint64_t group_bytes = XStoreTunables::LIVE_WIDEN_GROUP_BYTES);
+                                         uint64_t group_bytes = XStoreTunables::LIVE_WIDEN_GROUP_BYTES,
+                                         livewiden::LiveWidenGovernor *governor = nullptr,
+                                         livewiden::LiveWidenLoadSource *load = nullptr);
 
         // Live widening trigger, M4 stage 3 (Tech Reference 4.18 "Live widening, stage 3"). MaybeGrowColumnCount's
         // rare path records a DB whose effective tracked width rose; the background index thread
@@ -1111,7 +1127,9 @@ class XStore {
         // DB's exact effective width: the zone map when its width differs, the catidx when it is narrower (widths
         // only: a file is normally dirty at runtime). A year whose index is already in rebuild state is skipped (one
         // log line per year file per process). Tests call it directly with a fake `now`. Returns one entry per year
-        // looked at, in processing order.
+        // looked at, in processing order. `governor`/`load` (tests) are passed to every year; when null and
+        // LIVE_WIDEN_GOVERNOR is true, the pass makes one production governor and load source per DB, shared by its
+        // years (the ramp-up carries over).
         struct LiveWidenPassEntry {
             std::string db_name;
             unsigned short year = 0;
@@ -1119,7 +1137,9 @@ class XStore {
             bool skipped_rebuilding = false;                        // left alone: already in rebuild state
         };
         std::vector<LiveWidenPassEntry> RunLiveWidenPass(std::chrono::steady_clock::time_point now,
-                                                         unsigned workers = XStoreTunables::LIVE_WIDEN_WORKERS);
+                                                         unsigned workers = XStoreTunables::LIVE_WIDEN_WORKERS,
+                                                         livewiden::LiveWidenGovernor *governor = nullptr,
+                                                         livewiden::LiveWidenLoadSource *load = nullptr);
 
         // Startup index rebuild engine (Tech Reference 4.14): rebuilds the selected index files of every listed year of
         // ONE DB directory. Serially, year by year in list order, it begins each year (registry erase, pins,
@@ -1283,7 +1303,8 @@ class XStore {
 
         enum class LiveWidenDbOutcome { kDone, kRetry, kStopped, kGone };
         LiveWidenDbOutcome LiveWidenDb(const std::string &db_base_path, const std::string &db_name,
-                                       std::vector<LiveWidenPassEntry> &out, unsigned workers);
+                                       std::vector<LiveWidenPassEntry> &out, unsigned workers,
+                                       livewiden::LiveWidenGovernor *governor, livewiden::LiveWidenLoadSource *load);
 
         // Width of a year's .zmap / .catidx: the warm registry object's when there is one, else the file header's;
         // nullopt for a missing or unreadable file. `rebuilding`: a warm object of the year is in rebuild state.

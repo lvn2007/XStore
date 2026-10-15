@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <limits>
 #include "include/DataStructs/FileRangeLock.h"
+#include "include/XStore/XStore_Tunables.h"
 
 bool FileRangeLock::Conflicts(unsigned long long start, unsigned long long end, LockType type) const {
     for (const ActiveLock &lock : active_locks) {
@@ -49,7 +50,13 @@ void FileRangeLock::LockRangeSlow(std::unique_lock<std::mutex> &lk, unsigned lon
         ++waiting_writer_overflow;
     }
     // Registering only adds a reason for a yielding reader to wait: nobody needs waking for it.
+    const Clock::time_point wait_start = Clock::now();
     cv.wait(lk, free);
+    const uint64_t waited_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - wait_start).count());
+    writer_wait_us_.fetch_add(waited_us, std::memory_order_relaxed);
+    writer_waits_.fetch_add(1, std::memory_order_relaxed);
+    if (waited_us >= XStoreTunables::LIVE_WIDEN_WRITER_LONG_WAIT_US) long_waits_.fetch_add(1, std::memory_order_relaxed);
     if (slotted) {
         // Our entry or an identical one (same range): which one goes does not matter. Swap-and-pop.
         for (uint32_t i = 0; i < waiting_writer_count; ++i) {
@@ -105,6 +112,11 @@ bool FileRangeLock::TryReadLockYieldingFor(unsigned long long start, unsigned lo
                                            WriterYield &yield) {
     unsigned long long end = (length == 0) ? std::numeric_limits<unsigned long long>::max() : start + length;
     return TimedLock(start, end, LockType::READ, timeout, yield_max, &yield);
+}
+
+FileRangeLock::WriterWaitStats FileRangeLock::WriterWaits() const noexcept {
+    return {writer_wait_us_.load(std::memory_order_relaxed), writer_waits_.load(std::memory_order_relaxed),
+            long_waits_.load(std::memory_order_relaxed)};
 }
 
 uint32_t FileRangeLock::WaitingWritersForTests() {

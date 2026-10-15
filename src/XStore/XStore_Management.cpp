@@ -6,6 +6,8 @@
 #include "include/XStore/XStore_WireEncode.h"
 #include "include/XStore/XStore_WalRing.h"
 #include "include/XStore/XStore_WalCheckpoint.h"
+#include "include/XStore/XStore_LiveWidenGovernor.h"
+#include "include/XStore/XStore_LiveWidenLoadSource.h"
 #include <spdlog/fmt/fmt.h>
 #include "include/Logger/Logger.h"
 #include <algorithm>
@@ -13,6 +15,7 @@
 #include <optional>
 #include <cerrno>
 #include <chrono>
+#include <ctime>
 #include <exception>
 #include <cstring>
 #include <filesystem>
@@ -1502,7 +1505,9 @@ XStore::FoldResult XStore::FoldChunk(int data_fd, uint64_t chunk_begin, uint64_t
 XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path, unsigned short year,
                                                  uint16_t row_length, uint32_t tracked_column_count, bool widen_zmap,
                                                  bool widen_catidx, const std::atomic<bool> *stop,
-                                                 LiveWidenStats *stats, unsigned workers, uint64_t group_bytes) try {
+                                                 LiveWidenStats *stats, unsigned workers, uint64_t group_bytes,
+                                                 livewiden::LiveWidenGovernor *governor,
+                                                 livewiden::LiveWidenLoadSource *load) try {
     using Clock = std::chrono::steady_clock;
     LiveWidenStats local_stats;
     LiveWidenStats &st = stats != nullptr ? *stats : local_stats;
@@ -1573,17 +1578,21 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
     // Groups of whole zone-map blocks (two groups never share a block, so folds of different groups touch different
     // blocks, each in row order: the bytes equal the sequential build's). One worker: one group, the whole year, which
     // is exactly the sequential builder (same chunks, same frontier sequence, same stats).
-    unsigned want_workers = std::max(1u, workers);
+    // A governor decides how many of its MaxWorkers() fold at once (Tech Reference 4.18 "Governor"): all of them are
+    // started and the year is always cut into groups, even if only one may run now.
+    unsigned want_workers = governor != nullptr ? std::max(1u, governor->MaxWorkers()) : std::max(1u, workers);
     // The groups are block-aligned only if the files' own block size is the one computed here (always so today: a file
     // with another block size is rebuilt at startup). If it ever differs, a block could span two groups and the writer
     // checks (rows owned by writers form a prefix of every block) would no longer hold: use one group instead.
     if (want_workers > 1 && ((zmap.get() != nullptr && zmap->RowsPerBlockValue() != RowsPerBlock(row_length)) ||
                              (catidx.get() != nullptr && catidx->RowsPerBlockValue() != RowsPerBlock(row_length)))) {
-        spdlog::warn("[LIVE WIDEN] [{}] - Index block size differs from the computed one; widening with one worker", data_path);
+        spdlog::warn("[LIVE WIDEN] [{}] - Index block size differs from the computed one; widening with one worker{}",
+                     data_path, governor != nullptr ? " (the load governor is not consulted)" : "");
         want_workers = 1;
+        governor = nullptr;
     }
     const uint64_t block_bytes = RowsPerBlock(row_length) * row_len;
-    const uint64_t group_rows = want_workers == 1
+    const uint64_t group_rows = want_workers == 1 && governor == nullptr
                                     ? std::max<uint64_t>(1, total_rows)
                                     : std::max<uint64_t>(1, (group_bytes + block_bytes - 1) / block_bytes) * RowsPerBlock(row_length);
     const uint64_t group_count = (total_rows + group_rows - 1) / group_rows;
@@ -1599,9 +1608,33 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
     std::atomic<bool> was_stopped{false};
     std::atomic<uint64_t> watermark{0}; // for the log only
     const Clock::time_point started = Clock::now();
+    const livewiden::LiveWidenGovernor::Snapshot gov_before =
+        governor != nullptr ? governor->GetSnapshot() : livewiden::LiveWidenGovernor::Snapshot{};
+
+    // One governed group turn: from a granted Permit to the end of that group, whatever way it ends. Reports the
+    // worker's own CPU for the group (the governor subtracts it from the machine's busy CPU), then releases.
+    struct GroupTurn {
+        livewiden::LiveWidenGovernor *gov;
+        unsigned index;
+        uint64_t cpu0;
+        static uint64_t ThreadCpuNs() noexcept {
+            timespec ts{};
+            if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0) return 0;
+            return static_cast<uint64_t>(ts.tv_sec) * 1'000'000'000ull + static_cast<uint64_t>(ts.tv_nsec);
+        }
+        GroupTurn(livewiden::LiveWidenGovernor *g, unsigned i) noexcept : gov(g), index(i), cpu0(g ? ThreadCpuNs() : 0) {}
+        ~GroupTurn() {
+            if (gov == nullptr) return;
+            const uint64_t cpu1 = ThreadCpuNs();
+            if (cpu1 > cpu0) gov->AddBuilderCpu(cpu1 - cpu0);
+            gov->Release(index);
+        }
+        GroupTurn(const GroupTurn &) = delete;
+        GroupTurn &operator=(const GroupTurn &) = delete;
+    };
 
     // One worker: claims groups in order and walks each chunk by chunk. Never throws (an exception is a failure).
-    const auto work = [&](LiveWidenStats &ws) noexcept {
+    const auto work = [&](LiveWidenStats &ws, unsigned index) noexcept {
         try {
             uint64_t data_rows = std::clamp<uint64_t>(XStoreTunables::LIVE_WIDEN_INITIAL_CHUNK_ROWS,
                                                       XStoreTunables::LIVE_WIDEN_MIN_CHUNK_ROWS, max_data_rows);
@@ -1617,8 +1650,24 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
                 return true;
             };
             const auto fail = [&] { failed.store(true, std::memory_order_relaxed); };
-            for (uint64_t g = next_group.fetch_add(1, std::memory_order_relaxed); g < group_count;
-                 g = next_group.fetch_add(1, std::memory_order_relaxed)) {
+            // Governed: waits for a Permit between groups (never inside one: a parked worker owns no group, so the
+            // watermark never waits for it). False: stopped, failed, or no group left. Permit is called every slice
+            // even while parked, which keeps the governor evaluating when every worker is parked (floor 0).
+            const auto permitted = [&]() -> bool {
+                for (;;) {
+                    if (next_group.load(std::memory_order_relaxed) >= group_count) return false;
+                    if (governor->Permit(index)) return true;
+                    if (halt()) return false;
+                    const Clock::time_point p0 = Clock::now();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    ws.governor_parked_s += std::chrono::duration<double>(Clock::now() - p0).count();
+                }
+            };
+            for (;;) {
+                if (governor != nullptr && !permitted()) return;
+                const GroupTurn turn(governor, index); // releases on every exit from this group
+                const uint64_t g = next_group.fetch_add(1, std::memory_order_relaxed);
+                if (g >= group_count) return;
                 uint64_t pos = g * group_rows; // this group's folded end: rows below it are folded
                 const uint64_t end = std::min(total_rows, pos + group_rows);
                 while (pos < end) {
@@ -1768,14 +1817,28 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
     const size_t worker_count = static_cast<size_t>(std::min<uint64_t>(want_workers, std::max<uint64_t>(1, group_count)));
     std::vector<LiveWidenStats> per_worker(worker_count);
     std::vector<std::thread> threads;
+    // RULE (G2 review, finding 1): pointing the sampler at this year's lock and RebaselineWriterCounters() are NOT
+    // race-free against concurrent Permit calls (an evaluation in between would take one file's counters against the
+    // other's baseline). So both happen here, on the calling thread, before any worker of this year starts; the
+    // previous year's workers were all joined before its LiveWidenOneYear returned, so no Permit runs in between and
+    // thread start/join orders everything. Never call either from a worker.
+    struct YearSwitch {
+        livewiden::LiveWidenLoadSource *load;
+        ~YearSwitch() { if (load != nullptr) load->SetYear(nullptr, nullptr, 0); } // after the joins below
+    } year_switch{governor != nullptr ? load : nullptr};
+    if (governor != nullptr) {
+        // A FileLockRegistry entry is never erased, so the pointer stays valid after this year.
+        if (load != nullptr) load->SetYear(&FileLockRegistry::Get(data_path), &watermark, total_rows);
+        governor->RebaselineWriterCounters();
+    }
     try {
         threads.reserve(worker_count - 1);
-        for (size_t i = 1; i < worker_count; ++i) threads.emplace_back(work, std::ref(per_worker[i]));
+        for (size_t i = 1; i < worker_count; ++i) threads.emplace_back(work, std::ref(per_worker[i]), static_cast<unsigned>(i));
     } catch (const std::exception &e) { // system_error (no more threads) or bad_alloc: carry on with those started
         spdlog::warn("[LIVE WIDEN] [{}] - Started {} of {} build workers: {}", data_path, threads.size() + 1,
                      worker_count, e.what());
     }
-    work(per_worker[0]);
+    work(per_worker[0], 0);
     for (std::thread &t : threads) t.join();
     for (const LiveWidenStats &ws : per_worker) {
         st.chunks += ws.chunks;
@@ -1788,6 +1851,15 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
         st.writer_yields += ws.writer_yields;
         st.writer_yield_us += ws.writer_yield_us;
         st.lock_hold_us.insert(st.lock_hold_us.end(), ws.lock_hold_us.begin(), ws.lock_hold_us.end());
+        st.governor_parked_s += ws.governor_parked_s;
+    }
+    if (governor != nullptr) {
+        const livewiden::LiveWidenGovernor::Snapshot gov_after = governor->GetSnapshot();
+        st.governed = true;
+        st.governor_allowed_min = gov_after.min_allowed_seen;
+        st.governor_allowed_max = gov_after.max_allowed_seen;
+        st.governor_grants = gov_after.grants - gov_before.grants;
+        st.governor_brakes = gov_after.brakes - gov_before.brakes;
     }
     // Every early end leaves the files that began in rebuild at the contiguous watermark they reached: dirty on disk,
     // blocks past F scanned (never trusted), MarkClean refusing, unevictable; the next start rebuilds them.
@@ -1831,6 +1903,12 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
                  zmap_finished, catidx_finished, st.rows_folded, st.chunks, st.lock_timeouts, st.max_lock_hold_us,
                  std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started).count(), st.writer_yields,
                  st.writer_yield_us / 1000);
+    if (st.governed) {
+        spdlog::info("[LIVE WIDEN] [{}] - Load governor: {} of {} workers started, {}-{} allowed, {} group grants, {} "
+                     "writer brakes, {:.1f} s parked (summed over workers)", data_path, worker_count,
+                     governor->MaxWorkers(), st.governor_allowed_min, st.governor_allowed_max, st.governor_grants,
+                     st.governor_brakes, st.governor_parked_s);
+    }
     if (!all_ok) return LiveWidenResult::kFailed;
     return refused ? LiveWidenResult::kPartial : LiveWidenResult::kDone;
 } catch (const std::exception &e) {
@@ -1839,7 +1917,9 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
 }
 
 std::vector<XStore::LiveWidenPassEntry> XStore::RunLiveWidenPass(std::chrono::steady_clock::time_point now,
-                                                                 unsigned workers) {
+                                                                 unsigned workers,
+                                                                 livewiden::LiveWidenGovernor *governor,
+                                                                 livewiden::LiveWidenLoadSource *load) {
     std::vector<LiveWidenPassEntry> processed;
     if (!live_widen_pending_.load(std::memory_order_relaxed)) return processed; // the per-tick cost when idle
     struct Due {
@@ -1861,7 +1941,18 @@ std::vector<XStore::LiveWidenPassEntry> XStore::RunLiveWidenPass(std::chrono::st
         if (bg_cancel_.load(std::memory_order_relaxed)) break;
         spdlog::info("[LIVE WIDEN] [DB: {}] - Width stable for {} s; widening its year index files, newest year first",
                      d.db_name, XStoreTunables::LIVE_WIDEN_QUIET_PERIOD_SEC);
-        const LiveWidenDbOutcome outcome = LiveWidenDb(d.db_base_path, d.db_name, processed, workers);
+        // Production governor (off by default): one per DB, shared by its years so the ramp-up carries over.
+        std::unique_ptr<livewiden::LiveWidenLoadSource> own_load;
+        std::unique_ptr<livewiden::LiveWidenGovernor> own_governor;
+        livewiden::LiveWidenGovernor *db_governor = governor;
+        livewiden::LiveWidenLoadSource *db_load = load;
+        if (governor == nullptr && XStoreTunables::LIVE_WIDEN_GOVERNOR) {
+            own_load = std::make_unique<livewiden::LiveWidenLoadSource>();
+            own_governor = livewiden::MakeLiveWidenGovernor(*own_load, d.db_name);
+            db_governor = own_governor.get();
+            db_load = own_load.get();
+        }
+        const LiveWidenDbOutcome outcome = LiveWidenDb(d.db_base_path, d.db_name, processed, workers, db_governor, db_load);
         bool gave_up = false;
         uint32_t attempts = 0;
         uint64_t wait_sec = 0;
@@ -1906,7 +1997,9 @@ std::vector<XStore::LiveWidenPassEntry> XStore::RunLiveWidenPass(std::chrono::st
 }
 
 XStore::LiveWidenDbOutcome XStore::LiveWidenDb(const std::string &db_base_path, const std::string &db_name,
-                                               std::vector<LiveWidenPassEntry> &out, unsigned workers) try {
+                                               std::vector<LiveWidenPassEntry> &out, unsigned workers,
+                                               livewiden::LiveWidenGovernor *governor,
+                                               livewiden::LiveWidenLoadSource *load) try {
     XStore_Proto::ConfigStruct cfg;
     if (!GetOrLoadCfg(db_name, db_base_path, cfg)) {
         spdlog::info("[LIVE WIDEN] [DB: {}] - The DB no longer exists; nothing to widen", db_name);
@@ -1975,7 +2068,7 @@ XStore::LiveWidenDbOutcome XStore::LiveWidenDb(const std::string &db_base_path, 
                      desired, widen_zmap, widen_catidx);
         LiveWidenStats stats;
         entry.result = LiveWidenOneYear(db_base_path, year, row_length, desired, widen_zmap, widen_catidx, &bg_cancel_, &stats,
-                                        workers);
+                                        workers, XStoreTunables::LIVE_WIDEN_GROUP_BYTES, governor, load);
         out.push_back(entry);
         if (entry.result == LiveWidenResult::kDone || entry.result == LiveWidenResult::kNothingToDo) continue;
         if (entry.result == LiveWidenResult::kStopped) return LiveWidenDbOutcome::kStopped;

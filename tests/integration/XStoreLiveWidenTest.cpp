@@ -9,6 +9,9 @@
 #include "XStore/XStore_RowScan.h"
 #include "XStore/XStore_WireEncode.h"
 #include "XStore/XStore_WalRing.h"
+#include "XStore/XStore_Tunables.h"
+#include "XStore/XStore_LiveWidenGovernor.h"
+#include "XStore/XStore_LiveWidenLoadSource.h"
 #include "include/DataStructs/FileRangeLock.h"
 #include "XStoreTestSupport.h"
 #include "XStoreSyscallFault.h"
@@ -383,6 +386,143 @@ TEST(FileRangeLockYieldTest, StressNoDeadlockNoLostWakeupExclusionHolds) {
                 static_cast<unsigned long long>(yields.load()));
 }
 
+// ---- FileRangeLock::WriterWaits (S3b-2 G1) --------------------------------------------------------------------------
+
+constexpr uint64_t kLongWaitUs = XStoreTunables::LIVE_WIDEN_WRITER_LONG_WAIT_US;
+
+// A WRITE on [0, 100) blocked behind a READ the test holds for hold_ms after the writer registered as waiting. Returns
+// the writer's own measurement of its LockRange call, in us.
+uint64_t BlockedWriteBehindHeldRead(FileRangeLock &lock, int hold_ms) {
+    lock.LockRange(0, 100, kRead);
+    uint64_t measured_us = 0;
+    std::thread writer([&] {
+        const Clock::time_point t0 = Clock::now();
+        lock.LockRange(50, 10, kWrite);
+        measured_us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t0).count());
+        lock.UnlockRange(50, 10, kWrite);
+    });
+    WaitForWaitingWriters(lock, 1);
+    std::this_thread::sleep_for(milliseconds(hold_ms));
+    lock.UnlockRange(0, 100, kRead);
+    writer.join();
+    return measured_us;
+}
+
+TEST(FileRangeLockWriterWaitTest, ABlockedWriteAddsOneLongWait) {
+    FileRangeLock lock;
+    const int hold_ms = static_cast<int>(kLongWaitUs / 1000) + 25;
+    const uint64_t measured_us = BlockedWriteBehindHeldRead(lock, hold_ms);
+    const FileRangeLock::WriterWaitStats s = lock.WriterWaits();
+    EXPECT_EQ(s.waits, 1u);
+    EXPECT_GE(s.total_us, static_cast<uint64_t>(hold_ms) * 1000);
+    EXPECT_LE(s.total_us, measured_us) << "the lock counted more than the writer spent in LockRange";
+    EXPECT_EQ(s.long_waits, 1u);
+}
+
+TEST(FileRangeLockWriterWaitTest, AShortBlockedWriteIsNotALongWait) {
+    FileRangeLock lock;
+    BlockedWriteBehindHeldRead(lock, 2);
+    const FileRangeLock::WriterWaitStats s = lock.WriterWaits();
+    EXPECT_EQ(s.waits, 1u);
+    EXPECT_GE(s.total_us, 2000u);
+    // A loaded machine can stretch a 2 ms wait past the threshold; the classification must follow the measured wait.
+    EXPECT_EQ(s.long_waits, s.total_us >= kLongWaitUs ? 1u : 0u);
+    if (s.total_us >= kLongWaitUs) std::printf("[writer wait] the 2 ms wait took %llu us\n", static_cast<unsigned long long>(s.total_us));
+}
+
+// Uncontended WRITEs, a READ that waits behind a WRITE, timed READ/WRITE attempts and a timed yielding READ add nothing.
+TEST(FileRangeLockWriterWaitTest, OnlyBlockedBlockingWritesCount) {
+    FileRangeLock lock;
+    lock.LockRange(0, 100, kWrite);
+    lock.LockRange(200, 10, kWrite); // disjoint: no wait
+    lock.UnlockRange(200, 10, kWrite);
+    EXPECT_FALSE(lock.TryLockRangeFor(10, 10, kRead, milliseconds(20)));
+    EXPECT_FALSE(lock.TryLockRangeFor(10, 10, kWrite, milliseconds(20)));
+    WriterYield yield;
+    EXPECT_FALSE(lock.TryReadLockYieldingFor(10, 10, milliseconds(20), milliseconds(20), yield));
+    std::atomic<bool> got{false};
+    std::thread reader([&] {
+        lock.LockRange(10, 10, kRead);
+        got.store(true);
+    });
+    std::this_thread::sleep_for(milliseconds(50));
+    EXPECT_FALSE(got.load()) << "the READ did not wait behind the WRITE";
+    lock.UnlockRange(0, 100, kWrite);
+    reader.join();
+    lock.UnlockRange(10, 10, kRead);
+    // A timed WRITE that waits and then gets in is not counted either.
+    lock.LockRange(0, 10, kRead);
+    std::thread releaser([&] {
+        std::this_thread::sleep_for(milliseconds(30));
+        lock.UnlockRange(0, 10, kRead);
+    });
+    EXPECT_TRUE(lock.TryLockRangeFor(0, 10, kWrite, milliseconds(3000)));
+    releaser.join();
+    lock.UnlockRange(0, 10, kWrite);
+    const FileRangeLock::WriterWaitStats s = lock.WriterWaits();
+    EXPECT_EQ(s.waits, 0u);
+    EXPECT_EQ(s.total_us, 0u);
+    EXPECT_EQ(s.long_waits, 0u);
+}
+
+// Rounds of kWriters writers that are known to block (a READ over all their ranges is held until every one is
+// registered as waiting), while other threads take uncontended WRITEs on their own ranges throughout. The count is
+// exact; the total lies between what the test held the READ for and what the writers measured around LockRange.
+TEST(FileRangeLockWriterWaitTest, StressCountsExactlyTheBlockedWriters) {
+    FileRangeLock lock;
+    constexpr unsigned kWriters = 8, kRounds = 40, kFree = 4;
+    std::atomic<bool> stop{false};
+    std::atomic<uint64_t> free_ops{0};
+    std::vector<std::thread> free_threads;
+    for (unsigned t = 0; t < kFree; ++t) {
+        free_threads.emplace_back([&, t] {
+            const unsigned long long off = 10000 + t * 10ULL;
+            while (!stop.load()) {
+                lock.LockRange(off, 10, kWrite);
+                lock.UnlockRange(off, 10, kWrite);
+                ++free_ops;
+            }
+        });
+    }
+    std::mt19937 rng(12345);
+    uint64_t measured_sum_us = 0, held_sum_us = 0;
+    for (unsigned round = 0; round < kRounds; ++round) {
+        lock.LockRange(0, 1000, kRead);
+        std::array<uint64_t, kWriters> measured{};
+        std::vector<std::thread> writers;
+        for (unsigned w = 0; w < kWriters; ++w) {
+            const unsigned long long off = rng() % 900, len = 1 + rng() % 100;
+            writers.emplace_back([&lock, &measured, w, off, len] {
+                const Clock::time_point t0 = Clock::now();
+                lock.LockRange(off, len, kWrite);
+                measured[w] = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t0).count());
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+                lock.UnlockRange(off, len, kWrite);
+            });
+        }
+        WaitForWaitingWriters(lock, kWriters);
+        const Clock::time_point held_from = Clock::now();
+        std::this_thread::sleep_for(milliseconds(1));
+        held_sum_us += kWriters * static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - held_from).count());
+        lock.UnlockRange(0, 1000, kRead);
+        for (std::thread &t : writers) t.join();
+        for (uint64_t m : measured) measured_sum_us += m;
+    }
+    stop.store(true);
+    for (std::thread &t : free_threads) t.join();
+    const FileRangeLock::WriterWaitStats s = lock.WriterWaits();
+    EXPECT_EQ(s.waits, static_cast<uint64_t>(kWriters) * kRounds);
+    EXPECT_GE(s.total_us, held_sum_us);
+    EXPECT_LE(s.total_us, measured_sum_us);
+    EXPECT_LE(s.long_waits, s.waits);
+    EXPECT_GT(free_ops.load(), 0u);
+    std::printf("[writer wait stress] waits %llu, total %llu us (held %llu, measured %llu), long %llu, free ops %llu\n",
+                static_cast<unsigned long long>(s.waits), static_cast<unsigned long long>(s.total_us),
+                static_cast<unsigned long long>(held_sum_us), static_cast<unsigned long long>(measured_sum_us),
+                static_cast<unsigned long long>(s.long_waits), static_cast<unsigned long long>(free_ops.load()));
+}
+
 // ---- Helpers --------------------------------------------------------------------------------------------------------
 
 unsigned long long Jan1(unsigned short year) {
@@ -604,7 +744,8 @@ protected:
 
     void RunIdleWiden(XStore &store, int width, const std::string &db, const std::string &ref_db);
     // The concurrent oracle of section 2, with the builder's worker count and group size.
-    void RunConcurrentOracle(const std::string &db, unsigned workers, uint64_t group_bytes);
+    void RunConcurrentOracle(const std::string &db, unsigned workers, uint64_t group_bytes,
+                             livewiden::LiveWidenGovernor *governor = nullptr);
 
     // Answers on [lo, hi] for every listed column, against a scan of the data file (no concurrent writers here).
     void ExpectAnswersMatchTheData(XStore &store, const std::string &db, uint64_t lo, uint64_t hi,
@@ -732,7 +873,8 @@ TEST_F(XStoreLiveWidenTest, IdleWidenTo100IsByteIdenticalToTheStartupRebuild) {
 // the data file is the exact answer the store must give at that instant: before, during and after the widen. At the
 // end every tracked column of every exact block equals a startup rebuild of the final data, and the bloom holds every
 // present value.
-void XStoreLiveWidenTest::RunConcurrentOracle(const std::string &db, unsigned workers, uint64_t group_bytes) {
+void XStoreLiveWidenTest::RunConcurrentOracle(const std::string &db, unsigned workers, uint64_t group_bytes,
+                                              livewiden::LiveWidenGovernor *governor) {
     XStore store;
     constexpr int kWidth = 70;
     const uint64_t rpb = Rpb();
@@ -985,7 +1127,7 @@ void XStoreLiveWidenTest::RunConcurrentOracle(const std::string &db, unsigned wo
     XStore::LiveWidenStats stats;
     const Clock::time_point widen_start = Clock::now();
     const Result result = store.LiveWidenOneYear(path, kYear, kRowLength, kWidth, true, true, nullptr, &stats, workers,
-                                                 group_bytes);
+                                                 group_bytes, governor);
     const int64_t widen_ms = MsSince(widen_start);
     const int queries_during = queries.load() - queries_before;
     const int writes_at_end_of_widen = writes.load();
@@ -3346,6 +3488,285 @@ TEST_F(XStoreLiveWidenTest, AWriterWaitingForeverDelaysEachChunkByTheCapButTheWi
                 static_cast<unsigned long long>(stats.chunks), static_cast<unsigned long long>(stats.writer_yields));
     BuildStartupReference(store, db, db + "REF", 70);
     ExpectSameFilesAs(db, db + "REF");
+}
+
+// ---- 13. Load governor (S3b-2 G3): the governed live widen -----------------------------------------------------------
+
+// Fake governor inputs. Every clock read advances fake time by one second, so every Permit evaluates (tick 1 s) and a
+// parked worker (one Permit per 50 ms) moves fake time 20 s per real second. The sampler's foreground CPU per fake
+// second is fg(n) for the n-th sample; `writers` (optional) supplies the writer counters (a real load source).
+struct FakeGovernorInputs {
+    std::atomic<int64_t> now_ns{1'000'000'000};
+    std::mutex mtx;
+    double busy_s = 0;
+    int64_t last_sample_ns = 1'000'000'000;
+    uint64_t samples = 0;
+    std::function<double(uint64_t)> fg = [](uint64_t) { return 0.0; };
+    livewiden::LiveWidenLoadSource *writers = nullptr;
+
+    Clock::time_point Now() {
+        return Clock::time_point(std::chrono::duration_cast<Clock::duration>(std::chrono::nanoseconds(now_ns += 1'000'000'000)));
+    }
+    livewiden::Signals Sample() {
+        std::lock_guard<std::mutex> lk(mtx);
+        livewiden::Signals s = writers != nullptr ? writers->Sample() : livewiden::Signals{};
+        const int64_t t = now_ns.load();
+        // Large enough that the builder's real thread CPU (reported through AddBuilderCpu) barely moves the figure.
+        busy_s += fg(samples++) * static_cast<double>(t - last_sample_ns) * 1e-9;
+        last_sample_ns = t;
+        s.busy_cpu_s = busy_s;
+        return s;
+    }
+};
+
+livewiden::GovernorParams FakeParams(unsigned cores, unsigned max_workers, unsigned floor_workers) {
+    livewiden::GovernorParams p;
+    p.cores = cores;
+    p.max_workers = max_workers;
+    p.floor_workers = floor_workers;
+    p.headroom_cores = 2;
+    p.tick = std::chrono::seconds(1);
+    p.brake_hold = std::chrono::seconds(3);
+    p.starvation_guard = std::chrono::seconds(5);
+    p.at_floor_warn = std::chrono::seconds(1'000'000);
+    p.wait_brake_us = 1000;
+    p.long_waits_brake = 1;
+    p.smoothing_ticks = 1;   // a raise looks at the last tick only: the levels follow fg() tick by tick
+    p.label = "governed test";
+    return p;
+}
+
+std::unique_ptr<livewiden::LiveWidenGovernor> MakeFakeGovernor(FakeGovernorInputs &in, livewiden::GovernorParams p) {
+    return std::make_unique<livewiden::LiveWidenGovernor>(std::move(p), [&in] { return in.Sample(); },
+                                                          [&in] { return in.Now(); });
+}
+
+// The allowed count changes on every tick: with 8 cores, headroom 2 and max 4, an idle tick raises it by one and a
+// tick with 100 foreground CPUs drops it to the floor at once, so the pattern idle x3, busy, idle x2, busy gives
+// 1 -> 2 -> 3 -> 4 -> 1 -> 2 -> 3 -> 1 -> ... The widen equals the startup rebuild (= the sequential builder), and no
+// more workers ever fold at once than the MOST the governor ever allowed during the run (peak_active counts workers
+// between a granted Permit and their Release; only a worker whose index is below `allowed` is granted). This is not
+// "never more than allowed at that instant": after a drop, workers finish their current group (parking is between
+// groups only). Second run: target 2 (4 cores, headroom 2) with 4 workers started: never more than 2 fold at once.
+TEST_F(XStoreParallelLiveWidenTest, GovernedWidenIsByteIdenticalAndNeverRunsMoreWorkersThanTheMostEverAllowed) {
+    XStore store;
+    const std::string db = "LWGOVBYTES";
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    Insert(store, db, {{Epoch(0), MixedRow(0, 10)}});
+    Rows rows;
+    for (uint64_t i = 1; i < 20 * Rpb() + 300; ++i) rows.emplace_back(Epoch(i), MixedRow(i, i % 10 == 0 ? 70 : 40 + static_cast<int>(i % 9)));
+    Insert(store, db, rows);
+    BuildStartupReference(store, db, db + "REF", 70);
+    const std::string path = DbPath(db);
+    {
+        SCOPED_TRACE("allowed 1..4, changing every tick");
+        FakeGovernorInputs in;
+        in.fg = [](uint64_t n) { return n % 4 == 3 ? 100.0 : 0.0; };
+        auto gov = MakeFakeGovernor(in, FakeParams(8, 4, 1));
+        XStore::LiveWidenStats stats;
+        ASSERT_EQ(store.LiveWidenOneYear(path, kYear, kRowLength, 70, true, true, nullptr, &stats, 1, Rpb() * kRowLength,
+                                         gov.get()), Result::kDone);
+        ExpectSameFilesAs(db, db + "REF");
+        const auto snap = gov->GetSnapshot();
+        EXPECT_EQ(snap.min_allowed_seen, 1u);
+        EXPECT_EQ(snap.max_allowed_seen, 4u);
+        EXPECT_GE(snap.peak_active, 1u);
+        EXPECT_LE(snap.peak_active, snap.max_allowed_seen);
+        EXPECT_EQ(snap.active, 0u) << "every grant released";
+        EXPECT_GT(snap.evaluations, 100u);
+        EXPECT_TRUE(stats.governed);
+        EXPECT_EQ(stats.governor_allowed_max, 4u);
+        EXPECT_GT(stats.governor_grants, 20u);
+        std::printf("[governed widen] grants %llu, denials %llu, peak %u, parked %.2f s\n",
+                    static_cast<unsigned long long>(snap.grants), static_cast<unsigned long long>(snap.denials),
+                    snap.peak_active, stats.governor_parked_s);
+    }
+    {
+        SCOPED_TRACE("allowed at most 2 of 4 started workers");
+        FakeGovernorInputs in;
+        auto gov = MakeFakeGovernor(in, FakeParams(4, 4, 1));
+        XStore::LiveWidenStats stats;
+        ASSERT_EQ(store.LiveWidenOneYear(path, kYear, kRowLength, 70, true, true, nullptr, &stats, 1, Rpb() * kRowLength,
+                                         gov.get()), Result::kDone);
+        ExpectSameFilesAs(db, db + "REF");
+        const auto snap = gov->GetSnapshot();
+        EXPECT_EQ(snap.max_allowed_seen, 2u);
+        EXPECT_LE(snap.peak_active, 2u);
+        EXPECT_GT(snap.denials, 0u) << "workers 2 and 3 were started and asked";
+    }
+    ExpectAnswersMatchTheData(store, db, 0, 2 * Rpb() - 1, {0, 2, 64, 66});
+}
+
+// The S2 concurrent oracle (writers, overwrites, deletes, exact answers during the widen, final state equal to a
+// startup rebuild) with the widen governed, the allowed count moving 1..4.
+TEST_F(XStoreParallelLiveWidenTest, GovernedWidenLosesNoUpdateUnderConcurrentWrites) {
+    FakeGovernorInputs in;
+    in.fg = [](uint64_t n) { return n % 5 == 4 ? 100.0 : 0.0; };
+    auto gov = MakeFakeGovernor(in, FakeParams(8, 4, 1));
+    RunConcurrentOracle("LWGOVLIVE", 1, Rpb() * kRowLength, gov.get());
+    const auto snap = gov->GetSnapshot();
+    EXPECT_EQ(snap.max_allowed_seen, 4u);
+    EXPECT_LE(snap.peak_active, 4u);
+}
+
+// Floor 0 with the CPU target held at 0 (100 foreground CPUs): no worker may fold until the starvation guard (5 fake
+// seconds) has passed, then worker 0 gets one group per guard period, so the year completes through single grants.
+// Four groups (group_bytes a quarter of the preallocated year file).
+TEST_F(XStoreParallelLiveWidenTest, GovernedFloorZeroProgressesOnlyThroughStarvationGrants) {
+    XStore store;
+    const std::string db = "LWGOVFLOOR0";
+    SeedNarrowIndexWideRows(store, db, 3000, 70);
+    BuildStartupReference(store, db, db + "REF", 70);
+    const std::string path = DbPath(db);
+    const uint64_t year_bytes = static_cast<uint64_t>(std::filesystem::file_size(YearPath(db, ".XSTORE")));
+    const uint64_t group_bytes = (year_bytes + 3) / 4;
+    FakeGovernorInputs in;
+    in.fg = [](uint64_t) { return 100.0; };
+    auto gov = MakeFakeGovernor(in, FakeParams(4, 2, 0));
+    const int64_t t0 = in.now_ns.load();
+    XStore::LiveWidenStats stats;
+    ASSERT_EQ(store.LiveWidenOneYear(path, kYear, kRowLength, 70, true, true, nullptr, &stats, 1, group_bytes, gov.get()),
+              Result::kDone);
+    ExpectSameFilesAs(db, db + "REF");
+    const auto snap = gov->GetSnapshot();
+    EXPECT_EQ(snap.max_allowed_seen, 0u) << "only starvation grants";
+    EXPECT_EQ(snap.grants, 4u) << "one grant per group";
+    EXPECT_EQ(snap.peak_active, 1u) << "only worker 0 is ever granted";
+    EXPECT_GT(snap.denials, 0u);
+    EXPECT_GE(in.now_ns.load() - t0, 4 * 5 * 1'000'000'000LL) << "each group waited a full guard period";
+    EXPECT_GT(stats.governor_parked_s, 0.0);
+}
+
+// Every worker parked (floor 0, guard far away): the stop flag ends the year within a few 50 ms park slices.
+TEST_F(XStoreParallelLiveWidenTest, GovernedStopWhileEveryWorkerIsParkedReturnsPromptly) {
+    XStore store;
+    const std::string db = "LWGOVSTOP";
+    SeedNarrowIndexWideRows(store, db, 3000, 70);
+    const std::string path = DbPath(db);
+    FakeGovernorInputs in;
+    in.fg = [](uint64_t) { return 100.0; };
+    livewiden::GovernorParams p = FakeParams(4, 2, 0);
+    p.starvation_guard = std::chrono::seconds(1'000'000'000);
+    auto gov = MakeFakeGovernor(in, p);
+    std::atomic<bool> stop{false};
+    auto builder = std::async(std::launch::async, [&] {
+        XStore b;
+        return b.LiveWidenOneYear(path, kYear, kRowLength, 70, true, true, &stop, nullptr, 1, Rpb() * kRowLength,
+                                  gov.get());
+    });
+    const Clock::time_point deadline = Clock::now() + std::chrono::seconds(10);
+    while (gov->GetSnapshot().denials < 10 && Clock::now() < deadline) std::this_thread::sleep_for(milliseconds(5));
+    ASSERT_GE(gov->GetSnapshot().denials, 10u) << "the workers never parked";
+    EXPECT_EQ(gov->GetSnapshot().grants, 0u);
+    const Clock::time_point stopped_at = Clock::now();
+    stop.store(true);
+    const bool ended = builder.wait_for(std::chrono::seconds(10)) == std::future_status::ready;
+    const int64_t stop_ms = MsSince(stopped_at);
+    ASSERT_TRUE(ended);
+    EXPECT_EQ(builder.get(), Result::kStopped);
+    EXPECT_LT(stop_ms, 200) << "parked workers took " << stop_ms << " ms to see the stop flag";
+    EXPECT_TRUE(XStore::GetOrOpenZoneMap(path, kYear, kRowLength).Rebuilding());
+}
+
+// One governor for a pass over two years (as RunLiveWidenPass shares it): the older year's data-file lock already
+// carries long writer waits from before the pass. At the switch to that year LiveWidenOneYear points the load source
+// at the new lock and rebaselines, so its (larger) cumulative counters are a baseline, not a writer brake. Writer
+// counters come from a real LiveWidenLoadSource (CPU from a missing /proc file: constant).
+TEST_F(XStoreParallelLiveWidenTest, GovernedPassOverTwoYearsDoesNotBrakeOnTheNextFilesCounters) {
+    XStore store;
+    const std::string db = "LWGOVYEARS";
+    const std::string path = DbPath(db);
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    Rows rows;
+    for (unsigned short y : {1979, 1980}) {
+        Insert(store, db, {{Jan1(y), ValueRow(1, 10)}});
+        for (uint64_t r = 1; r < 3 * Rpb(); ++r) rows.emplace_back(Jan1(y) + r, ValueRow(r, 70));
+    }
+    Insert(store, db, rows);
+    // Two long writer waits on 1979's lock (processed second: newest year first).
+    FileRangeLock &old_lock = FileLockRegistry::Get(YearPath(db, ".XSTORE", 1979));
+    for (int i = 0; i < 2; ++i) {
+        old_lock.LockRange(0, kRowLength, kRead);
+        std::thread writer([&] {
+            old_lock.LockRange(0, kRowLength, kWrite);
+            old_lock.UnlockRange(0, kRowLength, kWrite);
+        });
+        WaitForWaitingWriters(old_lock, 1);
+        std::this_thread::sleep_for(milliseconds(40));
+        old_lock.UnlockRange(0, kRowLength, kRead);
+        writer.join();
+    }
+    ASSERT_GE(old_lock.WriterWaits().long_waits, 2u);
+    ASSERT_LT(FileLockRegistry::Get(YearPath(db, ".XSTORE", 1980)).WriterWaits().long_waits,
+              old_lock.WriterWaits().long_waits) << "the second file's counters must be the larger ones";
+
+    livewiden::LiveWidenLoadSource load((scratch->test_root / "no_such_proc_stat").string());
+    FakeGovernorInputs in;
+    in.writers = &load;
+    auto gov = MakeFakeGovernor(in, FakeParams(8, 4, 1));
+    const Clock::time_point g = *XStore::LiveWidenLastGrowthForTests(path);
+    const auto pass = store.RunLiveWidenPass(g + std::chrono::seconds(30), 1, gov.get(), &load);
+    EXPECT_EQ(YearsAndResults(pass), (PassResult{{1980, Result::kDone}, {1979, Result::kDone}}));
+    const auto snap = gov->GetSnapshot();
+    EXPECT_EQ(snap.brakes, 0u) << "the next file's cumulative counters were taken as writer waits";
+    EXPECT_EQ(snap.max_allowed_seen, 4u);
+    EXPECT_EQ(load.Progress(), 0.0) << "the year is cleared after its workers are joined";
+    EXPECT_EQ(XStore::GetOrOpenZoneMap(path, 1979, kRowLength).TrackedColumnCount(), 70u);
+    EXPECT_EQ(XStore::GetOrOpenZoneMap(path, 1980, kRowLength).TrackedColumnCount(), 70u);
+}
+
+// LiveWidenLoadSource: busy CPU from /proc/stat never goes backwards while this thread burns CPU; the writer counters
+// are read through the year's lock pointer; an unreadable /proc file repeats the previous values; progress follows
+// the watermark.
+TEST(LiveWidenLoadSourceTest, ReadsCpuAndTheYearsWriterCountersAndSurvivesAMissingProcFile) {
+    livewiden::LiveWidenLoadSource load;
+    EXPECT_GE(load.Cores(), 1u);
+    double prev = load.Sample().busy_cpu_s;
+    EXPECT_GT(prev, 0.0);
+    volatile uint64_t sink = 0;
+    for (int i = 0; i < 20; ++i) {
+        const Clock::time_point until = Clock::now() + milliseconds(10);
+        while (Clock::now() < until) sink = sink + 1;
+        const double cur = load.Sample().busy_cpu_s;
+        EXPECT_GE(cur, prev);
+        prev = cur;
+    }
+
+    FileRangeLock lock;
+    std::atomic<uint64_t> done{25};
+    load.SetYear(&lock, &done, 100);
+    EXPECT_DOUBLE_EQ(load.Progress(), 0.25);
+    EXPECT_EQ(load.Sample().long_waits, 0u);
+    lock.LockRange(0, 10, kRead);
+    std::thread writer([&] {
+        lock.LockRange(0, 10, kWrite);
+        lock.UnlockRange(0, 10, kWrite);
+    });
+    WaitForWaitingWriters(lock, 1);
+    std::this_thread::sleep_for(milliseconds(30));
+    lock.UnlockRange(0, 10, kRead);
+    writer.join();
+    const livewiden::Signals s = load.Sample();
+    EXPECT_EQ(s.writer_waits, 1u);
+    EXPECT_EQ(s.long_waits, 1u);
+    EXPECT_GE(s.writer_wait_us, 25'000u);
+    load.SetYear(nullptr, nullptr, 0);
+    EXPECT_EQ(load.Progress(), 0.0);
+    EXPECT_EQ(load.Sample().writer_waits, 1u) << "no lock: the previous values repeat";
+
+    livewiden::LiveWidenLoadSource missing("/nonexistent/proc/stat");
+    for (int i = 0; i < 3; ++i) EXPECT_EQ(missing.Sample().busy_cpu_s, 0.0);
+    // Real values first, then the file goes away: the last good value repeats.
+    ScratchDir dir("xstore_load_source_test");
+    const std::string fake = (dir.test_root / "stat").string();
+    { std::ofstream(fake) << "cpu  100 0 100 1000 0 0 0 0 0 0\n"; }
+    livewiden::LiveWidenLoadSource flaky(fake);
+    const double good = flaky.Sample().busy_cpu_s;
+    EXPECT_GT(good, 0.0);
+    std::filesystem::remove(fake);
+    EXPECT_EQ(flaky.Sample().busy_cpu_s, good);
+    { std::ofstream(fake) << "garbage\n"; }
+    EXPECT_EQ(flaky.Sample().busy_cpu_s, good);
 }
 
 } // namespace

@@ -19,6 +19,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <ctime>
 #include <fcntl.h>
 #include <fstream>
 #include <iomanip>
@@ -36,6 +37,9 @@
 
 #include <spdlog/fmt/fmt.h>
 #include "include/Logger/Logger.h"
+#include "include/DataStructs/FileRangeLock.h"
+#include "include/XStore/XStore_LiveWidenGovernor.h"
+#include "include/XStore/XStore_LiveWidenLoadSource.h"
 #include "tests/integration/XStoreTestSupport.h"
 
 using namespace xstore_test;
@@ -1004,6 +1008,15 @@ TEST_F(XStorePerfTest, RebuildThroughput_FourYears) {
 // many seconds (60 recommended; B and C count only builder time), over
 // XSTORE_LW_ROUNDS rounds (default 3: about 12-14 minutes at 60 s).
 // XSTORE_LW_WORKERS (default 1) sets the builder's worker count (parallel live widen).
+// XSTORE_LW_GOVERNOR=1 runs every timed builder run of B and C through a production load governor (real clock, real
+// /proc/stat, the year lock's writer counters; one governor per arm phase, as a pass has one per DB) instead of the
+// fixed XSTORE_LW_WORKERS (which the untimed B resets still use; their CPU, all on the calling thread with 1 worker,
+// is reported to the governor as builder CPU so it is not taken for foreground load). Every arm also reports the
+// year file lock's writer waits (FileRangeLock::WriterWaits deltas over the counted time) and, sampled once per
+// second of builder time, their per-second distribution: the governor's writer-brake calibration input. Governed
+// arms also print a per-second timeline of the governor (allowed, CPU target, foreground, brake, reason).
+// XSTORE_LW_WAIT_BRAKE_US overrides the governed arms' writer-wait brake (calibration only).
+// XSTORE_LW_NO_WRITERS=1 starts no writer thread (the builder alone: widen speed with an idle machine).
 // ---------------------------------------------------------------------
 
 namespace {
@@ -1036,6 +1049,17 @@ struct ArmResult {
     std::vector<double> overwrite_us, append_us;
     std::vector<double> holds_us;
     unsigned long long builder_runs = 0, timeouts = 0, yields = 0, yield_us = 0;
+    unsigned long long wait_us = 0, waits = 0, long_waits = 0;   // writer waits on the year lock, counted time only
+    unsigned long long chunks = 0, hole_chunks = 0;
+    // Every builder arm, once per second of builder time: the year lock's writer wait (us/s) and long waits.
+    std::vector<double> sec_wait_rate, sec_long;
+    // Governed arms: allowed sampled with them, the governor's brakes and grants, parked time, a per-second timeline.
+    std::vector<std::string> timeline;
+    unsigned allowed_min = 0, allowed_max = 0;
+    double allowed_sum = 0;
+    unsigned long long allowed_samples = 0, brakes = 0, grants = 0;
+    double parked_s = 0;
+    unsigned max_workers = 0;
 };
 
 std::string LatencyText(const std::vector<double> &v) {
@@ -1087,10 +1111,23 @@ TEST_F(XStorePerfTest, LiveWidenDuringInserts) {
     }
     const std::string path = (fs::current_path() / "DataStore" / db).string();
     const unsigned workers = static_cast<unsigned>(EnvInt("XSTORE_LW_WORKERS", 1)); // live widen workers (default 1)
-    std::cout << "[PERF] LiveWidenDuringInserts workers " << workers << std::endl;
-    const auto widen = [&](uint32_t width, XStore::LiveWidenStats *stats) {
+    const bool governed = EnvInt("XSTORE_LW_GOVERNOR", 0) == 1;
+    std::cout << "[PERF] LiveWidenDuringInserts workers " << (governed ? std::string("governed") : std::to_string(workers))
+              << std::endl;
+    FileRangeLock &year_lock = FileLockRegistry::Get(fmt::format("{}/2024.XSTORE", path)); // the writers' lock key
+    std::unique_ptr<livewiden::LiveWidenLoadSource> gov_load;
+    std::unique_ptr<livewiden::LiveWidenGovernor> gov;
+    const auto widen = [&](uint32_t width, XStore::LiveWidenStats *stats, bool use_governor = false) {
         XStore b;
-        return b.LiveWidenOneYear(path, 2024, kLiveWidenRowLength, width, true, true, nullptr, stats, workers);
+        return b.LiveWidenOneYear(path, 2024, kLiveWidenRowLength, width, true, true, nullptr, stats, workers,
+                                  XStoreTunables::LIVE_WIDEN_GROUP_BYTES, use_governor ? gov.get() : nullptr,
+                                  use_governor ? gov_load.get() : nullptr);
+    };
+    const auto add_waits = [&](ArmResult &r, const FileRangeLock::WriterWaitStats &w0) {
+        const FileRangeLock::WriterWaitStats w1 = year_lock.WriterWaits();
+        r.wait_us += w1.total_us - w0.total_us;
+        r.waits += w1.waits - w0.waits;
+        r.long_waits += w1.long_waits - w0.long_waits;
     };
     ASSERT_EQ(widen(kLiveWidenColumns, nullptr), XStore::LiveWidenResult::kDone); // arm A starts 100 wide
 
@@ -1101,7 +1138,9 @@ TEST_F(XStorePerfTest, LiveWidenDuringInserts) {
     std::mutex sink_mutex;
     ArmResult *sink[3] = {nullptr, nullptr, nullptr};
     std::vector<std::thread> writers;
-    for (int t = 0; t < 4; ++t) {
+    const int writer_threads = EnvInt("XSTORE_LW_NO_WRITERS", 0) == 1 ? 0 : 4;
+    std::cout << "[PERF] LiveWidenDuringInserts writer threads " << writer_threads << std::endl;
+    for (int t = 0; t < writer_threads; ++t) {
         writers.emplace_back([&, t] {
             XStore w;
             std::mt19937_64 rng(99 + t);
@@ -1161,26 +1200,109 @@ TEST_F(XStorePerfTest, LiveWidenDuringInserts) {
                 sink[arm] = &r;
             }
             if (arm == 0) {
+                const FileRangeLock::WriterWaitStats w0 = year_lock.WriterWaits();
                 recording.store(0);
                 const auto t0 = std::chrono::steady_clock::now();
                 std::this_thread::sleep_for(std::chrono::seconds(phase_s));
                 recording.store(-1);
                 r.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+                add_waits(r, w0);
                 continue;
             }
+            std::atomic<bool> phase_over{false};
+            if (governed) {
+                gov_load = std::make_unique<livewiden::LiveWidenLoadSource>();
+                // XSTORE_LW_WAIT_BRAKE_US: try another writer-wait brake (us/s) without changing the tunable.
+                livewiden::GovernorParams params;
+                params.cores = gov_load->Cores();
+                params.label = fmt::format("perf r{} {}", round, arm == 1 ? "B" : "C");
+                params.wait_brake_us = static_cast<uint64_t>(EnvInt("XSTORE_LW_WAIT_BRAKE_US",
+                                                                    static_cast<int>(params.wait_brake_us)));
+                livewiden::LiveWidenLoadSource *src = gov_load.get();
+                gov = std::make_unique<livewiden::LiveWidenGovernor>(
+                    std::move(params), [src] { return src->Sample(); },
+                    [] { return livewiden::LiveWidenGovernor::Clock::now(); }, [src] { return src->Progress(); });
+                r.max_workers = gov->MaxWorkers();
+                r.allowed_min = std::numeric_limits<unsigned>::max();
+            }
+            // Once a second; a second counts only if the builder was timed (recording == arm) at both ends.
+            std::thread monitor([&, arm] {
+                FileRangeLock::WriterWaitStats w0 = year_lock.WriterWaits();
+                auto t0 = std::chrono::steady_clock::now();
+                bool was_recording = recording.load() == arm;
+                double builder_s = 0;
+                while (!phase_over.load()) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    const FileRangeLock::WriterWaitStats w1 = year_lock.WriterWaits();
+                    const auto t1 = std::chrono::steady_clock::now();
+                    const bool is_recording = recording.load() == arm;
+                    const double dt = std::chrono::duration<double>(t1 - t0).count();
+                    if (was_recording && is_recording && dt > 0) {
+                        builder_s += dt;
+                        const double rate = static_cast<double>(w1.total_us - w0.total_us) / dt;
+                        const double lw = static_cast<double>(w1.long_waits - w0.long_waits);
+                        std::string line;
+                        if (governed) {
+                            const auto snap = gov->GetSnapshot();
+                            static constexpr const char *kReason[] = {"start", "none", "ramp", "fgcpu", "WAIT", "LONG"};
+                            line = fmt::format("t{:.0f} a{} tgt{} fg{:.1f}/{:.1f} lock{:.0f}k lw{:.0f} gov{:.0f}k glw{} {}{}",
+                                               builder_s, snap.allowed, snap.cpu_target, snap.fg_tick, snap.fg_cores,
+                                               rate / 1000, lw, snap.wait_us_per_s / 1000, snap.long_waits_delta,
+                                               kReason[static_cast<int>(snap.reason)], snap.brake_active ? " BRAKE" : "");
+                        }
+                        std::lock_guard<std::mutex> lock(sink_mutex);
+                        r.sec_wait_rate.push_back(rate);
+                        r.sec_long.push_back(lw);
+                        if (governed) {
+                            const unsigned a = gov->GetSnapshot().allowed;
+                            r.allowed_min = std::min(r.allowed_min, a);
+                            r.allowed_max = std::max(r.allowed_max, a);
+                            r.allowed_sum += a;
+                            ++r.allowed_samples;
+                            r.timeline.push_back(std::move(line));
+                        }
+                    }
+                    w0 = w1;
+                    t0 = t1;
+                    was_recording = is_recording;
+                }
+            });
             while (r.seconds < phase_s) {
-                if (arm == 1) all_done = widen(64, nullptr) == XStore::LiveWidenResult::kDone && all_done; // untimed reset
+                if (arm == 1) { // untimed reset; with a governor its CPU is builder CPU, not foreground
+                    const auto cpu_ns = [] {
+                        timespec ts{};
+                        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+                        return static_cast<uint64_t>(ts.tv_sec) * 1'000'000'000ull + static_cast<uint64_t>(ts.tv_nsec);
+                    };
+                    const uint64_t c0 = cpu_ns();
+                    all_done = widen(64, nullptr) == XStore::LiveWidenResult::kDone && all_done;
+                    if (gov != nullptr) gov->AddBuilderCpu(cpu_ns() - c0);
+                }
                 XStore::LiveWidenStats stats;
+                const FileRangeLock::WriterWaitStats w0 = year_lock.WriterWaits();
                 recording.store(arm);
                 const auto t0 = std::chrono::steady_clock::now();
-                all_done = widen(kLiveWidenColumns, &stats) == XStore::LiveWidenResult::kDone && all_done;
+                all_done = widen(kLiveWidenColumns, &stats, governed) == XStore::LiveWidenResult::kDone && all_done;
                 recording.store(-1);
                 r.seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+                add_waits(r, w0);
+                r.parked_s += stats.governor_parked_s;
+                r.chunks += stats.chunks;
+                r.hole_chunks += stats.hole_chunks;
                 r.holds_us.insert(r.holds_us.end(), stats.lock_hold_us.begin(), stats.lock_hold_us.end());
                 ++r.builder_runs;
                 r.timeouts += stats.lock_timeouts;
                 r.yields += stats.writer_yields;
                 r.yield_us += stats.writer_yield_us;
+            }
+            phase_over.store(true);
+            monitor.join();
+            if (governed) {
+                const auto snap = gov->GetSnapshot();
+                r.brakes = snap.brakes;
+                r.grants = snap.grants;
+                gov.reset();
+                gov_load.reset();
             }
         }
     }
@@ -1199,12 +1321,34 @@ TEST_F(XStorePerfTest, LiveWidenDuringInserts) {
                       << (arm == 0 ? std::string() : fmt::format(" | builder runs {} hold {} timeouts {} writer yields {} ({} ms)",
                                                                  r.builder_runs, LatencyText(r.holds_us), r.timeouts,
                                                                  r.yields, r.yield_us / 1000))
+                      << (arm == 0 ? std::string()
+                                   : fmt::format(" | run avg {:.2f} s, chunks {} (holes {}) | per-second wait us/s p50 {:.0f} "
+                                                 "p95 {:.0f} p99 {:.0f} max {:.0f} ({} s), seconds with a long wait {}",
+                                                 r.builder_runs ? r.seconds / static_cast<double>(r.builder_runs) : 0.0,
+                                                 r.chunks, r.hole_chunks, Quantile(r.sec_wait_rate, 0.5),
+                                                 Quantile(r.sec_wait_rate, 0.95), Quantile(r.sec_wait_rate, 0.99),
+                                                 r.sec_wait_rate.empty() ? 0.0 : *std::max_element(r.sec_wait_rate.begin(), r.sec_wait_rate.end()),
+                                                 r.sec_wait_rate.size(),
+                                                 std::count_if(r.sec_long.begin(), r.sec_long.end(), [](double v) { return v > 0; })))
+                      << fmt::format(" | writer waits {} us ({:.0f} us/s) {} waits ({:.1f}/s) {} long ({:.2f}/s)", r.wait_us,
+                                     r.seconds > 0 ? static_cast<double>(r.wait_us) / r.seconds : 0.0, r.waits,
+                                     r.seconds > 0 ? static_cast<double>(r.waits) / r.seconds : 0.0, r.long_waits,
+                                     r.seconds > 0 ? static_cast<double>(r.long_waits) / r.seconds : 0.0)
+                      << (r.allowed_samples == 0 ? std::string()
+                                                 : fmt::format(" | governor max {} allowed min {} max {} avg {:.2f} ({} samples) "
+                                                               "brakes {} grants {} parked {:.1f} s", r.max_workers,
+                                                               r.allowed_min, r.allowed_max,
+                                                               r.allowed_sum / static_cast<double>(r.allowed_samples),
+                                                               r.allowed_samples, r.brakes, r.grants, r.parked_s))
                       << std::endl;
+            for (const std::string &line : r.timeline)
+                std::cout << "[PERF] LiveWidenDuringInserts timeline r" << round << " " << (arm == 1 ? "B" : "C") << " " << line
+                          << std::endl;
         }
     }
     for (int arm = 0; arm < 3; ++arm) {
-        std::vector<double> rate, ow50, ow99, ow999, ap50, ap99, ap999;
-        std::vector<double> holds;
+        std::vector<double> rate, ow50, ow99, ow999, ap50, ap99, ap999, wait_rate, waits_rate, long_rate, runs;
+        std::vector<double> holds, per_sec;
         for (const auto &round : results) {
             const ArmResult &r = round[static_cast<size_t>(arm)];
             rate.push_back(r.seconds > 0 ? static_cast<double>(r.rows) / r.seconds : 0.0);
@@ -1215,12 +1359,27 @@ TEST_F(XStorePerfTest, LiveWidenDuringInserts) {
             ap99.push_back(Quantile(r.append_us, 0.99));
             ap999.push_back(Quantile(r.append_us, 0.999));
             holds.insert(holds.end(), r.holds_us.begin(), r.holds_us.end());
+            const double secs = r.seconds > 0 ? r.seconds : 1.0;
+            wait_rate.push_back(static_cast<double>(r.wait_us) / secs);
+            waits_rate.push_back(static_cast<double>(r.waits) / secs);
+            long_rate.push_back(static_cast<double>(r.long_waits) / secs);
+            runs.push_back(static_cast<double>(r.builder_runs));
+            per_sec.insert(per_sec.end(), r.sec_wait_rate.begin(), r.sec_wait_rate.end());
         }
         std::cout << fmt::format("[PERF] LiveWidenDuringInserts MEDIAN over {} rounds | {} | {:.0f} rows/s | overwrite p50 {:.1f} "
                                  "p99 {:.1f} p99.9 {:.1f} ms | head RangeInsert p50 {:.1f} p99 {:.1f} p99.9 {:.1f} ms", rounds,
                                  kArmNames[arm], Quantile(rate, 0.5), Quantile(ow50, 0.5) / 1000, Quantile(ow99, 0.5) / 1000,
                                  Quantile(ow999, 0.5) / 1000, Quantile(ap50, 0.5) / 1000, Quantile(ap99, 0.5) / 1000,
                                  Quantile(ap999, 0.5) / 1000)
-                  << (arm == 0 ? std::string() : " | lock hold over all rounds " + LatencyText(holds)) << std::endl;
+                  << (arm == 0 ? std::string() : " | lock hold over all rounds " + LatencyText(holds))
+                  << fmt::format(" | writer waits {:.0f} us/s {:.1f} waits/s {:.2f} long/s", Quantile(wait_rate, 0.5),
+                                 Quantile(waits_rate, 0.5), Quantile(long_rate, 0.5))
+                  << (arm == 0 ? std::string()
+                               : fmt::format(" | builder runs per phase {:.0f} | per-second wait us/s pooled p50 {:.0f} p95 {:.0f} "
+                                             "p99 {:.0f} max {:.0f} ({} s)", Quantile(runs, 0.5), Quantile(per_sec, 0.5),
+                                             Quantile(per_sec, 0.95), Quantile(per_sec, 0.99),
+                                             per_sec.empty() ? 0.0 : *std::max_element(per_sec.begin(), per_sec.end()),
+                                             per_sec.size()))
+                  << std::endl;
     }
 }

@@ -2,6 +2,7 @@
 #define XSTORE_FILERANGELOCK_H
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -50,6 +51,15 @@ class FileRangeLock {
         // Writers currently registered as waiting (slots plus overflow).
         [[nodiscard]] uint32_t WaitingWritersForTests();
 
+        // Cumulative since construction, over blocking LockRange(WRITE) calls that had to wait only: total wait, number
+        // of waits, and waits >= XStoreTunables::LIVE_WIDEN_WRITER_LONG_WAIT_US. Read by the live widen governor.
+        struct WriterWaitStats {
+            uint64_t total_us;
+            uint64_t waits;
+            uint64_t long_waits;
+        };
+        [[nodiscard]] WriterWaitStats WriterWaits() const noexcept;
+
     private:
         using Clock = std::chrono::steady_clock;
         struct ActiveLock {
@@ -84,6 +94,10 @@ class FileRangeLock {
         uint32_t waiting_writer_count = 0;
         uint32_t waiting_writer_overflow = 0;
         std::array<Range, MAX_WAITING_WRITERS> waiting_writers{};
+        // Written under mtx; atomic only so WriterWaits() needs no lock. Last, so no existing member moves.
+        std::atomic<uint64_t> writer_wait_us_{0};
+        std::atomic<uint64_t> writer_waits_{0};
+        std::atomic<uint64_t> long_waits_{0};
 };
 
 // Process-wide registry: one FileRangeLock per file path, shared across

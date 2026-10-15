@@ -19,9 +19,12 @@
 
 #include "XStore.pb.h"
 #include "include/Logger/Logger.h"
+#include "include/XStore/XStore_CpuJiffies.h"
 #include "include/XStore/XStore_Tunables.h"
 
 namespace {
+
+using sysstats::ReadCpuJiffies;
 
 // Cumulative counters read once per tick; every published field except the
 // disk-space and mem ones is a DELTA between two consecutive samples, so
@@ -112,25 +115,6 @@ bool IsDiskPartition(const std::string &n, const std::set<std::string> &all_name
         if (all_digits(n.substr(p + 1)) && all_names.count(n.substr(0, p))) return true;
     }
     return false;
-}
-
-// /proc/stat's first line: "cpu  user nice system idle iowait irq softirq
-// steal guest guest_nice". Sums the active fields (everything but idle and
-// iowait -- iowait is idle time, just idle-while-a-request-is-outstanding)
-// against the sum of every field for the percentage denominator.
-void ReadCpuJiffies(uint64_t &active, uint64_t &total) {
-    active = 0;
-    total = 0;
-    std::ifstream f("/proc/stat");
-    if (!f.is_open()) return;
-    std::string label;
-    f >> label; // "cpu"
-    if (label != "cpu") return;
-    uint64_t user, nice, system, idle, iowait, irq, softirq, steal;
-    f >> user >> nice >> system >> idle >> iowait >> irq >> softirq >> steal;
-    if (f.fail()) return;
-    active = user + nice + system + irq + softirq + steal;
-    total = active + idle + iowait;
 }
 
 void ReadMemBytes(uint64_t &mem_total, uint64_t &mem_used) {

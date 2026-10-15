@@ -437,6 +437,8 @@ inline constexpr uint64_t LIVE_WIDEN_MAX_PAUSE_US = 50000;
 // the cap the attempt waits for held locks only. Yield time does not count
 // against LIVE_WIDEN_LOCK_WAIT_MS.
 inline constexpr uint64_t LIVE_WIDEN_YIELD_MAX_MS = 200;
+// A blocked WRITE in FileRangeLock that waited at least this long also counts as a long wait (WriterWaits()).
+inline constexpr uint64_t LIVE_WIDEN_WRITER_LONG_WAIT_US = 25000;
 // After this many consecutive timeouts at the minimum chunk the builder logs
 // a warning once (per stretch of timeouts) and keeps retrying.
 inline constexpr uint64_t LIVE_WIDEN_TIMEOUT_WARN_AFTER = 100;
@@ -464,6 +466,28 @@ inline constexpr uint64_t LIVE_WIDEN_MAX_HOLE_SPAN_ROWS = 1ull << 20;
 // its own timed READ range lock. The load governor (S3) is meant to raise N when the machine is idle.
 inline constexpr unsigned LIVE_WIDEN_WORKERS = 1;
 inline constexpr uint64_t LIVE_WIDEN_GROUP_BYTES = 8 * LIVE_WIDEN_MAX_CHUNK_BYTES;
+// Live-widen load governor (XStore_LiveWidenGovernor.h, Tech Reference 4.18 "Governor"). These are the defaults of
+// GovernorParams. LIVE_WIDEN_GOVERNOR true: RunLiveWidenPass gives every DB's years one governor (cores - headroom
+// workers, parked between groups while the governor denies them) instead of the fixed LIVE_WIDEN_WORKERS.
+inline constexpr bool LIVE_WIDEN_GOVERNOR = false;                   // off: the fixed LIVE_WIDEN_WORKERS, as before
+inline constexpr unsigned LIVE_WIDEN_FLOOR_WORKERS = 1;              // workers always allowed (0: the starvation guard)
+inline constexpr unsigned LIVE_WIDEN_HEADROOM_CORES = 2;             // logical CPUs kept free for foreground work
+inline constexpr unsigned LIVE_WIDEN_MAX_WORKERS_CAP = 16;           // max workers = min(cores - headroom, this)
+inline constexpr uint64_t LIVE_WIDEN_GOVERNOR_BRAKE_HOLD_SEC = 10;   // no raise for this long after a writer brake
+// Summed writer wait, in microseconds PER SECOND of the interval since the last evaluation (intervals vary:
+// evaluations happen when a worker calls Permit), that brakes. G3 calibration (local 16-vCPU VM only, 4 SYNC writers,
+// per-second samples): the 1-worker floor alone reaches p95 103-116k, p99 116-120k, max 120k (up to ~130k while
+// governed), so the earlier 100000 braked the floor itself and kept the governor at 1 worker; 4 workers p50
+// 107-145k, p95 166-175k. 150000 is above every 1-worker second seen and below the 4-worker p95; verified in a
+// governed run (floor never braked, ramps to 3-8 then brakes). Recheck on Mystic.
+inline constexpr uint64_t LIVE_WIDEN_WRITER_WAIT_BRAKE_US = 150000;
+// Long waits (>= LIVE_WIDEN_WRITER_LONG_WAIT_US) since the last evaluation that brake (a plain count, not a rate: one
+// long wait is one too many whatever the interval). G3 local VM: no wait >= 25 ms in any arm (1, 4 or governed
+// workers, ~550 builder seconds); kept at 1, never the trigger there.
+inline constexpr uint64_t LIVE_WIDEN_LONG_WAITS_BRAKE = 1;
+inline constexpr uint64_t LIVE_WIDEN_STARVATION_GUARD_SEC = 600;     // floor 0 only: one-group grant after this
+inline constexpr uint64_t LIVE_WIDEN_AT_FLOOR_WARN_SEC = 60;         // WARNING once per at-floor episode this long
+inline constexpr unsigned LIVE_WIDEN_GOVERNOR_SMOOTHING_TICKS = 3;   // window for raises (drops use the last tick)
 
 // Live widening trigger (M4 stage 3, XStore::RunLiveWidenPass). When an insert
 // raises a DB's effective tracked width, the DB is recorded; once its width

@@ -422,6 +422,12 @@ add_library(xstore_core STATIC
         include/XStore/XStore_Internal.h src/XStore/XStore_Internal.cpp
         src/XStore/XStore_Management.cpp
         src/XStore/XStore_RebuildProgress.cpp
+        src/XStore/XStore_LiveWidenGovernor.cpp
+        include/XStore/XStore_LiveWidenGovernor.h
+        src/XStore/XStore_LiveWidenLoadSource.cpp
+        include/XStore/XStore_LiveWidenLoadSource.h
+        src/XStore/XStore_CpuJiffies.cpp
+        include/XStore/XStore_CpuJiffies.h
         include/XStore/XStore_RebuildProgress.h
         include/XStore/XStore_ProgressBar.h
         src/XStore/XStore_DirLock.cpp
