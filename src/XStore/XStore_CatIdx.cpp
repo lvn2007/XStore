@@ -619,10 +619,19 @@ void XStore::CompactOneYearCatIdx(const std::string &db_base_path, unsigned shor
         // Graceful shutdown must not wait out a multi-minute scan: abandon
         // the year (nothing was appended, so it is simply retried next start).
         // bg_cancel_: also a RemoveDB / RemoveDBFiles of this year waiting for the background thread to let go.
-        if ((r & 0xFFFFu) == 0 && (catidx_compaction_stop_flag_.load(std::memory_order_relaxed) ||
-                                   bg_cancel_.load(std::memory_order_relaxed))) {
-            close(fd);
-            return;
+        // live_widen_pending_: a live widen was recorded; it runs on this thread, so compaction steps aside.
+        if ((r & 0xFFFFu) == 0) {
+            if (catidx_compaction_stop_flag_.load(std::memory_order_relaxed) ||
+                bg_cancel_.load(std::memory_order_relaxed)) {
+                close(fd);
+                return;
+            }
+            if (live_widen_pending_.load(std::memory_order_relaxed)) {
+                close(fd);
+                spdlog::info("[CATIDX] - Compaction of {}/{} stopped: a live widen is pending; resumes after it",
+                             db_base_path, year);
+                return;
+            }
         }
         [[maybe_unused]] ssize_t row_read = pread(fd, row_buf.data(), row_length, static_cast<off_t>(r) * row_length);
         for (uint32_t c = 0; c < tracked_column_count; ++c) {
@@ -703,6 +712,11 @@ void XStore::CompactColdCatIdxForAllDbs(const std::string &data_store_dir) {
             try { year = static_cast<unsigned short>(std::stoi(filename.substr(0, filename.size() - 7))); }
             catch (...) { continue; }
             if (year >= current_year) continue; // only cold (closed) years
+            if (live_widen_pending_.load(std::memory_order_relaxed)) {
+                spdlog::info("[CATIDX] - Compaction of {}/{} stopped: a live widen is pending; resumes after it",
+                             db_base_path, year);
+                return;
+            }
 
             // Handshake with RemoveDB / RemoveDBFiles (see bg_mutex_): a year being removed is not started, and a
             // removal waits until this year is done or abandoned (bg_cancel_).
@@ -734,33 +748,61 @@ void XStore::StartCatIdxCompactionThread(const std::string &data_store_dir) {
 
     catidx_compaction_thread_ = std::thread([data_store_dir]() {
         XStore compaction_store; // one instance for this thread's lifetime, same convention every ZMQ worker already follows
-        // The background index thread: every tick, due live widening (M4 stage 3) first, then compaction when its
-        // interval (counted from the end of the previous run, as before) has passed. Both on this one thread, so they
-        // never overlap (AppendBitmapSection racing a widen's reset would be unsafe). An exception must not end the
-        // thread (std::terminate): logged, retried next tick / interval.
-        using Clock = std::chrono::steady_clock;
-        Clock::time_point next_compaction = Clock::now(); // first run at start, as before
+        BackgroundIndexSchedule schedule; // first compaction at start, as before
+        const auto now = [] { return std::chrono::steady_clock::now(); };
         while (!XStore::catidx_compaction_stop_flag_.load(std::memory_order_relaxed)) {
-            try {
-                compaction_store.RunLiveWidenPass(Clock::now());
-            } catch (const std::exception &e) {
-                spdlog::error("[LIVE WIDEN] - Pass failed: {}", e.what());
-            }
-            if (XStore::catidx_compaction_stop_flag_.load(std::memory_order_relaxed)) break;
-            if (Clock::now() >= next_compaction) {
-                try {
-                    compaction_store.CompactColdCatIdxForAllDbs(data_store_dir);
-                } catch (const std::exception &e) {
-                    spdlog::error("[CATIDX] - Compaction pass failed: {}", e.what());
-                }
-                next_compaction = Clock::now() + std::chrono::seconds(XStoreTunables::CATIDX_COMPACTION_POLL_INTERVAL_SEC);
-            }
+            compaction_store.BackgroundIndexTick(data_store_dir, schedule, now);
             std::this_thread::sleep_for(std::chrono::seconds(XStoreTunables::LIVE_WIDEN_TICK_SEC));
         }
     });
     // Same atexit-at-spawn-time ordering argument as StartWalWriters: register
     // the join here so it runs before any static logger/queue teardown.
     std::atexit([]() { XStore::StopCatIdxCompactionThread(); });
+}
+
+// Widening and compaction share this one thread, so they never overlap (AppendBitmapSection racing a widen's reset
+// would be unsafe); widening has priority. An exception must not end the thread (std::terminate): logged, retried next
+// tick / interval.
+void XStore::BackgroundIndexTick(const std::string &data_store_dir, BackgroundIndexSchedule &schedule,
+                                 const std::function<std::chrono::steady_clock::time_point()> &now) {
+    try {
+        RunLiveWidenPass(now());
+    } catch (const std::exception &e) {
+        spdlog::error("[LIVE WIDEN] - Pass failed: {}", e.what());
+    }
+    if (catidx_compaction_stop_flag_.load(std::memory_order_relaxed)) return;
+    // A recorded widen (in its quiet period, or waiting to retry): compaction is not started, so a flood of growths
+    // costs nothing here. A record that outlives a pass keeps compaction waiting with it.
+    // Any widen, due compaction or not, brings the next compaction forward to shortly after it: a widen drops the
+    // widened years' bitmap sections, which only compaction rebuilds (until then FindByValue uses the bloom alone).
+    if (live_widen_pending_.load(std::memory_order_relaxed)) {
+        if (!schedule.compaction_yielded) {
+            schedule.compaction_yielded = true;
+            if (now() >= schedule.next_compaction) {
+                spdlog::info("[CATIDX] - Compaction deferred: a live widen is pending; resumes after it");
+            }
+        }
+        return;
+    }
+    if (schedule.compaction_yielded) {
+        schedule.compaction_yielded = false;
+        schedule.next_compaction = now() + std::chrono::seconds(XStoreTunables::LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC);
+        spdlog::info("[CATIDX] - No live widen pending any more; compaction resumes in {} s",
+                     XStoreTunables::LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC);
+    }
+    if (now() < schedule.next_compaction) return;
+    try {
+        CompactColdCatIdxForAllDbs(data_store_dir);
+    } catch (const std::exception &e) {
+        spdlog::error("[CATIDX] - Compaction pass failed: {}", e.what());
+    }
+    // A widen recorded during the pass: it abandoned its year (and logged which), or it had just finished. Either way
+    // it runs again soon after the widen, which drops the widened years' bitmap sections anyway.
+    if (live_widen_pending_.load(std::memory_order_relaxed)) {
+        schedule.compaction_yielded = true;
+    } else {
+        schedule.next_compaction = now() + std::chrono::seconds(XStoreTunables::CATIDX_COMPACTION_POLL_INTERVAL_SEC);
+    }
 }
 
 void XStore::StopCatIdxCompactionThread() {

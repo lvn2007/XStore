@@ -475,6 +475,12 @@ inline constexpr uint64_t LIVE_WIDEN_TICK_SEC = 1;
 // given up until its width grows again or the next start rebuilds it.
 inline constexpr uint32_t LIVE_WIDEN_MAX_ATTEMPTS = 3;
 inline constexpr uint64_t LIVE_WIDEN_RETRY_BASE_SEC = 60;
+// Compaction yields to live widening: while a widen is recorded, the
+// background index thread does not start compaction, and a running pass
+// abandons its year at its next 64K-row check. Once no widen is recorded any
+// more, the next compaction after any live widen runs this long after
+// that tick instead of waiting out CATIDX_COMPACTION_POLL_INTERVAL_SEC.
+inline constexpr uint64_t LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC = 30;
 // RemoveDB / RemoveDBFiles of a year file stop the background index thread's
 // work on that DB/year (widening or compaction) and wait at most this long for
 // it to let go, then remove anyway (with an error in the log).

@@ -138,6 +138,7 @@ protected:
         XStore::ClearZoneMapRegistryForTests();
         XStore::ClearCatIdxRegistryForTests();
         walring::ClearRingRegistryForTests();
+        XStore::ClearLiveWidenRequestsForTests(); // another test's growth would make compaction yield
     }
     void TearDown() override {
         XStore::ResetShutdownForTests();

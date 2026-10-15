@@ -269,6 +269,7 @@ protected:
         scratch = std::make_unique<ScratchDir>("xstore_catidx_test");
         for (auto &shard : XStore::cfg_shards) shard.map.clear();
         XStore::ClearCatIdxRegistryForTests();
+        XStore::ClearLiveWidenRequestsForTests(); // another test's growth would make compaction yield
     }
 
     void TearDown() override {

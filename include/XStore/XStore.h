@@ -1027,6 +1027,19 @@ class XStore {
         // (it takes part in the RemoveDB handshake, see bg_mutex_).
         void CompactColdCatIdxForAllDbs(const std::string &data_store_dir);
 
+        // One tick of the background index thread (StartCatIdxCompactionThread runs it every LIVE_WIDEN_TICK_SEC with
+        // the real clock; tests with a fake one). Due live widening first (RunLiveWidenPass). Compaction yields to
+        // widening: while a widen is recorded (live_widen_pending_) compaction is not started, and a running pass
+        // abandons its year at its next 64K-row check (nothing appended; retried later). Once no widen is recorded, a
+        // compaction after any widen runs LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC later; otherwise
+        // compaction runs CATIDX_COMPACTION_POLL_INTERVAL_SEC after the end of its previous run, as before.
+        struct BackgroundIndexSchedule {
+            std::chrono::steady_clock::time_point next_compaction{}; // the clock's epoch: the first tick compacts
+            bool compaction_yielded = false; // a widen was pending: the next compaction is brought forward to after it
+        };
+        void BackgroundIndexTick(const std::string &data_store_dir, BackgroundIndexSchedule &schedule,
+                                 const std::function<std::chrono::steady_clock::time_point()> &now);
+
         // Rebuilds this year's .catidx bloom from the year file (Task 11): a thin wrapper over RebuildYearIndexes with
         // only the catidx selected, so it takes the same path InitDB does (the .zmap is not touched). A correctness
         // requirement, not an optimization: the bloom must never produce a false negative, and a discarded/narrow file

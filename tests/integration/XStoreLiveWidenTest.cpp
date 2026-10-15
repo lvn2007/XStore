@@ -2201,6 +2201,8 @@ TEST_F(XStoreLiveWidenTest, CompactionAfterAPassSkipsARebuildingYearAndCompactsA
     ASSERT_TRUE(ended);
     EXPECT_EQ(YearsAndResults(pass.get()), (PassResult{{kYear, Result::kStopped}}));
     XStore::bg_cancel_.store(false);
+    XStore::ClearLiveWidenRequestsForTests(); // else compaction yields to the kept record and never reaches the guard
+    kLogCapture->Clear();
     store.CompactColdCatIdxForAllDbs(store.data_store_dir);
     EXPECT_EQ(ReadHeader<CatIdxFileHeader>(YearPath(db, ".catidx")).bitmap_section_offset, 0u)
         << "compaction wrote into a rebuilding catidx";
@@ -2240,6 +2242,288 @@ TEST_F(XStoreLiveWidenTest, InsertsAtAnUnchangedWidthRecordNothing) {
         store.UnaryInsert(Epoch(r), ValueRow(r, 70), db, &rep);
     }
     EXPECT_EQ(XStore::LiveWidenRequestCountForTests(), 0u);
+}
+
+// ---- 10b. Compaction yields to a pending live widen (S3a) -------------------------------------------------------------
+
+// The capture sink keeps warn+ only; the yield/resume lines are INFO. A sink's level is atomic, so this is safe while
+// other threads log.
+struct ScopedInfoCapture {
+    ScopedInfoCapture() { kLogCapture->set_level(spdlog::level::info); }
+    ~ScopedInfoCapture() { kLogCapture->set_level(spdlog::level::warn); }
+    ScopedInfoCapture(const ScopedInfoCapture &) = delete;
+    ScopedInfoCapture &operator=(const ScopedInfoCapture &) = delete;
+};
+constexpr const char *kYieldLine = "stopped: a live widen is pending; resumes after it";
+constexpr const char *kDeferredLine = "Compaction deferred: a live widen is pending; resumes after it";
+constexpr const char *kResumeLine = "No live widen pending any more; compaction resumes in 30 s";
+
+// A widen recorded while the background thread's compaction scans a long cold year: the pass abandons the year at its
+// next 64K-row check (its catidx byte-for-byte as before, no section), a year compacted earlier keeps its section, and
+// the schedule is not pushed an hour out. The next ticks (fake clock) widen every year after the quiet period, then
+// compact again LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC later; the result equals a startup rebuild plus a compaction.
+TEST_F(XStoreLiveWidenTest, CompactionYieldsToAWidenRecordedMidScanAndRunsSoonAfterIt) {
+    static_assert(XStoreTunables::LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC == 30, "kResumeLine says 30 s");
+    XStore store;
+    const std::string db = "LWYIELD";
+    const std::string path = DbPath(db);
+    constexpr uint64_t kRows = 3000;
+    const auto seed = [&](unsigned short y) {
+        Insert(store, db, {{Jan1(y), ValueRow(1, 10)}}); // index files born 64 wide
+        Rows rows;
+        for (uint64_t r = 1; r < kRows; ++r) rows.emplace_back(Jan1(y) + r, ValueRow((r * 7 + y) % 100000, r % 5 == 0 ? 40 : 70));
+        Insert(store, db, rows);
+    };
+    // Year files are preallocated to the whole year: cut them to bound every scan.
+    const auto cut = [&](const std::string &d, unsigned short y, uint64_t rows) {
+        ASSERT_TRUE(walring::Checkpointer::Instance().RunCycle());
+        ASSERT_EQ(truncate(YearPath(d, ".XSTORE", y).c_str(), static_cast<off_t>(rows) * kRowLength), 0);
+    };
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    seed(1979);
+    cut(db, 1979, kRows + 1000);
+    XStore::ClearLiveWidenRequestsForTests(); // drop the 64 -> 70 growth: the index files stay 64 wide for now
+    store.CompactColdCatIdxForAllDbs(store.data_store_dir);
+    ASSERT_TRUE(XStore::PinCatIdx(path, 1979, kRowLength)->HasBitmapSection());
+    seed(1980); // no growth: the DB is 70 wide already
+    ASSERT_EQ(XStore::LiveWidenRequestCountForTests(), 0u);
+    cut(db, 1980, 8000000); // a sparse year whose scan takes seconds
+    const std::string catidx_1979 = ReadFileBytes(YearPath(db, ".catidx", 1979));
+    const std::string catidx_1980 = ReadFileBytes(YearPath(db, ".catidx", 1980));
+
+    ScopedInfoCapture info;
+    kLogCapture->Clear();
+    XStore::BackgroundIndexSchedule schedule;
+    Clock::time_point fake = Clock::now();
+    const auto now = [&] { return fake; };
+    auto tick = std::async(std::launch::async, [&] {
+        XStore b;
+        b.BackgroundIndexTick(b.data_store_dir, schedule, now);
+    });
+    const std::string year_key = path + "/1980";
+    const Clock::time_point t0 = Clock::now();
+    while (XStore::BackgroundActiveKeyForTests() != year_key && MsSince(t0) < 20000) std::this_thread::yield();
+    ASSERT_EQ(XStore::BackgroundActiveKeyForTests(), year_key) << "the compaction never started on 1980";
+    Insert(store, db, {{Jan1(1981) + 5, ValueRow(3, 80)}}); // growth 70 -> 80 recorded while 1980 is scanned
+    const Clock::time_point g = *XStore::LiveWidenLastGrowthForTests(path);
+    ASSERT_EQ(tick.wait_for(seconds(120)), std::future_status::ready);
+    tick.get();
+
+    EXPECT_EQ(kLogCapture->Count(std::string("Compaction of ") + year_key + " " + kYieldLine), 1u);
+    EXPECT_GE(kLogCapture->Count(kYieldLine), 1u);
+    EXPECT_LE(kLogCapture->Count(kYieldLine), 2u) << "one line per yielding year (the abandoned one, and the next cold year the pass stops at), not one per 64K rows; which year is listed first depends on the directory order";
+    EXPECT_TRUE(schedule.compaction_yielded);
+    EXPECT_EQ(schedule.next_compaction, Clock::time_point{}) << "a yielded pass must not push compaction an hour out";
+    EXPECT_EQ(XStore::BackgroundActiveKeyForTests(), "");
+    EXPECT_EQ(ReadHeader<CatIdxFileHeader>(YearPath(db, ".catidx", 1980)).bitmap_section_offset, 0u);
+    EXPECT_TRUE(ReadFileBytes(YearPath(db, ".catidx", 1980)) == catidx_1980) << "the abandoned year's catidx changed";
+    EXPECT_TRUE(ReadFileBytes(YearPath(db, ".catidx", 1979)) == catidx_1979) << "the completed year's catidx changed";
+    EXPECT_TRUE(XStore::PinCatIdx(path, 1979, kRowLength)->HasBitmapSection());
+    for (unsigned short y : {1979, 1980}) ExpectAnswersMatchTheData(store, db, 0, kRows - 1, {0, 65}, y);
+
+    cut(db, 1980, kRows + 1000);
+    cut(db, 1981, 1000);
+    fake = g + seconds(29);
+    store.BackgroundIndexTick(store.data_store_dir, schedule, now);
+    EXPECT_EQ(XStore::LiveWidenRequestCountForTests(), 1u) << "inside the quiet period";
+    EXPECT_EQ(kLogCapture->Count(kDeferredLine), 0u) << "already logged as yielded";
+    EXPECT_EQ(ReadHeader<CatIdxFileHeader>(YearPath(db, ".catidx", 1980)).bitmap_section_offset, 0u)
+        << "compaction ran while a widen was recorded";
+
+    fake = g + seconds(30);
+    store.BackgroundIndexTick(store.data_store_dir, schedule, now); // widens, then reschedules compaction
+    EXPECT_EQ(XStore::LiveWidenRequestCountForTests(), 0u);
+    EXPECT_FALSE(schedule.compaction_yielded);
+    EXPECT_EQ(schedule.next_compaction, g + seconds(30 + XStoreTunables::LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC));
+    EXPECT_EQ(kLogCapture->Count(kResumeLine), 1u);
+    for (unsigned short y : {1979, 1980, 1981}) {
+        SCOPED_TRACE("year " + std::to_string(y));
+        EXPECT_EQ(XStore::GetOrOpenZoneMap(path, y, kRowLength).TrackedColumnCount(), 80u);
+        EXPECT_EQ(XStore::GetOrOpenCatIdx(path, y, kRowLength).TrackedColumnCount(), 80u);
+        EXPECT_FALSE(XStore::PinCatIdx(path, y, kRowLength)->HasBitmapSection()) << "not compacted yet";
+    }
+    for (unsigned short y : {1979, 1980}) ExpectAnswersMatchTheData(store, db, 0, kRows - 1, {0, 65}, y);
+
+    fake = schedule.next_compaction - seconds(1);
+    store.BackgroundIndexTick(store.data_store_dir, schedule, now);
+    EXPECT_FALSE(XStore::PinCatIdx(path, 1980, kRowLength)->HasBitmapSection()) << "compacted before its time";
+    // A query's cold mapping regrows a year file to the whole year: cut again before compaction scans them.
+    cut(db, 1979, kRows + 1000);
+    cut(db, 1980, kRows + 1000);
+    fake = schedule.next_compaction;
+    const Clock::time_point compacted_at = fake;
+    store.BackgroundIndexTick(store.data_store_dir, schedule, now);
+    EXPECT_EQ(schedule.next_compaction, compacted_at + seconds(XStoreTunables::CATIDX_COMPACTION_POLL_INTERVAL_SEC));
+    EXPECT_GE(kLogCapture->Count(kYieldLine), 1u);
+    EXPECT_LE(kLogCapture->Count(kYieldLine), 2u);
+    for (unsigned short y : {1979, 1980, 1981}) {
+        EXPECT_TRUE(XStore::PinCatIdx(path, y, kRowLength)->HasBitmapSection()) << "year " << y << " not compacted";
+    }
+    for (unsigned short y : {1979, 1980}) ExpectAnswersMatchTheData(store, db, 0, kRows - 1, {0, 65}, y);
+
+    // Equal to a startup rebuild plus a compaction (1981 was born at 80 at runtime, never widened: not compared).
+    std::map<std::pair<unsigned short, std::string>, std::string> live;
+    for (unsigned short y : {1979, 1980}) {
+        for (const char *ext : {".zmap", ".catidx"}) live[{y, ext}] = ReadFileBytes(YearPath(db, ext, y));
+    }
+    const std::string ref = "LWYIELDREF";
+    CreateTestDb(store, ref, XStore_Proto::SECOND, kRowLength);
+    Insert(store, ref, {{Jan1(1975), ValueRow(1, 80)}});
+    for (unsigned short y : {1979, 1980}) SparseCopy(YearPath(db, ".XSTORE", y), YearPath(ref, ".XSTORE", y));
+    cut(ref, 1975, 1000);
+    for (unsigned short y : {1979, 1980}) cut(ref, y, kRows + 1000); // the size the live years were compacted at
+    store.InitDB();
+    for (unsigned short y : {1979, 1980}) cut(ref, y, kRows + 1000);
+    XStore::ClearLiveWidenRequestsForTests(); // the reference DB's own growth
+    store.CompactColdCatIdxForAllDbs(store.data_store_dir);
+    for (unsigned short y : {1979, 1980}) {
+        ASSERT_TRUE(XStore::PinCatIdx(DbPath(ref), y, kRowLength)->HasBitmapSection());
+        for (const char *ext : {".zmap", ".catidx"}) {
+            EXPECT_TRUE((live[{y, ext}] == ReadFileBytes(YearPath(ref, ext, y)))) << y << ext << " differs from rebuild + compaction";
+        }
+    }
+}
+
+// A due compaction is held back, not started, while a widen is recorded (one log line however many ticks), and runs
+// LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC after the widen. A widen recorded while compaction is not due leaves its
+// interval alone.
+TEST_F(XStoreLiveWidenTest, AHeldBackCompactionRunsSoonAfterTheWidenAndAnyLaterWidenBringsCompactionForward) {
+    XStore store;
+    const std::string db = "LWYIELDTICK";
+    const std::string path = DbPath(db);
+    constexpr uint64_t kRows = 3000;
+    SeedNarrowIndexWideRows(store, db, kRows, 70); // records the 64 -> 70 growth
+    ASSERT_TRUE(walring::Checkpointer::Instance().RunCycle());
+    ASSERT_EQ(truncate(YearPath(db, ".XSTORE").c_str(), static_cast<off_t>(kRows + 1000) * kRowLength), 0);
+    const Clock::time_point g1 = *XStore::LiveWidenLastGrowthForTests(path);
+    ScopedInfoCapture info;
+    kLogCapture->Clear();
+    XStore::BackgroundIndexSchedule schedule;
+    Clock::time_point fake = g1 + seconds(1);
+    const auto now = [&] { return fake; };
+    for (int i = 0; i < 5; ++i) {
+        fake = g1 + seconds(1 + i);
+        store.BackgroundIndexTick(store.data_store_dir, schedule, now);
+    }
+    EXPECT_TRUE(schedule.compaction_yielded);
+    EXPECT_EQ(kLogCapture->Count(kDeferredLine), 1u) << "one line, not one per tick";
+    EXPECT_EQ(kLogCapture->Count(kYieldLine), 0u) << "compaction must not even start";
+    EXPECT_FALSE(XStore::PinCatIdx(path, kYear, kRowLength)->HasBitmapSection());
+
+    fake = g1 + seconds(30);
+    store.BackgroundIndexTick(store.data_store_dir, schedule, now);
+    EXPECT_EQ(XStore::LiveWidenRequestCountForTests(), 0u);
+    EXPECT_EQ(XStore::PinCatIdx(path, kYear, kRowLength)->TrackedColumnCount(), 70u);
+    EXPECT_FALSE(schedule.compaction_yielded);
+    const Clock::time_point resume = g1 + seconds(30 + XStoreTunables::LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC);
+    EXPECT_EQ(schedule.next_compaction, resume);
+    EXPECT_EQ(kLogCapture->Count(kResumeLine), 1u);
+    fake = resume - seconds(1);
+    store.BackgroundIndexTick(store.data_store_dir, schedule, now);
+    EXPECT_FALSE(XStore::PinCatIdx(path, kYear, kRowLength)->HasBitmapSection());
+    fake = resume;
+    store.BackgroundIndexTick(store.data_store_dir, schedule, now);
+    EXPECT_TRUE(XStore::PinCatIdx(path, kYear, kRowLength)->HasBitmapSection());
+    const Clock::time_point next = resume + seconds(XStoreTunables::CATIDX_COMPACTION_POLL_INTERVAL_SEC);
+    EXPECT_EQ(schedule.next_compaction, next);
+    ExpectAnswersMatchTheData(store, db, 0, kRows - 1, {0, 65});
+
+    // Compaction not due when the next growth comes: nothing is logged as deferred, but the widen drops the widened
+    // years' bitmap sections, so the next compaction is brought forward to shortly after it.
+    Insert(store, db, {{Epoch(kRows + 10), ValueRow(4, 72)}}); // 70 -> 72
+    const Clock::time_point g2 = *XStore::LiveWidenLastGrowthForTests(path);
+    ASSERT_LT(g2 + seconds(30), next);
+    fake = g2 + seconds(1);
+    store.BackgroundIndexTick(store.data_store_dir, schedule, now);
+    EXPECT_TRUE(schedule.compaction_yielded);
+    fake = g2 + seconds(30);
+    store.BackgroundIndexTick(store.data_store_dir, schedule, now);
+    EXPECT_EQ(XStore::LiveWidenRequestCountForTests(), 0u);
+    EXPECT_EQ(XStore::PinCatIdx(path, kYear, kRowLength)->TrackedColumnCount(), 72u);
+    EXPECT_FALSE(schedule.compaction_yielded);
+    EXPECT_EQ(schedule.next_compaction, g2 + seconds(30) + seconds(XStoreTunables::LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC))
+        << "any widen brings the next compaction forward";
+    EXPECT_EQ(kLogCapture->Count(kResumeLine), 2u);
+    ExpectAnswersMatchTheData(store, db, 0, kRows - 1, {0, 65});
+}
+
+// RemoveDB of the DB whose widen holds compaction back: no hang, the record goes, and compaction resumes soon for the
+// other DBs.
+TEST_F(XStoreLiveWidenTest, RemoveDbWhileCompactionWaitsForAWidenLetsCompactionResume) {
+    XStore store;
+    const std::string db = "LWYIELDRM";
+    const std::string keep = "LWYIELDKEEP";
+    constexpr uint64_t kRows = 3000;
+    SeedNarrowIndexWideRows(store, db, kRows, 70);
+    CreateTestDb(store, keep, XStore_Proto::SECOND, kRowLength);
+    Rows rows;
+    for (uint64_t r = 0; r < 1000; ++r) rows.emplace_back(Epoch(r), ValueRow(1000 + r % 7, 2));
+    Insert(store, keep, rows);
+    ASSERT_TRUE(walring::Checkpointer::Instance().RunCycle());
+    for (const std::string &d : {db, keep}) {
+        ASSERT_EQ(truncate(YearPath(d, ".XSTORE").c_str(), static_cast<off_t>(kRows + 1000) * kRowLength), 0);
+    }
+    const Clock::time_point g = *XStore::LiveWidenLastGrowthForTests(DbPath(db));
+    XStore::BackgroundIndexSchedule schedule;
+    Clock::time_point fake = g + seconds(1);
+    const auto now = [&] { return fake; };
+    store.BackgroundIndexTick(store.data_store_dir, schedule, now);
+    ASSERT_TRUE(schedule.compaction_yielded);
+
+    auto remove = std::async(std::launch::async, [&] {
+        XStore r;
+        return r.RemoveDB(db).removestatus();
+    });
+    ASSERT_EQ(remove.wait_for(seconds(30)), std::future_status::ready) << "RemoveDB hung";
+    EXPECT_NE(remove.get().find("[INFO]"), std::string::npos);
+    EXPECT_EQ(XStore::LiveWidenRequestCountForTests(), 0u);
+    EXPECT_FALSE(std::filesystem::exists(DbPath(db)));
+
+    fake = g + seconds(2);
+    store.BackgroundIndexTick(store.data_store_dir, schedule, now);
+    EXPECT_FALSE(schedule.compaction_yielded);
+    EXPECT_EQ(schedule.next_compaction, fake + seconds(XStoreTunables::LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC));
+    fake = schedule.next_compaction;
+    store.BackgroundIndexTick(store.data_store_dir, schedule, now);
+    EXPECT_TRUE(XStore::PinCatIdx(DbPath(keep), kYear, kRowLength)->HasBitmapSection());
+    EXPECT_FALSE(std::filesystem::exists(DbPath(db))) << "compaction re-created the removed DB";
+}
+
+// Shutdown (StopCatIdxCompactionThread's flags; no thread runs in tests) while compaction waits for a widen: the tick
+// returns at once, widens nothing (the record is kept for the next start) and compacts nothing.
+TEST_F(XStoreLiveWidenTest, ShutdownWhileCompactionWaitsForAWidenEndsTheTickAtOnce) {
+    XStore store;
+    const std::string db = "LWYIELDSTOP";
+    const std::string path = DbPath(db);
+    constexpr uint64_t kRows = 3000;
+    SeedNarrowIndexWideRows(store, db, kRows, 70);
+    ASSERT_TRUE(walring::Checkpointer::Instance().RunCycle());
+    ASSERT_EQ(truncate(YearPath(db, ".XSTORE").c_str(), static_cast<off_t>(kRows + 1000) * kRowLength), 0);
+    const Clock::time_point g = *XStore::LiveWidenLastGrowthForTests(path);
+    XStore::BackgroundIndexSchedule schedule;
+    Clock::time_point fake = g + seconds(1);
+    const auto now = [&] { return fake; };
+    store.BackgroundIndexTick(store.data_store_dir, schedule, now);
+    ASSERT_TRUE(schedule.compaction_yielded);
+
+    struct ResetFlags {
+        ~ResetFlags() {
+            XStore::catidx_compaction_stop_flag_.store(false);
+            XStore::bg_cancel_.store(false);
+        }
+    } reset;
+    XStore::StopCatIdxCompactionThread();
+    fake = g + seconds(3600);
+    auto tick = std::async(std::launch::async, [&] {
+        XStore b;
+        b.BackgroundIndexTick(b.data_store_dir, schedule, now);
+    });
+    ASSERT_EQ(tick.wait_for(seconds(30)), std::future_status::ready) << "the tick hung at shutdown";
+    tick.get();
+    EXPECT_EQ(XStore::LiveWidenRequestCountForTests(), 1u) << "a cancelled pass keeps the record";
+    EXPECT_EQ(XStore::PinZoneMap(path, kYear, kRowLength)->TrackedColumnCount(), 64u) << "widened during shutdown";
+    EXPECT_FALSE(XStore::PinCatIdx(path, kYear, kRowLength)->HasBitmapSection()) << "compacted during shutdown";
+    EXPECT_TRUE(schedule.compaction_yielded);
 }
 
 // ---- 11. Parallel live widen (S2): N workers inside one year ---------------------------------------------------------
