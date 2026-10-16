@@ -31,6 +31,7 @@
 #include <mutex>
 #include <optional>
 #include <random>
+#include <regex>
 #include <set>
 #include <string>
 #include <thread>
@@ -2244,6 +2245,210 @@ TEST_F(XStoreLiveWidenTest, RebuildNoticeShowsProgressOnTheRebuildingYearOnlyAnd
     EXPECT_EQ(FindStatus(store, db, Epoch(0), Epoch(kRows - 1), 5).find(kBeingIndexed), std::string::npos);
 }
 
+// ---- Progress log (Tech Reference 4.18 "Progress log") -------------------------------------------------------------
+
+// The lines of the live widen's progress reporter, captured through Options::log_line (the sink of the test-only
+// `progress` argument of RunLiveWidenPass), with a tiny interval so a widen is sampled many times.
+struct ProgressLines {
+    std::mutex mutex;
+    std::vector<std::string> lines;
+
+    rebuildprogress::Options Options(milliseconds interval = milliseconds(2)) {
+        rebuildprogress::Options o;
+        o.log_interval = interval;
+        o.log_line = [this](const std::string &line) {
+            std::lock_guard<std::mutex> lock(mutex);
+            lines.push_back(line);
+        };
+        return o;
+    }
+    std::vector<std::string> Copy() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return lines;
+    }
+    // Waits (20 s at most) for a line containing `what`.
+    bool WaitFor(const std::string &what) {
+        const Clock::time_point deadline = Clock::now() + std::chrono::seconds(20);
+        while (Clock::now() < deadline) {
+            for (const std::string &l : Copy()) {
+                if (l.find(what) != std::string::npos) return true;
+            }
+            std::this_thread::sleep_for(milliseconds(1));
+        }
+        return false;
+    }
+};
+
+struct ParsedProgress {
+    int percent = -1;
+    size_t years_done = 0, years_total = 0;
+    double rows_done = 0, rows_total = 0; // from the SI text ("13.0M of 41.7M rows"), so rounded
+};
+double FromSi(const std::string &text) {
+    double v = std::stod(text);
+    if (const char c = text.back(); c == 'K') v *= 1e3;
+    else if (c == 'M') v *= 1e6;
+    else if (c == 'G') v *= 1e9;
+    return v;
+}
+ParsedProgress ParseProgress(const std::string &line) {
+    static const std::regex re(R"( - (\d+)% \((\S+) of (\S+) rows\), (\d+)/(\d+) years done)");
+    std::smatch m;
+    ParsedProgress p;
+    if (std::regex_search(line, m, re)) {
+        p.percent = std::stoi(m[1]);
+        p.rows_done = FromSi(m[2]);
+        p.rows_total = FromSi(m[3]);
+        p.years_done = std::stoul(m[4]);
+        p.years_total = std::stoul(m[5]);
+    } else {
+        ADD_FAILURE() << "not a progress line: " << line;
+    }
+    return p;
+}
+
+// Three years of one DB widened 64 -> 70 (a fourth, born at 70, needs nothing). The second year (1980) is held by a
+// WRITE lock on one row until a "1/3 years done" line has been logged: the lines before it stay below 100%.
+TEST_F(XStoreLiveWidenTest, ProgressLogCountsTheYearsToWidenAndEndsAt100Percent) {
+    XStore store;
+    const std::string db = "LWPROG";
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    const std::vector<unsigned short> years = {1979, 1980, 1981};
+    for (unsigned short y : years) Insert(store, db, {{Jan1(y), ValueRow(1, 10)}}); // index files born 64 wide
+    Rows rows;
+    for (unsigned short y : years) {
+        for (uint64_t r = 1; r < 4000; ++r) rows.emplace_back(Jan1(y) + r, ValueRow((r * 7 + y) % 100000, r % 5 == 0 ? 40 : 70));
+    }
+    Insert(store, db, rows); // growth 64 -> 70
+    Insert(store, db, {{Jan1(1982) + 1, ValueRow(9, 70)}}); // born 70 wide: not widened
+    const Clock::time_point g = *XStore::LiveWidenLastGrowthForTests(DbPath(db));
+    constexpr uint64_t kStuck = 2000;
+    FileRangeLock &lock = FileLockRegistry::Get(YearPath(db, ".XSTORE", 1980));
+    lock.LockRange(kStuck * kRowLength, kRowLength, kWrite);
+    ProgressLines capture;
+    const rebuildprogress::Options options = capture.Options();
+    auto future = std::async(std::launch::async, [&] {
+        XStore b;
+        return b.RunLiveWidenPass(g + seconds(30), 1, nullptr, nullptr, &options);
+    });
+    // (no ASSERT while the lock is held: the pass would never end)
+    const bool one_done = capture.WaitFor(", 1/3 years done");
+    const std::vector<std::string> held = capture.Copy();
+    lock.UnlockRange(kStuck * kRowLength, kRowLength, kWrite);
+    EXPECT_TRUE(one_done) << "no line with the first year done";
+    ASSERT_EQ(future.wait_for(seconds(60)), std::future_status::ready);
+    const auto pass = future.get();
+    ASSERT_EQ(pass.size(), 4u);
+    for (const std::string &line : held) EXPECT_LT(ParseProgress(line).percent, 100) << "held back by the locked row: " << line;
+
+    const std::vector<std::string> lines = capture.Copy();
+    ASSERT_FALSE(lines.empty());
+    int last_percent = 0;
+    size_t last_done = 0;
+    for (const std::string &line : lines) {
+        SCOPED_TRACE(line);
+        EXPECT_EQ(line.rfind("[LIVE WIDEN] [DB: LWPROG] - ", 0), 0u);
+        EXPECT_EQ(line.find(" | workers"), std::string::npos) << "ungoverned: no governor text";
+        const ParsedProgress p = ParseProgress(line);
+        EXPECT_EQ(p.years_total, 3u) << "the years this pass widens";
+        EXPECT_LE(p.rows_done, p.rows_total);
+        EXPECT_GE(p.percent, last_percent);
+        EXPECT_GE(p.years_done, last_done);
+        last_percent = p.percent;
+        last_done = p.years_done;
+    }
+    const ParsedProgress last = ParseProgress(lines.back());
+    EXPECT_EQ(last.percent, 100);
+    EXPECT_EQ(last.years_done, 3u);
+}
+
+// Frozen mid-way by a WRITE lock on one row (the technique of the rebuild notice tests): the lines show the partial
+// percent of the year and the DB label, then the final line reaches 100%.
+TEST_F(XStoreLiveWidenTest, ProgressLogShowsThePartialPercentWhileTheWidenIsHeld) {
+    XStore store;
+    const std::string db = "LWPROGHELD";
+    constexpr uint64_t kRows = 20000;
+    SeedNarrowIndexWideRows(store, db, kRows, 70);
+    const std::string path = DbPath(db);
+    const Clock::time_point g = *XStore::LiveWidenLastGrowthForTests(path);
+    const uint64_t kStuck = 10 * Rpb() + 7;
+    const uint64_t total = static_cast<uint64_t>(std::filesystem::file_size(YearPath(db, ".XSTORE"))) / kRowLength;
+    FileRangeLock &lock = FileLockRegistry::Get(YearPath(db, ".XSTORE"));
+    lock.LockRange(kStuck * kRowLength, kRowLength, kWrite);
+    ProgressLines capture;
+    const rebuildprogress::Options options = capture.Options();
+    auto pass = std::async(std::launch::async, [&] {
+        XStore b;
+        return b.RunLiveWidenPass(g + seconds(30), 1, nullptr, nullptr, &options);
+    });
+    // (no ASSERT while the lock is held: the pass would never end)
+    const std::string want = "[LIVE WIDEN] [DB: LWPROGHELD] - " + std::to_string(kStuck * 100 / total) + "% (";
+    const bool seen = capture.WaitFor(want);
+    for (const std::string &line : capture.Copy()) {
+        EXPECT_LE(ParseProgress(line).percent, static_cast<int>(kStuck * 100 / total)) << "held back by the locked row: " << line;
+        EXPECT_EQ(ParseProgress(line).years_total, 1u);
+        EXPECT_LE(ParseProgress(line).rows_done, ParseProgress(line).rows_total) << line;
+    }
+    lock.UnlockRange(kStuck * kRowLength, kRowLength, kWrite);
+    EXPECT_TRUE(seen) << "no line with the partial percent";
+    ASSERT_EQ(pass.wait_for(seconds(60)), std::future_status::ready);
+    EXPECT_EQ(YearsAndResults(pass.get()), (PassResult{{kYear, Result::kDone}}));
+    const std::vector<std::string> lines = capture.Copy();
+    ASSERT_FALSE(lines.empty());
+    EXPECT_EQ(ParseProgress(lines.back()).percent, 100);
+    EXPECT_EQ(ParseProgress(lines.back()).years_done, 1u);
+}
+
+// A DB whose years all have the right width starts no reporter: not even the final line.
+TEST_F(XStoreLiveWidenTest, ProgressLogStartsNothingWhenNoYearNeedsWidening) {
+    XStore store;
+    const std::string db = "LWPROGNONE";
+    SeedNarrowIndexWideRows(store, db, 20000, 70);
+    const std::string path = DbPath(db);
+    const Clock::time_point g = *XStore::LiveWidenLastGrowthForTests(path);
+    ASSERT_EQ(store.LiveWidenOneYear(path, kYear, kRowLength, 70, true, true, nullptr), Result::kDone); // widened already
+    ProgressLines capture;
+    const rebuildprogress::Options options = capture.Options(milliseconds(1));
+    EXPECT_EQ(YearsAndResults(store.RunLiveWidenPass(g + seconds(30), 1, nullptr, nullptr, &options)),
+              (PassResult{{kYear, Result::kNothingToDo}}));
+    EXPECT_TRUE(capture.Copy().empty());
+}
+
+// The stop flag (RemoveDB's and the shutdown's) ends the pass promptly with the reporter joined: it has emitted its
+// final line by the time the pass returns, and a later pass of the same DB (flag cleared) reports again.
+TEST_F(XStoreLiveWidenTest, ProgressLogReporterIsJoinedWhenTheStopFlagEndsThePass) {
+    XStore store;
+    const std::string db = "LWPROGSTOP";
+    constexpr uint64_t kRows = 20000;
+    SeedNarrowIndexWideRows(store, db, kRows, 70);
+    const std::string path = DbPath(db);
+    const Clock::time_point g = *XStore::LiveWidenLastGrowthForTests(path);
+    FileRangeLock &lock = FileLockRegistry::Get(YearPath(db, ".XSTORE"));
+    lock.LockRange(kRows * kRowLength, kRowLength, kWrite);
+    ZoneMapFile &zmap = XStore::GetOrOpenZoneMap(path, kYear, kRowLength);
+    ProgressLines capture;
+    const rebuildprogress::Options options = capture.Options();
+    auto pass = std::async(std::launch::async, [&] {
+        XStore b;
+        return b.RunLiveWidenPass(g + seconds(30), 1, nullptr, nullptr, &options);
+    });
+    WaitForFrontierPast(zmap, Rpb());
+    EXPECT_TRUE(capture.WaitFor("[LIVE WIDEN] [DB: LWPROGSTOP] - "));
+    XStore::bg_cancel_.store(true);
+    const bool ended = pass.wait_for(seconds(30)) == std::future_status::ready;
+    lock.UnlockRange(kRows * kRowLength, kRowLength, kWrite);
+    ASSERT_TRUE(ended) << "the pass ignored the cancel flag";
+    EXPECT_EQ(YearsAndResults(pass.get()), (PassResult{{kYear, Result::kStopped}}));
+    XStore::bg_cancel_.store(false);
+    // Only the final sample (taken when the reporter is stopped, which joins it) says "stopped before the end": it is
+    // the last line by the time the pass has returned.
+    const size_t count = capture.Copy().size();
+    ASSERT_GT(count, 0u);
+    EXPECT_NE(capture.Copy().back().find("stopped before the end"), std::string::npos) << capture.Copy().back();
+    std::this_thread::sleep_for(milliseconds(50)); // a reporter thread left running would log more
+    EXPECT_EQ(capture.Copy().size(), count) << "the reporter was still running after the pass returned";
+}
+
 // Real growth through MaybeGrowColumnCount, debounce, then one pass widens every year of the DB, newest first, to the
 // exact width, byte-identical to a startup rebuild of each year. Queries are right before, during (a query thread runs
 // while the pass works) and after.
@@ -3958,6 +4163,42 @@ TEST_F(XStoreParallelLiveWidenTest, RebuildNoticeSaysSlowedUnderAGovernorAndKeep
 
     XStore::ClearZoneMapRegistryForTests();
     EXPECT_EQ(XStore::YearsRebuilding(), before);
+}
+
+// Under a governor every progress line carries its workers and, while it holds the widen back, the reason.
+TEST_F(XStoreParallelLiveWidenTest, ProgressLogCarriesTheGovernorsWorkersAndSlowedReason) {
+    XStore store;
+    const std::string db = "LWPROGGOV";
+    constexpr uint64_t kRows = 20000;
+    SeedNarrowIndexWideRows(store, db, kRows, 70);
+    const std::string path = DbPath(db);
+    const Clock::time_point g = *XStore::LiveWidenLastGrowthForTests(path);
+    const uint64_t kStuck = 10 * Rpb() + 7;
+    FileRangeLock &lock = FileLockRegistry::Get(YearPath(db, ".XSTORE"));
+    lock.LockRange(kStuck * kRowLength, kRowLength, kWrite);
+    FakeGovernorInputs in;
+    in.fg = [](uint64_t) { return 100.0; };
+    auto gov = MakeFakeGovernor(in, FakeParams(4, 4, 1));
+    ProgressLines capture;
+    const rebuildprogress::Options options = capture.Options();
+    auto pass = std::async(std::launch::async, [&] {
+        XStore b;
+        return b.RunLiveWidenPass(g + seconds(30), 1, gov.get(), nullptr, &options);
+    });
+    const bool slowed = capture.WaitFor(" | workers 1/4 | slowed: foreground CPU");
+    XStore::bg_cancel_.store(true);
+    const bool ended = pass.wait_for(seconds(30)) == std::future_status::ready;
+    lock.UnlockRange(kStuck * kRowLength, kRowLength, kWrite);
+    XStore::bg_cancel_.store(false);
+    ASSERT_TRUE(ended);
+    EXPECT_TRUE(slowed);
+    pass.get();
+    for (const std::string &line : capture.Copy()) {
+        SCOPED_TRACE(line);
+        EXPECT_EQ(line.rfind("[LIVE WIDEN] [DB: LWPROGGOV] - ", 0), 0u);
+        EXPECT_NE(line.find(" | workers "), std::string::npos);
+        EXPECT_NE(line.find("/4"), std::string::npos);
+    }
 }
 
 // Two live widens on one year, one per file (BeginLiveRebuild admits one builder per file): the catidx by a governed

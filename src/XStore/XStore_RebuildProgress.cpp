@@ -87,7 +87,7 @@ Reporter::Reporter(std::string label, Sampler sampler, Options options)
     try {
         thread_ = std::thread([this] { Run(); });
     } catch (const std::exception &e) {
-        spdlog::warn("[INDEX REBUILD] [DB: {}] - No progress display: {}", label_, e.what());
+        spdlog::warn("[{}] [DB: {}] - No progress display: {}", options_.tag, label_, e.what());
     }
 }
 
@@ -110,12 +110,12 @@ void Reporter::Run() noexcept {
         Loop(bar_mode);
     } catch (const std::exception &e) {
         try {
-            spdlog::warn("[INDEX REBUILD] [DB: {}] - Progress display stopped: {}", label_, e.what());
+            spdlog::warn("[{}] [DB: {}] - Progress display stopped: {}", options_.tag, label_, e.what());
         } catch (...) {
         }
     } catch (...) {
         try {
-            spdlog::warn("[INDEX REBUILD] [DB: {}] - Progress display stopped", label_);
+            spdlog::warn("[{}] [DB: {}] - Progress display stopped", options_.tag, label_);
         } catch (...) {
         }
     }
@@ -153,7 +153,7 @@ void Reporter::Loop(bool bar_mode) {
             bar->set_progress(static_cast<size_t>(PercentDone(sample)));
             if (sample.finished && !bar->is_completed()) bar->mark_as_completed(); // a stopped rebuild: end the line
         } else {
-            const std::string line = fmt::format("[INDEX REBUILD] [DB: {}] - {}", label_, FormatRebuildProgress(sample));
+            const std::string line = fmt::format("[{}] [DB: {}] - {}", options_.tag, label_, FormatRebuildProgress(sample));
             if (options_.log_line) {
                 options_.log_line(line);
             } else {

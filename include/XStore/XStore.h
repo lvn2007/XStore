@@ -1125,6 +1125,7 @@ class XStore {
             uint64_t done_rows = 0;
             uint64_t total_rows = 0;
             const char *slowed = nullptr;
+            bool governed = false; // that file's builder runs under a governor
         };
         // The notice for a year whose index is being rebuilt. progress nullptr: a column >= ZONE_MAP_MAX_TRACKED_COLUMNS
         // of a rebuilding year with no live-widen status (a rebuild begun some other way): the old text. With progress:
@@ -1151,7 +1152,8 @@ class XStore {
         // log line per year file per process). Tests call it directly with a fake `now`. Returns one entry per year
         // looked at, in processing order. `governor`/`load` (tests) are passed to every year; when null and
         // LIVE_WIDEN_GOVERNOR is true, the pass makes one production governor and load source per DB, shared by its
-        // years (the ramp-up carries over).
+        // years (the ramp-up carries over). `progress` (tests): the progress reporter's options (interval, line sink); it is
+        // always logged, never a bar (Tech Reference 4.18 "Progress log").
         struct LiveWidenPassEntry {
             std::string db_name;
             unsigned short year = 0;
@@ -1161,7 +1163,8 @@ class XStore {
         std::vector<LiveWidenPassEntry> RunLiveWidenPass(std::chrono::steady_clock::time_point now,
                                                          unsigned workers = XStoreTunables::LIVE_WIDEN_WORKERS,
                                                          livewiden::LiveWidenGovernor *governor = nullptr,
-                                                         livewiden::LiveWidenLoadSource *load = nullptr);
+                                                         livewiden::LiveWidenLoadSource *load = nullptr,
+                                                         const rebuildprogress::Options *progress = nullptr);
 
         // Startup index rebuild engine (Tech Reference 4.14): rebuilds the selected index files of every listed year of
         // ONE DB directory. Serially, year by year in list order, it begins each year (registry erase, pins,
@@ -1326,7 +1329,8 @@ class XStore {
         enum class LiveWidenDbOutcome { kDone, kRetry, kStopped, kGone };
         LiveWidenDbOutcome LiveWidenDb(const std::string &db_base_path, const std::string &db_name,
                                        std::vector<LiveWidenPassEntry> &out, unsigned workers,
-                                       livewiden::LiveWidenGovernor *governor, livewiden::LiveWidenLoadSource *load);
+                                       livewiden::LiveWidenGovernor *governor, livewiden::LiveWidenLoadSource *load,
+                                       const rebuildprogress::Options *progress);
 
         // Width of a year's .zmap / .catidx: the warm registry object's when there is one, else the file header's;
         // nullopt for a missing or unreadable file. `rebuilding`: a warm object of the year is in rebuild state.

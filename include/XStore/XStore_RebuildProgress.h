@@ -45,6 +45,7 @@ enum class Mode { kAuto, kBar, kLog }; // kAuto: bar on a terminal (not TERM=dum
 
 struct Options {
     Mode mode = Mode::kAuto;
+    std::string tag = "INDEX REBUILD"; // the log line's bracketed prefix
     std::chrono::milliseconds log_interval{XStoreTunables::REBUILD_PROGRESS_LOG_INTERVAL_SEC * 1000};
     std::chrono::milliseconds bar_interval{XStoreTunables::REBUILD_PROGRESS_BAR_INTERVAL_MS};
     std::function<void(const std::string &)> log_line; // empty: spdlog::info

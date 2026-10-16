@@ -410,6 +410,8 @@ inline constexpr uint64_t REBUILD_PARALLEL_GROUP_BYTES = 64ull * 1024 * 1024;
 // REBUILD_PROGRESS_LOG_INTERVAL_SEC seconds. Both only read one relaxed atomic per rebuilt chunk.
 inline constexpr unsigned REBUILD_PROGRESS_LOG_INTERVAL_SEC = 10;
 inline constexpr unsigned REBUILD_PROGRESS_BAR_INTERVAL_MS = 500;
+// Live index widen progress (Tech Reference 4.18 "Progress log"): one info line per widened DB every this many seconds.
+inline constexpr unsigned LIVE_WIDEN_PROGRESS_LOG_INTERVAL_SEC = 30;
 // Upper bound on the startup rebuild threads (each holds a 1 MiB read buffer plus fold batches of about 15-18 MB, so
 // 64 threads is about 1.2 GB); the old shared pool was capped at 32.
 inline constexpr unsigned REBUILD_MAX_THREADS = 64;

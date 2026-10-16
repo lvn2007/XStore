@@ -93,17 +93,17 @@ void SyncRebuildActive(LiveRebuildStatus &n) noexcept {
     }
 }
 
-// A builder begins (true) its files: their watermarks restart at 0.
-void BeginRebuildFiles(LiveRebuildStatus &n, bool zmap, bool catidx) {
+// A builder begins (true) its files: their watermarks restart at 0; `governed`: it runs under a governor.
+void BeginRebuildFiles(LiveRebuildStatus &n, bool zmap, bool catidx, bool governed) {
     std::lock_guard<std::mutex> lock(RebuildStatusMutex());
     if (zmap) {
         n.zmap_rows.store(0, std::memory_order_relaxed);
-        n.zmap_governed.store(false, std::memory_order_relaxed);
+        n.zmap_governed.store(governed, std::memory_order_relaxed);
         n.zmap.store(true, std::memory_order_relaxed);
     }
     if (catidx) {
         n.catidx_rows.store(0, std::memory_order_relaxed);
-        n.catidx_governed.store(false, std::memory_order_relaxed);
+        n.catidx_governed.store(governed, std::memory_order_relaxed);
         n.catidx.store(true, std::memory_order_relaxed);
     }
     SyncRebuildActive(n);
@@ -1160,6 +1160,7 @@ bool XStore::FindRebuildProgress(std::string_view db_base_path, unsigned short y
     if (!(catidx ? n->catidx : n->zmap).load(std::memory_order_relaxed)) return false;
     out.done_rows = (catidx ? n->catidx_rows : n->zmap_rows).load(std::memory_order_relaxed);
     out.total_rows = n->total_rows.load(std::memory_order_relaxed);
+    out.governed = (catidx ? n->catidx_governed : n->zmap_governed).load(std::memory_order_relaxed);
     out.slowed = (catidx ? n->catidx_governed : n->zmap_governed).load(std::memory_order_relaxed)
                      ? livewiden::SlowedText(n->allowed.load(std::memory_order_relaxed),
                                              n->max_workers.load(std::memory_order_relaxed),
@@ -1726,31 +1727,8 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
     }
     refused = refused || busy;
 
-    // The query notice's status of this year (Tech Reference 4.18 "Rebuild notice"): this builder flags only the files
-    // it began; each stays flagged until it finishes here (an early return, a stop or a failure leaves it flagged at
-    // its last progress). The year is counted while either file is flagged.
-    LiveRebuildStatus &rebuild_status = RebuildStatusFor(db_base_path, year);
-    BeginRebuildFiles(rebuild_status, zmap.get() != nullptr, catidx.get() != nullptr);
-
-    // From here every early return leaves the files that began in rebuild at the frontier they reached: dirty on
-    // disk, blocks past F scanned (never trusted), MarkClean refusing, unevictable; the next start rebuilds them.
-    struct FdCloser {
-        int fd;
-        ~FdCloser() { if (fd >= 0) close(fd); }
-    } data{open(data_path.c_str(), O_RDONLY | O_CLOEXEC)};
-    struct stat data_st{};
-    if (data.fd < 0 || fstat(data.fd, &data_st) != 0) {
-        spdlog::error("[LIVE WIDEN] [{}] - Cannot open the year file for the scan; the index stays in rebuild until "
-                      "the next start", data_path);
-        return LiveWidenResult::kFailed;
-    }
-    // Read ONCE: the year file is preallocated to its full size. If it is cut or replaced meanwhile, the scan fails
-    // (short read) or the identity check below stops the build.
-    const uint64_t total_rows = static_cast<uint64_t>(data_st.st_size) / row_length;
-    rebuild_status.total_rows.store(total_rows, std::memory_order_relaxed);
-    const uint64_t row_len = row_length;
-    const uint64_t max_data_rows = std::max<uint64_t>(XStoreTunables::LIVE_WIDEN_MIN_CHUNK_ROWS,
-                                                      XStoreTunables::LIVE_WIDEN_MAX_CHUNK_BYTES / row_len);
+    // (Decided before the status is flagged, so that "governed" is never published late: a governor is dropped here
+    // when the block size differs.)
     // Groups of whole zone-map blocks (two groups never share a block, so folds of different groups touch different
     // blocks, each in row order: the bytes equal the sequential build's). One worker: one group, the whole year, which
     // is exactly the sequential builder (same chunks, same frontier sequence, same stats).
@@ -1767,13 +1745,38 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
         want_workers = 1;
         governor = nullptr;
     }
-    if (governor != nullptr) {
+    // The query notice's status of this year (Tech Reference 4.18 "Rebuild notice"): this builder flags only the files
+    // it began; each stays flagged until it finishes here (an early return, a stop or a failure leaves it flagged at
+    // its last progress). The year is counted while either file is flagged.
+    LiveRebuildStatus &rebuild_status = RebuildStatusFor(db_base_path, year);
+    if (governor != nullptr) { // before the files are flagged governed: never visible with stale values
         rebuild_status.allowed.store(governor->Allowed(), std::memory_order_relaxed);
         rebuild_status.reason.store(governor->Reason(), std::memory_order_relaxed);
         rebuild_status.max_workers.store(governor->MaxWorkers(), std::memory_order_relaxed);
-        if (zmap.get() != nullptr) rebuild_status.zmap_governed.store(true, std::memory_order_relaxed);
-        if (catidx.get() != nullptr) rebuild_status.catidx_governed.store(true, std::memory_order_relaxed);
     }
+    BeginRebuildFiles(rebuild_status, zmap.get() != nullptr, catidx.get() != nullptr, governor != nullptr);
+
+    // From here every early return leaves the files that began in rebuild at the frontier they reached: dirty on
+    // disk, blocks past F scanned (never trusted), MarkClean refusing, unevictable; the next start rebuilds them.
+    struct FdCloser {
+        int fd;
+        ~FdCloser() { if (fd >= 0) close(fd); }
+    } data{open(data_path.c_str(), O_RDONLY | O_CLOEXEC)};
+    struct stat data_st{};
+    if (data.fd < 0 || fstat(data.fd, &data_st) != 0) {
+        spdlog::error("[LIVE WIDEN] [{}] - Cannot open the year file for the scan; the index stays in rebuild until "
+                      "the next start", data_path);
+        if (zmap.get() != nullptr) rebuild_status.zmap_governed.store(false, std::memory_order_relaxed); // no "slowed"
+        if (catidx.get() != nullptr) rebuild_status.catidx_governed.store(false, std::memory_order_relaxed);
+        return LiveWidenResult::kFailed;
+    }
+    // Read ONCE: the year file is preallocated to its full size. If it is cut or replaced meanwhile, the scan fails
+    // (short read) or the identity check below stops the build.
+    const uint64_t total_rows = static_cast<uint64_t>(data_st.st_size) / row_length;
+    rebuild_status.total_rows.store(total_rows, std::memory_order_relaxed);
+    const uint64_t row_len = row_length;
+    const uint64_t max_data_rows = std::max<uint64_t>(XStoreTunables::LIVE_WIDEN_MIN_CHUNK_ROWS,
+                                                      XStoreTunables::LIVE_WIDEN_MAX_CHUNK_BYTES / row_len);
     const auto publish_governor = [&rebuild_status, governor] {
         if (governor == nullptr) return;
         rebuild_status.allowed.store(governor->Allowed(), std::memory_order_relaxed);
@@ -2131,7 +2134,8 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
 std::vector<XStore::LiveWidenPassEntry> XStore::RunLiveWidenPass(std::chrono::steady_clock::time_point now,
                                                                  unsigned workers,
                                                                  livewiden::LiveWidenGovernor *governor,
-                                                                 livewiden::LiveWidenLoadSource *load) {
+                                                                 livewiden::LiveWidenLoadSource *load,
+                                                                 const rebuildprogress::Options *progress) {
     std::vector<LiveWidenPassEntry> processed;
     if (!live_widen_pending_.load(std::memory_order_relaxed)) return processed; // the per-tick cost when idle
     struct Due {
@@ -2164,7 +2168,8 @@ std::vector<XStore::LiveWidenPassEntry> XStore::RunLiveWidenPass(std::chrono::st
             db_governor = own_governor.get();
             db_load = own_load.get();
         }
-        const LiveWidenDbOutcome outcome = LiveWidenDb(d.db_base_path, d.db_name, processed, workers, db_governor, db_load);
+        const LiveWidenDbOutcome outcome = LiveWidenDb(d.db_base_path, d.db_name, processed, workers, db_governor, db_load,
+                                                     progress);
         bool gave_up = false;
         uint32_t attempts = 0;
         uint64_t wait_sec = 0;
@@ -2211,7 +2216,8 @@ std::vector<XStore::LiveWidenPassEntry> XStore::RunLiveWidenPass(std::chrono::st
 XStore::LiveWidenDbOutcome XStore::LiveWidenDb(const std::string &db_base_path, const std::string &db_name,
                                                std::vector<LiveWidenPassEntry> &out, unsigned workers,
                                                livewiden::LiveWidenGovernor *governor,
-                                               livewiden::LiveWidenLoadSource *load) try {
+                                               livewiden::LiveWidenLoadSource *load,
+                                               const rebuildprogress::Options *progress_options) try {
     XStore_Proto::ConfigStruct cfg;
     if (!GetOrLoadCfg(db_name, db_base_path, cfg)) {
         spdlog::info("[LIVE WIDEN] [DB: {}] - The DB no longer exists; nothing to widen", db_name);
@@ -2238,12 +2244,151 @@ XStore::LiveWidenDbOutcome XStore::LiveWidenDb(const std::string &db_base_path, 
     }
     std::sort(years.begin(), years.end(), std::greater<>()); // newest (the current) year first
 
+    // Widths only (mirrors ZoneMapNeedsRebuild / CatIdxNeedsRebuild): the dirty flag says nothing at runtime.
+    struct Decision {
+        bool rebuilding = false; // a stopped or failed rebuild (or a startup rebuild that could not begin)
+        bool widen_zmap = false;
+        bool widen_catidx = false;
+    };
+    const auto decide = [&](unsigned short year) {
+        const YearIndexWidths widths = PeekYearIndexWidths(db_base_path, year);
+        Decision d;
+        d.rebuilding = widths.rebuilding;
+        d.widen_zmap = !widths.zmap.has_value() || *widths.zmap != desired;
+        d.widen_catidx = !widths.catidx.has_value() || *widths.catidx < desired;
+        return d;
+    };
+
+    // Progress log (Tech Reference 4.18 "Progress log"): the years this pass will widen, decided now as the loop below
+    // decides them. The reporter thread only reads these atomics and the per-year status watermarks.
+    constexpr int32_t kNoYear = -1;
+    struct WidenProgress {
+        std::vector<std::pair<unsigned short, uint64_t>> planned; // (year, rows of its data file); only the widen thread reads or writes it
+        std::atomic<size_t> years_total{0};
+        std::atomic<uint64_t> rows_total{0};
+        std::atomic<size_t> years_done{0};
+        std::atomic<uint64_t> rows_finished{0}; // rows of the years finished OK
+        std::atomic<int32_t> current_year{-1}; // kNoYear; stored last (release) after the fields below
+        std::atomic<uint64_t> current_rows{0}; // the current year's planned rows: its progress is clamped to them
+        std::atomic<bool> current_zmap{false}; // the files the current year's widen asks for
+        std::atomic<bool> current_catidx{false};
+        // The year leaves the plan (skipped or nothing to do after all): the percentage must still reach 100.
+        void Drop(unsigned short year) noexcept {
+            for (auto &[y, rows] : planned) {
+                if (y != year || rows == UINT64_MAX) continue;
+                years_total.fetch_sub(1, std::memory_order_relaxed);
+                rows_total.fetch_sub(rows, std::memory_order_relaxed);
+                rows = UINT64_MAX; // dropped
+            }
+        }
+        [[nodiscard]] uint64_t RowsOf(unsigned short year) const noexcept {
+            for (const auto &[y, rows] : planned) {
+                if (y == year) return rows;
+            }
+            return UINT64_MAX;
+        }
+    } widen_progress;
+    for (const unsigned short year : years) {
+        const Decision d = decide(year);
+        if (d.rebuilding || (!d.widen_zmap && !d.widen_catidx)) continue;
+        std::error_code size_ec;
+        const uintmax_t bytes = std::filesystem::file_size(fmt::format("{}/{}.XSTORE", db_base_path, year), size_ec);
+        const uint64_t rows = size_ec || row_length == 0 ? 0 : static_cast<uint64_t>(bytes) / row_length;
+        widen_progress.planned.emplace_back(year, rows);
+        widen_progress.years_total.fetch_add(1, std::memory_order_relaxed);
+        widen_progress.rows_total.fetch_add(rows, std::memory_order_relaxed);
+    }
+    // Declared after widen_progress and the governor (a parameter), so it is stopped (joined, final line) before they
+    // go, on every exit: return, stop flag, RemoveDB cancel, exception.
+    std::optional<rebuildprogress::Reporter> reporter;
+    if (!widen_progress.planned.empty()) {
+        rebuildprogress::Options options;
+        if (progress_options != nullptr) {
+            options = *progress_options;
+        } else {
+            options.log_interval = std::chrono::milliseconds(XStoreTunables::LIVE_WIDEN_PROGRESS_LOG_INTERVAL_SEC * 1000);
+        }
+        options.mode = rebuildprogress::Mode::kLog; // a live server logs to a service / tmux: never a bar
+        options.tag = "LIVE WIDEN";
+        // The current year's progress (lock-free): the watermark of the file(s) it widens (the smaller when both), at most
+        // the year's planned rows, and whether its builder runs under a governor.
+        struct CurrentYear {
+            int32_t year = kNoYear;
+            bool active = false;
+            bool governed = false;
+            uint64_t rows = 0;
+        };
+        const auto read_current = [&db_base_path, &widen_progress]() {
+            CurrentYear cur;
+            const int32_t year = widen_progress.current_year.load(std::memory_order_acquire);
+            cur.year = year;
+            if (year == kNoYear) return cur;
+            LiveRebuildProgress zmap, catidx;
+            const bool has_zmap = widen_progress.current_zmap.load(std::memory_order_relaxed) &&
+                                  FindRebuildProgress(db_base_path, static_cast<unsigned short>(year), false, zmap);
+            const bool has_catidx = widen_progress.current_catidx.load(std::memory_order_relaxed) &&
+                                    FindRebuildProgress(db_base_path, static_cast<unsigned short>(year), true, catidx);
+            if (!has_zmap && !has_catidx) return cur;
+            cur.active = true;
+            cur.governed = (has_zmap && zmap.governed) || (has_catidx && catidx.governed);
+            const uint64_t watermark = has_zmap && has_catidx ? std::min(zmap.done_rows, catidx.done_rows)
+                                                              : has_zmap ? zmap.done_rows : catidx.done_rows;
+            cur.rows = std::min(watermark, widen_progress.current_rows.load(std::memory_order_relaxed));
+            return cur;
+        };
+        // The governor's state follows the current year's status (LiveWidenOneYear may run a year without it). The first
+        // answer of a year is kept for the whole year, so the suffix cannot drop out when the builder clears its flag at
+        // the end; between years and on the final line the last year's answer stays.
+        options.log_line = [sink = std::move(options.log_line), governor, read_current, governed = governor != nullptr,
+                            year = kNoYear, decided = false](const std::string &line) mutable {
+            std::string out = line;
+            if (governor != nullptr) {
+                const CurrentYear cur = read_current();
+                if (cur.year != year) {
+                    year = cur.year;
+                    decided = false;
+                }
+                if (cur.active && !decided) {
+                    governed = cur.governed;
+                    decided = true;
+                }
+                if (governed) { // lock-free reads of the governor's atomics
+                    const unsigned allowed = governor->Allowed();
+                    out += fmt::format(" | workers {}/{}", allowed, governor->MaxWorkers());
+                    if (const char *slowed = livewiden::SlowedText(allowed, governor->MaxWorkers(), governor->Reason())) {
+                        out += fmt::format(" | slowed: {}", slowed);
+                    }
+                }
+            }
+            if (sink) {
+                sink(out);
+            } else {
+                spdlog::info("{}", out);
+            }
+        };
+        const auto sampler = [&widen_progress, read_current, last = uint64_t{0}]() mutable {
+            rebuildprogress::Sample sample;
+            sample.rows_total = widen_progress.rows_total.load(std::memory_order_relaxed);
+            sample.years_total = widen_progress.years_total.load(std::memory_order_relaxed);
+            sample.years_done = widen_progress.years_done.load(std::memory_order_relaxed);
+            const uint64_t done = widen_progress.rows_finished.load(std::memory_order_relaxed) + read_current().rows;
+            // Never backwards (a year's status ends just before its rows are counted as finished), never past the total.
+            last = std::max(last, std::min(done, sample.rows_total));
+            sample.rows_done = last;
+            return sample;
+        };
+        reporter.emplace(db_name, std::move(sampler), std::move(options));
+    }
+
     bool retry = false;
     for (const unsigned short year : years) {
         const std::string year_key = fmt::format("{}/{}", db_base_path, year);
         const BgEnter enter = EnterBackgroundYear(year_key);
         if (enter == BgEnter::kCancelled) return LiveWidenDbOutcome::kStopped;
-        if (enter == BgEnter::kRemoving) continue; // that year (or the whole DB) is being removed
+        if (enter == BgEnter::kRemoving) { // that year (or the whole DB) is being removed
+            widen_progress.Drop(year);
+            continue;
+        }
         struct Leave {
             ~Leave() { XStore::LeaveBackgroundYear(); }
         } leave;
@@ -2251,8 +2396,9 @@ XStore::LiveWidenDbOutcome XStore::LiveWidenDb(const std::string &db_base_path, 
         LiveWidenPassEntry entry;
         entry.db_name = db_name;
         entry.year = year;
-        const YearIndexWidths widths = PeekYearIndexWidths(db_base_path, year);
-        if (widths.rebuilding) {
+        const Decision decision = decide(year);
+        if (decision.rebuilding) {
+            widen_progress.Drop(year);
             // A stopped or failed rebuild (or a startup rebuild that could not begin): untrusted until the next start
             // rebuilds it. Never resumed here: its owner may still be alive.
             entry.skipped_rebuilding = true;
@@ -2269,18 +2415,34 @@ XStore::LiveWidenDbOutcome XStore::LiveWidenDb(const std::string &db_base_path, 
             }
             continue;
         }
-        // Widths only (mirrors ZoneMapNeedsRebuild / CatIdxNeedsRebuild): the dirty flag says nothing at runtime.
-        const bool widen_zmap = !widths.zmap.has_value() || *widths.zmap != desired;
-        const bool widen_catidx = !widths.catidx.has_value() || *widths.catidx < desired;
+        const bool widen_zmap = decision.widen_zmap;
+        const bool widen_catidx = decision.widen_catidx;
         if (!widen_zmap && !widen_catidx) {
+            widen_progress.Drop(year);
             out.push_back(entry); // kNothingToDo
             continue;
         }
         spdlog::info("[LIVE WIDEN] [DB: {}] - Widening year {} to {} columns (zone map: {}, catidx: {})", db_name, year,
                      desired, widen_zmap, widen_catidx);
         LiveWidenStats stats;
+        const uint64_t year_rows = widen_progress.RowsOf(year); // UINT64_MAX: not in the plan (grew since)
+        if (year_rows != UINT64_MAX) {
+            widen_progress.current_rows.store(year_rows, std::memory_order_relaxed);
+            widen_progress.current_zmap.store(widen_zmap, std::memory_order_relaxed);
+            widen_progress.current_catidx.store(widen_catidx, std::memory_order_relaxed);
+            widen_progress.current_year.store(year, std::memory_order_release);
+        }
         entry.result = LiveWidenOneYear(db_base_path, year, row_length, desired, widen_zmap, widen_catidx, &bg_cancel_, &stats,
                                         workers, XStoreTunables::LIVE_WIDEN_GROUP_BYTES, governor, load);
+        if (year_rows != UINT64_MAX) {
+            if (entry.result == LiveWidenResult::kDone) {
+                widen_progress.rows_finished.fetch_add(year_rows, std::memory_order_relaxed);
+                widen_progress.years_done.fetch_add(1, std::memory_order_relaxed);
+            } else if (entry.result == LiveWidenResult::kNothingToDo) {
+                widen_progress.Drop(year);
+            }
+            widen_progress.current_year.store(kNoYear, std::memory_order_release);
+        }
         out.push_back(entry);
         if (entry.result == LiveWidenResult::kDone || entry.result == LiveWidenResult::kNothingToDo) continue;
         if (entry.result == LiveWidenResult::kStopped) return LiveWidenDbOutcome::kStopped;
