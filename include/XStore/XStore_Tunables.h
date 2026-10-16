@@ -482,9 +482,11 @@ inline constexpr uint64_t LIVE_WIDEN_GOVERNOR_BRAKE_HOLD_SEC = 10;   // no raise
 // governed run (floor never braked, ramps to 3-8 then brakes). Recheck on Mystic.
 inline constexpr uint64_t LIVE_WIDEN_WRITER_WAIT_BRAKE_US = 150000;
 // Long waits (>= LIVE_WIDEN_WRITER_LONG_WAIT_US) since the last evaluation that brake (a plain count, not a rate: one
-// long wait is one too many whatever the interval). G3 local VM: no wait >= 25 ms in any arm (1, 4 or governed
-// workers, ~550 builder seconds); kept at 1, never the trigger there.
-inline constexpr uint64_t LIVE_WIDEN_LONG_WAITS_BRAKE = 1;
+// long wait is one too many whatever the interval). 0 = this brake is off (the wait-RATE brake still applies).
+// Mystic, 8-thread random batch inserts, one run per arm: at 1 the brake fired 6 times in one 2009 widen (each time
+// 8 -> 1 workers for 10 s), 329 s against 266 s with it off (fixed 8: 243 s), and no insert latency difference we could
+// resolve; with it off nothing braked. Default 0 until a heavier write load shows a need (counts above 1 are untested).
+inline constexpr uint64_t LIVE_WIDEN_LONG_WAITS_BRAKE = 0;
 inline constexpr uint64_t LIVE_WIDEN_STARVATION_GUARD_SEC = 600;     // floor 0 only: one-group grant after this
 inline constexpr uint64_t LIVE_WIDEN_AT_FLOOR_WARN_SEC = 60;         // WARNING once per at-floor episode this long
 inline constexpr unsigned LIVE_WIDEN_GOVERNOR_SMOOTHING_TICKS = 3;   // window for raises (drops use the last tick)
