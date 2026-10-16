@@ -2100,6 +2100,150 @@ PassResult YearsAndResults(const std::vector<XStore::LiveWidenPassEntry> &pass) 
 constexpr const char *kBeingIndexed = "being indexed in the background";
 using std::chrono::seconds;
 
+// Waits until the live widen of (path, year)'s zone map (catidx: its catidx) has published a watermark >= done_rows
+// (and, with want_slowed, a "slowed" reason), or fails after 20 s.
+XStore::LiveRebuildProgress WaitForRebuildProgress(const std::string &path, unsigned short year, uint64_t done_rows,
+                                                   bool want_slowed = false, bool catidx = false) {
+    const Clock::time_point deadline = Clock::now() + seconds(20);
+    XStore::LiveRebuildProgress p;
+    while (Clock::now() < deadline) {
+        if (XStore::FindRebuildProgress(path, year, catidx, p) && p.done_rows >= done_rows &&
+            (!want_slowed || p.slowed != nullptr)) {
+            return p;
+        }
+        std::this_thread::sleep_for(milliseconds(1));
+    }
+    ADD_FAILURE() << "the live widen never published a watermark >= " << done_rows << (want_slowed ? " slowed" : "");
+    return p;
+}
+
+std::string MaxStatus(XStore &store, const std::string &db, unsigned long long lo, unsigned long long hi, unsigned short c) {
+    XStore_Proto::Max_REP rep;
+    store.MaxAggregate(lo, hi, db, c, &rep);
+    return rep.opstatus();
+}
+
+std::string FindStatus(XStore &store, const std::string &db, unsigned long long lo, unsigned long long hi, int32_t c) {
+    std::string buf;
+    store.FindByValue(lo, hi, db, c, FDouble(1.0), XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                      [&](std::string &&chunk, bool) { buf += chunk; });
+    XStore_Proto::FindByValue_REP rep;
+    EXPECT_TRUE(rep.ParseFromString(buf));
+    return rep.querystatus();
+}
+
+size_t Occurrences(const std::string &s, const std::string &what) {
+    size_t n = 0;
+    for (size_t at = s.find(what); at != std::string::npos; at = s.find(what, at + 1)) ++n;
+    return n;
+}
+
+// ---- Rebuild notice (Tech Reference 4.18 "Rebuild notice") ---------------------------------------------------------
+
+TEST_F(XStoreLiveWidenTest, RebuildNoticeTextCarriesTheRoundedDownPercentAndTheSlowedReason) {
+    const std::string tail = " (a rebuild that was interrupted finishes at the next start)";
+    XStore::LiveRebuildProgress p{2, 3, nullptr};
+    EXPECT_EQ(XStore::RebuildingColumnNoticeText("MAX AGGREGATE", "DB", 65, 2009, &p),
+              "[WARNING] [MAX AGGREGATE] [DB: DB] - column 65 is being indexed in the background in 2009 (66% done); "
+              "the part not yet rebuilt is answered by full scan" + tail);
+    p.slowed = "writers waiting";
+    EXPECT_EQ(XStore::RebuildingColumnNoticeText("MAX AGGREGATE", "DB", 5, 2009, &p),
+              "[WARNING] [MAX AGGREGATE] [DB: DB] - column 5 is being indexed in the background in 2009 (66% done; "
+              "slowed: writers waiting); the part not yet rebuilt is answered by scan, results are correct" + tail);
+    const auto pct = [](uint64_t done, uint64_t total) {
+        XStore::LiveRebuildProgress q{done, total, nullptr};
+        const std::string text = XStore::RebuildingColumnNoticeText("SUM AGGREGATE", "DB", 5, 2009, &q);
+        const size_t open = text.find("2009 (");
+        return text.substr(open + 6, text.find('%') - open - 6);
+    };
+    EXPECT_EQ(pct(0, 0), "0");
+    EXPECT_EQ(pct(0, 1000), "0");
+    EXPECT_EQ(pct(9, 1000), "0");
+    EXPECT_EQ(pct(999, 1000), "99");
+    EXPECT_EQ(pct(1000, 1000), "100");
+    EXPECT_EQ(XStore::RebuildingColumnNoticeText("FINDBYVALUE", "DB", 65, 2009),
+              "[WARNING] [FINDBYVALUE] [DB: DB] - column 65 is being indexed in the background in 2009; answered by full "
+              "scan until it finishes" + tail) << "no live-widen status: the old text";
+
+    using livewiden::GovernorReason;
+    EXPECT_STREQ(livewiden::SlowedText(1, 4, GovernorReason::kWriterWait), "writers waiting");
+    EXPECT_STREQ(livewiden::SlowedText(1, 4, GovernorReason::kLongWaits), "long writer waits");
+    EXPECT_STREQ(livewiden::SlowedText(3, 4, GovernorReason::kForegroundCpu), "foreground CPU");
+    EXPECT_EQ(livewiden::SlowedText(1, 4, GovernorReason::kRampUp), nullptr);
+    EXPECT_EQ(livewiden::SlowedText(1, 4, GovernorReason::kStart), nullptr);
+    EXPECT_EQ(livewiden::SlowedText(1, 4, GovernorReason::kNone), nullptr);
+    EXPECT_EQ(livewiden::SlowedText(4, 4, GovernorReason::kWriterWait), nullptr) << "at its maximum it is not slowed";
+
+    // Nothing rebuilt (the fixture dropped every status): the counter is zero and a low column gets no notice.
+    EXPECT_EQ(XStore::YearsRebuilding(), 0u);
+    XStore store;
+    const std::string db = "LWNOTICE0";
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    Insert(store, db, {{Epoch(0), ValueRow(1, 10)}});
+    EXPECT_FALSE(XStore::FindRebuildProgress(DbPath(db), kYear, false, p));
+    EXPECT_EQ(MaxStatus(store, db, Epoch(0), Epoch(10), 5), "SUCCESS");
+}
+
+// A widen held at a known watermark (a WRITE lock on row kStuck, which the builder can only wait for; no query may
+// cover that row while it is held: its READ lock would wait too): (a) a low column over rows past the watermark is
+// right and says how far the rebuild is; (b) a range below the watermark is answered from the
+// index, no notice; (c) a column >= 64 always says so; (d) another year: nothing; (e) after the widen: nothing, and the
+// counter is back where it was.
+TEST_F(XStoreLiveWidenTest, RebuildNoticeShowsProgressOnTheRebuildingYearOnlyAndEndsWithTheRebuild) {
+    XStore store;
+    const std::string db = "LWNOTICE";
+    constexpr uint64_t kRows = 20000;
+    SeedNarrowIndexWideRows(store, db, kRows, 70);
+    Rows other;
+    for (uint64_t r = 0; r < 100; ++r) other.emplace_back(Jan1(1979) + r, ValueRow(r + 1, 70)); // born 70 wide
+    Insert(store, db, other);
+    const std::string path = DbPath(db);
+    const uint32_t before = XStore::YearsRebuilding();
+    const uint64_t kStuck = 10 * Rpb() + 7;
+    FileRangeLock &lock = FileLockRegistry::Get(YearPath(db, ".XSTORE"));
+    lock.LockRange(kStuck * kRowLength, kRowLength, kWrite);
+    auto builder = std::async(std::launch::async, [&] {
+        XStore b;
+        return b.LiveWidenOneYear(path, kYear, kRowLength, 70, true, true, nullptr, nullptr, 1);
+    });
+    // (no ASSERT while the lock is held: the builder would never end)
+    const XStore::LiveRebuildProgress p = WaitForRebuildProgress(path, kYear, kStuck);
+    EXPECT_EQ(p.done_rows, kStuck);
+    EXPECT_EQ(XStore::YearsRebuilding(), before + 1);
+    const uint64_t total = static_cast<uint64_t>(std::filesystem::file_size(YearPath(db, ".XSTORE"))) / kRowLength;
+    EXPECT_EQ(p.total_rows, total);
+    EXPECT_EQ(p.slowed, nullptr) << "ungoverned";
+    const std::string state = " in 1980 (" + std::to_string(kStuck * 100 / total) + "% done)";
+
+    const std::string low = MaxStatus(store, db, Epoch(kStuck + 1), Epoch(kRows - 1), 5);                // (a)
+    EXPECT_NE(low.find(kBeingIndexed + state + "; the part not yet rebuilt is answered by scan, results are correct"),
+              std::string::npos) << low;
+    EXPECT_EQ(MaxStatus(store, db, Epoch(0), Epoch(kStuck - 1), 5), "SUCCESS");                         // (b)
+    const std::string high = MaxStatus(store, db, Epoch(0), Epoch(10), 65);                              // (c)
+    EXPECT_NE(high.find(kBeingIndexed + state + "; the part not yet rebuilt is answered by full scan"), std::string::npos)
+        << high;
+    EXPECT_NE(FindStatus(store, db, Epoch(kStuck + 1), Epoch(kRows - 1), 5).find(kBeingIndexed + state), std::string::npos);
+    EXPECT_EQ(FindStatus(store, db, Epoch(0), Epoch(kStuck - 1), 5).find(kBeingIndexed), std::string::npos);
+    EXPECT_NE(FindStatus(store, db, Epoch(0), Epoch(10), 65).find(kBeingIndexed + state), std::string::npos);
+    EXPECT_EQ(MaxStatus(store, db, Jan1(1979), Jan1(1979) + 99, 5), "SUCCESS");                         // (d)
+    EXPECT_EQ(MaxStatus(store, db, Jan1(1979), Jan1(1979) + 99, 65), "SUCCESS");
+    const std::string both = MaxStatus(store, db, Jan1(1979), Epoch(10), 65);
+    EXPECT_EQ(Occurrences(both, kBeingIndexed), 1u) << both;
+    EXPECT_NE(both.find(kBeingIndexed + state), std::string::npos) << both;
+    ExpectAnswersMatchTheData(store, db, 0, kStuck - 1, {5, 65});
+    ExpectAnswersMatchTheData(store, db, kStuck + 1, kRows - 1, {5, 65});
+
+    lock.UnlockRange(kStuck * kRowLength, kRowLength, kWrite);
+    ASSERT_EQ(builder.wait_for(seconds(60)), std::future_status::ready);
+    EXPECT_EQ(builder.get(), Result::kDone);
+    EXPECT_EQ(XStore::YearsRebuilding(), before) << "a finished year is no longer counted";                // (e)
+    XStore::LiveRebuildProgress q;
+    EXPECT_FALSE(XStore::FindRebuildProgress(path, kYear, false, q));
+    EXPECT_EQ(MaxStatus(store, db, Epoch(0), Epoch(kRows - 1), 5), "SUCCESS");
+    EXPECT_EQ(MaxStatus(store, db, Epoch(0), Epoch(kRows - 1), 65), "SUCCESS");
+    EXPECT_EQ(FindStatus(store, db, Epoch(0), Epoch(kRows - 1), 5).find(kBeingIndexed), std::string::npos);
+}
+
 // Real growth through MaybeGrowColumnCount, debounce, then one pass widens every year of the DB, newest first, to the
 // exact width, byte-identical to a startup rebuild of each year. Queries are right before, during (a query thread runs
 // while the pass works) and after.
@@ -2231,7 +2375,9 @@ TEST_F(XStoreLiveWidenTest, AGrowthDuringAPassKeepsTheRecordAndTheNextPassWidens
     WaitForFrontierPast(zmap, Rpb());
     EXPECT_TRUE(zmap.Rebuilding()); // (no ASSERT while the lock is held: the pass would never end)
 
-    // Notices on a rebuilding year: a column >= 64 says "being indexed in the background", a lower one says nothing.
+    // Notices on a rebuilding year: a column >= 64 says "being indexed in the background"; a lower one says it only
+    // when the range reaches the watermark (here held at kRows, the locked row: the data below it is all folded).
+    WaitForRebuildProgress(path, kYear, kRows);
     XStore_Proto::Max_REP high;
     store.MaxAggregate(Epoch(0), Epoch(kRows - 1), db, 65, &high);
     EXPECT_NE(high.opstatus().find(kBeingIndexed), std::string::npos) << high.opstatus();
@@ -3767,6 +3913,121 @@ TEST(LiveWidenLoadSourceTest, ReadsCpuAndTheYearsWriterCountersAndSurvivesAMissi
     EXPECT_EQ(flaky.Sample().busy_cpu_s, good);
     { std::ofstream(fake) << "garbage\n"; }
     EXPECT_EQ(flaky.Sample().busy_cpu_s, good);
+}
+
+// (f) A governor whose fake CPU signal holds it at 1 of 4 workers (row kStuck WRITE-locked as above): the notice says "slowed: foreground CPU". (g) After a
+// stop the year stays counted and keeps its notice with the last percentage (no "slowed": nothing governs it now) until
+// the next start (here: the registries dropped, as a restart does).
+TEST_F(XStoreParallelLiveWidenTest, RebuildNoticeSaysSlowedUnderAGovernorAndKeepsItsPercentAfterAStop) {
+    XStore store;
+    const std::string db = "LWNOTICEGOV";
+    constexpr uint64_t kRows = 20000;
+    SeedNarrowIndexWideRows(store, db, kRows, 70);
+    const std::string path = DbPath(db);
+    const uint32_t before = XStore::YearsRebuilding();
+    const uint64_t kStuck = 10 * Rpb() + 7;
+    FileRangeLock &lock = FileLockRegistry::Get(YearPath(db, ".XSTORE"));
+    lock.LockRange(kStuck * kRowLength, kRowLength, kWrite);
+    FakeGovernorInputs in;
+    in.fg = [](uint64_t) { return 100.0; };
+    auto gov = MakeFakeGovernor(in, FakeParams(4, 4, 1));
+    std::atomic<bool> stop{false};
+    auto builder = std::async(std::launch::async, [&] {
+        XStore b;
+        return b.LiveWidenOneYear(path, kYear, kRowLength, 70, true, true, &stop, nullptr, 1, Rpb() * kRowLength,
+                                  gov.get());
+    });
+    const XStore::LiveRebuildProgress p = WaitForRebuildProgress(path, kYear, kStuck, /*want_slowed=*/true);
+    EXPECT_EQ(p.done_rows, kStuck);
+    EXPECT_STREQ(p.slowed, "foreground CPU");
+    const std::string pct = " in 1980 (" + std::to_string(kStuck * 100 / std::max<uint64_t>(1, p.total_rows)) + "% done";
+    const std::string governed = MaxStatus(store, db, Epoch(kStuck + 1), Epoch(kRows - 1), 5);
+    EXPECT_NE(governed.find(kBeingIndexed + pct + "; slowed: foreground CPU)"), std::string::npos) << governed;
+
+    stop.store(true);
+    const bool ended = builder.wait_for(seconds(10)) == std::future_status::ready;
+    lock.UnlockRange(kStuck * kRowLength, kRowLength, kWrite);
+    ASSERT_TRUE(ended);
+    EXPECT_EQ(builder.get(), Result::kStopped);
+    EXPECT_EQ(XStore::YearsRebuilding(), before + 1) << "a stopped widen stays counted";
+    const std::string stopped = MaxStatus(store, db, Epoch(0), Epoch(kRows - 1), 5);
+    EXPECT_NE(stopped.find(kBeingIndexed + pct + ")"), std::string::npos) << stopped;
+    EXPECT_NE(MaxStatus(store, db, Epoch(0), Epoch(10), 65).find(kBeingIndexed + pct + ")"), std::string::npos);
+    EXPECT_EQ(MaxStatus(store, db, Epoch(0), Epoch(kStuck - 1), 5), "SUCCESS");
+    ExpectAnswersMatchTheData(store, db, 0, kRows - 1, {5, 65});
+
+    XStore::ClearZoneMapRegistryForTests();
+    EXPECT_EQ(XStore::YearsRebuilding(), before);
+}
+
+// Two live widens on one year, one per file (BeginLiveRebuild admits one builder per file): the catidx by a governed
+// builder whose workers stay parked (its watermark stays 0), the zone map by an ungoverned one held at row kFar (the
+// middle of the preallocated year: it skips the holes up to there) by a WRITE lock. The year counts once; each file
+// reports its own watermark and only the governed builder's file says "slowed"; the zone map's builder finishing does
+// not end the catidx's notice.
+TEST_F(XStoreParallelLiveWidenTest, RebuildNoticeFollowsEachFileOfAYearWithTwoBuilders) {
+    XStore store;
+    const std::string db = "LWNOTICE2";
+    constexpr uint64_t kRows = 8000;
+    SeedNarrowIndexWideRows(store, db, kRows, 70);
+    const uint64_t total = static_cast<uint64_t>(std::filesystem::file_size(YearPath(db, ".XSTORE"))) / kRowLength;
+    const uint64_t kFar = total / 2;
+    Insert(store, db, {{Epoch(kFar), ValueRow(1, 70)}, {Epoch(kFar + 5), ValueRow(2, 70)}});
+    const std::string path = DbPath(db);
+    const uint32_t before = XStore::YearsRebuilding();
+
+    FakeGovernorInputs in;
+    in.fg = [](uint64_t) { return 100.0; };
+    livewiden::GovernorParams params = FakeParams(4, 2, 0);
+    params.starvation_guard = std::chrono::seconds(1'000'000'000);
+    auto gov = MakeFakeGovernor(in, params);
+    std::atomic<bool> stop_catidx{false};
+    auto catidx_builder = std::async(std::launch::async, [&] {
+        XStore b;
+        return b.LiveWidenOneYear(path, kYear, kRowLength, 70, false, true, &stop_catidx, nullptr, 1, Rpb() * kRowLength,
+                                  gov.get());
+    });
+    WaitForRebuildProgress(path, kYear, 0, false, /*catidx=*/true);
+
+    FileRangeLock &lock = FileLockRegistry::Get(YearPath(db, ".XSTORE"));
+    lock.LockRange(kFar * kRowLength, kRowLength, kWrite);
+    auto zmap_builder = std::async(std::launch::async, [&] {
+        XStore b;
+        return b.LiveWidenOneYear(path, kYear, kRowLength, 70, true, false, nullptr, nullptr, 1);
+    });
+    // (no ASSERT while the lock is held)
+    const XStore::LiveRebuildProgress z = WaitForRebuildProgress(path, kYear, kFar);
+    XStore::LiveRebuildProgress c;
+    EXPECT_TRUE(XStore::FindRebuildProgress(path, kYear, /*catidx=*/true, c));
+    EXPECT_EQ(z.done_rows, kFar) << "the zone map's own watermark";
+    EXPECT_EQ(c.done_rows, 0u) << "the catidx's own watermark (parked builder)";
+    EXPECT_EQ(XStore::YearsRebuilding(), before + 1) << "one year, counted once";
+    const std::string zstate = " in 1980 (" + std::to_string(kFar * 100 / total) + "% done)";
+    EXPECT_NE(zstate, " in 1980 (0% done)");
+    const std::string low = MaxStatus(store, db, Epoch(kFar + 1), Epoch(kFar + 10), 5);
+    EXPECT_NE(low.find(kBeingIndexed + zstate), std::string::npos) << low;
+    EXPECT_EQ(MaxStatus(store, db, Epoch(0), Epoch(kRows - 1), 5), "SUCCESS");
+    const std::string find_low = FindStatus(store, db, Epoch(0), Epoch(kRows - 1), 5);
+    EXPECT_NE(find_low.find(kBeingIndexed + std::string(" in 1980 (0% done; slowed: foreground CPU)")), std::string::npos)
+        << find_low << " (the catidx's builder is the governed one)";
+
+    lock.UnlockRange(kFar * kRowLength, kRowLength, kWrite);
+    const bool zmap_ended = zmap_builder.wait_for(std::chrono::seconds(60)) == std::future_status::ready;
+    EXPECT_TRUE(zmap_ended);
+    if (zmap_ended) EXPECT_EQ(zmap_builder.get(), Result::kDone);
+    EXPECT_FALSE(XStore::FindRebuildProgress(path, kYear, /*catidx=*/false, c));
+    EXPECT_TRUE(XStore::FindRebuildProgress(path, kYear, /*catidx=*/true, c)) << "the zone map's end ended the catidx's";
+    EXPECT_EQ(XStore::YearsRebuilding(), before + 1);
+    EXPECT_EQ(MaxStatus(store, db, Epoch(0), Epoch(kFar + 10), 5), "SUCCESS");
+    EXPECT_EQ(MaxStatus(store, db, Epoch(0), Epoch(kRows - 1), 65), "SUCCESS");
+    EXPECT_NE(FindStatus(store, db, Epoch(0), Epoch(kRows - 1), 5).find(kBeingIndexed), std::string::npos);
+
+    stop_catidx.store(true);
+    ASSERT_EQ(catidx_builder.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    EXPECT_EQ(catidx_builder.get(), Result::kStopped);
+    EXPECT_EQ(XStore::YearsRebuilding(), before + 1) << "the stopped catidx keeps the year counted";
+    XStore::ClearZoneMapRegistryForTests();
+    EXPECT_EQ(XStore::YearsRebuilding(), before);
 }
 
 } // namespace

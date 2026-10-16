@@ -49,6 +49,10 @@ struct GovernorParams {
 
 enum class GovernorReason { kStart, kNone, kRampUp, kForegroundCpu, kWriterWait, kLongWaits };
 
+// The query notice's "slowed: <reason>" (Tech Reference 4.18 "Rebuild notice"): nullptr unless allowed < max_workers
+// for a reason other than starting or ramping up.
+[[nodiscard]] const char *SlowedText(unsigned allowed, unsigned max_workers, GovernorReason reason) noexcept;
+
 class LiveWidenGovernor {
     public:
         using Clock = std::chrono::steady_clock;
@@ -95,6 +99,9 @@ class LiveWidenGovernor {
         // The next evaluation re-reads the writer counters as a new baseline and computes no writer delta.
         void RebaselineWriterCounters() noexcept { rebaseline_writers_.store(true, std::memory_order_relaxed); }
         [[nodiscard]] Snapshot GetSnapshot() const;
+        // Lock-free reads of the current decision (the builder copies them into the year's rebuild status).
+        [[nodiscard]] unsigned Allowed() const noexcept { return allowed_.load(std::memory_order_relaxed); }
+        [[nodiscard]] GovernorReason Reason() const noexcept { return reason_.load(std::memory_order_relaxed); }
 
     private:
         struct Point {
@@ -115,6 +122,7 @@ class LiveWidenGovernor {
         const std::function<double()> progress_;
 
         std::atomic<unsigned> allowed_;
+        std::atomic<GovernorReason> reason_{GovernorReason::kStart};
         std::atomic<bool> starvation_grant_{false};
         std::atomic<bool> rebaseline_writers_{false};
         std::atomic<Clock::rep> last_now_;

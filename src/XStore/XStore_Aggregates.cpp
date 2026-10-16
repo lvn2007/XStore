@@ -1138,8 +1138,19 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
             const CatIdxFile::Pin catidx_pin = PinCatIdx(db_base_path_str, curr_ts.year,
                                                          static_cast<uint16_t>(cfg_struct.rowlength()), tracked_column_count);
             CatIdxFile &catidx = *catidx_pin;
-            if (!unindexed_notice_emitted &&
-                static_cast<uint32_t>(column_idx) >= XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS && catidx.Rebuilding()) {
+            const bool high_column = static_cast<uint32_t>(column_idx) >= XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS;
+            LiveRebuildProgress progress;
+            // No live widen anywhere (the common case): one relaxed load, no Rebuilding() for a low column.
+            const bool live = YearsRebuilding() != 0 &&
+                              FindRebuildProgress(db_base_path_str, curr_ts.year, /*catidx=*/true, progress);
+            if (live) {
+                // One notice per year whose part of the range reaches the catidx's contiguous watermark (any
+                // column >= the always-indexed width: anywhere in the year). See LiveRebuildNotices.
+                if (high_column || segment_end - static_cast<unsigned long long>(curr_ts.first_epoch) >= progress.done_rows) {
+                    set_warning("", RebuildingColumnNoticeText("FINDBYVALUE", db_name, column_idx, curr_ts.year, &progress));
+                    unindexed_notice_emitted = true;
+                }
+            } else if (!unindexed_notice_emitted && high_column && catidx.Rebuilding()) {
                 set_warning("", RebuildingColumnNoticeText("FINDBYVALUE", db_name, column_idx, curr_ts.year));
                 unindexed_notice_emitted = true;
             } else if (!unindexed_notice_emitted && static_cast<uint32_t>(column_idx) >= catidx.TrackedColumnCount()) {

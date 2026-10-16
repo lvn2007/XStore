@@ -32,6 +32,99 @@
 
 std::array<XStore::CfgShard, XStore::CFG_SHARD_COUNT> XStore::cfg_shards;
 
+namespace {
+// One live widen's status per (db_base_path, year) (Tech Reference 4.18 "Rebuild notice"), read lock-free by queries.
+// BeginLiveRebuild admits one builder per index FILE, so a year can have two (one per file, or a later widen of one file
+// while the other is left in rebuild by an earlier stopped one): each builder sets, resets and clears only the flag and
+// watermark of the files it began, and the year stops being counted only when both flags are false. Transitions run
+// under RebuildStatusMutex(); readers never lock. Nodes and the mutex are allocated once and never freed (like the WAL
+// ring registry): query threads that are never joined may still walk the list while static destructors run at exit.
+struct LiveRebuildStatus {
+    LiveRebuildStatus(std::string path, unsigned short y) : db_base_path(std::move(path)), year(y) {}
+    const std::string db_base_path;
+    const unsigned short year;
+    LiveRebuildStatus *next = nullptr;          // set once, before the node is published
+    std::atomic<bool> active{false};            // counted in g_years_rebuilding (== zmap || catidx, under the mutex)
+    std::atomic<bool> zmap{false};              // a live widen's .zmap rebuild is in progress or left stopped/failed
+    std::atomic<bool> catidx{false};
+    std::atomic<uint64_t> zmap_rows{0};         // each file's contiguous watermark
+    std::atomic<uint64_t> catidx_rows{0};
+    std::atomic<uint64_t> total_rows{0};
+    std::atomic<bool> zmap_governed{false};     // that file's builder runs under a governor (cleared when it ends)
+    std::atomic<bool> catidx_governed{false};
+    std::atomic<unsigned> allowed{0};           // the governor's state (two governed builders on one year share it)
+    std::atomic<unsigned> max_workers{0};
+    std::atomic<livewiden::GovernorReason> reason{livewiden::GovernorReason::kStart};
+};
+
+std::atomic<uint32_t> g_years_rebuilding{0};
+std::atomic<LiveRebuildStatus *> g_rebuild_status_head{nullptr};
+
+std::mutex &RebuildStatusMutex() {
+    static std::mutex *const m = new std::mutex; // never destroyed: see LiveRebuildStatus
+    return *m;
+}
+
+LiveRebuildStatus *FindRebuildStatus(std::string_view db_base_path, unsigned short year) noexcept {
+    for (LiveRebuildStatus *n = g_rebuild_status_head.load(std::memory_order_acquire); n != nullptr; n = n->next) {
+        if (n->year == year && n->db_base_path == db_base_path) return n;
+    }
+    return nullptr;
+}
+
+LiveRebuildStatus &RebuildStatusFor(const std::string &db_base_path, unsigned short year) {
+    std::lock_guard<std::mutex> lock(RebuildStatusMutex());
+    if (LiveRebuildStatus *n = FindRebuildStatus(db_base_path, year)) return *n;
+    auto *n = new LiveRebuildStatus(db_base_path, year); // never freed: see LiveRebuildStatus
+    n->next = g_rebuild_status_head.load(std::memory_order_relaxed);
+    g_rebuild_status_head.store(n, std::memory_order_release);
+    return *n;
+}
+
+// Mutex held. Counts the year while either file is flagged.
+void SyncRebuildActive(LiveRebuildStatus &n) noexcept {
+    const bool want = n.zmap.load(std::memory_order_relaxed) || n.catidx.load(std::memory_order_relaxed);
+    if (n.active.exchange(want, std::memory_order_acq_rel) != want) {
+        if (want) {
+            g_years_rebuilding.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            g_years_rebuilding.fetch_sub(1, std::memory_order_relaxed);
+        }
+    }
+}
+
+// A builder begins (true) its files: their watermarks restart at 0.
+void BeginRebuildFiles(LiveRebuildStatus &n, bool zmap, bool catidx) {
+    std::lock_guard<std::mutex> lock(RebuildStatusMutex());
+    if (zmap) {
+        n.zmap_rows.store(0, std::memory_order_relaxed);
+        n.zmap_governed.store(false, std::memory_order_relaxed);
+        n.zmap.store(true, std::memory_order_relaxed);
+    }
+    if (catidx) {
+        n.catidx_rows.store(0, std::memory_order_relaxed);
+        n.catidx_governed.store(false, std::memory_order_relaxed);
+        n.catidx.store(true, std::memory_order_relaxed);
+    }
+    SyncRebuildActive(n);
+}
+
+// The files given (true) are no longer in a live rebuild: finished, or their index state was dropped.
+void EndRebuildFiles(LiveRebuildStatus &n, bool zmap, bool catidx) noexcept {
+    if (zmap) n.zmap.store(false, std::memory_order_relaxed);
+    if (catidx) n.catidx.store(false, std::memory_order_relaxed);
+    SyncRebuildActive(n);
+}
+
+template <typename Match>
+void ForgetRebuildStatusMatching(const Match &match) {
+    std::lock_guard<std::mutex> lock(RebuildStatusMutex());
+    for (LiveRebuildStatus *n = g_rebuild_status_head.load(std::memory_order_acquire); n != nullptr; n = n->next) {
+        if (match(*n)) EndRebuildFiles(*n, true, true);
+    }
+}
+} // namespace
+
 // Initialization
 XStore::XStore() {
     // One XStore instance is constructed per worker thread (see ZMQ_Server),
@@ -363,6 +456,7 @@ void XStore::ClearZoneMapRegistryForTests() {
     zone_map_registry_.clear();
     zone_map_registry_lru_.clear();
     zone_map_registry_retired_.clear();
+    ForgetRebuildStatusMatching([](const LiveRebuildStatus &) { return true; });
 }
 
 template <typename Match>
@@ -371,8 +465,13 @@ void XStore::RetireIndexesMatching(const Match &match) {
         std::lock_guard<std::mutex> lock(zone_map_registry_mutex_);
         RetireMatching(zone_map_registry_, zone_map_registry_lru_, zone_map_registry_retired_, match);
     }
-    std::lock_guard<std::mutex> lock(catidx_registry_mutex_);
-    RetireMatching(catidx_registry_, catidx_registry_lru_, catidx_registry_retired_, match);
+    {
+        std::lock_guard<std::mutex> lock(catidx_registry_mutex_);
+        RetireMatching(catidx_registry_, catidx_registry_lru_, catidx_registry_retired_, match);
+    }
+    ForgetRebuildStatusMatching([&match](const LiveRebuildStatus &n) {
+        return match(fmt::format("{}/{}", n.db_base_path, n.year)); // the registry key format
+    });
 }
 
 void XStore::RetireIndexesUnderPrefix(const std::string &db_dir_prefix) {
@@ -1051,17 +1150,85 @@ std::string XStore::UnindexedColumnNoticeText(std::string_view op, const std::st
                         op, db_name, column_idx, year, index_width, XStoreTunables::LIVE_WIDEN_QUIET_PERIOD_SEC);
 }
 
-std::string XStore::RebuildingColumnNoticeText(std::string_view op, const std::string &db_name, int32_t column_idx,
-                                               unsigned short year) {
-    return fmt::format("[WARNING] [{}] [DB: {}] - column {} is being indexed in the background in {}; answered by full "
-                        "scan until it finishes (a rebuild that was interrupted finishes at the next start)",
-                        op, db_name, column_idx, year);
+
+uint32_t XStore::YearsRebuilding() noexcept { return g_years_rebuilding.load(std::memory_order_relaxed); }
+
+bool XStore::FindRebuildProgress(std::string_view db_base_path, unsigned short year, bool catidx,
+                                 LiveRebuildProgress &out) noexcept {
+    const LiveRebuildStatus *n = FindRebuildStatus(db_base_path, year);
+    if (n == nullptr || !n->active.load(std::memory_order_acquire)) return false;
+    if (!(catidx ? n->catidx : n->zmap).load(std::memory_order_relaxed)) return false;
+    out.done_rows = (catidx ? n->catidx_rows : n->zmap_rows).load(std::memory_order_relaxed);
+    out.total_rows = n->total_rows.load(std::memory_order_relaxed);
+    out.slowed = (catidx ? n->catidx_governed : n->zmap_governed).load(std::memory_order_relaxed)
+                     ? livewiden::SlowedText(n->allowed.load(std::memory_order_relaxed),
+                                             n->max_workers.load(std::memory_order_relaxed),
+                                             n->reason.load(std::memory_order_relaxed))
+                     : nullptr;
+    return true;
 }
+
+std::string XStore::RebuildingColumnNoticeText(std::string_view op, const std::string &db_name, int32_t column_idx,
+                                               unsigned short year, const LiveRebuildProgress *progress) {
+    if (progress == nullptr) {
+        return fmt::format("[WARNING] [{}] [DB: {}] - column {} is being indexed in the background in {}; answered by "
+                           "full scan until it finishes (a rebuild that was interrupted finishes at the next start)",
+                           op, db_name, column_idx, year);
+    }
+    const uint64_t pct = progress->total_rows == 0
+                             ? 0
+                             : std::min<uint64_t>(100, progress->done_rows * 100 / progress->total_rows);
+    const std::string state = progress->slowed != nullptr ? fmt::format("{}% done; slowed: {}", pct, progress->slowed)
+                                                          : fmt::format("{}% done", pct);
+    // A column >= ZONE_MAP_MAX_TRACKED_COLUMNS is noticed anywhere in the year (below the watermark it is indexed at
+    // the new width already), so its text names only the part not yet rebuilt, like a low column's.
+    if (column_idx >= static_cast<int32_t>(XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS)) {
+        return fmt::format("[WARNING] [{}] [DB: {}] - column {} is being indexed in the background in {} ({}); the part "
+                           "not yet rebuilt is answered by full scan (a rebuild that was interrupted finishes at the next "
+                           "start)", op, db_name, column_idx, year, state);
+    }
+    return fmt::format("[WARNING] [{}] [DB: {}] - column {} is being indexed in the background in {} ({}); the part not "
+                       "yet rebuilt is answered by scan, results are correct (a rebuild that was interrupted finishes at "
+                       "the next start)", op, db_name, column_idx, year, state);
+}
+
+namespace {
+// The rebuild notices of the years in [start_epoch, end_epoch] with a live widen of their .zmap: one per year whose
+// part of the range reaches a row at or past the zone map's contiguous watermark (a column >= the always-indexed width
+// counts in any part of the year). Exact for block usability: TryGetBlockStats serves only blocks that end at or below
+// the watermark, and every block a range ending below the watermark fully covers ends at or below it (the partial
+// blocks at a range's edges are scanned anyway). Allocates only for a notice.
+std::string LiveRebuildNotices(std::string_view op, const std::string &db_name, const std::string &db_base_path,
+                               const XStore_Proto::ConfigStruct &cfg, unsigned long long start_epoch,
+                               unsigned long long end_epoch, int32_t column_idx) {
+    std::string out;
+    const bool high = column_idx >= static_cast<int32_t>(XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS);
+    unsigned long long iter_epoch = start_epoch;
+    while (iter_epoch <= end_epoch) {
+        TimeStruct curr_ts(static_cast<std::time_t>(iter_epoch), cfg.timeresolution());
+        const unsigned long long end_of_current_year = std::min(end_epoch, static_cast<unsigned long long>(curr_ts.last_epoch));
+        XStore::LiveRebuildProgress p;
+        if (XStore::FindRebuildProgress(db_base_path, curr_ts.year, /*catidx=*/false, p) &&
+            (high || end_of_current_year - static_cast<unsigned long long>(curr_ts.first_epoch) >= p.done_rows)) {
+            if (!out.empty()) out += " | ";
+            out += XStore::RebuildingColumnNoticeText(op, db_name, column_idx, curr_ts.year, &p);
+        }
+        iter_epoch = end_of_current_year + 1;
+    }
+    return out;
+}
+} // namespace
 
 std::string XStore::UnindexedColumnNotice(std::string_view op, const std::string &db_name, const std::string &db_base_path,
                                            const XStore_Proto::ConfigStruct &cfg, unsigned long long start_epoch,
                                            unsigned long long end_epoch, int32_t column_idx) {
     if (column_idx < 0 || static_cast<uint32_t>(column_idx) >= EffectiveTrackedColumnCount(cfg)) return "";
+
+    // While no year of any DB is live-widened (the common case) this load and its branch are all this adds.
+    if (__builtin_expect(g_years_rebuilding.load(std::memory_order_relaxed) != 0, 0)) {
+        std::string notices = LiveRebuildNotices(op, db_name, db_base_path, cfg, start_epoch, end_epoch, column_idx);
+        if (!notices.empty()) return notices;
+    }
 
     // Every index file is created at least ZONE_MAP_MAX_TRACKED_COLUMNS wide
     // (EffectiveTrackedColumnCount's floor), so a column below it is always
@@ -1189,6 +1356,8 @@ void XStore::BeginYearRebuild(const std::string &db_base_path, uint16_t row_leng
     const std::string data_path = fmt::format("{}/{}.XSTORE", db_base_path, year);
     if ((!y.need_zmap && !y.need_catidx) || !std::filesystem::exists(data_path)) return;
     const std::string registry_key = fmt::format("{}/{}", db_base_path, year);
+    // A live widen left stopped or failed in this process ends here: this rebuild replaces its state.
+    ForgetRebuildStatusMatching([&](const LiveRebuildStatus &n) { return n.year == year && n.db_base_path == db_base_path; });
 
     // Startup only. A registry instance may already exist for this year (WAL replay opened it, possibly at another
     // width; a test may have deleted its file under it): drop it, so the pin below opens the file that is on disk and
@@ -1557,6 +1726,12 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
     }
     refused = refused || busy;
 
+    // The query notice's status of this year (Tech Reference 4.18 "Rebuild notice"): this builder flags only the files
+    // it began; each stays flagged until it finishes here (an early return, a stop or a failure leaves it flagged at
+    // its last progress). The year is counted while either file is flagged.
+    LiveRebuildStatus &rebuild_status = RebuildStatusFor(db_base_path, year);
+    BeginRebuildFiles(rebuild_status, zmap.get() != nullptr, catidx.get() != nullptr);
+
     // From here every early return leaves the files that began in rebuild at the frontier they reached: dirty on
     // disk, blocks past F scanned (never trusted), MarkClean refusing, unevictable; the next start rebuilds them.
     struct FdCloser {
@@ -1572,6 +1747,7 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
     // Read ONCE: the year file is preallocated to its full size. If it is cut or replaced meanwhile, the scan fails
     // (short read) or the identity check below stops the build.
     const uint64_t total_rows = static_cast<uint64_t>(data_st.st_size) / row_length;
+    rebuild_status.total_rows.store(total_rows, std::memory_order_relaxed);
     const uint64_t row_len = row_length;
     const uint64_t max_data_rows = std::max<uint64_t>(XStoreTunables::LIVE_WIDEN_MIN_CHUNK_ROWS,
                                                       XStoreTunables::LIVE_WIDEN_MAX_CHUNK_BYTES / row_len);
@@ -1591,6 +1767,24 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
         want_workers = 1;
         governor = nullptr;
     }
+    if (governor != nullptr) {
+        rebuild_status.allowed.store(governor->Allowed(), std::memory_order_relaxed);
+        rebuild_status.reason.store(governor->Reason(), std::memory_order_relaxed);
+        rebuild_status.max_workers.store(governor->MaxWorkers(), std::memory_order_relaxed);
+        if (zmap.get() != nullptr) rebuild_status.zmap_governed.store(true, std::memory_order_relaxed);
+        if (catidx.get() != nullptr) rebuild_status.catidx_governed.store(true, std::memory_order_relaxed);
+    }
+    const auto publish_governor = [&rebuild_status, governor] {
+        if (governor == nullptr) return;
+        rebuild_status.allowed.store(governor->Allowed(), std::memory_order_relaxed);
+        rebuild_status.reason.store(governor->Reason(), std::memory_order_relaxed);
+    };
+    // Several workers publish watermarks they read at different moments: keep the largest.
+    const auto store_max = [](std::atomic<uint64_t> &a, uint64_t v) {
+        for (uint64_t seen = a.load(std::memory_order_relaxed);
+             v > seen && !a.compare_exchange_weak(seen, v, std::memory_order_relaxed);) {
+        }
+    };
     const uint64_t block_bytes = RowsPerBlock(row_length) * row_len;
     const uint64_t group_rows = want_workers == 1 && governor == nullptr
                                     ? std::max<uint64_t>(1, total_rows)
@@ -1656,7 +1850,9 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
             const auto permitted = [&]() -> bool {
                 for (;;) {
                     if (next_group.load(std::memory_order_relaxed) >= group_count) return false;
-                    if (governor->Permit(index)) return true;
+                    const bool granted = governor->Permit(index);
+                    publish_governor();
+                    if (granted) return true;
                     if (halt()) return false;
                     const Clock::time_point p0 = Clock::now();
                     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -1749,11 +1945,17 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
                             }
                             // After the fold, before the unlock: no writer can sit on a row that changes side here.
                             uint64_t w = 0;
-                            if (z) w = zmap->MarkFolded(pos, new_pos);
-                            if (c) w = std::max(w, catidx->MarkFolded(pos, new_pos));
-                            for (uint64_t seen = watermark.load(std::memory_order_relaxed);
-                                 w > seen && !watermark.compare_exchange_weak(seen, w, std::memory_order_relaxed);) {
+                            if (z) {
+                                w = zmap->MarkFolded(pos, new_pos);
+                                store_max(rebuild_status.zmap_rows, w);
                             }
+                            if (c) {
+                                const uint64_t wc = catidx->MarkFolded(pos, new_pos);
+                                store_max(rebuild_status.catidx_rows, wc);
+                                w = std::max(w, wc);
+                            }
+                            store_max(watermark, w);
+                            publish_governor();
                             pos = new_pos;
                             hold_us = static_cast<uint64_t>(
                                 std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t0).count());
@@ -1840,6 +2042,11 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
     }
     work(per_worker[0], 0);
     for (std::thread &t : threads) t.join();
+    // No governor holds this builder's files back any more (a stopped or failed file never says "slowed"). Two governed
+    // builders on one year, one per file, would share allowed/max/reason (last writer wins); the trigger never makes
+    // that: it skips a year with a file in rebuild.
+    if (zmap.get() != nullptr) rebuild_status.zmap_governed.store(false, std::memory_order_relaxed);
+    if (catidx.get() != nullptr) rebuild_status.catidx_governed.store(false, std::memory_order_relaxed);
     for (const LiveWidenStats &ws : per_worker) {
         st.chunks += ws.chunks;
         st.hole_chunks += ws.hole_chunks;
@@ -1877,6 +2084,11 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
     const bool catidx_finished = catidx_good && catidx->FinishRebuild();
     st.zmap_widened = zmap_finished;
     st.catidx_widened = catidx_finished;
+    // FinishRebuild ended the rebuild state of a finished file (a later sync/MarkClean failure only leaves it dirty).
+    {
+        std::lock_guard<std::mutex> lock(RebuildStatusMutex());
+        EndRebuildFiles(rebuild_status, zmap_finished, catidx_finished); // only files this builder began can finish here
+    }
     const bool data_synced = (zmap_finished || catidx_finished) && fdatasync(data.fd) == 0;
     bool all_ok = (zmap.get() == nullptr || zmap_finished) && (catidx.get() == nullptr || catidx_finished) && data_synced;
     if (zmap.get() != nullptr && !zmap_finished) {

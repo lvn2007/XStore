@@ -135,6 +135,16 @@ void LiveWidenGovernor::MaybeEvaluate() noexcept {
     last_eval_.store(rep, std::memory_order_relaxed);
 }
 
+const char *SlowedText(unsigned allowed, unsigned max_workers, GovernorReason reason) noexcept {
+    if (allowed >= max_workers) return nullptr;
+    switch (reason) {
+        case GovernorReason::kForegroundCpu: return "foreground CPU";
+        case GovernorReason::kWriterWait: return "writers waiting";
+        case GovernorReason::kLongWaits: return "long writer waits";
+        default: return nullptr;
+    }
+}
+
 std::string LiveWidenGovernor::ReasonText(GovernorReason reason) const {
     switch (reason) {
         case GovernorReason::kStart:
@@ -296,6 +306,7 @@ void LiveWidenGovernor::Evaluate(Clock::time_point now) {
     std::lock_guard<std::mutex> lk(snap_mtx_);
     published_.cpu_target = cpu_target_;
     published_.brake_active = now < brake_until_;
+    reason_.store(reason, std::memory_order_relaxed);
     published_.reason = reason;
     published_.reason_text = ReasonText(reason);
     published_.fg_cores = fg_cores_;

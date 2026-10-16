@@ -1119,6 +1119,28 @@ class XStore {
                                          livewiden::LiveWidenGovernor *governor = nullptr,
                                          livewiden::LiveWidenLoadSource *load = nullptr);
 
+        // Progress of a live widen of one year (Tech Reference 4.18 "Rebuild notice"): rows below done_rows are
+        // indexed again (the contiguous watermark of the file asked for); slowed: SlowedText or nullptr.
+        struct LiveRebuildProgress {
+            uint64_t done_rows = 0;
+            uint64_t total_rows = 0;
+            const char *slowed = nullptr;
+        };
+        // The notice for a year whose index is being rebuilt. progress nullptr: a column >= ZONE_MAP_MAX_TRACKED_COLUMNS
+        // of a rebuilding year with no live-widen status (a rebuild begun some other way): the old text. With progress:
+        // "(<p>% done[; slowed: <reason>])" after the year (p = done/total rows of the preallocated year file, rounded
+        // down) and a text saying only the part not yet rebuilt is scanned (for a low column: results are correct).
+        static std::string RebuildingColumnNoticeText(std::string_view op, const std::string &db_name, int32_t column_idx,
+                                                       unsigned short year, const LiveRebuildProgress *progress = nullptr);
+        // Process-wide count of years with a live widen begun and not finished OK (a stopped or failed one stays
+        // counted until the next start, a removal of the year, or ClearZoneMapRegistryForTests). The aggregates' notice
+        // reads it first (one relaxed load); anything more runs only while it is non-zero.
+        static uint32_t YearsRebuilding() noexcept;
+        // The live-widen status of (db_base_path, year), lock-free and allocation-free: false when no live widen of that
+        // year's .zmap (catidx false) or .catidx (true) is in progress or left in rebuild.
+        static bool FindRebuildProgress(std::string_view db_base_path, unsigned short year, bool catidx,
+                                        LiveRebuildProgress &out) noexcept;
+
         // Live widening trigger, M4 stage 3 (Tech Reference 4.18 "Live widening, stage 3"). MaybeGrowColumnCount's
         // rare path records a DB whose effective tracked width rose; the background index thread
         // (StartCatIdxCompactionThread) calls RunLiveWidenPass once per LIVE_WIDEN_TICK_SEC with the current time.
@@ -1703,7 +1725,9 @@ class XStore {
         // resolves it, the same header-only open+pread+magic/version check
         // as ZoneMapNeedsRebuild -- deliberately never calls
         // GetOrOpenZoneMap, which would create/widen the file as a side
-        // effect of merely answering a query. FindByValue does NOT use this
+        // effect of merely answering a query. In front of tier (1): one relaxed load of the process-wide
+        // YearsRebuilding() counter; only while it is non-zero, the live-widen notices with progress (Tech Reference
+        // 4.18 "Rebuild notice") are looked up first. FindByValue does NOT use this
         // (it is about .zmap width): it decides from the width of the
         // .catidx file its own scan consults, via UnindexedColumnNoticeText.
         static std::string UnindexedColumnNotice(std::string_view op, const std::string &db_name, const std::string &db_base_path,
@@ -1713,11 +1737,6 @@ class XStore {
         // The one-line full-scan notice text shared by UnindexedColumnNotice and FindByValue.
         static std::string UnindexedColumnNoticeText(std::string_view op, const std::string &db_name, int32_t column_idx,
                                                       unsigned short year, uint32_t index_width);
-        // The same, for a column >= ZONE_MAP_MAX_TRACKED_COLUMNS of a year whose index is being rebuilt (Rebuilding()).
-        // Columns below that are also scanned in the blocks the rebuild has not reached yet, with correct results and
-        // no notice (they are indexed again as it passes).
-        static std::string RebuildingColumnNoticeText(std::string_view op, const std::string &db_name, int32_t column_idx,
-                                                       unsigned short year);
 
         // Rebuilds this year's .zmap from the year file: a thin wrapper over RebuildYearIndexes with only the zone map
         // selected (the .catidx is not touched). Startup/tests only.
