@@ -472,7 +472,7 @@ inline constexpr uint64_t LIVE_WIDEN_GROUP_BYTES = 8 * LIVE_WIDEN_MAX_CHUNK_BYTE
 inline constexpr bool LIVE_WIDEN_GOVERNOR = false;                   // off: the fixed LIVE_WIDEN_WORKERS, as before
 inline constexpr unsigned LIVE_WIDEN_FLOOR_WORKERS = 1;              // workers always allowed (0: the starvation guard)
 inline constexpr unsigned LIVE_WIDEN_HEADROOM_CORES = 2;             // logical CPUs kept free for foreground work
-inline constexpr unsigned LIVE_WIDEN_MAX_WORKERS_CAP = 16;           // max workers = min(cores - headroom, this)
+inline constexpr unsigned LIVE_WIDEN_MAX_WORKERS_CAP = 8;            // max workers = min(cores - headroom, this); Mystic (32 vCPU), quiet, one year: 8 workers 121 s, 16 workers 363 s
 inline constexpr uint64_t LIVE_WIDEN_GOVERNOR_BRAKE_HOLD_SEC = 10;   // no raise for this long after a writer brake
 // Summed writer wait, in microseconds PER SECOND of the interval since the last evaluation (intervals vary:
 // evaluations happen when a worker calls Permit), that brakes. G3 calibration (local 16-vCPU VM only, 4 SYNC writers,

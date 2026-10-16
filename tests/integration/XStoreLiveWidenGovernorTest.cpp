@@ -2,6 +2,8 @@
 // sleeps. The integration into LiveWidenOneYear is tested in XStoreLiveWidenTest.cpp (S3b-2 G3).
 #include "XStore/XStore_LiveWidenGovernor.h"
 
+#include "XStore/XStore_Tunables.h"
+
 #include <gtest/gtest.h>
 
 #include <atomic>
@@ -48,9 +50,9 @@ struct FakeEnv {
 GovernorParams Params(unsigned cores, unsigned floor_workers = 1) {
     GovernorParams p;
     p.cores = cores;
-    p.max_workers = 0;
     p.floor_workers = floor_workers;
     p.headroom_cores = 2;
+    p.max_workers = DefaultMaxWorkers(cores, p.headroom_cores, 16, floor_workers); // fixed cap: the tests do not follow the tunable
     p.tick = std::chrono::seconds(1);
     p.brake_hold = std::chrono::seconds(10);
     p.starvation_guard = std::chrono::seconds(600);
@@ -95,6 +97,7 @@ struct Rig {
 
 TEST(LiveWidenGovernorTest, MaxWorkersArithmetic) {
     EXPECT_EQ(DefaultMaxWorkers(32, 2, 16, 1), 16u);
+    EXPECT_EQ(DefaultMaxWorkers(32, 2, XStoreTunables::LIVE_WIDEN_MAX_WORKERS_CAP, 1), 8u); // the shipped default (Mystic data)
     EXPECT_EQ(DefaultMaxWorkers(4, 2, 16, 1), 2u);
     EXPECT_EQ(DefaultMaxWorkers(2, 2, 16, 1), 1u);
     EXPECT_EQ(DefaultMaxWorkers(1, 2, 16, 1), 1u);
