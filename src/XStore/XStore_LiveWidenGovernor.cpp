@@ -36,7 +36,8 @@ LiveWidenGovernor::LiveWidenGovernor(GovernorParams params, std::function<Signal
     : params_([&] {
           if (params.max_workers == 0)
               params.max_workers = DefaultMaxWorkers(params.cores, params.headroom_cores,
-                                                     XStoreTunables::LIVE_WIDEN_MAX_WORKERS_CAP, params.floor_workers);
+                                                     std::max(1u, params.cores / XStoreTunables::LIVE_WIDEN_CPUS_PER_WORKER),
+                                                     params.floor_workers);
           params.max_workers = std::max(params.max_workers, params.floor_workers);
           params.smoothing_ticks = std::max(params.smoothing_ticks, 1u);
           return std::move(params);

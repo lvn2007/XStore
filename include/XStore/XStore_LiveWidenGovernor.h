@@ -31,7 +31,7 @@ struct Signals {
 
 struct GovernorParams {
     unsigned cores = std::thread::hardware_concurrency();
-    unsigned max_workers = 0;   // 0: DefaultMaxWorkers(cores, headroom_cores, LIVE_WIDEN_MAX_WORKERS_CAP, floor)
+    unsigned max_workers = 0;   // 0: DefaultMaxWorkers(cores, headroom_cores, max(1, cores / LIVE_WIDEN_CPUS_PER_WORKER), floor)
     unsigned floor_workers = XStoreTunables::LIVE_WIDEN_FLOOR_WORKERS;
     unsigned headroom_cores = XStoreTunables::LIVE_WIDEN_HEADROOM_CORES;
     std::chrono::seconds tick{XStoreTunables::LIVE_WIDEN_TICK_SEC};

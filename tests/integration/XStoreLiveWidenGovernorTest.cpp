@@ -97,7 +97,16 @@ struct Rig {
 
 TEST(LiveWidenGovernorTest, MaxWorkersArithmetic) {
     EXPECT_EQ(DefaultMaxWorkers(32, 2, 16, 1), 16u);
-    EXPECT_EQ(DefaultMaxWorkers(32, 2, XStoreTunables::LIVE_WIDEN_MAX_WORKERS_CAP, 1), 8u); // the shipped default (Mystic data)
+    // The shipped default scales with the machine: cores / LIVE_WIDEN_CPUS_PER_WORKER (Mystic, 32 vCPU: 8).
+    static_assert(XStoreTunables::LIVE_WIDEN_CPUS_PER_WORKER == 4, "update the expectations below");
+    GovernorParams d = Params(32); d.max_workers = 0;
+    EXPECT_EQ(Rig(d).gov.MaxWorkers(), 8u);
+    d = Params(16); d.max_workers = 0;
+    EXPECT_EQ(Rig(d).gov.MaxWorkers(), 4u);
+    d = Params(64); d.max_workers = 0;
+    EXPECT_EQ(Rig(d).gov.MaxWorkers(), 16u);
+    d = Params(4); d.max_workers = 0;
+    EXPECT_EQ(Rig(d).gov.MaxWorkers(), 1u);
     EXPECT_EQ(DefaultMaxWorkers(4, 2, 16, 1), 2u);
     EXPECT_EQ(DefaultMaxWorkers(2, 2, 16, 1), 1u);
     EXPECT_EQ(DefaultMaxWorkers(1, 2, 16, 1), 1u);
