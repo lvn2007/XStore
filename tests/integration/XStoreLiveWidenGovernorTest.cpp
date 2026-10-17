@@ -9,6 +9,8 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -505,10 +507,33 @@ TEST(LiveWidenGovernorTest, ThrowingClockOrProgressNeverEscapesPermit) {
     EXPECT_TRUE(rig.gov.Permit(0));
 }
 
+// The writer signals are a function of the fake time the SAMPLING thread last read from the clock (the governor reads
+// the clock, then samples, on one thread): an evaluation never sees signals from later than its own clock reading.
+// Accumulating them per controller step instead let an evaluator preempted between its clock read and its sample
+// collect seconds of later waits, stamp the brake hold from its early clock reading, and leave the next evaluation (no
+// new waits since that late sample, hold already over) to ramp up while the controller was still braking: ~2% of runs.
 TEST(LiveWidenGovernorTest, ConcurrentPermitReleaseSmoke) {
     constexpr unsigned THREADS = 10;                    // indices 8 and 9 are beyond max and must never be granted
+    constexpr int64_t kSecond = 1'000'000'000;
     FakeEnv env;
-    LiveWidenGovernor gov(Params(10), [&env] { return env.Sample(); }, [&env] { return env.Now(); });
+    static thread_local int64_t seen_ns = 0;            // this thread's last clock reading
+    std::atomic<int64_t> brake_from{std::numeric_limits<int64_t>::max()};         // writers wait 300 ms per second from here...
+    std::atomic<int64_t> brake_to{std::numeric_limits<int64_t>::max()};           // ...to here (whole fake seconds)
+    LiveWidenGovernor gov(
+        Params(10),
+        [&] {
+            const int64_t from = brake_from.load();
+            const int64_t t = std::min(seen_ns, brake_to.load());
+            const uint64_t secs = t > from ? static_cast<uint64_t>((t - from) / kSecond) : 0;
+            Signals sig;
+            sig.writer_wait_us = secs * 300'000;
+            sig.long_waits = secs;
+            return sig;
+        },
+        [&env] {
+            seen_ns = env.now_ns.load();
+            return Clock::time_point(std::chrono::duration_cast<Clock::duration>(std::chrono::nanoseconds(seen_ns)));
+        });
     ASSERT_EQ(gov.MaxWorkers(), 8u);
     std::atomic<unsigned> started{0};
     std::atomic<bool> in_brake{false};
@@ -551,13 +576,8 @@ TEST(LiveWidenGovernorTest, ConcurrentPermitReleaseSmoke) {
     while (started.load() < THREADS)
         std::this_thread::yield();
 
-    auto step = [&](uint64_t wait_us, uint64_t long_waits) {
-        {
-            std::lock_guard<std::mutex> lk(env.mtx);
-            env.sig.writer_wait_us += wait_us;
-            env.sig.long_waits += long_waits;
-        }
-        env.now_ns += 1'000'000'000;
+    auto step = [&] {
+        env.now_ns += kSecond;
         std::this_thread::yield();
     };
     // No ASSERT while the workers are joinable (a return would destroy joinable threads: std::terminate).
@@ -568,15 +588,16 @@ TEST(LiveWidenGovernorTest, ConcurrentPermitReleaseSmoke) {
     };
     int guard = 0;
     while (gov.GetSnapshot().allowed < 8 && ++guard < 1'000'000)
-        step(0, 0);
+        step();
     EXPECT_EQ(gov.GetSnapshot().allowed, 8u);
     if (gov.GetSnapshot().allowed != 8u) {
         stop_and_join();
         return;
     }
     guard = 0;
+    brake_from = env.now_ns.load();
     while (!(gov.GetSnapshot().brake_active && gov.GetSnapshot().allowed == 1) && ++guard < 1'000'000)
-        step(300'000, 1);
+        step();
     EXPECT_EQ(gov.GetSnapshot().allowed, 1u);
     if (gov.GetSnapshot().allowed != 1u) {
         stop_and_join();
@@ -584,10 +605,11 @@ TEST(LiveWidenGovernorTest, ConcurrentPermitReleaseSmoke) {
     }
     in_brake = true;
     for (int i = 0; i < 300 || brake_phase_permits.load() < 1000; ++i)
-        step(300'000, 1);
+        step();
     in_brake = false;
+    brake_to = env.now_ns.load(); // after in_brake: no evaluation can see the waits stop while a Permit counts as braking
     for (int i = 0; i < 300; ++i)
-        step(0, 0);
+        step();
     stop_and_join();
 
     const auto snap = gov.GetSnapshot();
