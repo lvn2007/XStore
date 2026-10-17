@@ -314,6 +314,16 @@ XSTORE_FAULT_STAT(stat64, stat64)
 XSTORE_FAULT_STAT(lstat, stat)
 XSTORE_FAULT_STAT(lstat64, stat64)
 
+int rename(const char *from, const char *to) noexcept {
+    using Fn = int (*)(const char *, const char *);
+    static const Fn real = RealSymbol<Fn>("rename");
+    if (const int err = PathFaultErrno(from, g_open_hits, xstore_fault::kRename); err != 0) {
+        errno = err;
+        return -1;
+    }
+    return real(from, to);
+}
+
 #define XSTORE_FAULT_SYNC(NAME)                                                                    \
     int NAME(int fd) {                                                                             \
         using Fn = int (*)(int);                                                                   \

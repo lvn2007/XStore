@@ -1111,13 +1111,16 @@ class XStore {
         // year is always cut into groups and governor->MaxWorkers() workers are started; each asks Permit(i) before
         // claiming a group and parks (50 ms slices, still checking `stop`) while denied, so parking happens only
         // between groups. `load` (may be nullptr: tests with a fake sampler) is pointed at this year's data-file lock.
+        // keep_old (default LIVE_WIDEN_KEEP_OLD_INDEX; tests force it): each file begins with BeginLiveRebuild(width,
+        // true), so its old index keeps answering the blocks not yet rebuilt (Tech Reference 4.18 "Keep the old index").
         LiveWidenResult LiveWidenOneYear(const std::string &db_base_path, unsigned short year, uint16_t row_length,
                                          uint32_t tracked_column_count, bool widen_zmap, bool widen_catidx,
                                          const std::atomic<bool> *stop, LiveWidenStats *stats = nullptr,
                                          unsigned workers = XStoreTunables::LIVE_WIDEN_WORKERS,
                                          uint64_t group_bytes = XStoreTunables::LIVE_WIDEN_GROUP_BYTES,
                                          livewiden::LiveWidenGovernor *governor = nullptr,
-                                         livewiden::LiveWidenLoadSource *load = nullptr);
+                                         livewiden::LiveWidenLoadSource *load = nullptr,
+                                         bool keep_old = XStoreTunables::LIVE_WIDEN_KEEP_OLD_INDEX);
 
         // Progress of a live widen of one year (Tech Reference 4.18 "Rebuild notice"): rows below done_rows are
         // indexed again (the contiguous watermark of the file asked for); slowed: SlowedText or nullptr.
@@ -1126,6 +1129,7 @@ class XStore {
             uint64_t total_rows = 0;
             const char *slowed = nullptr;
             bool governed = false; // that file's builder runs under a governor
+            uint32_t old_width = 0; // a keep-old rebuild still answers columns below this from the old index (0: none)
         };
         // The notice for a year whose index is being rebuilt. progress nullptr: a column >= ZONE_MAP_MAX_TRACKED_COLUMNS
         // of a rebuilding year with no live-widen status (a rebuild begun some other way): the old text. With progress:
@@ -1646,6 +1650,9 @@ class XStore {
         void RebuildStaleIndexesForDb(const std::string &db_name, const std::string &db_base_path,
                                       const XStore_Proto::ConfigStruct &cfg_struct,
                                       const std::set<unsigned short> &force_rebuild_years);
+        // InitDB, before RebuildStaleIndexesForDb: removes "*.zmap.new" / "*.catidx.new" from one DB directory (left by a
+        // crash inside a keep-old begin before its rename; never in use).
+        static void RemoveIndexReplacementOrphans(const std::string &db_dir);
 
         // Startup rebuild of one year (Tech Reference 4.19): pins the selected index files (need_zmap / need_catidx; a
         // healthy one is never opened, so a compacted catidx keeps its bitmap section), BeginRebuild()s them at

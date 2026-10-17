@@ -77,6 +77,7 @@ static_assert(offsetof(ZoneMapFileHeader, dirty) == 12);
 
 #include <algorithm>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -109,6 +110,13 @@ struct ZoneMapFoldBatch {
 };
 
 enum class BeginRebuildResult { kStarted, kFailed, kAlreadyRebuilding };
+
+// Keep-old begin of a live rebuild (Tech Reference 4.18 "Keep the old index"), shared by ZoneMapFile and CatIdxFile:
+// creates "<path>.new" (O_TRUNC) holding exactly the header_bytes at header, fdatasyncs it, renames it over path and
+// fsyncs the directory. Returns the new file's fd, or -1 with path untouched and no ".new" left behind. A failed
+// directory fsync is only logged: either name a crash leaves holds a dirty index (the old one was marked dirty before),
+// which the next start rebuilds.
+[[nodiscard]] int CreateIndexReplacement(const std::string &path, const void *header, size_t header_bytes);
 
 // A rebuild cut into groups of consecutive rows that are folded in parallel, each group in row order: end(g) is the end
 // of the prefix of group g folded so far, Watermark() the contiguous frontier (every row below it folded). Shared by
@@ -227,7 +235,28 @@ public:
     // Live builder only: BeginRebuild, unless a rebuild already runs on this file -- then kAlreadyRebuilding with nothing
     // touched. The check and the begin are one step under the file mutex, so two builders on one file cannot both begin
     // (the second would truncate the first's work while the first keeps advancing F).
-    [[nodiscard]] BeginRebuildResult BeginLiveRebuild(uint32_t new_tracked_column_count);
+    // keep_old (LIVE_WIDEN_KEEP_OLD_INDEX, Tech Reference 4.18 "Keep the old index"): instead of emptying the file in
+    // place, the old index is marked dirty (durably; on failure nothing changes), the new one is created as
+    // "<path>.new" at the new width (dirty header, same rows_per_block, fdatasync), renamed over path and the directory
+    // fsynced; any failure of those steps returns kFailed with the old index unchanged, trusted and not rebuilding. On
+    // success THIS object (same pins, same registry entry) moves to the new file at F = 0 and keeps the old file's
+    // state (fd, header, cache) in an inner object until FinishRebuild: blocks not yet complete are answered from the
+    // old file at its old width, and every writer call is applied to both files (old first under this mutex; lock order
+    // this file's mutex -> the old one's). A stopped or failed build keeps the old file serving.
+    [[nodiscard]] BeginRebuildResult BeginLiveRebuild(uint32_t new_tracked_column_count, bool keep_old = false);
+    // Width of the old index a keep-old rebuild still serves blocks from; 0 when none. Lock-free.
+    [[nodiscard]] uint32_t OldWidth() const { return old_width_.load(std::memory_order_acquire); }
+    // Test-visible: TryGetBlockStats calls answered from the old index of a keep-old rebuild.
+    [[nodiscard]] uint64_t ServedFromOldForTests() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return served_from_old_;
+    }
+    // Test-visible: block_index as the old index of a keep-old rebuild has it (nullopt without one).
+    [[nodiscard]] std::optional<std::vector<ZoneMapEntry>> OldBlockStatsForTests(uint64_t block_index) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (old_ == nullptr) return std::nullopt;
+        return old_->TryGetBlockStats(block_index);
+    }
 
     // Startup only, after BeginRebuild failed on a file that must not be trusted (missing, dirty, wrong width or
     // WAL-forced): enters the rebuild state at F = 0 WITHOUT truncating or writing anything. Readers then scan every
@@ -266,8 +295,8 @@ public:
         return row_index < frontier_ || fold_.FoldedEnd(row_index) > row_index;
     }
 
-    // Ends the rebuild (F = kNoRebuild) once the dirty header is durable: it retries the header first, and if that
-    // still fails returns false with nothing changed (still rebuilding, still pinned, MarkClean still refuses), so a
+    // Ends the rebuild (F = kNoRebuild, and the old index of a keep-old rebuild is closed in the same mutex hold) once
+    // the dirty header is durable: it retries the header first, and if that still fails returns false with nothing changed (still rebuilding, still pinned, MarkClean still refuses), so a
     // header-less file can never be cleaned and later reopened as an empty, clean index. Retry later. On success the
     // file stays dirty until a later MarkClean, as after any write.
     [[nodiscard]] bool FinishRebuild();
@@ -366,6 +395,11 @@ private:
     // one predictable branch once the flag is on disk.
     void EnsureDirtyOnDisk() { if (!dirty_on_disk_) MarkDirtyOnDisk(); }
     bool BeginRebuildLocked(uint32_t new_tracked_column_count); // mutex_ held
+    bool BeginKeepOldLocked(uint32_t new_tracked_column_count); // mutex_ held
+    // Fresh object only: takes over from's open file (fd, header, dirty flag, cache; not the path, which now names the
+    // new file); from is then re-pointed. Moves only: never throws.
+    void AdoptOpenState(ZoneMapFile &from) noexcept;
+    [[nodiscard]] bool NeedsOverwriteCheckRebuildingLocked(uint64_t first_row, uint64_t row_count);
     void MarkDirtyOnDisk();
 
     CachedBlock &EnsureBlockLoaded(uint64_t block_index);
@@ -406,4 +440,9 @@ private:
     // same DB/year concurrently calls UpdateRow/TryGetBlockStats on this
     // SAME object. Guards cache_/lru_order_/fd_ against exactly that.
     mutable std::mutex mutex_;
+    // Appended last so every older member keeps its offset (hot-path layout unchanged by keep-old).
+    uint64_t served_from_old_ = 0;
+    std::string path_;                    // set by Open; the keep-old begin creates path_ + ".new"
+    std::unique_ptr<ZoneMapFile> old_;    // keep-old rebuild only: the old index, until FinishRebuild (under mutex_)
+    std::atomic<uint32_t> old_width_{0};  // old_'s width, 0 without old_; written under mutex_, read without it
 };

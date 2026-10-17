@@ -1,6 +1,6 @@
 #pragma once
 // Fault injection for libc calls WITHOUT any hook in production code: XStoreSyscallFault.cpp
-// defines open/openat/stat/lstat/fdatasync/fsync/pwrite/pread/lseek itself (link-time interposition,
+// defines open/openat/stat/lstat/rename/fdatasync/fsync/pwrite/pread/lseek itself (link-time interposition,
 // same pattern as XStoreDeleteFaultTest.cpp) and forwards to the real function via
 // dlsym(RTLD_NEXT) unless one of these guards is alive. Unarmed, every interposed call is a single
 // relaxed atomic load plus the forward. At most one guard of each class (for ScopedFdFault: of
@@ -13,8 +13,8 @@ namespace xstore_fault {
 
 // Which kinds of path-based calls a ScopedPathFault fails (a mask). kOpenWrite is open/openat with
 // write access or O_CREAT/O_TRUNC; kOpenRead is every other open/openat; kFopen is fopen in any
-// mode; kStat is stat/lstat.
-enum PathOp : unsigned { kOpenRead = 1, kOpenWrite = 2, kFopen = 4, kStat = 8 };
+// mode; kStat is stat/lstat; kRename is rename, matched on its SOURCE path (counted in OpenHits).
+enum PathOp : unsigned { kOpenRead = 1, kOpenWrite = 2, kFopen = 4, kStat = 8, kRename = 16 };
 
 // The selected calls on `path` (or on everything beneath it when `subtree`) fail with `err`, as
 // they would for a file or directory the process may not access but without the root exemption of

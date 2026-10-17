@@ -2,11 +2,41 @@
 #include "include/Logger/Logger.h"
 #include <algorithm>
 #include <cstring>
+#include <filesystem>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
+int CreateIndexReplacement(const std::string &path, const void *header, size_t header_bytes) {
+    // Every allocation before the first file operation: nothing after the rename may throw.
+    const std::string tmp = path + ".new";
+    std::string dir = std::filesystem::path(path).parent_path().string();
+    if (dir.empty()) dir = ".";
+    const int fd = open(tmp.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) {
+        spdlog::error("[INDEX] - Cannot create {} ({}); keeping the old index", tmp, strerror(errno));
+        return -1;
+    }
+    const auto fail = [&](const char *step) {
+        spdlog::error("[INDEX] - Cannot {} {} ({}); keeping the old index", step, tmp, strerror(errno));
+        close(fd);
+        unlink(tmp.c_str());
+        return -1;
+    };
+    if (pwrite(fd, header, header_bytes, 0) != static_cast<ssize_t>(header_bytes)) return fail("write the header of");
+    if (fdatasync(fd) != 0) return fail("sync");
+    if (rename(tmp.c_str(), path.c_str()) != 0) return fail("rename");
+    const int dir_fd = open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir_fd < 0 || fsync(dir_fd) != 0) {
+        spdlog::warn("[INDEX] - Cannot sync directory {} after replacing {} ({}); a crash leaves either index, both "
+                     "dirty, and the next start rebuilds it", dir, path, strerror(errno));
+    }
+    if (dir_fd >= 0) close(dir_fd);
+    return fd;
+}
+
 bool ZoneMapFile::Open(const std::string &path, uint16_t row_length, uint32_t tracked_column_count) {
+    path_ = path;
     fd_ = open(path.c_str(), O_RDWR | O_CREAT, 0644);
     if (fd_ < 0) return false;
 
@@ -129,8 +159,12 @@ void ZoneMapFile::EvictIfOverCapacity() {
 
 void ZoneMapFile::UpdateRow(uint64_t row_index, const std::vector<ZoneMapObservation> &observations, uint32_t pad_to) {
     std::lock_guard<std::mutex> lock(mutex_);
-    // A running rebuild folds this row later, from the data file, unless a parallel group already folded it.
-    if (row_index >= frontier_ && fold_.FoldedEnd(row_index) <= row_index) return;
+    // Not rebuilding: this one compare. A keep-old rebuild updates the old index first (it gets every writer call). A
+    // running rebuild folds this row later, from the data file, unless a parallel group already folded it.
+    if (__builtin_expect(frontier_ != kNoRebuild, 0)) {
+        if (old_ != nullptr) old_->UpdateRow(row_index, observations, pad_to);
+        if (row_index >= frontier_ && fold_.FoldedEnd(row_index) <= row_index) return;
+    }
     UpdateRowLocked(row_index, observations, pad_to);
 }
 
@@ -249,7 +283,15 @@ bool ZoneMapFile::WriteBlock(uint64_t block_index, const CachedBlock &block) {
 bool ZoneMapFile::NeedsOverwriteCheck(uint64_t first_row, uint64_t row_count) {
     if (row_count == 0) return false;
     std::lock_guard<std::mutex> lock(mutex_);
+    if (__builtin_expect(frontier_ != kNoRebuild, 0)) return NeedsOverwriteCheckRebuildingLocked(first_row, row_count);
     if (header_.tracked_column_count == 0) return false; // nothing is ever folded
+    return BlocksNeedOverwriteCheck(first_row, first_row + row_count - 1);
+}
+
+bool ZoneMapFile::NeedsOverwriteCheckRebuildingLocked(uint64_t first_row, uint64_t row_count) {
+    // The old index of a keep-old rebuild must learn of the overwrite too: true if either file needs the check.
+    if (old_ != nullptr && old_->NeedsOverwriteCheck(first_row, row_count)) return true;
+    if (header_.tracked_column_count == 0) return false;
     if (first_row + row_count > frontier_) {
         if (fold_.Active()) {
             bool needs = false;
@@ -291,6 +333,7 @@ void ZoneMapFile::ForEachWriterRun(uint64_t first_row, uint64_t last_row, Fn &&f
 
 void ZoneMapFile::MarkInexact(uint64_t first_row, uint64_t last_row) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (old_ != nullptr) old_->MarkInexact(first_row, last_row);
     MarkInexactLocked(first_row, last_row);
 }
 
@@ -336,7 +379,10 @@ void ZoneMapFile::MarkInexactRunLocked(uint64_t first_row, uint64_t last_row) {
 
 bool ZoneMapFile::DeleteRows(uint64_t first_row, uint64_t last_row, const std::function<bool()> &punch_data) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (header_.tracked_column_count == 0) return punch_data();
+    // The data punch, run exactly once: through the old index of a keep-old rebuild, which flags and resets its own
+    // blocks around it (it runs once on every path of DeleteRows). This file's own steps keep their order around it.
+    const auto punch = [&] { return old_ != nullptr ? old_->DeleteRows(first_row, last_row, punch_data) : punch_data(); };
+    if (header_.tracked_column_count == 0) return punch();
     EnsureDirtyOnDisk(); // before the data punch: a crash after it must find the index dirty
     const uint64_t rpb = header_.rows_per_block;
     // Fully covered blocks: [full_begin, full_end). Empty when the range sits inside one block.
@@ -352,11 +398,11 @@ bool ZoneMapFile::DeleteRows(uint64_t first_row, uint64_t last_row, const std::f
     }
     if (full_begin >= full_end) {
         MarkInexactLocked(first_row, last_row);
-        return punch_data();
+        return punch();
     }
     if (first_row < full_begin * rpb) MarkInexactLocked(first_row, full_begin * rpb - 1);
     if (last_row >= full_end * rpb) MarkInexactLocked(full_end * rpb, last_row);
-    if (!punch_data()) {
+    if (!punch()) {
         MarkInexactLocked(full_begin * rpb, full_end * rpb - 1); // the rows may be partly gone
         return false;
     }
@@ -389,7 +435,11 @@ bool ZoneMapFile::BlockInexact(uint64_t block_index) {
 
 std::optional<std::vector<ZoneMapEntry>> ZoneMapFile::TryGetBlockStats(uint64_t block_index) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if ((block_index + 1) * header_.rows_per_block > frontier_) return std::nullopt; // not rebuilt yet
+    if ((block_index + 1) * header_.rows_per_block > frontier_) { // not rebuilt yet
+        if (old_ == nullptr) return std::nullopt;
+        ++served_from_old_;
+        return old_->TryGetBlockStats(block_index); // the old width: callers check column < size()
+    }
     auto cached = cache_.find(block_index);
     if (cached != cache_.end()) return cached->second.entries; // always disk-coherent, safe to serve directly
 
@@ -443,10 +493,57 @@ bool ZoneMapFile::BeginRebuild(uint32_t new_tracked_column_count) {
     return BeginRebuildLocked(new_tracked_column_count);
 }
 
-BeginRebuildResult ZoneMapFile::BeginLiveRebuild(uint32_t new_tracked_column_count) {
+BeginRebuildResult ZoneMapFile::BeginLiveRebuild(uint32_t new_tracked_column_count, bool keep_old) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (frontier_ != kNoRebuild) return BeginRebuildResult::kAlreadyRebuilding; // another builder owns it: touch nothing
-    return BeginRebuildLocked(new_tracked_column_count) ? BeginRebuildResult::kStarted : BeginRebuildResult::kFailed;
+    const bool began = keep_old ? BeginKeepOldLocked(new_tracked_column_count) : BeginRebuildLocked(new_tracked_column_count);
+    return began ? BeginRebuildResult::kStarted : BeginRebuildResult::kFailed;
+}
+
+void ZoneMapFile::AdoptOpenState(ZoneMapFile &from) noexcept {
+    fd_ = from.fd_;
+    header_ = from.header_;
+    dirty_on_disk_ = from.dirty_on_disk_;
+    cache_ = std::move(from.cache_);
+    lru_order_ = std::move(from.lru_order_);
+    // path_ stays empty: the name now belongs to the new file (the old one is unlinked and never begins a rebuild).
+}
+
+bool ZoneMapFile::BeginKeepOldLocked(uint32_t new_tracked_column_count) {
+    // The old index is dirty on disk before anything else (a crash from here on rebuilds whichever file the name ends
+    // up on), and stays so: its writes never sync again.
+    EnsureDirtyOnDisk();
+    if (!dirty_on_disk_ || path_.empty()) {
+        spdlog::error("[ZONE MAP] - Cannot mark the index dirty before a rebuild; keeping it as it is");
+        return false;
+    }
+    ZoneMapFileHeader fresh = header_; // rows_per_block kept
+    fresh.magic = ZoneMapFileHeader{}.magic;
+    fresh.version = ZONE_MAP_VERSION;
+    fresh.tracked_column_count = new_tracked_column_count;
+    fresh.dirty = 1;
+    // Allocated before the rename: from the rename to the end of this function nothing may throw (AdoptOpenState only
+    // moves; the clears and stores are noexcept), so the object can never be left half switched.
+    auto old = std::make_unique<ZoneMapFile>();
+    const int new_fd = CreateIndexReplacement(path_, &fresh, sizeof(fresh));
+    if (new_fd < 0) return false;
+    old->AdoptOpenState(*this);
+    old_ = std::move(old);
+    fd_ = new_fd;
+    // Field by field: rows_per_block is unchanged and must not be written (RowsPerBlockValue reads it unlocked).
+    header_.magic = fresh.magic;
+    header_.version = fresh.version;
+    header_.tracked_column_count = fresh.tracked_column_count;
+    header_.dirty = 1;
+    dirty_on_disk_ = true;
+    ++dirty_mark_writes_;
+    cache_.clear();
+    lru_order_.clear();
+    frontier_ = 0;
+    fold_.Reset(0, 0);
+    old_width_.store(old_->header_.tracked_column_count, std::memory_order_release);
+    rebuilding_.store(true, std::memory_order_release);
+    return true;
 }
 
 bool ZoneMapFile::BeginRebuildLocked(uint32_t new_tracked_column_count) {
@@ -518,6 +615,8 @@ bool ZoneMapFile::FinishRebuild() {
     }
     frontier_ = kNoRebuild;
     fold_.Reset(0, 0);
+    old_width_.store(0, std::memory_order_release);
+    old_.reset(); // closes the old (unlinked) file
     rebuilding_.store(false, std::memory_order_release);
     return true;
 }

@@ -103,6 +103,7 @@ inline std::string EncodeFDataForCatIdx(const XStore_Proto::FData &f_data) {
 #include <array>
 #include <atomic>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
@@ -180,7 +181,8 @@ public:
     void UpdateRow(uint64_t row_index, const std::vector<CatIdxObservation> &observations);
 
     // True (scan the block) also for a column past this file's width and for a block a running rebuild has not
-    // finished.
+    // finished, unless a keep-old rebuild still has the old index: that block is then answered by the old bloom (true
+    // for a column past the old width).
     bool MightContain(uint64_t block_index, uint32_t column_idx, const std::string &encoded_value);
 
     // Live widening, stage 1 mechanics: same frontier protocol as ZoneMapFile (see its kNoRebuild comment). Rows at or
@@ -196,7 +198,11 @@ public:
     // Live builder only: BeginRebuild, unless a rebuild already runs on this file -- then kAlreadyRebuilding with nothing
     // touched. The check and the begin are one step under the file mutex, so two builders on one file cannot both begin
     // (the second would truncate the first's work while the first keeps advancing F).
-    [[nodiscard]] BeginRebuildResult BeginLiveRebuild(uint32_t new_tracked_column_count);
+    // keep_old: same contract as ZoneMapFile::BeginLiveRebuild(width, true): the new file is created as "<path>.new" and
+    // renamed over; the old file (its bitmap section too) serves until FinishRebuild and gets every UpdateRow.
+    [[nodiscard]] BeginRebuildResult BeginLiveRebuild(uint32_t new_tracked_column_count, bool keep_old = false);
+    // Width of the old index a keep-old rebuild still serves; 0 when none. Lock-free.
+    [[nodiscard]] uint32_t OldWidth() const { return old_width_.load(std::memory_order_acquire); }
 
     // Same contract as ZoneMapFile::EnterUntrustedRebuildState: F = 0 without writing anything; MightContain answers
     // "maybe" for every block for the rest of the session.
@@ -283,9 +289,11 @@ public:
 
     // False while a rebuild runs (also the untrusted state of EnterUntrustedRebuildState, which keeps an old section
     // on disk): the directory is a snapshot of rows the rebuild is re-deriving, and rows written since are not in it.
+    // A keep-old rebuild answers from the old index, whose section any write since compaction has invalidated.
     bool HasBitmapSection() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return header_.bitmap_section_offset != 0 && frontier_ == kNoRebuild;
+        if (frontier_ != kNoRebuild) return old_ != nullptr && old_->HasBitmapSection();
+        return header_.bitmap_section_offset != 0;
     }
 
     // Returns the exact row indices for (column_idx, encoded_value) if a
@@ -324,6 +332,8 @@ private:
     // one predictable branch once the flag is on disk.
     void EnsureDirtyOnDisk() { if (!dirty_on_disk_) MarkDirtyOnDisk(); }
     bool BeginRebuildLocked(uint32_t new_tracked_column_count); // mutex_ held
+    bool BeginKeepOldLocked(uint32_t new_tracked_column_count); // mutex_ held
+    void AdoptOpenState(CatIdxFile &from) noexcept; // fresh object only, see ZoneMapFile::AdoptOpenState
     void MarkDirtyOnDisk();
 
     using BloomEntry = std::array<unsigned char, XStoreTunables::CATIDX_BLOOM_BYTES_PER_ENTRY>;
@@ -348,4 +358,8 @@ private:
     std::unordered_map<uint64_t, std::vector<BloomEntry>> cache_; // block_index -> per-column bloom bytes
     std::vector<uint64_t> lru_order_;
     mutable std::mutex mutex_;
+    // Appended last so every older member keeps its offset (hot-path layout unchanged by keep-old).
+    std::string path_;                   // set by Open; the keep-old begin creates path_ + ".new"
+    std::unique_ptr<CatIdxFile> old_;    // keep-old rebuild only: the old index, until FinishRebuild (under mutex_)
+    std::atomic<uint32_t> old_width_{0}; // old_'s width, 0 without old_; written under mutex_, read without it
 };

@@ -1145,8 +1145,10 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
                               FindRebuildProgress(db_base_path_str, curr_ts.year, /*catidx=*/true, progress);
             if (live) {
                 // One notice per year whose part of the range reaches the catidx's contiguous watermark (any
-                // column >= the always-indexed width: anywhere in the year). See LiveRebuildNotices.
-                if (high_column || segment_end - static_cast<unsigned long long>(curr_ts.first_epoch) >= progress.done_rows) {
+                // column >= the always-indexed width: anywhere in the year). See LiveRebuildNotices. None for a
+                // column a keep-old rebuild's old index still covers.
+                if (static_cast<uint32_t>(column_idx) >= progress.old_width &&
+                    (high_column || segment_end - static_cast<unsigned long long>(curr_ts.first_epoch) >= progress.done_rows)) {
                     set_warning("", RebuildingColumnNoticeText("FINDBYVALUE", db_name, column_idx, curr_ts.year, &progress));
                     unindexed_notice_emitted = true;
                 }

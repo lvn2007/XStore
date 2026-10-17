@@ -41,6 +41,7 @@ bool BloomCheckBit(const unsigned char *entry, size_t entry_size, uint64_t h1, u
 
 bool CatIdxFile::Open(const std::string &path, uint16_t row_length, uint32_t tracked_column_count) {
     rows_per_block_ = RowsPerBlock(row_length);
+    path_ = path;
 
     fd_ = open(path.c_str(), O_RDWR | O_CREAT, 0644);
     if (fd_ < 0) {
@@ -202,8 +203,12 @@ bool CatIdxFile::FlushBlock(uint64_t block_index) {
 
 void CatIdxFile::UpdateRow(uint64_t row_index, const std::vector<CatIdxObservation> &observations) {
     std::lock_guard<std::mutex> lock(mutex_);
-    // A running rebuild folds this row later, from the data file, unless a parallel group already folded it.
-    if (row_index >= frontier_ && fold_.FoldedEnd(row_index) <= row_index) return;
+    // Not rebuilding: this one compare. A keep-old rebuild updates the old index first (it gets every UpdateRow). A
+    // running rebuild folds this row later, from the data file, unless a parallel group already folded it.
+    if (__builtin_expect(frontier_ != kNoRebuild, 0)) {
+        if (old_ != nullptr) old_->UpdateRow(row_index, observations);
+        if (row_index >= frontier_ && fold_.FoldedEnd(row_index) <= row_index) return;
+    }
     UpdateRowLocked(row_index, observations);
 }
 
@@ -260,7 +265,9 @@ bool CatIdxFile::RebuildFoldRows(const CatIdxFoldBatch &batch) {
 bool CatIdxFile::MightContain(uint64_t block_index, uint32_t column_idx, const std::string &encoded_value) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (column_idx >= header_.tracked_column_count) return true; // no bloom for this column -- caller must real-scan
-    if ((block_index + 1) * rows_per_block_ > frontier_) return true; // not rebuilt yet -- caller must real-scan
+    if ((block_index + 1) * rows_per_block_ > frontier_) { // not rebuilt yet: the old bloom, or real-scan
+        return old_ == nullptr || old_->MightContain(block_index, column_idx, encoded_value);
+    }
     EnsureBlockLoaded(block_index);
     auto &entries = cache_[block_index];
     uint64_t h1 = Crc32c(encoded_value.data(), encoded_value.size());
@@ -337,7 +344,10 @@ void CatIdxFile::AppendBitmapSection(const std::unordered_map<uint32_t, std::map
 
 std::optional<std::vector<uint64_t>> CatIdxFile::LookupExact(uint32_t column_idx, const std::string &encoded_value) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (header_.bitmap_section_offset == 0 || frontier_ != kNoRebuild) return std::nullopt; // see HasBitmapSection
+    if (frontier_ != kNoRebuild) { // see HasBitmapSection
+        return old_ != nullptr ? old_->LookupExact(column_idx, encoded_value) : std::nullopt;
+    }
+    if (header_.bitmap_section_offset == 0) return std::nullopt;
 
     struct stat st{};
     if (fstat(fd_, &st) != 0) return std::nullopt;
@@ -425,10 +435,51 @@ bool CatIdxFile::BeginRebuild(uint32_t new_tracked_column_count) {
     return BeginRebuildLocked(new_tracked_column_count);
 }
 
-BeginRebuildResult CatIdxFile::BeginLiveRebuild(uint32_t new_tracked_column_count) {
+BeginRebuildResult CatIdxFile::BeginLiveRebuild(uint32_t new_tracked_column_count, bool keep_old) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (frontier_ != kNoRebuild) return BeginRebuildResult::kAlreadyRebuilding; // another builder owns it: touch nothing
-    return BeginRebuildLocked(new_tracked_column_count) ? BeginRebuildResult::kStarted : BeginRebuildResult::kFailed;
+    const bool began = keep_old ? BeginKeepOldLocked(new_tracked_column_count) : BeginRebuildLocked(new_tracked_column_count);
+    return began ? BeginRebuildResult::kStarted : BeginRebuildResult::kFailed;
+}
+
+void CatIdxFile::AdoptOpenState(CatIdxFile &from) noexcept {
+    fd_ = from.fd_;
+    header_ = from.header_;
+    rows_per_block_ = from.rows_per_block_;
+    dirty_on_disk_ = from.dirty_on_disk_;
+    cache_ = std::move(from.cache_);
+    lru_order_ = std::move(from.lru_order_);
+    // path_ stays empty: the name now belongs to the new file (the old one is unlinked and never begins a rebuild).
+}
+
+// Same steps as ZoneMapFile::BeginKeepOldLocked. rows_per_block_ is a member derived from the row length, unchanged.
+bool CatIdxFile::BeginKeepOldLocked(uint32_t new_tracked_column_count) {
+    EnsureDirtyOnDisk();
+    if (!dirty_on_disk_ || path_.empty()) {
+        spdlog::error("[CATIDX] - Cannot mark the index dirty before a rebuild; keeping it as it is");
+        return false;
+    }
+    CatIdxFileHeader fresh{}; // no blocks, no bitmap section
+    fresh.tracked_column_count = new_tracked_column_count;
+    fresh.dirty = 1;
+    // Allocated before the rename: from the rename to the end of this function nothing may throw (AdoptOpenState only
+    // moves; the clears and stores are noexcept), so the object can never be left half switched.
+    auto old = std::make_unique<CatIdxFile>();
+    const int new_fd = CreateIndexReplacement(path_, &fresh, sizeof(fresh));
+    if (new_fd < 0) return false;
+    old->AdoptOpenState(*this);
+    old_ = std::move(old);
+    fd_ = new_fd;
+    header_ = fresh;
+    dirty_on_disk_ = true;
+    ++dirty_mark_writes_;
+    cache_.clear();
+    lru_order_.clear();
+    frontier_ = 0;
+    fold_.Reset(0, 0);
+    old_width_.store(old_->header_.tracked_column_count, std::memory_order_release);
+    rebuilding_.store(true, std::memory_order_release);
+    return true;
 }
 
 bool CatIdxFile::BeginRebuildLocked(uint32_t new_tracked_column_count) {
@@ -499,6 +550,8 @@ bool CatIdxFile::FinishRebuild() {
     }
     frontier_ = kNoRebuild;
     fold_.Reset(0, 0);
+    old_width_.store(0, std::memory_order_release);
+    old_.reset(); // closes the old (unlinked) file
     rebuilding_.store(false, std::memory_order_release);
     return true;
 }

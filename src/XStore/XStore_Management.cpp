@@ -52,6 +52,8 @@ struct LiveRebuildStatus {
     std::atomic<uint64_t> total_rows{0};
     std::atomic<bool> zmap_governed{false};     // that file's builder runs under a governor (cleared when it ends)
     std::atomic<bool> catidx_governed{false};
+    std::atomic<uint32_t> zmap_old_width{0};    // width of the old index a keep-old rebuild serves (0: none)
+    std::atomic<uint32_t> catidx_old_width{0};
     std::atomic<unsigned> allowed{0};           // the governor's state (two governed builders on one year share it)
     std::atomic<unsigned> max_workers{0};
     std::atomic<livewiden::GovernorReason> reason{livewiden::GovernorReason::kStart};
@@ -93,17 +95,21 @@ void SyncRebuildActive(LiveRebuildStatus &n) noexcept {
     }
 }
 
-// A builder begins (true) its files: their watermarks restart at 0; `governed`: it runs under a governor.
-void BeginRebuildFiles(LiveRebuildStatus &n, bool zmap, bool catidx, bool governed) {
+// A builder begins (true) its files: their watermarks restart at 0; `governed`: it runs under a governor; *_old_width:
+// the width of the old index a keep-old rebuild of that file still serves (0: none).
+void BeginRebuildFiles(LiveRebuildStatus &n, bool zmap, bool catidx, bool governed, uint32_t zmap_old_width,
+                       uint32_t catidx_old_width) {
     std::lock_guard<std::mutex> lock(RebuildStatusMutex());
     if (zmap) {
         n.zmap_rows.store(0, std::memory_order_relaxed);
         n.zmap_governed.store(governed, std::memory_order_relaxed);
+        n.zmap_old_width.store(zmap_old_width, std::memory_order_relaxed);
         n.zmap.store(true, std::memory_order_relaxed);
     }
     if (catidx) {
         n.catidx_rows.store(0, std::memory_order_relaxed);
         n.catidx_governed.store(governed, std::memory_order_relaxed);
+        n.catidx_old_width.store(catidx_old_width, std::memory_order_relaxed);
         n.catidx.store(true, std::memory_order_relaxed);
     }
     SyncRebuildActive(n);
@@ -111,8 +117,14 @@ void BeginRebuildFiles(LiveRebuildStatus &n, bool zmap, bool catidx, bool govern
 
 // The files given (true) are no longer in a live rebuild: finished, or their index state was dropped.
 void EndRebuildFiles(LiveRebuildStatus &n, bool zmap, bool catidx) noexcept {
-    if (zmap) n.zmap.store(false, std::memory_order_relaxed);
-    if (catidx) n.catidx.store(false, std::memory_order_relaxed);
+    if (zmap) {
+        n.zmap.store(false, std::memory_order_relaxed);
+        n.zmap_old_width.store(0, std::memory_order_relaxed);
+    }
+    if (catidx) {
+        n.catidx.store(false, std::memory_order_relaxed);
+        n.catidx_old_width.store(0, std::memory_order_relaxed);
+    }
     SyncRebuildActive(n);
 }
 
@@ -1112,7 +1124,27 @@ void XStore::InitDB() {
         auto replayed_it = replayed_years.find(curr_db_name);
         const std::set<unsigned short> &force_rebuild_years_for_db =
             replayed_it == replayed_years.end() ? kNoForcedYears : replayed_it->second;
+        RemoveIndexReplacementOrphans(p.path().string());
         RebuildStaleIndexesForDb(curr_db_name, p.path().string(), cfg_struct, force_rebuild_years_for_db);
+    }
+}
+
+// A crash inside a keep-old begin (Tech Reference 4.18 "Keep the old index") can leave "<year>.zmap.new" or
+// "<year>.catidx.new" before its rename: never an index in use (the rename is the switch), so it is removed.
+void XStore::RemoveIndexReplacementOrphans(const std::string &db_dir) {
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(db_dir, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string name = it->path().filename().string();
+        const auto ends_with = [&name](std::string_view suffix) {
+            return name.size() >= suffix.size() && name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0;
+        };
+        if (!ends_with(".zmap.new") && !ends_with(".catidx.new")) continue;
+        std::error_code rm_ec;
+        if (std::filesystem::remove(it->path(), rm_ec)) {
+            spdlog::info("[INIT DB] - Removed {}, left by an interrupted index rebuild start", it->path().string());
+        } else if (rm_ec) {
+            spdlog::error("[INIT DB] - Cannot remove {}: {}", it->path().string(), rm_ec.message());
+        }
     }
 }
 
@@ -1161,6 +1193,7 @@ bool XStore::FindRebuildProgress(std::string_view db_base_path, unsigned short y
     out.done_rows = (catidx ? n->catidx_rows : n->zmap_rows).load(std::memory_order_relaxed);
     out.total_rows = n->total_rows.load(std::memory_order_relaxed);
     out.governed = (catidx ? n->catidx_governed : n->zmap_governed).load(std::memory_order_relaxed);
+    out.old_width = (catidx ? n->catidx_old_width : n->zmap_old_width).load(std::memory_order_relaxed);
     out.slowed = (catidx ? n->catidx_governed : n->zmap_governed).load(std::memory_order_relaxed)
                      ? livewiden::SlowedText(n->allowed.load(std::memory_order_relaxed),
                                              n->max_workers.load(std::memory_order_relaxed),
@@ -1209,7 +1242,9 @@ std::string LiveRebuildNotices(std::string_view op, const std::string &db_name, 
         TimeStruct curr_ts(static_cast<std::time_t>(iter_epoch), cfg.timeresolution());
         const unsigned long long end_of_current_year = std::min(end_epoch, static_cast<unsigned long long>(curr_ts.last_epoch));
         XStore::LiveRebuildProgress p;
+        // A column the old index of a keep-old rebuild still covers is answered from it: no notice (owner decision).
         if (XStore::FindRebuildProgress(db_base_path, curr_ts.year, /*catidx=*/false, p) &&
+            static_cast<uint32_t>(column_idx) >= p.old_width &&
             (high || end_of_current_year - static_cast<unsigned long long>(curr_ts.first_epoch) >= p.done_rows)) {
             if (!out.empty()) out += " | ";
             out += XStore::RebuildingColumnNoticeText(op, db_name, column_idx, curr_ts.year, &p);
@@ -1253,8 +1288,13 @@ std::string XStore::UnindexedColumnNotice(std::string_view op, const std::string
         bool rebuilding = false;
         std::optional<uint32_t> warm_width = PeekOpenZoneMapWidth(db_base_path, curr_ts.year, &rebuilding);
         if (warm_width.has_value()) {
-            // During a rebuild the object already reports the new width, but blocks past the frontier are scanned.
-            if (rebuilding) return RebuildingColumnNoticeText(op, db_name, column_idx, curr_ts.year);
+            // During a rebuild the object already reports the new width, but blocks past the frontier are scanned
+            // (unless a keep-old rebuild's old index still covers the column).
+            LiveRebuildProgress keep_old;
+            if (rebuilding && !(FindRebuildProgress(db_base_path, curr_ts.year, /*catidx=*/false, keep_old) &&
+                                static_cast<uint32_t>(column_idx) < keep_old.old_width)) {
+                return RebuildingColumnNoticeText(op, db_name, column_idx, curr_ts.year);
+            }
             if (static_cast<uint32_t>(column_idx) >= *warm_width) {
                 return UnindexedColumnNoticeText(op, db_name, column_idx, curr_ts.year, *warm_width);
             }
@@ -1677,7 +1717,7 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
                                                  bool widen_catidx, const std::atomic<bool> *stop,
                                                  LiveWidenStats *stats, unsigned workers, uint64_t group_bytes,
                                                  livewiden::LiveWidenGovernor *governor,
-                                                 livewiden::LiveWidenLoadSource *load) try {
+                                                 livewiden::LiveWidenLoadSource *load, bool keep_old) try {
     using Clock = std::chrono::steady_clock;
     LiveWidenStats local_stats;
     LiveWidenStats &st = stats != nullptr ? *stats : local_stats;
@@ -1707,7 +1747,7 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
     bool busy = false;
     const auto begin = [&](auto &pin, const char *ext, bool &began, bool &file_busy) {
         if (pin.get() == nullptr) return;
-        const BeginRebuildResult r = pin->BeginLiveRebuild(tracked_column_count);
+        const BeginRebuildResult r = pin->BeginLiveRebuild(tracked_column_count, keep_old);
         began = r == BeginRebuildResult::kStarted;
         file_busy = r == BeginRebuildResult::kAlreadyRebuilding;
         if (began) return;
@@ -1754,10 +1794,12 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
         rebuild_status.reason.store(governor->Reason(), std::memory_order_relaxed);
         rebuild_status.max_workers.store(governor->MaxWorkers(), std::memory_order_relaxed);
     }
-    BeginRebuildFiles(rebuild_status, zmap.get() != nullptr, catidx.get() != nullptr, governor != nullptr);
+    BeginRebuildFiles(rebuild_status, zmap.get() != nullptr, catidx.get() != nullptr, governor != nullptr,
+                      zmap.get() != nullptr ? zmap->OldWidth() : 0, catidx.get() != nullptr ? catidx->OldWidth() : 0);
 
     // From here every early return leaves the files that began in rebuild at the frontier they reached: dirty on
-    // disk, blocks past F scanned (never trusted), MarkClean refusing, unevictable; the next start rebuilds them.
+    // disk, blocks past F scanned (never trusted from the new file; with keep_old they are answered from the old index,
+    // which stays until the next start), MarkClean refusing, unevictable; the next start rebuilds them.
     struct FdCloser {
         int fd;
         ~FdCloser() { if (fd >= 0) close(fd); }
@@ -2072,7 +2114,8 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
         st.governor_brakes = gov_after.brakes - gov_before.brakes;
     }
     // Every early end leaves the files that began in rebuild at the contiguous watermark they reached: dirty on disk,
-    // blocks past F scanned (never trusted), MarkClean refusing, unevictable; the next start rebuilds them.
+    // blocks past F scanned (never trusted from the new file; with keep_old they are answered from the old index, which
+    // stays until the next start), MarkClean refusing, unevictable; the next start rebuilds them.
     if (failed.load(std::memory_order_relaxed)) return LiveWidenResult::kFailed;
     if (was_stopped.load(std::memory_order_relaxed)) {
         spdlog::warn("[LIVE WIDEN] [{}] - Stopped at row {} of {}; the index stays in rebuild (dirty) until the next "

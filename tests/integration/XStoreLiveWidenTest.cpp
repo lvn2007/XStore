@@ -746,7 +746,8 @@ protected:
     void RunIdleWiden(XStore &store, int width, const std::string &db, const std::string &ref_db);
     // The concurrent oracle of section 2, with the builder's worker count and group size.
     void RunConcurrentOracle(const std::string &db, unsigned workers, uint64_t group_bytes,
-                             livewiden::LiveWidenGovernor *governor = nullptr);
+                             livewiden::LiveWidenGovernor *governor = nullptr,
+                             bool keep_old = XStoreTunables::LIVE_WIDEN_KEEP_OLD_INDEX);
 
     // Answers on [lo, hi] for every listed column, against a scan of the data file (no concurrent writers here).
     void ExpectAnswersMatchTheData(XStore &store, const std::string &db, uint64_t lo, uint64_t hi,
@@ -875,7 +876,7 @@ TEST_F(XStoreLiveWidenTest, IdleWidenTo100IsByteIdenticalToTheStartupRebuild) {
 // end every tracked column of every exact block equals a startup rebuild of the final data, and the bloom holds every
 // present value.
 void XStoreLiveWidenTest::RunConcurrentOracle(const std::string &db, unsigned workers, uint64_t group_bytes,
-                                              livewiden::LiveWidenGovernor *governor) {
+                                              livewiden::LiveWidenGovernor *governor, bool keep_old) {
     XStore store;
     constexpr int kWidth = 70;
     const uint64_t rpb = Rpb();
@@ -1125,24 +1126,40 @@ void XStoreLiveWidenTest::RunConcurrentOracle(const std::string &db, unsigned wo
 
     std::this_thread::sleep_for(milliseconds(400)); // before: the 64-wide index under traffic
     const int queries_before = queries.load();
+    const int writes_before = writes.load();
     XStore::LiveWidenStats stats;
     const Clock::time_point widen_start = Clock::now();
+    const uint64_t served_before = zmap.ServedFromOldForTests();
     const Result result = store.LiveWidenOneYear(path, kYear, kRowLength, kWidth, true, true, nullptr, &stats, workers,
-                                                 group_bytes, governor);
+                                                 group_bytes, governor, nullptr, keep_old);
+    const uint64_t served_from_old = zmap.ServedFromOldForTests() - served_before;
     const int64_t widen_ms = MsSince(widen_start);
     const int queries_during = queries.load() - queries_before;
-    const int writes_at_end_of_widen = writes.load();
+    const int writes_during = writes.load() - writes_before;
     std::this_thread::sleep_for(milliseconds(400)); // after: the widened index under traffic
     running.store(false);
     for (std::thread &t : threads) t.join();
     EXPECT_EQ(result, Result::kDone);
     EXPECT_EQ(mismatches.load(), 0);
-    EXPECT_GT(writes_at_end_of_widen, 200) << "too little concurrent traffic to mean anything";
+    // Writes that raced the builder, counted from the widen's start only. Local VM: the widen lasts 0.3-1.1 s and 83-416
+    // writes land during it (fewest with 4 workers); the floor proves the race happened with ~3x margin.
+    EXPECT_GT(writes_during, 30) << "too little concurrent traffic during the widen to mean anything";
     EXPECT_GT(queries_during, 10) << "too few queries during the widen";
-    std::printf("[live widen oracle] %u workers: widen %lld ms, %llu chunks, %llu rows, %llu timeouts, max hold %llu us; %d writes, "
+    // Keep-old: blocks past the frontier were answered from the old index during the build instead of being scanned.
+    // A weak check (random queries); KeepOldAnswersOldColumnsFromTheOldIndexWhileTheWidenIsHeld is the strong proof.
+    if (keep_old) {
+        EXPECT_GT(served_from_old, 0u);
+    } else {
+        EXPECT_EQ(served_from_old, 0u);
+    }
+    EXPECT_EQ(zmap.OldWidth(), 0u);
+    EXPECT_EQ(catidx.OldWidth(), 0u);
+    std::printf("[live widen oracle] keep_old %d: %llu block stats answered from the old index\n", keep_old ? 1 : 0,
+                static_cast<unsigned long long>(served_from_old));
+    std::printf("[live widen oracle] %u workers: widen %lld ms, %llu chunks, %llu rows, %llu timeouts, max hold %llu us; %d writes (%d during), "
                 "%d queries (%d during)\n", workers, static_cast<long long>(widen_ms), static_cast<unsigned long long>(stats.chunks),
                 static_cast<unsigned long long>(stats.rows_folded), static_cast<unsigned long long>(stats.lock_timeouts),
-                static_cast<unsigned long long>(stats.max_lock_hold_us), writes.load(), queries.load(), queries_during);
+                static_cast<unsigned long long>(stats.max_lock_hold_us), writes.load(), writes_during, queries.load(), queries_during);
 
     // Capture the live index before InitDB (which rebuilds this DB's index again: it is dirty after the writes).
     std::vector<std::vector<ZoneMapEntry>> live(kBlocks);
@@ -1207,6 +1224,10 @@ void XStoreLiveWidenTest::RunConcurrentOracle(const std::string &db, unsigned wo
 
 TEST_F(XStoreLiveWidenTest, AnswersStayExactUnderConcurrentWritesAndTheResultMatchesAStartupRebuild) {
     RunConcurrentOracle("LWLIVE", 1, XStoreTunables::LIVE_WIDEN_GROUP_BYTES);
+}
+
+TEST_F(XStoreLiveWidenTest, KeepOldAnswersStayExactUnderConcurrentWritesAndTheResultMatchesAStartupRebuild) {
+    RunConcurrentOracle("LWKEEPOLD", 1, XStoreTunables::LIVE_WIDEN_GROUP_BYTES, nullptr, /*keep_old=*/true);
 }
 
 // ---- 3. Starvation: a hot head must not stop the builder ------------------------------------------------------------
@@ -2243,6 +2264,119 @@ TEST_F(XStoreLiveWidenTest, RebuildNoticeShowsProgressOnTheRebuildingYearOnlyAnd
     EXPECT_EQ(MaxStatus(store, db, Epoch(0), Epoch(kRows - 1), 5), "SUCCESS");
     EXPECT_EQ(MaxStatus(store, db, Epoch(0), Epoch(kRows - 1), 65), "SUCCESS");
     EXPECT_EQ(FindStatus(store, db, Epoch(0), Epoch(kRows - 1), 5).find(kBeingIndexed), std::string::npos);
+}
+
+// Keep-old (LIVE_WIDEN_KEEP_OLD_INDEX) held at a known watermark: an index born 70 wide, rows 100 wide, widened to 100.
+// Columns below the old width (5, 66) are answered from the old index past the watermark (no notice, blocks served from
+// it, right answers); a column at or past it (80) still says how far the rebuild is. After the widen nothing is said.
+TEST_F(XStoreLiveWidenTest, KeepOldAnswersOldColumnsFromTheOldIndexWhileTheWidenIsHeld) {
+    XStore store;
+    const std::string db = "LWKEEPNOTICE";
+    constexpr uint64_t kRows = 20000;
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    Insert(store, db, {{Epoch(0), ValueRow(0, 70)}}); // index files born 70 wide
+    Rows batch;
+    for (uint64_t r = 1; r < kRows; ++r) batch.emplace_back(Epoch(r), ValueRow(r * 7 % 100000, r % 5 == 0 ? 40 : 100));
+    Insert(store, db, batch);
+    const std::string path = DbPath(db);
+    ZoneMapFile &zmap = XStore::GetOrOpenZoneMap(path, kYear, kRowLength);
+    ASSERT_EQ(zmap.TrackedColumnCount(), 70u);
+    const uint64_t kStuck = 10 * Rpb() + 7;
+    FileRangeLock &lock = FileLockRegistry::Get(YearPath(db, ".XSTORE"));
+    lock.LockRange(kStuck * kRowLength, kRowLength, kWrite);
+    auto builder = std::async(std::launch::async, [&] {
+        XStore b;
+        return b.LiveWidenOneYear(path, kYear, kRowLength, 100, true, true, nullptr, nullptr, 1,
+                                  XStoreTunables::LIVE_WIDEN_GROUP_BYTES, nullptr, nullptr, /*keep_old=*/true);
+    });
+    // (no ASSERT while the lock is held: the builder would never end)
+    const XStore::LiveRebuildProgress p = WaitForRebuildProgress(path, kYear, kStuck);
+    EXPECT_EQ(p.old_width, 70u);
+    XStore::LiveRebuildProgress pc;
+    EXPECT_TRUE(XStore::FindRebuildProgress(path, kYear, /*catidx=*/true, pc));
+    EXPECT_EQ(pc.old_width, 70u);
+    EXPECT_EQ(zmap.OldWidth(), 70u);
+    EXPECT_EQ(zmap.TrackedColumnCount(), 100u);
+
+    const uint64_t served = zmap.ServedFromOldForTests();
+    EXPECT_EQ(MaxStatus(store, db, Epoch(kStuck + 1), Epoch(kRows - 1), 5), "SUCCESS");
+    EXPECT_EQ(MaxStatus(store, db, Epoch(kStuck + 1), Epoch(kRows - 1), 66), "SUCCESS");
+    const uint64_t blocks_past = (kRows - 1) / Rpb() - (kStuck + 1) / Rpb() + 1;
+    EXPECT_GE(zmap.ServedFromOldForTests() - served, 2 * blocks_past) << "every block past the watermark, both queries";
+    const std::string high = MaxStatus(store, db, Epoch(kStuck + 1), Epoch(kRows - 1), 80); // never over the held row
+    EXPECT_NE(high.find(kBeingIndexed), std::string::npos) << high;
+    EXPECT_EQ(FindStatus(store, db, Epoch(kStuck + 1), Epoch(kRows - 1), 5).find(kBeingIndexed), std::string::npos);
+    EXPECT_EQ(FindStatus(store, db, Epoch(0), Epoch(10), 66).find(kBeingIndexed), std::string::npos);
+    EXPECT_NE(FindStatus(store, db, Epoch(0), Epoch(10), 80).find(kBeingIndexed), std::string::npos);
+    ExpectAnswersMatchTheData(store, db, 0, kStuck - 1, {5, 66, 80});
+    ExpectAnswersMatchTheData(store, db, kStuck + 1, kRows - 1, {5, 66, 80});
+
+    lock.UnlockRange(kStuck * kRowLength, kRowLength, kWrite);
+    ASSERT_EQ(builder.wait_for(seconds(60)), std::future_status::ready);
+    EXPECT_EQ(builder.get(), Result::kDone);
+    EXPECT_EQ(zmap.OldWidth(), 0u);
+    XStore::LiveRebuildProgress q;
+    EXPECT_FALSE(XStore::FindRebuildProgress(path, kYear, false, q));
+    EXPECT_EQ(MaxStatus(store, db, Epoch(0), Epoch(kRows - 1), 80), "SUCCESS");
+    ExpectAnswersMatchTheData(store, db, 0, kRows - 1, {5, 66, 80});
+}
+
+// Keep-old widen stopped through its stop flag: the old index keeps answering the blocks past F (no notice for its
+// columns), MarkClean refuses, a clean stop leaves the files dirty, and the next start rebuilds them.
+TEST_F(XStoreLiveWidenTest, KeepOldStoppedWidenKeepsTheOldIndexServingUntilTheNextStartRebuilds) {
+    XStore store;
+    const std::string db = "LWKEEPSTOP";
+    constexpr uint64_t kRows = 60000;
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    Insert(store, db, {{Epoch(0), ValueRow(0, 70)}}); // index files born 70 wide
+    Rows batch;
+    for (uint64_t r = 1; r < kRows; ++r) batch.emplace_back(Epoch(r), ValueRow(r * 7 % 100000, r % 5 == 0 ? 40 : 100));
+    Insert(store, db, batch);
+    const std::string path = DbPath(db);
+    ZoneMapFile &zmap = XStore::GetOrOpenZoneMap(path, kYear, kRowLength);
+    CatIdxFile &catidx = XStore::GetOrOpenCatIdx(path, kYear, kRowLength);
+    ASSERT_EQ(zmap.TrackedColumnCount(), 70u);
+    std::atomic<bool> stop{false};
+    auto builder = std::async(std::launch::async, [&] {
+        XStore b;
+        return b.LiveWidenOneYear(path, kYear, kRowLength, 100, true, true, &stop, nullptr, 1,
+                                  XStoreTunables::LIVE_WIDEN_GROUP_BYTES, nullptr, nullptr, /*keep_old=*/true);
+    });
+    WaitForFrontierPast(zmap, 3 * Rpb());
+    stop.store(true);
+    ASSERT_EQ(builder.get(), Result::kStopped);
+
+    const uint64_t f = zmap.FrontierForTests();
+    ASSERT_NE(f, ZoneMapFile::kNoRebuild);
+    ASSERT_LT(f + 2 * Rpb(), kRows) << "stopped too late to mean anything";
+    EXPECT_TRUE(zmap.Rebuilding());
+    EXPECT_EQ(zmap.OldWidth(), 70u);
+    EXPECT_EQ(catidx.OldWidth(), 70u);
+    const uint64_t past = f / Rpb() + 1;
+    auto old_block = zmap.TryGetBlockStats(past);
+    ASSERT_TRUE(old_block.has_value()) << "a block past F is answered from the old index";
+    EXPECT_EQ(old_block->size(), 70u);
+    const uint64_t served = zmap.ServedFromOldForTests();
+    EXPECT_EQ(MaxStatus(store, db, Epoch(f + 1), Epoch(kRows - 1), 5), "SUCCESS");
+    EXPECT_EQ(MaxStatus(store, db, Epoch(f + 1), Epoch(kRows - 1), 66), "SUCCESS");
+    EXPECT_GT(zmap.ServedFromOldForTests(), served);
+    EXPECT_NE(MaxStatus(store, db, Epoch(f + 1), Epoch(kRows - 1), 80).find(kBeingIndexed), std::string::npos);
+    ExpectAnswersMatchTheData(store, db, 0, kRows - 1, {5, 66, 80});
+    EXPECT_FALSE(zmap.MarkClean());
+    EXPECT_FALSE(catidx.MarkClean());
+
+    XStore::Shutdown(); // clean stop: the half-built index stays dirty
+    EXPECT_EQ(ReadHeader<ZoneMapFileHeader>(YearPath(db, ".zmap")).dirty, 1u);
+    EXPECT_EQ(ReadHeader<CatIdxFileHeader>(YearPath(db, ".catidx")).dirty, 1u);
+    XStore::ResetShutdownForTests();
+    XStore::ClearZoneMapRegistryForTests();
+    XStore::ClearCatIdxRegistryForTests();
+    BuildStartupReference(store, db, "LWKEEPSTOPREF", 100); // its InitDB also rebuilds LWKEEPSTOP's dirty index
+    EXPECT_EQ(ReadHeader<ZoneMapFileHeader>(YearPath(db, ".zmap")).dirty, 0u);
+    EXPECT_EQ(ReadHeader<ZoneMapFileHeader>(YearPath(db, ".zmap")).tracked_column_count, 100u);
+    EXPECT_EQ(XStore::GetOrOpenZoneMap(path, kYear, kRowLength).OldWidth(), 0u);
+    ExpectSameFilesAs(db, "LWKEEPSTOPREF");
+    ExpectAnswersMatchTheData(store, db, 0, kRows - 1, {5, 66, 80});
 }
 
 // ---- Progress log (Tech Reference 4.18 "Progress log") -------------------------------------------------------------
@@ -3566,6 +3700,10 @@ TEST_F(XStoreParallelLiveWidenTest, WritesIntoAFoldedGroupAboveTheFrontierAreNot
 }
 
 // Section 2's oracle with four workers and one block per group: writers race many folded groups above the frontier.
+TEST_F(XStoreParallelLiveWidenTest, KeepOldAnswersStayExactUnderConcurrentWritesWithFourWorkers) {
+    RunConcurrentOracle("LWKEEPOLD4", 4, Rpb() * kRowLength, nullptr, /*keep_old=*/true);
+}
+
 TEST_F(XStoreParallelLiveWidenTest, AnswersStayExactUnderConcurrentWritesWithFourWorkers) {
     RunConcurrentOracle("LWPLIVE", 4, Rpb() * kRowLength);
 }

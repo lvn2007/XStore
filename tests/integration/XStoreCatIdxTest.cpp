@@ -949,6 +949,75 @@ TEST_F(CatIdxLiveWidenTest, FailedDirtyMarkSyncLeavesTheOldIndexInPlace) {
     EXPECT_TRUE(f.FinishRebuild());
 }
 
+// Keep the old index (LIVE_WIDEN_KEEP_OLD_INDEX): blocks not yet rebuilt are answered by the old bloom, the old bitmap
+// section serves until the first write invalidates it, and every UpdateRow reaches the old file.
+TEST_F(CatIdxLiveWidenTest, KeepOldAnswersFromTheOldIndexUntilBlocksAreRebuilt) {
+    ASSERT_EQ(f.BeginLiveRebuild(4, /*keep_old=*/true), BeginRebuildResult::kStarted);
+    EXPECT_TRUE(f.Rebuilding());
+    EXPECT_EQ(f.TrackedColumnCount(), 4u);
+    EXPECT_EQ(f.OldWidth(), 2u);
+    const CatIdxFileHeader h = ReadCatIdxHeader(path);
+    EXPECT_EQ(h.tracked_column_count, 4u);
+    EXPECT_EQ(h.dirty, 1u);
+    EXPECT_EQ(h.block_count, 0u);
+    EXPECT_EQ(h.bitmap_section_offset, 0u);
+    EXPECT_EQ(CatIdxFileSize(path), static_cast<off_t>(sizeof(CatIdxFileHeader)));
+    EXPECT_FALSE(std::filesystem::exists(path + ".new"));
+
+    // Old bloom below its width, "maybe" at or past it; the old directory serves.
+    for (uint64_t b = 0; b < 4; ++b) {
+        EXPECT_TRUE(f.MightContain(b, 0, Enc(100 + static_cast<int64_t>(b)))) << "block " << b;
+        EXPECT_FALSE(f.MightContain(b, 0, Enc(777))) << "block " << b << ": the old bloom answers";
+        EXPECT_TRUE(f.MightContain(b, 2, Enc(777))) << "column 2 is past the old width";
+    }
+    EXPECT_TRUE(f.HasBitmapSection());
+    ASSERT_TRUE(f.LookupExact(0, Enc(100)).has_value());
+    EXPECT_EQ(*f.LookupExact(0, Enc(100)), std::vector<uint64_t>{1});
+    f.AppendBitmapSection({{0, {{Enc(101), {kLwRpb + 2}}}}});
+    EXPECT_EQ(ReadCatIdxHeader(path).bitmap_section_offset, 0u) << "compaction is refused while rebuilding";
+
+    // Builder: block 0 complete. A write above F reaches the old file (and invalidates its directory).
+    f.RebuildFoldRow(5, CatObs(3, 33));
+    f.AdvanceFrontier(kLwRpb);
+    EXPECT_FALSE(f.MightContain(0, 0, Enc(100))) << "block 0 now from the new file, which has no row with 100 yet";
+    EXPECT_TRUE(f.MightContain(0, 3, Enc(33)));
+    f.UpdateRow(2 * kLwRpb + 7, CatObs(1, 55));
+    EXPECT_TRUE(f.MightContain(2, 1, Enc(55))) << "the old bloom learned the write";
+    EXPECT_FALSE(f.HasBitmapSection()) << "a write invalidates the old directory";
+    EXPECT_FALSE(f.LookupExact(0, Enc(100)).has_value());
+    f.UpdateRow(10, CatObs(1, 56)); // below F: both files
+    EXPECT_TRUE(f.MightContain(0, 1, Enc(56)));
+
+    f.AdvanceFrontier(4 * kLwRpb);
+    EXPECT_FALSE(f.MightContain(2, 1, Enc(55))) << "rebuilt from the data (the stand-in builder folded nothing there)";
+    EXPECT_TRUE(f.FinishRebuild());
+    EXPECT_EQ(f.OldWidth(), 0u);
+    EXPECT_FALSE(f.HasBitmapSection());
+    f.AppendBitmapSection({{0, {{Enc(101), {kLwRpb + 2}}}}});
+    EXPECT_TRUE(f.HasBitmapSection()) << "compaction works again after the build";
+    EXPECT_TRUE(f.MarkClean());
+}
+
+TEST_F(CatIdxLiveWidenTest, KeepOldFailedBeginChangesNothing) {
+    const std::string tmp = path + ".new";
+    const off_t size_before = CatIdxFileSize(path);
+    {
+        xstore_fault::ScopedPathFault fault(tmp, false, EXDEV, xstore_fault::kRename);
+        EXPECT_EQ(f.BeginLiveRebuild(4, true), BeginRebuildResult::kFailed);
+    }
+    {
+        xstore_fault::ScopedFdFault fault(xstore_fault::FdOp::kSync, tmp, 0, 1, EIO);
+        EXPECT_EQ(f.BeginLiveRebuild(4, true), BeginRebuildResult::kFailed);
+    }
+    EXPECT_FALSE(f.Rebuilding());
+    EXPECT_EQ(f.OldWidth(), 0u);
+    EXPECT_EQ(f.TrackedColumnCount(), 2u);
+    EXPECT_EQ(CatIdxFileSize(path), size_before);
+    EXPECT_FALSE(std::filesystem::exists(tmp));
+    EXPECT_TRUE(f.HasBitmapSection());
+    EXPECT_FALSE(f.MightContain(2, 0, Enc(777)));
+}
+
 // S1 (sync flavour): the fresh header was written but its fdatasync failed, and so does every retry. FinishRebuild
 // keeps the rebuild (and the pin) until the header is durable.
 TEST_F(CatIdxLiveWidenTest, FinishRebuildRefusesWhileTheHeaderIsNotDurable) {
