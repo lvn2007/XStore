@@ -1111,8 +1111,9 @@ class XStore {
         // year is always cut into groups and governor->MaxWorkers() workers are started; each asks Permit(i) before
         // claiming a group and parks (50 ms slices, still checking `stop`) while denied, so parking happens only
         // between groups. `load` (may be nullptr: tests with a fake sampler) is pointed at this year's data-file lock.
-        // keep_old (default LIVE_WIDEN_KEEP_OLD_INDEX; tests force it): each file begins with BeginLiveRebuild(width,
-        // true), so its old index keeps answering the blocks not yet rebuilt (Tech Reference 4.18 "Keep the old index").
+        // keep_old (default LIVE_WIDEN_KEEP_OLD_INDEX, true since 2026-10-17; tests pass it explicitly, false to cover
+        // the in-place rebuild): each file begins with BeginLiveRebuild(width, true), so its old index keeps answering
+        // the blocks not yet rebuilt (Tech Reference 4.18 "Keep the old index"); false empties the file in place.
         LiveWidenResult LiveWidenOneYear(const std::string &db_base_path, unsigned short year, uint16_t row_length,
                                          uint32_t tracked_column_count, bool widen_zmap, bool widen_catidx,
                                          const std::atomic<bool> *stop, LiveWidenStats *stats = nullptr,

@@ -1312,6 +1312,8 @@ void WaitForFrontierPast(ZoneMapFile &zmap, uint64_t rows) {
 
 // ---- 4. Stop flag ---------------------------------------------------------------------------------------------------
 
+// keep_old=false: this test covers the in-place rebuild (a block past F is not trusted); the keep-old counterpart is
+// KeepOldStoppedWidenKeepsTheOldIndexServingUntilTheNextStartRebuilds. The flag defaults to true since 2026-10-17.
 TEST_F(XStoreLiveWidenTest, StopMidBuildLeavesADirtyHalfTrustedIndexThatTheNextStartRebuilds) {
     XStore store;
     const std::string db = "LWSTOP";
@@ -1324,7 +1326,8 @@ TEST_F(XStoreLiveWidenTest, StopMidBuildLeavesADirtyHalfTrustedIndexThatTheNextS
     XStore::LiveWidenStats stats;
     auto builder = std::async(std::launch::async, [&] {
         XStore b;
-        return b.LiveWidenOneYear(path, kYear, kRowLength, 70, true, true, &stop, &stats);
+        return b.LiveWidenOneYear(path, kYear, kRowLength, 70, true, true, &stop, &stats, XStoreTunables::LIVE_WIDEN_WORKERS, XStoreTunables::LIVE_WIDEN_GROUP_BYTES, nullptr, nullptr,
+                                  /*keep_old=*/false);
     });
     WaitForFrontierPast(zmap, 3 * Rpb());
     stop.store(true);
@@ -2210,7 +2213,9 @@ TEST_F(XStoreLiveWidenTest, RebuildNoticeTextCarriesTheRoundedDownPercentAndTheS
 // cover that row while it is held: its READ lock would wait too): (a) a low column over rows past the watermark is
 // right and says how far the rebuild is; (b) a range below the watermark is answered from the
 // index, no notice; (c) a column >= 64 always says so; (d) another year: nothing; (e) after the widen: nothing, and the
-// counter is back where it was.
+// counter is back where it was. keep_old=false: this is the in-place rebuild's notice (a low column is noticed past the
+// watermark); with keep-old (the default since 2026-10-17) low columns are silent, see
+// KeepOldAnswersOldColumnsFromTheOldIndexWhileTheWidenIsHeld.
 TEST_F(XStoreLiveWidenTest, RebuildNoticeShowsProgressOnTheRebuildingYearOnlyAndEndsWithTheRebuild) {
     XStore store;
     const std::string db = "LWNOTICE";
@@ -2226,7 +2231,8 @@ TEST_F(XStoreLiveWidenTest, RebuildNoticeShowsProgressOnTheRebuildingYearOnlyAnd
     lock.LockRange(kStuck * kRowLength, kRowLength, kWrite);
     auto builder = std::async(std::launch::async, [&] {
         XStore b;
-        return b.LiveWidenOneYear(path, kYear, kRowLength, 70, true, true, nullptr, nullptr, 1);
+        return b.LiveWidenOneYear(path, kYear, kRowLength, 70, true, true, nullptr, nullptr, 1, XStoreTunables::LIVE_WIDEN_GROUP_BYTES, nullptr, nullptr,
+                                  /*keep_old=*/false);
     });
     // (no ASSERT while the lock is held: the builder would never end)
     const XStore::LiveRebuildProgress p = WaitForRebuildProgress(path, kYear, kStuck);
@@ -3709,7 +3715,8 @@ TEST_F(XStoreParallelLiveWidenTest, AnswersStayExactUnderConcurrentWritesWithFou
 }
 
 // Stop with four workers: the files stay dirty at the contiguous watermark (a held row in the last data block keeps
-// the build from finishing first), never trusted past it, and the next start rebuilds them.
+// the build from finishing first), never trusted past it, and the next start rebuilds them. keep_old=false: in-place
+// rebuild coverage (with keep-old, the default since 2026-10-17, a block past F is served from the old index).
 TEST_F(XStoreParallelLiveWidenTest, StopMidBuildLeavesTheContiguousWatermarkAndTheNextStartRebuilds) {
     XStore store;
     const std::string db = "LWPSTOP";
@@ -3724,7 +3731,8 @@ TEST_F(XStoreParallelLiveWidenTest, StopMidBuildLeavesTheContiguousWatermarkAndT
     HeldWrite last(FileLockRegistry::Get(YearPath(db, ".XSTORE")), (kRows - 1) * kRowLength, kRowLength);
     builder = std::async(std::launch::async, [&] {
         XStore b;
-        return b.LiveWidenOneYear(path, kYear, kRowLength, 70, true, true, &stop, &stats, 4, Rpb() * kRowLength);
+        return b.LiveWidenOneYear(path, kYear, kRowLength, 70, true, true, &stop, &stats, 4, Rpb() * kRowLength, nullptr,
+                                  nullptr, /*keep_old=*/false);
     });
     WaitForFrontierPast(zmap, 3 * Rpb());
     stop.store(true);
@@ -4260,7 +4268,8 @@ TEST(LiveWidenLoadSourceTest, ReadsCpuAndTheYearsWriterCountersAndSurvivesAMissi
 
 // (f) A governor whose fake CPU signal holds it at 1 of 4 workers (row kStuck WRITE-locked as above): the notice says "slowed: foreground CPU". (g) After a
 // stop the year stays counted and keeps its notice with the last percentage (no "slowed": nothing governs it now) until
-// the next start (here: the registries dropped, as a restart does).
+// the next start (here: the registries dropped, as a restart does). keep_old=false: in-place rebuild coverage (with
+// keep-old, the default since 2026-10-17, a low column is silent; the notice moves to columns >= the old width).
 TEST_F(XStoreParallelLiveWidenTest, RebuildNoticeSaysSlowedUnderAGovernorAndKeepsItsPercentAfterAStop) {
     XStore store;
     const std::string db = "LWNOTICEGOV";
@@ -4278,7 +4287,7 @@ TEST_F(XStoreParallelLiveWidenTest, RebuildNoticeSaysSlowedUnderAGovernorAndKeep
     auto builder = std::async(std::launch::async, [&] {
         XStore b;
         return b.LiveWidenOneYear(path, kYear, kRowLength, 70, true, true, &stop, nullptr, 1, Rpb() * kRowLength,
-                                  gov.get());
+                                  gov.get(), nullptr, /*keep_old=*/false);
     });
     const XStore::LiveRebuildProgress p = WaitForRebuildProgress(path, kYear, kStuck, /*want_slowed=*/true);
     EXPECT_EQ(p.done_rows, kStuck);
@@ -4343,7 +4352,8 @@ TEST_F(XStoreParallelLiveWidenTest, ProgressLogCarriesTheGovernorsWorkersAndSlow
 // builder whose workers stay parked (its watermark stays 0), the zone map by an ungoverned one held at row kFar (the
 // middle of the preallocated year: it skips the holes up to there) by a WRITE lock. The year counts once; each file
 // reports its own watermark and only the governed builder's file says "slowed"; the zone map's builder finishing does
-// not end the catidx's notice.
+// not end the catidx's notice. keep_old=false on both builders: in-place rebuild coverage (with keep-old, the default
+// since 2026-10-17, the low columns these assertions use are silent).
 TEST_F(XStoreParallelLiveWidenTest, RebuildNoticeFollowsEachFileOfAYearWithTwoBuilders) {
     XStore store;
     const std::string db = "LWNOTICE2";
@@ -4364,7 +4374,7 @@ TEST_F(XStoreParallelLiveWidenTest, RebuildNoticeFollowsEachFileOfAYearWithTwoBu
     auto catidx_builder = std::async(std::launch::async, [&] {
         XStore b;
         return b.LiveWidenOneYear(path, kYear, kRowLength, 70, false, true, &stop_catidx, nullptr, 1, Rpb() * kRowLength,
-                                  gov.get());
+                                  gov.get(), nullptr, /*keep_old=*/false);
     });
     WaitForRebuildProgress(path, kYear, 0, false, /*catidx=*/true);
 
@@ -4372,7 +4382,8 @@ TEST_F(XStoreParallelLiveWidenTest, RebuildNoticeFollowsEachFileOfAYearWithTwoBu
     lock.LockRange(kFar * kRowLength, kRowLength, kWrite);
     auto zmap_builder = std::async(std::launch::async, [&] {
         XStore b;
-        return b.LiveWidenOneYear(path, kYear, kRowLength, 70, true, false, nullptr, nullptr, 1);
+        return b.LiveWidenOneYear(path, kYear, kRowLength, 70, true, false, nullptr, nullptr, 1, XStoreTunables::LIVE_WIDEN_GROUP_BYTES, nullptr, nullptr,
+                                  /*keep_old=*/false);
     });
     // (no ASSERT while the lock is held)
     const XStore::LiveRebuildProgress z = WaitForRebuildProgress(path, kYear, kFar);
