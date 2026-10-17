@@ -187,16 +187,31 @@ void ZoneMapFile::UpdateRowLocked(uint64_t row_index, const std::vector<ZoneMapO
     static_cast<void>(WriteBlock(block_index, block));
 }
 
+void ZoneMapFile::UpdateRows(const ZoneMapFoldBatch &batch) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (__builtin_expect(frontier_ != kNoRebuild, 0)) { // same rules as UpdateRow, row by row
+        if (old_ != nullptr) old_->UpdateRows(batch);
+        static_cast<void>(FoldBatchLocked(batch, [this](uint64_t row) { return row < frontier_ || fold_.FoldedEnd(row) > row; }));
+        return;
+    }
+    static_cast<void>(FoldBatchLocked(batch, [](uint64_t) { return true; })); // a failed write is logged in WriteBlock
+}
+
 bool ZoneMapFile::RebuildFoldRows(const ZoneMapFoldBatch &batch) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (frontier_ == kNoRebuild) return true;
+    return FoldBatchLocked(batch, [this](uint64_t row) { return row >= frontier_; }); // below F: already folded
+}
+
+template <class Keep>
+bool ZoneMapFile::FoldBatchLocked(const ZoneMapFoldBatch &batch, Keep keep) {
     bool all_written = true;
     CachedBlock *block = nullptr;
     uint64_t block_index = 0;
     size_t obs_begin = 0;
     for (size_t i = 0; i < batch.row_index.size(); obs_begin = batch.obs_end[i], ++i) {
         const uint64_t row_index = batch.row_index[i];
-        if (row_index < frontier_) continue; // already folded
+        if (!keep(row_index)) continue;
         const uint64_t b = BlockIndexForRow(row_index, header_.rows_per_block);
         if (block == nullptr || b != block_index) {
             // Writing the previous block before loading the next keeps every cached block disk-coherent, as the

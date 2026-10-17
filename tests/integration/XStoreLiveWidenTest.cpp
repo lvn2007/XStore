@@ -1128,10 +1128,26 @@ void XStoreLiveWidenTest::RunConcurrentOracle(const std::string &db, unsigned wo
     const int queries_before = queries.load();
     const int writes_before = writes.load();
     XStore::LiveWidenStats stats;
+    // The floors below must not depend on how fast the widen is: it is held (a WRITE lock on one row in the middle of
+    // the year, which the builder can only wait for) until the traffic floors are met during it, 20 s at the latest
+    // (the floors then fail and say so). Writers or queries that touch the row wait for it meanwhile.
+    const uint64_t held_row = rows / 2 + 1;
+    FileRangeLock &held = FileLockRegistry::Get(data_path);
+    held.LockRange(held_row * kRowLength, kRowLength, kWrite);
+    std::thread releaser([&] {
+        const Clock::time_point t0 = Clock::now();
+        while (!zmap.Rebuilding() && MsSince(t0) < 20000) std::this_thread::sleep_for(milliseconds(1));
+        const int w0 = writes.load(), q0 = queries.load(); // counted from the begin of the rebuild
+        while ((writes.load() - w0 <= 30 || queries.load() - q0 <= 10) && MsSince(t0) < 20000) {
+            std::this_thread::sleep_for(milliseconds(5));
+        }
+        held.UnlockRange(held_row * kRowLength, kRowLength, kWrite);
+    });
     const Clock::time_point widen_start = Clock::now();
     const uint64_t served_before = zmap.ServedFromOldForTests();
     const Result result = store.LiveWidenOneYear(path, kYear, kRowLength, kWidth, true, true, nullptr, &stats, workers,
                                                  group_bytes, governor, nullptr, keep_old);
+    releaser.join();
     const uint64_t served_from_old = zmap.ServedFromOldForTests() - served_before;
     const int64_t widen_ms = MsSince(widen_start);
     const int queries_during = queries.load() - queries_before;
@@ -1141,8 +1157,8 @@ void XStoreLiveWidenTest::RunConcurrentOracle(const std::string &db, unsigned wo
     for (std::thread &t : threads) t.join();
     EXPECT_EQ(result, Result::kDone);
     EXPECT_EQ(mismatches.load(), 0);
-    // Writes that raced the builder, counted from the widen's start only. Local VM: the widen lasts 0.3-1.1 s and 83-416
-    // writes land during it (fewest with 4 workers); the floor proves the race happened with ~3x margin.
+    // Writes that raced the builder, counted from the widen's start only. The held row above keeps the widen running
+    // until these floors are met (before 2026-10-17 they relied on the widen's own length: 0.3-1.1 s, 83-416 writes).
     EXPECT_GT(writes_during, 30) << "too little concurrent traffic during the widen to mean anything";
     EXPECT_GT(queries_during, 10) << "too few queries during the widen";
     // Keep-old: blocks past the frontier were answered from the old index during the build instead of being scanned.
@@ -2325,6 +2341,58 @@ TEST_F(XStoreLiveWidenTest, KeepOldAnswersOldColumnsFromTheOldIndexWhileTheWiden
     EXPECT_FALSE(XStore::FindRebuildProgress(path, kYear, false, q));
     EXPECT_EQ(MaxStatus(store, db, Epoch(0), Epoch(kRows - 1), 80), "SUCCESS");
     ExpectAnswersMatchTheData(store, db, 0, kRows - 1, {5, 66, 80});
+}
+
+// The writer's batch build in ApplyWalRecord (one UpdateRows per run, catidx values hashed only below the file's width)
+// through the real insert paths, on index files 64 wide while the rows are 70 wide (before a widen): the index bytes
+// equal a reference fed the same rows through UpdateRow one by one, with every observation the producers build
+// (all columns up to the record's width; pad = the record's width). Fresh rows only: no overwrite marks.
+TEST_F(XStoreLiveWidenTest, InsertsWiderThanTheIndexWriteTheBytesOfTheRowByRowFold) {
+    XStore store;
+    const std::string db = "LWBATCHBYTES";
+    constexpr uint64_t kRows = 3000;
+    SeedNarrowIndexWideRows(store, db, kRows, 70); // row 0 10 wide, then one BatchInsert record
+    {   // one RangeInsert record crossing blocks, then a UnaryInsert
+        XStore_Proto::RangeInsert_REQ req;
+        req.set_dbname(db);
+        req.set_durabilitymode(XStore_Proto::SYNC);
+        for (uint64_t r = kRows; r < kRows + 1500; ++r) {
+            XStore_Proto::RangeInsert_DATA *e = req.add_rangeinsert_data();
+            e->set_timestamp(Epoch(r));
+            *e->mutable_data() = ValueRow(r * 7 % 100000, r % 5 == 0 ? 40 : 70);
+        }
+        XStore_Proto::RangeInsert_REP rep;
+        store.RangeInsert(&req, &rep);
+        ASSERT_NE(rep.insertstatus().find("successfully"), std::string::npos) << rep.insertstatus();
+        XStore_Proto::UnaryInsert_REP urep;
+        store.UnaryInsert(Epoch(kRows + 2000), ValueRow(5, 70), db, &urep, XStore_Proto::SYNC);
+    }
+    ASSERT_EQ(XStore::GetOrOpenCatIdx(DbPath(db), kYear, kRowLength).TrackedColumnCount(), 64u) << "still narrow";
+
+    ZoneMapFile zref;
+    CatIdxFile cref;
+    ASSERT_TRUE(zref.Open((scratch->test_root / "ref.zmap").string(), kRowLength, 64));
+    ASSERT_TRUE(cref.Open((scratch->test_root / "ref.catidx").string(), kRowLength, 64));
+    const auto fold = [&](uint64_t r, const XStore_Proto::RowData &row, uint32_t record_width) {
+        std::vector<ZoneMapObservation> zobs;
+        std::vector<CatIdxObservation> cobs;
+        for (int c = 0; c < std::min(static_cast<int>(record_width), row.fielddata_size()); ++c) {
+            const XStore_Proto::FData &f = row.fielddata(c);
+            const bool numeric = f.oneOfData_case() == XStore_Proto::FData::kDoubleData;
+            zobs.push_back({static_cast<uint32_t>(c), numeric ? f.doubledata() : 0.0, numeric});
+            if (f.oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
+                cobs.push_back({static_cast<uint32_t>(c), EncodeFDataForCatIdx(f), true});
+            }
+        }
+        zref.UpdateRow(r, zobs, record_width);
+        cref.UpdateRow(r, cobs);
+    };
+    fold(0, ValueRow(0, 10), 64); // a new DB's first record is 64 wide (the default floor)
+    for (uint64_t r = 1; r < kRows + 1500; ++r) fold(r, ValueRow(r * 7 % 100000, r % 5 == 0 ? 40 : 70), 70);
+    fold(kRows + 2000, ValueRow(5, 70), 70);
+
+    EXPECT_TRUE(ReadFileBytes(YearPath(db, ".zmap")) == ReadFileBytes((scratch->test_root / "ref.zmap").string()));
+    EXPECT_TRUE(ReadFileBytes(YearPath(db, ".catidx")) == ReadFileBytes((scratch->test_root / "ref.catidx").string()));
 }
 
 // Keep-old widen stopped through its stop flag: the old index keeps answering the blocks past F (no notice for its

@@ -180,6 +180,12 @@ public:
 
     void UpdateRow(uint64_t row_index, const std::vector<CatIdxObservation> &observations);
 
+    // The writer's path (ApplyWalRecord, once per run): UpdateRow for every row of the batch, in order, under ONE hold
+    // of the mutex, with UpdateRow's per-row rules (the old index of a keep-old rebuild gets every row, sharing the
+    // batch's hashes). Each block is flushed once per run of consecutive rows in it, before this returns; the bytes on
+    // disk are identical to UpdateRow row by row with the same values (a batch holds only present values).
+    void UpdateRows(const CatIdxFoldBatch &batch);
+
     // True (scan the block) also for a column past this file's width and for a block a running rebuild has not
     // finished, unless a keep-old rebuild still has the old index: that block is then answered by the old bloom (true
     // for a column past the old width).
@@ -308,10 +314,9 @@ public:
 
     uint64_t RowsPerBlockValue() const { return rows_per_block_; }
 
-    [[nodiscard]] uint32_t TrackedColumnCount() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return header_.tracked_column_count;
-    }
+    // Lock-free (a mirror of the header's width, stored under mutex_ wherever it changes): the writer reads it per
+    // record while holding the record's range lock, and must not wait behind a builder's chunk-long mutex hold.
+    [[nodiscard]] uint32_t TrackedColumnCount() const { return width_.load(std::memory_order_acquire); }
 
     // Clears the on-disk dirty flag: fdatasync(index content), then header
     // dirty=0 + fdatasync. Returns false on any failure, leaving the file
@@ -345,6 +350,9 @@ private:
     // False if the bloom block or the block_count header write failed.
     bool FlushBlock(uint64_t block_index);
     void UpdateRowLocked(uint64_t row_index, const std::vector<CatIdxObservation> &observations);
+    // The batch fold shared by UpdateRows and RebuildFoldRows: every row with keep(row) true. mutex_ held.
+    template <class Keep>
+    [[nodiscard]] bool FoldBatchLocked(const CatIdxFoldBatch &batch, Keep keep);
 
     int fd_ = -1;
     CatIdxFileHeader header_;
@@ -362,4 +370,5 @@ private:
     std::string path_;                   // set by Open; the keep-old begin creates path_ + ".new"
     std::unique_ptr<CatIdxFile> old_;    // keep-old rebuild only: the old index, until FinishRebuild (under mutex_)
     std::atomic<uint32_t> old_width_{0}; // old_'s width, 0 without old_; written under mutex_, read without it
+    std::atomic<uint32_t> width_{0};     // header_.tracked_column_count, see TrackedColumnCount
 };

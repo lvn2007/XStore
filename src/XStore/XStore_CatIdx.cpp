@@ -59,6 +59,7 @@ bool CatIdxFile::Open(const std::string &path, uint16_t row_length, uint32_t tra
             on_disk.version == XStoreTunables::CATIDX_VERSION &&
             on_disk.tracked_column_count > 0) {
             header_ = on_disk;
+            width_.store(header_.tracked_column_count, std::memory_order_release);
             dirty_on_disk_ = header_.dirty != 0;
             return true;
         }
@@ -76,6 +77,7 @@ bool CatIdxFile::WriteFreshHeader(uint16_t /*row_length*/, uint32_t tracked_colu
     dirty_on_disk_ = false;
     header_.dirty = 1;
     header_.tracked_column_count = tracked_column_count;
+    width_.store(header_.tracked_column_count, std::memory_order_release);
     header_.block_count = 0;
     header_.bitmap_section_offset = 0;
 
@@ -233,16 +235,31 @@ void CatIdxFile::UpdateRowLocked(uint64_t row_index, const std::vector<CatIdxObs
     static_cast<void>(FlushBlock(block_index)); // write-through, same immediacy as ZoneMapFile::UpdateRow
 }
 
+void CatIdxFile::UpdateRows(const CatIdxFoldBatch &batch) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (__builtin_expect(frontier_ != kNoRebuild, 0)) { // same rules as UpdateRow, row by row
+        if (old_ != nullptr) old_->UpdateRows(batch);
+        static_cast<void>(FoldBatchLocked(batch, [this](uint64_t row) { return row < frontier_ || fold_.FoldedEnd(row) > row; }));
+        return;
+    }
+    static_cast<void>(FoldBatchLocked(batch, [](uint64_t) { return true; })); // a failed write is logged in FlushBlock
+}
+
 bool CatIdxFile::RebuildFoldRows(const CatIdxFoldBatch &batch) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (frontier_ == kNoRebuild) return true;
+    return FoldBatchLocked(batch, [this](uint64_t row) { return row >= frontier_; }); // below F: already folded
+}
+
+template <class Keep>
+bool CatIdxFile::FoldBatchLocked(const CatIdxFoldBatch &batch, Keep keep) {
     bool all_written = true;
     std::vector<BloomEntry> *entries = nullptr;
     uint64_t block_index = 0;
     size_t value_begin = 0;
     for (size_t i = 0; i < batch.row_index.size(); value_begin = batch.value_end[i], ++i) {
         const uint64_t row_index = batch.row_index[i];
-        if (row_index < frontier_) continue; // already folded
+        if (!keep(row_index)) continue;
         const uint64_t b = BlockIndexForRow(row_index, rows_per_block_);
         if (entries == nullptr || b != block_index) {
             // Flush before loading the next block, as the per-row path does, so a reload reads what was folded.
@@ -445,6 +462,7 @@ BeginRebuildResult CatIdxFile::BeginLiveRebuild(uint32_t new_tracked_column_coun
 void CatIdxFile::AdoptOpenState(CatIdxFile &from) noexcept {
     fd_ = from.fd_;
     header_ = from.header_;
+    width_.store(header_.tracked_column_count, std::memory_order_release);
     rows_per_block_ = from.rows_per_block_;
     dirty_on_disk_ = from.dirty_on_disk_;
     cache_ = std::move(from.cache_);
@@ -471,6 +489,7 @@ bool CatIdxFile::BeginKeepOldLocked(uint32_t new_tracked_column_count) {
     old_ = std::move(old);
     fd_ = new_fd;
     header_ = fresh;
+    width_.store(header_.tracked_column_count, std::memory_order_release);
     dirty_on_disk_ = true;
     ++dirty_mark_writes_;
     cache_.clear();
@@ -497,6 +516,7 @@ bool CatIdxFile::BeginRebuildLocked(uint32_t new_tracked_column_count) {
     // with it; compaction rebuilds it once the rebuild is over.
     header_ = CatIdxFileHeader{};
     header_.tracked_column_count = new_tracked_column_count;
+    width_.store(header_.tracked_column_count, std::memory_order_release);
     header_.dirty = 1;
     dirty_on_disk_ = false;
     if (pwrite(fd_, &header_, sizeof(header_), 0) == static_cast<ssize_t>(sizeof(header_)) && fdatasync(fd_) == 0) {

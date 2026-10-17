@@ -198,6 +198,12 @@ public:
     // wants no additional padding.
     void UpdateRow(uint64_t row_index, const std::vector<ZoneMapObservation> &observations, uint32_t pad_to);
 
+    // The writer's path (ApplyWalRecord, once per run): UpdateRow for every row of the batch, in order, under ONE hold
+    // of the mutex, with the same per-row rules (while a rebuild runs: the old index of a keep-old rebuild gets every
+    // row, this file only rows below F or in a folded group prefix). Each block is written once per run of consecutive
+    // rows in it, before this returns; the bytes on disk are identical to UpdateRow row by row.
+    void UpdateRows(const ZoneMapFoldBatch &batch);
+
     // True when a write of rows [first_row, first_row + row_count) might replace a row already folded into an
     // exact block, so the caller must read the old bytes and call MarkInexact for any it finds. False (no I/O
     // needed) when every touched block is already inexact or provably holds no folded row at or after the run's
@@ -407,6 +413,9 @@ private:
     // The fold of one row into its (loaded) block, shared by UpdateRowLocked and RebuildFoldRows.
     void FoldRowIntoBlock(CachedBlock &block, uint64_t row_index, const ZoneMapObservation *observations, size_t count,
                           uint32_t pad_to);
+    // The batch fold shared by UpdateRows and RebuildFoldRows: every row with keep(row) true. mutex_ held.
+    template <class Keep>
+    [[nodiscard]] bool FoldBatchLocked(const ZoneMapFoldBatch &batch, Keep keep);
     [[nodiscard]] bool WriteBlock(uint64_t block_index, const CachedBlock &block);
     void TouchLru(uint64_t block_index);
     void MarkInexactLocked(uint64_t first_row, uint64_t last_row);

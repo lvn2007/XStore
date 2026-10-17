@@ -320,6 +320,13 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
     // Thread-local scratch buffer, grown to fit the largest run applied so
     // far and reused across calls -- avoids a heap allocation per run.
     thread_local std::vector<char> run_buf;
+    // One batch per run for each index (reused: no allocation once grown), folded under one mutex hold per file.
+    thread_local ZoneMapFoldBatch zmap_batch;
+    thread_local CatIdxFoldBatch catidx_batch;
+    // Values in columns past the catidx width are never folded, so they are not hashed. Read once, under the range
+    // lock: a widen begun after this read only widens the file and starts it at F = 0, and the builder cannot fold
+    // these rows (it needs a READ lock on them) before this record is applied, so no folded row needs a dropped value.
+    const uint32_t catidx_width = catidx.TrackedColumnCount();
     bool all_rows_ok = true;
 
     for (size_t run_start = 0; run_start < offsets.size(); ) {
@@ -371,11 +378,29 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
             // Only reached when this run's rows are confirmed durably
             // written above -- never update the zone map for a row whose
             // real write just failed.
+            // The run's rows go to each index as one batch (UpdateRows: one mutex hold, one block write per block
+            // touched), still before the next run's overwrite check reads the blocks.
+            zmap_batch.Clear();
+            catidx_batch.Clear();
+            zmap_batch.pad_to = record_to_apply.rows[run_start].zone_map_pad_to;
             for (size_t i = run_start; i < run_end; ++i) {
-                uint64_t diff = record_to_apply.rows[i].epoch_time - first_ts.first_epoch;
-                zmap.UpdateRow(diff, record_to_apply.rows[i].zone_map_observations, record_to_apply.rows[i].zone_map_pad_to);
-                catidx.UpdateRow(diff, record_to_apply.rows[i].catidx_observations);
+                const WalRow &row = record_to_apply.rows[i];
+                const uint64_t diff = row.epoch_time - first_ts.first_epoch;
+                if (row.zone_map_pad_to != zmap_batch.pad_to) { // a batch has one pad_to
+                    zmap.UpdateRows(zmap_batch);
+                    zmap_batch.Clear();
+                    zmap_batch.pad_to = row.zone_map_pad_to;
+                }
+                zmap_batch.observations.insert(zmap_batch.observations.end(), row.zone_map_observations.begin(),
+                                               row.zone_map_observations.end());
+                zmap_batch.EndRow(diff);
+                for (const CatIdxObservation &obs : row.catidx_observations) {
+                    if (obs.is_present && obs.column_idx < catidx_width) catidx_batch.Add(obs.column_idx, obs.encoded_value);
+                }
+                catidx_batch.EndRow(diff);
             }
+            zmap.UpdateRows(zmap_batch);
+            catidx.UpdateRows(catidx_batch);
         }
         run_start = run_end;
     }
@@ -384,6 +409,11 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
         // RingClear needs, the range makes the checkpointer sync it). The checkpoint is NOT held.
         walring::Dirty().Note(ring, target_file, offsets.front(), offsets.back() + record_to_apply.row_length, ring_lsn_end);
     }
+    // The batches keep their capacity for the next record (24 B per observation of the largest run so far), except
+    // after a very large run: above ~6 MB a batch is freed rather than kept per applying thread.
+    constexpr size_t kKeepBatchValues = size_t{1} << 18;
+    if (zmap_batch.observations.capacity() > kKeepBatchValues) zmap_batch = ZoneMapFoldBatch{};
+    if (catidx_batch.values.capacity() > kKeepBatchValues) catidx_batch = CatIdxFoldBatch{};
     return all_rows_ok;
 }
 

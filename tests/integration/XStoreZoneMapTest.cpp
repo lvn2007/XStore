@@ -21,6 +21,9 @@
 #include <cmath>
 #include <limits>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <map>
 #include <thread>
 #include <type_traits>
 #include <vector>
@@ -3308,6 +3311,186 @@ TEST_F(XStoreZoneMapTest, LiveWidenUnderConcurrentWritesMatchesAFreshRebuild) {
     EXPECT_GT(exact_blocks, 2) << "test too weak: almost every block ended inexact";
     std::printf("[live widen oracle] %d writes, %d of %llu compared blocks exact\n", writes.load(), exact_blocks,
                 static_cast<unsigned long long>(kBlocks + 2));
+}
+
+// ---- The writer's batched fold (UpdateRows) writes the same bytes as UpdateRow row by row -----------------------------
+
+std::string WholeFile(const std::string &path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+// Two pairs of index files driven by one script: pair A gets every writer row through UpdateRow, pair B the same rows
+// through UpdateRows; every other call (builder folds, deletes, inexact marks, bitmap sections, rebuild begin and end)
+// is made on both. Before the keep-old begin each file is hard-linked to "<name>.keep", which then still names the old
+// index the rebuild writes through its forward, so the old copies are compared too.
+class BatchFoldIdentityTest : public ::testing::Test {
+protected:
+    static constexpr uint64_t kRpb = kLwRpb;
+    std::unique_ptr<ScratchDir> scratch;
+    ZoneMapFile za, zb;
+    CatIdxFile ca, cb;
+
+    std::string Path(const std::string &name) const { return (scratch->test_root / name).string(); }
+
+    void SetUp() override {
+        scratch = std::make_unique<ScratchDir>("batch_fold_identity");
+        ASSERT_TRUE(za.Open(Path("a.zmap"), kWideRowLength, 4));
+        ASSERT_TRUE(zb.Open(Path("b.zmap"), kWideRowLength, 4));
+        ASSERT_TRUE(ca.Open(Path("a.catidx"), kWideRowLength, 4));
+        ASSERT_TRUE(cb.Open(Path("b.catidx"), kWideRowLength, 4));
+    }
+
+    // 0..10 leading columns (past both widths sometimes), some non-numeric.
+    static std::vector<ZoneMapObservation> ZObs(uint64_t row, uint32_t salt) {
+        std::vector<ZoneMapObservation> obs;
+        for (uint32_t c = 0; c < (row + salt) % 11; ++c) {
+            const double v = static_cast<double>(static_cast<int64_t>((row * 31 + c * 7 + salt) % 1000) - 300);
+            obs.push_back({c, v, (row + c + salt) % 5 != 0});
+        }
+        return obs;
+    }
+    // Some values absent (is_present=false is never folded; the writer leaves them out of a batch).
+    static std::vector<CatIdxObservation> CObs(uint64_t row, uint32_t salt) {
+        std::vector<CatIdxObservation> obs;
+        for (uint32_t c = 0; c < (row + salt + 3) % 11; ++c) {
+            const bool present = (row + c) % 4 != 0;
+            obs.push_back({c, present ? "v" + std::to_string((row * (c + 1) + salt) % 50) : std::string(), present});
+        }
+        return obs;
+    }
+
+    void Write(const std::vector<uint64_t> &rows, uint32_t salt, uint32_t pad_to) {
+        ZoneMapFoldBatch zbatch;
+        CatIdxFoldBatch cbatch;
+        zbatch.pad_to = pad_to;
+        for (const uint64_t r : rows) {
+            const auto zobs = ZObs(r, salt);
+            const auto cobs = CObs(r, salt);
+            za.UpdateRow(r, zobs, pad_to);
+            ca.UpdateRow(r, cobs);
+            zbatch.observations.insert(zbatch.observations.end(), zobs.begin(), zobs.end());
+            zbatch.EndRow(r);
+            for (const CatIdxObservation &o : cobs) {
+                if (o.is_present) cbatch.Add(o.column_idx, o.encoded_value);
+            }
+            cbatch.EndRow(r);
+        }
+        zb.UpdateRows(zbatch);
+        cb.UpdateRows(cbatch);
+    }
+    void WriteRange(uint64_t first, uint64_t end, uint32_t salt, uint32_t pad_to) {
+        std::vector<uint64_t> rows;
+        for (uint64_t r = first; r < end; ++r) rows.push_back(r);
+        Write(rows, salt, pad_to);
+    }
+
+    // The live builder over rows [begin, end) of one group (begin = the group's folded end so far), on both pairs.
+    void BuilderFold(uint64_t begin, uint64_t end) {
+        ZoneMapFoldBatch zbatch;
+        CatIdxFoldBatch cbatch;
+        zbatch.pad_to = 8;
+        for (uint64_t r = begin; r < end; ++r) {
+            const auto zobs = ZObs(r, 99);
+            zbatch.observations.insert(zbatch.observations.end(), zobs.begin(), zobs.end());
+            zbatch.EndRow(r);
+            for (const CatIdxObservation &o : CObs(r, 99)) {
+                if (o.is_present) cbatch.Add(o.column_idx, o.encoded_value);
+            }
+            cbatch.EndRow(r);
+        }
+        for (ZoneMapFile *z : {&za, &zb}) {
+            ASSERT_TRUE(z->RebuildFoldRows(zbatch));
+            z->MarkFolded(begin, end);
+        }
+        for (CatIdxFile *c : {&ca, &cb}) {
+            ASSERT_TRUE(c->RebuildFoldRows(cbatch));
+            c->MarkFolded(begin, end);
+        }
+    }
+
+    void Delete(uint64_t lo, uint64_t hi) {
+        for (ZoneMapFile *z : {&za, &zb}) EXPECT_TRUE(z->DeleteRows(lo, hi, [] { return true; }));
+    }
+    void MarkInexact(uint64_t lo, uint64_t hi) {
+        for (ZoneMapFile *z : {&za, &zb}) z->MarkInexact(lo, hi);
+    }
+    void AppendBitmapSection() {
+        const std::unordered_map<uint32_t, std::map<std::string, std::vector<uint64_t>>> section{{0, {{"v1", {1, 2}}}}};
+        for (CatIdxFile *c : {&ca, &cb}) c->AppendBitmapSection(section);
+    }
+
+    void ExpectSameFiles(const std::string &step) {
+        SCOPED_TRACE(step);
+        for (const char *ext : {".zmap", ".catidx", ".zmap.keep", ".catidx.keep"}) {
+            const std::string a = Path(std::string("a") + ext);
+            if (!fs::exists(a)) continue;
+            const std::string got = WholeFile(Path(std::string("b") + ext));
+            const std::string want = WholeFile(a);
+            EXPECT_GT(want.size(), 64u) << ext;
+            EXPECT_TRUE(got == want) << ext << ": UpdateRows wrote other bytes than UpdateRow";
+        }
+    }
+};
+
+TEST_F(BatchFoldIdentityTest, UpdateRowsWritesTheBytesOfUpdateRowWithAndWithoutAKeepOldRebuild) {
+    std::mt19937_64 rng(20261017);
+    // No rebuild: runs crossing blocks, a run in one block, out-of-order rows, overwrites of folded rows, pads below,
+    // at and past the width, deletes and inexact marks between runs, a write after a bitmap section.
+    WriteRange(100, 300, 1, 4);
+    WriteRange(5, 9, 2, 0);
+    WriteRange(400, 410, 15, 4); // back-to-back batches in one block with different pads (ApplyWalRecord's pad split)
+    WriteRange(410, 420, 16, 10);
+    std::vector<uint64_t> random_rows;
+    for (int i = 0; i < 300; ++i) random_rows.push_back(rng() % (8 * kRpb));
+    Write(random_rows, 3, 10);
+    ExpectSameFiles("out-of-order rows"); // before a later run rewrites these blocks
+    MarkInexact(150, 170);
+    WriteRange(150, 171, 4, 4); // overwrite
+    Delete(2 * kRpb - 3, 4 * kRpb + 2);
+    WriteRange(3 * kRpb - 5, 3 * kRpb + 5, 5, 4);
+    AppendBitmapSection();
+    WriteRange(6 * kRpb, 7 * kRpb + 10, 6, 4);
+    WriteRange(0, 8 * kRpb, 7, 4);
+    ExpectSameFiles("no rebuild");
+
+    // Keep-old rebuild to width 8 in groups of 2 blocks: F = 200 (group 0 partly folded), group 2 folded to 600.
+    AppendBitmapSection(); // the old catidx is invalidated by its first forwarded write
+    for (const char *name : {"a.zmap", "b.zmap", "a.catidx", "b.catidx"}) {
+        ASSERT_EQ(link(Path(name).c_str(), Path(std::string(name) + ".keep").c_str()), 0);
+    }
+    for (ZoneMapFile *z : {&za, &zb}) {
+        ASSERT_EQ(z->BeginLiveRebuild(8, /*keep_old=*/true), BeginRebuildResult::kStarted);
+        z->SetLiveFoldGroups(2 * kRpb, 8 * kRpb);
+    }
+    for (CatIdxFile *c : {&ca, &cb}) {
+        ASSERT_EQ(c->BeginLiveRebuild(8, /*keep_old=*/true), BeginRebuildResult::kStarted);
+        c->SetLiveFoldGroups(2 * kRpb, 8 * kRpb);
+    }
+    BuilderFold(0, 200);
+    BuilderFold(4 * kRpb, 600);
+    ASSERT_EQ(za.FrontierForTests(), 200u);
+    ASSERT_TRUE(za.WriterUpdatesRowForTests(550));
+    ASSERT_FALSE(za.WriterUpdatesRowForTests(650));
+    WriteRange(150, 700, 8, 8);           // below F, across F, unfolded, a folded prefix and past it
+    WriteRange(195, 205, 9, 4);           // overwrite across F
+    MarkInexact(190, 210);
+    Delete(5 * kRpb, 6 * kRpb + 3);       // in a group nobody folded
+    Delete(4 * kRpb + 10, 4 * kRpb + 20); // inside the folded prefix
+    random_rows.clear();
+    for (int i = 0; i < 400; ++i) random_rows.push_back(rng() % (9 * kRpb));
+    Write(random_rows, 10, 8);
+    BuilderFold(200, 2 * kRpb);           // group 0 done: F jumps to 2 * kRpb
+    BuilderFold(2 * kRpb, 2 * kRpb + 40);
+    WriteRange(2 * kRpb - 10, 2 * kRpb + 60, 11, 8);
+    WriteRange(8 * kRpb - 5, 9 * kRpb + 5, 12, 0); // past the year's end
+    ExpectSameFiles("keep-old rebuild running");
+
+    for (ZoneMapFile *z : {&za, &zb}) ASSERT_TRUE(z->FinishRebuild());
+    for (CatIdxFile *c : {&ca, &cb}) ASSERT_TRUE(c->FinishRebuild());
+    WriteRange(0, 3 * kRpb, 13, 8);
+    Write(random_rows, 14, 9);
+    ExpectSameFiles("after the rebuild");
 }
 
 } // namespace
