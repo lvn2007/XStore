@@ -36,6 +36,17 @@ class FileRangeLock {
         [[nodiscard]] bool TryLockRangeFor(unsigned long long start, unsigned long long length, LockType type,
                                            std::chrono::milliseconds timeout);
 
+        // A set of WRITE ranges taken and released together (the WAL apply's runs). Runs must be sorted ascending,
+        // non-overlapping, length > 0. All-or-nothing: the set waits until no run conflicts, holding none of them
+        // meanwhile, so no deadlock and no acquire order exist. A waiting set registers its hull [first, last end) as
+        // ONE waiting writer (yielding readers in the gaps yield too: conservative). count == 1 is LockRange.
+        struct Run {
+            unsigned long long start;
+            unsigned long long length;
+        };
+        void LockRuns(const Run *runs, size_t count);
+        void UnlockRuns(const Run *runs, size_t count);
+
         // What a yielding READ attempt spent on waiting writers: set if it waited for one at least once.
         struct WriterYield {
             bool yielded = false;
@@ -50,6 +61,8 @@ class FileRangeLock {
                                                   WriterYield &yield);
         // Writers currently registered as waiting (slots plus overflow).
         [[nodiscard]] uint32_t WaitingWritersForTests();
+        // Entries in the held-lock table (one per held range or run).
+        [[nodiscard]] size_t ActiveLocksForTests();
 
         // Cumulative since construction, over blocking LockRange(WRITE) calls that had to wait only: total wait, number
         // of waits, and waits >= XStoreTunables::LIVE_WIDEN_WRITER_LONG_WAIT_US. Read by the live widen governor.
@@ -78,6 +91,10 @@ class FileRangeLock {
         bool TimedLock(unsigned long long start, unsigned long long end, LockType type, std::chrono::milliseconds timeout,
                        std::chrono::milliseconds yield_max, WriterYield *yield);
         void LockRangeSlow(std::unique_lock<std::mutex> &lk, unsigned long long start, unsigned long long end, LockType type);
+        // A WRITE's wait until free(): registers [start, end) as a waiting writer and does the writer-wait accounting.
+        template <typename Free>
+        void WaitAsWriter(std::unique_lock<std::mutex> &lk, unsigned long long start, unsigned long long end,
+                          const Free &free);
 
         std::mutex mtx;
         std::condition_variable cv;
@@ -150,6 +167,22 @@ class FileRangeLockGuard {
         unsigned long long start;
         unsigned long long length;
         FileRangeLock::LockType type;
+};
+
+// RAII guard over LockRuns/UnlockRuns. Keeps a pointer into the caller's list, which must outlive the guard unchanged
+// (ApplyWalRecord's thread_local lock_runs: no apply nests on one thread).
+class FileRangeLockRunsGuard {
+    public:
+        FileRangeLockRunsGuard(const std::string &file_path, const FileRangeLock::Run *runs, size_t count);
+        ~FileRangeLockRunsGuard();
+
+        FileRangeLockRunsGuard(const FileRangeLockRunsGuard&) = delete;
+        FileRangeLockRunsGuard& operator=(const FileRangeLockRunsGuard&) = delete;
+
+    private:
+        FileRangeLock &lock;
+        const FileRangeLock::Run *runs;
+        size_t count;
 };
 
 // RAII guard over TryLockRangeFor: unlocks on destruction only if the timed acquire succeeded (owns_lock()).

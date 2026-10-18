@@ -704,4 +704,12 @@ inline constexpr unsigned    WAL_CKPT_MAX_AGE_MS           = 5000;        // ful
 inline constexpr unsigned    WAL_CKPT_IDLE_MS              = 50;          // idle time with no WAL traffic that triggers a checkpoint
 inline constexpr size_t      WAL_FLUSH_CHUNK_BYTES         = 4u << 20;    // paced data-file flush granularity during a checkpoint
 
+// WAL apply: a record WRITE-locks exactly its runs of contiguous rows, so readers, deletes and the live widen builder
+// touching rows in the gaps do not wait for it. Every lock call on the file scans the held entries linearly, so a
+// record with more runs than this locks its first-to-last row span as ONE range instead (bounds the table per holder).
+// 1 = the single first-to-last span lock of every record (the behaviour before per-run locks: the rollback value).
+// ponytail: all-or-hull; greedy gap-merging down to the cap is the upgrade if big scattered records matter.
+inline constexpr uint64_t WAL_APPLY_MAX_RUN_LOCKS = 512;
+static_assert(WAL_APPLY_MAX_RUN_LOCKS >= 1, "a record needs at least one lock");
+
 } // namespace XStoreTunables

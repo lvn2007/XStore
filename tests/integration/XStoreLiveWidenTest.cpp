@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <future>
@@ -524,6 +525,283 @@ TEST(FileRangeLockWriterWaitTest, StressCountsExactlyTheBlockedWriters) {
                 static_cast<unsigned long long>(s.long_waits), static_cast<unsigned long long>(free_ops.load()));
 }
 
+// ---- FileRangeLock::LockRuns: the WAL apply's per-run WRITE locks ----------------------------------------------------
+
+using LockRun = FileRangeLock::Run;
+
+// A run set taken (blocking) on its own thread; `acquired` set once held; released when `release` is set.
+std::thread RunsThread(FileRangeLock &lock, std::vector<LockRun> runs, std::atomic<bool> &acquired, std::atomic<bool> &release) {
+    return std::thread([&lock, runs = std::move(runs), &acquired, &release] {
+        lock.LockRuns(runs.data(), runs.size());
+        acquired.store(true);
+        while (!release.load()) std::this_thread::sleep_for(std::chrono::microseconds(200));
+        lock.UnlockRuns(runs.data(), runs.size());
+    });
+}
+
+// After a failed wait the set (or writer) is stuck in its lock call: joining it would hang the suite and returning
+// would destroy a joinable thread. End the process with the failure printed instead.
+void AbortIfAWaitFailed() {
+    if (!::testing::Test::HasFatalFailure()) return;
+    std::fprintf(stderr, "a lock wait failed; aborting instead of joining a blocked thread\n");
+    std::fflush(nullptr);
+    std::abort();
+}
+
+void WaitForFlag(const std::atomic<bool> &flag, const char *what) {
+    const Clock::time_point deadline = Clock::now() + std::chrono::seconds(5);
+    while (!flag.load()) {
+        ASSERT_LT(Clock::now(), deadline) << what;
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+}
+
+TEST(FileRangeLockRunsTest, TwoRunSetsInEachOthersGapsDoNotBlock) {
+    FileRangeLock lock;
+    const std::vector<LockRun> a = {{0, 10}, {100, 10}, {200, 10}};
+    const std::vector<LockRun> b = {{10, 90}, {150, 10}, {210, 1000}};
+    lock.LockRuns(a.data(), a.size());
+    EXPECT_EQ(lock.ActiveLocksForTests(), 3u) << "one entry per run";
+    auto other = std::async(std::launch::async, [&] { lock.LockRuns(b.data(), b.size()); });
+    ASSERT_EQ(other.wait_for(std::chrono::seconds(5)), std::future_status::ready) << "a set waited for one in its gaps";
+    EXPECT_EQ(lock.ActiveLocksForTests(), 6u);
+    EXPECT_EQ(lock.WriterWaits().waits, 0u);
+    lock.UnlockRuns(b.data(), b.size());
+    lock.UnlockRuns(a.data(), a.size());
+    EXPECT_EQ(lock.ActiveLocksForTests(), 0u);
+}
+
+TEST(FileRangeLockRunsTest, AHeldSetBlocksWritesAndReadsOnItsRunsButNotReadsInItsGaps) {
+    FileRangeLock lock;
+    const std::vector<LockRun> runs = {{0, 10}, {100, 10}, {200, 10}};
+    lock.LockRuns(runs.data(), runs.size());
+    for (const LockRun &r : runs) {
+        SCOPED_TRACE(r.start);
+        EXPECT_FALSE(lock.TryLockRangeFor(r.start, r.length, kWrite, milliseconds(0)));
+        EXPECT_FALSE(lock.TryLockRangeFor(r.start + 5, 1, kRead, milliseconds(0)));
+    }
+    EXPECT_FALSE(lock.TryLockRangeFor(50, 100, kRead, milliseconds(0))) << "a READ straddling a run";
+    EXPECT_FALSE(lock.TryLockRangeFor(0, 0, kRead, milliseconds(0))) << "rest of file covers every run";
+    ASSERT_TRUE(lock.TryLockRangeFor(10, 90, kRead, milliseconds(0))) << "a READ in a gap";
+    ASSERT_TRUE(lock.TryLockRangeFor(110, 90, kWrite, milliseconds(0))) << "a WRITE in a gap";
+    lock.UnlockRange(10, 90, kRead);
+    lock.UnlockRange(110, 90, kWrite);
+    lock.UnlockRuns(runs.data(), runs.size());
+    ASSERT_TRUE(lock.TryLockRangeFor(0, 0, kWrite, milliseconds(0))) << "a run leaked";
+    lock.UnlockRange(0, 0, kWrite);
+}
+
+// All-or-nothing: a set waiting on one conflicting run holds none of its other runs meanwhile.
+TEST(FileRangeLockRunsTest, AWaitingSetHoldsNoneOfItsRuns) {
+    FileRangeLock lock;
+    lock.LockRange(100, 10, kWrite);
+    std::atomic<bool> acquired{false}, release{false};
+    std::thread set = RunsThread(lock, {{0, 10}, {100, 10}, {200, 10}}, acquired, release);
+    WaitForWaitingWriters(lock, 1);
+    AbortIfAWaitFailed();
+    EXPECT_EQ(lock.ActiveLocksForTests(), 1u);
+    EXPECT_TRUE(lock.TryLockRangeFor(0, 10, kWrite, milliseconds(0))) << "the waiting set holds its first run";
+    EXPECT_TRUE(lock.TryLockRangeFor(200, 10, kRead, milliseconds(0))) << "the waiting set holds its last run";
+    lock.UnlockRange(100, 10, kWrite);
+    std::this_thread::sleep_for(milliseconds(30));
+    EXPECT_FALSE(acquired.load()) << "the set got in while its first run was held";
+    lock.UnlockRange(0, 10, kWrite);
+    std::this_thread::sleep_for(milliseconds(30));
+    EXPECT_FALSE(acquired.load()) << "the set got in while its last run was held";
+    lock.UnlockRange(200, 10, kRead);
+    WaitForFlag(acquired, "the set never got in");
+    AbortIfAWaitFailed();
+    EXPECT_EQ(lock.ActiveLocksForTests(), 3u);
+    EXPECT_EQ(lock.WaitingWritersForTests(), 0u);
+    release.store(true);
+    set.join();
+    EXPECT_EQ(lock.ActiveLocksForTests(), 0u);
+    EXPECT_EQ(lock.WriterWaits().waits, 1u) << "a set's wait counts once";
+}
+
+// The hull is registered as ONE waiting writer while the set waits and is gone once it got in, through a slot and
+// through the overflow (slots all taken).
+TEST(FileRangeLockRunsTest, AWaitingSetRegistersItsHullOnceAndLeavesNothingBehind) {
+    FileRangeLock lock;
+    lock.LockRange(0, 20, kRead);
+    {
+        std::atomic<bool> acquired{false}, release{false};
+        std::thread set = RunsThread(lock, {{10, 10}, {500, 10}}, acquired, release);
+        WaitForWaitingWriters(lock, 1);
+        AbortIfAWaitFailed();
+        WriterYield yield;
+        EXPECT_TRUE(lock.TryReadLockYieldingFor(305, 1, milliseconds(0), milliseconds(20), yield)) << "past the cap";
+        EXPECT_TRUE(yield.yielded) << "the hull between the runs is not registered";
+        lock.UnlockRange(305, 1, kRead);
+        lock.UnlockRange(0, 20, kRead);
+        WaitForFlag(acquired, "the set never got in");
+        AbortIfAWaitFailed();
+        EXPECT_EQ(lock.WaitingWritersForTests(), 0u);
+        release.store(true);
+        set.join();
+    }
+    // Overflow: 32 single writers take every slot, the set counts in the overflow.
+    lock.LockRange(0, 100000, kRead);
+    std::vector<std::thread> writers;
+    for (unsigned i = 0; i < 32; ++i) writers.push_back(WriterThread(lock, i * 10ULL, 10, 1));
+    WaitForWaitingWriters(lock, 32);
+    AbortIfAWaitFailed();
+    std::atomic<bool> acquired{false}, release{false};
+    std::thread set = RunsThread(lock, {{1000, 10}, {5000, 10}}, acquired, release);
+    WaitForWaitingWriters(lock, 33);
+    AbortIfAWaitFailed();
+    lock.UnlockRange(0, 100000, kRead);
+    for (std::thread &t : writers) t.join();
+    WaitForFlag(acquired, "the set never got in");
+    AbortIfAWaitFailed();
+    EXPECT_EQ(lock.WaitingWritersForTests(), 0u);
+    release.store(true);
+    set.join();
+    EXPECT_EQ(lock.ActiveLocksForTests(), 0u);
+    EXPECT_EQ(lock.WriterWaits().waits, 34u);
+}
+
+// count == 1 is LockRange/UnlockRange: the same entry (either call releases the other's), the same wait accounting.
+TEST(FileRangeLockRunsTest, ASetOfOneIsLockRange) {
+    FileRangeLock lock;
+    const LockRun one{40, 20};
+    lock.LockRuns(&one, 1);
+    EXPECT_EQ(lock.ActiveLocksForTests(), 1u);
+    EXPECT_FALSE(lock.TryLockRangeFor(59, 1, kRead, milliseconds(0)));
+    lock.UnlockRange(40, 20, kWrite);
+    EXPECT_EQ(lock.ActiveLocksForTests(), 0u);
+    lock.LockRange(40, 20, kWrite);
+    lock.UnlockRuns(&one, 1);
+    EXPECT_EQ(lock.ActiveLocksForTests(), 0u);
+    lock.LockRange(0, 100, kRead);
+    std::atomic<bool> acquired{false}, release{true};
+    std::thread set = RunsThread(lock, {one}, acquired, release);
+    WaitForWaitingWriters(lock, 1);
+    AbortIfAWaitFailed();
+    lock.UnlockRange(0, 100, kRead);
+    set.join();
+    EXPECT_TRUE(acquired.load());
+    EXPECT_EQ(lock.WriterWaits().waits, 1u);
+    lock.LockRuns(nullptr, 0);
+    lock.UnlockRuns(nullptr, 0);
+    EXPECT_EQ(lock.ActiveLocksForTests(), 0u);
+}
+
+// The registered hull is conservative: a yielding READ in a gap of a WAITING set yields to it, like to a single wide
+// writer. Once the set holds its runs, the gap READ has no reason to wait and is let go at once (not at the set's
+// unlock, not at the cap).
+TEST(FileRangeLockRunsTest, AYieldingReadInTheGapOfAWaitingSetYieldsUntilTheSetGotIn) {
+    FileRangeLock lock;
+    lock.LockRange(0, 10, kRead);
+    std::atomic<bool> acquired{false}, release{false};
+    std::thread set = RunsThread(lock, {{0, 10}, {500, 10}}, acquired, release);
+    WaitForWaitingWriters(lock, 1);
+    AbortIfAWaitFailed();
+    WriterYield yield;
+    auto reader = std::async(std::launch::async, [&] { return lock.TryReadLockYieldingFor(200, 10, milliseconds(50), milliseconds(5000), yield); });
+    EXPECT_EQ(reader.wait_for(milliseconds(100)), std::future_status::timeout) << "a gap READ did not yield to the hull";
+    lock.UnlockRange(0, 10, kRead);
+    ASSERT_EQ(reader.wait_for(std::chrono::seconds(4)), std::future_status::ready) << "the gap READ waited for the set's unlock";
+    EXPECT_TRUE(reader.get());
+    EXPECT_TRUE(yield.yielded);
+    EXPECT_LT(yield.us, 2'000'000u);
+    WaitForFlag(acquired, "the set never got in");
+    AbortIfAWaitFailed();
+    lock.UnlockRange(200, 10, kRead);
+    release.store(true);
+    set.join();
+    EXPECT_EQ(lock.ActiveLocksForTests(), 0u);
+}
+
+// 8 threads for 5 s: run sets of 1-6 runs, blocking single WRITEs and READs, yielding READs over 32 cells. No deadlock
+// or lost wakeup (a watchdog), exclusion holds per cell, and nothing is left registered.
+TEST(FileRangeLockRunsTest, StressRunSetsAndSingleRangesNoDeadlockExclusionHolds) {
+    FileRangeLock lock;
+    constexpr unsigned kCells = 32;
+    std::array<std::atomic<int>, kCells> readers{};
+    std::array<std::atomic<int>, kCells> writers_in{};
+    std::atomic<bool> stop{false};
+    std::atomic<uint64_t> violations{0}, ops{0}, set_ops{0};
+    const auto enter = [&](unsigned lo, unsigned hi, bool write) {
+        for (unsigned c = lo; c < hi; ++c) {
+            if (write) {
+                if (writers_in[c].fetch_add(1) != 0 || readers[c].load() != 0) ++violations;
+            } else {
+                readers[c].fetch_add(1);
+                if (writers_in[c].load() != 0) ++violations;
+            }
+        }
+    };
+    const auto leave = [&](unsigned lo, unsigned hi, bool write) {
+        for (unsigned c = lo; c < hi; ++c) (write ? writers_in[c] : readers[c]).fetch_sub(1);
+    };
+    const auto hold = [](std::mt19937 &rng) { std::this_thread::sleep_for(std::chrono::microseconds(rng() % 200)); };
+    std::vector<std::thread> threads;
+    for (unsigned t = 0; t < 8; ++t) {
+        threads.emplace_back([&, t] {
+            std::mt19937 rng(t * 104729u + 3);
+            std::vector<LockRun> runs;
+            std::vector<std::pair<unsigned, unsigned>> cells;
+            while (!stop.load()) {
+                const unsigned kind = t % 4; // 0,1: run sets; 2: single WRITE or READ; 3: yielding READ
+                if (kind < 2) {
+                    runs.clear();
+                    cells.clear();
+                    for (unsigned c = rng() % 4; c < kCells && runs.size() < 6; c += 1 + rng() % 8) {
+                        const unsigned hi = std::min(kCells, c + 1 + static_cast<unsigned>(rng() % 2));
+                        cells.emplace_back(c, hi);
+                        runs.push_back({c * 100ULL, (hi - c) * 100ULL});
+                        c = hi;
+                    }
+                    lock.LockRuns(runs.data(), runs.size());
+                    for (const auto &[lo, hi] : cells) enter(lo, hi, true);
+                    hold(rng);
+                    for (const auto &[lo, hi] : cells) leave(lo, hi, true);
+                    lock.UnlockRuns(runs.data(), runs.size());
+                    ++set_ops;
+                } else {
+                    const unsigned lo = rng() % kCells;
+                    const unsigned hi = lo + 1 + rng() % std::min(4u, kCells - lo);
+                    const unsigned long long off = lo * 100ULL, len = (hi - lo) * 100ULL;
+                    if (kind == 2) {
+                        const bool write = rng() % 2 == 0;
+                        lock.LockRange(off, len, write ? kWrite : kRead);
+                        enter(lo, hi, write);
+                        hold(rng);
+                        leave(lo, hi, write);
+                        lock.UnlockRange(off, len, write ? kWrite : kRead);
+                    } else {
+                        WriterYield y;
+                        if (lock.TryReadLockYieldingFor(off, len, milliseconds(rng() % 5), milliseconds(rng() % 20), y)) {
+                            enter(lo, hi, false);
+                            hold(rng);
+                            leave(lo, hi, false);
+                            lock.UnlockRange(off, len, kRead);
+                        }
+                    }
+                }
+                ++ops;
+            }
+        });
+    }
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+    stop.store(true);
+    auto joined = std::async(std::launch::async, [&] { for (std::thread &t : threads) t.join(); });
+    if (joined.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
+        // stop is already set: a thread still not out is blocked for good, and the future's destructor would join it.
+        ADD_FAILURE() << "deadlock or lost wakeup";
+        std::fflush(nullptr);
+        std::abort();
+    }
+    EXPECT_EQ(violations.load(), 0u);
+    EXPECT_GT(set_ops.load(), 100u);
+    EXPECT_GT(lock.WriterWaits().waits, 0u) << "nothing ever waited: the test proves little";
+    EXPECT_EQ(lock.WaitingWritersForTests(), 0u);
+    EXPECT_EQ(lock.ActiveLocksForTests(), 0u);
+    std::printf("[run lock stress] %llu ops, %llu run sets, %llu writer waits\n", static_cast<unsigned long long>(ops.load()),
+                static_cast<unsigned long long>(set_ops.load()), static_cast<unsigned long long>(lock.WriterWaits().waits));
+}
+
 // ---- Helpers --------------------------------------------------------------------------------------------------------
 
 unsigned long long Jan1(unsigned short year) {
@@ -748,6 +1026,11 @@ protected:
     void RunConcurrentOracle(const std::string &db, unsigned workers, uint64_t group_bytes,
                              livewiden::LiveWidenGovernor *governor = nullptr,
                              bool keep_old = XStoreTunables::LIVE_WIDEN_KEEP_OLD_INDEX);
+    void ExpectIndexesMatchAStartupRebuild(XStore &store, const std::string &db, int width, uint64_t blocks,
+                                           uint64_t min_bloom_checked);
+    // Per-run WAL apply locks: scattered BatchInserts, BatchDeletes of rows in their gaps and range queries at once.
+    enum class Widen { kNone, kDropOld, kKeepOld };
+    void RunScatteredInsertsWithGapDeletes(const std::string &db, Widen widen);
 
     // Answers on [lo, hi] for every listed column, against a scan of the data file (no concurrent writers here).
     void ExpectAnswersMatchTheData(XStore &store, const std::string &db, uint64_t lo, uint64_t hi,
@@ -1177,6 +1460,20 @@ void XStoreLiveWidenTest::RunConcurrentOracle(const std::string &db, unsigned wo
                 static_cast<unsigned long long>(stats.rows_folded), static_cast<unsigned long long>(stats.lock_timeouts),
                 static_cast<unsigned long long>(stats.max_lock_hold_us), writes.load(), writes_during, queries.load(), queries_during);
 
+    ExpectIndexesMatchAStartupRebuild(store, db, kWidth, kBlocks, 1000000);
+}
+
+// Every tracked column of every exact block of db's kYear zone map equals a startup rebuild of the final data (an
+// inexact block only has to bound it), and the bloom holds every present value. `blocks` covers the data.
+void XStoreLiveWidenTest::ExpectIndexesMatchAStartupRebuild(XStore &store, const std::string &db, int width, uint64_t blocks,
+                                                            uint64_t min_bloom_checked) {
+    const int kWidth = width;
+    const uint64_t kBlocks = blocks;
+    const uint64_t rpb = Rpb();
+    const uint64_t rows = kBlocks * rpb;
+    const std::string data_path = YearPath(db, ".XSTORE");
+    ZoneMapFile &zmap = XStore::GetOrOpenZoneMap(DbPath(db), kYear, kRowLength);
+    CatIdxFile &catidx = XStore::GetOrOpenCatIdx(DbPath(db), kYear, kRowLength);
     // Capture the live index before InitDB (which rebuilds this DB's index again: it is dirty after the writes).
     std::vector<std::vector<ZoneMapEntry>> live(kBlocks);
     for (uint64_t b = 0; b < kBlocks; ++b) {
@@ -1200,7 +1497,7 @@ void XStoreLiveWidenTest::RunConcurrentOracle(const std::string &db, unsigned wo
         }
         close(fd);
         EXPECT_EQ(misses, 0u);
-        EXPECT_GT(checked, 1000000u);
+        EXPECT_GT(checked, min_bloom_checked);
     }
 
     BuildStartupReference(store, db, db + "REF", kWidth);
@@ -1244,6 +1541,324 @@ TEST_F(XStoreLiveWidenTest, AnswersStayExactUnderConcurrentWritesAndTheResultMat
 
 TEST_F(XStoreLiveWidenTest, KeepOldAnswersStayExactUnderConcurrentWritesAndTheResultMatchesAStartupRebuild) {
     RunConcurrentOracle("LWKEEPOLD", 1, XStoreTunables::LIVE_WIDEN_GROUP_BYTES, nullptr, /*keep_old=*/true);
+}
+
+// ---- 2b. Per-run WAL apply locks: scattered records -----------------------------------------------------------------
+
+// A scattered record WRITE-locks only its runs, so another writer, a reader or the builder in its gaps runs beside it.
+// Scattered SYNC/BYPASS BatchInserts of fresh rows (row % 4 == 0) race one-row deletes of seeded rows in their gaps
+// (row % 4 == 2, first 8 blocks only, so the other blocks stay exact; the inserts touch those blocks too), range queries and, if asked, a live widen
+// (held until inserts ran during it, as in RunConcurrentOracle). The insert and delete sets are disjoint, so the final
+// data must equal any serial replay; the zone map and the catidx must equal a startup rebuild.
+void XStoreLiveWidenTest::RunScatteredInsertsWithGapDeletes(const std::string &db, Widen widen) {
+    XStore store;
+    const int width = widen == Widen::kNone ? 64 : 70;
+    const uint64_t rpb = Rpb();
+    constexpr uint64_t kBlocks = 32;
+    const uint64_t rows = kBlocks * rpb;
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    std::map<uint64_t, XStore_Proto::RowData> expected;
+    expected[0] = ValueRow(0, 10); // index files born 64 wide
+    Insert(store, db, {{Epoch(0), expected[0]}});
+    std::vector<uint64_t> deletable;
+    {
+        Rows seed;
+        for (uint64_t r = 2; r < rows; r += 4) {
+            expected[r] = ValueRow(r * 7 % 100000, width);
+            seed.emplace_back(Epoch(r), expected[r]);
+            if (r < 8 * rpb) deletable.push_back(r);
+        }
+        Insert(store, db, seed);
+    }
+    std::mt19937_64 rng(31337);
+    std::vector<uint64_t> fresh;
+    for (uint64_t r = 4; r < rows; r += 4) {
+        fresh.push_back(r);
+        expected[r] = ValueRow(100000 + r, width);
+    }
+    std::shuffle(fresh.begin(), fresh.end(), rng);
+    std::shuffle(deletable.begin(), deletable.end(), rng);
+    deletable.resize(deletable.size() / 2);
+    for (uint64_t r : deletable) expected.erase(r);
+
+    const std::string path = DbPath(db);
+    const std::string data_path = YearPath(db, ".XSTORE");
+    ZoneMapFile &zmap = XStore::GetOrOpenZoneMap(path, kYear, kRowLength);
+    constexpr size_t kBatchRows = 110;
+    std::atomic<int> insert_batches{0}, deletes{0}, queries{0}, writers_left{3};
+    std::vector<std::thread> threads;
+    for (unsigned t = 0; t < 2; ++t) {
+        threads.emplace_back([&, t] {
+            XStore w;
+            for (size_t k = t; k * kBatchRows < fresh.size(); k += 2) {
+                XStore_Proto::BatchInsert_REQ req;
+                req.set_dbname(db);
+                req.set_durabilitymode(k / 2 % 2 == 0 ? XStore_Proto::SYNC : XStore_Proto::BYPASS);
+                for (size_t i = k * kBatchRows; i < std::min(fresh.size(), (k + 1) * kBatchRows); ++i) {
+                    XStore_Proto::BatchInsert_DATA *e = req.add_batchinsert_data();
+                    e->set_timestamp(Epoch(fresh[i]));
+                    *e->mutable_data() = expected.at(fresh[i]);
+                }
+                XStore_Proto::BatchInsert_REP rep;
+                w.BatchInsert(&req, &rep);
+                EXPECT_NE(rep.insertstatus().find("successfully"), std::string::npos) << rep.insertstatus();
+                ++insert_batches;
+            }
+            --writers_left;
+        });
+    }
+    // One gap row per call (UnaryDelete or a one-row BatchDelete): its lock fits between two insert rows, so it runs
+    // beside an apply that folds into the same zone-map block (the delete flags the block inexact meanwhile).
+    threads.emplace_back([&] {
+        XStore w;
+        // Paced by the inserts, so the deletes spread over the whole insert phase instead of finishing first.
+        const size_t total_batches = (fresh.size() + kBatchRows - 1) / kBatchRows;
+        for (size_t i = 0; i < deletable.size(); ++i) {
+            while (static_cast<size_t>(insert_batches.load()) < i * total_batches / deletable.size() && writers_left.load() > 1) {
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            }
+            std::string status;
+            if (i % 2 == 0) {
+                status = w.UnaryDelete(Epoch(deletable[i]), db).deletestatus();
+            } else {
+                XStore_Proto::BatchDelete_REQ req;
+                req.set_dbname(db);
+                req.add_timestamp(Epoch(deletable[i]));
+                status = w.BatchDelete(&req).deletestatus();
+            }
+            EXPECT_NE(status.find("[INFO]"), std::string::npos) << status;
+            ++deletes;
+        }
+        --writers_left;
+    });
+    threads.emplace_back([&] {
+        XStore r;
+        std::mt19937_64 qrng(99);
+        while (writers_left.load() > 0) {
+            const uint64_t lo = qrng() % rows;
+            const uint64_t hi = std::min(rows - 1, lo + qrng() % (2 * rpb));
+            const XStore_Proto::RangeQuery_REP rep = RangeQuery(r, Epoch(lo), Epoch(hi), db);
+            EXPECT_EQ(static_cast<uint64_t>(rep.queryresponse_size()), hi - lo + 1) << rep.querystatus();
+            ++queries;
+        }
+    });
+
+    if (widen != Widen::kNone) {
+        const uint64_t held_row = rows / 2 + 1; // row % 4 == 1: no writer's row; inside nearly every insert's span
+        FileRangeLock &held = FileLockRegistry::Get(data_path);
+        held.LockRange(held_row * kRowLength, kRowLength, kWrite);
+        std::thread releaser([&] {
+            const Clock::time_point t0 = Clock::now();
+            while (!zmap.Rebuilding() && MsSince(t0) < 20000) std::this_thread::sleep_for(milliseconds(1));
+            const int b0 = insert_batches.load();
+            while (insert_batches.load() - b0 < 10 && writers_left.load() > 1 && MsSince(t0) < 20000) {
+                std::this_thread::sleep_for(milliseconds(2));
+            }
+            held.UnlockRange(held_row * kRowLength, kRowLength, kWrite);
+        });
+        XStore::LiveWidenStats stats;
+        const int b_before = insert_batches.load();
+        const Result result = store.LiveWidenOneYear(path, kYear, kRowLength, static_cast<uint32_t>(width), true, true,
+                                                     nullptr, &stats, 4, XStoreTunables::LIVE_WIDEN_GROUP_BYTES, nullptr,
+                                                     nullptr, widen == Widen::kKeepOld);
+        releaser.join();
+        const int during = insert_batches.load() - b_before;
+        EXPECT_EQ(result, Result::kDone);
+        EXPECT_GT(during, 0) << "no scattered insert ran during the widen";
+        std::printf("[scattered runs] widen keep_old %d: %d insert batches during, %llu chunks, %llu timeouts\n",
+                    widen == Widen::kKeepOld ? 1 : 0, during, static_cast<unsigned long long>(stats.chunks),
+                    static_cast<unsigned long long>(stats.lock_timeouts));
+    }
+    for (std::thread &t : threads) t.join();
+    EXPECT_EQ(zmap.OldWidth(), 0u);
+    EXPECT_GT(queries.load(), 0);
+    std::printf("[scattered runs] %d insert batches, %d one-row deletes, %d range queries\n", insert_batches.load(),
+                deletes.load(), queries.load());
+
+    {   // Final data == the serial replay.
+        const int fd = open(data_path.c_str(), O_RDONLY);
+        ASSERT_GE(fd, 0);
+        const auto got = ReadRows(fd, 0, rows - 1, kRowLength);
+        close(fd);
+        EXPECT_EQ(got.size(), expected.size());
+        uint64_t wrong = 0;
+        for (const auto &[r, row] : got) {
+            const auto it = expected.find(r);
+            if (it == expected.end() || it->second.SerializeAsString() != row.SerializeAsString()) {
+                if (++wrong < 5) ADD_FAILURE() << "row " << r << (it == expected.end() ? " should be absent" : " has the wrong value");
+            }
+        }
+        EXPECT_EQ(wrong, 0u);
+    }
+    ExpectIndexesMatchAStartupRebuild(store, db, width, kBlocks, 100000);
+}
+
+TEST_F(XStoreLiveWidenTest, ScatteredInsertsBesideGapDeletesAndQueriesMatchASerialReplayAndAStartupRebuild) {
+    RunScatteredInsertsWithGapDeletes("RUNLOCKMIX", Widen::kNone);
+}
+
+TEST_F(XStoreLiveWidenTest, ScatteredInsertsDuringAWidenMatchASerialReplayAndAStartupRebuild) {
+    RunScatteredInsertsWithGapDeletes("RUNLOCKWIDEN", Widen::kDropOld);
+}
+
+TEST_F(XStoreLiveWidenTest, KeepOldScatteredInsertsDuringAWidenMatchASerialReplayAndAStartupRebuild) {
+    RunScatteredInsertsWithGapDeletes("RUNLOCKKEEPOLD", Widen::kKeepOld);
+}
+
+// Atomicity for readers: one scattered record (110 rows over 20000, one generation value in every row), rewritten
+// generation after generation (SYNC through the WAL thread, BYPASS on the caller's thread), while range and batch
+// queries over random sub-spans of its rows must see every row of their span at ONE generation.
+TEST_F(XStoreLiveWidenTest, ReadersNeverSeeAScatteredRecordHalfApplied) {
+    XStore store;
+    const std::string db = "RUNLOCKATOM";
+    CreateTestDb(store, db, XStore_Proto::SECOND, 64);
+    std::mt19937_64 rng(2026);
+    std::set<uint64_t> picked;
+    while (picked.size() < 110) picked.insert(rng() % 20000);
+    const std::vector<uint64_t> record_rows(picked.begin(), picked.end());
+    const auto write_generation = [&](XStore &s, int64_t gen, XStore_Proto::WalDurabilityMode mode) {
+        XStore_Proto::BatchInsert_REQ req;
+        req.set_dbname(db);
+        req.set_durabilitymode(mode);
+        for (uint64_t r : record_rows) {
+            XStore_Proto::BatchInsert_DATA *e = req.add_batchinsert_data();
+            e->set_timestamp(Epoch(r));
+            *e->mutable_data() = MakeRow({FInt64(gen), FInt64(static_cast<int64_t>(r))});
+        }
+        XStore_Proto::BatchInsert_REP rep;
+        s.BatchInsert(&req, &rep);
+        return rep.insertstatus().find("successfully") != std::string::npos;
+    };
+    ASSERT_TRUE(write_generation(store, 0, XStore_Proto::SYNC));
+
+    constexpr int64_t kGenerations = 300;
+    std::atomic<bool> done{false};
+    std::atomic<uint64_t> mixes{0}, reads{0}, newest_seen{0};
+    std::vector<std::thread> readers;
+    for (unsigned q = 0; q < 4; ++q) {
+        readers.emplace_back([&, q] {
+            XStore r;
+            std::mt19937_64 qrng(500 + q);
+            while (!done.load()) {
+                const size_t i = qrng() % record_rows.size();
+                const size_t j = i + qrng() % (record_rows.size() - i);
+                std::set<int64_t> gens;
+                size_t present = 0;
+                const auto take = [&](const XStore_Proto::UnaryQuery_REP &e) {
+                    if (e.data().fielddata_size() == 0) return;
+                    ++present;
+                    gens.insert(e.data().fielddata(0).int64data());
+                };
+                if (q % 2 == 0) {
+                    const XStore_Proto::RangeQuery_REP rep = RangeQuery(r, Epoch(record_rows[i]), Epoch(record_rows[j]), db);
+                    for (const auto &e : rep.queryresponse()) take(e);
+                } else {
+                    XStore_Proto::BatchQuery_REQ req;
+                    req.set_dbname(db);
+                    for (size_t k = i; k <= j; ++k) req.add_timestamp(Epoch(record_rows[k]));
+                    const XStore_Proto::BatchQuery_REP rep = BatchQuery(r, &req);
+                    for (const auto &e : rep.queryresponse()) take(e);
+                }
+                if (present != j - i + 1 || gens.size() != 1) {
+                    if (mixes.fetch_add(1) < 5) {
+                        ADD_FAILURE() << (q % 2 == 0 ? "range" : "batch") << " query over record rows " << i << ".." << j
+                                      << " saw " << present << " rows at " << gens.size() << " generations";
+                    }
+                } else {
+                    const uint64_t g = static_cast<uint64_t>(*gens.begin());
+                    uint64_t seen = newest_seen.load();
+                    while (g > seen && !newest_seen.compare_exchange_weak(seen, g)) {}
+                }
+                ++reads;
+            }
+        });
+    }
+    {
+        XStore w;
+        for (int64_t gen = 1; gen <= kGenerations; ++gen) {
+            if (!write_generation(w, gen, gen % 2 == 0 ? XStore_Proto::SYNC : XStore_Proto::BYPASS)) {
+                ADD_FAILURE() << "generation " << gen << " failed";
+                break;
+            }
+        }
+    }
+    done.store(true);
+    for (std::thread &t : readers) t.join();
+    EXPECT_EQ(mixes.load(), 0u);
+    EXPECT_GT(reads.load(), 100u);
+    EXPECT_GT(newest_seen.load(), 0u) << "no reader ever saw a rewrite: the test proves little";
+    std::printf("[scattered atomicity] %llu reads, newest generation seen %llu of %lld\n",
+                static_cast<unsigned long long>(reads.load()), static_cast<unsigned long long>(newest_seen.load()),
+                static_cast<long long>(kGenerations));
+}
+
+// WAL_APPLY_MAX_RUN_LOCKS: a record of exactly the cap's runs locks them one by one (a READ held on a gap row does not
+// stop it), one more run locks the whole span (the held READ stops it until released). Both paths, SYNC and BYPASS,
+// leave the same data and the same index files as the same rows applied as small records.
+TEST_F(XStoreLiveWidenTest, ARecordPastTheRunCapLocksItsWholeSpanAndGivesTheSameResult) {
+    constexpr uint64_t kCap = XStoreTunables::WAL_APPLY_MAX_RUN_LOCKS;
+    // `runs` isolated rows (every other row) from `first`.
+    const auto every_other = [](uint64_t first, uint64_t runs, uint64_t base) {
+        Rows out;
+        for (uint64_t i = 0; i < runs; ++i) out.emplace_back(Epoch(first + 2 * i), ValueRow(base + i, 10));
+        return out;
+    };
+    const std::array<std::pair<Rows, XStore_Proto::WalDurabilityMode>, 4> records = {{
+        {every_other(10, kCap, 1000), XStore_Proto::SYNC},
+        {every_other(2000, kCap, 3000), XStore_Proto::BYPASS},
+        {every_other(4000, kCap + 1, 5000), XStore_Proto::SYNC},
+        {every_other(6000, kCap + 1, 7000), XStore_Proto::BYPASS},
+    }};
+    XStore store;
+    const std::string db = "RUNLOCKCAP", ref = "RUNLOCKCAPSMALL";
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    CreateTestDb(store, ref, XStore_Proto::SECOND, kRowLength);
+    Insert(store, db, {{Epoch(0), ValueRow(0, 10)}});
+    Insert(store, ref, {{Epoch(0), ValueRow(0, 10)}});
+    FileRangeLock &lock = FileLockRegistry::Get(YearPath(db, ".XSTORE"));
+    for (size_t k = 0; k < records.size(); ++k) {
+        SCOPED_TRACE("record " + std::to_string(k));
+        const Rows &record = records[k].first;
+        const XStore_Proto::WalDurabilityMode mode = records[k].second;
+        const uint64_t gap_row = record.front().first - Jan1(kYear) + 1;
+        lock.LockRange(gap_row * kRowLength, kRowLength, kRead);
+        auto insert = std::async(std::launch::async, [&] {
+            XStore w;
+            Insert(w, db, record, mode);
+        });
+        if (record.size() <= kCap) {
+            const bool ready = insert.wait_for(std::chrono::seconds(10)) == std::future_status::ready;
+            EXPECT_TRUE(ready) << "a record at the cap waited for a READ in its gaps";
+            lock.UnlockRange(gap_row * kRowLength, kRowLength, kRead);
+        } else {
+            EXPECT_EQ(insert.wait_for(milliseconds(300)), std::future_status::timeout)
+                << "a record past the cap did not lock its whole span";
+            lock.UnlockRange(gap_row * kRowLength, kRowLength, kRead);
+        }
+        ASSERT_EQ(insert.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+        insert.get();
+        for (size_t from = 0; from < record.size(); from += 100) {
+            Insert(store, ref, Rows(record.begin() + static_cast<std::ptrdiff_t>(from),
+                                    record.begin() + static_cast<std::ptrdiff_t>(std::min(record.size(), from + 100))), mode);
+        }
+    }
+    EXPECT_EQ(lock.ActiveLocksForTests(), 0u);
+    const int fd = open(YearPath(db, ".XSTORE").c_str(), O_RDONLY);
+    const int ref_fd = open(YearPath(ref, ".XSTORE").c_str(), O_RDONLY);
+    ASSERT_GE(fd, 0);
+    ASSERT_GE(ref_fd, 0);
+    const auto got = ReadRows(fd, 0, 8000, kRowLength);
+    const auto want = ReadRows(ref_fd, 0, 8000, kRowLength);
+    close(fd);
+    close(ref_fd);
+    ASSERT_EQ(got.size(), 1 + 4 * kCap + 2);
+    ASSERT_EQ(got.size(), want.size());
+    for (size_t i = 0; i < got.size(); ++i) {
+        ASSERT_EQ(got[i].first, want[i].first);
+        ASSERT_EQ(got[i].second.SerializeAsString(), want[i].second.SerializeAsString()) << "row " << got[i].first;
+    }
+    CleanRestartState(); // both indexes clean on disk
+    ExpectSameFilesAs(db, ref);
 }
 
 // ---- 3. Starvation: a hot head must not stop the builder ------------------------------------------------------------

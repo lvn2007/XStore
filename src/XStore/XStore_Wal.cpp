@@ -311,11 +311,26 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
         offsets[i] = (record_to_apply.rows[i].epoch_time - first_ts.first_epoch) * record_to_apply.row_length;
     }
 
-    // One lock spanning the whole record's min-to-max offset span --
-    // cheaper than one lock per run, and correct regardless of how many
-    // runs the offsets below turn out to have.
-    unsigned long long region_length = (offsets.back() + record_to_apply.row_length) - offsets.front();
-    FileRangeLockGuard guard(target_file, offsets.front(), region_length, FileRangeLock::LockType::WRITE);
+    // WRITE locks on exactly the record's runs (contiguous rows; a duplicate row joins its run), taken all at once, so
+    // other lock users conflict only on these rows and a reader never sees the record half-applied. Past the cap the
+    // record's whole min-to-max span is one lock.
+    thread_local std::vector<FileRangeLock::Run> lock_runs;
+    lock_runs.clear();
+    const unsigned long long row_length = record_to_apply.row_length;
+    lock_runs.push_back({offsets.front(), row_length});
+    for (size_t i = 1; i < offsets.size(); ++i) {
+        FileRangeLock::Run &last = lock_runs.back();
+        if (offsets[i] == last.start + last.length) {
+            last.length += row_length;
+        } else if (offsets[i] != offsets[i - 1]) {
+            if (lock_runs.size() == XStoreTunables::WAL_APPLY_MAX_RUN_LOCKS) {   // over the cap: stop collecting
+                lock_runs.assign(1, {offsets.front(), (offsets.back() + row_length) - offsets.front()});
+                break;
+            }
+            lock_runs.push_back({offsets[i], row_length});
+        }
+    }
+    FileRangeLockRunsGuard guard(target_file, lock_runs.data(), lock_runs.size());
 
     // Thread-local scratch buffer, grown to fit the largest run applied so
     // far and reused across calls -- avoids a heap allocation per run.

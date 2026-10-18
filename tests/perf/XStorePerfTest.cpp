@@ -485,6 +485,60 @@ TEST_F(XStorePerfTest, BatchInsertThroughput_Sync) {
     ReportPerf({"BatchInsert[SYNC]", n, elapsed});
 }
 
+// Same as BatchInsertThroughput_Sync but scattered, the XBench BATCH_RAND shape: SYNC calls of `rows_per_call` random
+// distinct rows each (fixed seed, no duplicates), all within one year, so every call is one WAL record of that many
+// isolated runs.
+static void RunScatteredBatchInsertSync(const char *label, unsigned long long rows_per_call) {
+    XStore store;
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
+    const unsigned long long kRowsPerCall = rows_per_call;
+    constexpr unsigned long long kYearStart = 1704067200ULL;   // 2024-01-01 00:00:00 UTC
+    constexpr unsigned long long kYearSeconds = 366ULL * 86400;
+    // Distinct rows of one year: more than the year holds would never be found.
+    const unsigned long long n = std::min(PerfOpCount(200'000), kYearSeconds);
+    std::mt19937_64 rng(20261018);
+    std::unordered_set<unsigned long long> used;
+    std::vector<unsigned long long> rows;
+    rows.reserve(n);
+    while (rows.size() < n) {
+        const unsigned long long r = rng() % kYearSeconds;
+        if (used.insert(r).second) rows.push_back(r);
+    }
+    std::vector<XStore_Proto::BatchInsert_REQ> reqs;
+    for (unsigned long long from = 0; from < n; from += kRowsPerCall) {
+        XStore_Proto::BatchInsert_REQ &req = reqs.emplace_back();
+        req.set_dbname("PERFDB");
+        req.set_durabilitymode(XStore_Proto::SYNC);
+        for (unsigned long long i = from; i < std::min(n, from + kRowsPerCall); i++) {
+            XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
+            entry->set_timestamp(kYearStart + rows[i]);
+            *entry->mutable_data() = PerfRow(i);
+        }
+    }
+
+    unsigned long long failed = 0;
+    auto start = std::chrono::steady_clock::now();
+    for (XStore_Proto::BatchInsert_REQ &req : reqs) {
+        XStore_Proto::BatchInsert_REP rep;
+        store.BatchInsert(&req, &rep);
+        if (rep.insertstatus().find("successfully") == std::string::npos) ++failed;
+    }
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+    EXPECT_EQ(failed, 0u);
+    ReportPerf({label, n, elapsed});
+}
+
+// 110 isolated runs per record: under WAL_APPLY_MAX_RUN_LOCKS, so every run is locked on its own.
+TEST_F(XStorePerfTest, BatchInsertScatteredThroughput_Sync) {
+    RunScatteredBatchInsertSync("BatchInsertScattered[SYNC]", 110);
+}
+
+// 1000 isolated runs per record (the XBench BATCH_RAND record size): over the cap, so the record locks its whole span.
+TEST_F(XStorePerfTest, BatchInsertScatteredLargeThroughput_Sync) {
+    RunScatteredBatchInsertSync("BatchInsertScatteredLarge[SYNC]", 1000);
+}
+
 TEST_F(XStorePerfTest, BatchQueryThroughput) {
     XStore store;
     CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);

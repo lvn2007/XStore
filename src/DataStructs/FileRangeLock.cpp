@@ -43,6 +43,12 @@ void FileRangeLock::LockRangeSlow(std::unique_lock<std::mutex> &lk, unsigned lon
         cv.wait(lk, free);
         return;
     }
+    WaitAsWriter(lk, start, end, free);
+}
+
+template <typename Free>
+void FileRangeLock::WaitAsWriter(std::unique_lock<std::mutex> &lk, unsigned long long start, unsigned long long end,
+                                 const Free &free) {
     const bool slotted = waiting_writer_count < MAX_WAITING_WRITERS;
     if (slotted) {
         waiting_writers[waiting_writer_count++] = {start, end};
@@ -65,13 +71,59 @@ void FileRangeLock::LockRangeSlow(std::unique_lock<std::mutex> &lk, unsigned lon
                 break;
             }
         }
-        // No notify: the caller now HOLDS a WRITE on exactly this range, so every yielding reader that overlapped the
-        // entry still conflicts and is woken by the UnlockRange that ends it.
+        // No notify here: a LockRange caller now HOLDS a WRITE on exactly this range, so every yielding reader that
+        // overlapped the entry still conflicts and is woken by the UnlockRange that ends it. LockRuns notifies itself.
     } else {
         --waiting_writer_overflow;
         // The overflow stood for "a writer waits on the whole file": a yielding reader elsewhere may proceed now.
         if (waiting_writer_overflow == 0) cv.notify_all();
     }
+}
+
+void FileRangeLock::LockRuns(const Run *runs, size_t count) {
+    if (count == 0) return;
+    if (count == 1) {
+        LockRange(runs[0].start, runs[0].length, LockType::WRITE);
+        return;
+    }
+    const auto free = [&] {
+        for (size_t i = 0; i < count; ++i) {
+            if (Conflicts(runs[i].start, runs[i].start + runs[i].length, LockType::WRITE)) return false;
+        }
+        return true;
+    };
+    std::unique_lock<std::mutex> lk(mtx);
+    if (!free()) {
+        WaitAsWriter(lk, runs[0].start, runs[count - 1].start + runs[count - 1].length, free);
+        // Unlike LockRange, what is now held is less than the hull that was registered: a yielding reader in a gap
+        // no longer has a reason to wait.
+        cv.notify_all();
+    }
+    active_locks.reserve(active_locks.size() + count); // a bad_alloc must not leave the set partly registered
+    for (size_t i = 0; i < count; ++i) {
+        active_locks.push_back({runs[i].start, runs[i].start + runs[i].length, LockType::WRITE});
+    }
+}
+
+void FileRangeLock::UnlockRuns(const Run *runs, size_t count) {
+    if (count == 0) return;
+    if (count == 1) {
+        UnlockRange(runs[0].start, runs[0].length, LockType::WRITE);
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(mtx);
+        // One pass, O(entries * log runs): the runs are sorted and disjoint, and two identical WRITE entries cannot be
+        // held at once, so every entry matching a run is that run's own.
+        const Run *runs_end = runs + count;
+        active_locks.erase(std::remove_if(active_locks.begin(), active_locks.end(), [&](const ActiveLock &l) {
+            if (l.type != LockType::WRITE) return false;
+            const Run *r = std::lower_bound(runs, runs_end, l.start,
+                                            [](const Run &run, unsigned long long v) { return run.start < v; });
+            return r != runs_end && r->start == l.start && r->start + r->length == l.end;
+        }), active_locks.end());
+    }
+    cv.notify_all();
 }
 
 bool FileRangeLock::TimedLock(unsigned long long start, unsigned long long end, LockType type,
@@ -122,6 +174,11 @@ FileRangeLock::WriterWaitStats FileRangeLock::WriterWaits() const noexcept {
 uint32_t FileRangeLock::WaitingWritersForTests() {
     std::lock_guard<std::mutex> lk(mtx);
     return waiting_writer_count + waiting_writer_overflow;
+}
+
+size_t FileRangeLock::ActiveLocksForTests() {
+    std::lock_guard<std::mutex> lk(mtx);
+    return active_locks.size();
 }
 
 void FileRangeLock::UnlockRange(unsigned long long start, unsigned long long length, LockType type) {
@@ -179,6 +236,15 @@ FileRangeLockGuard::FileRangeLockGuard(const std::string &file_path, unsigned lo
 
 FileRangeLockGuard::~FileRangeLockGuard() {
     lock.UnlockRange(start, length, type);
+}
+
+FileRangeLockRunsGuard::FileRangeLockRunsGuard(const std::string &file_path, const FileRangeLock::Run *runs, size_t count)
+    : lock(FileLockRegistry::Get(file_path)), runs(runs), count(count) {
+    lock.LockRuns(runs, count);
+}
+
+FileRangeLockRunsGuard::~FileRangeLockRunsGuard() {
+    lock.UnlockRuns(runs, count);
 }
 
 TimedFileRangeLockGuard::TimedFileRangeLockGuard(const std::string &file_path, unsigned long long start,
