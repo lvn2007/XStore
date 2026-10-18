@@ -36,16 +36,18 @@ class FileRangeLock {
         [[nodiscard]] bool TryLockRangeFor(unsigned long long start, unsigned long long length, LockType type,
                                            std::chrono::milliseconds timeout);
 
-        // A set of WRITE ranges taken and released together (the WAL apply's runs). Runs must be sorted ascending,
-        // non-overlapping, length > 0. All-or-nothing: the set waits until no run conflicts, holding none of them
-        // meanwhile, so no deadlock and no acquire order exist. A waiting set registers its hull [first, last end) as
-        // ONE waiting writer (yielding readers in the gaps yield too: conservative). count == 1 is LockRange.
+        // A set of ranges of one type taken and released together (the WAL apply's and BatchDelete's WRITE runs,
+        // BatchQuery's READ runs). Runs must be sorted ascending, non-overlapping, length > 0. All-or-nothing: the set
+        // waits until no run conflicts, holding none of them meanwhile, so no deadlock and no acquire order exist. A
+        // waiting WRITE set registers its hull [first, last end) as ONE waiting writer (yielding readers in the gaps
+        // yield too: conservative); a waiting READ set registers nothing, like LockRange(READ). count == 1 is
+        // LockRange.
         struct Run {
             unsigned long long start;
             unsigned long long length;
         };
-        void LockRuns(const Run *runs, size_t count);
-        void UnlockRuns(const Run *runs, size_t count);
+        void LockRuns(const Run *runs, size_t count, LockType type = LockType::WRITE);
+        void UnlockRuns(const Run *runs, size_t count, LockType type = LockType::WRITE);
 
         // What a yielding READ attempt spent on waiting writers: set if it waited for one at least once.
         struct WriterYield {
@@ -169,11 +171,18 @@ class FileRangeLockGuard {
         FileRangeLock::LockType type;
 };
 
+// The run list for rows at `offsets` (sorted ascending, duplicates allowed), each row_length bytes: adjacent rows
+// merge into one run, a duplicate joins its run. More than max_runs runs -> the single min-to-max hull instead.
+// Clears `runs` first; empty offsets leave it empty. (ApplyWalRecord keeps its own inline copy of this loop.)
+void BuildLockRuns(const unsigned long long *offsets, size_t count, unsigned long long row_length, size_t max_runs,
+                   std::vector<FileRangeLock::Run> &runs);
+
 // RAII guard over LockRuns/UnlockRuns. Keeps a pointer into the caller's list, which must outlive the guard unchanged
-// (ApplyWalRecord's thread_local lock_runs: no apply nests on one thread).
+// (the callers' thread_local run lists: none of them nests on one thread).
 class FileRangeLockRunsGuard {
     public:
-        FileRangeLockRunsGuard(const std::string &file_path, const FileRangeLock::Run *runs, size_t count);
+        FileRangeLockRunsGuard(const std::string &file_path, const FileRangeLock::Run *runs, size_t count,
+                               FileRangeLock::LockType type = FileRangeLock::LockType::WRITE);
         ~FileRangeLockRunsGuard();
 
         FileRangeLockRunsGuard(const FileRangeLockRunsGuard&) = delete;
@@ -183,6 +192,7 @@ class FileRangeLockRunsGuard {
         FileRangeLock &lock;
         const FileRangeLock::Run *runs;
         size_t count;
+        FileRangeLock::LockType type;
 };
 
 // RAII guard over TryLockRangeFor: unlocks on destruction only if the timed acquire succeeded (owns_lock()).

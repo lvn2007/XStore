@@ -80,17 +80,20 @@ void FileRangeLock::WaitAsWriter(std::unique_lock<std::mutex> &lk, unsigned long
     }
 }
 
-void FileRangeLock::LockRuns(const Run *runs, size_t count) {
+void FileRangeLock::LockRuns(const Run *runs, size_t count, LockType type) {
     if (count == 0) return;
     if (count == 1) {
-        LockRange(runs[0].start, runs[0].length, LockType::WRITE);
+        LockRange(runs[0].start, runs[0].length, type);
         return;
     }
     // O(entries * log runs), like UnlockRuns: the runs are sorted and disjoint, so their ends ascend; the first run
-    // ending after an entry's start is the only candidate to overlap it. Any overlap conflicts (the set is WRITE).
+    // ending after an entry's start is the only candidate to overlap it. A WRITE set conflicts with any overlap, a
+    // READ set only with a held WRITE.
     const Run *runs_end = runs + count;
+    const bool write = type == LockType::WRITE;
     const auto free = [&] {
         for (const ActiveLock &l : active_locks) {
+            if (!write && l.type == LockType::READ) continue;
             const Run *r = std::upper_bound(runs, runs_end, l.start,
                                             [](unsigned long long v, const Run &run) { return v < run.start + run.length; });
             if (r != runs_end && r->start < l.end) return false;
@@ -99,36 +102,76 @@ void FileRangeLock::LockRuns(const Run *runs, size_t count) {
     };
     std::unique_lock<std::mutex> lk(mtx);
     if (!free()) {
-        WaitAsWriter(lk, runs[0].start, runs[count - 1].start + runs[count - 1].length, free);
-        // Unlike LockRange, what is now held is less than the hull that was registered: a yielding reader in a gap
-        // no longer has a reason to wait.
-        cv.notify_all();
+        if (write) {
+            WaitAsWriter(lk, runs[0].start, runs[count - 1].start + runs[count - 1].length, free);
+            // Unlike LockRange, what is now held is less than the hull that was registered: a yielding reader in a gap
+            // no longer has a reason to wait.
+            cv.notify_all();
+        } else {
+            cv.wait(lk, free);
+        }
     }
     active_locks.reserve(active_locks.size() + count); // a bad_alloc must not leave the set partly registered
     for (size_t i = 0; i < count; ++i) {
-        active_locks.push_back({runs[i].start, runs[i].start + runs[i].length, LockType::WRITE});
+        active_locks.push_back({runs[i].start, runs[i].start + runs[i].length, type});
     }
 }
 
-void FileRangeLock::UnlockRuns(const Run *runs, size_t count) {
+void FileRangeLock::UnlockRuns(const Run *runs, size_t count, LockType type) {
     if (count == 0) return;
     if (count == 1) {
-        UnlockRange(runs[0].start, runs[0].length, LockType::WRITE);
+        UnlockRange(runs[0].start, runs[0].length, type);
         return;
     }
     {
         std::lock_guard<std::mutex> lk(mtx);
-        // One pass, O(entries * log runs): the runs are sorted and disjoint, and two identical WRITE entries cannot be
-        // held at once, so every entry matching a run is that run's own.
         const Run *runs_end = runs + count;
-        active_locks.erase(std::remove_if(active_locks.begin(), active_locks.end(), [&](const ActiveLock &l) {
-            if (l.type != LockType::WRITE) return false;
+        const auto is_ours = [&](const ActiveLock &l) {
+            if (l.type != type) return false;
             const Run *r = std::lower_bound(runs, runs_end, l.start,
                                             [](const Run &run, unsigned long long v) { return run.start < v; });
             return r != runs_end && r->start == l.start && r->start + r->length == l.end;
-        }), active_locks.end());
+        };
+        if (type == LockType::WRITE) {
+            // One pass, O(entries * log runs): two identical WRITE entries cannot be held at once, so every entry
+            // matching a run is that run's own.
+            active_locks.erase(std::remove_if(active_locks.begin(), active_locks.end(), is_ours), active_locks.end());
+        } else {
+            // Another reader may hold an identical READ entry, so exactly ONE entry per run goes. In place, no
+            // allocation (this runs in a destructor): move the matching entries to the tail, sort them so identical
+            // ones are adjacent (every run has at least its own), drop the first of each group, keep the rest.
+            // Entry order does not matter (UnlockRange swap-and-pops).
+            const auto tail = std::partition(active_locks.begin(), active_locks.end(),
+                                             [&](const ActiveLock &l) { return !is_ours(l); });
+            std::sort(tail, active_locks.end(),
+                      [](const ActiveLock &a, const ActiveLock &b) { return a.start < b.start; });
+            auto out = tail;
+            for (auto it = tail; it != active_locks.end(); ++it) {
+                if (it != tail && it->start == (it - 1)->start) *out++ = *it;
+            }
+            active_locks.erase(out, active_locks.end());
+        }
     }
     cv.notify_all();
+}
+
+void BuildLockRuns(const unsigned long long *offsets, size_t count, unsigned long long row_length, size_t max_runs,
+                   std::vector<FileRangeLock::Run> &runs) {
+    runs.clear();
+    if (count == 0) return;
+    runs.push_back({offsets[0], row_length});
+    for (size_t i = 1; i < count; ++i) {
+        FileRangeLock::Run &last = runs.back();
+        if (offsets[i] == last.start + last.length) {
+            last.length += row_length;
+        } else if (offsets[i] != offsets[i - 1]) {
+            if (runs.size() == max_runs) {   // over the cap: the hull
+                runs.assign(1, {offsets[0], (offsets[count - 1] + row_length) - offsets[0]});
+                return;
+            }
+            runs.push_back({offsets[i], row_length});
+        }
+    }
 }
 
 bool FileRangeLock::TimedLock(unsigned long long start, unsigned long long end, LockType type,
@@ -243,13 +286,14 @@ FileRangeLockGuard::~FileRangeLockGuard() {
     lock.UnlockRange(start, length, type);
 }
 
-FileRangeLockRunsGuard::FileRangeLockRunsGuard(const std::string &file_path, const FileRangeLock::Run *runs, size_t count)
-    : lock(FileLockRegistry::Get(file_path)), runs(runs), count(count) {
-    lock.LockRuns(runs, count);
+FileRangeLockRunsGuard::FileRangeLockRunsGuard(const std::string &file_path, const FileRangeLock::Run *runs, size_t count,
+                                               FileRangeLock::LockType type)
+    : lock(FileLockRegistry::Get(file_path)), runs(runs), count(count), type(type) {
+    lock.LockRuns(runs, count, type);
 }
 
 FileRangeLockRunsGuard::~FileRangeLockRunsGuard() {
-    lock.UnlockRuns(runs, count);
+    lock.UnlockRuns(runs, count, type);
 }
 
 TimedFileRangeLockGuard::TimedFileRangeLockGuard(const std::string &file_path, unsigned long long start,

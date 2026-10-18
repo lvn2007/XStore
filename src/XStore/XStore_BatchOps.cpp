@@ -191,6 +191,11 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStor
     spdlog::info(success_msg);
 }
 
+namespace {
+// BatchQuery's thread_local lock list is released above this many entries (512 KB) instead of kept for the next call.
+constexpr size_t BATCH_LOCK_OFFSETS_KEEP = 65536;
+} // namespace
+
 // BATCH QUERY (streamed) -- see XStore.h's declaration comment for the
 // contract. Mirrors BatchQuery's structure exactly (sort/bucket/lock, the
 // same pread-not-mmap fd path since BatchQuery's scattered access pattern
@@ -291,17 +296,26 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, bool so
         // description, not a resource that accumulates or needs undoing.
         posix_fadvise(fd, 0, 0, POSIX_FADV_RANDOM);
 
-        auto [MinIt, MaxIt] = std::minmax_element(indices.begin(), indices.end(),
-            [&](unsigned long long int a, unsigned long long int b) {
-                return proto_from_client->timestamp(a) < proto_from_client->timestamp(b);
-        });
-        const unsigned long long int min_offset = (proto_from_client->timestamp(*MinIt) - this_ts.first_epoch) * cfg_struct.rowlength();
-        const unsigned long long int max_offset = (proto_from_client->timestamp(*MaxIt) - this_ts.first_epoch) * cfg_struct.rowlength();
-        const unsigned long long int region_length = (max_offset + cfg_struct.rowlength()) - min_offset;
-
-        FileRangeLockGuard guard(target_file, min_offset, region_length, FileRangeLock::LockType::READ);
-
         const size_t row_len = static_cast<size_t>(cfg_struct.rowlength());
+
+        // READ locks on exactly the rows read (indices are in request order: only this lock list is sorted), so a
+        // writer's rows in the gaps never wait for this query nor it for them. Past the cap: the min-to-max span.
+        // thread_local scratch, reused: the guard is gone before the next year-group refills it.
+        thread_local std::vector<unsigned long long int> lock_offsets;
+        thread_local std::vector<FileRangeLock::Run> lock_runs;
+        lock_offsets.resize(indices.size());
+        for (size_t i = 0; i < indices.size(); i++) {
+            lock_offsets[i] = (proto_from_client->timestamp(indices[i]) - this_ts.first_epoch) * row_len;
+        }
+        // O(n) check first: a request sent sorted (or sorted by sort_time) skips the O(n log n) sort.
+        if (!std::is_sorted(lock_offsets.begin(), lock_offsets.end())) {
+            std::sort(lock_offsets.begin(), lock_offsets.end());   // duplicates join their run in BuildLockRuns
+        }
+        BuildLockRuns(lock_offsets.data(), lock_offsets.size(), row_len, XStoreTunables::BATCH_QUERY_MAX_RUN_LOCKS,
+                      lock_runs);
+        // One huge query must not pin 8 bytes per row on every server thread that ever ran one (lock_runs is capped).
+        if (lock_offsets.capacity() > BATCH_LOCK_OFFSETS_KEEP) std::vector<unsigned long long int>().swap(lock_offsets);
+        FileRangeLockRunsGuard guard(target_file, lock_runs.data(), lock_runs.size(), FileRangeLock::LockType::READ);
 
         // Below the threshold, plain serial pread inline -- no job-submit +
         // semaphore-wait round trip for a handful of rows where that
@@ -346,7 +360,7 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, bool so
         // pread is submitted to the shared XStorePreadPool (pread takes its
         // offset as a parameter and doesn't touch shared file-position
         // state, so concurrent calls on the same fd need no locking; the
-        // FileRangeLockGuard above is already a READ lock, so concurrent
+        // run guard above is a READ lock, so concurrent
         // readers inside it are fine too). Unlike a plain std::execution::
         // par_unseq fan-out, the pool's worker count is fixed and SHARED
         // across every concurrent BatchQuery call server-wide --
@@ -506,22 +520,25 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
         }
         int fd = *fd_handle;
 
-        // Single lock spanning this year-group's min-to-max offset span
-        // instead of one lock per row -- Indices is sorted ascending (the
-        // whole batch was sorted by timestamp above), so front()/back() give
-        // the span directly (same trick as BatchInsert). The fallocate64
-        // calls below still can't be coalesced into one, though: timestamps
-        // here are randomly distributed, not contiguous, so punching one big
-        // range would also deallocate OTHER rows' data sitting in the gaps
-        // between the requested points -- unlike a lock, which is harmless
-        // to over-cover.
-        const unsigned long long int first_offset = (proto_from_client->timestamp(indices.front()) - this_ts.first_epoch) * cfg_struct.rowlength();
-        const unsigned long long int last_offset = (proto_from_client->timestamp(indices.back()) - this_ts.first_epoch) * cfg_struct.rowlength();
-        const unsigned long long int region_length = (last_offset + cfg_struct.rowlength()) - first_offset;
+        // WRITE locks on exactly this year-group's runs of rows, taken all at once -- indices is sorted ascending
+        // (the whole batch was sorted by timestamp above), so the offsets are too. Rows in the gaps (a scattered
+        // writer's, a reader's) do not conflict; past the cap the group locks its min-to-max span. The fallocate64
+        // calls below still can't be coalesced into one, though: timestamps here are randomly distributed, not
+        // contiguous, so punching one big range would also deallocate OTHER rows' data sitting in the gaps between
+        // the requested points. thread_local scratch, reused: the guard is gone before the next year-group refills it.
+        thread_local std::vector<unsigned long long int> lock_offsets;
+        thread_local std::vector<FileRangeLock::Run> lock_runs;
+        lock_offsets.resize(indices.size());
+        for (size_t i = 0; i < indices.size(); i++) {
+            lock_offsets[i] = (proto_from_client->timestamp(indices[i]) - this_ts.first_epoch) * cfg_struct.rowlength();
+        }
+        BuildLockRuns(lock_offsets.data(), lock_offsets.size(), cfg_struct.rowlength(),
+                      XStoreTunables::BATCH_DELETE_MAX_RUN_LOCKS, lock_runs);
+        if (lock_offsets.capacity() > BATCH_LOCK_OFFSETS_KEEP) std::vector<unsigned long long int>().swap(lock_offsets);   // as in BatchQuery
 
         {
             // Lock prior to file OP
-            FileRangeLockGuard guard(target_file, first_offset, region_length, FileRangeLock::LockType::WRITE);
+            FileRangeLockRunsGuard guard(target_file, lock_runs.data(), lock_runs.size(), FileRangeLock::LockType::WRITE);
 
             // Union of the successful punches: ONE dirty note per year-group (one tracker lock) instead of one per
             // row. Over-marks the unpunched gaps between rows, which only costs the checkpoint a slightly wider

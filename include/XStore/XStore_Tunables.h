@@ -724,4 +724,13 @@ static_assert(WAL_APPLY_MAX_RUN_LOCKS >= 1, "a record needs at least one lock");
 inline constexpr uint64_t WAL_APPLY_MAX_RUN_LOCKS_KEEP_OLD_REBUILD = 512;
 static_assert(WAL_APPLY_MAX_RUN_LOCKS_KEEP_OLD_REBUILD >= 1, "a record needs at least one lock");
 
+// BatchDelete (WRITE) and BatchQuery (READ) lock exactly a year-group's runs of rows (BuildLockRuns), so a scattered
+// writer's rows in the gaps and the request's rows never conflict; past the cap the group locks its min-to-max span.
+// 1 = the single span lock of every year-group (the behaviour before per-run locks for these two calls). 512 is
+// conservative, not measured: it equals the WAL apply's keep-old cap (WAL_APPLY_MAX_RUN_LOCKS_KEEP_OLD_REBUILD).
+inline constexpr uint64_t BATCH_DELETE_MAX_RUN_LOCKS = 512;
+static_assert(BATCH_DELETE_MAX_RUN_LOCKS >= 1, "a year-group needs at least one lock");
+inline constexpr uint64_t BATCH_QUERY_MAX_RUN_LOCKS = 512;
+static_assert(BATCH_QUERY_MAX_RUN_LOCKS >= 1, "a year-group needs at least one lock");
+
 } // namespace XStoreTunables

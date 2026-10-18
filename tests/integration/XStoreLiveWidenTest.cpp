@@ -530,12 +530,13 @@ TEST(FileRangeLockWriterWaitTest, StressCountsExactlyTheBlockedWriters) {
 using LockRun = FileRangeLock::Run;
 
 // A run set taken (blocking) on its own thread; `acquired` set once held; released when `release` is set.
-std::thread RunsThread(FileRangeLock &lock, std::vector<LockRun> runs, std::atomic<bool> &acquired, std::atomic<bool> &release) {
-    return std::thread([&lock, runs = std::move(runs), &acquired, &release] {
-        lock.LockRuns(runs.data(), runs.size());
+std::thread RunsThread(FileRangeLock &lock, std::vector<LockRun> runs, std::atomic<bool> &acquired, std::atomic<bool> &release,
+                       FileRangeLock::LockType type = kWrite) {
+    return std::thread([&lock, runs = std::move(runs), &acquired, &release, type] {
+        lock.LockRuns(runs.data(), runs.size(), type);
         acquired.store(true);
         while (!release.load()) std::this_thread::sleep_for(std::chrono::microseconds(200));
-        lock.UnlockRuns(runs.data(), runs.size());
+        lock.UnlockRuns(runs.data(), runs.size(), type);
     });
 }
 
@@ -870,6 +871,128 @@ TEST(FileRangeLockRunsTest, StressRunSetsAndSingleRangesNoDeadlockExclusionHolds
     EXPECT_EQ(lock.ActiveLocksForTests(), 0u);
     std::printf("[run lock stress] %llu ops, %llu run sets, %llu writer waits\n", static_cast<unsigned long long>(ops.load()),
                 static_cast<unsigned long long>(set_ops.load()), static_cast<unsigned long long>(lock.WriterWaits().waits));
+}
+
+// ---- FileRangeLock::LockRuns(READ): BatchQuery's per-run READ locks; BuildLockRuns ----------------------------------
+
+// READ sets share overlapping and identical runs; releasing one leaves exactly the other's entries (an identical READ
+// entry of another holder is not taken with it).
+TEST(FileRangeLockReadRunsTest, OverlappingReadSetsCoexistAndEachUnlockTakesOnlyItsOwnEntries) {
+    FileRangeLock lock;
+    const std::vector<LockRun> a = {{0, 10}, {100, 10}, {200, 10}};
+    const std::vector<LockRun> b = {{5, 10}, {100, 10}, {300, 10}};
+    lock.LockRuns(a.data(), a.size(), kRead);
+    auto other = std::async(std::launch::async, [&] {
+        lock.LockRuns(b.data(), b.size(), kRead);
+        lock.LockRuns(a.data(), a.size(), kRead);   // an identical set too
+    });
+    if (other.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {   // stuck in LockRuns: f would hang
+        ADD_FAILURE() << "a READ set waited for READs";
+        AbortAfterAFailedWait();
+    }
+    EXPECT_EQ(lock.ActiveLocksForTests(), 9u);
+    lock.UnlockRuns(a.data(), a.size(), kRead);
+    EXPECT_EQ(lock.ActiveLocksForTests(), 6u);
+    for (const LockRun &r : a) EXPECT_FALSE(lock.TryLockRangeFor(r.start, r.length, kWrite, milliseconds(0))) << r.start;
+    lock.UnlockRuns(a.data(), a.size(), kRead);
+    EXPECT_EQ(lock.ActiveLocksForTests(), 3u);
+    EXPECT_TRUE(lock.TryLockRangeFor(200, 10, kWrite, milliseconds(0))) << "a's last run was not released";
+    lock.UnlockRange(200, 10, kWrite);
+    EXPECT_FALSE(lock.TryLockRangeFor(100, 10, kWrite, milliseconds(0))) << "b's shared run was released with a's";
+    lock.UnlockRuns(b.data(), b.size(), kRead);
+    EXPECT_EQ(lock.ActiveLocksForTests(), 0u);
+    EXPECT_EQ(lock.WriterWaits().waits, 0u);
+}
+
+// A held READ set blocks writes on its runs only; a WRITE held in a gap does not keep it out.
+TEST(FileRangeLockReadRunsTest, AHeldWriteInAGapDoesNotBlockAReadSet) {
+    FileRangeLock lock;
+    const std::vector<LockRun> runs = {{0, 10}, {100, 10}, {200, 10}};
+    lock.LockRange(10, 90, kWrite);
+    lock.LockRange(110, 90, kRead);
+    auto set = std::async(std::launch::async, [&] { lock.LockRuns(runs.data(), runs.size(), kRead); });
+    if (set.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+        ADD_FAILURE() << "a READ set waited for a gap WRITE";
+        AbortAfterAFailedWait();
+    }
+    for (const LockRun &r : runs) {
+        SCOPED_TRACE(r.start);
+        EXPECT_FALSE(lock.TryLockRangeFor(r.start, r.length, kWrite, milliseconds(0)));
+        ASSERT_TRUE(lock.TryLockRangeFor(r.start + 5, 1, kRead, milliseconds(0)));
+        lock.UnlockRange(r.start + 5, 1, kRead);
+    }
+    EXPECT_FALSE(lock.TryLockRangeFor(50, 100, kWrite, milliseconds(0))) << "a WRITE straddling a run";
+    lock.UnlockRuns(runs.data(), runs.size(), kRead);
+    lock.UnlockRange(10, 90, kWrite);
+    lock.UnlockRange(110, 90, kRead);
+    EXPECT_EQ(lock.ActiveLocksForTests(), 0u);
+}
+
+// A WRITE on one run keeps the READ set out until released; meanwhile the set holds none of its runs and registers
+// nothing as a waiting writer, and its wait is not a writer wait.
+TEST(FileRangeLockReadRunsTest, AHeldWriteOnARunBlocksTheReadSetWhichHoldsNothingMeanwhile) {
+    FileRangeLock lock;
+    lock.LockRange(105, 1, kWrite);
+    std::atomic<bool> acquired{false}, release{false};
+    std::thread set = RunsThread(lock, {{0, 10}, {100, 10}, {200, 10}}, acquired, release, kRead);
+    std::this_thread::sleep_for(milliseconds(50));
+    EXPECT_FALSE(acquired.load()) << "the READ set got in over a held WRITE";
+    EXPECT_EQ(lock.WaitingWritersForTests(), 0u);
+    EXPECT_EQ(lock.ActiveLocksForTests(), 1u);
+    EXPECT_TRUE(lock.TryLockRangeFor(0, 10, kWrite, milliseconds(0))) << "the waiting set holds its first run";
+    EXPECT_TRUE(lock.TryLockRangeFor(200, 10, kWrite, milliseconds(0))) << "the waiting set holds its last run";
+    lock.UnlockRange(105, 1, kWrite);
+    std::this_thread::sleep_for(milliseconds(30));
+    EXPECT_FALSE(acquired.load()) << "the set got in while its first run was held";
+    lock.UnlockRange(0, 10, kWrite);
+    std::this_thread::sleep_for(milliseconds(30));
+    EXPECT_FALSE(acquired.load()) << "the set got in while its last run was held";
+    lock.UnlockRange(200, 10, kWrite);
+    WaitForFlag(acquired, "the set never got in");
+    AbortIfAWaitFailed();
+    EXPECT_EQ(lock.ActiveLocksForTests(), 3u);
+    release.store(true);
+    set.join();
+    EXPECT_EQ(lock.ActiveLocksForTests(), 0u);
+    EXPECT_EQ(lock.WaitingWritersForTests(), 0u);
+    EXPECT_EQ(lock.WriterWaits().waits, 0u) << "a READ set's wait is not a writer wait";
+}
+
+// UnlockRuns(READ) wakes waiters: a WRITE set waiting on a held READ set gets in once it goes; a set of one is
+// LockRange(READ).
+TEST(FileRangeLockReadRunsTest, UnlockingAReadSetWakesAWaitingWriteSet) {
+    FileRangeLock lock;
+    const std::vector<LockRun> reads = {{0, 10}, {100, 10}};
+    lock.LockRuns(reads.data(), reads.size(), kRead);
+    std::atomic<bool> acquired{false}, release{true};
+    std::thread set = RunsThread(lock, {{50, 10}, {105, 1}}, acquired, release);
+    WaitForWaitingWriters(lock, 1);
+    AbortIfAWaitFailed();
+    lock.UnlockRuns(reads.data(), reads.size(), kRead);
+    WaitForFlag(acquired, "the WRITE set never got in after the READ set went");
+    AbortIfAWaitFailed();
+    set.join();
+    const LockRun one{40, 20};
+    lock.LockRuns(&one, 1, kRead);
+    lock.UnlockRange(40, 20, kRead);
+    EXPECT_EQ(lock.ActiveLocksForTests(), 0u);
+}
+
+TEST(BuildLockRunsTest, MergesAdjacentAndDuplicateRowsAndTakesTheHullPastTheCap) {
+    std::vector<LockRun> runs = {{1, 1}};   // cleared first
+    const auto build = [&](std::vector<unsigned long long> offsets, size_t cap) {
+        BuildLockRuns(offsets.data(), offsets.size(), 10, cap, runs);
+        std::vector<std::pair<unsigned long long, unsigned long long>> out;
+        for (const LockRun &r : runs) out.emplace_back(r.start, r.length);
+        return out;
+    };
+    using V = std::vector<std::pair<unsigned long long, unsigned long long>>;
+    EXPECT_EQ(build({}, 4), V{});
+    EXPECT_EQ(build({30}, 1), (V{{30, 10}}));
+    EXPECT_EQ(build({0, 10, 10, 20, 50, 50, 70, 80}, 3), (V{{0, 30}, {50, 10}, {70, 20}})) << "exactly the cap";
+    EXPECT_EQ(build({0, 10, 10, 20, 50, 50, 70, 80}, 2), (V{{0, 90}})) << "one over the cap: the hull";
+    EXPECT_EQ(build({0, 20}, 1), (V{{0, 30}}));
+    EXPECT_EQ(build({40, 40, 40}, 1), (V{{40, 10}}));
 }
 
 // ---- Helpers --------------------------------------------------------------------------------------------------------
@@ -2018,6 +2141,350 @@ TEST_F(XStoreLiveWidenTest, AKeepOldRebuildLowersTheRunCapOfTheWalApply) {
     ASSERT_TRUE(zmap.FinishRebuild());
     ASSERT_TRUE(catidx.FinishRebuild());
     EXPECT_EQ(lock.ActiveLocksForTests(), 0u);
+}
+
+// ---- 2c. Per-run locks of BatchQuery (READ) and BatchDelete (WRITE) -------------------------------------------------
+
+// BatchQuery READ-locks only the rows it reads: a WRITE held on a gap row between queried rows does not stop it, one held
+// on a queried row does until released. BATCH_QUERY_MAX_RUN_LOCKS runs still lock run by run, one more locks the
+// min-to-max span (the gap WRITE stops it). Every answer is in request order (sort_time off), with duplicates repeated
+// and holes omitted, exactly the rows present.
+TEST_F(XStoreLiveWidenTest, BatchQueryLocksOnlyItsRowsAndAnswersAsBefore) {
+    constexpr uint64_t kCap = XStoreTunables::BATCH_QUERY_MAX_RUN_LOCKS;
+    XStore store;
+    const std::string db = "BQRUNLOCK";
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    std::map<uint64_t, XStore_Proto::RowData> present;
+    {
+        Rows seed;
+        for (uint64_t i = 0; i < kCap + 100; ++i) {
+            if (i % 7 == 3) continue;   // a hole
+            const uint64_t r = 10 + 2 * i;
+            present[r] = ValueRow(r * 3, 10);
+            seed.emplace_back(Epoch(r), present[r]);
+        }
+        Insert(store, db, seed);
+    }
+    FileRangeLock &lock = FileLockRegistry::Get(YearPath(db, ".XSTORE"));
+    std::mt19937_64 rng(512);
+    const auto query = [&](const std::vector<uint64_t> &rows) {
+        return std::async(std::launch::async, [&db, rows] {
+            XStore r;
+            XStore_Proto::BatchQuery_REQ req;
+            req.set_dbname(db);
+            for (uint64_t row : rows) req.add_timestamp(Epoch(row));
+            return BatchQuery(r, &req, /*sort_time=*/false);
+        });
+    };
+    const auto expect_answer = [&](const std::vector<uint64_t> &rows, const XStore_Proto::BatchQuery_REP &rep) {
+        std::vector<uint64_t> want;
+        for (uint64_t row : rows) if (present.count(row) != 0) want.push_back(row);
+        ASSERT_EQ(static_cast<size_t>(rep.queryresponse_size()), want.size()) << rep.querystatus();
+        for (size_t i = 0; i < want.size(); ++i) {
+            ASSERT_EQ(rep.queryresponse(static_cast<int>(i)).timestamp(), Epoch(want[i])) << "entry " << i;
+            ASSERT_EQ(rep.queryresponse(static_cast<int>(i)).data().SerializeAsString(), present.at(want[i]).SerializeAsString())
+                << "entry " << i;
+        }
+    };
+    // `runs` isolated rows (every other row from 10, holes included), shuffled, a few duplicated.
+    const auto rows_of = [&](uint64_t runs) {
+        std::vector<uint64_t> rows;
+        for (uint64_t i = 0; i < runs; ++i) rows.push_back(10 + 2 * i);
+        for (uint64_t i = 0; i < 5; ++i) rows.push_back(rows[rng() % runs]);
+        std::shuffle(rows.begin(), rows.end(), rng);
+        return rows;
+    };
+    const auto wait_ready = [](auto &f, const char *what) {
+        if (f.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+            ADD_FAILURE() << what;
+            AbortAfterAFailedWait();
+        }
+    };
+    constexpr uint64_t kGapRow = 13;   // between queried rows 12 and 14
+    // A bounded WRITE on `row`: a run the store leaked would otherwise block this thread for good.
+    const auto hold_write = [&](uint64_t row) {
+        if (!lock.TryLockRangeFor(row * kRowLength, kRowLength, kWrite, std::chrono::seconds(10))) {
+            ADD_FAILURE() << "a lock leaked";
+            AbortAfterAFailedWait();
+        }
+    };
+
+    {   // A WRITE on a gap row: no wait.
+        const std::vector<uint64_t> rows = rows_of(40);
+        hold_write(kGapRow);
+        auto f = query(rows);
+        EXPECT_EQ(f.wait_for(std::chrono::seconds(10)), std::future_status::ready) << "waited for a WRITE in its gaps";
+        lock.UnlockRange(kGapRow * kRowLength, kRowLength, kWrite);
+        wait_ready(f, "the query never finished");
+        expect_answer(rows, f.get());
+    }
+    {   // A WRITE on a queried row: waits until it goes.
+        const std::vector<uint64_t> rows = rows_of(40);
+        hold_write(14);
+        auto f = query(rows);
+        EXPECT_EQ(f.wait_for(milliseconds(300)), std::future_status::timeout) << "read a row a WRITE holds";
+        lock.UnlockRange(14 * kRowLength, kRowLength, kWrite);
+        wait_ready(f, "the query never got in after the WRITE went");
+        expect_answer(rows, f.get());
+    }
+    for (const uint64_t runs : {kCap, kCap + 1}) {
+        SCOPED_TRACE(std::to_string(runs) + " runs");
+        const std::vector<uint64_t> rows = rows_of(runs);
+        hold_write(kGapRow);
+        auto f = query(rows);
+        if (runs <= kCap) {
+            EXPECT_EQ(f.wait_for(std::chrono::seconds(10)), std::future_status::ready) << "at the cap: waited for a gap WRITE";
+        } else {
+            EXPECT_EQ(f.wait_for(milliseconds(300)), std::future_status::timeout) << "past the cap: did not lock its span";
+        }
+        lock.UnlockRange(kGapRow * kRowLength, kRowLength, kWrite);
+        wait_ready(f, "the query never finished");
+        expect_answer(rows, f.get());
+    }
+    // An already-sorted request (the lock list needs no sort) and the same rows shuffled, small and past the
+    // thread_local release bound (70000 timestamps, mostly holes): the same answers, in request order.
+    for (const uint64_t runs : {uint64_t{40}, uint64_t{70000}}) {
+        SCOPED_TRACE(std::to_string(runs) + " rows, sorted then shuffled");
+        std::vector<uint64_t> rows = rows_of(runs);
+        std::sort(rows.begin(), rows.end());
+        for (int pass = 0; pass < 2; ++pass) {
+            auto f = query(rows);
+            wait_ready(f, "the query never finished");
+            expect_answer(rows, f.get());
+            std::shuffle(rows.begin(), rows.end(), rng);
+        }
+    }
+    EXPECT_EQ(lock.ActiveLocksForTests(), 0u);
+}
+
+// BatchDelete WRITE-locks only the rows it deletes: a READ held on a gap row does not stop it, one held on a deleted
+// row does until released; BATCH_DELETE_MAX_RUN_LOCKS runs lock run by run, one more locks the span. The data and
+// the index files equal a reference DB given the same deletes as one-row BatchDeletes.
+TEST_F(XStoreLiveWidenTest, BatchDeleteLocksOnlyItsRowsAndDeletesAsBefore) {
+    constexpr uint64_t kCap = XStoreTunables::BATCH_DELETE_MAX_RUN_LOCKS;
+    XStore store;
+    const std::string db = "BDRUNLOCK", ref = "BDRUNLOCKREF";
+    constexpr uint64_t kRows = 100 + 2 * (2 * kCap + 1) + 20;
+    for (const std::string &d : {db, ref}) {
+        CreateTestDb(store, d, XStore_Proto::SECOND, kRowLength);
+        Rows seed;
+        for (uint64_t r = 0; r < kRows; ++r) seed.emplace_back(Epoch(r), ValueRow(r * 3, 10));
+        Insert(store, d, seed);
+    }
+    FileRangeLock &lock = FileLockRegistry::Get(YearPath(db, ".XSTORE"));
+    std::mt19937_64 rng(513);
+    const auto delete_rows = [&](XStore &s, const std::string &d, const std::vector<uint64_t> &rows) {
+        XStore_Proto::BatchDelete_REQ req;
+        req.set_dbname(d);
+        for (uint64_t row : rows) req.add_timestamp(Epoch(row));
+        const std::string status = s.BatchDelete(&req).deletestatus();
+        EXPECT_NE(status.find("[INFO]"), std::string::npos) << status;
+    };
+    // Deletes `rows` (one request, shuffled) from db while `held` is READ-locked; `waits`: whether it must wait for it.
+    const auto expect_delete = [&](std::vector<uint64_t> rows, uint64_t held, bool waits) {
+        SCOPED_TRACE(std::to_string(rows.size()) + " rows, held row " + std::to_string(held));
+        std::shuffle(rows.begin(), rows.end(), rng);
+        if (!lock.TryLockRangeFor(held * kRowLength, kRowLength, kRead, std::chrono::seconds(10))) {
+            ADD_FAILURE() << "a lock leaked";
+            AbortAfterAFailedWait();
+        }
+        auto f = std::async(std::launch::async, [&] {
+            XStore w;
+            delete_rows(w, db, rows);
+        });
+        if (waits) {
+            WaitForWaitingWriters(lock, 1); // the delete waits as a writer on the held READ (not merely slow)
+            EXPECT_EQ(f.wait_for(milliseconds(0)), std::future_status::timeout) << "deleted a row a READ holds";
+        } else {
+            EXPECT_EQ(f.wait_for(std::chrono::seconds(10)), std::future_status::ready) << "waited for a READ in its gaps";
+        }
+        lock.UnlockRange(held * kRowLength, kRowLength, kRead);
+        if (f.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+            ADD_FAILURE() << "the delete never finished";
+            AbortAfterAFailedWait();
+        }
+        f.get();
+        for (uint64_t row : rows) delete_rows(store, ref, {row});
+    };
+    expect_delete({10, 12, 12, 13, 20}, 11, false);          // runs [10], [12, 13], [20]; a duplicate
+    expect_delete({30, 32, 34}, 32, true);
+    std::vector<uint64_t> at_cap, over_cap;
+    for (uint64_t i = 0; i < kCap; ++i) at_cap.push_back(100 + 2 * i);
+    for (uint64_t i = 0; i < kCap + 1; ++i) over_cap.push_back(100 + 2 * kCap + 10 + 2 * i);
+    expect_delete(at_cap, 101, false);
+    expect_delete(over_cap, over_cap.front() + 1, true);
+    EXPECT_EQ(lock.ActiveLocksForTests(), 0u);
+
+    const int fd = open(YearPath(db, ".XSTORE").c_str(), O_RDONLY);
+    const int ref_fd = open(YearPath(ref, ".XSTORE").c_str(), O_RDONLY);
+    ASSERT_GE(fd, 0);
+    ASSERT_GE(ref_fd, 0);
+    const auto got = ReadRows(fd, 0, kRows - 1, kRowLength);
+    const auto want = ReadRows(ref_fd, 0, kRows - 1, kRowLength);
+    close(fd);
+    close(ref_fd);
+    ASSERT_EQ(got.size(), kRows - (4 + 3 + 2 * kCap + 1)) << "rows 10, 12, 13, 20, 30, 32, 34 and the cap rows gone";
+    ASSERT_EQ(got.size(), want.size());
+    for (size_t i = 0; i < got.size(); ++i) {
+        ASSERT_EQ(got[i].first, want[i].first);
+        ASSERT_EQ(got[i].second.SerializeAsString(), want[i].second.SerializeAsString()) << "row " << got[i].first;
+    }
+    CleanRestartState(); // both indexes clean on disk
+    ExpectSameFilesAs(db, ref);
+}
+
+// One scattered SYNC writer (110-row records of fresh rows, row % 4 == 0), BatchDeletes of seeded rows (row % 4 == 2,
+// first 8 blocks) and two BatchQuery threads over rows nobody writes (row % 4 == 3 present, row % 4 == 1 holes) on one
+// year: every lock set is under its cap and the row sets are disjoint, so no WRITE ever waits (the writer-wait counter
+// does not move) and every query answer is exact. The final data equals the serial replay, the indexes a startup
+// rebuild.
+TEST_F(XStoreLiveWidenTest, ScatteredWriterBesideBatchQueriesAndBatchDeletesOnDisjointRowsNeverWaits) {
+    XStore store;
+    const std::string db = "RUNLOCKBATCHMIX";
+    constexpr int kWidth = 64;
+    const uint64_t rpb = Rpb();
+    constexpr uint64_t kBlocks = 32;
+    const uint64_t rows = kBlocks * rpb;
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    std::map<uint64_t, XStore_Proto::RowData> expected;
+    expected[0] = ValueRow(0, 10); // index files born 64 wide
+    Insert(store, db, {{Epoch(0), expected[0]}});
+    std::vector<uint64_t> deletable, readable;
+    {
+        Rows seed;
+        for (uint64_t r = 2; r < rows; r += 4) {
+            expected[r] = ValueRow(r * 7 % 100000, kWidth);
+            seed.emplace_back(Epoch(r), expected[r]);
+            if (r < 8 * rpb) deletable.push_back(r);
+        }
+        Insert(store, db, seed);
+    }
+    for (uint64_t r = 3; r < rows; r += 4) {
+        expected[r] = ValueRow(r * 7 % 100000, kWidth);
+        readable.push_back(r);
+    }
+    {
+        Rows seed;
+        for (uint64_t r = 3; r < rows; r += 4) seed.emplace_back(Epoch(r), expected[r]);
+        Insert(store, db, seed);
+    }
+    const std::map<uint64_t, XStore_Proto::RowData> readable_rows = [&] {
+        std::map<uint64_t, XStore_Proto::RowData> m;
+        for (uint64_t r = 3; r < rows; r += 4) m[r] = expected[r];
+        return m;
+    }();
+    std::mt19937_64 rng(4242);
+    std::vector<uint64_t> fresh;
+    for (uint64_t r = 4; r < rows; r += 4) {
+        fresh.push_back(r);
+        expected[r] = ValueRow(100000 + r, kWidth);
+    }
+    std::shuffle(fresh.begin(), fresh.end(), rng);
+    std::shuffle(deletable.begin(), deletable.end(), rng);
+    deletable.resize(deletable.size() / 2);
+    for (uint64_t r : deletable) expected.erase(r);
+
+    const std::string data_path = YearPath(db, ".XSTORE");
+    FileRangeLock &lock = FileLockRegistry::Get(data_path);
+    const uint64_t waits_before = lock.WriterWaits().waits;
+    constexpr size_t kBatchRows = 110, kDeleteRows = 40, kQueryRows = 200;
+    std::atomic<int> insert_batches{0}, delete_batches{0}, queries{0}, writers_left{2};
+    std::vector<std::thread> threads;
+    threads.emplace_back([&] {
+        XStore w;
+        for (size_t from = 0; from < fresh.size(); from += kBatchRows) {
+            XStore_Proto::BatchInsert_REQ req;
+            req.set_dbname(db);
+            req.set_durabilitymode(XStore_Proto::SYNC);
+            for (size_t i = from; i < std::min(fresh.size(), from + kBatchRows); ++i) {
+                XStore_Proto::BatchInsert_DATA *e = req.add_batchinsert_data();
+                e->set_timestamp(Epoch(fresh[i]));
+                *e->mutable_data() = expected.at(fresh[i]);
+            }
+            XStore_Proto::BatchInsert_REP rep;
+            w.BatchInsert(&req, &rep);
+            EXPECT_NE(rep.insertstatus().find("successfully"), std::string::npos) << rep.insertstatus();
+            ++insert_batches;
+        }
+        --writers_left;
+    });
+    threads.emplace_back([&] {
+        XStore w;
+        const size_t total_batches = (fresh.size() + kBatchRows - 1) / kBatchRows;
+        const size_t delete_calls = (deletable.size() + kDeleteRows - 1) / kDeleteRows;
+        for (size_t k = 0; k < delete_calls; ++k) {
+            // Paced by the inserts, so the deletes spread over the whole insert phase.
+            while (static_cast<size_t>(insert_batches.load()) < k * total_batches / delete_calls && writers_left.load() > 1) {
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            }
+            XStore_Proto::BatchDelete_REQ req;
+            req.set_dbname(db);
+            for (size_t i = k * kDeleteRows; i < std::min(deletable.size(), (k + 1) * kDeleteRows); ++i) {
+                req.add_timestamp(Epoch(deletable[i]));
+            }
+            const std::string status = w.BatchDelete(&req).deletestatus();
+            EXPECT_NE(status.find("[INFO]"), std::string::npos) << status;
+            ++delete_batches;
+        }
+        --writers_left;
+    });
+    for (unsigned q = 0; q < 2; ++q) {
+        threads.emplace_back([&, q] {
+            XStore r;
+            std::mt19937_64 qrng(700 + q);
+            while (writers_left.load() > 0) {
+                XStore_Proto::BatchQuery_REQ req;
+                req.set_dbname(db);
+                std::vector<uint64_t> asked;
+                for (size_t i = 0; i < kQueryRows; ++i) {
+                    const uint64_t row = readable[qrng() % readable.size()] - (qrng() % 2 == 0 ? 0 : 2); // % 4 == 3 or 1
+                    asked.push_back(row);
+                    req.add_timestamp(Epoch(row));
+                }
+                const bool sort_time = q == 0;
+                const XStore_Proto::BatchQuery_REP rep = BatchQuery(r, &req, sort_time);
+                if (sort_time) std::sort(asked.begin(), asked.end());
+                std::vector<uint64_t> want;
+                for (uint64_t row : asked) if (readable_rows.count(row) != 0) want.push_back(row);
+                bool same = static_cast<size_t>(rep.queryresponse_size()) == want.size();
+                for (size_t i = 0; same && i < want.size(); ++i) {
+                    same = rep.queryresponse(static_cast<int>(i)).timestamp() == Epoch(want[i]) &&
+                           rep.queryresponse(static_cast<int>(i)).data().SerializeAsString() ==
+                               readable_rows.at(want[i]).SerializeAsString();
+                }
+                EXPECT_TRUE(same) << "query " << queries.load() << " (sort_time " << sort_time << ") answered wrong";
+                ++queries;
+            }
+        });
+    }
+    auto joined = std::async(std::launch::async, [&] { for (std::thread &t : threads) t.join(); });
+    if (joined.wait_for(std::chrono::seconds(120)) != std::future_status::ready) {
+        ADD_FAILURE() << "a thread is stuck (deadlock or lost wakeup)";
+        AbortAfterAFailedWait();
+    }
+    EXPECT_EQ(lock.WriterWaits().waits, waits_before) << "a WRITE waited: some lock set covered rows beyond its own";
+    EXPECT_GT(queries.load(), 10);
+    EXPECT_EQ(lock.ActiveLocksForTests(), 0u);
+    std::printf("[batch run locks] %d insert batches, %d batch deletes, %d batch queries, %llu writer waits\n",
+                insert_batches.load(), delete_batches.load(), queries.load(),
+                static_cast<unsigned long long>(lock.WriterWaits().waits - waits_before));
+
+    {   // Final data == the serial replay.
+        const int fd = open(data_path.c_str(), O_RDONLY);
+        ASSERT_GE(fd, 0);
+        const auto got = ReadRows(fd, 0, rows - 1, kRowLength);
+        close(fd);
+        EXPECT_EQ(got.size(), expected.size());
+        uint64_t wrong = 0;
+        for (const auto &[r, row] : got) {
+            const auto it = expected.find(r);
+            if (it == expected.end() || it->second.SerializeAsString() != row.SerializeAsString()) {
+                if (++wrong < 5) ADD_FAILURE() << "row " << r << (it == expected.end() ? " should be absent" : " has the wrong value");
+            }
+        }
+        EXPECT_EQ(wrong, 0u);
+    }
+    ExpectIndexesMatchAStartupRebuild(store, db, kWidth, kBlocks, 100000);
 }
 
 // ---- 3. Starvation: a hot head must not stop the builder ------------------------------------------------------------
