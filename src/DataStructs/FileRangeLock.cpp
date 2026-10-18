@@ -86,9 +86,14 @@ void FileRangeLock::LockRuns(const Run *runs, size_t count) {
         LockRange(runs[0].start, runs[0].length, LockType::WRITE);
         return;
     }
+    // O(entries * log runs), like UnlockRuns: the runs are sorted and disjoint, so their ends ascend; the first run
+    // ending after an entry's start is the only candidate to overlap it. Any overlap conflicts (the set is WRITE).
+    const Run *runs_end = runs + count;
     const auto free = [&] {
-        for (size_t i = 0; i < count; ++i) {
-            if (Conflicts(runs[i].start, runs[i].start + runs[i].length, LockType::WRITE)) return false;
+        for (const ActiveLock &l : active_locks) {
+            const Run *r = std::upper_bound(runs, runs_end, l.start,
+                                            [](unsigned long long v, const Run &run) { return v < run.start + run.length; });
+            if (r != runs_end && r->start < l.end) return false;
         }
         return true;
     };

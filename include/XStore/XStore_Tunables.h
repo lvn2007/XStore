@@ -707,9 +707,21 @@ inline constexpr size_t      WAL_FLUSH_CHUNK_BYTES         = 4u << 20;    // pac
 // WAL apply: a record WRITE-locks exactly its runs of contiguous rows, so readers, deletes and the live widen builder
 // touching rows in the gaps do not wait for it. Every lock call on the file scans the held entries linearly, so a
 // record with more runs than this locks its first-to-last row span as ONE range instead (bounds the table per holder).
-// 1 = the single first-to-last span lock of every record (the behaviour before per-run locks: the rollback value).
+// 1 = the single first-to-last span lock of every record (the behaviour before per-run locks; a full rollback also needs the keep-old cap below set to 1).
+// 4096 covers the ~1000-row XBench BATCH_RAND records. Measured on a Mystic server copy with cap 4096 everywhere: the
+// random-batch live widen was 1.6x faster with keep-old OFF (in-place rebuild, which this cap still serves) and 2.2x
+// faster with keep-old ON; the shipped rule does NOT use 4096 during a keep-old rebuild (see the cap below), so the
+// 2.2x does not apply to it. Writer lock acquisition fell from ~550 to ~20 us per record. The cost: while a record holds
+// 4096 runs, every other lock call on the file scans ~4096 x 24 B = ~100 KB of entries linearly.
 // ponytail: all-or-hull; greedy gap-merging down to the cap is the upgrade if big scattered records matter.
-inline constexpr uint64_t WAL_APPLY_MAX_RUN_LOCKS = 512;
+inline constexpr uint64_t WAL_APPLY_MAX_RUN_LOCKS = 4096;
 static_assert(WAL_APPLY_MAX_RUN_LOCKS >= 1, "a record needs at least one lock");
+// The cap while a KEEP-OLD live rebuild is active on the record's year file (its zone map or catidx): exactly the
+// behaviour of commit 8f50c0a5 during a keep-old widen (the ~1000-row XBench records exceed it and take the span
+// lock). Measured on Mystic with this rule: keep-old ON widen 428/453 s, insert max ~1.6 s, no stall. A larger cap
+// during a keep-old rebuild reproduced the end-of-widen insert stall
+// (cause open: TODO.md "Raise the per-run lock cap ... end-of-widen insert stall"). 1 = the whole-span lock always.
+inline constexpr uint64_t WAL_APPLY_MAX_RUN_LOCKS_KEEP_OLD_REBUILD = 512;
+static_assert(WAL_APPLY_MAX_RUN_LOCKS_KEEP_OLD_REBUILD >= 1, "a record needs at least one lock");
 
 } // namespace XStoreTunables

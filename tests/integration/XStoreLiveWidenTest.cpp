@@ -541,11 +541,14 @@ std::thread RunsThread(FileRangeLock &lock, std::vector<LockRun> runs, std::atom
 
 // After a failed wait the set (or writer) is stuck in its lock call: joining it would hang the suite and returning
 // would destroy a joinable thread. End the process with the failure printed instead.
-void AbortIfAWaitFailed() {
-    if (!::testing::Test::HasFatalFailure()) return;
+[[noreturn]] void AbortAfterAFailedWait() {
     std::fprintf(stderr, "a lock wait failed; aborting instead of joining a blocked thread\n");
     std::fflush(nullptr);
     std::abort();
+}
+
+void AbortIfAWaitFailed() {
+    if (::testing::Test::HasFatalFailure()) AbortAfterAFailedWait();
 }
 
 void WaitForFlag(const std::atomic<bool> &flag, const char *what) {
@@ -659,6 +662,73 @@ TEST(FileRangeLockRunsTest, AWaitingSetRegistersItsHullOnceAndLeavesNothingBehin
     set.join();
     EXPECT_EQ(lock.ActiveLocksForTests(), 0u);
     EXPECT_EQ(lock.WriterWaits().waits, 34u);
+}
+
+// The set's conflict check at a large set (4096 runs, the normal cap's size): 4096 runs [100 i, 100 i + 50) against 1000 held READ ranges in random
+// gaps (some touching both neighbouring runs exactly), one WRITE in a free gap and one READ past the last run gets in
+// at once; adding ONE held range (READ or WRITE) that overlaps a run (each shape: over a run's start, over its end,
+// inside, around it, across two runs, rest of file; and the first byte of run 0 and the last byte of the last run)
+// keeps it out until that range goes. (The set is WRITE: the held type does not matter to it; the random gaps are
+// READs so the overlapping ranges can be taken beside them.)
+TEST(FileRangeLockRunsTest, AFullSizeSetConflictsIffAHeldRangeOverlapsOneOfItsRuns) {
+    constexpr uint64_t kRuns = 4096;   // the predicate at a large set, not the tunable
+    std::vector<LockRun> runs;
+    for (uint64_t i = 0; i < kRuns; ++i) runs.push_back({100 * i, 50});
+    std::mt19937_64 rng(4096);
+    FileRangeLock lock;
+    struct Held { unsigned long long start, length; FileRangeLock::LockType type; };
+    std::vector<Held> gaps;
+    std::set<uint64_t> gap_runs;
+    while (gap_runs.size() < 1000) gap_runs.insert(rng() % kRuns);
+    for (uint64_t i : gap_runs) {
+        const unsigned long long lo = 100 * i + 50 + (i % 3 == 0 ? 0 : rng() % 25);
+        const unsigned long long hi = i % 3 == 0 ? 100 * i + 100 : lo + 1 + rng() % (100 * i + 100 - lo - 1);
+        gaps.push_back({lo, hi - lo, kRead});
+    }
+    uint64_t free_gap = rng() % (kRuns - 1);   // a WRITE in a gap nothing else holds
+    while (gap_runs.count(free_gap) != 0) free_gap = rng() % (kRuns - 1);
+    gap_runs.insert(free_gap);                  // the overlapped run below keeps clear of it too
+    gaps.push_back({100 * free_gap + 50, 50, kWrite});
+    gaps.push_back({100 * kRuns, 10, kRead});   // after every run: the search finds no run ending past it
+    for (const Held &h : gaps) lock.LockRange(h.start, h.length, h.type);
+
+    const auto set_gets_in = [&](std::chrono::milliseconds within) {
+        auto f = std::async(std::launch::async, [&] { lock.LockRuns(runs.data(), runs.size()); });
+        const bool in = f.wait_for(within) == std::future_status::ready;
+        return std::make_pair(in, std::move(f));
+    };
+    {
+        auto [in, f] = set_gets_in(std::chrono::seconds(10));
+        if (!in) {   // the set is stuck in LockRuns: f's destructor would hang
+            ADD_FAILURE() << "the set waited for ranges in its gaps only";
+            AbortAfterAFailedWait();
+        }
+        lock.UnlockRuns(runs.data(), runs.size());
+    }
+    uint64_t k = 1 + rng() % (kRuns - 2);   // the overlapped run: the gaps around it hold nothing (no WRITE vs gap READ)
+    while (gap_runs.count(k - 1) + gap_runs.count(k) + gap_runs.count(k + 1) != 0) k = 1 + rng() % (kRuns - 2);
+    const uint64_t s = 100 * k;
+    const std::vector<Held> overlaps = {
+        {s - 10, 11, kRead}, {s + 49, 11, kWrite}, {s + 10, 10, kRead},
+        {s - 5, 60, kWrite}, {s + 40, 70, kRead}, {0, 1, kRead},                         // run 0's first byte
+        {100 * (kRuns - 1) + 49, 1, kRead}, {100 * (kRuns - 1) + 10, 0, kRead}, // last run's last byte; to the end of file
+    };
+    for (const Held &o : overlaps) {
+        SCOPED_TRACE("held [" + std::to_string(o.start) + ", +" + std::to_string(o.length) + ")");
+        lock.LockRange(o.start, o.length, o.type);
+        auto [in, f] = set_gets_in(milliseconds(0));
+        WaitForWaitingWriters(lock, 1); // the set waits as a writer on the held range (not merely slow to start)
+        EXPECT_NE(f.wait_for(milliseconds(0)), std::future_status::ready) << "the set got in over a held overlapping range";
+        (void)in;
+        lock.UnlockRange(o.start, o.length, o.type);
+        if (f.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+            ADD_FAILURE() << "the set did not get in after the overlapping range went";
+            AbortAfterAFailedWait();
+        }
+        lock.UnlockRuns(runs.data(), runs.size());
+    }
+    for (const Held &h : gaps) lock.UnlockRange(h.start, h.length, h.type);
+    EXPECT_EQ(lock.ActiveLocksForTests(), 0u);
 }
 
 // count == 1 is LockRange/UnlockRange: the same entry (either call releases the other's), the same wait accounting.
@@ -961,13 +1031,14 @@ protected:
         return DbPath(db) + "/" + std::to_string(year) + ext;
     }
 
+    // `per_request` rows per BatchInsert (one WAL record per year in each).
     static void Insert(XStore &store, const std::string &db, const Rows &rows,
-                       XStore_Proto::WalDurabilityMode mode = XStore_Proto::SYNC) {
-        for (size_t from = 0; from < rows.size(); from += 4000) {
+                       XStore_Proto::WalDurabilityMode mode = XStore_Proto::SYNC, size_t per_request = 4000) {
+        for (size_t from = 0; from < rows.size(); from += per_request) {
             XStore_Proto::BatchInsert_REQ req;
             req.set_dbname(db);
             req.set_durabilitymode(mode);
-            for (size_t i = from; i < std::min(rows.size(), from + 4000); ++i) {
+            for (size_t i = from; i < std::min(rows.size(), from + per_request); ++i) {
                 XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
                 entry->set_timestamp(rows[i].first);
                 *entry->mutable_data() = rows[i].second;
@@ -1803,11 +1874,12 @@ TEST_F(XStoreLiveWidenTest, ARecordPastTheRunCapLocksItsWholeSpanAndGivesTheSame
         for (uint64_t i = 0; i < runs; ++i) out.emplace_back(Epoch(first + 2 * i), ValueRow(base + i, 10));
         return out;
     };
+    constexpr uint64_t kStride = 2 * (kCap + 1) + 10; // rows from one record's start to the next one's
     const std::array<std::pair<Rows, XStore_Proto::WalDurabilityMode>, 4> records = {{
         {every_other(10, kCap, 1000), XStore_Proto::SYNC},
-        {every_other(2000, kCap, 3000), XStore_Proto::BYPASS},
-        {every_other(4000, kCap + 1, 5000), XStore_Proto::SYNC},
-        {every_other(6000, kCap + 1, 7000), XStore_Proto::BYPASS},
+        {every_other(10 + kStride, kCap, 1000 + kStride), XStore_Proto::BYPASS},
+        {every_other(10 + 2 * kStride, kCap + 1, 1000 + 2 * kStride), XStore_Proto::SYNC},
+        {every_other(10 + 3 * kStride, kCap + 1, 1000 + 3 * kStride), XStore_Proto::BYPASS},
     }};
     XStore store;
     const std::string db = "RUNLOCKCAP", ref = "RUNLOCKCAPSMALL";
@@ -1824,14 +1896,15 @@ TEST_F(XStoreLiveWidenTest, ARecordPastTheRunCapLocksItsWholeSpanAndGivesTheSame
         lock.LockRange(gap_row * kRowLength, kRowLength, kRead);
         auto insert = std::async(std::launch::async, [&] {
             XStore w;
-            Insert(w, db, record, mode);
+            Insert(w, db, record, mode, record.size()); // one record
         });
         if (record.size() <= kCap) {
             const bool ready = insert.wait_for(std::chrono::seconds(10)) == std::future_status::ready;
             EXPECT_TRUE(ready) << "a record at the cap waited for a READ in its gaps";
             lock.UnlockRange(gap_row * kRowLength, kRowLength, kRead);
         } else {
-            EXPECT_EQ(insert.wait_for(milliseconds(300)), std::future_status::timeout)
+            WaitForWaitingWriters(lock, 1); // the apply waits as a writer on the gap READ (not merely slow)
+            EXPECT_EQ(insert.wait_for(milliseconds(0)), std::future_status::timeout)
                 << "a record past the cap did not lock its whole span";
             lock.UnlockRange(gap_row * kRowLength, kRowLength, kRead);
         }
@@ -1847,8 +1920,8 @@ TEST_F(XStoreLiveWidenTest, ARecordPastTheRunCapLocksItsWholeSpanAndGivesTheSame
     const int ref_fd = open(YearPath(ref, ".XSTORE").c_str(), O_RDONLY);
     ASSERT_GE(fd, 0);
     ASSERT_GE(ref_fd, 0);
-    const auto got = ReadRows(fd, 0, 8000, kRowLength);
-    const auto want = ReadRows(ref_fd, 0, 8000, kRowLength);
+    const auto got = ReadRows(fd, 0, 10 + 4 * kStride, kRowLength);
+    const auto want = ReadRows(ref_fd, 0, 10 + 4 * kStride, kRowLength);
     close(fd);
     close(ref_fd);
     ASSERT_EQ(got.size(), 1 + 4 * kCap + 2);
@@ -1859,6 +1932,92 @@ TEST_F(XStoreLiveWidenTest, ARecordPastTheRunCapLocksItsWholeSpanAndGivesTheSame
     }
     CleanRestartState(); // both indexes clean on disk
     ExpectSameFilesAs(db, ref);
+}
+
+// WAL_APPLY_MAX_RUN_LOCKS_KEEP_OLD_REBUILD (512): while a keep-old rebuild is active on either of the year's index
+// files, a record of 513 single-row runs (one over 512, under WAL_APPLY_MAX_RUN_LOCKS) locks its whole span (a READ
+// held on a gap row stops it) and records of 3 and exactly 512 runs still lock their runs. Without a rebuild, after
+// FinishRebuild and during an in-place rebuild the 513-run record locks its runs. The rebuilds are begun by hand (no
+// builder): only the apply's cap choice is under test.
+TEST_F(XStoreLiveWidenTest, AKeepOldRebuildLowersTheRunCapOfTheWalApply) {
+    constexpr uint64_t kKeepOldCap = XStoreTunables::WAL_APPLY_MAX_RUN_LOCKS_KEEP_OLD_REBUILD;
+    constexpr uint64_t kOver = kKeepOldCap + 1;
+    static_assert(kKeepOldCap < kOver && kOver <= XStoreTunables::WAL_APPLY_MAX_RUN_LOCKS, "kOver runs: between the caps");
+    XStore store;
+    const std::string db = "RUNLOCKKEEPOLDCAP";
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    Insert(store, db, {{Epoch(0), ValueRow(0, 10)}});
+    const std::string path = DbPath(db);
+    ZoneMapFile &zmap = XStore::GetOrOpenZoneMap(path, kYear, kRowLength);
+    CatIdxFile &catidx = XStore::GetOrOpenCatIdx(path, kYear, kRowLength);
+    FileRangeLock &lock = FileLockRegistry::Get(YearPath(db, ".XSTORE"));
+    uint64_t next_first = 10;
+    // One SYNC record of `runs` isolated rows (every other row) while a READ is held on its first gap row: per-run
+    // locks get in while the READ is held, the hull waits for it.
+    const auto expect_record = [&](uint64_t runs, bool hull) {
+        SCOPED_TRACE(std::to_string(runs) + " runs, expect " + (hull ? "the hull" : "per-run locks"));
+        const uint64_t first = next_first;
+        next_first += 2 * runs + 10;
+        Rows record;
+        for (uint64_t i = 0; i < runs; ++i) record.emplace_back(Epoch(first + 2 * i), ValueRow(first + i, 10));
+        lock.LockRange((first + 1) * kRowLength, kRowLength, kRead);
+        auto insert = std::async(std::launch::async, [&] {
+            XStore w;
+            Insert(w, db, record, XStore_Proto::SYNC, record.size()); // one record
+        });
+        if (hull) {
+            WaitForWaitingWriters(lock, 1); // the apply waits as a writer on the gap READ (not merely slow)
+            EXPECT_EQ(insert.wait_for(milliseconds(0)), std::future_status::timeout) << "did not lock its whole span";
+        } else {
+            EXPECT_EQ(insert.wait_for(std::chrono::seconds(10)), std::future_status::ready) << "waited for a gap READ";
+        }
+        lock.UnlockRange((first + 1) * kRowLength, kRowLength, kRead);
+        ASSERT_EQ(insert.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+        insert.get();
+    };
+
+    EXPECT_EQ(zmap.OldWidth(), 0u);
+    EXPECT_EQ(catidx.OldWidth(), 0u);
+    expect_record(kOver, false); // no rebuild
+
+    // Only the catidx keeps an old index: the lower cap already applies (either file is enough).
+    ASSERT_EQ(catidx.BeginLiveRebuild(70, /*keep_old=*/true), BeginRebuildResult::kStarted);
+    EXPECT_EQ(zmap.OldWidth(), 0u);
+    EXPECT_NE(catidx.OldWidth(), 0u);
+    expect_record(kOver, true);
+    ASSERT_TRUE(catidx.FinishRebuild());
+    EXPECT_EQ(catidx.OldWidth(), 0u);
+    // Only the zone map keeps one.
+    ASSERT_EQ(zmap.BeginLiveRebuild(70, /*keep_old=*/true), BeginRebuildResult::kStarted);
+    EXPECT_NE(zmap.OldWidth(), 0u);
+    EXPECT_EQ(catidx.OldWidth(), 0u);
+    expect_record(kOver, true);
+    ASSERT_TRUE(zmap.FinishRebuild());
+
+    // Both files keep-old.
+    ASSERT_EQ(zmap.BeginLiveRebuild(80, /*keep_old=*/true), BeginRebuildResult::kStarted);
+    ASSERT_EQ(catidx.BeginLiveRebuild(80, /*keep_old=*/true), BeginRebuildResult::kStarted);
+    EXPECT_NE(zmap.OldWidth(), 0u);
+    EXPECT_NE(catidx.OldWidth(), 0u);
+    expect_record(3, false);
+    expect_record(kKeepOldCap, false);
+    expect_record(kOver, true);
+    ASSERT_TRUE(zmap.FinishRebuild());
+    ASSERT_TRUE(catidx.FinishRebuild());
+    EXPECT_EQ(zmap.OldWidth(), 0u);
+    EXPECT_EQ(catidx.OldWidth(), 0u);
+    expect_record(kOver, false); // after FinishRebuild
+
+    // In-place rebuild of both files: no old index, the normal cap.
+    ASSERT_EQ(zmap.BeginLiveRebuild(90, /*keep_old=*/false), BeginRebuildResult::kStarted);
+    ASSERT_EQ(catidx.BeginLiveRebuild(90, /*keep_old=*/false), BeginRebuildResult::kStarted);
+    EXPECT_TRUE(zmap.Rebuilding());
+    EXPECT_EQ(zmap.OldWidth(), 0u);
+    EXPECT_EQ(catidx.OldWidth(), 0u);
+    expect_record(kOver, false);
+    ASSERT_TRUE(zmap.FinishRebuild());
+    ASSERT_TRUE(catidx.FinishRebuild());
+    EXPECT_EQ(lock.ActiveLocksForTests(), 0u);
 }
 
 // ---- 3. Starvation: a hot head must not stop the builder ------------------------------------------------------------
@@ -3064,6 +3223,7 @@ TEST_F(XStoreLiveWidenTest, KeepOldStoppedWidenKeepsTheOldIndexServingUntilTheNe
     EXPECT_EQ(ReadHeader<ZoneMapFileHeader>(YearPath(db, ".zmap")).dirty, 0u);
     EXPECT_EQ(ReadHeader<ZoneMapFileHeader>(YearPath(db, ".zmap")).tracked_column_count, 100u);
     EXPECT_EQ(XStore::GetOrOpenZoneMap(path, kYear, kRowLength).OldWidth(), 0u);
+    EXPECT_EQ(XStore::GetOrOpenCatIdx(path, kYear, kRowLength).OldWidth(), 0u);
     ExpectSameFilesAs(db, "LWKEEPSTOPREF");
     ExpectAnswersMatchTheData(store, db, 0, kRows - 1, {5, 66, 80});
 }

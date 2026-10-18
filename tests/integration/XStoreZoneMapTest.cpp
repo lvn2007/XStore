@@ -3061,6 +3061,8 @@ TEST_F(XStoreZoneMapTest, KeepOldCrashImagesAreRebuiltAtTheNextStartAndOrphansRe
         EXPECT_EQ(catidx.BeginLiveRebuild(70, true), BeginRebuildResult::kFailed);
     }
     EXPECT_FALSE(fs::exists(zmap_path + ".new"));
+    EXPECT_EQ(zmap.OldWidth(), 0u) << "a failed begin keeps no old copy";
+    EXPECT_EQ(catidx.OldWidth(), 0u);
     EXPECT_EQ(ReadZmapHeader(zmap_path).dirty, 1u);
     EXPECT_EQ(ReadZmapHeader(zmap_path).tracked_column_count, 64u);
     save("o");

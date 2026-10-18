@@ -313,7 +313,14 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
 
     // WRITE locks on exactly the record's runs (contiguous rows; a duplicate row joins its run), taken all at once, so
     // other lock users conflict only on these rows and a reader never sees the record half-applied. Past the cap the
-    // record's whole min-to-max span is one lock.
+    // record's whole min-to-max span is one lock. While a keep-old rebuild runs on either index file the cap is the
+    // keep-old one (see the tunable). A rebuild that starts right after this check only means this one record used
+    // the normal cap, which is correct either way (the cap is a performance choice, not a correctness one).
+    // OldWidth() is the OLD file's width: non-zero whenever an old index is kept, because production files are created
+    // at EffectiveTrackedColumnCount >= 64 (a 0-width old file would only mean the larger cap during that rebuild).
+    const uint64_t run_cap = (zmap.OldWidth() != 0 || catidx.OldWidth() != 0)
+                                 ? XStoreTunables::WAL_APPLY_MAX_RUN_LOCKS_KEEP_OLD_REBUILD
+                                 : XStoreTunables::WAL_APPLY_MAX_RUN_LOCKS;
     thread_local std::vector<FileRangeLock::Run> lock_runs;
     lock_runs.clear();
     const unsigned long long row_length = record_to_apply.row_length;
@@ -323,7 +330,7 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
         if (offsets[i] == last.start + last.length) {
             last.length += row_length;
         } else if (offsets[i] != offsets[i - 1]) {
-            if (lock_runs.size() == XStoreTunables::WAL_APPLY_MAX_RUN_LOCKS) {   // over the cap: stop collecting
+            if (lock_runs.size() == run_cap) {   // over the cap: stop collecting
                 lock_runs.assign(1, {offsets.front(), (offsets.back() + row_length) - offsets.front()});
                 break;
             }

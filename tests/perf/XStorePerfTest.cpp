@@ -488,33 +488,39 @@ TEST_F(XStorePerfTest, BatchInsertThroughput_Sync) {
 // Same as BatchInsertThroughput_Sync but scattered, the XBench BATCH_RAND shape: SYNC calls of `rows_per_call` random
 // distinct rows each (fixed seed, no duplicates), all within one year, so every call is one WAL record of that many
 // isolated runs.
-static void RunScatteredBatchInsertSync(const char *label, unsigned long long rows_per_call) {
-    XStore store;
-    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
-    const unsigned long long kRowsPerCall = rows_per_call;
-    constexpr unsigned long long kYearStart = 1704067200ULL;   // 2024-01-01 00:00:00 UTC
-    constexpr unsigned long long kYearSeconds = 366ULL * 86400;
-    // Distinct rows of one year: more than the year holds would never be found.
-    const unsigned long long n = std::min(PerfOpCount(200'000), kYearSeconds);
+constexpr unsigned long long kScatterYearStart = 1704067200ULL;   // 2024-01-01 00:00:00 UTC
+constexpr unsigned long long kScatterYearSeconds = 366ULL * 86400;
+
+// The SYNC BatchInsert requests of the scattered tests, `n` rows in all.
+static std::vector<XStore_Proto::BatchInsert_REQ> ScatteredSyncRequests(unsigned long long n, unsigned long long rows_per_call) {
     std::mt19937_64 rng(20261018);
     std::unordered_set<unsigned long long> used;
     std::vector<unsigned long long> rows;
     rows.reserve(n);
     while (rows.size() < n) {
-        const unsigned long long r = rng() % kYearSeconds;
+        const unsigned long long r = rng() % kScatterYearSeconds;
         if (used.insert(r).second) rows.push_back(r);
     }
     std::vector<XStore_Proto::BatchInsert_REQ> reqs;
-    for (unsigned long long from = 0; from < n; from += kRowsPerCall) {
+    for (unsigned long long from = 0; from < n; from += rows_per_call) {
         XStore_Proto::BatchInsert_REQ &req = reqs.emplace_back();
         req.set_dbname("PERFDB");
         req.set_durabilitymode(XStore_Proto::SYNC);
-        for (unsigned long long i = from; i < std::min(n, from + kRowsPerCall); i++) {
+        for (unsigned long long i = from; i < std::min(n, from + rows_per_call); i++) {
             XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
-            entry->set_timestamp(kYearStart + rows[i]);
+            entry->set_timestamp(kScatterYearStart + rows[i]);
             *entry->mutable_data() = PerfRow(i);
         }
     }
+    return reqs;
+}
+
+static void RunScatteredBatchInsertSync(const char *label, unsigned long long rows_per_call) {
+    XStore store;
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
+    // Distinct rows of one year: more than the year holds would never be found.
+    const unsigned long long n = std::min(PerfOpCount(200'000), kScatterYearSeconds);
+    std::vector<XStore_Proto::BatchInsert_REQ> reqs = ScatteredSyncRequests(n, rows_per_call);
 
     unsigned long long failed = 0;
     auto start = std::chrono::steady_clock::now();
@@ -534,7 +540,7 @@ TEST_F(XStorePerfTest, BatchInsertScatteredThroughput_Sync) {
     RunScatteredBatchInsertSync("BatchInsertScattered[SYNC]", 110);
 }
 
-// 1000 isolated runs per record (the XBench BATCH_RAND record size): over the cap, so the record locks its whole span.
+// 1000 isolated runs per record (the XBench BATCH_RAND record size): under the cap (4096) too, so per-run locks.
 TEST_F(XStorePerfTest, BatchInsertScatteredLargeThroughput_Sync) {
     RunScatteredBatchInsertSync("BatchInsertScatteredLarge[SYNC]", 1000);
 }
@@ -1436,4 +1442,84 @@ TEST_F(XStorePerfTest, LiveWidenDuringInserts) {
                                              per_sec.size()))
                   << std::endl;
     }
+}
+
+// One writer thread makes the SYNC scattered BatchInsert calls of BatchInsertScatteredLargeThroughput_Sync (1000
+// random distinct rows each, one year, fixed seed) while XSTORE_PERF_READERS (default 4) reader threads, each with its
+// own XStore and fixed seed, UnaryQuery random rows of the same year (misses are fine) until the writer is done. The
+// year file exists before the readers start (one seed row), and they start on the writer's 'go', set right before its
+// start timestamp; reader ops/s counts only reads that completed inside the writer's window. Latencies are kept per
+// thread and merged after the join. Reports only; no performance assertion.
+TEST_F(XStorePerfTest, ScatteredInsertWithConcurrentReads) {
+    XStore store;
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
+    {   // the year file must exist, or the readers time the missing-file path (a scattered write may overwrite it)
+        XStore_Proto::UnaryInsert_REP seed;
+        store.UnaryInsert(kScatterYearStart, PerfRow(0), "PERFDB", &seed, XStore_Proto::SYNC);
+        ASSERT_NE(seed.insertstatus().find("[INFO]"), std::string::npos) << seed.insertstatus();
+    }
+    const unsigned long long n = std::min(PerfOpCount(200'000), kScatterYearSeconds);
+    std::vector<XStore_Proto::BatchInsert_REQ> reqs = ScatteredSyncRequests(n, 1000);
+    const unsigned readers = static_cast<unsigned>(EnvInt("XSTORE_PERF_READERS", 4));
+
+    using SteadyClock = std::chrono::steady_clock;
+    std::atomic<bool> go{false}, writer_done{false};
+    // Written by the writer before it releases go / sets writer_done; read by the readers after the join only.
+    SteadyClock::time_point window_start, window_end;
+    struct Read { SteadyClock::time_point done; double us; };
+    std::vector<std::vector<Read>> reads(readers);
+    std::vector<std::thread> reader_threads;
+    for (unsigned t = 0; t < readers; ++t) {
+        reader_threads.emplace_back([&, t] {
+            XStore r;
+            std::mt19937_64 rng(7000 + t);
+            std::vector<Read> &mine = reads[t];
+            XStore_Proto::UnaryQuery_REP rep;
+            while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
+            while (!writer_done.load(std::memory_order_relaxed)) {
+                const unsigned long long ts = kScatterYearStart + rng() % kScatterYearSeconds;
+                const SteadyClock::time_point t0 = SteadyClock::now();
+                r.UnaryQuery(ts, "PERFDB", &rep);
+                const SteadyClock::time_point t1 = SteadyClock::now();
+                mine.push_back({t1, std::chrono::duration<double, std::micro>(t1 - t0).count()});
+            }
+        });
+    }
+
+    unsigned long long failed = 0;
+    std::thread writer([&] {
+        XStore w;
+        window_start = SteadyClock::now();
+        go.store(true, std::memory_order_release);
+        for (XStore_Proto::BatchInsert_REQ &req : reqs) {
+            XStore_Proto::BatchInsert_REP rep;
+            w.BatchInsert(&req, &rep);
+            if (rep.insertstatus().find("successfully") == std::string::npos) ++failed;
+        }
+        window_end = SteadyClock::now();
+        writer_done.store(true, std::memory_order_relaxed);
+    });
+    writer.join();
+    for (std::thread &t : reader_threads) t.join();
+    const double elapsed = std::chrono::duration<double>(window_end - window_start).count();
+
+    std::vector<double> in_window;   // latencies of reads completed inside [window_start, window_end]
+    for (const std::vector<Read> &v : reads) {
+        for (const Read &e : v) {
+            if (e.done <= window_end) in_window.push_back(e.us);
+        }
+    }
+    std::sort(in_window.begin(), in_window.end());
+    const auto at = [&](double q) {
+        return in_window.empty() ? 0.0 : in_window[std::min(in_window.size() - 1, static_cast<size_t>(q * static_cast<double>(in_window.size())))];
+    };
+    EXPECT_EQ(failed, 0u);
+    ReportPerf({"ScatteredInsertWithConcurrentReads[writer SYNC]", n, elapsed});
+    const double secs = elapsed > 0 ? elapsed : 1.0;
+    std::cout << fmt::format("[PERF] ScatteredInsertWithConcurrentReads | readers={} | writer {:.0f} rows/s | readers {} ops, "
+                             "{:.0f} ops/s total | read latency p50 {:.1f} p99 {:.1f} max {:.1f} us",
+                             readers, static_cast<double>(n) / secs, in_window.size(),
+                             static_cast<double>(in_window.size()) / secs, at(0.5), at(0.99),
+                             in_window.empty() ? 0.0 : in_window.back())
+              << std::endl;
 }
