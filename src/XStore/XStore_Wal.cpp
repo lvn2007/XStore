@@ -296,14 +296,25 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
     //
     // Both files are pinned until this record is applied: the registry may not evict (destroy) a file this apply
     // still writes. The pin is one atomic increment inside the registry lookup and one decrement at return.
-    const ZoneMapFile::Pin zmap_pin = PinZoneMap(record_to_apply.db_base_path, first_ts.year, record_to_apply.row_length,
-                                                 record_to_apply.tracked_column_count);
+    // Same reasoning as zmap for the catidx, same (db, year, row_length, tracked_column_count) key -- the bloom filter
+    // is only ever updated here, alongside zmap, after a row's real pwrite is confirmed durable.
+    // A cold open that fails (the year is being removed, see RemovalCovers, or the file cannot be opened) fails this
+    // record before any byte is written, like the data-file open above, instead of throwing out of the WAL writer's
+    // whole batch.
+    ZoneMapFile::Pin zmap_pin;
+    CatIdxFile::Pin catidx_pin;
+    try {
+        zmap_pin = PinZoneMap(record_to_apply.db_base_path, first_ts.year, record_to_apply.row_length,
+                              record_to_apply.tracked_column_count);
+        catidx_pin = PinCatIdx(record_to_apply.db_base_path, first_ts.year, record_to_apply.row_length,
+                               record_to_apply.tracked_column_count);
+    } catch (const std::exception &e) {
+        spdlog::error("[WAL APPLY] [DB: {}] - Unable to open the indexes of {}.XSTORE: {}", record_to_apply.db_name,
+                      first_ts.year, e.what());
+        walring::Dirty().NoteRingMarkOnly(ring, target_file, ring_lsn_end);
+        return false;
+    }
     ZoneMapFile &zmap = *zmap_pin;
-    // Same reasoning as zmap above, same (db, year, row_length,
-    // tracked_column_count) key -- the bloom filter is only ever updated
-    // here, alongside zmap, after a row's real pwrite is confirmed durable.
-    const CatIdxFile::Pin catidx_pin = PinCatIdx(record_to_apply.db_base_path, first_ts.year, record_to_apply.row_length,
-                                                 record_to_apply.tracked_column_count);
     CatIdxFile &catidx = *catidx_pin;
 
     std::vector<unsigned long long> offsets(record_to_apply.rows.size());

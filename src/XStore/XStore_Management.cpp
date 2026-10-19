@@ -323,6 +323,10 @@ ZoneMapFile& XStore::GetOrOpenZoneMapLocked(std::string_view db_base_path, unsig
         return *it->second;
     }
 
+    // Its files are being removed and its entry was retired (see RemovalCovers): a new object now would pair with
+    // whichever data file a request happens to hold, old or new.
+    if (RemovalCovers(key)) throw std::runtime_error(fmt::format("{}.zmap is being removed", key));
+
     if (!zone_map_registry_retired_.empty()) SweepRetired(zone_map_registry_retired_);
 
     // Pinned and rebuilding entries are never evicted: their holder has a pointer, and a cold reopen of a half-built
@@ -736,6 +740,63 @@ XStore::BgEnter XStore::EnterBackgroundYear(const std::string &year_key) {
     return BgEnter::kGo;
 }
 
+bool XStore::RemovalCovers(const std::string &year_key) {
+    std::lock_guard<std::mutex> lock(bg_mutex_);
+    for (const std::string &scope : bg_removing_scopes_) {
+        if (ScopeCovers(scope, year_key)) return true;
+    }
+    return false;
+}
+
+bool XStore::RemovalScopeHasRebuildingIndex(const std::string &scope) {
+    {
+        std::lock_guard<std::mutex> lock(zone_map_registry_mutex_);
+        for (const auto &[key, file] : zone_map_registry_) {
+            if (ScopeCovers(scope, key) && file->Rebuilding()) return true;
+        }
+    }
+    std::lock_guard<std::mutex> lock(catidx_registry_mutex_);
+    for (const auto &[key, file] : catidx_registry_) {
+        if (ScopeCovers(scope, key) && file->Rebuilding()) return true;
+    }
+    return false;
+}
+
+bool XStore::RetiredIndexesReleased() {
+    {
+        std::lock_guard<std::mutex> lock(zone_map_registry_mutex_);
+        SweepRetired(zone_map_registry_retired_);
+        if (!zone_map_registry_retired_.empty()) return false;
+    }
+    std::lock_guard<std::mutex> lock(catidx_registry_mutex_);
+    SweepRetired(catidx_registry_retired_);
+    return catidx_registry_retired_.empty();
+}
+
+// Waits for every retired object (not only this scope's: they carry no key), so another removal's long-held pin can
+// stretch this wait up to the bound.
+void XStore::WaitForRemovedFilesReleased(const std::string &scope, std::vector<std::shared_ptr<int>> &fds) {
+    const auto released = [&fds] {
+        for (const std::shared_ptr<int> &fd : fds) {
+            if (fd.use_count() > 1) return false; // a request still holds the erased fd (ours is the other reference)
+        }
+        return RetiredIndexesReleased();
+    };
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(XStoreTunables::BACKGROUND_REMOVE_WAIT_MS);
+    while (!released()) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            spdlog::error("[REMOVE] [{}] - Requests still held the removed files after {} ms; finishing the removal anyway",
+                          scope, XStoreTunables::BACKGROUND_REMOVE_WAIT_MS);
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    // use_count() is a relaxed load: pairs with the holders' releasing decrement, so their registry lookups (done
+    // before they let the fd go) happen before the caller's ResumeBackgroundWork.
+    std::atomic_thread_fence(std::memory_order_acquire);
+    fds.clear();
+}
+
 void XStore::LeaveBackgroundYear() {
     {
         std::lock_guard<std::mutex> lock(bg_mutex_);
@@ -912,22 +973,49 @@ XStore_Proto::RemoveDB_REP XStore::RemoveDB(std::string_view db_name_view) {
         ~ResumeOnExit() { XStore::ResumeBackgroundWork(scope, cancelled); }
     } resume{bg_scope, StopBackgroundWork(bg_scope)};
 
-    // Recursively remove entire DB with given DB Name
-    std::filesystem::remove_all(db_loc);
+    // The warm index objects go BEFORE the files (a DB re-created under this name must not get the old stats and
+    // blooms back): the scope above now refuses their cold reopen until Resume, so no request can pair an old index
+    // object with a new data file, or a new one with a deleted file (see RemovalCovers). Unless one of them is in
+    // rebuild: then they go only once remove_all succeeded (a failed one leaves its half-built files behind, and a
+    // retired untrusted object would let a cold reopen trust them). That late retire leaves a gap between the unlinks
+    // and the retire in which a request can still hit an old entry; the .CFG is gone first, so only a request already
+    // past it can, and the DB it writes into is the one being removed.
+    const bool retire_late = RemovalScopeHasRebuildingIndex(bg_scope);
+    if (!retire_late) RetireIndexesUnderPrefix(bg_scope);
 
-    // Remove DB from cfgMap
+    // New requests stop at the door ("DB does not exist"): the .CFG goes first, then its cached copy, so a cache miss
+    // cannot load it back.
+    std::error_code remove_ec;
+    std::filesystem::remove(JoinPath(db_loc, db_name + ".CFG"), remove_ec);
     EraseCfg(db_name);
 
-    // Drop & unmap any cached read mappings under this DB -- otherwise a
-    // future query (via GetOrMapFile) could keep reading an orphaned,
-    // unlinked mapping instead of a freshly-recreated DB with the same name.
-    EraseMappedFilesUnderPrefix(db_loc + "/");
-    // Same reasoning for UnaryInsert's cached fds (see GetOrOpenFile).
-    EraseOpenFilesUnderPrefix(db_loc + "/");
-    // And for the warm index objects: a DB re-created under this name must not get the old stats and blooms back.
-    RetireIndexesUnderPrefix(db_loc + "/");
+    // A request already past the .CFG can still create a year file in the directory while remove_all walks it (its
+    // index lookup is refused, but the data file is opened first), and remove_all then fails on the non-empty
+    // directory. Once such requests have let go (the wait below), one retry removes what they created.
+    std::vector<std::shared_ptr<int>> old_fds;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        std::filesystem::remove_all(db_loc, remove_ec);
+        if (retire_late && !remove_ec) RetireIndexesUnderPrefix(bg_scope);
+        // Drop & unmap any cached read mappings under this DB -- otherwise a
+        // future query (via GetOrMapFile) could keep reading an orphaned,
+        // unlinked mapping instead of a freshly-recreated DB with the same name.
+        EraseMappedFilesUnderPrefix(bg_scope);
+        // Same reasoning for UnaryInsert's cached fds (see GetOrOpenFile).
+        EraseOpenFilesUnderPrefix(bg_scope, &old_fds);
+        WaitForRemovedFilesReleased(bg_scope, old_fds);
+        if (!remove_ec) break;
+    }
     // A pending widen of the removed DB is dropped (a DB re-created under the name records its own growth).
     DropLiveWidenRequest(db_loc);
+
+    if (remove_ec) {
+        remove_status = fmt::format("[REMOVE DB] [DB: {}] - Unable to remove every file of the DB ({}). Its .CFG is gone, "
+                                    "so the DB is invisible to every request, and CreateDB answers \"Already existed\" "
+                                    "until RemoveDB is retried", db_name, remove_ec.message());
+        SetTaggedStatus(to_return.mutable_removestatus(), "[ERROR] ", remove_status);
+        spdlog::error(remove_status);
+        return to_return;
+    }
 
     remove_status = fmt::format("[REMOVE DB] [DB: {}] - Removed DB with name: {}", db_name, db_name);
     SetTaggedStatus(to_return.mutable_removestatus(), "[INFO] ", remove_status);
@@ -958,18 +1046,21 @@ XStore_Proto::RemoveDBFiles_REP XStore::RemoveDBFiles(XStore_Proto::RemoveDBFile
     // Same reason as RemoveDB: records for the files about to be unlinked must be checkpointed first.
     CheckpointBeforeRemoval(db_name);
 
-    // Removes one file directly inside the DB directory and drops its cached mapping/fd. Never throws. Reports the
-    // outcome when the file existed, when its removal failed, or (absent) when `report_missing` (a requested name is
-    // always reported; a year's index files only if present or not removable). Returns false only when the file
-    // exists and could not be removed.
-    auto remove_one = [&](const std::string &file_name, bool report_missing) {
+    // Removes one file directly inside the DB directory and drops its cached mapping/fd (the dropped fd handle goes to
+    // old_fds). Never throws. Reports the outcome when the file existed, when its removal failed, or (absent) when
+    // `report_missing` (a requested name is always reported; a year's index files only if present or not removable).
+    // Returns false only when the file exists and could not be removed. An index file (`empty_if_stuck`) that cannot
+    // be removed is truncated to 0 bytes instead, still reported as an [ERROR]: an empty index file opens as a fresh
+    // index, so a year re-created later does not trust the deleted rows' stats.
+    std::vector<std::shared_ptr<int>> old_fds;
+    auto remove_one = [&](const std::string &file_name, bool report_missing, bool empty_if_stuck) {
         const std::filesystem::path target_path = JoinPath(db_loc, file_name);
         std::error_code ec;
         if (std::filesystem::remove(target_path, ec)) {
             // Drop this file's cached read mapping, if any -- same
             // reasoning as RemoveDB, scoped to a single file.
             EraseMappedFile(target_path.string());
-            EraseOpenFile(target_path.string());
+            if (std::shared_ptr<int> fd = EraseOpenFile(target_path.string())) old_fds.push_back(std::move(fd));
             std::string info_msg = fmt::format("[REMOVE DB FILES] [DB: {}] - Removed {}", db_name, file_name);
             SetTaggedStatus(to_return.add_removestatus(), "[INFO] ", info_msg);
             spdlog::info(info_msg);
@@ -977,6 +1068,7 @@ XStore_Proto::RemoveDBFiles_REP XStore::RemoveDBFiles(XStore_Proto::RemoveDBFile
         }
         if (ec) { // it is there (or cannot be checked) and the removal failed: EIO, EBUSY, a non-empty directory...
             std::string err_msg = fmt::format("[REMOVE DB FILES] [DB: {}] - Unable to remove {} ({})", db_name, file_name, ec.message());
+            if (empty_if_stuck && ::truncate(target_path.c_str(), 0) == 0) err_msg += "; emptied it instead";
             SetTaggedStatus(to_return.add_removestatus(), "[ERROR] ", err_msg);
             spdlog::error(err_msg);
             return false;
@@ -1035,8 +1127,9 @@ XStore_Proto::RemoveDBFiles_REP XStore::RemoveDBFiles(XStore_Proto::RemoveDBFile
                 year = static_cast<unsigned short>(std::stoul(stem));
             }
         }
+        old_fds.clear();
         if (!year.has_value()) {
-            remove_one(file_name, /*report_missing=*/true);
+            remove_one(file_name, /*report_missing=*/true, /*empty_if_stuck=*/false);
             continue;
         }
 
@@ -1048,14 +1141,27 @@ XStore_Proto::RemoveDBFiles_REP XStore::RemoveDBFiles(XStore_Proto::RemoveDBFile
             bool cancelled;
             ~ResumeOnExit() { XStore::ResumeBackgroundWork(scope, cancelled); }
         } resume{bg_scope, StopBackgroundWork(bg_scope)};
-        // The data file still exists when its removal failed: then its index files and entries stay as they are (a
-        // fresh, empty index next to rows that are still there would answer "no rows here" wrongly).
-        if (remove_one(file_name, /*report_missing=*/true)) {
-            // A sidecar that cannot be removed is reported, and the entries are retired anyway: a live entry would
-            // let a later insert re-create the year through it with the deleted rows' stats.
-            remove_one(std::to_string(*year) + ".zmap", /*report_missing=*/false);
-            remove_one(std::to_string(*year) + ".catidx", /*report_missing=*/false);
-            RetireYearIndexes(db_loc, *year);
+        // Retired BEFORE the data file goes, as in RemoveDB: the scope refuses a cold reopen until Resume, so an insert
+        // that creates the year file anew after the unlink cannot write its stats into the old object, and one that
+        // still holds the old fd cannot get a fresh index (see RemovalCovers). A sidecar that cannot be removed is
+        // emptied, and the entries are retired anyway: a live entry would let a later insert re-create the year
+        // through it with the deleted rows' stats.
+        // Exception: an entry in rebuild (RemovalScopeHasRebuildingIndex) is retired only after the unlink succeeded.
+        // If the unlink fails its files stay, and a retired untrusted object would let a cold reopen trust the
+        // half-built index. That case keeps the old gap (an insert creating the file anew between the unlink and the
+        // retire can still hit the old entry) for a year whose widen was just cancelled.
+        const bool retire_late = RemovalScopeHasRebuildingIndex(bg_scope);
+        if (!retire_late) RetireYearIndexes(db_loc, *year);
+        // The data file still exists when its removal failed: then its index files stay as they are (a fresh, empty
+        // index next to rows that are still there would answer "no rows here" wrongly); after the wait nothing holds
+        // the retired objects, so the next cold open is the only object on those files.
+        const bool data_removed = remove_one(file_name, /*report_missing=*/true, /*empty_if_stuck=*/false);
+        if (retire_late && data_removed) RetireYearIndexes(db_loc, *year);
+        // Also before the sidecars go: a retired object still pinned would write into an index file this empties.
+        WaitForRemovedFilesReleased(bg_scope, old_fds);
+        if (data_removed) {
+            remove_one(std::to_string(*year) + ".zmap", /*report_missing=*/false, /*empty_if_stuck=*/true);
+            remove_one(std::to_string(*year) + ".catidx", /*report_missing=*/false, /*empty_if_stuck=*/true);
         }
     }
     return to_return;
@@ -2522,7 +2628,7 @@ void XStore::AppendRebuildObservations(uint64_t row_index, const char *row, uint
     // the slot) and every column decodes. Then the per-row rebuild got exactly these columns: RowData parse of
     // [0, real_len) sees the same n columns in the same order (no unknown or mis-typed field to skip or keep), and
     // ExtractColumnByIndexSkipParse(c) skips the same c columns and decodes column c from the same bytes (an
-    // empty, unset column included: it is present and encodes as its tag byte alone).
+    // empty, unset column included: the zone map sees it as null; the catidx skips it, like BuildCatIdxObservations).
     google::protobuf::io::CodedInputStream in(reinterpret_cast<const uint8_t *>(row), row_length);
     bool one_pass = true;
     uint32_t column = 0;

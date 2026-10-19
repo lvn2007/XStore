@@ -619,6 +619,9 @@ CatIdxFile& XStore::GetOrOpenCatIdxLocked(std::string_view db_base_path, unsigne
         return *it->second;
     }
 
+    // Same refusal as GetOrOpenZoneMapLocked: its files are being removed.
+    if (RemovalCovers(key)) throw std::runtime_error(fmt::format("{}.catidx is being removed", key));
+
     if (!catidx_registry_retired_.empty()) SweepRetired(catidx_registry_retired_);
 
     // Pinned and rebuilding entries are never evicted: their holder has a pointer, and a cold reopen of a half-built

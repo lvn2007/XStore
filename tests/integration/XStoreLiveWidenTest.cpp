@@ -3030,7 +3030,8 @@ TEST_F(XStoreLiveWidenTest, RemoveDbForgetsTheIndexesOfTheRemovedDb) {
 }
 
 // A pinned entry under a removed DB is retired, not destroyed: its holder keeps a valid object (writing into the unlinked
-// file), lookups never return it, and a re-created DB gets a fresh one. Once the pin drops a later sweep frees it.
+// file) and lookups never return it. The removal waits for the pin to drop before it finishes (F4), frees the retired
+// objects, and a re-created DB gets fresh ones.
 TEST_F(XStoreLiveWidenTest, RemoveDbRetiresAPinnedIndexAndLookupsNeverReturnIt) {
     XStore store;
     const std::string db = "REGRETIRE";
@@ -3041,28 +3042,32 @@ TEST_F(XStoreLiveWidenTest, RemoveDbRetiresAPinnedIndexAndLookupsNeverReturnIt) 
     ZoneMapFile *old_zmap = zmap->get();
     CatIdxFile *old_catidx = catidx->get();
 
-    ASSERT_NE(store.RemoveDB(db).removestatus().find("[INFO]"), std::string::npos);
+    auto remove = std::async(std::launch::async, [&] {
+        XStore r;
+        return r.RemoveDB(db).removestatus();
+    });
+    const Clock::time_point t0 = Clock::now();
+    while (std::filesystem::exists(DbPath(db)) && MsSince(t0) < 5000) std::this_thread::sleep_for(milliseconds(1));
+    ASSERT_FALSE(std::filesystem::exists(DbPath(db))) << "the removal never got to the files";
+    EXPECT_EQ(remove.wait_for(milliseconds(50)), std::future_status::timeout) << "it did not wait for the pins";
     EXPECT_FALSE(XStore::PeekOpenZoneMapWidth(DbPath(db), kYear).has_value()) << "a lookup returned the retired entry";
+    EXPECT_EQ(XStore::RetiredIndexCountForTests(), 2u);
     old_zmap->UpdateRow(9, {{0, 1.0, true}}, 1); // the holder may still use it
     EXPECT_TRUE(old_catidx->MightContain(0, 0, EncodeFDataForCatIdx(ValueRow(700, 2).fielddata(0))));
+
+    zmap.reset();
+    catidx.reset();
+    ASSERT_EQ(remove.wait_for(std::chrono::seconds(5)), std::future_status::ready) << "the removal did not finish";
+    EXPECT_NE(remove.get().find("[INFO]"), std::string::npos);
+    EXPECT_EQ(XStore::RetiredIndexCountForTests(), 0u) << "the removal's wait frees the retired objects";
 
     CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
     Insert(store, db, {{Epoch(4), ValueRow(800, 2)}});
     ZoneMapFile::Pin fresh_zmap = XStore::PinZoneMap(DbPath(db), kYear, kRowLength);
-    CatIdxFile::Pin fresh_catidx = XStore::PinCatIdx(DbPath(db), kYear, kRowLength);
-    EXPECT_NE(fresh_zmap.get(), old_zmap);
-    EXPECT_NE(fresh_catidx.get(), old_catidx);
     auto stats = fresh_zmap->TryGetBlockStats(0);
     ASSERT_TRUE(stats.has_value());
     EXPECT_EQ((*stats)[0].valid_count, 1u);
     EXPECT_EQ((*stats)[0].min_value, 800.0);
-    EXPECT_EQ(XStore::RetiredIndexCountForTests(), 2u);
-
-    zmap.reset();
-    catidx.reset();
-    XStore::GetOrOpenZoneMap(DbPath(db), 1999, kRowLength); // a cold open sweeps the retired zone maps
-    XStore::GetOrOpenCatIdx(DbPath(db), 1999, kRowLength);
-    EXPECT_EQ(XStore::RetiredIndexCountForTests(), 0u);
 }
 
 // The DB-prefix match is a whole directory: removing DB1 leaves DB10's warm entries alone.
@@ -3369,10 +3374,261 @@ TEST_F(XStoreLiveWidenTest, RemoveDbFilesRetiresTheYearEvenWhenASidecarCannotBeR
     EXPECT_EQ(rep.removestatus(0), "[INFO] [REMOVE DB FILES] [DB: REGRMFAIL] - Removed 1980.XSTORE");
     EXPECT_EQ(rep.removestatus(1).rfind("[ERROR] [REMOVE DB FILES] [DB: REGRMFAIL] - Unable to remove 1980.zmap", 0), 0u)
         << rep.removestatus(1);
+    EXPECT_EQ(rep.removestatus(1).find("emptied"), std::string::npos) << "a directory cannot be truncated";
     EXPECT_EQ(rep.removestatus(2), "[INFO] [REMOVE DB FILES] [DB: REGRMFAIL] - Removed 1980.catidx");
     EXPECT_FALSE(XStore::PeekOpenZoneMapWidth(DbPath(db), kYear).has_value()) << "the year's entry was not retired";
     EXPECT_EQ(&XStore::GetOrOpenZoneMap(DbPath(db), kNextYear, kRowLength), next_zmap) << "another year was touched";
     std::filesystem::remove_all(zmap_path);
+}
+
+// A regular sidecar that cannot be unlinked (the DB directory turns read-only after the data file went) is truncated to
+// 0 bytes: still an [ERROR] for the unlink, plus "emptied it instead". A year re-created later opens the empty files as
+// fresh indexes, not the deleted rows' stats. The test's pin holds the removal in its wait between the data file and
+// the sidecars (the wait for retired objects), which is where the directory is made read-only. Root ignores directory
+// permissions, so the test needs a non-root user.
+TEST_F(XStoreLiveWidenTest, RemoveDbFilesEmptiesARegularSidecarItCannotRemove) {
+    if (geteuid() == 0) GTEST_SKIP() << "root can unlink in a read-only directory";
+    XStore store;
+    const std::string db = "REGRMTRUNC";
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    Rows rows;
+    for (uint64_t r = 0; r < 2 * Rpb(); ++r) rows.emplace_back(Epoch(r), ValueRow(1000 + r, 2));
+    Insert(store, db, rows);
+    std::optional<ZoneMapFile::Pin> pin(XStore::PinZoneMap(DbPath(db), kYear, kRowLength));
+    ASSERT_GT(std::filesystem::file_size(YearPath(db, ".zmap")), 0u);
+
+    auto remove = std::async(std::launch::async, [&] {
+        XStore r;
+        XStore_Proto::RemoveDBFiles_REQ req;
+        req.add_filename(std::to_string(kYear) + ".XSTORE");
+        return r.RemoveDBFiles(&req, db);
+    });
+    const Clock::time_point t0 = Clock::now();
+    while (std::filesystem::exists(YearPath(db, ".XSTORE")) && MsSince(t0) < 5000) std::this_thread::sleep_for(milliseconds(1));
+    ASSERT_FALSE(std::filesystem::exists(YearPath(db, ".XSTORE"))) << "the removal never got to the data file";
+    struct RestorePermissions {
+        std::string dir;
+        ~RestorePermissions() {
+            std::error_code ec;
+            std::filesystem::permissions(dir, static_cast<std::filesystem::perms>(0755), ec);
+        }
+    } restore{DbPath(db)};
+    std::filesystem::permissions(DbPath(db), static_cast<std::filesystem::perms>(0555));
+    pin.reset();
+    ASSERT_EQ(remove.wait_for(std::chrono::seconds(15)), std::future_status::ready);
+    std::filesystem::permissions(DbPath(db), static_cast<std::filesystem::perms>(0755));
+    const XStore_Proto::RemoveDBFiles_REP rep = remove.get();
+
+    ASSERT_EQ(rep.removestatus_size(), 3);
+    EXPECT_EQ(rep.removestatus(0), "[INFO] [REMOVE DB FILES] [DB: REGRMTRUNC] - Removed 1980.XSTORE");
+    for (int i : {1, 2}) {
+        EXPECT_EQ(rep.removestatus(i).rfind("[ERROR] [REMOVE DB FILES] [DB: REGRMTRUNC] - Unable to remove 1980.", 0), 0u)
+            << rep.removestatus(i);
+        EXPECT_NE(rep.removestatus(i).find("; emptied it instead"), std::string::npos) << rep.removestatus(i);
+    }
+    for (const char *ext : {".zmap", ".catidx"}) {
+        ASSERT_TRUE(std::filesystem::exists(YearPath(db, ext))) << ext;
+        EXPECT_EQ(std::filesystem::file_size(YearPath(db, ext)), 0u) << ext;
+    }
+
+    Insert(store, db, {{Epoch(5), ValueRow(5000, 2)}, {Epoch(Rpb() + 7), ValueRow(5001, 2)}});
+    auto stats = XStore::PinZoneMap(DbPath(db), kYear, kRowLength)->TryGetBlockStats(0);
+    ASSERT_TRUE(stats.has_value());
+    EXPECT_EQ((*stats)[0].valid_count, 1u);
+    EXPECT_EQ((*stats)[0].min_value, 5000.0);
+    XStore_Proto::Min_REP min_rep;
+    store.MinAggregate(Epoch(0), Epoch(2 * Rpb() - 1), db, 0, &min_rep);
+    EXPECT_EQ(min_rep.opresult().doubledata(), 5000.0);
+    XStore_Proto::FData old_value;
+    old_value.set_doubledata(1000.0);
+    EXPECT_FALSE(XStore::PinCatIdx(DbPath(db), kYear, kRowLength)->MightContain(0, 0, EncodeFDataForCatIdx(old_value)));
+}
+
+// ---- F4: removal vs requests on the same DB/year ---------------------------------------------------------------------
+
+// Deterministic: while a RemoveDBFiles of a year is under way (held in its wait by a pin on the retired zone map), the
+// year's index files cannot be cold-opened: a pin throws, and an insert fails before it writes anything, instead of
+// writing its stats into an object that is about to go or into one that pairs with the deleted data file. Once the
+// removal finishes the year inserts again, with fresh indexes.
+TEST_F(XStoreLiveWidenTest, ARemovalRefusesTheYearsIndexOpensUntilItFinishes) {
+    XStore store;
+    const std::string db = "REGRMREFUSE";
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    Insert(store, db, {{Epoch(1), ValueRow(1, 2)}, {Jan1(kNextYear) + 1, ValueRow(2, 2)}});
+    std::optional<ZoneMapFile::Pin> pin(XStore::PinZoneMap(DbPath(db), kYear, kRowLength));
+
+    auto remove = std::async(std::launch::async, [&] {
+        XStore r;
+        XStore_Proto::RemoveDBFiles_REQ req;
+        req.add_filename(std::to_string(kYear) + ".XSTORE");
+        return r.RemoveDBFiles(&req, db);
+    });
+    const Clock::time_point t0 = Clock::now();
+    while (std::filesystem::exists(YearPath(db, ".XSTORE")) && MsSince(t0) < 5000) std::this_thread::sleep_for(milliseconds(1));
+    ASSERT_FALSE(std::filesystem::exists(YearPath(db, ".XSTORE"))) << "the removal never got to the data file";
+
+    EXPECT_THROW(XStore::PinZoneMap(DbPath(db), kYear, kRowLength), std::runtime_error);
+    EXPECT_THROW(XStore::PinCatIdx(DbPath(db), kYear, kRowLength), std::runtime_error);
+    XStore_Proto::UnaryInsert_REP refused;
+    store.UnaryInsert(Epoch(7), ValueRow(77, 2), db, &refused, XStore_Proto::BYPASS);
+    EXPECT_EQ(refused.insertstatus().rfind("[ERROR] ", 0), 0u) << refused.insertstatus();
+    XStore_Proto::UnaryInsert_REP other_year;
+    store.UnaryInsert(Jan1(kNextYear) + 2, ValueRow(3, 2), db, &other_year, XStore_Proto::BYPASS);
+    EXPECT_NE(other_year.insertstatus().find("[INFO]"), std::string::npos) << "another year was blocked";
+
+    pin.reset();
+    ASSERT_EQ(remove.wait_for(std::chrono::seconds(15)), std::future_status::ready);
+    EXPECT_NE(remove.get().removestatus(0).find("[INFO]"), std::string::npos);
+    Insert(store, db, {{Epoch(5), ValueRow(5000, 2)}});
+    auto stats = XStore::PinZoneMap(DbPath(db), kYear, kRowLength)->TryGetBlockStats(0);
+    ASSERT_TRUE(stats.has_value());
+    EXPECT_EQ((*stats)[0].valid_count, 1u);
+    EXPECT_EQ((*stats)[0].min_value, 5000.0);
+}
+
+namespace {
+// No null columns: column 0 is always set, so every row present in the data file is one valid_count of column 0.
+XStore_Proto::RowData RemovalRaceRow(uint64_t v) {
+    XStore_Proto::RowData row;
+    for (uint64_t c = 0; c < 4; ++c) row.add_fielddata()->set_doubledata(static_cast<double>(v + c));
+    return row;
+}
+
+// The year's zone map counts exactly the rows of its data file (column 0, per block, rows [0, rows_bound]), with their
+// min/max, and its bloom has every row's column-0 value (a missing file counts as no rows). Run with nothing in flight.
+void ExpectIndexesMatchTheYearFile(const std::string &db_path, unsigned short year, uint16_t row_length,
+                                   uint64_t rows_bound) {
+    SCOPED_TRACE(db_path + "/" + std::to_string(year));
+    std::vector<std::pair<uint64_t, XStore_Proto::RowData>> rows;
+    const int fd = open((db_path + "/" + std::to_string(year) + ".XSTORE").c_str(), O_RDONLY);
+    if (fd >= 0) {
+        rows = ReadRows(fd, 0, rows_bound, row_length);
+        close(fd);
+    }
+    const uint64_t rpb = RowsPerBlock(row_length);
+    std::map<uint64_t, std::vector<double>> by_block;
+    for (const auto &[r, row] : rows) {
+        double v = 0;
+        ASSERT_TRUE(row.fielddata_size() > 0 && NumericOf(row.fielddata(0), v)) << "row " << r;
+        by_block[r / rpb].push_back(v);
+    }
+    const ZoneMapFile::Pin zmap = XStore::PinZoneMap(db_path, year, row_length);
+    const CatIdxFile::Pin catidx = XStore::PinCatIdx(db_path, year, row_length);
+    for (uint64_t b = 0; b <= rows_bound / rpb; ++b) {
+        const auto stats = zmap->TryGetBlockStats(b);
+        ASSERT_TRUE(stats.has_value()) << "block " << b;
+        const auto it = by_block.find(b);
+        const uint64_t want = it == by_block.end() ? 0 : it->second.size();
+        EXPECT_EQ((*stats)[0].valid_count, want) << "block " << b << ": the zone map does not count the file's rows";
+        if (want > 0) {
+            EXPECT_EQ((*stats)[0].min_value, *std::min_element(it->second.begin(), it->second.end())) << "block " << b;
+            EXPECT_EQ((*stats)[0].max_value, *std::max_element(it->second.begin(), it->second.end())) << "block " << b;
+        }
+    }
+    for (const auto &[r, row] : rows) {
+        EXPECT_TRUE(catidx->MightContain(r / rpb, 0, EncodeFDataForCatIdx(row.fielddata(0)))) << "row " << r;
+    }
+}
+} // namespace
+
+// Stress (real concurrency, bounded rounds): in each round two inserters (BYPASS on their own thread, SYNC through the
+// WAL writers) append fresh rows to a year while the test removes that year's data file once, mid-stream; the inserts
+// go on into the re-created file, then stop. The year's indexes must then describe exactly the rows of the year file
+// there is: no stats of rows that went into the deleted file (an old fd paired with a fresh index), no rows of the new
+// file whose stats went into a retired object, no cached fd of the deleted file. Inserts that meet the removal may
+// fail; they must never throw. Each round ends with a quiet removal, so rows never repeat within one file.
+TEST_F(XStoreLiveWidenTest, RemoveDbFilesRacingInsertsLeavesIndexesThatMatchTheData) {
+    XStore store;
+    const std::string db = "REGRMRACE";
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    XStore_Proto::RemoveDBFiles_REQ req;
+    req.add_filename(std::to_string(kYear) + ".XSTORE");
+    for (int round = 0; round < 40; ++round) {
+        SCOPED_TRACE("round " + std::to_string(round));
+        std::atomic<bool> running{true};
+        std::atomic<uint64_t> next_row{0};
+        std::vector<std::thread> inserters;
+        for (int t = 0; t < 2; ++t) {
+            inserters.emplace_back([&, t] {
+                XStore w;
+                const XStore_Proto::WalDurabilityMode mode = t == 0 ? XStore_Proto::BYPASS : XStore_Proto::SYNC;
+                while (running.load()) {
+                    const uint64_t r = next_row.fetch_add(1);
+                    XStore_Proto::UnaryInsert_REP rep;
+                    EXPECT_NO_THROW(w.UnaryInsert(Epoch(r), RemovalRaceRow(r * 7), db, &rep, mode));
+                }
+            });
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(300 + 97 * (round % 11)));
+        XStore_Proto::RemoveDBFiles_REP rep;
+        {
+            XStore r;
+            EXPECT_NO_THROW(rep = r.RemoveDBFiles(&req, db));
+        }
+        for (const std::string &s : rep.removestatus()) { // the only acceptable error: no insert had created it yet
+            if (s.rfind("[INFO] ", 0) != 0) EXPECT_EQ(s, "[ERROR] [REMOVE DB FILES] [DB: REGRMRACE] - Unable to remove 1980.XSTORE");
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(300 + 89 * (round % 7)));
+        running.store(false);
+        for (std::thread &t : inserters) t.join();
+
+        ExpectIndexesMatchTheYearFile(DbPath(db), kYear, kRowLength, next_row.load());
+        if (HasFailure()) return;
+        (void)store.RemoveDBFiles(&req, db);
+    }
+}
+
+// Stress (real concurrency, bounded rounds): the same for RemoveDB + CreateDB under the same name (same row length),
+// with the inserts spread over two years. RemoveDB must never throw and must report success (a year file created
+// inside the directory while remove_all walks it is removed by its retry). A different row length is not used: an
+// insert that read the old .CFG before the removal and applies after the re-create writes the old geometry into the new
+// DB, which stays open (it needs a per-DB lock or generation check on the insert path).
+TEST_F(XStoreLiveWidenTest, RemoveDbAndCreateDbRacingInsertsLeaveIndexesThatMatchTheData) {
+    XStore store;
+    const std::string db = "REGRMDBRACE";
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    for (int round = 0; round < 30; ++round) {
+        SCOPED_TRACE("round " + std::to_string(round));
+        std::atomic<bool> running{true};
+        std::atomic<uint64_t> next_row{0};
+        std::vector<std::thread> inserters;
+        for (int t = 0; t < 2; ++t) {
+            inserters.emplace_back([&, t] {
+                XStore w;
+                const XStore_Proto::WalDurabilityMode mode = t == 0 ? XStore_Proto::BYPASS : XStore_Proto::SYNC;
+                while (running.load()) {
+                    const uint64_t r = next_row.fetch_add(1);
+                    const unsigned long long epoch = r % 2 == 0 ? Epoch(r) : Jan1(kNextYear) + r;
+                    XStore_Proto::UnaryInsert_REP rep;
+                    EXPECT_NO_THROW(w.UnaryInsert(epoch, RemovalRaceRow(r * 7), db, &rep, mode));
+                }
+            });
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(300 + 97 * (round % 11)));
+        {
+            XStore r;
+            // An [ERROR] is allowed (a queued SYNC insert can re-create a year file between remove_all's two attempts);
+            // a retry of RemoveDB must then finish the job.
+            XStore_Proto::RemoveDB_REP rep;
+            for (int attempt = 0; attempt < 5; ++attempt) {
+                EXPECT_NO_THROW(rep = r.RemoveDB(db));
+                if (rep.removestatus().rfind("[INFO] ", 0) == 0) break;
+                EXPECT_EQ(rep.removestatus().rfind("[ERROR] ", 0), 0u) << rep.removestatus();
+            }
+            EXPECT_EQ(rep.removestatus().rfind("[INFO] ", 0), 0u) << rep.removestatus(); // no ASSERT: inserters run
+            EXPECT_FALSE(std::filesystem::exists(DbPath(db)));
+            EXPECT_EQ(r.CreateDB(db, XStore_Proto::SECOND, kRowLength).createdbstatus().rfind("[INFO] ", 0), 0u);
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(300 + 89 * (round % 7)));
+        running.store(false);
+        for (std::thread &t : inserters) t.join();
+
+        ExpectIndexesMatchTheYearFile(DbPath(db), kYear, kRowLength, next_row.load());
+        ExpectIndexesMatchTheYearFile(DbPath(db), kNextYear, kRowLength, next_row.load());
+        if (HasFailure()) return;
+        ASSERT_EQ(store.RemoveDB(db).removestatus().rfind("[INFO] ", 0), 0u);
+        CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    }
 }
 
 // ---- 10. The trigger (M4 stage 3): RunLiveWidenPass driven with a fake clock ----------------------------------------

@@ -1355,7 +1355,7 @@ class XStore {
         // compaction) and clears it after; it refuses to start a year that a removal scope covers, or any year while
         // bg_cancel_ is set. A removal adds its scope ("<db dir>/" for RemoveDB, "<db dir>/<year>" for RemoveDBFiles),
         // sets bg_cancel_ if the active key is covered, and waits (bounded) until it is not. Lock order: bg_mutex_ is a
-        // leaf (nothing else is taken while it is held).
+        // leaf (nothing else is taken while it is held); the registries' cold-open check takes it under their mutex.
         static std::mutex bg_mutex_;
         static std::condition_variable bg_cv_;
         static std::string bg_active_key_;
@@ -1365,6 +1365,23 @@ class XStore {
         static void LeaveBackgroundYear();
         [[nodiscard]] static bool StopBackgroundWork(const std::string &scope); // true: it set bg_cancel_
         static void ResumeBackgroundWork(const std::string &scope, bool cancelled);
+
+        // Removal vs requests on the same DB/year (F4). Between StopBackgroundWork and ResumeBackgroundWork a removal's
+        // scope also refuses every cold open of a covered zone-map/catidx key (RemovalCovers, checked by
+        // GetOrOpen*Locked on a registry miss only: a hit costs nothing). The removal retires the entries right after
+        // Stop, so from then on no request gets an index object for the files being removed. Before Resume it waits
+        // (WaitForRemovedFilesReleased, bounded by BACKGROUND_REMOVE_WAIT_MS) until no request holds a data-file fd it
+        // erased from the cache and no retired index object is pinned: a request that took the old data fd then
+        // cannot reach the index lookup after Resume (it would get a fresh index for its write into the deleted
+        // file), and nothing still writes into an index file the removal empties or leaves on disk.
+        [[nodiscard]] static bool RemovalCovers(const std::string &year_key);
+        // A registry entry the scope covers is in rebuild (a cancelled widen, or untrusted until the next start). Then
+        // the removal retires only after its files are gone: retiring an untrusted object whose files stay (a failed
+        // unlink) would let a cold reopen trust a half-built index. Stable once StopBackgroundWork returned (only the
+        // background thread starts a rebuild, and it no longer enters a covered year).
+        [[nodiscard]] static bool RemovalScopeHasRebuildingIndex(const std::string &scope);
+        [[nodiscard]] static bool RetiredIndexesReleased();
+        static void WaitForRemovedFilesReleased(const std::string &scope, std::vector<std::shared_ptr<int>> &fds);
 
         // Bodies of GetOrOpenZoneMap/GetOrOpenCatIdx and the Pin* calls; the caller holds the registry mutex.
         static ZoneMapFile& GetOrOpenZoneMapLocked(std::string_view db_base_path, unsigned short year, uint16_t row_length,
@@ -1775,11 +1792,12 @@ class XStore {
         // GetOrOpenFile's O_CREAT can skip that stat() on a cache hit.
         bool IsFdCached(const std::string &target_file);
 
-        // close + drop targetFile's cached fd, if present.
-        void EraseOpenFile(const std::string &target_file);
+        // close + drop targetFile's cached fd, if present. Returns the dropped handle (null if none), so a removal can
+        // wait for the requests still holding it (WaitForRemovedFilesReleased).
+        std::shared_ptr<int> EraseOpenFile(const std::string &target_file);
 
-        // close + drop every cached fd whose path falls under dbDirPrefix.
-        void EraseOpenFilesUnderPrefix(const std::string &db_dir_prefix);
+        // close + drop every cached fd whose path falls under dbDirPrefix; the dropped handles go to `erased`.
+        void EraseOpenFilesUnderPrefix(const std::string &db_dir_prefix, std::vector<std::shared_ptr<int>> *erased = nullptr);
 
         // Joins base and child with exactly one '/' between them, regardless
         // of whether base already happens to end with one -- the single

@@ -245,6 +245,14 @@ std::shared_ptr<int> XStore::GetOrOpenFile(const std::string &target_file, size_
         return winner;
     }
 
+    // Unlinked since the open above (RemoveDB/RemoveDBFiles): caching it would hand every later request a dead inode,
+    // since the removal's erase may already have run. Checked under the shard mutex: a removal that unlinks after this
+    // check erases the entry afterwards (its erase takes this mutex). Miss path only: one fstat.
+    struct stat linked{};
+    if (fstat(fd, &linked) != 0 || linked.st_nlink == 0) {
+        return nullptr;
+    }
+
     // Insert-at-front overwrites the LRU tail slot once the shard is at
     // FD_SHARD_CAP -- that assignment is the eviction: only the cache's
     // reference is dropped there, if some other thread is still holding a
@@ -262,7 +270,7 @@ bool XStore::IsFdCached(const std::string &target_file) {
     return FindIndex(shard, target_file) != shard.count;
 }
 
-void XStore::EraseOpenFile(const std::string &target_file) {
+std::shared_ptr<int> XStore::EraseOpenFile(const std::string &target_file) {
     FdShard &shard = fd_shards[std::hash<std::string>{}(target_file) % FD_SHARD_COUNT];
     std::lock_guard<std::mutex> lock(shard.mutex);
 
@@ -271,16 +279,25 @@ void XStore::EraseOpenFile(const std::string &target_file) {
     // shared_ptr, close() is deferred until that copy is released too.
     size_t idx = FindIndex(shard, target_file);
     if (idx == shard.count) {
-        return;
+        return nullptr;
     }
+    std::shared_ptr<int> erased = shard.entries[idx].value;
     EraseAtIndex(shard, idx);
+    return erased;
 }
 
-void XStore::EraseOpenFilesUnderPrefix(const std::string &db_dir_prefix) {
+void XStore::EraseOpenFilesUnderPrefix(const std::string &db_dir_prefix, std::vector<std::shared_ptr<int>> *erased) {
     // Same rationale as EraseMappedFilesUnderPrefix -- sweep each shard
     // under its own lock rather than one lock for the whole sweep.
     for (FdShard &shard : fd_shards) {
         std::lock_guard<std::mutex> lock(shard.mutex);
+        if (erased != nullptr) {
+            for (size_t i = 0; i < shard.count; ++i) {
+                if (shard.entries[i].key.compare(0, db_dir_prefix.size(), db_dir_prefix) == 0) {
+                    erased->push_back(shard.entries[i].value);
+                }
+            }
+        }
         ErasePrefix(shard, db_dir_prefix);
     }
 }
