@@ -7,11 +7,107 @@
 #include <re2/re2.h>
 #endif
 
-namespace {
-constexpr char AsciiLower(char c) {
-    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c | 0x20) : c;
+using patternfold::AsciiLower;
+
+std::string PatternMatcher::RegexRequiredLiteral(std::string_view pattern, bool case_insensitive) {
+    if (case_insensitive) return {};  // RE2 folds Unicode (K vs Kelvin sign): no byte-level proof
+    std::string best;
+    std::string run;
+    // True while the last atom is the final byte of `run` (a plain literal a
+    // following quantifier may still make optional).
+    bool last_is_run_byte = false;
+    int quantifier_len = 0;  // quantifier chars since the last atom; 2nd '?' is the lazy marker
+    auto close_run = [&] {
+        if (run.size() > best.size()) best = run;
+        run.clear();
+        last_is_run_byte = false;
+    };
+    for (size_t i = 0; i < pattern.size(); ++i) {
+        const char c = pattern[i];
+        if (static_cast<unsigned char>(c) >= 0x80) return {};
+        if (c == '*' || c == '?' || c == '+' || c == '{') {
+            if (quantifier_len > 0) {
+                if (c == '?' && quantifier_len == 1) {  // lazy marker: harmless
+                    quantifier_len = 2;
+                    continue;
+                }
+                return {};  // stacked quantifier ("a+*" would make a optional)
+            }
+            quantifier_len = 1;
+            if (c == '{') {
+                // Only {n}, {n,}, {n,m}; anything else is a literal '{' in RE2: bail.
+                size_t j = i + 1;
+                const size_t digits_start = j;
+                while (j < pattern.size() && pattern[j] >= '0' && pattern[j] <= '9') ++j;
+                if (j == digits_start) return {};
+                if (j < pattern.size() && pattern[j] == ',') {
+                    ++j;
+                    while (j < pattern.size() && pattern[j] >= '0' && pattern[j] <= '9') ++j;
+                }
+                if (j >= pattern.size() || pattern[j] != '}') return {};
+                i = j;
+            }
+            if (c == '+') {
+                close_run();  // atom kept (at least once), run ends after it
+            } else {
+                if (last_is_run_byte) run.pop_back();  // atom becomes optional
+                close_run();
+            }
+            continue;
+        }
+        quantifier_len = 0;
+        switch (c) {
+            case '|': case '(': case ')':
+                return {};
+            case '[': {
+                // One non-literal atom. Skip to the closing ']': a leading '^' and
+                // then a leading ']' are literal members, '\x' escapes one byte and
+                // '[:name:]' ends at ":]" (the pattern already compiled, so it is closed).
+                size_t j = i + 1;
+                if (j < pattern.size() && pattern[j] == '^') ++j;
+                if (j < pattern.size() && pattern[j] == ']') ++j;
+                while (j < pattern.size() && pattern[j] != ']') {
+                    if (pattern[j] == '\\') {
+                        j += 2;
+                    } else if (pattern[j] == '[' && j + 1 < pattern.size() && pattern[j + 1] == ':') {
+                        const size_t close = pattern.find(":]", j + 2);
+                        if (close == std::string_view::npos) return {};
+                        j = close + 2;
+                    } else {
+                        ++j;
+                    }
+                }
+                if (j >= pattern.size()) return {};
+                i = j;
+                close_run();
+                break;
+            }
+            case '.': case '^': case '$':
+                close_run();
+                break;
+            case '\\': {
+                if (++i == pattern.size()) return {};
+                const char n = pattern[i];
+                const bool alnum = (n >= '0' && n <= '9') || (n >= 'a' && n <= 'z') || (n >= 'A' && n <= 'Z');
+                if (!alnum) {
+                    run.push_back(n);  // escaped punctuation is itself
+                    last_is_run_byte = true;
+                } else if (std::strchr("dDwWsSbBAznrtfav", n) != nullptr) {
+                    close_run();  // class/assertion/control char: not a required literal
+                } else {
+                    return {};  // \Q \E \x \p \P \C digits...: multi-char escapes
+                }
+                break;
+            }
+            default:
+                run.push_back(c);
+                last_is_run_byte = true;
+                break;
+        }
+    }
+    close_run();
+    return best;
 }
-} // namespace
 
 PatternMatcher::PatternMatcher(PatternMatcher &&) noexcept = default;
 PatternMatcher &PatternMatcher::operator=(PatternMatcher &&) noexcept = default;
@@ -37,6 +133,7 @@ std::optional<PatternMatcher> PatternMatcher::Compile(std::string_view pattern, 
             error = matcher.regex_->error();
             return std::nullopt;
         }
+        matcher.prefilter_literal_ = RegexRequiredLiteral(pattern, case_insensitive);
         return std::optional<PatternMatcher>(std::move(matcher));
 #else
         error = "REGEX mode unavailable: server built without RE2";
@@ -70,16 +167,17 @@ std::optional<PatternMatcher> PatternMatcher::Compile(std::string_view pattern, 
         seg.any_mask.push_back(any ? 1 : 0);
         seg.has_any = seg.has_any || any;
     }
-    if (!case_insensitive) {
-        for (const Segment &seg : matcher.segments_) {
-            size_t run_start = 0;
-            for (size_t i = 0; i <= seg.bytes.size(); ++i) {
-                if (i == seg.bytes.size() || seg.any_mask[i] != 0) {
-                    if (i - run_start > matcher.prefilter_literal_.size()) {
-                        matcher.prefilter_literal_ = seg.bytes.substr(run_start, i - run_start);
-                    }
-                    run_start = i + 1;
+    // Segment bytes are already ASCII-lowered for ILIKE, so the same longest-run
+    // extraction yields the lowercase literal for FindCaseInsensitive.
+    matcher.prefilter_case_insensitive_ = case_insensitive;
+    for (const Segment &seg : matcher.segments_) {
+        size_t run_start = 0;
+        for (size_t i = 0; i <= seg.bytes.size(); ++i) {
+            if (i == seg.bytes.size() || seg.any_mask[i] != 0) {
+                if (i - run_start > matcher.prefilter_literal_.size()) {
+                    matcher.prefilter_literal_ = seg.bytes.substr(run_start, i - run_start);
                 }
+                run_start = i + 1;
             }
         }
     }

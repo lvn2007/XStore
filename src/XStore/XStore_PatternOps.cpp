@@ -156,13 +156,20 @@ void XStore::FindByPattern(unsigned long long int start_epoch_t, unsigned long l
                 // serialized row, so every matching row contains `literal`. One
                 // memmem over the contiguous span skips decoding rows without it;
                 // hits in another column, across a row boundary, or in a hole's
-                // zero bytes are rejected by test_row's full check.
+                // zero bytes are rejected by test_row's full check. ILIKE (and only
+                // ILIKE) searches ASCII case-insensitively for its lowercased literal.
+                const bool literal_ci = matcher->PrefilterCaseInsensitive();
                 const size_t row_len = cfg_struct.rowlength();
                 const char *span_begin = mapped_base + first_offset;
                 const char *span_end = span_begin + region_length;
                 const char *cursor = span_begin;
+                // Stateful across hits: it remembers each case's next memchr hit, so
+                // an anchor case that never occurs is scanned once per span, not per row.
+                patternfold::CaseInsensitiveFinder ci_finder(span_end, literal.data(), literal.size());
                 while (cursor < span_end) {
-                    const void *hit = memmem(cursor, static_cast<size_t>(span_end - cursor), literal.data(), literal.size());
+                    const size_t remaining = static_cast<size_t>(span_end - cursor);
+                    const void *hit = literal_ci ? ci_finder.Next(cursor)
+                                                 : memmem(cursor, remaining, literal.data(), literal.size());
                     if (hit == nullptr) break;
                     const size_t row_in_span = static_cast<size_t>(static_cast<const char *>(hit) - span_begin) / row_len;
                     if (!test_row(iter_epoch + row_in_span)) break;

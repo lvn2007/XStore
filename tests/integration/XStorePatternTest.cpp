@@ -4,12 +4,14 @@
 #include "XStore/XStore.h"
 #include "XStoreTestSupport.h"
 #include "XStore.pb.h"
+#include <chrono>
 #include <map>
 #include <memory>
 #include <random>
 #include <set>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace {
 bool Like(std::string_view pattern, std::string_view text, bool case_insensitive = false) {
@@ -119,20 +121,194 @@ TEST(PatternMatcherTest, PrefilterLiteralIsLongestFixedRun) {
     EXPECT_EQ(Literal(std::string_view("%a\0b%", 5)), std::string("a\0b", 3));
 }
 
+namespace {
+// Reference for the finder: first start >= from with the folded literal fully inside hay.
+long NaiveCaseFind(std::string_view hay, size_t from, std::string_view lit) {
+    for (size_t p = from; p + lit.size() <= hay.size(); ++p) {
+        size_t i = 0;
+        while (i < lit.size() && patternfold::AsciiLower(hay[p + i]) == lit[i]) ++i;
+        if (i == lit.size()) return static_cast<long>(p);
+    }
+    return -1;
+}
+} // namespace
+
+TEST(PatternMatcherTest, CaseInsensitiveFinderRepeatedCallsMatchNaiveSearch) {
+    // Row-by-row cursor, as FindByPattern drives it. Only upper case 'A'/'B' ever
+    // occur, so the lowercase anchor's cached memchr stays "exhausted" across calls.
+    std::mt19937_64 rng(77);
+    const char alphabet[] = {'A', 'B', 'a', 'x', '-', '1', 'P', 'L'};
+    for (const std::string lit : {"aapl", "-1", "b-a", "x", "ab1"}) {
+        std::string hay(20'000, ' ');
+        for (char &c : hay) c = alphabet[rng() % 6 == 0 ? rng() % sizeof(alphabet) : rng() % 2];
+        for (size_t at = 37; at + lit.size() < hay.size(); at += 97) {
+            for (size_t i = 0; i < lit.size(); ++i) hay[at + i] = ((rng() & 1) && lit[i] >= 'a' && lit[i] <= 'z') ? static_cast<char>(lit[i] & ~0x20) : lit[i];
+        }
+        patternfold::CaseInsensitiveFinder finder(hay.data() + hay.size(), lit.data(), lit.size());
+        size_t cursor = 0;
+        for (int call = 0; call < 2000 && cursor < hay.size(); ++call) {
+            const void *got = finder.Next(hay.data() + cursor);
+            const long want = NaiveCaseFind(hay, cursor, lit);
+            if (want < 0) {
+                ASSERT_EQ(got, nullptr) << lit << " cursor=" << cursor;
+                break;
+            }
+            ASSERT_NE(got, nullptr) << lit << " cursor=" << cursor;
+            ASSERT_EQ(static_cast<const char *>(got) - hay.data(), want) << lit << " cursor=" << cursor;
+            // Next row start (64-byte rows), sometimes skipping several rows.
+            cursor = (static_cast<size_t>(want) / 64 + 1 + rng() % 3 * (rng() % 2)) * 64;
+        }
+    }
+}
+
+TEST(PatternMatcherTest, CaseInsensitiveFinderIsLinearOverRepeatedCalls) {
+    // 10 MB of 100-byte rows, "AAPL" (upper case only) at the start of each: the
+    // lowercase 'a' anchor never occurs. A per-call rescan would be ~100k x 5 MB
+    // of memchr (minutes); the cached finder is one pass. Generous bound, coarse guard.
+    std::string hay(10'000'000, '-');
+    for (size_t at = 0; at + 4 <= hay.size(); at += 100) hay.replace(at, 4, "AAPL");
+    patternfold::CaseInsensitiveFinder finder(hay.data() + hay.size(), "aapl", 4);
+    const auto start = std::chrono::steady_clock::now();
+    size_t cursor = 0;
+    size_t calls = 0;
+    while (cursor < hay.size()) {
+        const void *hit = finder.Next(hay.data() + cursor);
+        if (hit == nullptr) break;
+        ASSERT_EQ(static_cast<size_t>(static_cast<const char *>(hit) - hay.data()), cursor);
+        cursor += 100;
+        ++calls;
+    }
+    EXPECT_EQ(calls, 100'000u);
+    EXPECT_LT(std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(), 2.0);
+}
+
 TEST(PatternMatcherTest, PrefilterLiteralEmptyWhenUnusable) {
     EXPECT_EQ(Literal("%"), "");
     EXPECT_EQ(Literal(""), "");
     EXPECT_EQ(Literal("___"), "");
     EXPECT_EQ(Literal("%_%"), "");
-    EXPECT_EQ(Literal("%aapl%", /*case_insensitive=*/true), "");
+}
+
+TEST(PatternMatcherTest, IlikePrefilterLiteralIsLowercasedAndFlagged) {
+    auto compile = [](std::string_view pattern, bool ci) {
+        std::string error;
+        auto matcher = PatternMatcher::Compile(pattern, XStore_Proto::PATTERN_LIKE, ci, error);
+        EXPECT_TRUE(matcher.has_value()) << error;
+        return std::move(*matcher);
+    };
+    auto ilike = compile("%AaPl-Order_1%", true);
+    EXPECT_EQ(ilike.PrefilterLiteral(), "aapl-order");  // '_' splits runs; longest wins
+    EXPECT_TRUE(ilike.PrefilterCaseInsensitive());
+    auto like = compile("%AaPl%", false);
+    EXPECT_EQ(like.PrefilterLiteral(), "AaPl");
+    EXPECT_FALSE(like.PrefilterCaseInsensitive());
+    EXPECT_EQ(Literal("%aapl%", /*case_insensitive=*/true), "aapl");
+    EXPECT_EQ(Literal("x\\_Yz", /*case_insensitive=*/true), "x_yz");  // escaped '_' is a fixed byte
+}
+
+TEST(PatternMatcherTest, FindCaseInsensitiveFoldsAsciiAndRespectsBounds) {
+    using patternfold::FindCaseInsensitive;
+    auto find = [](std::string_view hay, std::string_view lit) -> long {
+        const void *hit = FindCaseInsensitive(hay.data(), hay.size(), lit.data(), lit.size());
+        return hit == nullptr ? -1 : static_cast<const char *>(hit) - hay.data();
+    };
+    EXPECT_EQ(find("xxAaPLyy", "aapl"), 2);
+    EXPECT_EQ(find("xxAAPL", "aapl"), 2);          // hit flush with the end
+    EXPECT_EQ(find("AAPLxx", "aapl"), 0);          // hit flush with the start
+    EXPECT_EQ(find("aapaaPL", "aapl"), 3);         // earlier partial candidate then real hit
+    EXPECT_EQ(find("order-12", "-1"), 5);          // non-letter anchor byte
+    EXPECT_EQ(find("a1B2", "1b2"), 1);
+    EXPECT_EQ(find("xxAB", "abcd"), -1);
+    EXPECT_EQ(find("xxAB", "abc"), -1);
+    EXPECT_EQ(find("ab", "abc"), -1);              // haystack shorter than literal
+    EXPECT_EQ(find("", "a"), -1);
+    EXPECT_EQ(find("zz", ""), 0);
+    // A hit that would straddle the end of the searched span must not be reported
+    // even though the next bytes in memory complete it.
+    const std::string_view two_rows = "xxABCDyy";
+    EXPECT_EQ(FindCaseInsensitive(two_rows.data(), 4, "abcd", 4), nullptr);
+    EXPECT_NE(FindCaseInsensitive(two_rows.data(), 6, "abcd", 4), nullptr);
+    // Only A-Z fold: '@' (0x40) vs '`' (0x60), '[' (0x5B) vs '{' (0x7B), and bytes >= 0x80 compare exactly.
+    EXPECT_EQ(find("@", "`"), -1);
+    EXPECT_EQ(find("[", "{"), -1);
+    EXPECT_EQ(find("\xC3\xA9", "\xC3\x89"), -1);
+    EXPECT_EQ(find("\xC3\xA9", "\xC3\xA9"), 0);
+    EXPECT_EQ(find(std::string_view("a\0B", 3), std::string_view("\0b", 2)), 1);
 }
 
 #ifdef XSTORE_HAVE_RE2
-TEST(PatternMatcherTest, PrefilterLiteralEmptyForRegex) {
+TEST(PatternMatcherTest, RegexPrefilterLiteralIsCaseSensitiveRequiredLiteral) {
     std::string error;
     auto matcher = PatternMatcher::Compile("AAPL.*", XStore_Proto::PATTERN_REGEX, false, error);
     ASSERT_TRUE(matcher.has_value()) << error;
-    EXPECT_TRUE(matcher->PrefilterLiteral().empty());
+    EXPECT_EQ(matcher->PrefilterLiteral(), "AAPL");
+    EXPECT_FALSE(matcher->PrefilterCaseInsensitive());
+    auto ci = PatternMatcher::Compile("AAPL.*", XStore_Proto::PATTERN_REGEX, true, error);
+    ASSERT_TRUE(ci.has_value()) << error;
+    EXPECT_TRUE(ci->PrefilterLiteral().empty());
+    EXPECT_FALSE(ci->PrefilterCaseInsensitive());
+}
+
+TEST(PatternMatcherTest, RegexRequiredLiteralTable) {
+    struct Case {
+        std::string pattern;
+        const char *expected;
+    };
+    // Rules: runs end at ., ^, $, class escapes (\d \w \s \b ...), '+' (atom kept) and at
+    // a quantifier that makes the previous atom optional (* ? {n,m}: that atom is
+    // dropped). Longest run wins, ties go to the first. Bail ("") on | ( ) \Q \E
+    // \x \p \P and other alphanumeric escapes, stacked quantifiers, a '{' that is
+    // not {n} / {n,} / {n,m}, bytes >= 0x80, or case-insensitive.
+    const std::vector<Case> cases = {
+        {"order-12", "order-12"},
+        {"^AAPL-order-[0-9]+7$", "AAPL-order-"},  // class = one non-literal atom
+        {"[ab]cd", "cd"},
+        {"order-1234[0-9]", "order-1234"},
+        {"[^]]x", "x"},                       // leading ']' after '^' is a class member
+        {"[a\\]b]cd", "cd"},                  // escaped ']' does not close the class
+        {"[[:alpha:]]ab", "ab"},
+        {"a[b]*c", "a"},
+        {"ab[c]?d", "ab"},
+        {"[abc", ""},                         // unterminated: bail
+        {"^AAPL-order-\\d+7$", "AAPL-order-"},
+        {"ab*c", "a"},                        // b optional; runs "a","c": tie -> first
+        {"abc*", "ab"},
+        {"ab+c", "ab"},                       // b kept, run ends after it; "c" is shorter
+        {"ab+cde", "cde"},
+        {"ab+?cde", "cde"},                   // lazy marker is harmless
+        {"ab??cde", "cde"},                   // optional + lazy marker: b dropped
+        {"a.b", "a"},
+        {"a.bc", "bc"},
+        {"foo\\.bar", "foo.bar"},
+        {"foo\\_bar", "foo_bar"},
+        {"x{2}y", "y"},
+        {"abc{2,}d", "ab"},
+        {"a{2,3}bcd", "bcd"},
+        {"a{x}b", ""},                        // not a repetition: bail
+        {"a{2", ""},
+        {"a+*", ""},                          // stacked quantifiers bail
+        {"a*+", ""},
+        {"(a|b)c", ""},
+        {"ab|cd", ""},
+        {"(abc)", ""},
+        {"(?i)abc", ""},
+        {"abc\\Qx.y\\E", ""},
+        {"\\x41bc", ""},
+        {"\\pLabc", ""},
+        {"\\p{Greek}abc", ""},
+        {"\\1abc", ""},
+        {"\\d+abc", "abc"},
+        {"abc\\bdefg", "defg"},
+        {"a]b}", "a]b}"},                     // ']' and '}' outside a class are literals
+        {"abc$", "abc"},
+        {"x*", ""},
+        {"", ""},
+        {"caf\xC3\xA9", ""},                // non-ASCII bails
+    };
+    for (const Case &c : cases) {
+        EXPECT_EQ(PatternMatcher::RegexRequiredLiteral(c.pattern, false), c.expected) << "pattern '" << c.pattern << "'";
+    }
+    EXPECT_EQ(PatternMatcher::RegexRequiredLiteral("abc", true), "");  // case-insensitive bails
 }
 #endif
 
@@ -186,6 +362,59 @@ protected:
             XStore_Proto::UnaryInsert_REP rep;
             store.UnaryInsert(1000 + i, MakeRow({FInt64(i), FString(SYMBOLS[i % 5])}), db, &rep, XStore_Proto::SYNC);
         }
+    }
+
+    // 500 rows at t=8000..8499: column 0 is a hole (10%), unset (10%), an int (10%)
+    // or a random string over `alphabet`; column 1 is a random decoy string.
+    // Returns ts -> column-0 value for the string rows.
+    static std::map<uint64_t, std::string> LoadRandomRows(XStore &store, std::string_view db, std::mt19937_64 &rng,
+                                                          std::string_view alphabet) {
+        auto random_text = [&](size_t max_len) {
+            std::string s(rng() % (max_len + 1), ' ');
+            for (char &c : s) c = alphabet[rng() % alphabet.size()];
+            return s;
+        };
+        std::map<uint64_t, std::string> col0_strings;
+        XStore_Proto::UnaryInsert_REP rep;
+        for (uint64_t k = 0; k < 500; ++k) {
+            const uint64_t ts = 8000 + k;
+            const uint64_t kind = rng() % 10;
+            if (kind == 0) continue;  // hole
+            XStore_Proto::FData col0;
+            if (kind == 1) {
+                col0 = XStore_Proto::FData();  // unset
+            } else if (kind == 2) {
+                col0 = FInt64(static_cast<int64_t>(k));
+            } else {
+                std::string v = random_text(8);
+                col0 = FString(v);
+                col0_strings[ts] = v;
+            }
+            store.UnaryInsert(ts, MakeRow({col0, FString(random_text(8))}), db, &rep, XStore_Proto::SYNC);
+        }
+        return col0_strings;
+    }
+
+    // FindByPattern (prefiltered) vs the matcher applied to every stored value.
+    // Returns false if the pattern is invalid (then the query must return no rows).
+    static bool ExpectMatchesReference(XStore &store, std::string_view db,
+                                       const std::map<uint64_t, std::string> &col0_strings, std::string_view pattern,
+                                       XStore_Proto::PatternMode mode, bool ci) {
+        std::string error;
+        auto matcher = PatternMatcher::Compile(pattern, mode, ci, error);
+        auto result = Run(store, db, 8000, 8499, 0, pattern, mode, ci);
+        if (!matcher.has_value()) {
+            EXPECT_EQ(result.queryresponse_size(), 0) << pattern;
+            return false;
+        }
+        std::set<uint64_t> expected;
+        for (const auto &[ts, v] : col0_strings) {
+            if (matcher->Matches(v)) expected.insert(ts);
+        }
+        std::set<uint64_t> got;
+        for (const auto &entry : result.queryresponse()) got.insert(entry.timestamp());
+        EXPECT_EQ(got, expected) << "pattern '" << pattern << "' ci=" << ci << " literal='" << matcher->PrefilterLiteral() << "'";
+        return true;
     }
 };
 
@@ -383,6 +612,71 @@ TEST_F(XStorePatternTestFixture, RandomizedResultsEqualPerRowReference) {
     }
 }
 
+TEST_F(XStorePatternTestFixture, IlikePrefilterRandomizedEqualsPerRowReference) {
+    // ILIKE only: letters of both cases, digits/punctuation anchors, wildcards, escapes.
+    XStore store;
+    CreateTestDb(store, "PATTERNIL1", XStore_Proto::SECOND, 64);
+    std::mt19937_64 rng(20261019);
+    const auto col0_strings = LoadRandomRows(store, "PATTERNIL1", rng, "abABxX1-_");
+    const std::string pattern_alphabet = "abABxX1-_%\\";
+    size_t with_literal = 0;
+    for (int q = 0; q < 400; ++q) {
+        std::string pattern(1 + rng() % 6, ' ');
+        for (char &c : pattern) c = pattern_alphabet[rng() % pattern_alphabet.size()];
+        std::string error;
+        auto matcher = PatternMatcher::Compile(pattern, XStore_Proto::PATTERN_LIKE, true, error);
+        if (matcher.has_value() && !matcher->PrefilterLiteral().empty()) ++with_literal;
+        ExpectMatchesReference(store, "PATTERNIL1", col0_strings, pattern, XStore_Proto::PATTERN_LIKE, true);
+    }
+    EXPECT_GE(with_literal, 200u) << "too few patterns exercised the prefilter";
+}
+
+TEST_F(XStorePatternTestFixture, IlikePrefilterIgnoresCaseButNotBytes) {
+    XStore store;
+    CreateTestDb(store, "PATTERNIL2", XStore_Proto::SECOND, 64);
+    XStore_Proto::UnaryInsert_REP rep;
+    auto put = [&](uint64_t ts, const std::string &v, const std::string &decoy = "zz") {
+        store.UnaryInsert(ts, MakeRow({FString(v), FString(decoy)}), "PATTERNIL2", &rep, XStore_Proto::SYNC);
+    };
+    put(9000, "AAPL-order-1");
+    put(9001, "aapl-order-2");
+    put(9002, "AaPl-ORDER-3");
+    put(9003, "msft-order-4");
+    put(9004, "xx", "AAPL");                       // literal only in the decoy column
+    put(9005, "AAP");                              // near miss
+    put(9006, "a@pl");                             // '@' must not fold onto '`' / 'A'
+    auto ts_of = [](const XStore_Proto::FindByPattern_REP &r) {
+        std::set<uint64_t> out;
+        for (const auto &e : r.queryresponse()) out.insert(e.timestamp());
+        return out;
+    };
+    const auto kLike = XStore_Proto::PATTERN_LIKE;
+    EXPECT_EQ(ts_of(Run(store, "PATTERNIL2", 9000, 9099, 0, "%aapl%", kLike, true)), (std::set<uint64_t>{9000, 9001, 9002}));
+    EXPECT_EQ(ts_of(Run(store, "PATTERNIL2", 9000, 9099, 0, "%AAPL%", kLike, true)), (std::set<uint64_t>{9000, 9001, 9002}));
+    EXPECT_EQ(ts_of(Run(store, "PATTERNIL2", 9000, 9099, 0, "%aapl%", kLike, false)), (std::set<uint64_t>{9001}));
+    EXPECT_EQ(ts_of(Run(store, "PATTERNIL2", 9000, 9099, 1, "%aapl%", kLike, true)), (std::set<uint64_t>{9004}));
+    // Literal of digits/punctuation only: needs a single memchr, no case work.
+    EXPECT_EQ(ts_of(Run(store, "PATTERNIL2", 9000, 9099, 0, "%-1", kLike, true)), (std::set<uint64_t>{9000}));
+    EXPECT_EQ(ts_of(Run(store, "PATTERNIL2", 9000, 9099, 0, "%-3", kLike, true)), (std::set<uint64_t>{9002}));
+    EXPECT_EQ(ts_of(Run(store, "PATTERNIL2", 9000, 9099, 0, "%r-4%", kLike, true)), (std::set<uint64_t>{9003}));
+    EXPECT_TRUE(ts_of(Run(store, "PATTERNIL2", 9000, 9099, 0, "%`pl%", kLike, true)).empty());
+}
+
+TEST_F(XStorePatternTestFixture, IlikePrefilterLiteralStraddlingRowsIsNotAMatch) {
+    // Row 9100's 60-byte string serializes to exactly 64 bytes, so "AB" is the
+    // last row byte; row 9101 holds "CD". Neither row contains "abcd" and the
+    // prefilter's span search must not invent it across the boundary (row 9101's
+    // own header bytes sit between them in the mapped span).
+    XStore store;
+    CreateTestDb(store, "PATTERNIL3", XStore_Proto::SECOND, 64);
+    XStore_Proto::UnaryInsert_REP rep;
+    store.UnaryInsert(9100, MakeRow({FString(std::string(58, 'x') + "AB")}), "PATTERNIL3", &rep, XStore_Proto::SYNC);
+    store.UnaryInsert(9101, MakeRow({FString("CDyy")}), "PATTERNIL3", &rep, XStore_Proto::SYNC);
+    EXPECT_EQ(Run(store, "PATTERNIL3", 9100, 9101, 0, "%abcd%", XStore_Proto::PATTERN_LIKE, true).queryresponse_size(), 0);
+    EXPECT_EQ(Run(store, "PATTERNIL3", 9100, 9101, 0, "%cd%", XStore_Proto::PATTERN_LIKE, true).queryresponse_size(), 1);
+    EXPECT_EQ(Run(store, "PATTERNIL3", 9100, 9101, 0, "%xab", XStore_Proto::PATTERN_LIKE, true).queryresponse_size(), 1);
+}
+
 #ifdef XSTORE_HAVE_RE2
 #include <chrono>
 
@@ -429,5 +723,44 @@ TEST_F(XStorePatternTestFixture, RegexModeFiltersRowsEndToEnd) {
     auto rep = Run(store, "PATTERNRX", 1000, 1299, 1, "^(AAPL|MSFT)$", XStore_Proto::PATTERN_REGEX);
     EXPECT_FALSE(rep.has_querystatus()) << rep.querystatus();
     EXPECT_EQ(rep.queryresponse_size(), 120);
+}
+
+TEST_F(XStorePatternTestFixture, RegexPrefilterRandomizedEqualsPerRowReference) {
+    // Random regexes assembled from atoms and quantifiers covering every
+    // extractor rule (classes, groups, alternation, escapes, optional atoms);
+    // stops after 300 compile-valid ones. Deterministic seed.
+    XStore store;
+    CreateTestDb(store, "PATTERNRX2", XStore_Proto::SECOND, 64);
+    std::mt19937_64 rng(20261020);
+    const auto col0_strings = LoadRandomRows(store, "PATTERNRX2", rng, "abAx-.2d");
+    static const char *const ATOMS[] = {"a", "b", "A", "x", "-", "2", "ab", "xa-", "\\.", "\\d", ".", "^", "$",
+                                        "[ab]", "(a|b)", "a|b", "\\w", "\\bx", "\\-"};
+    static const char *const QUANTS[] = {"", "", "", "", "*", "+", "?", "{2}", "{1,2}", "*?", "+?", "??"};
+    size_t valid = 0;
+    size_t with_literal = 0;
+    for (int attempt = 0; attempt < 5000 && valid < 300; ++attempt) {
+        std::string pattern;
+        const size_t atoms = 1 + rng() % 5;
+        for (size_t i = 0; i < atoms; ++i) {
+            pattern += ATOMS[rng() % (sizeof(ATOMS) / sizeof(ATOMS[0]))];
+            pattern += QUANTS[rng() % (sizeof(QUANTS) / sizeof(QUANTS[0]))];
+        }
+        if (!ExpectMatchesReference(store, "PATTERNRX2", col0_strings, pattern, XStore_Proto::PATTERN_REGEX, false)) continue;
+        ++valid;
+        if (!PatternMatcher::RegexRequiredLiteral(pattern, false).empty()) ++with_literal;
+    }
+    EXPECT_EQ(valid, 300u);
+    EXPECT_GE(with_literal, 100u) << "too few patterns exercised the prefilter";
+}
+
+TEST_F(XStorePatternTestFixture, RegexPrefilterEndToEnd) {
+    XStore store;
+    CreateTestDb(store, "PATTERNRX3", XStore_Proto::SECOND, 64);
+    InsertSymbols(store, "PATTERNRX3");
+    // Required literal "AAPL" (AAPL rows are i % 5 == 0 -> 60 of 300); case-insensitive has none.
+    EXPECT_EQ(Run(store, "PATTERNRX3", 1000, 1299, 1, "^AAPL$", XStore_Proto::PATTERN_REGEX).queryresponse_size(), 60);
+    EXPECT_EQ(Run(store, "PATTERNRX3", 1000, 1299, 1, "^aapl$", XStore_Proto::PATTERN_REGEX, true).queryresponse_size(), 60);
+    EXPECT_EQ(Run(store, "PATTERNRX3", 1000, 1299, 1, "AA?PL", XStore_Proto::PATTERN_REGEX).queryresponse_size(), 60);
+    EXPECT_EQ(Run(store, "PATTERNRX3", 1000, 1299, 1, "ZZZZ", XStore_Proto::PATTERN_REGEX).queryresponse_size(), 0);
 }
 #endif

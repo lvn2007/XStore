@@ -926,9 +926,15 @@ TEST_F(XStorePerfTest, FindByPatternScanThroughput) {
         {"LIKE common literal '%order%'", "%order%", XStore_Proto::PATTERN_LIKE, false},
         {"LIKE no-match '%ZZZZ%'", "%ZZZZ%", XStore_Proto::PATTERN_LIKE, false},
         {"ILIKE '%aapl%'", "%aapl%", XStore_Proto::PATTERN_LIKE, true},
+        {"ILIKE selective '%OrDeR-1234%'", "%OrDeR-1234%", XStore_Proto::PATTERN_LIKE, true},
+        {"ILIKE no-match '%zzzz%'", "%zzzz%", XStore_Proto::PATTERN_LIKE, true},
     };
 #ifdef XSTORE_HAVE_RE2
     cases.push_back({"REGEX '^(AAPL|MSFT)-order-[0-9]+7$'", "^(AAPL|MSFT)-order-[0-9]+7$", XStore_Proto::PATTERN_REGEX, false});
+    // Selective regexes with a required literal ("order-1234" / "ZZZZ") for the prefilter.
+    cases.push_back({"REGEX selective 'order-1234[0-9]'", "order-1234[0-9]", XStore_Proto::PATTERN_REGEX, false});
+    cases.push_back({"REGEX selective 'order-1234\\d+$'", "order-1234\\d+$", XStore_Proto::PATTERN_REGEX, false});
+    cases.push_back({"REGEX no-match 'ZZZZ.*'", "ZZZZ.*", XStore_Proto::PATTERN_REGEX, false});
 #endif
 
     auto run = [&](const Case &c) {
