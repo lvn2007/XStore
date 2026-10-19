@@ -55,6 +55,11 @@ unsigned long long PerfOpCount(unsigned long long default_count) {
     return default_count;
 }
 
+int EnvInt(const char *name, int fallback) {
+    const char *v = std::getenv(name);
+    return v != nullptr && std::atoi(v) > 0 ? std::atoi(v) : fallback;
+}
+
 struct PerfStats {
     std::string name;
     unsigned long long count;
@@ -574,6 +579,79 @@ TEST_F(XStorePerfTest, BatchQueryThroughput) {
 
     ASSERT_EQ(query_rep.queryresponse_size(), (int)n) << "batch query lost/gained rows";
     ReportPerf({"BatchQuery", n, elapsed});
+}
+
+TEST_F(XStorePerfTest, BatchDeleteThroughput) {
+    XStore store;
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
+    const unsigned long long n = PerfOpCount(200'000);
+
+    XStore_Proto::BatchInsert_REQ insert_req;
+    insert_req.set_dbname("PERFDB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);   // see BatchQueryThroughput
+    for (unsigned long long i = 0; i < n; i++) {
+        XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
+        entry->set_timestamp(BASE_TS + i);
+        *entry->mutable_data() = PerfRow(i);
+    }
+    XStore_Proto::BatchInsert_REP insert_rep;
+    store.BatchInsert(&insert_req, &insert_rep);
+    ASSERT_NE(insert_rep.insertstatus().find("successfully"), std::string::npos) << insert_rep.insertstatus();
+
+    XStore_Proto::BatchDelete_REQ delete_req;
+    delete_req.set_dbname("PERFDB");
+    for (unsigned long long i = 0; i < n; i++) delete_req.add_timestamp(BASE_TS + i);   // ascending, as a client sends it
+
+    auto start = std::chrono::steady_clock::now();
+    XStore_Proto::BatchDelete_REP delete_rep = store.BatchDelete(&delete_req);
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+    ASSERT_NE(delete_rep.deletestatus().find(fmt::format("Deleted {} items", n)), std::string::npos) << delete_rep.deletestatus();
+    ReportPerf({"BatchDelete", n, elapsed});
+}
+
+// BatchDelete of scattered rows: the n rows of the XBench BATCH_RAND shape (ScatteredSyncRequests) are inserted, then
+// deleted in disjoint random subsets of XSTORE_PERF_BATCH_DELETE_ROWS (default 300) rows (fixed seed, ascending within a
+// call), so every call is that many isolated runs: BATCH_DELETE_MAX_RUN_LOCKS is 1 today (the span lock); a build with a
+// per-run BatchDelete (cap >= 300) locks run by run. Request building stays outside the timed window.
+TEST_F(XStorePerfTest, BatchDeleteScatteredThroughput) {
+    XStore store;
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
+    const unsigned long long n = std::min(PerfOpCount(200'000), kScatterYearSeconds);
+    const unsigned long long kRowsPerCall = static_cast<unsigned long long>(EnvInt("XSTORE_PERF_BATCH_DELETE_ROWS", 300));
+    std::vector<unsigned long long> rows;
+    rows.reserve(n);
+    for (XStore_Proto::BatchInsert_REQ &req : ScatteredSyncRequests(n, kRowsPerCall)) {
+        XStore_Proto::BatchInsert_REP rep;
+        store.BatchInsert(&req, &rep);
+        ASSERT_NE(rep.insertstatus().find("successfully"), std::string::npos) << rep.insertstatus();
+        for (const XStore_Proto::BatchInsert_DATA &entry : req.batchinsert_data()) rows.push_back(entry.timestamp());
+    }
+    std::mt19937_64 rng(20261019);
+    std::shuffle(rows.begin(), rows.end(), rng);
+
+    std::vector<XStore_Proto::BatchDelete_REQ> reqs;
+    for (unsigned long long from = 0; from < n; from += kRowsPerCall) {
+        const unsigned long long to = std::min(n, from + kRowsPerCall);
+        std::sort(rows.begin() + static_cast<std::ptrdiff_t>(from), rows.begin() + static_cast<std::ptrdiff_t>(to));
+        XStore_Proto::BatchDelete_REQ &req = reqs.emplace_back();
+        req.set_dbname("PERFDB");
+        for (unsigned long long i = from; i < to; i++) req.add_timestamp(rows[i]);
+    }
+
+    std::vector<std::string> wants;
+    for (const XStore_Proto::BatchDelete_REQ &req : reqs) wants.push_back(fmt::format("Deleted {} items", req.timestamp_size()));
+
+    unsigned long long failed = 0;
+    auto start = std::chrono::steady_clock::now();
+    for (size_t i = 0; i < reqs.size(); i++) {
+        XStore_Proto::BatchDelete_REP rep = store.BatchDelete(&reqs[i]);
+        if (rep.deletestatus().find(wants[i]) == std::string::npos) ++failed;
+    }
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+    EXPECT_EQ(failed, 0u);
+    ReportPerf({"BatchDeleteScattered", n, elapsed});
 }
 
 // ---------------------------------------------------------------------
@@ -1135,11 +1213,6 @@ std::string LoadAvg() {
     return a + " " + b + " " + c;
 }
 
-int EnvInt(const char *name, int fallback) {
-    const char *v = std::getenv(name);
-    return v != nullptr && std::atoi(v) > 0 ? std::atoi(v) : fallback;
-}
-
 }  // namespace
 
 TEST_F(XStorePerfTest, LiveWidenDuringInserts) {
@@ -1607,4 +1680,138 @@ TEST_F(XStorePerfTest, ScatteredInsertWithConcurrentBatchQueries) {
                              static_cast<double>(in_window.size()) / secs, at(0.5), at(0.99),
                              in_window.empty() ? 0.0 : in_window.back())
               << std::endl;
+}
+
+// ScatteredInsertWithConcurrentBatchQueries with BatchDelete threads: the same SYNC writer (1000 random distinct rows
+// per BatchInsert, one year, fixed seed) while XSTORE_PERF_DELETERS (default 4) threads each BatchDelete
+// XSTORE_PERF_BATCH_DELETE_ROWS (default 300) rows per call until the writer is done. The
+// deleted rows are real hits: a row set D (random, fixed seed, disjoint from the writer's rows, so interleaved with them
+// across the year) is inserted SYNC before the window, and each deleter works through its own disjoint, pre-built,
+// ascending chunks of D in order, wrapping around when it reaches the end. With the per-run WRITE set a delete conflicts with a writer record only where their
+// rows coincide or sit next to each other, not over their spans. D is capped (kMaxDeleteSetRows, 500 chunks per deleter),
+// so only the first pass over the chunks hits rows; later passes delete already-deleted rows (same locks, same status
+// text). The calls made per deleter are printed with the first-pass chunk count. Same window rule and output style
+// as the BatchQueries test. Run it with XSTORE_TEST_RING_BYTES=67108864 like the other perf tests: on the default
+// 8 MiB test ring the checkpointer falls behind and a writer batch fails with "ring full".
+TEST_F(XStorePerfTest, ScatteredInsertWithConcurrentBatchDeletes) {
+    XStore store;
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
+    {   // the year file must exist, or the deleters time the missing-file path (a scattered write may overwrite it)
+        XStore_Proto::UnaryInsert_REP seed;
+        store.UnaryInsert(kScatterYearStart, PerfRow(0), "PERFDB", &seed, XStore_Proto::SYNC);
+        ASSERT_NE(seed.insertstatus().find("[INFO]"), std::string::npos) << seed.insertstatus();
+    }
+    const unsigned long long n = std::min(PerfOpCount(200'000), kScatterYearSeconds);
+    std::vector<XStore_Proto::BatchInsert_REQ> reqs = ScatteredSyncRequests(n, 1000);
+    const unsigned deleters = static_cast<unsigned>(EnvInt("XSTORE_PERF_DELETERS", 4));
+    const unsigned long long delete_rows = static_cast<unsigned long long>(EnvInt("XSTORE_PERF_BATCH_DELETE_ROWS", 300));
+
+    // D: about deleters x chunks x delete_rows rows, capped so the SYNC setup insert stays short.
+    constexpr unsigned long long kMaxDeleteSetRows = 150'000;
+    const unsigned long long chunks = std::clamp<unsigned long long>(kMaxDeleteSetRows / (deleters * delete_rows), 1, 500);
+    const unsigned long long d_rows = deleters * chunks * delete_rows;
+    std::unordered_set<unsigned long long> used = {kScatterYearStart};
+    for (const XStore_Proto::BatchInsert_REQ &req : reqs) {
+        for (const XStore_Proto::BatchInsert_DATA &entry : req.batchinsert_data()) used.insert(entry.timestamp());
+    }
+    std::vector<unsigned long long> d;
+    d.reserve(d_rows);
+    std::mt19937_64 d_rng(20261020);
+    while (d.size() < d_rows) {
+        const unsigned long long ts = kScatterYearStart + d_rng() % kScatterYearSeconds;
+        if (used.insert(ts).second) d.push_back(ts);
+    }
+    for (unsigned long long from = 0; from < d_rows; from += 1000) {
+        XStore_Proto::BatchInsert_REQ req;
+        req.set_dbname("PERFDB");
+        req.set_durabilitymode(XStore_Proto::SYNC);
+        for (unsigned long long i = from; i < std::min(d_rows, from + 1000); i++) {
+            XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
+            entry->set_timestamp(d[i]);
+            *entry->mutable_data() = PerfRow(i);
+        }
+        XStore_Proto::BatchInsert_REP rep;
+        store.BatchInsert(&req, &rep);
+        ASSERT_NE(rep.insertstatus().find("successfully"), std::string::npos) << rep.insertstatus();
+    }
+    // deleter t owns d[t * chunks * delete_rows, (t + 1) * chunks * delete_rows), cut into ascending chunks
+    std::vector<std::vector<XStore_Proto::BatchDelete_REQ>> del_reqs(deleters);
+    for (unsigned t = 0; t < deleters; ++t) {
+        for (unsigned long long c = 0; c < chunks; ++c) {
+            const auto first = d.begin() + static_cast<std::ptrdiff_t>((t * chunks + c) * delete_rows);
+            std::sort(first, first + static_cast<std::ptrdiff_t>(delete_rows));
+            XStore_Proto::BatchDelete_REQ &req = del_reqs[t].emplace_back();
+            req.set_dbname("PERFDB");
+            for (auto it = first; it != first + static_cast<std::ptrdiff_t>(delete_rows); ++it) req.add_timestamp(*it);
+        }
+    }
+    const std::string want = fmt::format("Deleted {} items", delete_rows);
+
+    using SteadyClock = std::chrono::steady_clock;
+    std::atomic<bool> go{false}, writer_done{false};
+    SteadyClock::time_point window_start, window_end;
+    struct Del { SteadyClock::time_point done; double us; };
+    std::vector<std::vector<Del>> dels(deleters);
+    std::vector<unsigned long long> del_failed(deleters, 0);
+    std::vector<std::thread> deleter_threads;
+    for (unsigned t = 0; t < deleters; ++t) {
+        deleter_threads.emplace_back([&, t] {
+            XStore dl;
+            std::vector<Del> &mine = dels[t];
+            while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
+            // Wraps around until the writer is done: after the first pass the rows are gone, so later passes punch
+            // holes on empty rows (same locks, same status text).
+            for (size_t i = 0; !writer_done.load(std::memory_order_relaxed); i = (i + 1) % del_reqs[t].size()) {
+                XStore_Proto::BatchDelete_REQ &req = del_reqs[t][i];
+                const SteadyClock::time_point t0 = SteadyClock::now();
+                XStore_Proto::BatchDelete_REP rep = dl.BatchDelete(&req);
+                const SteadyClock::time_point t1 = SteadyClock::now();
+                mine.push_back({t1, std::chrono::duration<double, std::micro>(t1 - t0).count()});
+                if (rep.deletestatus().find(want) == std::string::npos) ++del_failed[t];
+            }
+        });
+    }
+
+    unsigned long long failed = 0;
+    std::thread writer([&] {
+        XStore w;
+        window_start = SteadyClock::now();
+        go.store(true, std::memory_order_release);
+        for (XStore_Proto::BatchInsert_REQ &req : reqs) {
+            XStore_Proto::BatchInsert_REP rep;
+            w.BatchInsert(&req, &rep);
+            if (rep.insertstatus().find("successfully") == std::string::npos) ++failed;
+        }
+        window_end = SteadyClock::now();
+        writer_done.store(true, std::memory_order_relaxed);
+    });
+    writer.join();
+    for (std::thread &t : deleter_threads) t.join();
+    const double elapsed = std::chrono::duration<double>(window_end - window_start).count();
+
+    std::vector<double> in_window;
+    unsigned long long delete_failed = 0;
+    for (unsigned t = 0; t < deleters; ++t) {
+        delete_failed += del_failed[t];
+        for (const Del &e : dels[t]) {
+            if (e.done <= window_end) in_window.push_back(e.us);
+        }
+    }
+    std::sort(in_window.begin(), in_window.end());
+    const auto at = [&](double q) {
+        return in_window.empty() ? 0.0 : in_window[std::min(in_window.size() - 1, static_cast<size_t>(q * static_cast<double>(in_window.size())))];
+    };
+    EXPECT_EQ(failed, 0u);
+    EXPECT_EQ(delete_failed, 0u);
+    ReportPerf({"ScatteredInsertWithConcurrentBatchDeletes[writer SYNC]", n, elapsed});
+    const double secs = elapsed > 0 ? elapsed : 1.0;
+    std::cout << fmt::format("[PERF] ScatteredInsertWithConcurrentBatchDeletes | deleters={} x {} rows | writer {:.0f} rows/s | "
+                             "deleters {} ops, {:.0f} ops/s total | delete latency p50 {:.1f} p99 {:.1f} max {:.1f} us",
+                             deleters, delete_rows, static_cast<double>(n) / secs, in_window.size(),
+                             static_cast<double>(in_window.size()) / secs, at(0.5), at(0.99),
+                             in_window.empty() ? 0.0 : in_window.back())
+              << std::endl;
+    std::cout << "ScatteredInsertWithConcurrentBatchDeletes calls per deleter (first pass = " << chunks << " chunks):";
+    for (const std::vector<Del> &v : dels) std::cout << " " << v.size();
+    std::cout << std::endl;
 }

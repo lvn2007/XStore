@@ -724,11 +724,15 @@ static_assert(WAL_APPLY_MAX_RUN_LOCKS >= 1, "a record needs at least one lock");
 inline constexpr uint64_t WAL_APPLY_MAX_RUN_LOCKS_KEEP_OLD_REBUILD = 512;
 static_assert(WAL_APPLY_MAX_RUN_LOCKS_KEEP_OLD_REBUILD >= 1, "a record needs at least one lock");
 
-// BatchDelete (WRITE) and BatchQuery (READ) lock exactly a year-group's runs of rows (BuildLockRuns), so a scattered
+// BatchDelete (WRITE) and BatchQuery (READ) can lock exactly a year-group's runs of rows (BuildLockRuns), so a scattered
 // writer's rows in the gaps and the request's rows never conflict; past the cap the group locks its min-to-max span.
-// 1 = the single span lock of every year-group (the behaviour before per-run locks for these two calls). 512 is
-// conservative, not measured: it equals the WAL apply's keep-old cap (WAL_APPLY_MAX_RUN_LOCKS_KEEP_OLD_REBUILD).
-inline constexpr uint64_t BATCH_DELETE_MAX_RUN_LOCKS = 512;
+// 1 = the single span lock of every year-group (the behaviour before per-run locks for these two calls).
+// BatchDelete is 1: measured on Mystic (2026-10-19) the per-run set gave no gain (the call is a series of
+// fallocate(PUNCH_HOLE), which serialise on the inode lock, so finer range locks only let the deleters run in
+// parallel against a writer's pwrite: deleter throughput equal, the writer 2-7x slower, the median delete 5x slower)
+// and cost ~7% on single-thread scattered deletes. BatchQuery is 512: 3x reader throughput and a 13x lower p99 with a
+// concurrent writer, no cost without one; 512 is conservative and equals the WAL apply's keep-old cap.
+inline constexpr uint64_t BATCH_DELETE_MAX_RUN_LOCKS = 1;
 static_assert(BATCH_DELETE_MAX_RUN_LOCKS >= 1, "a year-group needs at least one lock");
 inline constexpr uint64_t BATCH_QUERY_MAX_RUN_LOCKS = 512;
 static_assert(BATCH_QUERY_MAX_RUN_LOCKS >= 1, "a year-group needs at least one lock");

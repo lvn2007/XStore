@@ -2257,9 +2257,10 @@ TEST_F(XStoreLiveWidenTest, BatchQueryLocksOnlyItsRowsAndAnswersAsBefore) {
     EXPECT_EQ(lock.ActiveLocksForTests(), 0u);
 }
 
-// BatchDelete WRITE-locks only the rows it deletes: a READ held on a gap row does not stop it, one held on a deleted
-// row does until released; BATCH_DELETE_MAX_RUN_LOCKS runs lock run by run, one more locks the span. The data and
-// the index files equal a reference DB given the same deletes as one-row BatchDeletes.
+// BatchDelete WRITE-locks run by run up to BATCH_DELETE_MAX_RUN_LOCKS runs (1 today: the span lock, so a gap READ stops
+// every delete of two or more runs) and the span past it: a READ held on a gap row stops a delete exactly when it has
+// more runs than the cap, one held on a deleted row always does until released. The data and the index files equal a
+// reference DB given the same deletes as one-row BatchDeletes.
 TEST_F(XStoreLiveWidenTest, BatchDeleteLocksOnlyItsRowsAndDeletesAsBefore) {
     constexpr uint64_t kCap = XStoreTunables::BATCH_DELETE_MAX_RUN_LOCKS;
     XStore store;
@@ -2306,7 +2307,7 @@ TEST_F(XStoreLiveWidenTest, BatchDeleteLocksOnlyItsRowsAndDeletesAsBefore) {
         f.get();
         for (uint64_t row : rows) delete_rows(store, ref, {row});
     };
-    expect_delete({10, 12, 12, 13, 20}, 11, false);          // runs [10], [12, 13], [20]; a duplicate
+    expect_delete({10, 12, 12, 13, 20}, 11, kCap < 3);        // runs [10], [12, 13], [20]; a duplicate: waits iff it has more runs than the cap
     expect_delete({30, 32, 34}, 32, true);
     std::vector<uint64_t> at_cap, over_cap;
     for (uint64_t i = 0; i < kCap; ++i) at_cap.push_back(100 + 2 * i);
@@ -2336,7 +2337,8 @@ TEST_F(XStoreLiveWidenTest, BatchDeleteLocksOnlyItsRowsAndDeletesAsBefore) {
 // One scattered SYNC writer (110-row records of fresh rows, row % 4 == 0), BatchDeletes of seeded rows (row % 4 == 2,
 // first 8 blocks) and two BatchQuery threads over rows nobody writes (row % 4 == 3 present, row % 4 == 1 holes) on one
 // year: every lock set is under its cap and the row sets are disjoint, so no WRITE ever waits (the writer-wait counter
-// does not move) and every query answer is exact. The final data equals the serial replay, the indexes a startup
+// does not move; checked only while BATCH_DELETE_MAX_RUN_LOCKS covers the 40-row deletes, with the span lock the deletes
+// do wait for the writer) and every query answer is exact. The final data equals the serial replay, the indexes a startup
 // rebuild.
 TEST_F(XStoreLiveWidenTest, ScatteredWriterBesideBatchQueriesAndBatchDeletesOnDisjointRowsNeverWaits) {
     XStore store;
@@ -2462,7 +2464,9 @@ TEST_F(XStoreLiveWidenTest, ScatteredWriterBesideBatchQueriesAndBatchDeletesOnDi
         ADD_FAILURE() << "a thread is stuck (deadlock or lost wakeup)";
         AbortAfterAFailedWait();
     }
-    EXPECT_EQ(lock.WriterWaits().waits, waits_before) << "a WRITE waited: some lock set covered rows beyond its own";
+    if (XStoreTunables::BATCH_DELETE_MAX_RUN_LOCKS >= kDeleteRows) {   // with the span lock a delete does wait for the writer
+        EXPECT_EQ(lock.WriterWaits().waits, waits_before) << "a WRITE waited: some lock set covered rows beyond its own";
+    }
     EXPECT_GT(queries.load(), 10);
     EXPECT_EQ(lock.ActiveLocksForTests(), 0u);
     std::printf("[batch run locks] %d insert batches, %d batch deletes, %d batch queries, %llu writer waits\n",
