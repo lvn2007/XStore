@@ -1026,7 +1026,9 @@ class XStore {
         // the background thread started from StartCatIdxCompactionThread.
         // Public since M4 stage 3 so tests can run it next to RunLiveWidenPass
         // (it takes part in the RemoveDB handshake, see bg_mutex_).
-        void CompactColdCatIdxForAllDbs(const std::string &data_store_dir);
+        // Returns false when the run stopped early (a cancel, shutdown, a pending widen, or a DB whose cfg changed
+        // during the run), true when it went through.
+        bool CompactColdCatIdxForAllDbs(const std::string &data_store_dir);
 
         // One tick of the background index thread (StartCatIdxCompactionThread runs it every LIVE_WIDEN_TICK_SEC with
         // the real clock; tests with a fake one). Due live widening first (RunLiveWidenPass). Compaction yields to
@@ -1133,7 +1135,7 @@ class XStore {
             uint32_t old_width = 0; // a keep-old rebuild still answers columns below this from the old index (0: none)
         };
         // The notice for a year whose index is being rebuilt. progress nullptr: a column >= ZONE_MAP_MAX_TRACKED_COLUMNS
-        // of a rebuilding year with no live-widen status (a rebuild begun some other way): the old text. With progress:
+        // of a rebuilding year with no live-widen status (a rebuild begun some other way): no progress shown. With progress:
         // "(<p>% done[; slowed: <reason>])" after the year (p = done/total rows of the preallocated year file, rounded
         // down) and a text saying only the part not yet rebuilt is scanned (for a low column: results are correct).
         static std::string RebuildingColumnNoticeText(std::string_view op, const std::string &db_name, int32_t column_idx,
@@ -1204,6 +1206,12 @@ class XStore {
         static std::optional<std::chrono::steady_clock::time_point> LiveWidenLastGrowthForTests(const std::string &db_base_path);
         static void ClearLiveWidenRequestsForTests();
         static std::string BackgroundActiveKeyForTests(); // "<db_base_path>/<year>" the thread works on, or ""
+        // The test plays the background thread: enters a year key (false: refused) and leaves it.
+        static bool EnterBackgroundYearForTests(const std::string &year_key);
+        static void LeaveBackgroundYearForTests();
+        // ... and a removal's side of the handshake (StopBackgroundWork / ResumeBackgroundWork).
+        [[nodiscard]] static bool StopBackgroundWorkForTests(const std::string &scope);
+        static void ResumeBackgroundWorkForTests(const std::string &scope, bool cancelled);
 
         // Ring-format (record v2: ParseWalRecord's layout plus a u64 LSN after
         // the CRC; see XStore_WalRing.h) parser. kOk = real record (out_record
@@ -1336,6 +1344,10 @@ class XStore {
         static void DropLiveWidenRequest(const std::string &db_base_path);
 
         enum class LiveWidenDbOutcome { kDone, kRetry, kStopped, kGone };
+        // The DB's cfg still has `cfg`'s row length and tracked width. The background thread reads the cfg once per DB and
+        // calls this after entering each year: false for a DB removed (and maybe re-created) or grown since.
+        [[nodiscard]] bool CfgStillMatches(const std::string &db_name, const std::string &db_base_path,
+                                           const XStore_Proto::ConfigStruct &cfg);
         LiveWidenDbOutcome LiveWidenDb(const std::string &db_base_path, const std::string &db_name,
                                        std::vector<LiveWidenPassEntry> &out, unsigned workers,
                                        livewiden::LiveWidenGovernor *governor, livewiden::LiveWidenLoadSource *load,
@@ -1360,6 +1372,10 @@ class XStore {
         static std::condition_variable bg_cv_;
         static std::string bg_active_key_;
         static std::multiset<std::string> bg_removing_scopes_;
+        // A cancelling removal resumed while the thread was still on a year that a removal scope covers (its own after a
+        // timed-out wait, or another removal's still waiting): bg_cancel_ stays set until the thread leaves that year,
+        // and LeaveBackgroundYear clears it then.
+        static bool bg_cancel_clear_on_leave_;
         enum class BgEnter { kGo, kRemoving, kCancelled };
         static BgEnter EnterBackgroundYear(const std::string &year_key);
         static void LeaveBackgroundYear();

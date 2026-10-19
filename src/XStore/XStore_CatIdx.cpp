@@ -720,6 +720,9 @@ void XStore::CompactOneYearCatIdx(const std::string &db_base_path, unsigned shor
             // static sketch. Signature: (row_ptr, row_len, unsigned short
             // column_idx, FData& out_data) -> bool.
             if (!ExtractColumnByIndexSkipParse(row_buf.data(), row_length, static_cast<unsigned short>(c), f_data)) continue;
+            // An unset (null) column is skipped, like the bloom (live inserts and rebuilds): it is not a value, and it
+            // does not count towards CATIDX_MAX_BITMAP_DISTINCT_VALUES.
+            if (f_data.oneOfData_case() == XStore_Proto::FData::ONEOFDATA_NOT_SET) continue;
             std::string enc = EncodeFDataForCatIdx(f_data);
             auto &bucket = accumulators[c][enc];
             bucket.push_back(r);
@@ -756,9 +759,10 @@ void XStore::RebuildOneYearCatIdxBloom(const std::string &db_base_path, unsigned
     RebuildYearIndexes(db_base_path, year, row_length, tracked_column_count, /*need_zmap=*/false, /*need_catidx=*/true);
 }
 
-void XStore::CompactColdCatIdxForAllDbs(const std::string &data_store_dir) {
+bool XStore::CompactColdCatIdxForAllDbs(const std::string &data_store_dir) {
     unsigned short current_year = TimeStruct(static_cast<std::time_t>(std::time(nullptr)), XStore_Proto::SECOND).year;
-    if (!std::filesystem::exists(data_store_dir)) return;
+    if (!std::filesystem::exists(data_store_dir)) return true;
+    bool complete = true;
     for (auto &p : std::filesystem::directory_iterator(data_store_dir)) {
         if (!p.is_directory()) continue;
         // JoinPath, not p.path(): the spelling every request path uses (CachedDbBasePath), so registry keys and the
@@ -781,7 +785,7 @@ void XStore::CompactColdCatIdxForAllDbs(const std::string &data_store_dir) {
             // atexit-registered thread join until the whole remaining
             // corpus finishes. CompactOneYearCatIdx's row loop also checks
             // the flag (every 64K rows) and abandons the year in progress.
-            if (catidx_compaction_stop_flag_.load(std::memory_order_relaxed)) return;
+            if (catidx_compaction_stop_flag_.load(std::memory_order_relaxed)) return false;
             std::string filename = f.path().filename().string();
             if (filename.size() < 7 || filename.substr(filename.size() - 7) != ".XSTORE") continue;
             unsigned short year;
@@ -791,21 +795,30 @@ void XStore::CompactColdCatIdxForAllDbs(const std::string &data_store_dir) {
             if (live_widen_pending_.load(std::memory_order_relaxed)) {
                 spdlog::info("[CATIDX] - Compaction of {}/{} stopped: a live widen is pending; resumes after it",
                              db_base_path, year);
-                return;
+                return false;
             }
 
             // Handshake with RemoveDB / RemoveDBFiles (see bg_mutex_): a year being removed is not started, and a
             // removal waits until this year is done or abandoned (bg_cancel_).
             const BgEnter enter = EnterBackgroundYear(fmt::format("{}/{}", db_base_path, year));
-            if (enter == BgEnter::kCancelled) return;
+            if (enter == BgEnter::kCancelled) return false;
             if (enter == BgEnter::kRemoving) continue;
             struct Leave {
                 ~Leave() { XStore::LeaveBackgroundYear(); }
             } leave;
+            // As in LiveWidenDb: the cfg above was read before this DB's earlier years; a DB removed, re-created or
+            // grown since is not compacted with it (the next run reads it afresh).
+            if (!CfgStillMatches(db_name, db_base_path, cfg_struct)) {
+                complete = false;
+                break;
+            }
             CompactOneYearCatIdx(db_base_path, year, static_cast<uint16_t>(cfg_struct.rowlength()),
                                   EffectiveTrackedColumnCount(cfg_struct));
+            // A cancel abandoned that year (its removal, or shutdown): the run is cut here, as the next Enter would.
+            if (bg_cancel_.load(std::memory_order_relaxed)) return false;
         }
     }
+    return complete;
 }
 
 std::thread XStore::catidx_compaction_thread_;
@@ -867,8 +880,9 @@ void XStore::BackgroundIndexTick(const std::string &data_store_dir, BackgroundIn
                      XStoreTunables::LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC);
     }
     if (now() < schedule.next_compaction) return;
+    bool complete = true;
     try {
-        CompactColdCatIdxForAllDbs(data_store_dir);
+        complete = CompactColdCatIdxForAllDbs(data_store_dir);
     } catch (const std::exception &e) {
         spdlog::error("[CATIDX] - Compaction pass failed: {}", e.what());
     }
@@ -876,14 +890,23 @@ void XStore::BackgroundIndexTick(const std::string &data_store_dir, BackgroundIn
     // it runs again soon after the widen, which drops the widened years' bitmap sections anyway.
     if (live_widen_pending_.load(std::memory_order_relaxed)) {
         schedule.compaction_yielded = true;
+    } else if (!complete) {
+        // A removal's cancel (or a DB changed under it) cut the run short: what it had not reached runs soon, not an
+        // interval later.
+        schedule.next_compaction = now() + std::chrono::seconds(XStoreTunables::LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC);
     } else {
         schedule.next_compaction = now() + std::chrono::seconds(XStoreTunables::CATIDX_COMPACTION_POLL_INTERVAL_SEC);
     }
 }
 
 void XStore::StopCatIdxCompactionThread() {
-    catidx_compaction_stop_flag_.store(true, std::memory_order_relaxed);
-    bg_cancel_.store(true, std::memory_order_relaxed); // a running widen stops at its next chunk (left dirty)
+    {
+        // Both under bg_mutex_: a removal's ResumeBackgroundWork reads the stop flag and writes bg_cancel_ under it, so
+        // it cannot clear this cancel.
+        std::lock_guard<std::mutex> lock(bg_mutex_);
+        catidx_compaction_stop_flag_.store(true, std::memory_order_relaxed);
+        bg_cancel_.store(true, std::memory_order_relaxed); // a running widen stops at its next chunk (left dirty)
+    }
     if (catidx_compaction_thread_.joinable()) {
         catidx_compaction_thread_.join();
     }

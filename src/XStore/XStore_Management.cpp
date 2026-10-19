@@ -679,6 +679,7 @@ std::mutex XStore::bg_mutex_;
 std::condition_variable XStore::bg_cv_;
 std::string XStore::bg_active_key_;
 std::multiset<std::string> XStore::bg_removing_scopes_;
+bool XStore::bg_cancel_clear_on_leave_ = false;
 
 void XStore::RecordLiveWidenRequest(const std::string &db_name, const std::string &db_base_path) {
     std::lock_guard<std::mutex> lock(live_widen_mutex_);
@@ -801,6 +802,10 @@ void XStore::LeaveBackgroundYear() {
     {
         std::lock_guard<std::mutex> lock(bg_mutex_);
         bg_active_key_.clear();
+        if (bg_cancel_clear_on_leave_) { // a removal that timed out left its cancel set for this year (see Resume)
+            bg_cancel_clear_on_leave_ = false;
+            bg_cancel_.store(catidx_compaction_stop_flag_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        }
     }
     bg_cv_.notify_all();
 }
@@ -809,14 +814,22 @@ bool XStore::StopBackgroundWork(const std::string &scope) {
     std::unique_lock<std::mutex> lock(bg_mutex_);
     bg_removing_scopes_.insert(scope);
     bool cancelled = false;
-    if (!bg_active_key_.empty() && ScopeCovers(scope, bg_active_key_)) {
-        bg_cancel_.store(true, std::memory_order_relaxed);
-        cancelled = true;
-    }
-    const auto released = [&] { return bg_active_key_.empty() || !ScopeCovers(scope, bg_active_key_); };
-    if (!bg_cv_.wait_for(lock, std::chrono::milliseconds(XStoreTunables::BACKGROUND_REMOVE_WAIT_MS), released)) {
-        spdlog::error("[REMOVE] [{}] - The background index thread did not let go of {} within {} ms; removing anyway",
-                      scope, bg_active_key_, XStoreTunables::BACKGROUND_REMOVE_WAIT_MS);
+    try {
+        if (!bg_active_key_.empty() && ScopeCovers(scope, bg_active_key_)) {
+            bg_cancel_.store(true, std::memory_order_relaxed);
+            cancelled = true;
+        }
+        const auto released = [&] { return bg_active_key_.empty() || !ScopeCovers(scope, bg_active_key_); };
+        if (!bg_cv_.wait_for(lock, std::chrono::milliseconds(XStoreTunables::BACKGROUND_REMOVE_WAIT_MS), released)) {
+            spdlog::error("[REMOVE] [{}] - The background index thread did not let go of {} within {} ms; removing anyway",
+                          scope, bg_active_key_, XStoreTunables::BACKGROUND_REMOVE_WAIT_MS);
+        }
+    } catch (...) {
+        // The caller's guard is built from the return value, so nothing else would take the scope (and the cancel)
+        // back out.
+        if (lock.owns_lock()) lock.unlock();
+        ResumeBackgroundWork(scope, cancelled);
+        throw;
     }
     return cancelled;
 }
@@ -825,10 +838,36 @@ void XStore::ResumeBackgroundWork(const std::string &scope, bool cancelled) {
     std::lock_guard<std::mutex> lock(bg_mutex_);
     auto it = bg_removing_scopes_.find(scope);
     if (it != bg_removing_scopes_.end()) bg_removing_scopes_.erase(it);
+    if (!cancelled) return;
+    // The thread is still on a year that this scope (its wait timed out: a chunk that runs long) or another removal's
+    // (which cancelled it and still waits) covers: it must keep seeing the cancel until it lets go of that year, else it
+    // could finish it (append a bitmap, end a widen) into files being removed. LeaveBackgroundYear clears it then;
+    // Enter refuses every year until. (A scope that covers the active key always cancelled it: the thread cannot enter
+    // a covered year, so the key was there when that removal's Stop ran.)
+    if (!bg_active_key_.empty()) {
+        bool covered = ScopeCovers(scope, bg_active_key_);
+        for (const std::string &other : bg_removing_scopes_) covered = covered || ScopeCovers(other, bg_active_key_);
+        if (covered) {
+            bg_cancel_clear_on_leave_ = true;
+            return;
+        }
+    }
+    // An earlier removal whose wait timed out erased its scope and left the cancel to LeaveBackgroundYear: its year is
+    // still active (the flag is only set while a key is), so a later Resume must not clear it.
+    if (bg_cancel_clear_on_leave_) return;
     // Back to "only a shutdown cancels": the thread never starts a year while bg_cancel_ is set, so nothing else of
-    // its work was begun under this cancel.
-    if (cancelled) bg_cancel_.store(catidx_compaction_stop_flag_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    // its work was begun under this cancel. Read under bg_mutex_, which StopCatIdxCompactionThread sets both flags
+    // under, so a shutdown's cancel is never overwritten.
+    bg_cancel_.store(catidx_compaction_stop_flag_.load(std::memory_order_relaxed), std::memory_order_relaxed);
 }
+
+bool XStore::EnterBackgroundYearForTests(const std::string &year_key) { return EnterBackgroundYear(year_key) == BgEnter::kGo; }
+
+void XStore::LeaveBackgroundYearForTests() { LeaveBackgroundYear(); }
+
+bool XStore::StopBackgroundWorkForTests(const std::string &scope) { return StopBackgroundWork(scope); }
+
+void XStore::ResumeBackgroundWorkForTests(const std::string &scope, bool cancelled) { ResumeBackgroundWork(scope, cancelled); }
 
 XStore_Proto::CreateDB_REP XStore::CreateDB(std::string_view db_name_view, XStore_Proto::TimeUnit time_resolution, short int row_length, uint32_t column_count_seed,
                                              const std::vector<std::string> &column_names) {
@@ -1284,7 +1323,7 @@ std::string XStore::UnindexedColumnNoticeText(std::string_view op, const std::st
                                                unsigned short year, uint32_t index_width) {
     return fmt::format("[WARNING] [{}] [DB: {}] - column {} is not yet indexed in {} (index width {}); "
                         "answered by full scan -- the index is widened in the background once the column count has "
-                        "not grown for {} s (or at the next start)",
+                        "not grown for {} s if that widen can start, else at the next start",
                         op, db_name, column_idx, year, index_width, XStoreTunables::LIVE_WIDEN_QUIET_PERIOD_SEC);
 }
 
@@ -1311,9 +1350,9 @@ bool XStore::FindRebuildProgress(std::string_view db_base_path, unsigned short y
 std::string XStore::RebuildingColumnNoticeText(std::string_view op, const std::string &db_name, int32_t column_idx,
                                                unsigned short year, const LiveRebuildProgress *progress) {
     if (progress == nullptr) {
-        return fmt::format("[WARNING] [{}] [DB: {}] - column {} is being indexed in the background in {}; answered by "
-                           "full scan until it finishes (a rebuild that was interrupted finishes at the next start)",
-                           op, db_name, column_idx, year);
+        return fmt::format("[WARNING] [{}] [DB: {}] - column {} is not fully indexed in {}; answered by full scan until "
+                           "its rebuild finishes (the rebuild runs in the background; one that stopped or failed finishes "
+                           "at the next start)", op, db_name, column_idx, year);
     }
     const uint64_t pct = progress->total_rows == 0
                              ? 0
@@ -1323,13 +1362,13 @@ std::string XStore::RebuildingColumnNoticeText(std::string_view op, const std::s
     // A column >= ZONE_MAP_MAX_TRACKED_COLUMNS is noticed anywhere in the year (below the watermark it is indexed at
     // the new width already), so its text names only the part not yet rebuilt, like a low column's.
     if (column_idx >= static_cast<int32_t>(XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS)) {
-        return fmt::format("[WARNING] [{}] [DB: {}] - column {} is being indexed in the background in {} ({}); the part "
-                           "not yet rebuilt is answered by full scan (a rebuild that was interrupted finishes at the next "
-                           "start)", op, db_name, column_idx, year, state);
+        return fmt::format("[WARNING] [{}] [DB: {}] - column {} is not fully indexed in {} ({}); the part not yet "
+                           "rebuilt is answered by full scan (the rebuild runs in the background; one that stopped or "
+                           "failed finishes at the next start)", op, db_name, column_idx, year, state);
     }
-    return fmt::format("[WARNING] [{}] [DB: {}] - column {} is being indexed in the background in {} ({}); the part not "
-                       "yet rebuilt is answered by scan, results are correct (a rebuild that was interrupted finishes at "
-                       "the next start)", op, db_name, column_idx, year, state);
+    return fmt::format("[WARNING] [{}] [DB: {}] - column {} is not fully indexed in {} ({}); the part not yet rebuilt "
+                       "is answered by scan, results are correct (the rebuild runs in the background; one that stopped "
+                       "or failed finishes at the next start)", op, db_name, column_idx, year, state);
 }
 
 namespace {
@@ -2362,6 +2401,13 @@ std::vector<XStore::LiveWidenPassEntry> XStore::RunLiveWidenPass(std::chrono::st
     return processed;
 }
 
+bool XStore::CfgStillMatches(const std::string &db_name, const std::string &db_base_path,
+                             const XStore_Proto::ConfigStruct &cfg) {
+    XStore_Proto::ConfigStruct now;
+    return GetOrLoadCfg(db_name, db_base_path, now) && now.rowlength() == cfg.rowlength() &&
+           EffectiveTrackedColumnCount(now) == EffectiveTrackedColumnCount(cfg);
+}
+
 XStore::LiveWidenDbOutcome XStore::LiveWidenDb(const std::string &db_base_path, const std::string &db_name,
                                                std::vector<LiveWidenPassEntry> &out, unsigned workers,
                                                livewiden::LiveWidenGovernor *governor,
@@ -2541,6 +2587,16 @@ XStore::LiveWidenDbOutcome XStore::LiveWidenDb(const std::string &db_base_path, 
         struct Leave {
             ~Leave() { XStore::LeaveBackgroundYear(); }
         } leave;
+        // The cfg was read before the earlier years: a RemoveDB + CreateDB (another row length or width) since then
+        // would get this year widened with the old layout. Entered, no removal covers the year any more, so the cfg now
+        // is the one of its files. A changed DB keeps its record and the next pass reads the cfg afresh (a growth of
+        // this DB also bumped its growth_seq, so the kept record runs again after its quiet period: no livelock).
+        if (!CfgStillMatches(db_name, db_base_path, cfg)) {
+            widen_progress.Drop(year);
+            spdlog::info("[LIVE WIDEN] [DB: {}] - The DB was removed, re-created or grew during the pass; stopped",
+                         db_name);
+            return LiveWidenDbOutcome::kStopped;
+        }
 
         LiveWidenPassEntry entry;
         entry.db_name = db_name;

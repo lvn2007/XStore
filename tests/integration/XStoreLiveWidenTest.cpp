@@ -3639,7 +3639,7 @@ PassResult YearsAndResults(const std::vector<XStore::LiveWidenPassEntry> &pass) 
     for (const XStore::LiveWidenPassEntry &e : pass) out.emplace_back(e.year, e.result);
     return out;
 }
-constexpr const char *kBeingIndexed = "being indexed in the background";
+constexpr const char *kNotFullyIndexed = "not fully indexed";
 using std::chrono::seconds;
 
 // Waits until the live widen of (path, year)'s zone map (catidx: its catidx) has published a watermark >= done_rows
@@ -3683,14 +3683,14 @@ size_t Occurrences(const std::string &s, const std::string &what) {
 // ---- Rebuild notice (Tech Reference 4.18 "Rebuild notice") ---------------------------------------------------------
 
 TEST_F(XStoreLiveWidenTest, RebuildNoticeTextCarriesTheRoundedDownPercentAndTheSlowedReason) {
-    const std::string tail = " (a rebuild that was interrupted finishes at the next start)";
+    const std::string tail = " (the rebuild runs in the background; one that stopped or failed finishes at the next start)";
     XStore::LiveRebuildProgress p{2, 3, nullptr};
     EXPECT_EQ(XStore::RebuildingColumnNoticeText("MAX AGGREGATE", "DB", 65, 2009, &p),
-              "[WARNING] [MAX AGGREGATE] [DB: DB] - column 65 is being indexed in the background in 2009 (66% done); "
+              "[WARNING] [MAX AGGREGATE] [DB: DB] - column 65 is not fully indexed in 2009 (66% done); "
               "the part not yet rebuilt is answered by full scan" + tail);
     p.slowed = "writers waiting";
     EXPECT_EQ(XStore::RebuildingColumnNoticeText("MAX AGGREGATE", "DB", 5, 2009, &p),
-              "[WARNING] [MAX AGGREGATE] [DB: DB] - column 5 is being indexed in the background in 2009 (66% done; "
+              "[WARNING] [MAX AGGREGATE] [DB: DB] - column 5 is not fully indexed in 2009 (66% done; "
               "slowed: writers waiting); the part not yet rebuilt is answered by scan, results are correct" + tail);
     const auto pct = [](uint64_t done, uint64_t total) {
         XStore::LiveRebuildProgress q{done, total, nullptr};
@@ -3704,8 +3704,8 @@ TEST_F(XStoreLiveWidenTest, RebuildNoticeTextCarriesTheRoundedDownPercentAndTheS
     EXPECT_EQ(pct(999, 1000), "99");
     EXPECT_EQ(pct(1000, 1000), "100");
     EXPECT_EQ(XStore::RebuildingColumnNoticeText("FINDBYVALUE", "DB", 65, 2009),
-              "[WARNING] [FINDBYVALUE] [DB: DB] - column 65 is being indexed in the background in 2009; answered by full "
-              "scan until it finishes" + tail) << "no live-widen status: the old text";
+              "[WARNING] [FINDBYVALUE] [DB: DB] - column 65 is not fully indexed in 2009; answered by full scan until its "
+              "rebuild finishes" + tail) << "no live-widen status: no progress";
 
     using livewiden::GovernorReason;
     EXPECT_STREQ(livewiden::SlowedText(1, 4, GovernorReason::kWriterWait), "writers waiting");
@@ -3761,20 +3761,20 @@ TEST_F(XStoreLiveWidenTest, RebuildNoticeShowsProgressOnTheRebuildingYearOnlyAnd
     const std::string state = " in 1980 (" + std::to_string(kStuck * 100 / total) + "% done)";
 
     const std::string low = MaxStatus(store, db, Epoch(kStuck + 1), Epoch(kRows - 1), 5);                // (a)
-    EXPECT_NE(low.find(kBeingIndexed + state + "; the part not yet rebuilt is answered by scan, results are correct"),
+    EXPECT_NE(low.find(kNotFullyIndexed + state + "; the part not yet rebuilt is answered by scan, results are correct"),
               std::string::npos) << low;
     EXPECT_EQ(MaxStatus(store, db, Epoch(0), Epoch(kStuck - 1), 5), "SUCCESS");                         // (b)
     const std::string high = MaxStatus(store, db, Epoch(0), Epoch(10), 65);                              // (c)
-    EXPECT_NE(high.find(kBeingIndexed + state + "; the part not yet rebuilt is answered by full scan"), std::string::npos)
+    EXPECT_NE(high.find(kNotFullyIndexed + state + "; the part not yet rebuilt is answered by full scan"), std::string::npos)
         << high;
-    EXPECT_NE(FindStatus(store, db, Epoch(kStuck + 1), Epoch(kRows - 1), 5).find(kBeingIndexed + state), std::string::npos);
-    EXPECT_EQ(FindStatus(store, db, Epoch(0), Epoch(kStuck - 1), 5).find(kBeingIndexed), std::string::npos);
-    EXPECT_NE(FindStatus(store, db, Epoch(0), Epoch(10), 65).find(kBeingIndexed + state), std::string::npos);
+    EXPECT_NE(FindStatus(store, db, Epoch(kStuck + 1), Epoch(kRows - 1), 5).find(kNotFullyIndexed + state), std::string::npos);
+    EXPECT_EQ(FindStatus(store, db, Epoch(0), Epoch(kStuck - 1), 5).find(kNotFullyIndexed), std::string::npos);
+    EXPECT_NE(FindStatus(store, db, Epoch(0), Epoch(10), 65).find(kNotFullyIndexed + state), std::string::npos);
     EXPECT_EQ(MaxStatus(store, db, Jan1(1979), Jan1(1979) + 99, 5), "SUCCESS");                         // (d)
     EXPECT_EQ(MaxStatus(store, db, Jan1(1979), Jan1(1979) + 99, 65), "SUCCESS");
     const std::string both = MaxStatus(store, db, Jan1(1979), Epoch(10), 65);
-    EXPECT_EQ(Occurrences(both, kBeingIndexed), 1u) << both;
-    EXPECT_NE(both.find(kBeingIndexed + state), std::string::npos) << both;
+    EXPECT_EQ(Occurrences(both, kNotFullyIndexed), 1u) << both;
+    EXPECT_NE(both.find(kNotFullyIndexed + state), std::string::npos) << both;
     ExpectAnswersMatchTheData(store, db, 0, kStuck - 1, {5, 65});
     ExpectAnswersMatchTheData(store, db, kStuck + 1, kRows - 1, {5, 65});
 
@@ -3786,7 +3786,7 @@ TEST_F(XStoreLiveWidenTest, RebuildNoticeShowsProgressOnTheRebuildingYearOnlyAnd
     EXPECT_FALSE(XStore::FindRebuildProgress(path, kYear, false, q));
     EXPECT_EQ(MaxStatus(store, db, Epoch(0), Epoch(kRows - 1), 5), "SUCCESS");
     EXPECT_EQ(MaxStatus(store, db, Epoch(0), Epoch(kRows - 1), 65), "SUCCESS");
-    EXPECT_EQ(FindStatus(store, db, Epoch(0), Epoch(kRows - 1), 5).find(kBeingIndexed), std::string::npos);
+    EXPECT_EQ(FindStatus(store, db, Epoch(0), Epoch(kRows - 1), 5).find(kNotFullyIndexed), std::string::npos);
 }
 
 // Keep-old (LIVE_WIDEN_KEEP_OLD_INDEX) held at a known watermark: an index born 70 wide, rows 100 wide, widened to 100.
@@ -3827,10 +3827,10 @@ TEST_F(XStoreLiveWidenTest, KeepOldAnswersOldColumnsFromTheOldIndexWhileTheWiden
     const uint64_t blocks_past = (kRows - 1) / Rpb() - (kStuck + 1) / Rpb() + 1;
     EXPECT_GE(zmap.ServedFromOldForTests() - served, 2 * blocks_past) << "every block past the watermark, both queries";
     const std::string high = MaxStatus(store, db, Epoch(kStuck + 1), Epoch(kRows - 1), 80); // never over the held row
-    EXPECT_NE(high.find(kBeingIndexed), std::string::npos) << high;
-    EXPECT_EQ(FindStatus(store, db, Epoch(kStuck + 1), Epoch(kRows - 1), 5).find(kBeingIndexed), std::string::npos);
-    EXPECT_EQ(FindStatus(store, db, Epoch(0), Epoch(10), 66).find(kBeingIndexed), std::string::npos);
-    EXPECT_NE(FindStatus(store, db, Epoch(0), Epoch(10), 80).find(kBeingIndexed), std::string::npos);
+    EXPECT_NE(high.find(kNotFullyIndexed), std::string::npos) << high;
+    EXPECT_EQ(FindStatus(store, db, Epoch(kStuck + 1), Epoch(kRows - 1), 5).find(kNotFullyIndexed), std::string::npos);
+    EXPECT_EQ(FindStatus(store, db, Epoch(0), Epoch(10), 66).find(kNotFullyIndexed), std::string::npos);
+    EXPECT_NE(FindStatus(store, db, Epoch(0), Epoch(10), 80).find(kNotFullyIndexed), std::string::npos);
     ExpectAnswersMatchTheData(store, db, 0, kStuck - 1, {5, 66, 80});
     ExpectAnswersMatchTheData(store, db, kStuck + 1, kRows - 1, {5, 66, 80});
 
@@ -3935,7 +3935,7 @@ TEST_F(XStoreLiveWidenTest, KeepOldStoppedWidenKeepsTheOldIndexServingUntilTheNe
     EXPECT_EQ(MaxStatus(store, db, Epoch(f + 1), Epoch(kRows - 1), 5), "SUCCESS");
     EXPECT_EQ(MaxStatus(store, db, Epoch(f + 1), Epoch(kRows - 1), 66), "SUCCESS");
     EXPECT_GT(zmap.ServedFromOldForTests(), served);
-    EXPECT_NE(MaxStatus(store, db, Epoch(f + 1), Epoch(kRows - 1), 80).find(kBeingIndexed), std::string::npos);
+    EXPECT_NE(MaxStatus(store, db, Epoch(f + 1), Epoch(kRows - 1), 80).find(kNotFullyIndexed), std::string::npos);
     ExpectAnswersMatchTheData(store, db, 0, kRows - 1, {5, 66, 80});
     EXPECT_FALSE(zmap.MarkClean());
     EXPECT_FALSE(catidx.MarkClean());
@@ -4290,12 +4290,12 @@ TEST_F(XStoreLiveWidenTest, AGrowthDuringAPassKeepsTheRecordAndTheNextPassWidens
     WaitForFrontierPast(zmap, Rpb());
     EXPECT_TRUE(zmap.Rebuilding()); // (no ASSERT while the lock is held: the pass would never end)
 
-    // Notices on a rebuilding year: a column >= 64 says "being indexed in the background"; a lower one says it only
+    // Notices on a rebuilding year: a column >= 64 says "not fully indexed"; a lower one says it only
     // when the range reaches the watermark (here held at kRows, the locked row: the data below it is all folded).
     WaitForRebuildProgress(path, kYear, kRows);
     XStore_Proto::Max_REP high;
     store.MaxAggregate(Epoch(0), Epoch(kRows - 1), db, 65, &high);
-    EXPECT_NE(high.opstatus().find(kBeingIndexed), std::string::npos) << high.opstatus();
+    EXPECT_NE(high.opstatus().find(kNotFullyIndexed), std::string::npos) << high.opstatus();
     XStore_Proto::Max_REP low;
     store.MaxAggregate(Epoch(0), Epoch(kRows - 1), db, 5, &low);
     EXPECT_EQ(low.opstatus(), "SUCCESS");
@@ -4304,7 +4304,7 @@ TEST_F(XStoreLiveWidenTest, AGrowthDuringAPassKeepsTheRecordAndTheNextPassWidens
                       [&](std::string &&chunk, bool) { find_buf += chunk; });
     XStore_Proto::FindByValue_REP find_rep;
     EXPECT_TRUE(find_rep.ParseFromString(find_buf));
-    EXPECT_NE(find_rep.querystatus().find(kBeingIndexed), std::string::npos) << find_rep.querystatus();
+    EXPECT_NE(find_rep.querystatus().find(kNotFullyIndexed), std::string::npos) << find_rep.querystatus();
     ExpectAnswersMatchTheData(store, db, 0, kRows - 1, {0, 65});
 
     XStore_Proto::UnaryInsert_REP grow;
@@ -4325,7 +4325,7 @@ TEST_F(XStoreLiveWidenTest, AGrowthDuringAPassKeepsTheRecordAndTheNextPassWidens
     store.FindByValue(Epoch(0), Epoch(kRows - 1), db, 65, FDouble(1.0), XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
                       [&](std::string &&chunk, bool) { find_buf += chunk; });
     ASSERT_TRUE(find_rep.ParseFromString(find_buf));
-    EXPECT_EQ(find_rep.querystatus().find(kBeingIndexed), std::string::npos) << find_rep.querystatus();
+    EXPECT_EQ(find_rep.querystatus().find(kNotFullyIndexed), std::string::npos) << find_rep.querystatus();
     EXPECT_EQ(find_rep.querystatus().find(kNotIndexed), std::string::npos) << find_rep.querystatus();
 
     EXPECT_TRUE(store.RunLiveWidenPass(g2 + seconds(29)).empty()) << "the new quiet period counts from the growth";
@@ -4967,6 +4967,273 @@ TEST_F(XStoreLiveWidenTest, ShutdownWhileCompactionWaitsForAWidenEndsTheTickAtOn
     EXPECT_EQ(XStore::PinZoneMap(path, kYear, kRowLength)->TrackedColumnCount(), 64u) << "widened during shutdown";
     EXPECT_FALSE(XStore::PinCatIdx(path, kYear, kRowLength)->HasBitmapSection()) << "compacted during shutdown";
     EXPECT_TRUE(schedule.compaction_yielded);
+}
+
+// A removal whose bounded wait times out (the background thread is still on a year it removes, e.g. one compaction
+// chunk that runs long): the cancel stays set until the thread lets go of that year, so the thread cannot finish the
+// year into the removed files; then it is cleared and years start again. The test plays the stuck thread (about
+// BACKGROUND_REMOVE_WAIT_MS).
+TEST_F(XStoreLiveWidenTest, ARemovalWhoseWaitTimesOutKeepsTheCancelUntilTheThreadLetsGo) {
+    XStore store;
+    const std::string db = "LWRMTIMEOUT";
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    Insert(store, db, {{Epoch(0), ValueRow(1, 2)}});
+    const std::string year_key = DbPath(db) + "/" + std::to_string(kYear);
+    ASSERT_TRUE(XStore::EnterBackgroundYearForTests(year_key));
+    struct LeaveOnExit {
+        bool left = false;
+        ~LeaveOnExit() {
+            if (!left) XStore::LeaveBackgroundYearForTests();
+        }
+    } leave;
+    kLogCapture->Clear();
+    auto remove = std::async(std::launch::async, [&] {
+        XStore r;
+        return r.RemoveDB(db).removestatus();
+    });
+    ASSERT_EQ(remove.wait_for(seconds(60)), std::future_status::ready) << "RemoveDB hung";
+    EXPECT_NE(remove.get().find("[INFO]"), std::string::npos);
+    EXPECT_TRUE(kLogCapture->Contains("did not let go of " + year_key)) << "the wait did not time out";
+    EXPECT_TRUE(XStore::bg_cancel_.load()) << "cleared while the thread was still on the removed year";
+    XStore::LeaveBackgroundYearForTests();
+    leave.left = true;
+    EXPECT_FALSE(XStore::bg_cancel_.load()) << "not cleared when the thread let go of the year";
+    EXPECT_TRUE(XStore::EnterBackgroundYearForTests(DbPath(db) + "/1999")) << "years do not start again";
+    XStore::LeaveBackgroundYearForTests();
+}
+
+// Overlapping removals, reduced to the handshake (the test plays the thread and drives Stop/Resume itself): R2 cancelled
+// the thread on A/2020 and has not resumed yet; R1 resumed (the cancel went, the thread was idle); the thread entered
+// B/2019 and R3 cancelled it there and waits. R2's resume must leave R3's cancel set (B/2019 is not R2's, but R3 still
+// waits for it); the cancel goes when the thread lets go of B/2019.
+TEST_F(XStoreLiveWidenTest, AResumingRemovalKeepsTheCancelAnotherRemovalStillWaitsFor) {
+    const std::string a = DbPath("LWRMOVERLAPA");
+    const std::string b = DbPath("LWRMOVERLAPB");
+    const std::string a_year = a + "/2020";
+    const std::string b_year = b + "/2019";
+    const auto wait_for_cancel = [] {
+        const Clock::time_point t0 = Clock::now();
+        while (!XStore::bg_cancel_.load() && MsSince(t0) < 5000) std::this_thread::yield();
+        return XStore::bg_cancel_.load();
+    };
+    struct LeaveOnExit {
+        bool entered = false;
+        ~LeaveOnExit() {
+            if (entered) XStore::LeaveBackgroundYearForTests();
+        }
+    } leave;
+
+    leave.entered = XStore::EnterBackgroundYearForTests(a_year);
+    ASSERT_TRUE(leave.entered);
+    auto r2 = std::async(std::launch::async, [&] { return XStore::StopBackgroundWorkForTests(a_year); });
+    const bool r2_cancelled_now = wait_for_cancel();
+    XStore::LeaveBackgroundYearForTests();
+    leave.entered = false;
+    ASSERT_TRUE(r2_cancelled_now) << "R2 never cancelled the thread's year";
+    ASSERT_EQ(r2.wait_for(seconds(30)), std::future_status::ready);
+    const bool r2_cancelled = r2.get();
+    ASSERT_TRUE(r2_cancelled);
+    struct ResumeR2OnExit {
+        const std::string &scope;
+        bool resumed = false;
+        ~ResumeR2OnExit() {
+            if (!resumed) XStore::ResumeBackgroundWorkForTests(scope, true);
+        }
+    } resume_r2{a_year};
+    XStore::ResumeBackgroundWorkForTests(a + "/", true); // R1 (its scope is not even listed: nothing else changes)
+    ASSERT_FALSE(XStore::bg_cancel_.load()) << "R1's resume with the thread idle must clear the cancel";
+
+    leave.entered = XStore::EnterBackgroundYearForTests(b_year);
+    ASSERT_TRUE(leave.entered);
+    auto r3 = std::async(std::launch::async, [&] { return XStore::StopBackgroundWorkForTests(b + "/"); });
+    const bool r3_cancelled_now = wait_for_cancel();
+    XStore::ResumeBackgroundWorkForTests(a_year, true); // R2
+    resume_r2.resumed = true;
+    const bool kept = XStore::bg_cancel_.load();
+    XStore::LeaveBackgroundYearForTests();
+    leave.entered = false;
+    ASSERT_TRUE(r3_cancelled_now) << "R3 never cancelled the thread's year";
+    EXPECT_TRUE(kept) << "R2's resume cleared the cancel R3 still waited for";
+    ASSERT_EQ(r3.wait_for(seconds(30)), std::future_status::ready);
+    const bool r3_cancelled = r3.get();
+    EXPECT_TRUE(r3_cancelled);
+    EXPECT_FALSE(XStore::bg_cancel_.load()) << "not cleared when the thread let go of B/2019";
+    XStore::ResumeBackgroundWorkForTests(b + "/", r3_cancelled);
+    EXPECT_FALSE(XStore::bg_cancel_.load());
+    EXPECT_TRUE(XStore::EnterBackgroundYearForTests(b + "/2018")) << "years do not start again";
+    XStore::LeaveBackgroundYearForTests();
+}
+
+// A timed-out removal's cancel, held only by the clear-on-leave flag once its scope is gone, survives a later resume of
+// another removal that cancelled an earlier key. Handshake only, the test playing the thread: R0 (A/2020) cancels the
+// thread there and resumes after it left; the thread enters B/2019; R4 (B/2019) cancels it and resumes while the thread
+// is still there (as after a timed-out wait); then R2 (A/, which also cancelled on A/2020; modelled by its resume
+// alone, its scope is not listed) resumes. The cancel must hold until the thread lets go of B/2019.
+TEST_F(XStoreLiveWidenTest, ALaterResumeKeepsTheCancelOfATimedOutRemoval) {
+    const std::string a = DbPath("LWRMTIMEDA");
+    const std::string b = DbPath("LWRMTIMEDB");
+    const std::string a_year = a + "/2020";
+    const std::string b_year = b + "/2019";
+    const auto wait_for_cancel = [] {
+        const Clock::time_point t0 = Clock::now();
+        while (!XStore::bg_cancel_.load() && MsSince(t0) < 5000) std::this_thread::yield();
+        return XStore::bg_cancel_.load();
+    };
+    struct LeaveOnExit {
+        bool entered = false;
+        ~LeaveOnExit() {
+            if (entered) XStore::LeaveBackgroundYearForTests();
+        }
+    } leave;
+
+    leave.entered = XStore::EnterBackgroundYearForTests(a_year);
+    ASSERT_TRUE(leave.entered);
+    auto r0 = std::async(std::launch::async, [&] { return XStore::StopBackgroundWorkForTests(a_year); });
+    const bool r0_cancelled_now = wait_for_cancel();
+    XStore::LeaveBackgroundYearForTests();
+    leave.entered = false;
+    ASSERT_TRUE(r0_cancelled_now) << "R0 never cancelled the thread's year";
+    ASSERT_EQ(r0.wait_for(seconds(30)), std::future_status::ready);
+    const bool r0_cancelled = r0.get();
+    ASSERT_TRUE(r0_cancelled);
+    XStore::ResumeBackgroundWorkForTests(a_year, r0_cancelled);
+    ASSERT_FALSE(XStore::bg_cancel_.load()) << "R0's resume with the thread idle must clear the cancel";
+
+    leave.entered = XStore::EnterBackgroundYearForTests(b_year);
+    ASSERT_TRUE(leave.entered);
+    // R4's Stop keeps waiting (until the thread leaves); its resume comes now, as if that wait had timed out.
+    auto r4 = std::async(std::launch::async, [&] { return XStore::StopBackgroundWorkForTests(b_year); });
+    const bool r4_cancelled_now = wait_for_cancel();
+    XStore::ResumeBackgroundWorkForTests(b_year, true); // R4
+    const bool kept_after_r4 = XStore::bg_cancel_.load();
+    XStore::ResumeBackgroundWorkForTests(a + "/", true); // R2
+    const bool kept_after_r2 = XStore::bg_cancel_.load();
+    XStore::LeaveBackgroundYearForTests();
+    leave.entered = false;
+    ASSERT_TRUE(r4_cancelled_now) << "R4 never cancelled the thread's year";
+    EXPECT_TRUE(kept_after_r4) << "R4's resume cleared its cancel while the thread was still on B/2019";
+    EXPECT_TRUE(kept_after_r2) << "R2's resume cleared the cancel the timed-out R4 left for B/2019";
+    EXPECT_FALSE(XStore::bg_cancel_.load()) << "not cleared when the thread let go of B/2019";
+    ASSERT_EQ(r4.wait_for(seconds(30)), std::future_status::ready);
+    EXPECT_TRUE(r4.get());
+    EXPECT_TRUE(XStore::EnterBackgroundYearForTests(b + "/2018")) << "years do not start again";
+    XStore::LeaveBackgroundYearForTests();
+}
+
+// Nit 1 (LiveWidenDb / CompactColdCatIdxForAllDbs re-read the cfg after entering each year, CfgStillMatches) has no
+// test here: the race needs a RemoveDB + CreateDB to land while the thread is between two years and holds no key, and
+// nothing the thread does in that window can be paused from a test without a production hook.
+
+// A shutdown (StopCatIdxCompactionThread's flags; no thread runs in tests) while a removal waits for the thread: once the
+// removal resumes, the shutdown's cancel is still set. Outcome only: the race the fix closes (Resume reading the stop
+// flag just before Stop sets both flags) cannot be made deterministic without a hook in Stop; the fix is that Stop sets
+// both flags under bg_mutex_, which Resume holds while it reads and writes them.
+TEST_F(XStoreLiveWidenTest, ARemovalResumingAfterAShutdownLeavesTheShutdownCancelSet) {
+    XStore store;
+    const std::string db = "LWRMSTOP";
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    Insert(store, db, {{Epoch(0), ValueRow(1, 2)}});
+    struct ResetFlags {
+        ~ResetFlags() {
+            XStore::catidx_compaction_stop_flag_.store(false);
+            XStore::bg_cancel_.store(false);
+        }
+    } reset;
+    ASSERT_TRUE(XStore::EnterBackgroundYearForTests(DbPath(db) + "/" + std::to_string(kYear)));
+    auto remove = std::async(std::launch::async, [&] {
+        XStore r;
+        return r.RemoveDB(db).removestatus();
+    });
+    const Clock::time_point t0 = Clock::now();
+    while (!XStore::bg_cancel_.load() && MsSince(t0) < 5000) std::this_thread::yield();
+    const bool cancelled = XStore::bg_cancel_.load();
+    XStore::StopCatIdxCompactionThread();
+    XStore::LeaveBackgroundYearForTests();
+    ASSERT_TRUE(cancelled) << "the removal never cancelled the thread's year";
+    ASSERT_EQ(remove.wait_for(seconds(30)), std::future_status::ready) << "RemoveDB hung";
+    EXPECT_NE(remove.get().find("[INFO]"), std::string::npos);
+    EXPECT_TRUE(XStore::bg_cancel_.load()) << "the removal cleared the shutdown's cancel";
+    EXPECT_FALSE(XStore::EnterBackgroundYearForTests(DbPath(db) + "/1999")) << "a year started after the shutdown";
+}
+
+// A removal that cancels a compaction run cuts it short: the DBs the run had not reached are compacted
+// LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC later, not a whole poll interval later. The test is the removal's handshake
+// (Stop, then Resume only after the tick ended), so the run is always cut at the abandoned year; whether `keep` came
+// before it in the directory order does not matter: it is compacted by the next run either way.
+TEST_F(XStoreLiveWidenTest, ARemovalThatCancelsACompactionRunBringsTheNextRunForward) {
+    XStore store;
+    const std::string db = "LWCOMPRMSOON";
+    const std::string keep = "LWCOMPKEEPSOON";
+    for (const std::string &d : {db, keep}) {
+        CreateTestDb(store, d, XStore_Proto::SECOND, kRowLength);
+        Rows rows;
+        for (uint64_t r = 0; r < 1000; ++r) rows.emplace_back(Epoch(r), ValueRow(1000 + r % 7, 2));
+        Insert(store, d, rows);
+    }
+    ASSERT_TRUE(walring::Checkpointer::Instance().RunCycle());
+    ASSERT_EQ(truncate(YearPath(db, ".XSTORE").c_str(), static_cast<off_t>(2000000) * kRowLength), 0); // seconds of scan
+    ASSERT_EQ(truncate(YearPath(keep, ".XSTORE").c_str(), static_cast<off_t>(2000) * kRowLength), 0);
+    XStore::ClearLiveWidenRequestsForTests();
+    XStore::BackgroundIndexSchedule schedule;
+    const Clock::time_point start = Clock::now();
+    Clock::time_point fake = start;
+    const auto now = [&] { return fake; };
+    auto tick = std::async(std::launch::async, [&] {
+        XStore b;
+        b.BackgroundIndexTick(b.data_store_dir, schedule, now);
+    });
+    const std::string year_key = DbPath(db) + "/" + std::to_string(kYear);
+    const Clock::time_point t0 = Clock::now();
+    while (XStore::BackgroundActiveKeyForTests() != year_key && MsSince(t0) < 20000) std::this_thread::yield();
+    ASSERT_EQ(XStore::BackgroundActiveKeyForTests(), year_key) << "the compaction never started on the year";
+    const std::string scope = DbPath(db) + "/"; // RemoveDB's scope
+    struct ResumeOnExit {
+        const std::string &scope;
+        bool cancelled;
+        bool resumed = false;
+        ~ResumeOnExit() {
+            if (!resumed) XStore::ResumeBackgroundWorkForTests(scope, cancelled);
+        }
+    } resume{scope, XStore::StopBackgroundWorkForTests(scope)};
+    ASSERT_TRUE(resume.cancelled) << "the compaction had left the year already";
+    ASSERT_EQ(tick.wait_for(seconds(120)), std::future_status::ready);
+    tick.get();
+    EXPECT_EQ(schedule.next_compaction, start + seconds(XStoreTunables::LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC))
+        << "the cut run pushed the next one a whole poll interval out";
+    XStore::ResumeBackgroundWorkForTests(scope, resume.cancelled);
+    resume.resumed = true;
+    EXPECT_FALSE(XStore::bg_cancel_.load());
+    ASSERT_NE(store.RemoveDB(db).removestatus().find("[INFO]"), std::string::npos);
+
+    const auto keep_compacted = [&] { return XStore::PinCatIdx(DbPath(keep), kYear, kRowLength)->HasBitmapSection(); };
+    fake = start + seconds(XStoreTunables::LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC);
+    store.BackgroundIndexTick(store.data_store_dir, schedule, now);
+    EXPECT_TRUE(keep_compacted()) << "the DB the cut run had not reached waits a whole poll interval";
+    EXPECT_FALSE(std::filesystem::exists(DbPath(db)));
+}
+
+// Compaction leaves unset (null) columns out of the bitmap section, like the bloom: no directory entry for the unset
+// encoding, and the set values keep theirs.
+TEST_F(XStoreLiveWidenTest, CompactionLeavesUnsetColumnsOutOfTheBitmapSection) {
+    XStore store;
+    const std::string db = "LWCOMPNULL";
+    const std::string path = DbPath(db);
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    Rows rows;
+    // ValueRow nulls a column whose value is a multiple of 13: column 0 when r % 13 == 1, column 1 when r % 13 == 0.
+    for (uint64_t r = 0; r < 100; ++r) rows.emplace_back(Epoch(r), ValueRow(1000 + r % 13, 2));
+    Insert(store, db, rows);
+    ASSERT_TRUE(walring::Checkpointer::Instance().RunCycle());
+    ASSERT_EQ(truncate(YearPath(db, ".XSTORE").c_str(), static_cast<off_t>(1000) * kRowLength), 0);
+    store.CompactOneYearCatIdx(path, kYear, kRowLength, XStore::GetOrOpenCatIdx(path, kYear, kRowLength).TrackedColumnCount());
+    CatIdxFile::Pin catidx = XStore::PinCatIdx(path, kYear, kRowLength);
+    ASSERT_TRUE(catidx->HasBitmapSection());
+    const std::string unset = EncodeFDataForCatIdx(XStore_Proto::FData());
+    for (uint32_t c : {0u, 1u}) EXPECT_FALSE(catidx->LookupExact(c, unset).has_value()) << "column " << c;
+    const auto rows_1002 = catidx->LookupExact(0, EncodeFDataForCatIdx(FDouble(1002.0))); // r % 13 == 2
+    ASSERT_TRUE(rows_1002.has_value());
+    EXPECT_EQ(rows_1002->size(), 8u);
+    ExpectAnswersMatchTheData(store, db, 0, 99, {0, 1});
 }
 
 // ---- 11. Parallel live widen (S2): N workers inside one year ---------------------------------------------------------
@@ -5864,7 +6131,7 @@ TEST_F(XStoreParallelLiveWidenTest, RebuildNoticeSaysSlowedUnderAGovernorAndKeep
     EXPECT_STREQ(p.slowed, "foreground CPU");
     const std::string pct = " in 1980 (" + std::to_string(kStuck * 100 / std::max<uint64_t>(1, p.total_rows)) + "% done";
     const std::string governed = MaxStatus(store, db, Epoch(kStuck + 1), Epoch(kRows - 1), 5);
-    EXPECT_NE(governed.find(kBeingIndexed + pct + "; slowed: foreground CPU)"), std::string::npos) << governed;
+    EXPECT_NE(governed.find(kNotFullyIndexed + pct + "; slowed: foreground CPU)"), std::string::npos) << governed;
 
     stop.store(true);
     const bool ended = builder.wait_for(seconds(10)) == std::future_status::ready;
@@ -5873,8 +6140,8 @@ TEST_F(XStoreParallelLiveWidenTest, RebuildNoticeSaysSlowedUnderAGovernorAndKeep
     EXPECT_EQ(builder.get(), Result::kStopped);
     EXPECT_EQ(XStore::YearsRebuilding(), before + 1) << "a stopped widen stays counted";
     const std::string stopped = MaxStatus(store, db, Epoch(0), Epoch(kRows - 1), 5);
-    EXPECT_NE(stopped.find(kBeingIndexed + pct + ")"), std::string::npos) << stopped;
-    EXPECT_NE(MaxStatus(store, db, Epoch(0), Epoch(10), 65).find(kBeingIndexed + pct + ")"), std::string::npos);
+    EXPECT_NE(stopped.find(kNotFullyIndexed + pct + ")"), std::string::npos) << stopped;
+    EXPECT_NE(MaxStatus(store, db, Epoch(0), Epoch(10), 65).find(kNotFullyIndexed + pct + ")"), std::string::npos);
     EXPECT_EQ(MaxStatus(store, db, Epoch(0), Epoch(kStuck - 1), 5), "SUCCESS");
     ExpectAnswersMatchTheData(store, db, 0, kRows - 1, {5, 65});
 
@@ -5965,10 +6232,10 @@ TEST_F(XStoreParallelLiveWidenTest, RebuildNoticeFollowsEachFileOfAYearWithTwoBu
     const std::string zstate = " in 1980 (" + std::to_string(kFar * 100 / total) + "% done)";
     EXPECT_NE(zstate, " in 1980 (0% done)");
     const std::string low = MaxStatus(store, db, Epoch(kFar + 1), Epoch(kFar + 10), 5);
-    EXPECT_NE(low.find(kBeingIndexed + zstate), std::string::npos) << low;
+    EXPECT_NE(low.find(kNotFullyIndexed + zstate), std::string::npos) << low;
     EXPECT_EQ(MaxStatus(store, db, Epoch(0), Epoch(kRows - 1), 5), "SUCCESS");
     const std::string find_low = FindStatus(store, db, Epoch(0), Epoch(kRows - 1), 5);
-    EXPECT_NE(find_low.find(kBeingIndexed + std::string(" in 1980 (0% done; slowed: foreground CPU)")), std::string::npos)
+    EXPECT_NE(find_low.find(kNotFullyIndexed + std::string(" in 1980 (0% done; slowed: foreground CPU)")), std::string::npos)
         << find_low << " (the catidx's builder is the governed one)";
 
     lock.UnlockRange(kFar * kRowLength, kRowLength, kWrite);
@@ -5980,7 +6247,7 @@ TEST_F(XStoreParallelLiveWidenTest, RebuildNoticeFollowsEachFileOfAYearWithTwoBu
     EXPECT_EQ(XStore::YearsRebuilding(), before + 1);
     EXPECT_EQ(MaxStatus(store, db, Epoch(0), Epoch(kFar + 10), 5), "SUCCESS");
     EXPECT_EQ(MaxStatus(store, db, Epoch(0), Epoch(kRows - 1), 65), "SUCCESS");
-    EXPECT_NE(FindStatus(store, db, Epoch(0), Epoch(kRows - 1), 5).find(kBeingIndexed), std::string::npos);
+    EXPECT_NE(FindStatus(store, db, Epoch(0), Epoch(kRows - 1), 5).find(kNotFullyIndexed), std::string::npos);
 
     stop_catidx.store(true);
     ASSERT_EQ(catidx_builder.wait_for(std::chrono::seconds(10)), std::future_status::ready);
