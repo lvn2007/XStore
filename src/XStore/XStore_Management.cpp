@@ -2536,7 +2536,9 @@ void XStore::AppendRebuildObservations(uint64_t row_index, const char *row, uint
         }
         if (column < tracked_column_count) {
             if (zmap != nullptr) zmap->observations.push_back(ZoneMapObservationOf(*this, scratch.column, column));
-            if (catidx != nullptr) catidx->Add(column, EncodeFDataForCatIdx(scratch.column));
+            if (catidx != nullptr && scratch.column.oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
+                catidx->Add(column, EncodeFDataForCatIdx(scratch.column));
+            }
         }
         static_cast<void>(in.Skip(length)); // cannot fail: length was checked against the slot
     }
@@ -2557,7 +2559,8 @@ void XStore::AppendRebuildObservations(uint64_t row_index, const char *row, uint
             catidx->values.resize(catidx_mark);
             for (uint32_t c = 0; c < tracked_column_count; ++c) {
                 scratch.column.Clear();
-                if (ExtractColumnByIndexSkipParse(row, row_length, static_cast<unsigned short>(c), scratch.column)) {
+                if (ExtractColumnByIndexSkipParse(row, row_length, static_cast<unsigned short>(c), scratch.column) &&
+                    scratch.column.oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
                     catidx->Add(c, EncodeFDataForCatIdx(scratch.column));
                 }
             }

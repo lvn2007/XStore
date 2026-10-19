@@ -3495,4 +3495,64 @@ TEST_F(BatchFoldIdentityTest, UpdateRowsWritesTheBytesOfUpdateRowWithAndWithoutA
     ExpectSameFiles("after the rebuild");
 }
 
+// A live insert skips an unset column in the .catidx bloom; the startup/live rebuild (FoldChunk) must too. Rows with
+// unset columns in the middle and at the end (RowData keeps a trailing empty column), inserted live, then the sidecar
+// is rebuilt from the data file: the bloom blocks (everything after the header, whose dirty flag differs) must match.
+TEST_F(XStoreZoneMapTest, RebuiltCatIdxBloomEqualsLiveBuiltBloomForRowsWithUnsetColumns) {
+    constexpr uint16_t kRowLength = 256;
+    XStore store;
+    CreateTestDb(store, "CATNULLBLOOM", XStore_Proto::SECOND, kRowLength);
+    const std::string db_path = DbPath("CATNULLBLOOM");
+    const unsigned short year = TimeStruct(7000, XStore_Proto::SECOND).year;
+    const std::string catidx_path = fmt::format("{}/{}.catidx", db_path, year);
+
+    XStore_Proto::UnaryInsert_REP rep;
+    for (int i = 0; i < 40; ++i) {
+        const XStore_Proto::FData unset;
+        using xstore_test::FInt64;
+        using xstore_test::FString;
+        store.UnaryInsert(7000 + i, xstore_test::MakeRow({FInt64(i), i % 2 == 0 ? unset : FString("s" + std::to_string(i)),
+                                                          i % 3 == 0 ? unset : FInt64(i * 7), unset}),
+                          "CATNULLBLOOM", &rep, XStore_Proto::SYNC);
+    }
+    // One more row, then damaged after the live build (an unknown trailing field): the rebuild's one-pass decoder
+    // gives up on it and the per-row fallback must fold the same columns, unset one skipped.
+    {
+        using xstore_test::FInt64;
+        using xstore_test::FString;
+        const XStore_Proto::FData unset;
+        store.UnaryInsert(7040, xstore_test::MakeRow({FInt64(40), unset, FString("damaged"), FInt64(5)}), "CATNULLBLOOM", &rep,
+                          XStore_Proto::SYNC);
+    }
+    const uint32_t width = XStore::GetOrOpenCatIdx(db_path, year, kRowLength).TrackedColumnCount();
+    XStore::ClearCatIdxRegistryForTests(); // closes the live file; its blocks are written through
+    const std::string live = WholeFile(catidx_path);
+    ASSERT_GT(live.size(), sizeof(CatIdxFileHeader));
+
+    const std::string data_path = fmt::format("{}/{}.XSTORE", db_path, year);
+    {
+        const size_t row_start = 7040ull * kRowLength; // the year file is preallocated (sparse): read only this row
+        std::fstream f(data_path, std::ios::in | std::ios::out | std::ios::binary);
+        std::string row(kRowLength, '\0');
+        f.seekg(static_cast<std::streamoff>(row_start));
+        ASSERT_TRUE(f.read(row.data(), kRowLength).good());
+        const size_t real_len = XStoreWireEncode::RealRowDataLength(row.data(), kRowLength);
+        ASSERT_GT(real_len, 0u);
+        ASSERT_LT(real_len + 2, static_cast<size_t>(kRowLength));
+        f.seekp(static_cast<std::streamoff>(row_start + real_len));
+        f.write("\x10\x01", 2); // field 2, varint 1: not a column tag
+        ASSERT_TRUE(f.good());
+    }
+    ASSERT_TRUE(std::filesystem::remove(catidx_path));
+    std::filesystem::resize_file(data_path, 7041ull * kRowLength); // scan only the written rows
+    store.RebuildOneYearCatIdxBloom(db_path, year, kRowLength, width);
+    XStore::ClearCatIdxRegistryForTests();
+    const std::string rebuilt = WholeFile(catidx_path);
+
+    ASSERT_EQ(rebuilt.size(), live.size());
+    EXPECT_TRUE(rebuilt.compare(sizeof(CatIdxFileHeader), std::string::npos, live, sizeof(CatIdxFileHeader),
+                                std::string::npos) == 0)
+        << "a rebuilt bloom differs from the live-built one: unset columns are folded differently";
+}
+
 } // namespace

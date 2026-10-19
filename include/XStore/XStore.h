@@ -1268,6 +1268,10 @@ class XStore {
         // near hot-path enough to need striping the way the WAL/mmap caches
         // do. static -- see GetOrOpenZoneMap's comment for why (reachable
         // from ApplyWalRecord, which has no XStore instance).
+        // Both registries (this and the catidx one) are destroyed after every pin holder is gone: the WAL writers and the
+        // background index thread (its widen workers are joined std::threads) are joined by atexit hooks registered after
+        // these statics were constructed; ZMQ workers drain before StartServer returns (else _exit); pread-pool workers pin only inside a ParallelFor job
+        // whose calling worker is blocked on it.
         static std::mutex zone_map_registry_mutex_;
         static std::unordered_map<std::string, std::unique_ptr<ZoneMapFile>> zone_map_registry_;
         static std::vector<std::string> zone_map_registry_lru_; // most-recently-touched at the back
