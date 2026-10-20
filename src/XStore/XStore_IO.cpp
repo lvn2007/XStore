@@ -129,7 +129,7 @@ std::shared_ptr<void> XStore::GetOrMapFile(const std::string &target_file, size_
     // to any DB, not just this one -- for that syscall's whole duration. Two
     // threads racing to first-touch the same file both pay this cost
     // unlocked; the loser's redundant mapping is dropped below.
-    int fd = open(target_file.c_str(), O_RDWR | O_CREAT, 0644);
+    int fd = OpenDataFile(target_file);
     if (fd < 0) {
         return nullptr;
     }
@@ -154,9 +154,8 @@ std::shared_ptr<void> XStore::GetOrMapFile(const std::string &target_file, size_
     // (durability hole), so make that an immediate SIGSEGV. MAP_SHARED keeps
     // concurrent pwrite()s visible (same page cache).
     void *base = mmap(NULL, file_len, PROT_READ, MAP_SHARED, fd, 0);
-    // Mapping stays valid after the fd is closed -- no need to keep it open.
-    close(fd);
     if (base == MAP_FAILED) {
+        close(fd);
         return nullptr;
     }
 
@@ -168,6 +167,12 @@ std::shared_ptr<void> XStore::GetOrMapFile(const std::string &target_file, size_
         delete mf;
     });
 
+    // The mapping stays valid after the fd is closed; the fd is kept only for the unlink check at the install below.
+    struct FdCloser {
+        int fd;
+        ~FdCloser() { close(fd); }
+    } fd_closer{fd};
+
     // Re-acquire to install into the cache, double-checked: another thread
     // may have raced us to map this same file while we were unlocked.
     std::lock_guard<std::mutex> lock(shard.mutex);
@@ -178,6 +183,14 @@ std::shared_ptr<void> XStore::GetOrMapFile(const std::string &target_file, size_
         std::shared_ptr<MappedFile> winner = shard.entries[idx].value;
         PromoteToFront(shard, idx);
         return std::shared_ptr<void>(winner, winner->base);
+    }
+
+    // Same rule as GetOrOpenFile: a mapping of a file unlinked since the open above (RemoveDB/RemoveDBFiles) is not
+    // cached, or every later query would read the deleted rows (the removal's erase may already have run; one that
+    // unlinks after this check erases the entry afterwards, under this mutex). Miss path only: one fstat.
+    struct stat linked{};
+    if (fstat(fd, &linked) != 0 || linked.st_nlink == 0) {
+        return nullptr;
     }
 
     // Insert-at-front overwrites the LRU tail slot once the shard is at
@@ -209,7 +222,7 @@ std::shared_ptr<int> XStore::GetOrOpenFile(const std::string &target_file, size_
     // Cache miss -> open (create if needed), ensure size. Done WITHOUT the
     // lock for the same reason as GetOrMapFile: these are syscalls whose
     // cost shouldn't serialize every other thread's inserts.
-    int fd = open(target_file.c_str(), O_RDWR | O_CREAT, 0644);
+    int fd = OpenDataFile(target_file);
     if (fd < 0) {
         return nullptr;
     }
@@ -259,6 +272,17 @@ std::shared_ptr<int> XStore::GetOrOpenFile(const std::string &target_file, size_
     // copy of that entry's shared_ptr from an earlier GetOrOpenFile() call,
     // the deleter (and its close()) doesn't run until that copy is
     // released too.
+    // Such a still-held victim is remembered (weakly) so a removal of its file waits for its holder as well. use_count()
+    // is exact here: a copy is only made under this mutex.
+    if (shard.count == shard.entries.size()) {
+        FdShard::Entry &victim = shard.entries[shard.count - 1];
+        if (victim.value.use_count() > 1) {
+            shard.evicted_held.erase(std::remove_if(shard.evicted_held.begin(), shard.evicted_held.end(),
+                                                    [](const auto &e) { return e.second.expired(); }),
+                                     shard.evicted_held.end());
+            shard.evicted_held.emplace_back(victim.key, victim.value);
+        }
+    }
     InsertAtFront(shard, FdShard::Entry{target_file, owner});
 
     return owner;
@@ -270,30 +294,49 @@ bool XStore::IsFdCached(const std::string &target_file) {
     return FindIndex(shard, target_file) != shard.count;
 }
 
-std::shared_ptr<int> XStore::EraseOpenFile(const std::string &target_file) {
+namespace {
+// Moves the still-held evicted fds whose key matches into `erased` (expired ones are just dropped). Caller holds the
+// shard mutex.
+template <typename Match>
+void TakeEvictedHeld(XStore::FdShard &shard, const Match &match, std::vector<std::shared_ptr<int>> *erased) {
+    auto &held = shard.evicted_held;
+    held.erase(std::remove_if(held.begin(), held.end(), [&](const auto &e) {
+                   if (!match(e.first)) return e.second.expired();
+                   if (std::shared_ptr<int> fd = e.second.lock(); fd && erased != nullptr) erased->push_back(std::move(fd));
+                   return true;
+               }),
+               held.end());
+}
+} // namespace
+
+void XStore::EraseOpenFile(const std::string &target_file, std::vector<std::shared_ptr<int>> *erased) {
     FdShard &shard = fd_shards[std::hash<std::string>{}(target_file) % FD_SHARD_COUNT];
     std::lock_guard<std::mutex> lock(shard.mutex);
 
     // Only drops the cache's reference -- see FdShard's comment. If a
     // caller is still mid-pwrite()/pread() on a copy of this fd's
     // shared_ptr, close() is deferred until that copy is released too.
+    TakeEvictedHeld(shard, [&target_file](const std::string &key) { return key == target_file; }, erased);
     size_t idx = FindIndex(shard, target_file);
     if (idx == shard.count) {
-        return nullptr;
+        return;
     }
-    std::shared_ptr<int> erased = shard.entries[idx].value;
+    if (erased != nullptr) erased->push_back(shard.entries[idx].value);
     EraseAtIndex(shard, idx);
-    return erased;
 }
 
 void XStore::EraseOpenFilesUnderPrefix(const std::string &db_dir_prefix, std::vector<std::shared_ptr<int>> *erased) {
     // Same rationale as EraseMappedFilesUnderPrefix -- sweep each shard
     // under its own lock rather than one lock for the whole sweep.
+    const auto under_prefix = [&db_dir_prefix](const std::string &key) {
+        return key.compare(0, db_dir_prefix.size(), db_dir_prefix) == 0;
+    };
     for (FdShard &shard : fd_shards) {
         std::lock_guard<std::mutex> lock(shard.mutex);
+        TakeEvictedHeld(shard, under_prefix, erased);
         if (erased != nullptr) {
             for (size_t i = 0; i < shard.count; ++i) {
-                if (shard.entries[i].key.compare(0, db_dir_prefix.size(), db_dir_prefix) == 0) {
+                if (under_prefix(shard.entries[i].key)) {
                     erased->push_back(shard.entries[i].value);
                 }
             }

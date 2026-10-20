@@ -69,10 +69,29 @@ class XStore {
         // own shared_mutex.
         struct CfgShard {
             std::unordered_map<std::string, XStore_Proto::ConfigStruct> map;
+            // Per DB name ever removed in this process: the cfg epoch EraseCfg produced (the counter value after its
+            // bump), set under this shard's lock and never erased (one small entry per removed name, bounded by the
+            // number of distinct names removed). Only the WAL apply's slow path reads it (CfgEpochCurrent), never the
+            // GetOrLoadCfg hit path.
+            std::unordered_map<std::string, uint32_t> erased_epoch;
             std::shared_mutex mutex;
         };
         static constexpr size_t CFG_SHARD_COUNT = XStoreTunables::CFG_SHARD_COUNT;
         static std::array<CfgShard, CFG_SHARD_COUNT> cfg_shards;
+
+        // Removal epoch of the cfg cache: EraseCfg (RemoveDB) bumps it, under the shard lock, after erasing. An insert
+        // loads it (CfgEpoch) BEFORE it reads the cfg and carries it in WalRecord::cfg_epoch; ApplyWalRecord drops a
+        // record whose DB was removed since (CfgEpochCurrent). Starts at 1: a record's 0 means "not
+        // checked". On a cache line of its own (read once per record by every WAL writer and insert thread).
+        struct alignas(64) PaddedCfgEpoch {
+            std::atomic<uint32_t> value{1};
+        };
+        static PaddedCfgEpoch cfg_epoch_counter;
+        [[nodiscard]] static uint32_t CfgEpoch() noexcept { return cfg_epoch_counter.value.load(std::memory_order_acquire); }
+        // True when the cfg a record was built from (epoch loaded before the cfg read) is still its DB's current one.
+        // Fast path: one atomic load (no removal anywhere since). Otherwise, under the shard's shared lock: false iff
+        // this DB name was erased after record_epoch was loaded (erased_epoch[name] > record_epoch).
+        [[nodiscard]] static bool CfgEpochCurrent(const std::string &db_name, uint32_t record_epoch);
 
         // Shared cache of read-only (PROT_READ, MAP_SHARED) mmap regions for
         // .XSTORE data files, keyed by full path, used by the read paths
@@ -184,6 +203,9 @@ class XStore {
             std::array<Entry, FD_SHARD_CAP> entries{};
             size_t count = 0;
             std::mutex mutex;
+            // Entries the LRU evicted while a request still held their fd (miss path only; expired ones are swept on
+            // the next eviction of this shard). A removal waits for these too, not only for the cached ones it erases.
+            std::vector<std::pair<std::string, std::weak_ptr<int>>> evicted_held;
         };
         static std::array<FdShard, FD_SHARD_COUNT> fd_shards;
 
@@ -295,7 +317,13 @@ class XStore {
             // forgets to set it still gets the pre-columnCount behavior
             // rather than a zero-width zone map.
             uint32_t tracked_column_count = XStoreTunables::ZONE_MAP_MAX_TRACKED_COLUMNS;
-            std::vector<WalRow> rows;          // 1 entry for UnaryInsert; N for a BatchInsert/RangeInsert year-bucket group
+            // CfgEpoch() loaded before the producer read the cfg this record was built from (row_length, time
+            // resolution, width). ApplyWalRecord drops the record when that cfg is no longer the DB's current one
+            // (RemoveDB, maybe + CreateDB, since): its geometry must never reach a re-created DB. 0 = not checked
+            // (replay: ring records carry no epoch, and none is written to the ring). In-memory only; sits in the
+            // padding after tracked_column_count, so sizeof(WalRecord) is unchanged.
+            uint32_t cfg_epoch = 0;
+            std::vector<WalRow> rows;         // 1 entry for UnaryInsert; N for a BatchInsert/RangeInsert year-bucket group
             XStore_Proto::WalDurabilityMode durability_mode = XStore_Proto::SYNC;
             // One per REQUEST, not per row -- null for ASYNC (nobody
             // waits). Carries whether this record was actually durably
@@ -310,8 +338,9 @@ class XStore {
         };
 #if defined(__GLIBCXX__) && defined(__x86_64__) && (!defined(_GLIBCXX_USE_CXX11_ABI) || _GLIBCXX_USE_CXX11_ABI)
         // std::string is 32 bytes only in libstdc++ with the C++11 ABI; guard so a layout change is noticed. WalRecord::year must keep
-        // fitting in the padding after row_length (record stays 120 bytes, two cache lines).
-        static_assert(sizeof(WalRecord) == 120, "WalRecord grew: WalRecord::year must fit in existing padding");
+        // fitting in the padding after row_length, and WalRecord::cfg_epoch in the one after tracked_column_count (record
+        // stays 120 bytes, two cache lines).
+        static_assert(sizeof(WalRecord) == 120, "WalRecord grew: WalRecord::year / cfg_epoch must fit in existing padding");
 #endif
 
         struct WalShard {
@@ -1387,7 +1416,8 @@ class XStore {
         // GetOrOpen*Locked on a registry miss only: a hit costs nothing). The removal retires the entries right after
         // Stop, so from then on no request gets an index object for the files being removed. Before Resume it waits
         // (WaitForRemovedFilesReleased, bounded by BACKGROUND_REMOVE_WAIT_MS) until no request holds a data-file fd it
-        // erased from the cache and no retired index object is pinned: a request that took the old data fd then
+        // erased from the cache (or one the LRU evicted earlier that a request still holds: FdShard::evicted_held) and
+        // no retired index object is pinned: a request that took the old data fd then
         // cannot reach the index lookup after Resume (it would get a fresh index for its write into the deleted
         // file), and nothing still writes into an index file the removal empties or leaves on disk.
         [[nodiscard]] static bool RemovalCovers(const std::string &year_key);
@@ -1458,7 +1488,9 @@ class XStore {
         // of which path populated it).
         void PutCfg(const std::string &db_name, const XStore_Proto::ConfigStruct &cfg);
 
-        // Remove dbName's ConfigStruct from CfgMap under exclusive lock.
+        // Remove dbName's ConfigStruct from CfgMap under exclusive lock, bump
+        // the cfg epoch and record it in erased_epoch (records built from the
+        // erased cfg are dropped at apply).
         void EraseCfg(const std::string &db_name);
 
         // Fetch targetFile's cached read-only mapping, creating (and
@@ -1808,12 +1840,20 @@ class XStore {
         // GetOrOpenFile's O_CREAT can skip that stat() on a cache hit.
         bool IsFdCached(const std::string &target_file);
 
-        // close + drop targetFile's cached fd, if present. Returns the dropped handle (null if none), so a removal can
-        // wait for the requests still holding it (WaitForRemovedFilesReleased).
-        std::shared_ptr<int> EraseOpenFile(const std::string &target_file);
+        // close + drop targetFile's cached fd, if present. The dropped handle, and any fd of that file evicted earlier
+        // that a request still holds (FdShard::evicted_held), go to `erased`, so a removal can wait for the requests
+        // still holding them (WaitForRemovedFilesReleased).
+        void EraseOpenFile(const std::string &target_file, std::vector<std::shared_ptr<int>> *erased = nullptr);
 
-        // close + drop every cached fd whose path falls under dbDirPrefix; the dropped handles go to `erased`.
+        // close + drop every cached fd whose path falls under dbDirPrefix; the dropped handles (and the still-held
+        // evicted ones under the prefix) go to `erased`.
         void EraseOpenFilesUnderPrefix(const std::string &db_dir_prefix, std::vector<std::shared_ptr<int>> *erased = nullptr);
+
+        // The miss-path open of GetOrOpenFile/GetOrMapFile (O_RDWR, the fd is the caller's). A file that does not exist
+        // is created only when no removal scope covers it ("<db dir>/<year>", the path minus ".XSTORE"), and under
+        // bg_mutex_, so a creation is ordered before a covering removal's StopBackgroundWork and that removal unlinks
+        // it; while a removal runs nothing re-creates its files. Returns -1 (errno ENOENT when refused).
+        static int OpenDataFile(const std::string &target_file);
 
         // Joins base and child with exactly one '/' between them, regardless
         // of whether base already happens to end with one -- the single

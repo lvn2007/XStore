@@ -31,6 +31,7 @@
 #include <unordered_set>
 
 std::array<XStore::CfgShard, XStore::CFG_SHARD_COUNT> XStore::cfg_shards;
+XStore::PaddedCfgEpoch XStore::cfg_epoch_counter;
 
 namespace {
 // One live widen's status per (db_base_path, year) (Tech Reference 4.18 "Rebuild notice"), read lock-free by queries.
@@ -250,6 +251,20 @@ void XStore::EraseCfg(const std::string &db_name) {
     CfgShard &shard = cfg_shards[std::hash<std::string>{}(db_name) % CFG_SHARD_COUNT];
     std::unique_lock write_lock(shard.mutex);
     shard.map.erase(db_name);
+    // After the erase, under the lock. A request that read the erased entry loaded its epoch before that read, so
+    // below this value: it is dropped. One that loaded its epoch after this bump reads the state after the erase (no
+    // entry, or a re-created DB's): it is kept. Removals of other names never touch this name's entry.
+    shard.erased_epoch[db_name] = cfg_epoch_counter.value.fetch_add(1, std::memory_order_acq_rel) + 1;
+}
+
+bool XStore::CfgEpochCurrent(const std::string &db_name, uint32_t record_epoch) {
+    if (record_epoch == 0) return true; // replay: not checked
+    if (cfg_epoch_counter.value.load(std::memory_order_acquire) == record_epoch) return true;
+    // Some DB was removed since the request's cfg read (rare): only a removal of this name matters.
+    CfgShard &shard = cfg_shards[std::hash<std::string>{}(db_name) % CFG_SHARD_COUNT];
+    std::shared_lock read_lock(shard.mutex);
+    const auto it = shard.erased_epoch.find(db_name);
+    return it == shard.erased_epoch.end() || it->second <= record_epoch;
 }
 
 std::string XStore::DbBasePath(const std::string &db_name) const {
@@ -749,6 +764,25 @@ bool XStore::RemovalCovers(const std::string &year_key) {
     return false;
 }
 
+int XStore::OpenDataFile(const std::string &target_file) {
+    const int fd = open(target_file.c_str(), O_RDWR);
+    if (fd >= 0 || errno != ENOENT) return fd;
+    // A file a removal unlinked must not come back while that removal runs (a refused insert used to leave an empty
+    // full-size year file behind a reported removal). Rare: only the first open of a year file creates it.
+    constexpr std::string_view kSuffix = ".XSTORE";
+    const bool year_file = target_file.size() > kSuffix.size() &&
+                           target_file.compare(target_file.size() - kSuffix.size(), kSuffix.size(), kSuffix) == 0;
+    const std::string year_key = year_file ? target_file.substr(0, target_file.size() - kSuffix.size()) : target_file;
+    std::lock_guard<std::mutex> lock(bg_mutex_);
+    for (const std::string &scope : bg_removing_scopes_) {
+        if (ScopeCovers(scope, year_key)) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    return open(target_file.c_str(), O_RDWR | O_CREAT, 0644);
+}
+
 bool XStore::RemovalScopeHasRebuildingIndex(const std::string &scope) {
     {
         std::lock_guard<std::mutex> lock(zone_map_registry_mutex_);
@@ -908,19 +942,45 @@ XStore_Proto::CreateDB_REP XStore::CreateDB(std::string_view db_name_view, XStor
     // Target directory of a given DB name
     std::string target_path = DbBasePath(db_name);
 
+    // A RemoveDB of this name still running (its scope registered: it may be waiting for requests that hold the old
+    // files) refuses the re-create instead of blocking: the new DB would share the scope, so its inserts would be
+    // refused until that removal ends. Checked and the directory created under bg_mutex_ (a leaf; one mkdir), so a
+    // removal either registered first (refused here) or registers after the directory exists (and removes this new
+    // DB, the order the two requests ran in).
+    const bool valid_resolution = std::find(std::begin(permitted_time_resolution), std::end(permitted_time_resolution),
+                                            XStore_Proto::TimeUnit_Name(time_resolution)) != std::end(permitted_time_resolution);
+    bool removing = false;
+    bool exists = true;
+    bool created_dir = false;
+    {
+        std::lock_guard<std::mutex> lock(bg_mutex_);
+        const std::string db_scope = target_path + "/"; // RemoveDB's scope format
+        for (const std::string &scope : bg_removing_scopes_) removing = removing || scope == db_scope;
+        if (!removing) {
+            exists = std::filesystem::is_directory(target_path);
+            // Create DB directory
+            if (!exists && valid_resolution) created_dir = std::filesystem::create_directory(target_path);
+        }
+    }
+    if (removing) {
+        create_db_status = fmt::format("[CREATE DB] [DB: {}] - A removal of this DB is still running; retry", db_name);
+        SetTaggedStatus(to_return.mutable_createdbstatus(), "[WARNING] ", create_db_status);
+        spdlog::warn(create_db_status);
+        return to_return;
+    }
+
     // IF folder for dbName is already created
     //  -> Inform user about the error
-    if (std::filesystem::is_directory(target_path) == 0) {
+    if (!exists) {
         // Check if within permitted time resolution bounds
-        if (std::find(std::begin(permitted_time_resolution), std::end(permitted_time_resolution), XStore_Proto::TimeUnit_Name(time_resolution)) == std::end(permitted_time_resolution)) {
+        if (!valid_resolution) {
             create_db_status = fmt::format("[CREATE DB] [DB: {}] - Invalid time resolution", db_name);
             SetTaggedStatus(to_return.mutable_createdbstatus(), "[WARNING] ", create_db_status);
             spdlog::warn(create_db_status);
             return to_return;
         }
 
-        // Create DB directory
-        if (std::filesystem::create_directory(target_path) == 1) {
+        if (created_dir) {
             std::string success_msg = fmt::format("[CREATE DB] [DB: {}] - Created DB", db_name);
             SetTaggedStatus(to_return.mutable_createdbstatus(), "[INFO] ", success_msg);
 
@@ -1028,9 +1088,10 @@ XStore_Proto::RemoveDB_REP XStore::RemoveDB(std::string_view db_name_view) {
     std::filesystem::remove(JoinPath(db_loc, db_name + ".CFG"), remove_ec);
     EraseCfg(db_name);
 
-    // A request already past the .CFG can still create a year file in the directory while remove_all walks it (its
-    // index lookup is refused, but the data file is opened first), and remove_all then fails on the non-empty
-    // directory. Once such requests have let go (the wait below), one retry removes what they created.
+    // A data file is no longer created while the scope is registered (OpenDataFile), but an index cold open that passed
+    // its RemovalCovers check just before the scope was registered can still create its file while remove_all walks
+    // the directory, and remove_all then fails on the non-empty directory. Once such requests have let go (the wait
+    // below), one retry removes what they created.
     std::vector<std::shared_ptr<int>> old_fds;
     for (int attempt = 0; attempt < 2; ++attempt) {
         std::filesystem::remove_all(db_loc, remove_ec);
@@ -1099,7 +1160,7 @@ XStore_Proto::RemoveDBFiles_REP XStore::RemoveDBFiles(XStore_Proto::RemoveDBFile
             // Drop this file's cached read mapping, if any -- same
             // reasoning as RemoveDB, scoped to a single file.
             EraseMappedFile(target_path.string());
-            if (std::shared_ptr<int> fd = EraseOpenFile(target_path.string())) old_fds.push_back(std::move(fd));
+            EraseOpenFile(target_path.string(), &old_fds);
             std::string info_msg = fmt::format("[REMOVE DB FILES] [DB: {}] - Removed {}", db_name, file_name);
             SetTaggedStatus(to_return.add_removestatus(), "[INFO] ", info_msg);
             spdlog::info(info_msg);
@@ -2912,6 +2973,8 @@ void XStore::ReplayRingShard(const std::string &wal_path, size_t shard_idx, int 
 
     unsigned replayed_count = 0;
     std::set<std::string> touched_paths;
+    // Per DB base path: its .CFG's row length and time resolution, or nullopt without a readable .CFG.
+    std::unordered_map<std::string, std::optional<std::pair<int32_t, int>>> cfg_geometry;
     WalRecord record;
     // Why the scan stopped. A DAMAGED record (CRC failure, impossible length, structure mismatch) whose
     // UNCHECKED LSN field (bytes [8,16) of the candidate) equals the expected LSN is a torn record of THIS
@@ -2957,6 +3020,31 @@ void XStore::ReplayRingShard(const std::string &wal_path, size_t shard_idx, int 
         if (parsed == RingParse::kPad) { lsn += consumed; continue; }
 
         record.db_base_path = DbBasePath(record.db_name);
+        // A ring record carries no cfg epoch. A record of a removed DB can still be past the checkpoint (queued or
+        // applying when the removal's checkpoint ran, then dropped at apply) and a DB re-created under the name
+        // since: its geometry must not be replayed into that DB. A record of another row length or time resolution
+        // than the current .CFG cannot be this DB's, so it is skipped like a record of a DB that is gone. (One of the
+        // same geometry cannot be told apart and is replayed.)
+        // Read from the .CFG on disk once per DB (not the cfg cache, which a caller may not have cleared).
+        auto geometry = cfg_geometry.find(record.db_base_path);
+        if (geometry == cfg_geometry.end()) {
+            std::optional<std::pair<int32_t, int>> on_disk;
+            if (FILE *cfg_file = std::fopen(JoinPath(record.db_base_path, record.db_name + ".CFG").c_str(), "rb")) {
+                XStore_Proto::ConfigStruct cfg;
+                if (cfg.ParseFromFileDescriptor(fileno(cfg_file))) on_disk.emplace(cfg.rowlength(), static_cast<int>(cfg.timeresolution()));
+                std::fclose(cfg_file);
+            }
+            geometry = cfg_geometry.emplace(record.db_base_path, on_disk).first;
+        }
+        if (geometry->second.has_value() && (geometry->second->first != static_cast<int32_t>(record.row_length) ||
+                                             geometry->second->second != static_cast<int>(record.time_resolution))) {
+            spdlog::warn("[WAL REPLAY] [DB: {}] - Record at LSN {} ({} rows) has row length {} / time resolution {}, the DB has "
+                         "{} / {}: a record of a removed DB of that name; skipped",
+                         record.db_name, lsn, record.rows.size(), record.row_length, static_cast<int>(record.time_resolution),
+                         geometry->second->first, geometry->second->second);
+            lsn += consumed;
+            continue;
+        }
         if (!ApplyWalRecord(record)) {
             if (DbStillExists(record.db_base_path, record.db_name)) {
                 spdlog::error("[WAL REPLAY] [DB: {}] - Record at LSN {} ({} rows) failed to apply although the DB is not gone (reason: see the "

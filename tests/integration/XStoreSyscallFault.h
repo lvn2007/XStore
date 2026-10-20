@@ -63,4 +63,19 @@ public:
     ScopedFdObserver &operator=(const ScopedFdObserver &) = delete;
 };
 
+// Calls `fn` once, right after the first successful open/open64 of exactly `path` BY THE THREAD THAT
+// CONSTRUCTED THE HOOK returns, before its caller sees the descriptor: e.g. to unlink the file between
+// a cache miss's open and its install. Opens by other threads (the checkpointer's syncs, WAL writers)
+// never consume it. `fn` runs under the hook's (non-recursive) mutex, which every open/open64 of any
+// thread takes while the hook is armed: it must not open ANY file (deadlock). At most one hook alive
+// at a time.
+class ScopedOpenHook {
+public:
+    ScopedOpenHook(const std::string &path, std::function<void()> fn);
+    ~ScopedOpenHook();
+    ScopedOpenHook(const ScopedOpenHook &) = delete;
+    ScopedOpenHook &operator=(const ScopedOpenHook &) = delete;
+    bool Fired() const;
+};
+
 }  // namespace xstore_fault

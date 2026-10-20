@@ -3578,17 +3578,18 @@ TEST_F(XStoreLiveWidenTest, RemoveDbFilesRacingInsertsLeavesIndexesThatMatchTheD
     }
 }
 
-// Stress (real concurrency, bounded rounds): the same for RemoveDB + CreateDB under the same name (same row length),
-// with the inserts spread over two years. RemoveDB must never throw and must report success (a year file created
-// inside the directory while remove_all walks it is removed by its retry). A different row length is not used: an
-// insert that read the old .CFG before the removal and applies after the re-create writes the old geometry into the new
-// DB, which stays open (it needs a per-DB lock or generation check on the insert path).
+// Stress (real concurrency, bounded rounds): the same for RemoveDB + CreateDB under the same name, with the inserts
+// spread over two years. RemoveDB must never throw and must report success (a year file created inside the directory
+// while remove_all walks it is removed by its retry). Every round re-creates the DB with another row length,
+// alternately twice and half the original: an insert that read the old .CFG before the removal and applies after the
+// re-create must be dropped (cfg epoch), never write the old geometry into the new DB.
 TEST_F(XStoreLiveWidenTest, RemoveDbAndCreateDbRacingInsertsLeaveIndexesThatMatchTheData) {
     XStore store;
     const std::string db = "REGRMDBRACE";
     CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
     for (int round = 0; round < 30; ++round) {
         SCOPED_TRACE("round " + std::to_string(round));
+        const uint16_t new_row_length = round % 2 == 0 ? static_cast<uint16_t>(2 * kRowLength) : static_cast<uint16_t>(kRowLength / 2);
         std::atomic<bool> running{true};
         std::atomic<uint64_t> next_row{0};
         std::vector<std::thread> inserters;
@@ -3617,17 +3618,306 @@ TEST_F(XStoreLiveWidenTest, RemoveDbAndCreateDbRacingInsertsLeaveIndexesThatMatc
             }
             EXPECT_EQ(rep.removestatus().rfind("[INFO] ", 0), 0u) << rep.removestatus(); // no ASSERT: inserters run
             EXPECT_FALSE(std::filesystem::exists(DbPath(db)));
-            EXPECT_EQ(r.CreateDB(db, XStore_Proto::SECOND, kRowLength).createdbstatus().rfind("[INFO] ", 0), 0u);
+            EXPECT_EQ(r.CreateDB(db, XStore_Proto::SECOND, new_row_length).createdbstatus().rfind("[INFO] ", 0), 0u);
         }
         std::this_thread::sleep_for(std::chrono::microseconds(300 + 89 * (round % 7)));
         running.store(false);
         for (std::thread &t : inserters) t.join();
 
-        ExpectIndexesMatchTheYearFile(DbPath(db), kYear, kRowLength, next_row.load());
-        ExpectIndexesMatchTheYearFile(DbPath(db), kNextYear, kRowLength, next_row.load());
+        ExpectIndexesMatchTheYearFile(DbPath(db), kYear, new_row_length, next_row.load());
+        ExpectIndexesMatchTheYearFile(DbPath(db), kNextYear, new_row_length, next_row.load());
         if (HasFailure()) return;
         ASSERT_EQ(store.RemoveDB(db).removestatus().rfind("[INFO] ", 0), 0u);
         CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    }
+}
+
+// ---- Removal residuals (R1, R2, R3, R6, R8) ---------------------------------------------------------------------------
+
+namespace {
+// True when some descriptor of this process refers to `path` (resolved through /proc/self/fd).
+bool SomeFdRefersTo(const std::string &path) {
+    std::error_code ec;
+    const std::string want = std::filesystem::weakly_canonical(path, ec).string();
+    for (const auto &entry : std::filesystem::directory_iterator("/proc/self/fd", ec)) {
+        std::error_code link_ec;
+        const std::filesystem::path target = std::filesystem::read_symlink(entry.path(), link_ec);
+        if (!link_ec && target.string() == want) return true;
+    }
+    return false;
+}
+} // namespace
+
+// R1, deterministic: records built from the old .CFG (one ASYNC, one SYNC) and applied after RemoveDB + CreateDB with
+// another row length are dropped: no row and no index file of the old geometry in the re-created DB, the SYNC caller
+// is told it failed, and the new DB inserts normally. The WAL writer is held by an earlier record of another DB on the
+// same WAL shard, which waits inside its apply (after its index lookups) on a WRITE lock the test holds.
+TEST_F(XStoreLiveWidenTest, ARecordOfARemovedDbNeverReachesTheDbReCreatedUnderItsName) {
+    XStore store;
+    const std::string db = "RMGEN";
+    constexpr uint16_t kNewRowLength = 512;
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    const size_t active = XStore::active_wal_shard_count.load();
+    const size_t shard = XStore::WalShardFor(DbPath(db), kYear, active);
+    std::string blocker;
+    for (int i = 0; blocker.empty() && i < 10000; ++i) {
+        const std::string candidate = "RMGENHOLD" + std::to_string(i);
+        if (XStore::WalShardFor(DbPath(candidate), kYear, active) == shard) blocker = candidate;
+    }
+    ASSERT_FALSE(blocker.empty());
+    CreateTestDb(store, blocker, XStore_Proto::SECOND, kRowLength);
+
+    auto hold = std::make_unique<FileRangeLockGuard>(YearPath(blocker, ".XSTORE"), 0, 0, kWrite);
+    auto held = std::async(std::launch::async, [&] {
+        XStore w;
+        XStore_Proto::UnaryInsert_REP rep;
+        w.UnaryInsert(Epoch(1), ValueRow(1, 2), blocker, &rep, XStore_Proto::SYNC);
+        return rep.insertstatus();
+    });
+    // Its catidx appears inside its second index lookup: from then on the writer is inside that record's apply and
+    // dequeues nothing else until the lock is released.
+    const Clock::time_point t0 = Clock::now();
+    while (!std::filesystem::exists(YearPath(blocker, ".catidx")) && MsSince(t0) < 10000) std::this_thread::sleep_for(milliseconds(1));
+    ASSERT_TRUE(std::filesystem::exists(YearPath(blocker, ".catidx"))) << "the writer never reached the held record";
+
+    XStore_Proto::UnaryInsert_REP async_rep;
+    store.UnaryInsert(Epoch(2), ValueRow(2, 2), db, &async_rep, XStore_Proto::ASYNC);
+    ASSERT_NE(async_rep.insertstatus().find("[INFO]"), std::string::npos) << async_rep.insertstatus();
+    auto sync = std::async(std::launch::async, [&] {
+        XStore w;
+        XStore_Proto::UnaryInsert_REP rep;
+        w.UnaryInsert(Epoch(3), ValueRow(3, 2), db, &rep, XStore_Proto::SYNC);
+        return rep.insertstatus();
+    });
+    while (XStore::wal_shards[shard].queue.size_approx() < 2 && MsSince(t0) < 20000) std::this_thread::sleep_for(milliseconds(1));
+    ASSERT_GE(XStore::wal_shards[shard].queue.size_approx(), 2u) << "the two records of the old DB were never queued";
+
+    EXPECT_EQ(store.RemoveDB(db).removestatus().rfind("[INFO] ", 0), 0u);
+    EXPECT_EQ(store.CreateDB(db, XStore_Proto::SECOND, kNewRowLength).createdbstatus().rfind("[INFO] ", 0), 0u);
+    hold.reset();
+    ASSERT_EQ(held.wait_for(std::chrono::seconds(30)), std::future_status::ready);
+    EXPECT_NE(held.get().find("[INFO]"), std::string::npos);
+    ASSERT_EQ(sync.wait_for(std::chrono::seconds(30)), std::future_status::ready);
+    EXPECT_EQ(sync.get().rfind("[ERROR] ", 0), 0u) << "the SYNC caller must be told its record was not applied";
+    while (XStore::wal_shards[shard].queue.size_approx() > 0 && MsSince(t0) < 40000) std::this_thread::sleep_for(milliseconds(1));
+
+    // Dropped before their data-file open: nothing of the old geometry was created or sized in the new DB.
+    EXPECT_FALSE(std::filesystem::exists(YearPath(db, ".XSTORE")));
+    EXPECT_FALSE(std::filesystem::exists(YearPath(db, ".zmap")));
+    EXPECT_FALSE(std::filesystem::exists(YearPath(db, ".catidx")));
+    // Then a SYNC insert into the new DB (the same shard: the ASYNC record, dequeued before, is done when it returns).
+    XStore_Proto::UnaryInsert_REP new_rep;
+    store.UnaryInsert(Epoch(4), ValueRow(4, 2), db, &new_rep, XStore_Proto::SYNC);
+    ASSERT_NE(new_rep.insertstatus().find("[INFO]"), std::string::npos) << new_rep.insertstatus();
+
+    const int fd = open(YearPath(db, ".XSTORE").c_str(), O_RDONLY);
+    ASSERT_GE(fd, 0);
+    std::vector<char> head(4 * kRowLength); // covers the old rows' offsets (2 and 3 * kRowLength)
+    ASSERT_EQ(pread(fd, head.data(), head.size(), 0), static_cast<ssize_t>(head.size()));
+    close(fd);
+    for (size_t i = 0; i < head.size(); ++i) {
+        if (i >= 4 * kNewRowLength && i < 5 * kNewRowLength) continue; // the new row
+        ASSERT_EQ(head[i], 0) << "byte " << i << ": a row of the removed DB's geometry in the re-created DB";
+    }
+    XStore_Proto::UnaryQuery_REP query_rep;
+    store.UnaryQuery(Epoch(4), db, &query_rep);
+    ASSERT_EQ(query_rep.data().fielddata_size(), 2);
+    EXPECT_EQ(query_rep.data().fielddata(0).doubledata(), 4.0);
+    auto stats = XStore::PinZoneMap(DbPath(db), kYear, kNewRowLength)->TryGetBlockStats(0);
+    ASSERT_TRUE(stats.has_value());
+    EXPECT_EQ((*stats)[0].valid_count, 1u) << "only the new DB's row is counted";
+}
+
+// R2: CreateDB of a name whose RemoveDB is still running (held in its wait by a pin on a retired index) is refused,
+// not blocked, and creates nothing; once the removal ended it succeeds and the new DB takes inserts.
+TEST_F(XStoreLiveWidenTest, CreateDbIsRefusedWhileARemovalOfTheNameRunsAndWorksAfterIt) {
+    XStore store;
+    const std::string db = "RMRECREATE";
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    Insert(store, db, {{Epoch(1), ValueRow(1, 2)}});
+    std::optional<ZoneMapFile::Pin> pin(XStore::PinZoneMap(DbPath(db), kYear, kRowLength));
+    auto remove = std::async(std::launch::async, [&] {
+        XStore r;
+        return r.RemoveDB(db).removestatus();
+    });
+    const Clock::time_point t0 = Clock::now();
+    while (std::filesystem::exists(DbPath(db)) && MsSince(t0) < 5000) std::this_thread::sleep_for(milliseconds(1));
+    ASSERT_FALSE(std::filesystem::exists(DbPath(db))) << "the removal never got to the directory";
+    ASSERT_NE(remove.wait_for(milliseconds(0)), std::future_status::ready) << "the removal did not wait for the pin";
+
+    const Clock::time_point create_t0 = Clock::now();
+    EXPECT_EQ(store.CreateDB(db, XStore_Proto::SECOND, 512).createdbstatus(),
+              "[WARNING] [CREATE DB] [DB: RMRECREATE] - A removal of this DB is still running; retry");
+    EXPECT_LT(MsSince(create_t0), 1000) << "CreateDB must refuse, not wait for the removal";
+    EXPECT_FALSE(std::filesystem::exists(DbPath(db)));
+
+    pin.reset();
+    ASSERT_EQ(remove.wait_for(std::chrono::seconds(15)), std::future_status::ready);
+    EXPECT_EQ(remove.get().rfind("[INFO] ", 0), 0u);
+    EXPECT_EQ(store.CreateDB(db, XStore_Proto::SECOND, 512).createdbstatus().rfind("[INFO] ", 0), 0u);
+    XStore_Proto::UnaryInsert_REP rep;
+    store.UnaryInsert(Epoch(5), ValueRow(5, 2), db, &rep, XStore_Proto::SYNC);
+    ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+    XStore_Proto::UnaryQuery_REP query_rep;
+    store.UnaryQuery(Epoch(5), db, &query_rep);
+    ASSERT_EQ(query_rep.data().fielddata_size(), 2);
+    EXPECT_EQ(query_rep.data().fielddata(0).doubledata(), 5.0);
+}
+
+// R3: a removal also waits for a request that holds a data fd the cache evicted earlier, not only for the fds it
+// erases: a UnaryQuery waits inside its read (WRITE lock on the row) while FD_SHARD_CAP other files of its fd-cache
+// shard push its fd out; RemoveDBFiles of the year then waits until the query let go.
+TEST_F(XStoreLiveWidenTest, ARemovalWaitsForAnEvictedFdARequestStillHolds) {
+    XStore store;
+    const std::string db = "RMEVICTED";
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    Insert(store, db, {{Epoch(3), ValueRow(3, 2)}});
+    const std::string year_file = YearPath(db, ".XSTORE");
+    const size_t fd_shard = std::hash<std::string>{}(year_file) % XStore::FD_SHARD_COUNT;
+    std::vector<std::string> same_shard;
+    for (unsigned short y = 2000; same_shard.size() < XStore::FD_SHARD_CAP && y < 6000; ++y) {
+        const std::string path = YearPath(db, ".XSTORE", y);
+        if (std::hash<std::string>{}(path) % XStore::FD_SHARD_COUNT == fd_shard) same_shard.push_back(path);
+    }
+    ASSERT_EQ(same_shard.size(), XStore::FD_SHARD_CAP);
+
+    store.EvictFdForTests(year_file); // no descriptor of the year file is open now: the query's open is observable
+    ASSERT_FALSE(SomeFdRefersTo(year_file));
+    auto hold = std::make_unique<FileRangeLockGuard>(year_file, 3 * kRowLength, kRowLength, kWrite);
+    auto query = std::async(std::launch::async, [&] {
+        XStore q;
+        XStore_Proto::UnaryQuery_REP rep;
+        q.UnaryQuery(Epoch(3), db, &rep);
+        return rep.data().fielddata_size();
+    });
+    const Clock::time_point t0 = Clock::now();
+    while (!SomeFdRefersTo(year_file) && MsSince(t0) < 10000) std::this_thread::sleep_for(milliseconds(1));
+    ASSERT_TRUE(SomeFdRefersTo(year_file)) << "the query never opened the year file";
+    // Its cache install follows the open on the same thread within microseconds, then it waits for the lock. No public
+    // accessor shows the fd cache (IsFdCached is private), so this is a sleep. If the install had not happened yet, the
+    // query's fd would stay cached instead of evicted: the removal still waits, the test passes without exercising
+    // the evicted case.
+    std::this_thread::sleep_for(milliseconds(100));
+    for (const std::string &path : same_shard) store.WarmFdForTests(path, kRowLength, 1);
+
+    auto remove = std::async(std::launch::async, [&] {
+        XStore r;
+        XStore_Proto::RemoveDBFiles_REQ req;
+        req.add_filename(std::to_string(kYear) + ".XSTORE");
+        return r.RemoveDBFiles(&req, db);
+    });
+    EXPECT_EQ(remove.wait_for(milliseconds(500)), std::future_status::timeout)
+        << "the removal finished while a request still held the evicted fd of the removed file";
+    hold.reset();
+    ASSERT_EQ(query.wait_for(std::chrono::seconds(15)), std::future_status::ready);
+    (void)query.get();
+    ASSERT_EQ(remove.wait_for(std::chrono::seconds(15)), std::future_status::ready);
+    EXPECT_EQ(remove.get().removestatus(0).rfind("[INFO] ", 0), 0u);
+}
+
+// R6: GetOrMapFile does not cache a mapping of a file unlinked between its open and its install (the same rule as
+// GetOrOpenFile): an open hook (this thread's opens only) unlinks the year file right after the query's mapping
+// open. Once the year is written
+// again, the next query maps the new file and reads its row, not the deleted one.
+TEST_F(XStoreLiveWidenTest, AMappingOfAFileUnlinkedDuringItsOpenIsNotCached) {
+    XStore store;
+    const std::string db = "RMMAPUNLINK";
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    Insert(store, db, {{Epoch(1), ValueRow(10, 2)}});
+    const std::string year_file = YearPath(db, ".XSTORE");
+    store.EvictMappedFilesUnderPrefixForTests(DbPath(db) + "/");
+    {
+        xstore_fault::ScopedOpenHook unlink_after_open(year_file, [&] { EXPECT_EQ(unlink(year_file.c_str()), 0); });
+        const XStore_Proto::RangeQuery_REP rep = RangeQuery(store, Epoch(0), Epoch(4), db);
+        ASSERT_TRUE(unlink_after_open.Fired()) << "the query never opened the year file";
+        EXPECT_EQ(rep.queryresponse_size(), 0) << "the query used a mapping of the unlinked file: " << rep.querystatus();
+    }
+    store.EvictFdForTests(year_file); // a removal erases the writers' fd too
+    Insert(store, db, {{Epoch(2), ValueRow(20, 2)}}); // re-creates the year file
+    const XStore_Proto::RangeQuery_REP after = RangeQuery(store, Epoch(1), Epoch(2), db);
+    ASSERT_EQ(after.queryresponse_size(), 2) << after.querystatus();
+    EXPECT_EQ(after.queryresponse(0).data().fielddata_size(), 0) << "the deleted row came back from a stale mapping";
+    ASSERT_EQ(after.queryresponse(1).data().fielddata_size(), 2);
+    EXPECT_EQ(after.queryresponse(1).data().fielddata(0).doubledata(), 20.0);
+}
+
+// R8, deterministic: an insert the removal refuses (RemoveDBFiles held in its wait by a pin) does not re-create the
+// year file it unlinked, and none is there after the reported removal.
+TEST_F(XStoreLiveWidenTest, ARefusedInsertDoesNotRecreateTheYearFileARemovalUnlinked) {
+    XStore store;
+    const std::string db = "RMNOCREATE";
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    Insert(store, db, {{Epoch(1), ValueRow(1, 2)}});
+    std::optional<ZoneMapFile::Pin> pin(XStore::PinZoneMap(DbPath(db), kYear, kRowLength));
+    auto remove = std::async(std::launch::async, [&] {
+        XStore r;
+        XStore_Proto::RemoveDBFiles_REQ req;
+        req.add_filename(std::to_string(kYear) + ".XSTORE");
+        return r.RemoveDBFiles(&req, db);
+    });
+    const Clock::time_point t0 = Clock::now();
+    while (std::filesystem::exists(YearPath(db, ".XSTORE")) && MsSince(t0) < 5000) std::this_thread::sleep_for(milliseconds(1));
+    ASSERT_FALSE(std::filesystem::exists(YearPath(db, ".XSTORE"))) << "the removal never got to the data file";
+
+    for (const XStore_Proto::WalDurabilityMode mode : {XStore_Proto::BYPASS, XStore_Proto::SYNC}) {
+        XStore_Proto::UnaryInsert_REP refused;
+        store.UnaryInsert(Epoch(7), ValueRow(77, 2), db, &refused, mode);
+        EXPECT_EQ(refused.insertstatus().rfind("[ERROR] ", 0), 0u) << refused.insertstatus();
+        EXPECT_FALSE(std::filesystem::exists(YearPath(db, ".XSTORE"))) << "a refused insert re-created the year file";
+    }
+    pin.reset();
+    ASSERT_EQ(remove.wait_for(std::chrono::seconds(15)), std::future_status::ready);
+    EXPECT_EQ(remove.get().removestatus(0).rfind("[INFO] ", 0), 0u);
+    EXPECT_FALSE(std::filesystem::exists(YearPath(db, ".XSTORE"))) << "an empty year file behind the reported removal";
+}
+
+// R8, stress (bounded rounds): inserters (BYPASS, SYNC) keep writing one year while the test removes its data file;
+// they stop as soon as the removal returned. If no insert succeeded after the removal started, the year file is gone;
+// if it exists, it holds rows (never an empty file left by a refused insert).
+TEST_F(XStoreLiveWidenTest, ARefusedInsertNeverLeavesAnEmptyYearFileBehindARemoval) {
+    XStore store;
+    const std::string db = "RMNOEMPTY";
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    XStore_Proto::RemoveDBFiles_REQ req;
+    req.add_filename(std::to_string(kYear) + ".XSTORE");
+    for (int round = 0; round < 40; ++round) {
+        SCOPED_TRACE("round " + std::to_string(round));
+        Insert(store, db, {{Epoch(0), RemovalRaceRow(0)}});
+        std::atomic<bool> running{true};
+        std::atomic<bool> removal_started{false};
+        std::atomic<int> late_ok{0};
+        std::atomic<uint64_t> next_row{1};
+        std::vector<std::thread> inserters;
+        for (int t = 0; t < 2; ++t) {
+            inserters.emplace_back([&, t] {
+                XStore w;
+                const XStore_Proto::WalDurabilityMode mode = t == 0 ? XStore_Proto::BYPASS : XStore_Proto::SYNC;
+                while (running.load()) {
+                    const uint64_t r = next_row.fetch_add(1);
+                    XStore_Proto::UnaryInsert_REP rep;
+                    EXPECT_NO_THROW(w.UnaryInsert(Epoch(r), RemovalRaceRow(r * 7), db, &rep, mode));
+                    // Counted by completion: any insert that could have written after the unlink.
+                    if (removal_started.load() && rep.insertstatus().rfind("[INFO] ", 0) == 0) late_ok.fetch_add(1);
+                }
+            });
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(300 + 97 * (round % 11)));
+        removal_started.store(true);
+        {
+            XStore r;
+            EXPECT_NO_THROW((void)r.RemoveDBFiles(&req, db));
+        }
+        running.store(false);
+        for (std::thread &t : inserters) t.join();
+
+        const int fd = open(YearPath(db, ".XSTORE").c_str(), O_RDONLY);
+        if (late_ok.load() == 0) EXPECT_LT(fd, 0) << "a refused insert left the year file behind the removal";
+        if (fd >= 0) {
+            EXPECT_FALSE(ReadRows(fd, 0, next_row.load(), kRowLength).empty()) << "an empty year file after the removal";
+            close(fd);
+        }
+        if (HasFailure()) return;
+        (void)store.RemoveDBFiles(&req, db);
     }
 }
 

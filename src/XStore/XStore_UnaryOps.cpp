@@ -24,6 +24,8 @@ void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::R
     // covers "DB does not exist": GetOrLoadCfg stats the .CFG file itself on
     // a cache miss, so a separate upfront is_directory() check on every call
     // (cache hit or not) would just be a redundant stat -- dropped.
+    // The cfg epoch is loaded BEFORE the cfg is read (see WalRecord::cfg_epoch).
+    const uint32_t cfg_epoch = CfgEpoch();
     XStore_Proto::ConfigStruct cfg_struct;
     if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
         std::string err_msg = fmt::format("[UNARY INSERT] [DB: {}] - DB does not exist", db_name);
@@ -66,6 +68,7 @@ void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::R
     record.db_base_path = db_base_path_str;
     record.time_resolution = cfg_struct.timeresolution();
     record.row_length = cfg_struct.rowlength();
+    record.cfg_epoch = cfg_epoch;
     record.durability_mode = durability_mode;
     // Built here (not after the enqueue) so the year can route the record; the success message below reuses it.
     const TimeStruct curr_ts(unix_time, cfg_struct.timeresolution());

@@ -130,6 +130,29 @@ void Observe(ObservedOp op, int fd, uint64_t offset, uint64_t length) {
     s.fn(op, offset, length);
 }
 
+struct OpenHookSlot {
+    std::mutex mu;
+    std::string path, canonical;  // the caller's spelling and its canonical form: either matches
+    std::thread::id thread;
+    std::function<void()> fn;
+    bool fired = false;
+};
+OpenHookSlot &OpenHookState() {
+    static OpenHookSlot *s = new OpenHookSlot;
+    return *s;
+}
+std::atomic<bool> g_open_hook_armed{false};
+std::atomic<bool> g_open_hook_guard_active{false};
+
+void AfterOpen(const char *path, int fd) {
+    if (fd < 0 || !g_open_hook_armed.load(std::memory_order_relaxed) || path == nullptr) return;
+    OpenHookSlot &s = OpenHookState();
+    std::lock_guard<std::mutex> lock(s.mu);
+    if (s.fired || !s.fn || s.thread != std::this_thread::get_id() || (s.path != path && s.canonical != path)) return;
+    s.fired = true;
+    s.fn();
+}
+
 std::string Canonical(const std::string &path) {
     std::error_code ec;
     const std::filesystem::path canonical = std::filesystem::weakly_canonical(path, ec);
@@ -219,6 +242,32 @@ ScopedFdObserver::~ScopedFdObserver() {
     g_observer_guard_active.store(false);
 }
 
+ScopedOpenHook::ScopedOpenHook(const std::string &path, std::function<void()> fn) {
+    ClaimOrAbort(g_open_hook_guard_active, "ScopedOpenHook");
+    OpenHookSlot &s = OpenHookState();
+    std::lock_guard<std::mutex> lock(s.mu);
+    s.path = path;
+    s.canonical = Canonical(path);
+    s.thread = std::this_thread::get_id();
+    s.fn = std::move(fn);
+    s.fired = false;
+    g_open_hook_armed.store(true);
+}
+ScopedOpenHook::~ScopedOpenHook() {
+    g_open_hook_armed.store(false);
+    {
+        OpenHookSlot &s = OpenHookState();
+        std::lock_guard<std::mutex> lock(s.mu);
+        s.fn = nullptr;
+    }
+    g_open_hook_guard_active.store(false);
+}
+bool ScopedOpenHook::Fired() const {
+    OpenHookSlot &s = OpenHookState();
+    std::lock_guard<std::mutex> lock(s.mu);
+    return s.fired;
+}
+
 }  // namespace xstore_fault
 
 namespace {
@@ -244,6 +293,7 @@ using xstore_fault::PathFaultErrno;
 using xstore_fault::FdFaultErrno;
 using xstore_fault::FdOp;
 using xstore_fault::Observe;
+using xstore_fault::AfterOpen;
 using xstore_fault::ObservedOp;
 using xstore_fault::kFopen;
 using xstore_fault::kStat;
@@ -264,7 +314,9 @@ extern "C" {
             errno = err;                                                                           \
             return -1;                                                                             \
         }                                                                                          \
-        return real(path, flags, mode);                                                            \
+        const int fd = real(path, flags, mode);                                                    \
+        AfterOpen(path, fd);                                                                       \
+        return fd;                                                                                 \
     }
 XSTORE_FAULT_OPEN(open)
 XSTORE_FAULT_OPEN(open64)

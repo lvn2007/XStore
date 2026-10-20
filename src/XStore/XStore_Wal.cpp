@@ -261,6 +261,17 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
     TimeStruct first_ts(record_to_apply.rows.front().epoch_time, record_to_apply.time_resolution);
     const std::string &target_file = CachedYearFilePath(record_to_apply.db_base_path, first_ts.year);
 
+    // The DB was removed (and maybe re-created, with another row length) since this record's cfg was read: nothing of
+    // it may be written, like a record of a DB that is gone. Checked twice. Here, before the open: a record already
+    // stale does not create (or size, at its old geometry) the re-created DB's year file. Again after the open (below).
+    const auto drop_stale = [&]() {
+        spdlog::warn("[WAL APPLY] [DB: {}] - The DB was removed after this record was built; its {} row(s) are dropped",
+                     record_to_apply.db_name, record_to_apply.rows.size());
+        walring::Dirty().NoteRingMarkOnly(ring, target_file, ring_lsn_end);
+        return false;
+    };
+    if (!CfgEpochCurrent(record_to_apply.db_name, record_to_apply.cfg_epoch)) return drop_stale();
+
     std::shared_ptr<int> fd_handle = GetOrOpenFile(target_file, record_to_apply.row_length,
                                                     first_ts.last_epoch - first_ts.first_epoch);
     if (!fd_handle) {
@@ -273,6 +284,13 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
         walring::Dirty().NoteRingMarkOnly(ring, target_file, ring_lsn_end);
         return false;
     }
+    // The binding check, AFTER the open (a record can turn stale between the first check and the open): an open of
+    // the re-created DB's file comes after that removal's epoch bump, so it is seen here; a record that passes holds
+    // an fd opened before the bump, which the removal waits for (cached or evicted-but-held, see EraseOpenFile*)
+    // before a re-create can run (CreateDB refuses while the removal's scope is registered). The index lookups below
+    // come after it, so a dropped record never creates index files in a re-created DB. Per record: two atomic loads
+    // of one cache line (none per row).
+    if (!CfgEpochCurrent(record_to_apply.db_name, record_to_apply.cfg_epoch)) return drop_stale();
     int fd = *fd_handle;
 
     // Fetched once per record (every row shares the same (db, year), see

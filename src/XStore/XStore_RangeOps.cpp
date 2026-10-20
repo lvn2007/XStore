@@ -33,6 +33,7 @@ void XStore::RangeInsert(XStore_Proto::RangeInsert_REQ *proto_from_client, XStor
     }
 
     // Fetch cfgStruct from cache, loading from disk on first use
+    const uint32_t cfg_epoch = CfgEpoch(); // before the cfg read (see WalRecord::cfg_epoch)
     XStore_Proto::ConfigStruct cfg_struct;
     if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
         std::string err_msg = fmt::format("[RANGE INSERT] [DB: {}] - DB does not exist", db_name);
@@ -131,6 +132,7 @@ void XStore::RangeInsert(XStore_Proto::RangeInsert_REQ *proto_from_client, XStor
         record.db_base_path = db_base_path_str;
         record.time_resolution = cfg_struct.timeresolution();
         record.row_length = cfg_struct.rowlength();
+        record.cfg_epoch = cfg_epoch;
         record.year = year_key;  // routes the record to its (db, year) shard
         record.durability_mode = durability_mode;
         // One width for both the observations below and the zone map
