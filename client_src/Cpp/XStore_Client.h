@@ -486,30 +486,8 @@ class XStoreClient {
   }
 
   // ==== Range (contiguous timestamp span) ====
-  // durability_mode: same WAL-routed semantics as BatchInsert's overload
-  // above -- see RangeInsert_REQ's durabilityMode comment in XStore.proto,
-  // including the ASYNC default-mode note there.
-  [[nodiscard]] std::string RangeInsert(std::string_view db_name, const std::vector<std::pair<uint64_t, XStore_Proto::RowData>> &rows,
-                                         XStore_Proto::WalDurabilityMode durability_mode = XStore_Proto::ASYNC) {
-      XStore_Proto::Request to_server;
-      auto *payload = to_server.mutable_rangeinsert();
-      payload->set_rtype(XStore_Proto::RANGEINSERT);
-      payload->set_dbname(std::string(db_name));
-      payload->set_durabilitymode(durability_mode);
-      payload->mutable_rangeinsert_data()->Reserve(static_cast<int>(rows.size()));
-      for (const auto &row : rows) {
-          XStore_Proto::RangeInsert_DATA *entry = payload->add_rangeinsert_data();
-          entry->set_timestamp(row.first);
-          *entry->mutable_data() = row.second;
-      }
-      return SendRecv<XStore_Proto::RangeInsert_REP>(to_server).insertstatus();
-  }
-
-  [[nodiscard]] std::string RangeInsert(XStore_Proto::RangeInsert_REQ insert_data) {
-      XStore_Proto::Request to_server;
-      *to_server.mutable_rangeinsert() = std::move(insert_data);
-      return SendRecv<XStore_Proto::RangeInsert_REP>(to_server).insertstatus();
-  }
+  // There is no RangeInsert here: BatchInsert takes timestamp-ordered, gapped or unordered rows alike (the server
+  // detects order itself; the last duplicate wins). The RANGEINSERT wire message stays server-side for old clients.
 
   [[nodiscard]] XStore_Proto::RangeQuery_REP RangeQuery(uint64_t start_time, uint64_t end_time, std::string_view db_name) {
       XStore_Proto::Request to_server;

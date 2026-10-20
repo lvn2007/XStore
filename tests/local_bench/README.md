@@ -55,7 +55,7 @@ corpus files' own `startTime`/`endTime` columns:
 | Experiment | Op/iteration | Iterations/thread | Batch size / range width |
 |---|---|---|---|
 | UNARY_INSERT_SEQ/RAND | 1 row insert | 1000 | n/a |
-| BATCH_INSERT_SEQ/RAND | 1 RangeInsert/BatchInsert call | 10 | 1000 rows/call |
+| BATCH_INSERT_SEQ/RAND | 1 BatchInsert call (SEQ: ascending contiguous rows; RAND: unsorted distinct rows; same RPC, the server detects the order) | 10 | 1000 rows/call |
 | UNARY_QUERY_SEQ/RAND | 1 row query | 1000 | n/a |
 | BATCH_QUERY_SEQ/RAND | 1 range/batch query | 10 | 100 rows/call |
 | AGG_MIN/MAX/AVG/SUM | 1 aggregate RPC | 1000 | 60s range width, random target column |

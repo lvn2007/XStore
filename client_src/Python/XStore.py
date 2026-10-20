@@ -242,48 +242,6 @@ class XStoreClient:
         recvObj = self._sendRecv(envelope, XStore_Proto.UnaryDelete_REP)
         return recvObj.deleteStatus
 
-    def rangeInsert(self, dataList, targetDBName, durabilityMode=XStore_Proto.ASYNC):
-        """
-        :param dataList:
-        :param targetDBName:
-        :param durabilityMode: same WAL-routed semantics as UnaryInsert's --
-            see RangeInsert_REQ's durabilityMode comment in XStore.proto.
-            SYNC blocks until the write is durably fsync'd and applied;
-            ASYNC (the default) enqueues and returns immediately, deferring
-            both the fsync AND the data-file write itself to the server's
-            WAL writer thread -- a read immediately after an ASYNC
-            rangeInsert is not guaranteed to see it yet.
-        :return:
-        """
-        envelope = XStore_Proto.Request()
-        payload = envelope.rangeinsert
-        payload.RType = XStore_Proto.RANGEINSERT
-        payload.dbName = targetDBName
-        payload.durabilityMode = durabilityMode
-
-        # IF first element in dataList is not type rangeInsert_DATA
-        #   -> Inferred data type -- Assume worse case scenario for space-efficiency
-        if type(dataList[0]) != XStore_Proto.RangeInsert_DATA:
-            # Build 1 row worth of data
-            for data in dataList:
-                rowData = XStore_Proto.RowData()
-                for idx, item in enumerate(data["data"]):
-                    if isinstance(item, str):
-                        rowData.fieldData.add().stringData = item
-                    elif isinstance(item, bool):
-                        rowData.fieldData.add().boolData = item
-                    elif isinstance(item, (int, float)):
-                        rowData.fieldData.add().doubleData = item
-                insertData = XStore_Proto.RangeInsert_DATA()
-                insertData.timestamp = data["timestamp"]
-                insertData.data.MergeFrom(rowData)
-                payload.rangeInsert_DATA.append(insertData)
-        else:
-            payload.rangeInsert_DATA.MergeFrom(dataList)
-
-        recvObj = self._sendRecv(envelope, XStore_Proto.RangeInsert_REP)
-        return recvObj.insertStatus
-
     def batchInsert(self, dataList, targetDBName, durabilityMode=XStore_Proto.ASYNC):
         """
         :param dataList:

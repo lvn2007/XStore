@@ -127,7 +127,7 @@ TEST_F(XStoreClientLiveTest, UnaryInsertedDataActuallyAppearsOnServer) {
         XStore_Proto::RowData row = MakeRow({xstore_fdata::Double(c.double_val),
                                               xstore_fdata::String(c.string_val),
                                               xstore_fdata::Bool(c.bool_val)});
-        std::string status = client->UnaryInsert(ts, row, db_name_arg);
+        std::string status = client->UnaryInsert(ts, row, db_name_arg, XStore_Proto::SYNC);
         ASSERT_NE(status.find("[INFO]"), std::string::npos) << "UnaryInsert failed: " << status;
     }
 
@@ -155,7 +155,7 @@ TEST_F(XStoreClientLiveTest, UnaryDeletedDataIsGoneOnServer) {
     std::time_t ts = 1856260800;  // 2028-10-27
     std::string db_name_arg = db_name;
     XStore_Proto::RowData row = MakeRow({xstore_fdata::Int64(424242)});
-    std::string insert_status = client->UnaryInsert(ts, row, db_name_arg);
+    std::string insert_status = client->UnaryInsert(ts, row, db_name_arg, XStore_Proto::SYNC);
     ASSERT_NE(insert_status.find("[INFO]"), std::string::npos);
 
     XStore_Proto::UnaryQuery_REP before_delete = client->UnaryQuery(ts, db_name_arg);
@@ -190,7 +190,7 @@ TEST_F(XStoreClientLiveTest, BatchInsertedDataActuallyAppearsOnServer) {
         {ts2, MakeRow({xstore_fdata::Int32(888)})},
         {ts3, MakeRow({xstore_fdata::UInt64(123456789ULL), xstore_fdata::Bytes("batch-two-cols")})},
     };
-    std::string insert_status = client->BatchInsert(db_name_arg, rows);
+    std::string insert_status = client->BatchInsert(db_name_arg, rows, XStore_Proto::SYNC);
     EXPECT_NE(insert_status.find("Inserted 3 elements"), std::string::npos) << insert_status;
 
     std::vector<uint64_t> query_timestamps = {ts1, ts_hole, ts2, ts3};
@@ -222,7 +222,7 @@ TEST_F(XStoreClientLiveTest, BatchInsertedDataActuallyAppearsOnServer) {
 // server returns every offset in range (hole included as an empty row) with
 // the endpoints holding the exact values written.
 // ---------------------------------------------------------------------
-TEST_F(XStoreClientLiveTest, RangeInsertedDataActuallyAppearsOnServer) {
+TEST_F(XStoreClientLiveTest, BatchInsertedDataWithHolesIsReadBackByRangeQuery) {
     const std::string db_name = UniqueDbName("RANGE");
     CreateDb(db_name);
 
@@ -235,7 +235,7 @@ TEST_F(XStoreClientLiveTest, RangeInsertedDataActuallyAppearsOnServer) {
         // start+1 and start+2 deliberately left as holes.
         {end, MakeRow({xstore_fdata::SFixed64(4242)})},
     };
-    std::string insert_status = client->RangeInsert(db_name_arg, rows);
+    std::string insert_status = client->BatchInsert(db_name_arg, rows, XStore_Proto::SYNC);
     ASSERT_NE(insert_status.find("[INFO]"), std::string::npos) << insert_status;
 
     XStore_Proto::RangeQuery_REP rep = client->RangeQuery(start, end, db_name_arg);
@@ -266,7 +266,7 @@ TEST_F(XStoreClientLiveTest, SumAndAvgAggregateOverRealNetworkMatchExpectedValue
         rows.push_back({start + i, MakeRow({xstore_fdata::Int64(val)})});
         expected_sum += val;
     }
-    std::string insert_status = client->RangeInsert(db_name_arg, rows);
+    std::string insert_status = client->BatchInsert(db_name_arg, rows, XStore_Proto::SYNC);
     ASSERT_NE(insert_status.find("[INFO]"), std::string::npos) << insert_status;
 
     XStore_Proto::Sum_REP sum_rep = client->Sum(start, start + n - 1, db_name_arg, /*columnIdx=*/0);
