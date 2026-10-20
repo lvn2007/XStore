@@ -218,6 +218,9 @@ XStore_Proto::UnaryDelete_REP XStore::UnaryDelete(unsigned long long int epoch_t
     // a cache miss, so a separate upfront is_directory() check on every call
     // (cache hit or not) would just be a redundant stat -- dropped, same fix
     // already applied to UnaryInsert/UnaryQuery.
+    // The cfg epoch is loaded BEFORE the cfg is read, as for the inserts (see WalRecord::cfg_epoch): the row's offset
+    // comes from this cfg's row length, so the delete must not run in a DB re-created under the name since.
+    const uint32_t cfg_epoch = CfgEpoch();
     XStore_Proto::ConfigStruct cfg_struct;
     if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
         std::string err_msg = fmt::format("[UNARY DELETE] [DB: {}] - DB does not exist", db_name);
@@ -239,6 +242,17 @@ XStore_Proto::UnaryDelete_REP XStore::UnaryDelete(unsigned long long int epoch_t
         spdlog::warn(err_msg);
         return to_return;
     }
+
+    // The DB was removed (and maybe re-created with another row length) since the cfg read. Checked twice, as in
+    // ApplyWalRecord: here, so a delete already stale does not open (or size) the re-created DB's year file; again
+    // under the row lock below, the binding check.
+    const auto removed_meanwhile = [&]() {
+        std::string err_msg = fmt::format("[UNARY DELETE] [DB: {}] - The DB was removed while the request ran", db_name);
+        SetTaggedStatus(to_return.mutable_deletestatus(), "[ERROR] ", err_msg);
+        spdlog::error(err_msg);
+        return to_return;
+    };
+    if (!CfgEpochCurrent(db_name, cfg_epoch)) return removed_meanwhile();
 
     // Cached fd instead of a fresh fopen()/fclose() per call -- fallocate64()
     // just needs a plain fd (punching holes isn't an mmap operation), and
@@ -264,6 +278,12 @@ XStore_Proto::UnaryDelete_REP XStore::UnaryDelete(unsigned long long int epoch_t
     {
         // Lock prior to file OP
         FileRangeLockGuard guard(target_file_path, offset, cfg_struct.rowlength(), FileRangeLock::LockType::WRITE);
+
+        // The binding check: after the open and the lock, before the zone map or any byte is touched. An open of the
+        // re-created DB's file comes after that removal's epoch bump, so it is seen here; an fd opened before the bump
+        // is one the removal waits for, and if that wait timed out while this delete waited for its lock, the bump is
+        // seen here too. Per request: three acquire loads of one cache line (CfgEpoch, pre-open, here), no lock.
+        if (!CfgEpochCurrent(db_name, cfg_epoch)) return removed_meanwhile();
 
         // The zone map still counts this row: flag its block before the row goes.
         const ZoneMapFile::Pin zmap = OpenZoneMapForDelete(db_base_path_str, curr_ts.year, cfg_struct);

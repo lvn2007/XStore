@@ -344,7 +344,9 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(unsigned long long int start_e
     // Base directory of a DB
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
-    // Fetch cfgStruct from cache, loading from disk on first use
+    // Fetch cfgStruct from cache, loading from disk on first use. The cfg epoch is loaded BEFORE the cfg is read (see
+    // UnaryDelete).
+    const uint32_t cfg_epoch = CfgEpoch();
     XStore_Proto::ConfigStruct cfg_struct;
     if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
         std::string err_msg = fmt::format("[RANGE DELETE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
@@ -367,6 +369,15 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(unsigned long long int start_e
         spdlog::warn(err_msg);
         return to_return;
     }
+
+    // The DB was removed since the cfg read: checked before and after each year-segment's open, as in UnaryDelete.
+    // Segments already done went from the removed DB's files; the rest of the request is stale too.
+    const auto removed_meanwhile = [&]() {
+        std::string err_msg = fmt::format("[RANGE DELETE] [DB: {}] - The DB was removed while the request ran", db_name);
+        SetTaggedStatus(to_return.mutable_deletestatus(), "[ERROR] ", err_msg);
+        spdlog::error(err_msg);
+        return to_return;
+    };
 
     // Walk the span one year-file at a time. Each iteration clamps its
     // segment to [IterEpoch, min(endEpochT, thisYear.last_epoch)] and always
@@ -391,6 +402,7 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(unsigned long long int start_e
             iter_epoch = segment_end + 1;
             continue;
         }
+        if (!CfgEpochCurrent(db_name, cfg_epoch)) return removed_meanwhile();
 
         // Cached fd instead of a fresh fopen()/fclose() per year-segment --
         // fallocate64() just needs a plain fd (punching holes isn't an mmap
@@ -417,6 +429,10 @@ XStore_Proto::RangeDelete_REP XStore::RangeDelete(unsigned long long int start_e
         {
             // Lock file prior to deleting
             FileRangeLockGuard guard(target_file_path, offset, cfg_struct.rowlength() * range_count, FileRangeLock::LockType::WRITE);
+
+            // The binding check (see UnaryDelete): after the open and the lock, before the zone map or the punch.
+            // Per request: one CfgEpoch load; per year-segment: two more (before the open and here), none per row.
+            if (!CfgEpochCurrent(db_name, cfg_epoch)) return removed_meanwhile();
 
             // The zone map still counts these rows. DeleteRows flags the partly covered end blocks, punches, then
             // resets the fully covered blocks to empty without reading them.

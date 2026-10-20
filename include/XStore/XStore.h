@@ -71,8 +71,8 @@ class XStore {
             std::unordered_map<std::string, XStore_Proto::ConfigStruct> map;
             // Per DB name ever removed in this process: the cfg epoch EraseCfg produced (the counter value after its
             // bump), set under this shard's lock and never erased (one small entry per removed name, bounded by the
-            // number of distinct names removed). Only the WAL apply's slow path reads it (CfgEpochCurrent), never the
-            // GetOrLoadCfg hit path.
+            // number of distinct names removed). Only the slow path of CfgEpochCurrent (WAL apply, deletes) reads it,
+            // never the GetOrLoadCfg hit path.
             std::unordered_map<std::string, uint32_t> erased_epoch;
             std::shared_mutex mutex;
         };
@@ -81,8 +81,9 @@ class XStore {
 
         // Removal epoch of the cfg cache: EraseCfg (RemoveDB) bumps it, under the shard lock, after erasing. An insert
         // loads it (CfgEpoch) BEFORE it reads the cfg and carries it in WalRecord::cfg_epoch; ApplyWalRecord drops a
-        // record whose DB was removed since (CfgEpochCurrent). Starts at 1: a record's 0 means "not
-        // checked". On a cache line of its own (read once per record by every WAL writer and insert thread).
+        // record whose DB was removed since (CfgEpochCurrent). The deletes load it the same way and check it before
+        // their data-file open and again under their row locks. Starts at 1: a record's 0 means "not checked". On a
+        // cache line of its own (read once per record by every WAL writer and insert thread).
         struct alignas(64) PaddedCfgEpoch {
             std::atomic<uint32_t> value{1};
         };

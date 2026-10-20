@@ -3921,6 +3921,80 @@ TEST_F(XStoreLiveWidenTest, ARefusedInsertNeverLeavesAnEmptyYearFileBehindARemov
     }
 }
 
+// Residual (g), deterministic: a UnaryDelete, a BatchDelete and a RangeDelete that read the old .CFG wait for their row
+// locks (a READ on the whole year file the test holds) while RemoveDB runs and CreateDB re-creates the name with
+// another row length. The removal waits for the fd they hold until its bound, then finishes anyway; released after the
+// re-create, each delete is refused before it touches anything: the new DB gets no year file and no index file of the
+// old geometry, and takes inserts normally.
+TEST_F(XStoreLiveWidenTest, ADeleteOfARemovedDbNeverReachesTheDbReCreatedUnderItsName) {
+    XStore store;
+    const std::string db = "RMDELGEN";
+    constexpr uint16_t kNewRowLength = 512;
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    Rows seed;
+    for (uint64_t r = 1; r <= 8; ++r) seed.emplace_back(Epoch(r), ValueRow(r, 2));
+    Insert(store, db, seed);
+
+    FileRangeLock &lock = FileLockRegistry::Get(YearPath(db, ".XSTORE"));
+    ASSERT_TRUE(lock.TryLockRangeFor(0, 0, kRead, std::chrono::seconds(10)));
+
+    auto unary = std::async(std::launch::async, [&] {
+        XStore w;
+        return w.UnaryDelete(Epoch(2), db).deletestatus();
+    });
+    auto batch = std::async(std::launch::async, [&] {
+        XStore w;
+        XStore_Proto::BatchDelete_REQ req;
+        req.set_dbname(db);
+        req.add_timestamp(Epoch(4));
+        req.add_timestamp(Epoch(5));
+        return w.BatchDelete(&req).deletestatus();
+    });
+    auto range = std::async(std::launch::async, [&] {
+        XStore w;
+        return w.RangeDelete(Epoch(7), Epoch(8), db).deletestatus();
+    });
+    // Declared after the futures, so a failed assertion releases the lock before their destructors wait for the deletes.
+    bool held = true;
+    struct UnlockOnExit {
+        FileRangeLock &lock;
+        bool &held;
+        ~UnlockOnExit() {
+            if (held) lock.UnlockRange(0, 0, kRead);
+        }
+    } unlock_on_exit{lock, held};
+    WaitForWaitingWriters(lock, 3); // all three are past their cfg read and their open, waiting for their row locks
+    ASSERT_EQ(lock.WaitingWritersForTests(), 3u);
+
+    kLogCapture->Clear();
+    EXPECT_EQ(store.RemoveDB(db).removestatus().rfind("[INFO] ", 0), 0u);
+    EXPECT_TRUE(kLogCapture->Contains("Requests still held the removed files")) << "the removal did not wait for the deletes";
+    EXPECT_EQ(store.CreateDB(db, XStore_Proto::SECOND, kNewRowLength).createdbstatus().rfind("[INFO] ", 0), 0u);
+    lock.UnlockRange(0, 0, kRead);
+    held = false;
+
+    for (auto *f : {&unary, &batch, &range}) {
+        ASSERT_EQ(f->wait_for(std::chrono::seconds(30)), std::future_status::ready);
+        const std::string status = f->get();
+        EXPECT_EQ(status.rfind("[ERROR] ", 0), 0u) << status;
+        EXPECT_NE(status.find("The DB was removed while the request ran"), std::string::npos) << status;
+    }
+    EXPECT_FALSE(std::filesystem::exists(YearPath(db, ".XSTORE")));
+    EXPECT_FALSE(std::filesystem::exists(YearPath(db, ".zmap"))) << "a stale delete opened a zone map in the new DB";
+    EXPECT_FALSE(std::filesystem::exists(YearPath(db, ".catidx")));
+
+    XStore_Proto::UnaryInsert_REP new_rep;
+    store.UnaryInsert(Epoch(4), ValueRow(4, 2), db, &new_rep, XStore_Proto::SYNC);
+    ASSERT_NE(new_rep.insertstatus().find("[INFO]"), std::string::npos) << new_rep.insertstatus();
+    XStore_Proto::UnaryQuery_REP query_rep;
+    store.UnaryQuery(Epoch(4), db, &query_rep);
+    ASSERT_EQ(query_rep.data().fielddata_size(), 2);
+    EXPECT_EQ(query_rep.data().fielddata(0).doubledata(), 4.0);
+    auto stats = XStore::PinZoneMap(DbPath(db), kYear, kNewRowLength)->TryGetBlockStats(0);
+    ASSERT_TRUE(stats.has_value());
+    EXPECT_EQ((*stats)[0].valid_count, 1u) << "only the new DB's row is counted";
+}
+
 // ---- 10. The trigger (M4 stage 3): RunLiveWidenPass driven with a fake clock ----------------------------------------
 
 using PassResult = std::vector<std::pair<unsigned short, Result>>;

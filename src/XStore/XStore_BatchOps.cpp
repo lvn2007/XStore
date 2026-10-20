@@ -439,7 +439,9 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
     // Base directory of a DB
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
-    // Fetch cfgStruct from cache, loading from disk on first use
+    // Fetch cfgStruct from cache, loading from disk on first use. The cfg epoch is loaded BEFORE the cfg is read (see
+    // UnaryDelete).
+    const uint32_t cfg_epoch = CfgEpoch();
     XStore_Proto::ConfigStruct cfg_struct;
     if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
         std::string err_msg = fmt::format("[BATCH DELETE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
@@ -489,6 +491,15 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
         AppendToYearBucket(data_map, curr_year, static_cast<unsigned long long int>(i));
     }
 
+    // The DB was removed since the cfg read: checked before and after each year-group's open, as in UnaryDelete. Rows
+    // of earlier groups went from the removed DB's files; the rest of the request is stale too.
+    const auto removed_meanwhile = [&]() {
+        std::string err_msg = fmt::format("[BATCH DELETE] [DB: {}] - The DB was removed while the request ran", db_name);
+        SetTaggedStatus(to_return.mutable_deletestatus(), "[ERROR] ", err_msg);
+        spdlog::error(err_msg);
+        return to_return;
+    };
+
     // Iterate through each key (year) of dataMap
     for (const std::pair<unsigned short int, std::vector<unsigned long long int>> &pair : data_map) {
         unsigned short int year_key = pair.first;
@@ -502,6 +513,7 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
             spdlog::warn(warning_msg);
             continue;
         }
+        if (!CfgEpochCurrent(db_name, cfg_epoch)) return removed_meanwhile();
 
         TimeStruct this_ts{static_cast<time_t>(proto_from_client->timestamp(indices.front())), cfg_struct.timeresolution()};
 
@@ -541,6 +553,10 @@ XStore_Proto::BatchDelete_REP XStore::BatchDelete(XStore_Proto::BatchDelete_REQ 
         {
             // Lock prior to file OP
             FileRangeLockRunsGuard guard(target_file, lock_runs.data(), lock_runs.size(), FileRangeLock::LockType::WRITE);
+
+            // The binding check (see UnaryDelete): after the open and the locks, before the zone map or any punch.
+            // Per request: one CfgEpoch load; per year-group: two more (before the open and here), none per row.
+            if (!CfgEpochCurrent(db_name, cfg_epoch)) return removed_meanwhile();
 
             // Union of the successful punches: ONE dirty note per year-group (one tracker lock) instead of one per
             // row. Over-marks the unpunched gaps between rows, which only costs the checkpoint a slightly wider
