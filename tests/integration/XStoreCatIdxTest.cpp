@@ -397,6 +397,35 @@ TEST_F(XStoreCatIdxTestFixture, FindByValueForAbsentValueSkipsBlockViaBloom) {
     EXPECT_EQ(rep.queryresponse_size(), 0);
 }
 
+// A null (unset) target is refused with a warning and no rows, whether or not the column is indexed: the bloom never
+// holds unset columns, so an indexed column would answer "none" while the real-scan fallback would match the
+// explicitly-unset cells. Column 0 is indexed, column 999 is past the tracked width (real scan).
+TEST_F(XStoreCatIdxTestFixture, FindByValueRefusesANullTargetOnIndexedAndUnindexedColumns) {
+    XStore store;
+    CreateTestDb(store, "FINDBYVALUE4", XStore_Proto::SECOND, 64);
+
+    for (int64_t i = 0; i < 300; ++i) {
+        XStore_Proto::RowData row;
+        XStore_Proto::FData *c0 = row.add_fielddata();
+        if (i % 3 != 0) c0->set_int64data(i); // every third cell stays unset
+        XStore_Proto::UnaryInsert_REP rep;
+        store.UnaryInsert(1000 + i, row, "FINDBYVALUE4", &rep, XStore_Proto::SYNC);
+    }
+
+    const XStore_Proto::FData null_target; // no oneof case set
+    for (int32_t column : {0, 999}) {
+        std::string reassembled;
+        store.FindByValue(1000, 1000 + 299, "FINDBYVALUE4", column, null_target,
+                          XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                          [&](std::string &&chunk, bool) { reassembled += chunk; });
+        XStore_Proto::RangeQuery_REP rep;
+        ASSERT_TRUE(rep.ParseFromString(reassembled)) << "column " << column;
+        EXPECT_EQ(rep.queryresponse_size(), 0) << "column " << column;
+        EXPECT_NE(rep.querystatus().find("Searching for a null (unset) value is not supported"), std::string::npos)
+            << "column " << column << ": " << rep.querystatus();
+    }
+}
+
 // End-to-end regression test for Critical Finding #1 (task-9-report.md fix
 // round, see AppendBitmapSection/EnsureBlockLoaded/FlushBlock): a real
 // compaction, then a real backfill write into a never-touched block whose

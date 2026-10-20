@@ -1077,6 +1077,15 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
         return;
     }
 
+    // A null (unset) target is refused on every path: the bloom never holds unset columns (live inserts and rebuilds
+    // both skip them), so an indexed column would answer "no rows" while the real-scan fallback would match the
+    // explicitly-unset cells. One rule instead of an answer that depends on indexing.
+    if (value.oneOfData_case() == XStore_Proto::FData::ONEOFDATA_NOT_SET) {
+        set_warning("[WARNING] ", fmt::format("[FINDBYVALUE] [DB: {}] - Searching for a null (unset) value is not supported", db_name));
+        finish(std::string());
+        return;
+    }
+
     std::string encoded_target = EncodeFDataForCatIdx(value);
     uint32_t tracked_column_count = EffectiveTrackedColumnCount(cfg_struct);
     // Notice-only: the scan is always correct (real-scan fallback), the caller just deserves to know it paid for
