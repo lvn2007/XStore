@@ -69,12 +69,21 @@ inline const std::string& UpperCaseInto(std::string_view src) {
 // across years the way the old std::map-based version did for free).
 using YearBucketMap = std::vector<std::pair<unsigned short int, std::vector<unsigned long long int>>>;
 
-inline void AppendToYearBucket(YearBucketMap &buckets, unsigned short int year, unsigned long long int idx) {
+inline void AppendToYearBucket(YearBucketMap &buckets, unsigned short int year, unsigned long long int idx,
+                               size_t first_bucket_reserve = 0) {
     for (auto &bucket : buckets) {
         if (bucket.first == year) {
             bucket.second.push_back(idx);
             return;
         }
+    }
+    // Insert passes its row count: the usual single-year request then fills one allocation instead of ~log2(n) regrowths.
+    if (first_bucket_reserve != 0 && buckets.empty()) {
+        std::vector<unsigned long long int> first;
+        first.reserve(first_bucket_reserve);
+        first.push_back(idx);
+        buckets.emplace_back(year, std::move(first));
+        return;
     }
     buckets.emplace_back(year, std::vector<unsigned long long int>{idx});
 }
@@ -228,7 +237,7 @@ void XStore::MultiRowInsert(Req *proto_from_client, Rep *return_data, const char
                 window_last_epoch = row_ts.last_epoch;
                 have_window = true;
             }
-            AppendToYearBucket(data_map, curr_year, static_cast<unsigned long long int>(i));
+            AppendToYearBucket(data_map, curr_year, static_cast<unsigned long long int>(i), static_cast<size_t>(row_count));
         }
         return true;
     };
@@ -308,9 +317,11 @@ void XStore::MultiRowInsert(Req *proto_from_client, Rep *return_data, const char
             if (serialized_size > static_cast<size_t>(cfg_struct.rowlength())) {
                 continue;
             }
+            // The '\0' fill already zero-pads the tail past serialized_size (no memset needed).
             std::string row_bytes(cfg_struct.rowlength(), '\0');
-            [[maybe_unused]] bool serialize_ok = entry.data().SerializeToArray(row_bytes.data(), static_cast<int>(cfg_struct.rowlength()));
-            std::memset(row_bytes.data() + serialized_size, 0, cfg_struct.rowlength() - serialized_size);
+            // Reuses the sizes ByteSizeLong() just cached (SerializeToArray would recompute them), as SendProto in ZMQ_Server.cpp.
+            [[maybe_unused]] const uint8_t *serialize_end =
+                entry.data().SerializeWithCachedSizesToArray(reinterpret_cast<uint8_t *>(row_bytes.data()));
             record.rows.push_back(WalRow{entry.timestamp(), std::move(row_bytes),
                                           BuildZoneMapObservations(*this, entry.data(), record.tracked_column_count),
                                           BuildCatIdxObservations(*this, entry.data(), record.tracked_column_count),
