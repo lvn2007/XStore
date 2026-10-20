@@ -3231,7 +3231,15 @@ TEST_F(XStoreZoneMapTest, LiveWidenUnderConcurrentWritesMatchesAFreshRebuild) {
 
     // The builder: the real one (XStore::LiveWidenOneYear, stage 2b) at the current width; a poller publishes its
     // frontier so the writers aim at and around it.
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    // Every SYNC/BYPASS write pays an fsync, and on a slow or busy disk (the root disk of the test machines shows
+    // 10x slow episodes lasting a whole run) a fixed 20 ms head start can leave the writers with almost no traffic.
+    // Wait (bounded) until they have really started, so the guard below tests the harness, not the disk.
+    {
+        const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (writes.load() < 100 && std::chrono::steady_clock::now() < give_up) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    }
     std::atomic<bool> widening{true};
     std::thread poller([&] {
         while (widening.load()) {
