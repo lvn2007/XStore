@@ -166,6 +166,7 @@ void XStore::FindByPattern(unsigned long long int start_epoch_t, unsigned long l
                 // Stateful across hits: it remembers each case's next memchr hit, so
                 // an anchor case that never occurs is scanned once per span, not per row.
                 patternfold::CaseInsensitiveFinder ci_finder(span_end, literal.data(), literal.size());
+                size_t hits = 0;
                 while (cursor < span_end) {
                     const size_t remaining = static_cast<size_t>(span_end - cursor);
                     const void *hit = literal_ci ? ci_finder.Next(cursor)
@@ -173,7 +174,18 @@ void XStore::FindByPattern(unsigned long long int start_epoch_t, unsigned long l
                     if (hit == nullptr) break;
                     const size_t row_in_span = static_cast<size_t>(static_cast<const char *>(hit) - span_begin) / row_len;
                     if (!test_row(iter_epoch + row_in_span)) break;
-                    cursor = span_begin + (row_in_span + 1) * row_len;
+                    // Adaptive fallback: a literal in most rows skips nothing, so
+                    // finish the segment with the plain loop (the span is exactly
+                    // segment_end - iter_epoch + 1 rows; rows up to this hit's are done).
+                    const size_t rows_covered = row_in_span + 1;
+                    if (++hits * 100 > rows_covered * XStoreTunables::FIND_BY_PATTERN_PREFILTER_ADAPT_HIT_PERCENT &&
+                        rows_covered >= XStoreTunables::FIND_BY_PATTERN_PREFILTER_ADAPT_MIN_ROWS) {
+                        for (unsigned long long int e = iter_epoch + rows_covered; e <= segment_end; ++e) {
+                            if (!test_row(e)) break;
+                        }
+                        break;
+                    }
+                    cursor = span_begin + rows_covered * row_len;
                 }
             }
         }

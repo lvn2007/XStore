@@ -375,6 +375,18 @@ inline constexpr size_t   FIND_BY_PATTERN_MAX_PATTERN_BYTES = 4096;
 // per-query memory; a regex that needs more fails to compile, it never OOMs.
 inline constexpr int64_t  FIND_BY_PATTERN_REGEX_MAX_MEM_BYTES = 8ll << 20;
 
+// FindByPattern raw-bytes prefilter, adaptive fallback (XStore_PatternOps.cpp).
+// A literal present in (nearly) every row skips nothing and adds one search per
+// row on top of the unchanged decode (measured 3-12% slower, Technical Reference
+// 4.16). Per year segment, once the prefilter has covered at least MIN_ROWS rows
+// and the hit rate exceeds HIT_PERCENT, the rest of the segment runs the plain
+// per-row loop. The break-even is high: a plain row costs ~280 ns of decode, a
+// hit costs the decode plus a ~10-30 ns search, so the prefilter still wins
+// clearly at 25-60% hits (a first 25% threshold made LIKE '%-1%' 3x slower).
+// Results are identical either way.
+inline constexpr size_t   FIND_BY_PATTERN_PREFILTER_ADAPT_MIN_ROWS = 4096;
+inline constexpr size_t   FIND_BY_PATTERN_PREFILTER_ADAPT_HIT_PERCENT = 85;
+
 // Same per-DB high-water-mark tracked-column-count concept zone-map uses
 // (ConfigStruct.columncount) -- reuse the existing cap rather than a second one.
 inline constexpr uint32_t CATIDX_MAX_TRACKED_COLUMNS = ZONE_MAP_MAX_TRACKED_COLUMNS;

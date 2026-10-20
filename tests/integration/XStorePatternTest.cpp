@@ -612,6 +612,80 @@ TEST_F(XStorePatternTestFixture, RandomizedResultsEqualPerRowReference) {
     }
 }
 
+TEST_F(XStorePatternTestFixture, AdaptiveFallbackEqualsPerRowReference) {
+    // 20000 rows in one year segment, well past FIND_BY_PATTERN_PREFILTER_ADAPT_MIN_ROWS. Column 0 holds
+    // "order-N" (contains 'e', 'E' under ILIKE and "r-<digit>") where `dense(i)` is true and "zzzz-N" otherwise;
+    // every 40th row carries the literal only in the decoy column 1, every 97th row is a hole, every 101st an int.
+    // The prefilter must give the exact per-row-reference output, in order, whether the hit rate is always high
+    // (switches at row 4096), starts low then rises (switches late), starts high then falls (switches early,
+    // then the plain loop handles the sparse tail), or stays high only briefly (never switches).
+    constexpr uint64_t BASE_TS = 100000;
+    constexpr uint64_t ROWS = 20000;
+    struct Scenario {
+        const char *db;
+        bool (*dense)(uint64_t);
+    };
+    static const Scenario SCENARIOS[] = {
+        {"PATTERNAD1", [](uint64_t) { return true; }},
+        {"PATTERNAD2", [](uint64_t i) { return i >= 8000 || i % 50 == 0; }},
+        {"PATTERNAD3", [](uint64_t i) { return i < 6000 || i % 50 == 0; }},
+        {"PATTERNAD4", [](uint64_t i) { return i < 3000 || i % 50 == 0; }},
+    };
+    struct Query {
+        const char *pattern;
+        XStore_Proto::PatternMode mode;
+        bool ci;
+    };
+    static const Query QUERIES[] = {
+        {"%e%", XStore_Proto::PATTERN_LIKE, false},
+        {"%E%", XStore_Proto::PATTERN_LIKE, true},
+#ifdef XSTORE_HAVE_RE2
+        {"r-[0-9]", XStore_Proto::PATTERN_REGEX, false},
+#endif
+    };
+    for (const Scenario &sc : SCENARIOS) {
+        XStore store;
+        CreateTestDb(store, sc.db, XStore_Proto::SECOND, 64);
+        std::map<uint64_t, std::string> col0_strings;
+        XStore_Proto::BatchInsert_REQ req;
+        req.set_dbname(sc.db);
+        req.set_durabilitymode(XStore_Proto::SYNC);
+        for (uint64_t i = 0; i < ROWS; ++i) {
+            if (i % 97 == 0) continue;  // hole
+            XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
+            entry->set_timestamp(BASE_TS + i);
+            XStore_Proto::FData col0;
+            if (i % 101 == 0) {
+                col0 = FInt64(static_cast<int64_t>(i));
+            } else {
+                std::string v = (sc.dense(i) ? "order-" : "zzzz-") + std::to_string(i);
+                col0 = FString(v);
+                col0_strings[BASE_TS + i] = v;
+            }
+            *entry->mutable_data() = MakeRow({col0, FString(i % 40 == 0 ? "Er-1e" : "x")});
+        }
+        XStore_Proto::BatchInsert_REP rep;
+        store.BatchInsert(&req, &rep);
+        ASSERT_NE(rep.insertstatus().find("Inserted"), std::string::npos) << rep.insertstatus();
+
+        for (const Query &q : QUERIES) {
+            std::string error;
+            auto matcher = PatternMatcher::Compile(q.pattern, q.mode, q.ci, error);
+            ASSERT_TRUE(matcher.has_value()) << q.pattern << ": " << error;
+            ASSERT_FALSE(matcher->PrefilterLiteral().empty()) << q.pattern;
+            std::vector<uint64_t> expected;
+            for (const auto &[ts, v] : col0_strings) {
+                if (matcher->Matches(v)) expected.push_back(ts);
+            }
+            auto result = Run(store, sc.db, BASE_TS, BASE_TS + ROWS - 1, 0, q.pattern, q.mode, q.ci);
+            std::vector<uint64_t> got;
+            for (const auto &entry : result.queryresponse()) got.push_back(entry.timestamp());
+            EXPECT_EQ(got, expected) << sc.db << " pattern '" << q.pattern << "' ci=" << q.ci;
+            EXPECT_GT(expected.size(), 500u) << sc.db << " pattern '" << q.pattern << "'";
+        }
+    }
+}
+
 TEST_F(XStorePatternTestFixture, IlikePrefilterRandomizedEqualsPerRowReference) {
     // ILIKE only: letters of both cases, digits/punctuation anchors, wildcards, escapes.
     XStore store;
