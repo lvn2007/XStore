@@ -478,7 +478,9 @@ class XStore {
         // UNARY DELETE
         [[nodiscard]] XStore_Proto::UnaryDelete_REP UnaryDelete(unsigned long long int epoch_time, std::string_view db_name);
 
-        // BATCH INSERT
+        // BATCH INSERT. Same implementation as RangeInsert (see below): input
+        // that is not ascending is stable-sorted in place, so for duplicate
+        // timestamps the last occurrence in the request wins.
         void BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStore_Proto::BatchInsert_REP *return_data);
 
         // BATCH QUERY (streamed, wire-format encode -- the only BatchQuery
@@ -500,6 +502,7 @@ class XStore {
 
         // RANGE INSERT. Takes the request non-const because input that is not
         // ascending is sorted in place (only then; sorted input is never sorted).
+        // An alias RPC of BatchInsert: both run MultiRowInsert.
         void RangeInsert(XStore_Proto::RangeInsert_REQ *proto_from_client, XStore_Proto::RangeInsert_REP *return_data);
 
         // RANGE QUERY (streamed, wire-format encode -- the only RangeQuery
@@ -1454,6 +1457,15 @@ class XStore {
         // (see WalRow::catidx_observations in XStore.h and XStore_Internal.h
         // for the implementation).
         static std::vector<CatIdxObservation> BuildCatIdxObservations(XStore &store, const XStore_Proto::RowData &row, uint32_t tracked_column_count);
+
+        // Shared body of BatchInsert and RangeInsert (identical semantics; the
+        // two RPCs differ only in proto message types and the log/status tag
+        // `op`, e.g. "BATCH INSERT"). Defined in XStore_Internal.h.
+        template <typename Req, typename Rep>
+        void MultiRowInsert(Req *proto_from_client, Rep *return_data, const char *op);
+        // MultiRowInsert's rows accessor: resolved by overload at compile time, inlines to the generated mutable_*_data().
+        static google::protobuf::RepeatedPtrField<XStore_Proto::BatchInsert_DATA>& InsertRows(XStore_Proto::BatchInsert_REQ *req) { return *req->mutable_batchinsert_data(); }
+        static google::protobuf::RepeatedPtrField<XStore_Proto::RangeInsert_DATA>& InsertRows(XStore_Proto::RangeInsert_REQ *req) { return *req->mutable_rangeinsert_data(); }
 
         // Clamps a ConfigStruct's columnCount to MAX_TRACKED_COLUMN_COUNT,
         // logging once (spdlog::warn, same shape as CreateDB's own rejection

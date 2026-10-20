@@ -550,6 +550,42 @@ TEST_F(XStorePerfTest, BatchInsertScatteredLargeThroughput_Sync) {
     RunScatteredBatchInsertSync("BatchInsertScatteredLarge[SYNC]", 1000);
 }
 
+// Large UNSORTED SYNC BatchInsert: n consecutive seconds of one year in a fixed-seed random order, sent as ~50k-row
+// requests -- every request takes the sort path (the request order is never ascending).
+TEST_F(XStorePerfTest, BatchInsertUnsortedThroughput_Sync) {
+    constexpr unsigned long long kRowsPerCall = 50'000;
+    XStore store;
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
+    const unsigned long long n = std::min(PerfOpCount(200'000), kScatterYearSeconds);
+    std::vector<unsigned long long> order(n);
+    for (unsigned long long i = 0; i < n; i++) order[i] = i;
+    std::shuffle(order.begin(), order.end(), std::mt19937_64(20261020));
+
+    std::vector<XStore_Proto::BatchInsert_REQ> reqs;
+    for (unsigned long long from = 0; from < n; from += kRowsPerCall) {
+        XStore_Proto::BatchInsert_REQ &req = reqs.emplace_back();
+        req.set_dbname("PERFDB");
+        req.set_durabilitymode(XStore_Proto::SYNC);
+        for (unsigned long long i = from; i < std::min(n, from + kRowsPerCall); i++) {
+            XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
+            entry->set_timestamp(kScatterYearStart + order[i]);
+            *entry->mutable_data() = PerfRow(order[i]);
+        }
+    }
+
+    unsigned long long failed = 0;
+    auto start = std::chrono::steady_clock::now();
+    for (XStore_Proto::BatchInsert_REQ &req : reqs) {
+        XStore_Proto::BatchInsert_REP rep;
+        store.BatchInsert(&req, &rep);
+        if (rep.insertstatus().find("successfully") == std::string::npos) ++failed;
+    }
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+    EXPECT_EQ(failed, 0u);
+    ReportPerf({"BatchInsertUnsorted[SYNC]", n, elapsed});
+}
+
 TEST_F(XStorePerfTest, BatchQueryThroughput) {
     XStore store;
     CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
@@ -706,6 +742,41 @@ TEST_F(XStorePerfTest, RangeInsertThroughput_Sync) {
 
     EXPECT_NE(rep.insertstatus().find(fmt::format("Inserted {} elements", n)), std::string::npos) << rep.insertstatus();
     ReportPerf({"RangeInsert[SYNC]", n, elapsed});
+}
+
+// SYNC RangeInsert in ~50k-row requests, each ascending except its last two rows swapped: the one inversion is found
+// at the very end of the bucketing pass, so every request pays a full bucketing pass, the sort and a re-bucket.
+TEST_F(XStorePerfTest, RangeInsertLateInversionThroughput_Sync) {
+    constexpr unsigned long long kRowsPerCall = 50'000;
+    XStore store;
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, 64);
+    const unsigned long long n = PerfOpCount(200'000);
+
+    std::vector<XStore_Proto::RangeInsert_REQ> reqs;
+    for (unsigned long long from = 0; from < n; from += kRowsPerCall) {
+        XStore_Proto::RangeInsert_REQ &req = reqs.emplace_back();
+        req.set_dbname("PERFDB");
+        req.set_durabilitymode(XStore_Proto::SYNC);
+        for (unsigned long long i = from; i < std::min(n, from + kRowsPerCall); i++) {
+            XStore_Proto::RangeInsert_DATA *entry = req.add_rangeinsert_data();
+            entry->set_timestamp(BASE_TS + i);
+            *entry->mutable_data() = PerfRow(i);
+        }
+        const int rows = req.rangeinsert_data_size();
+        if (rows >= 2) req.mutable_rangeinsert_data()->SwapElements(rows - 2, rows - 1);
+    }
+
+    unsigned long long failed = 0;
+    auto start = std::chrono::steady_clock::now();
+    for (XStore_Proto::RangeInsert_REQ &req : reqs) {
+        XStore_Proto::RangeInsert_REP rep;
+        store.RangeInsert(&req, &rep);
+        if (rep.insertstatus().find("successfully") == std::string::npos) ++failed;
+    }
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+    EXPECT_EQ(failed, 0u);
+    ReportPerf({"RangeInsertLateInversion[SYNC]", n, elapsed});
 }
 
 TEST_F(XStorePerfTest, RangeQueryThroughput) {

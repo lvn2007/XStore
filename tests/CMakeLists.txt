@@ -17,6 +17,7 @@ add_executable(xstore_tests
         integration/XStoreMemoryTest.cpp
         integration/XStoreDurabilityTest.cpp
         integration/XStoreWalRingTest.cpp
+        integration/XStoreInsertUnifyTest.cpp
         integration/XStoreRowScanTest.cpp
         integration/XStoreDeleteFaultTest.cpp
         integration/XStoreRebuildTest.cpp
