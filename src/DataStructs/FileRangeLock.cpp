@@ -1,20 +1,32 @@
 #include <algorithm>
+#include <cassert>
 #include <limits>
 #include "include/DataStructs/FileRangeLock.h"
 #include "include/XStore/XStore_Tunables.h"
 
+// The first held WRITE ending after `start` is the only candidate: held WRITEs are disjoint, so ends ascend.
+bool FileRangeLock::WriteOverlaps(unsigned long long start, unsigned long long end) const {
+    const auto w = std::partition_point(writes.begin(), writes.end(), [&](const Range &r) { return r.end <= start; });
+    return w != writes.end() && w->start < end;
+}
+
 bool FileRangeLock::Conflicts(unsigned long long start, unsigned long long end, LockType type) const {
-    for (const ActiveLock &lock : active_locks) {
-        bool ranges_overlap = start < lock.end && lock.start < end;
-        if (!ranges_overlap) {
-            continue;
-        }
-        if (type == LockType::WRITE || lock.type == LockType::WRITE) {
-            return true;
-        }
-        // Both sides READ on an overlapping range -- readers may share it
+    if (WriteOverlaps(start, end)) return true;
+    if (type == LockType::READ) return false;  // readers share
+    for (const Range &r : reads) {
+        if (start < r.end && r.start < end) return true;
     }
     return false;
+}
+
+void FileRangeLock::Register(unsigned long long start, unsigned long long end, LockType type) {
+    if (type == LockType::READ) {
+        reads.push_back({start, end});
+        return;
+    }
+    assert(start < end);
+    const auto at = std::partition_point(writes.begin(), writes.end(), [&](const Range &r) { return r.start < start; });
+    writes.insert(at, {start, end});
 }
 
 bool FileRangeLock::WaitingWriterOverlaps(unsigned long long start, unsigned long long end) const {
@@ -31,9 +43,9 @@ void FileRangeLock::LockRange(unsigned long long start, unsigned long long lengt
     unsigned long long end = (length == 0) ? std::numeric_limits<unsigned long long>::max() : start + length;
 
     std::unique_lock<std::mutex> lk(mtx);
-    // Uncontended: one Conflicts scan and the push_back, exactly what cv.wait(lk, pred) did before.
+    // Uncontended: one Conflicts check and the insert, exactly what cv.wait(lk, pred) did before.
     if (Conflicts(start, end, type)) LockRangeSlow(lk, start, end, type);
-    active_locks.push_back({start, end, type});
+    Register(start, end, type);
 }
 
 void FileRangeLock::LockRangeSlow(std::unique_lock<std::mutex> &lk, unsigned long long start, unsigned long long end,
@@ -80,26 +92,40 @@ void FileRangeLock::WaitAsWriter(std::unique_lock<std::mutex> &lk, unsigned long
     }
 }
 
+// A WRITE set conflicts with any overlap, a READ set only with a held WRITE. Vs `writes`: both sides sorted, so each
+// run's candidate (first WRITE ending after its start) only moves right; search from the previous one. Vs `reads`,
+// O(reads * log runs): the runs' ends ascend, so the first run ending after a read's start is its only candidate.
+bool FileRangeLock::RunsFree(const Run *runs, size_t count, LockType type) const {
+    const Run *runs_end = runs + count;
+    auto w = writes.begin();
+    for (const Run *r = runs; r != runs_end; ++r) {
+        w = std::partition_point(w, writes.end(), [&](const Range &h) { return h.end <= r->start; });
+        if (w == writes.end()) break;
+        if (w->start < r->start + r->length) return false;
+    }
+    if (type == LockType::READ) return true;
+    for (const Range &l : reads) {
+        const Run *r = std::upper_bound(runs, runs_end, l.start,
+                                        [](unsigned long long v, const Run &run) { return v < run.start + run.length; });
+        if (r != runs_end && r->start < l.end) return false;
+    }
+    return true;
+}
+
 void FileRangeLock::LockRuns(const Run *runs, size_t count, LockType type) {
     if (count == 0) return;
     if (count == 1) {
         LockRange(runs[0].start, runs[0].length, type);
         return;
     }
-    // O(entries * log runs), like UnlockRuns: the runs are sorted and disjoint, so their ends ascend; the first run
-    // ending after an entry's start is the only candidate to overlap it. A WRITE set conflicts with any overlap, a
-    // READ set only with a held WRITE.
-    const Run *runs_end = runs + count;
+#ifndef NDEBUG
+    for (size_t i = 0; i < count; ++i) {
+        assert(runs[i].length > 0);
+        assert(i == 0 || runs[i - 1].start + runs[i - 1].length <= runs[i].start);
+    }
+#endif
     const bool write = type == LockType::WRITE;
-    const auto free = [&] {
-        for (const ActiveLock &l : active_locks) {
-            if (!write && l.type == LockType::READ) continue;
-            const Run *r = std::upper_bound(runs, runs_end, l.start,
-                                            [](unsigned long long v, const Run &run) { return v < run.start + run.length; });
-            if (r != runs_end && r->start < l.end) return false;
-        }
-        return true;
-    };
+    const auto free = [&] { return RunsFree(runs, count, type); };
     std::unique_lock<std::mutex> lk(mtx);
     if (!free()) {
         if (write) {
@@ -111,9 +137,24 @@ void FileRangeLock::LockRuns(const Run *runs, size_t count, LockType type) {
             cv.wait(lk, free);
         }
     }
-    active_locks.reserve(active_locks.size() + count); // a bad_alloc must not leave the set partly registered
-    for (size_t i = 0; i < count; ++i) {
-        active_locks.push_back({runs[i].start, runs[i].start + runs[i].length, type});
+    if (!write) {
+        reads.reserve(reads.size() + count); // a bad_alloc must not leave the set partly registered
+        for (size_t i = 0; i < count; ++i) reads.push_back({runs[i].start, runs[i].start + runs[i].length});
+        return;
+    }
+    // Merge the sorted runs into `writes` from the back, in place. The resize is the only thing that may throw, and
+    // leaves `writes` unchanged if it does; nothing allocates after it (unlike std::inplace_merge's temporary buffer).
+    size_t old_size = writes.size();
+    writes.resize(old_size + count);
+    size_t out = writes.size();
+    size_t r = count;
+    while (r > 0) {
+        if (old_size > 0 && writes[old_size - 1].start > runs[r - 1].start) {
+            writes[--out] = writes[--old_size];
+        } else {
+            --r;
+            writes[--out] = {runs[r].start, runs[r].start + runs[r].length};
+        }
     }
 }
 
@@ -126,30 +167,27 @@ void FileRangeLock::UnlockRuns(const Run *runs, size_t count, LockType type) {
     {
         std::lock_guard<std::mutex> lk(mtx);
         const Run *runs_end = runs + count;
-        const auto is_ours = [&](const ActiveLock &l) {
-            if (l.type != type) return false;
+        const auto is_ours = [&](const Range &l) {
             const Run *r = std::lower_bound(runs, runs_end, l.start,
                                             [](const Run &run, unsigned long long v) { return run.start < v; });
             return r != runs_end && r->start == l.start && r->start + r->length == l.end;
         };
         if (type == LockType::WRITE) {
-            // One pass, O(entries * log runs): two identical WRITE entries cannot be held at once, so every entry
-            // matching a run is that run's own.
-            active_locks.erase(std::remove_if(active_locks.begin(), active_locks.end(), is_ours), active_locks.end());
+            // One pass, O(entries * log runs), stable (`writes` stays sorted): two identical WRITE entries cannot be
+            // held at once, so every entry matching a run is that run's own.
+            writes.erase(std::remove_if(writes.begin(), writes.end(), is_ours), writes.end());
         } else {
             // Another reader may hold an identical READ entry, so exactly ONE entry per run goes. In place, no
             // allocation (this runs in a destructor): move the matching entries to the tail, sort them so identical
             // ones are adjacent (every run has at least its own), drop the first of each group, keep the rest.
             // Entry order does not matter (UnlockRange swap-and-pops).
-            const auto tail = std::partition(active_locks.begin(), active_locks.end(),
-                                             [&](const ActiveLock &l) { return !is_ours(l); });
-            std::sort(tail, active_locks.end(),
-                      [](const ActiveLock &a, const ActiveLock &b) { return a.start < b.start; });
+            const auto tail = std::partition(reads.begin(), reads.end(), [&](const Range &l) { return !is_ours(l); });
+            std::sort(tail, reads.end(), [](const Range &a, const Range &b) { return a.start < b.start; });
             auto out = tail;
-            for (auto it = tail; it != active_locks.end(); ++it) {
+            for (auto it = tail; it != reads.end(); ++it) {
                 if (it != tail && it->start == (it - 1)->start) *out++ = *it;
             }
-            active_locks.erase(out, active_locks.end());
+            reads.erase(out, reads.end());
         }
     }
     cv.notify_all();
@@ -197,7 +235,7 @@ bool FileRangeLock::TimedLock(unsigned long long start, unsigned long long end, 
         if (Clock::now() >= deadline) return false;
         cv.wait_until(lk, deadline);
     }
-    active_locks.push_back({start, end, type});
+    Register(start, end, type);
     return true;
 }
 
@@ -224,9 +262,14 @@ uint32_t FileRangeLock::WaitingWritersForTests() {
     return waiting_writer_count + waiting_writer_overflow;
 }
 
+bool FileRangeLock::RunsFreeForTests(const Run *runs, size_t count, LockType type) {
+    std::lock_guard<std::mutex> lk(mtx);
+    return RunsFree(runs, count, type);
+}
+
 size_t FileRangeLock::ActiveLocksForTests() {
     std::lock_guard<std::mutex> lk(mtx);
-    return active_locks.size();
+    return writes.size() + reads.size();
 }
 
 void FileRangeLock::UnlockRange(unsigned long long start, unsigned long long length, LockType type) {
@@ -234,13 +277,18 @@ void FileRangeLock::UnlockRange(unsigned long long start, unsigned long long len
 
     {
         std::lock_guard<std::mutex> lk(mtx);
-        auto it = std::find_if(active_locks.begin(), active_locks.end(), [&](const ActiveLock &l) {
-            return l.start == start && l.end == end && l.type == type;
-        });
-        if (it != active_locks.end()) {
-            // Swap-and-pop: O(1) removal, order doesn't matter here.
-            *it = active_locks.back();
-            active_locks.pop_back();
+        if (type == LockType::WRITE) {
+            const auto it = std::partition_point(writes.begin(), writes.end(),
+                                                 [&](const Range &r) { return r.start < start; });
+            if (it != writes.end() && it->start == start && it->end == end) writes.erase(it);
+        } else {
+            // From the back: the caller's own entry is usually recent. Swap-and-pop, order doesn't matter.
+            const auto it = std::find_if(reads.rbegin(), reads.rend(),
+                                         [&](const Range &r) { return r.start == start && r.end == end; });
+            if (it != reads.rend()) {
+                *it = reads.back();
+                reads.pop_back();
+            }
         }
     }
     // Wakes every waiter on this file to recheck its own range against the

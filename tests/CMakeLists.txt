@@ -25,6 +25,7 @@ add_executable(xstore_tests
         integration/XStoreRebuildProgressTest.cpp
         integration/XStoreLiveWidenTest.cpp
         integration/XStoreLiveWidenGovernorTest.cpp
+        integration/XStoreFileRangeLockTest.cpp
         integration/XStoreSyscallFault.cpp
 )
 target_link_libraries(xstore_tests PRIVATE GTest::gtest_main xstore_core ${CMAKE_DL_LIBS})

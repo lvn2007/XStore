@@ -65,6 +65,8 @@ class FileRangeLock {
         [[nodiscard]] uint32_t WaitingWritersForTests();
         // Entries in the held-lock table (one per held range or run).
         [[nodiscard]] size_t ActiveLocksForTests();
+        // Whether LockRuns(runs, count, type) would take the set without waiting.
+        [[nodiscard]] bool RunsFreeForTests(const Run *runs, size_t count, LockType type);
 
         // Cumulative since construction, over blocking LockRange(WRITE) calls that had to wait only: total wait, number
         // of waits, and waits >= XStoreTunables::LIVE_WIDEN_WRITER_LONG_WAIT_US. Read by the live widen governor.
@@ -77,11 +79,6 @@ class FileRangeLock {
 
     private:
         using Clock = std::chrono::steady_clock;
-        struct ActiveLock {
-            unsigned long long start;
-            unsigned long long end;    // exclusive
-            LockType type;
-        };
         struct Range {
             unsigned long long start;
             unsigned long long end;    // exclusive
@@ -89,7 +86,10 @@ class FileRangeLock {
 
         // Caller must hold mtx.
         bool Conflicts(unsigned long long start, unsigned long long end, LockType type) const;
+        bool WriteOverlaps(unsigned long long start, unsigned long long end) const;
+        bool RunsFree(const Run *runs, size_t count, LockType type) const;
         bool WaitingWriterOverlaps(unsigned long long start, unsigned long long end) const;
+        void Register(unsigned long long start, unsigned long long end, LockType type);
         bool TimedLock(unsigned long long start, unsigned long long end, LockType type, std::chrono::milliseconds timeout,
                        std::chrono::milliseconds yield_max, WriterYield *yield);
         void LockRangeSlow(std::unique_lock<std::mutex> &lk, unsigned long long start, unsigned long long end, LockType type);
@@ -100,10 +100,13 @@ class FileRangeLock {
 
         std::mutex mtx;
         std::condition_variable cv;
-        // Concurrently held ranges per file are bounded by the worker thread
-        // count, so a flat vector + linear scan is cheaper than a node-based
-        // container: no per-lock heap allocation and better cache locality.
-        std::vector<ActiveLock> active_locks;
+        // Held locks, split by type. A WAL apply holds up to 4096 WRITE runs for a whole record, so a reader must not
+        // scan them linearly: held WRITEs are pairwise disjoint (a WRITE conflicts with every overlap), so `writes` is
+        // kept sorted by start, ends ascend too, and one binary search finds the only candidate. A READ checks only
+        // `writes`; a WRITE also scans `reads` (unordered; identical entries from different holders allowed). The
+        // sorted/disjoint invariant relies on non-empty ranges and LockRuns' sorted, disjoint runs (asserted in Debug).
+        std::vector<Range> writes;
+        std::vector<Range> reads;
         // WRITEs blocked in LockRange, for TryReadLockYieldingFor only. Registered only once a writer has to wait, so
         // the uncontended path never touches them. Fixed slots, never allocated: waiting writers per file are bounded
         // by the worker threads; one that finds every slot taken counts in waiting_writer_overflow, which yielding
