@@ -115,6 +115,20 @@ endif()
 
 gtest_discover_tests(xstore_perf_tests)
 
+# xstore_zmq_perf_tests: BatchInsert over the real ZMQ server on loopback (the arena-allocated request path the
+# in-process perf cases skip). Opt-in at run time as well (XSTORE_ZMQ_PERF=1, see the file header), so it is not
+# registered with ctest.
+add_executable(xstore_zmq_perf_tests
+        perf/XStoreZmqInsertPerfTest.cpp
+)
+target_link_libraries(xstore_zmq_perf_tests PRIVATE GTest::gtest_main xstore_network)
+if(XSTORE_USE_JEMALLOC)
+    target_sources(xstore_zmq_perf_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/XStore_Alloc/jemalloc_conf.cpp)
+    target_compile_definitions(xstore_zmq_perf_tests PRIVATE XSTORE_JEMALLOC_THP=$<BOOL:${XSTORE_JEMALLOC_THP}>)
+    target_link_libraries(xstore_zmq_perf_tests PRIVATE jemalloc::jemalloc)
+    target_link_options(xstore_zmq_perf_tests PRIVATE "-Wl,--whole-archive,$<TARGET_FILE:jemalloc::jemalloc>,--no-whole-archive")
+endif()
+
 # tests/local_bench: opt-in, single-machine benchmark harness (pure Python
 # driver around the real XStore server + the XBench binary -- see
 # tests/local_bench/README.md). Same "not part of the default build" stance
