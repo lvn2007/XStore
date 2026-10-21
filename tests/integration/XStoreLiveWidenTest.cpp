@@ -3635,14 +3635,23 @@ TEST_F(XStoreLiveWidenTest, RemoveDbAndCreateDbRacingInsertsLeaveIndexesThatMatc
 // ---- Removal residuals (R1, R2, R3, R6, R8) ---------------------------------------------------------------------------
 
 namespace {
-// True when some descriptor of this process refers to `path` (resolved through /proc/self/fd).
+// True when some read-write descriptor of this process refers to `path` (resolved through /proc/self/fd). Read-only
+// ones are skipped: the data-file fds of the fd cache and of a request are O_RDWR, while the checkpointer opens the
+// file read-only for a moment to fdatasync it after every insert, which would race any check made right after one.
 bool SomeFdRefersTo(const std::string &path) {
     std::error_code ec;
     const std::string want = std::filesystem::weakly_canonical(path, ec).string();
     for (const auto &entry : std::filesystem::directory_iterator("/proc/self/fd", ec)) {
         std::error_code link_ec;
         const std::filesystem::path target = std::filesystem::read_symlink(entry.path(), link_ec);
-        if (!link_ec && target.string() == want) return true;
+        if (link_ec || target.string() != want) continue;
+        std::ifstream fdinfo("/proc/self/fdinfo/" + entry.path().filename().string());
+        std::string line;
+        while (std::getline(fdinfo, line)) {
+            if (line.rfind("flags:", 0) != 0) continue;
+            if ((std::stoul(line.substr(6), nullptr, 8) & O_ACCMODE) == O_RDWR) return true;
+            break;
+        }
     }
     return false;
 }
