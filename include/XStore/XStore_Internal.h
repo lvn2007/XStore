@@ -107,22 +107,8 @@ void SortBatch(Iterator begin, Iterator end, Compare comp) {
     }
 }
 
-// Definition of XStore::BuildZoneMapObservations (declared in XStore.h,
-// private static). Built once at WAL enqueue time (row_bytes --
-// already-serialized wire bytes -- is all ApplyWalRecord has later, not the
-// original RowData, so this can't be deferred to apply time). Only emits
-// observations for columns actually present in the row (col <
-// row.fielddata_size()) -- columns past that, up to tracked_column_count,
-// are exactly as much a hole as an explicitly unset field at a present
-// index (XStoreZoneMapTest.UnaryInsertTreatsHoleAsNullNotZero -- an entirely
-// empty row still records a hole at column 0), but ZoneMapFile::UpdateRow's
-// pad_to parameter now bumps null_count for those instead of this building
-// an explicit is_numeric=false entry per hole -- same total effect, no
-// wasted observations for a narrow row against a wide tracked width.
-// tracked_column_count comes from XStore::EffectiveTrackedColumnCount(cfg_struct)
-// at every call site -- the per-DB columnCount high-water mark when it's
-// been seeded/grown past 0, otherwise the global ZONE_MAP_MAX_TRACKED_COLUMNS
-// default. Numeric-case check mirrors ProcessFileRangeSelect/
+// Definition of XStore::ZoneMapObservationOf (declared in XStore.h,
+// private static). Numeric-case check mirrors ProcessFileRangeSelect/
 // ProcessFileRangeAccumulate's own oneOfData_case() guard (XStore_IO.cpp) --
 // same "1..12 is numeric" rule the aggregate kernels already use, so a
 // bool/string/bytes column is a hole here too, not a crash or a silently-wrong 0.
@@ -135,37 +121,57 @@ inline ZoneMapObservation XStore::ZoneMapObservationOf(XStore &store, const XSto
     return {column_idx, static_cast<double>(vs.value), is_numeric};
 }
 
-inline std::vector<ZoneMapObservation> XStore::BuildZoneMapObservations(XStore &store, const XStore_Proto::RowData &row, uint32_t tracked_column_count) {
-    const int tracked = std::min(static_cast<int>(tracked_column_count), row.fielddata_size());
-    std::vector<ZoneMapObservation> observations;
-    observations.reserve(static_cast<size_t>(std::max(tracked, 0)));
-    for (int col = 0; col < tracked; ++col) {
-        observations.push_back(ZoneMapObservationOf(store, row.fielddata(col), static_cast<uint32_t>(col)));
-    }
-    return observations;
+inline void XStore::WalRecord::ReserveRows(size_t rows, size_t widest_fields) {
+    constexpr size_t kNumericCatIdxEntryBytes = kCatIdxEntryHeaderBytes + 1 + sizeof(uint64_t);
+    const size_t columns = std::min<size_t>(tracked_column_count, widest_fields);
+    wire.reserve(rows * RowStride());
+    zmap_obs.reserve(rows * columns);
+    catidx.reserve(rows * columns * kNumericCatIdxEntryBytes);
+    obs_end.reserve(rows);
 }
 
-// Definition of XStore::BuildCatIdxObservations (declared in XStore.h,
-// private static). Same enqueue-time-build contract as
-// BuildZoneMapObservations above, but covers ALL FData oneof cases -- not
-// gated to numeric -- since CatIdx's bloom filter works on
-// EncodeFDataForCatIdx's encoded byte string regardless of the field's
-// type (int/double/string/bytes/bool all encode to something hashable).
-// Only emits an entry for columns that are both present AND set --
-// CatIdxFile::UpdateRow already skips !is_present entries, so there is no
-// pad_to equivalent needed here: omitting the entry outright has the exact
-// same effect as pushing one with is_present=false.
-inline std::vector<CatIdxObservation> XStore::BuildCatIdxObservations(XStore &store, const XStore_Proto::RowData &row, uint32_t tracked_column_count) {
-    (void)store; // unused -- unlike BuildZoneMapObservations, no GetFDataValue coercion needed; EncodeFDataForCatIdx reads FData directly
-    const int tracked = std::min(static_cast<int>(tracked_column_count), row.fielddata_size());
-    std::vector<CatIdxObservation> observations;
-    observations.reserve(static_cast<size_t>(std::max(tracked, 0)));
+// Definition of XStore::WalRecord::AppendRow (declared in XStore.h). The
+// observations are built once at WAL enqueue time (the row's wire bytes --
+// already serialized -- are all ApplyWalRecord has later, not the original
+// RowData, so this can't be deferred to apply time). Both indexes see only
+// columns actually present in the row (col < row.fielddata_size()), clamped
+// to tracked_column_count:
+// - zone map: one observation per present column. Columns past that, up to
+//   tracked_column_count, are exactly as much a hole as an explicitly unset
+//   field at a present index (XStoreZoneMapTest.UnaryInsertTreatsHoleAsNullNotZero
+//   -- an entirely empty row still records a hole at column 0), but
+//   zone_map_pad_to bumps null_count for those instead of this building an
+//   explicit is_numeric=false entry per hole -- same total effect.
+// - catidx: ALL FData oneof cases (no numeric gate: the bloom works on
+//   AppendFDataForCatIdx's bytes regardless of type), but only columns that
+//   are also SET -- CatIdxFile always skipped unset ones, so omitting them is
+//   the same effect as passing them as not present.
+// tracked_column_count is max(EffectiveTrackedColumnCount(cfg_struct), the
+// request's widest accepted row) at every call site.
+inline void XStore::WalRecord::AppendRow(XStore &store, uint64_t epoch, const XStore_Proto::RowData &data) {
+    const size_t at = wire.size();
+    wire.resize(at + RowStride());   // the zero fill pads the tail past the serialized size
+    std::memcpy(&wire[at], &epoch, sizeof(epoch));
+    // Reuses the sizes the caller's ByteSizeLong() cached (SerializeToArray would recompute them), as SendProto in
+    // ZMQ_Server.cpp.
+    (void)data.SerializeWithCachedSizesToArray(reinterpret_cast<uint8_t *>(&wire[at + sizeof(uint64_t)]));
+    const int tracked = std::min(static_cast<int>(tracked_column_count), data.fielddata_size());
     for (int col = 0; col < tracked; ++col) {
-        if (row.fielddata(col).oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
-            observations.push_back({static_cast<uint32_t>(col), EncodeFDataForCatIdx(row.fielddata(col)), true});
+        const XStore_Proto::FData &f_data = data.fielddata(col);
+        zmap_obs.push_back(ZoneMapObservationOf(store, f_data, static_cast<uint32_t>(col)));
+        if (f_data.oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
+            // Header first, patched once the value's length is known.
+            const size_t entry = catidx.size();
+            catidx.resize(entry + kCatIdxEntryHeaderBytes);
+            AppendFDataForCatIdx(catidx, f_data);
+            const uint32_t column_idx = static_cast<uint32_t>(col);
+            const uint32_t len = static_cast<uint32_t>(catidx.size() - entry - kCatIdxEntryHeaderBytes);
+            std::memcpy(&catidx[entry], &column_idx, sizeof(column_idx));
+            std::memcpy(&catidx[entry + sizeof(column_idx)], &len, sizeof(len));
         }
     }
-    return observations;
+    obs_end.push_back({zmap_obs.size(), catidx.size()});
+    ++row_count;
 }
 
 // Definition of XStore::MultiRowInsert (declared in XStore.h, private): the
@@ -256,7 +262,7 @@ void XStore::MultiRowInsert(Req *proto_from_client, Rep *return_data, const char
     }
     // Invariant: from here rows are ascending, so every bucket's rows share
     // one year, so record.year (the bucket key, used to route the record to
-    // its shard) == the year ApplyWalRecord derives from rows.front().
+    // its shard) == the year ApplyWalRecord derives from the first row's epoch.
 
     // durabilityMode now routes through the WAL -- see the field's comment
     // on BatchInsert_REQ / RangeInsert_REQ in XStore.proto.
@@ -306,29 +312,24 @@ void XStore::MultiRowInsert(Req *proto_from_client, Rep *return_data, const char
         // not just EffectiveTrackedColumnCount's pre-growth floor.
         record.tracked_column_count = std::max(EffectiveTrackedColumnCount(cfg_struct),
                                                 std::min<uint32_t>(static_cast<uint32_t>(widest), XStoreTunables::MAX_TRACKED_COLUMN_COUNT));
-        record.rows.reserve(indices.size());
+        record.zone_map_pad_to = record.tracked_column_count;
+        // widest is the widest ACCEPTED row, so a true bound on every appended row's columns.
+        record.ReserveRows(indices.size(), static_cast<size_t>(widest));
 
         for (unsigned long long int idx : indices) {
             const Data &entry = rows.Get(static_cast<int>(idx));
             size_t serialized_size = entry.data().ByteSizeLong();
             // Reject-not-truncate, same guarantee as UnaryInsert: a row
             // that doesn't fit its slot is dropped rather than silently
-            // corrupting whatever follows it.
+            // corrupting whatever follows it. Before AppendRow: a row once
+            // appended cannot be taken back.
             if (serialized_size > static_cast<size_t>(cfg_struct.rowlength())) {
                 continue;
             }
-            // The '\0' fill already zero-pads the tail past serialized_size (no memset needed).
-            std::string row_bytes(cfg_struct.rowlength(), '\0');
-            // Reuses the sizes ByteSizeLong() just cached (SerializeToArray would recompute them), as SendProto in ZMQ_Server.cpp.
-            [[maybe_unused]] const uint8_t *serialize_end =
-                entry.data().SerializeWithCachedSizesToArray(reinterpret_cast<uint8_t *>(row_bytes.data()));
-            record.rows.push_back(WalRow{entry.timestamp(), std::move(row_bytes),
-                                          BuildZoneMapObservations(*this, entry.data(), record.tracked_column_count),
-                                          BuildCatIdxObservations(*this, entry.data(), record.tracked_column_count),
-                                          record.tracked_column_count});
+            record.AppendRow(*this, entry.timestamp(), entry.data());
         }
 
-        if (record.rows.empty()) {
+        if (record.row_count == 0) {
             // Every row in this year-group was rejected as oversized --
             // nothing to write, not a failure of the write path itself.
             continue;

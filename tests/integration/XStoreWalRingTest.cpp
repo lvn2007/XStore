@@ -108,10 +108,14 @@ TEST(WalRingFormatTest, PlanAppendNeverStraddlesAndPadsOrSkips) {
 TEST(WalRingFormatTest, RecordV2RoundTripRejectsStaleLapAndBadCrc) {
     std::string rec = BuildRecordV2ForTest(/*lsn=*/5000, "DB1", /*row_length=*/8, {{10, "AAAAAAAA"}, {11, "BBBBBBBB"}});
     XStore::WalRecord out; size_t used = 0;
+    // A reused record (replay loops reuse one): the parse must drop the previous record's observations and pad_to.
+    out.zmap_obs.push_back({0, 1.0, true}); out.catidx = "stale"; out.obs_end.push_back({1, 5}); out.zone_map_pad_to = 64;
     EXPECT_EQ(XStore::ParseWalRecordV2(rec.data(), rec.size(), 5000, used, out), XStore::RingParse::kOk);
-    EXPECT_EQ(used, rec.size()); EXPECT_EQ(out.rows.size(), 2u); EXPECT_EQ(out.db_name, "DB1");
+    EXPECT_EQ(used, rec.size()); EXPECT_EQ(out.row_count, 2u); EXPECT_EQ(out.db_name, "DB1");
     EXPECT_EQ(out.row_length, 8u);
-    EXPECT_EQ(out.rows[1].epoch_time, 11u); EXPECT_EQ(out.rows[1].row_bytes, "BBBBBBBB");
+    EXPECT_EQ(out.EpochAt(1), 11u); EXPECT_EQ(std::string(out.RowAt(1), out.row_length), "BBBBBBBB");
+    EXPECT_TRUE(out.zmap_obs.empty()); EXPECT_TRUE(out.catidx.empty()); EXPECT_TRUE(out.obs_end.empty());
+    EXPECT_EQ(out.zone_map_pad_to, 0u);
     EXPECT_EQ(XStore::ParseWalRecordV2(rec.data(), rec.size(), 5000 + 4096, used, out), XStore::RingParse::kEnd);  // stale lap
     EXPECT_EQ(XStore::ParseWalRecordV2(rec.data(), rec.size() - 1, 5000, used, out), XStore::RingParse::kEnd);     // torn tail
     rec[rec.size() - 1] ^= 1;
@@ -231,7 +235,7 @@ RingWalk WalkRing(const walring::Ring &ring, uint64_t from, uint64_t to) {
         XStore::WalRecord rec; size_t used = 0;
         const XStore::RingParse r = XStore::ParseWalRecordV2(bytes.data() + off, rem, w.end_lsn, used, rec);
         if (r == XStore::RingParse::kEnd) break;
-        if (r == XStore::RingParse::kPad) ++w.pads; else { ++w.records; w.rows += rec.rows.size(); }
+        if (r == XStore::RingParse::kPad) ++w.pads; else { ++w.records; w.rows += rec.row_count; }
         w.end_lsn += used;
     }
     return w;
@@ -314,10 +318,10 @@ TEST_F(WalRingWriterTest, RecordsAppendAtAdvancingLsn) {
     XStore::WalRecord rec1, rec2; size_t used1 = 0, used2 = 0;
     ASSERT_EQ(XStore::ParseWalRecordV2(bytes.data(), bytes.size(), 0, used1, rec1), XStore::RingParse::kOk);
     EXPECT_EQ(rec1.db_name, db_name);
-    ASSERT_EQ(rec1.rows.size(), 1u);
-    EXPECT_EQ(rec1.rows[0].epoch_time, kBaseEpoch);
+    ASSERT_EQ(rec1.row_count, 1u);
+    EXPECT_EQ(rec1.EpochAt(0), kBaseEpoch);
     ASSERT_EQ(XStore::ParseWalRecordV2(bytes.data() + used1, bytes.size() - used1, used1, used2, rec2), XStore::RingParse::kOk);
-    EXPECT_EQ(rec2.rows[0].epoch_time, kBaseEpoch + 1);
+    EXPECT_EQ(rec2.EpochAt(0), kBaseEpoch + 1);
     // All three records, contiguous, ending exactly at head.
     const RingWalk w = WalkRing(*ring, 0, ring->HeadLsn());
     EXPECT_EQ(w.end_lsn, ring->HeadLsn());
@@ -2536,7 +2540,7 @@ struct ExposeApplyWalRecord {
 template struct ExposeApplyWalRecord<&XStore::ApplyWalRecord>;
 }  // namespace
 
-// A replayed row carries no observations and zone_map_pad_to == 0 (ParseWalRecordV2 default-constructs WalRow), so
+// A replayed row carries no observations and zone_map_pad_to == 0 (ParseWalRecordV2 leaves obs_end empty), so
 // applying it must change neither the zone-map block stats nor the catidx bloom: InitDB rebuilds replayed years
 // from the raw rows, and a replay that also folded them would double-count whenever that rebuild is skipped.
 TEST_F(WalReplayTest, ReplayedRowLeavesZoneMapAndCatIdxUntouched) {
@@ -2579,6 +2583,194 @@ TEST_F(WalReplayTest, ReplayedRowLeavesZoneMapAndCatIdxUntouched) {
         << "a replayed row must not touch the zone map";
     EXPECT_TRUE(catidx.MightContain(block, 0, cat_key(1.0)));
     EXPECT_FALSE(catidx.MightContain(block, 0, cat_key(kReplayed))) << "a replayed row must not set catidx bloom bits";
+}
+
+// A record whose observation arrays disagree with its rows (a producer bug) is refused before any byte is written:
+// neither its rows nor anything of the indexes change, whichever consistency rule it breaks.
+TEST_F(WalReplayTest, MalformedObservationsFailTheRecordBeforeAnyWrite) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    ASSERT_TRUE(InsertAt(store, 0));   // creates the year file and both indexes
+    const std::string db_base = (scratch->test_root / "DataStore" / db_name).string();
+    const TimeStruct ts(kEpoch0, XStore_Proto::SECOND);
+    ZoneMapFile &zmap = XStore::GetOrOpenZoneMap(db_base, ts.year, row_length);
+    CatIdxFile &catidx = XStore::GetOrOpenCatIdx(db_base, ts.year, row_length);
+    const uint64_t block = BlockIndexForRow(kEpoch0 - ts.first_epoch, zmap.RowsPerBlockValue());
+    const auto before = zmap.TryGetBlockStats(block);
+    ASSERT_TRUE(before.has_value());
+    constexpr double kValue = 777.25;
+    const std::string key = EncodeFDataForCatIdx(xstore_test::FDouble(kValue));
+    ASSERT_FALSE(catidx.MightContain(block, 0, key)) << "precondition (a bloom false positive would make this vacuous)";
+
+    // Two well-formed rows (wire as the parser builds it), each with one observation of column 0.
+    XStore_Proto::RowData row;
+    row.add_fielddata()->set_doubledata(kValue);
+    std::string row_bytes(row_length, '\0');
+    ASSERT_TRUE(row.SerializeToArray(row_bytes.data(), static_cast<int>(row.ByteSizeLong())));
+    const std::string bytes = BuildRecordV2ForTest(/*lsn=*/0, db_name, row_length, {{kEpoch0 + 1, row_bytes}, {kEpoch0 + 2, row_bytes}});
+    XStore::WalRecord good;
+    size_t used = 0;
+    ASSERT_EQ(XStore::ParseWalRecordV2(bytes.data(), bytes.size(), 0, used, good), XStore::RingParse::kOk);
+    good.db_base_path = db_base;
+    good.zone_map_pad_to = good.tracked_column_count;
+    std::string entry(XStore::WalRecord::kCatIdxEntryHeaderBytes, '\0');
+    const uint32_t len = static_cast<uint32_t>(key.size());
+    std::memcpy(&entry[sizeof(uint32_t)], &len, sizeof(len));   // column 0
+    entry += key;
+    for (size_t i = 1; i <= 2; ++i) {
+        good.zmap_obs.push_back({0, kValue, true});
+        good.catidx += entry;
+        good.obs_end.push_back({i, good.catidx.size()});
+    }
+
+    const auto variant = [&](const char *name, const std::function<void(XStore::WalRecord &)> &corrupt) {
+        SCOPED_TRACE(name);
+        XStore::WalRecord bad = good;
+        corrupt(bad);
+        EXPECT_FALSE(ApplyWalRecordPtr()(bad, nullptr, 0));
+        EXPECT_FALSE(RowPresent(1));
+        EXPECT_FALSE(RowPresent(2));
+        const auto after = zmap.TryGetBlockStats(block);
+        ASSERT_TRUE(after.has_value());
+        ASSERT_EQ(after->size(), before->size());
+        EXPECT_EQ(std::memcmp(after->data(), before->data(), before->size() * sizeof(ZoneMapEntry)), 0);
+        EXPECT_FALSE(catidx.MightContain(block, 0, key));
+    };
+    variant("one end for two rows", [](XStore::WalRecord &r) { r.obs_end.pop_back(); });
+    variant("zone-map end past the array", [](XStore::WalRecord &r) { r.obs_end.back().zmap_end = 3; });
+    variant("zone-map ends decreasing", [](XStore::WalRecord &r) { r.obs_end.front().zmap_end = 2; r.obs_end.back().zmap_end = 1; });
+    variant("zone-map observations past the last end", [](XStore::WalRecord &r) { r.zmap_obs.push_back({0, 1.0, true}); });
+    variant("catidx end past the arena", [](XStore::WalRecord &r) { r.obs_end.back().catidx_end += 1; });
+    variant("catidx value past its row", [](XStore::WalRecord &r) {
+        const uint32_t long_len = 1000;
+        std::memcpy(&r.catidx[sizeof(uint32_t)], &long_len, sizeof(long_len));
+    });
+    variant("catidx header split across rows", [](XStore::WalRecord &r) { r.obs_end.front().catidx_end = 3; });
+    variant("observations without ends", [](XStore::WalRecord &r) { r.obs_end.clear(); });
+
+    // The same record, well formed, applies: both rows and their value reach the data file and the indexes.
+    ASSERT_TRUE(ApplyWalRecordPtr()(good, nullptr, 0));
+    EXPECT_TRUE(RowPresent(1));
+    EXPECT_TRUE(RowPresent(2));
+    EXPECT_TRUE(catidx.MightContain(block, 0, key));
+    const auto applied = zmap.TryGetBlockStats(block);
+    ASSERT_TRUE(applied.has_value());
+    EXPECT_EQ((*applied)[0].valid_count, (*before)[0].valid_count + 2);
+    EXPECT_EQ((*applied)[0].max_value, kValue);
+}
+
+// WalRecord::wire keeps the rows section in memory exactly as the ring carries it, and the writer frames it as one
+// iovec with one CRC update. These pin that the ring/WAL bytes did not change: the writer's record must equal the
+// test-owned BuildRecordV2ForTest layout byte for byte (length and CRC included), and a reference record must replay
+// through the parser and apply the same rows. Each case runs at two row lengths (37 is odd, so every epoch after
+// the first sits unaligned in wire) over rows with different serialized sizes (different zero padding), an empty
+// row and a duplicate timestamp (MultiRowInsert keeps both, in request order; the last one wins in the data file).
+class WalRecordFormatGoldenTest : public WalReplayTest {
+protected:
+    static std::vector<std::pair<uint64_t, XStore_Proto::RowData>> GoldenRows() {
+        using xstore_test::FDouble;
+        using xstore_test::FString;
+        using xstore_test::MakeRow;
+        return {{kEpoch0 + 0, MakeRow({FDouble(1.5)})},
+                {kEpoch0 + 1, XStore_Proto::RowData{}},
+                {kEpoch0 + 2, MakeRow({FDouble(2.5), FString("abc")})},
+                {kEpoch0 + 2, MakeRow({FString("dup-wins")})},
+                {kEpoch0 + 5, MakeRow({FDouble(-7.0), FDouble(8.0), FString("xy")})}};
+    }
+    // Each row as the ring carries it: serialized, zero-padded to row_length.
+    std::vector<std::pair<uint64_t, std::string>> WireRows() const {
+        std::vector<std::pair<uint64_t, std::string>> out;
+        for (const auto &[ts, data] : GoldenRows()) {
+            EXPECT_LE(data.ByteSizeLong(), row_length);
+            std::string bytes(row_length, '\0');
+            EXPECT_TRUE(data.SerializeToArray(bytes.data(), static_cast<int>(data.ByteSizeLong())));
+            out.emplace_back(ts, std::move(bytes));
+        }
+        return out;
+    }
+
+    void CheckWriterMatchesReference() {
+        XStore store;
+        xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+        XStore_Proto::BatchInsert_REQ req;
+        req.set_dbname(db_name);
+        req.set_durabilitymode(XStore_Proto::SYNC);
+        for (const auto &[ts, data] : GoldenRows()) {
+            XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
+            entry->set_timestamp(ts);
+            *entry->mutable_data() = data;
+        }
+        XStore_Proto::BatchInsert_REP rep;
+        store.BatchInsert(&req, &rep);
+        ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+
+        const std::vector<std::pair<uint64_t, std::string>> rows = WireRows();
+        const std::string expected = BuildRecordV2ForTest(/*lsn=*/0, db_name, row_length, rows);
+        auto ring = BusyRing();
+        ASSERT_NE(ring, nullptr);
+        ASSERT_EQ(ring->HeadLsn(), expected.size()) << "one ring record, at LSN 0";
+        std::string bytes(expected.size(), '\0');
+        ASSERT_EQ(pread(ring->fd(), bytes.data(), bytes.size(), static_cast<off_t>(walring::RingOffset(0, ring->ring_bytes()))),
+                  static_cast<ssize_t>(bytes.size()));
+        EXPECT_TRUE(bytes == expected) << "the writer's ring record differs from the reference layout (first differing byte "
+                                       << std::mismatch(bytes.begin(), bytes.end(), expected.begin()).first - bytes.begin() << ")";
+
+        // The writer's record parses back to the same rows, its rows section being wire byte for byte.
+        XStore::WalRecord parsed;
+        size_t used = 0;
+        ASSERT_EQ(XStore::ParseWalRecordV2(bytes.data(), bytes.size(), 0, used, parsed), XStore::RingParse::kOk);
+        ASSERT_EQ(parsed.row_count, rows.size());
+        const size_t rows_section = rows.size() * (sizeof(uint64_t) + row_length);
+        EXPECT_TRUE(parsed.wire == expected.substr(expected.size() - rows_section));
+    }
+
+    void CheckReferenceReplays() {
+        XStore store;
+        xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+        const std::vector<std::pair<uint64_t, std::string>> rows = WireRows();
+        const std::string bytes = BuildRecordV2ForTest(/*lsn=*/0, db_name, row_length, rows);
+        XStore::WalRecord record;
+        size_t used = 0;
+        ASSERT_EQ(XStore::ParseWalRecordV2(bytes.data(), bytes.size(), 0, used, record), XStore::RingParse::kOk);
+        EXPECT_EQ(used, bytes.size());
+        ASSERT_EQ(record.row_count, rows.size());
+        ASSERT_EQ(record.wire.size(), rows.size() * record.RowStride());
+        EXPECT_TRUE(record.obs_end.empty() && record.zmap_obs.empty() && record.catidx.empty())
+            << "a replayed record carries no observations";
+        EXPECT_EQ(record.zone_map_pad_to, 0u);
+        for (size_t i = 0; i < rows.size(); ++i) {
+            EXPECT_EQ(record.EpochAt(i), rows[i].first) << "row " << i;
+            EXPECT_TRUE(std::string(record.RowAt(i), row_length) == rows[i].second) << "row " << i;
+        }
+
+        record.db_base_path = (scratch->test_root / "DataStore" / db_name).string();
+        ASSERT_TRUE(ApplyWalRecordPtr()(record, nullptr, 0));
+        std::map<uint64_t, std::string> want;   // last duplicate wins
+        for (const auto &[ts, row_bytes] : rows) want[ts] = row_bytes;
+        for (const auto &[ts, row_bytes] : want) {
+            EXPECT_TRUE(RowBytes(ts - kEpoch0) == row_bytes) << "epoch " << ts;
+        }
+    }
+};
+
+TEST_F(WalRecordFormatGoldenTest, WriterRecordEqualsReferenceRowLength64) {
+    row_length = 64;
+    CheckWriterMatchesReference();
+}
+
+TEST_F(WalRecordFormatGoldenTest, WriterRecordEqualsReferenceOddRowLength37) {
+    row_length = 37;
+    CheckWriterMatchesReference();
+}
+
+TEST_F(WalRecordFormatGoldenTest, ReferenceRecordReplaysRowLength64) {
+    row_length = 64;
+    CheckReferenceReplays();
+}
+
+TEST_F(WalRecordFormatGoldenTest, ReferenceRecordReplaysOddRowLength37) {
+    row_length = 37;
+    CheckReferenceReplays();
 }
 
 TEST_F(WalReplayTest, ReplayAdvancesCheckpointOnlyAfterDirectorySync) {

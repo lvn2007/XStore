@@ -14,6 +14,8 @@
 #include <map>
 #include <optional>
 #include <cstdio>
+#include <cstdint>
+#include <cstring>
 #include <exception>
 #include <memory>
 #include <mutex>
@@ -226,36 +228,7 @@ class XStore {
         // is per-REQUEST: one completion future covers every row in the
         // record, so a batch's caller waits once for the whole batch, not
         // once per row.
-        struct WalRow {
-            unsigned long long epoch_time = 0;
-            std::string row_bytes;   // already-serialized, zero-padded, exactly row_length bytes
-            // Precomputed at enqueue time (BuildZoneMapObservations, before
-            // row_bytes is even serialized) since ApplyWalRecord only has
-            // row_bytes -- already-serialized wire bytes, not the original
-            // RowData -- to re-derive column values from. Applied to the
-            // zone map by ApplyWalRecord itself, at the same moment (and
-            // under the same success/failure check) as this row's real
-            // pwrite -- not eagerly at enqueue time -- so the zone map is
-            // never ahead of what's actually durable, including under
-            // ASYNC durability mode where the real write happens later on
-            // the WAL writer thread, not before this call returns.
-            std::vector<ZoneMapObservation> zone_map_observations;
-            // Same "precomputed at enqueue time, applied by ApplyWalRecord
-            // only after this row's real pwrite succeeds" contract as
-            // zone_map_observations above -- see BuildCatIdxObservations.
-            std::vector<CatIdxObservation> catidx_observations;
-            // Observations above now hold only PRESENT columns (Task 2), so
-            // ZoneMapFile::UpdateRow needs this to know how far to bump
-            // null_count for the columns past the end of that vector, up to
-            // the file's own tracked width -- the same total effect the old
-            // one-observation-per-tracked-column vector used to have, without
-            // building holes for columns the row never touched. 0 for
-            // WAL-replayed rows (ParseWalRecord default-constructs WalRow, so
-            // this stays 0), which correctly causes NO index update on replay
-            // -- see ApplyWalRecord's comment on why replay must be a no-op.
-            uint32_t zone_map_pad_to = 0;
-        };
-
+        //
         // Cross-thread completion signal for one WalRecord -- replaces
         // std::promise<bool>/std::future<bool> (measured on real hardware:
         // comparable typical-case cost once compared fairly -- a fresh
@@ -301,7 +274,7 @@ class XStore {
             std::string db_base_path;          // full path -- locates this DB's WAL subdir and, at apply time, its .XSTORE file
             XStore_Proto::TimeUnit time_resolution = XStore_Proto::SECOND;
             unsigned short row_length = 0;
-            // The year of this record's rows (TimeStruct(rows.front().epoch_time, time_resolution).year; a record is
+            // The year of this record's rows (TimeStruct(EpochAt(0), time_resolution).year; a record is
             // always one (db, year)). Set by every producer; EnqueueWalRecord routes by (db_base_path, year) only.
             // Sits in what was struct padding after row_length, so sizeof(WalRecord) is unchanged.
             unsigned short year = 0;
@@ -324,8 +297,38 @@ class XStore {
             // (replay: ring records carry no epoch, and none is written to the ring). In-memory only; sits in the
             // padding after tracked_column_count, so sizeof(WalRecord) is unchanged.
             uint32_t cfg_epoch = 0;
-            std::vector<WalRow> rows;         // 1 entry for UnaryInsert; N for a BatchInsert/RangeInsert year-bucket group
+            uint32_t row_count = 0;           // 1 for UnaryInsert; N for a BatchInsert/RangeInsert year-bucket group
+            // ZoneMapFile::UpdateRows' pad_to for every row: null_count is bumped for the columns past a row's
+            // observations, up to the file's own width -- the same total effect as one observation per tracked
+            // column, without building holes for columns the row never touched. Both producers set it to
+            // tracked_column_count (one width per record). 0 for a WAL-replayed record (no observations), which
+            // causes NO index update on replay -- see ApplyWalRecord's comment on why replay must be a no-op.
+            uint32_t zone_map_pad_to = 0;
             XStore_Proto::WalDurabilityMode durability_mode = XStore_Proto::SYNC;
+            // The rows section of the ring record, byte for byte: row_count x [u64 epoch, native endian][row_length
+            // bytes, zero-padded]. The writer frames it as ONE iovec with ONE CRC update, replay fills it with one
+            // assign. Always exactly row_count * RowStride() bytes. Offsets only, never pointers into it: the record
+            // is moved twice (into the queue, out into the writer's batch) and a short (SSO) string relocates.
+            std::string wire;
+            // Index observations, built at enqueue time (AppendRow) because ApplyWalRecord only has the rows'
+            // serialized bytes, not the RowData, to derive column values from. Applied by ApplyWalRecord itself,
+            // after the row's real pwrite succeeds and under the same check -- never eagerly at enqueue time -- so the
+            // indexes are never ahead of what is actually written, ASYNC included. Never part of the ring bytes.
+            // Row i covers zmap_obs [obs_end[i-1].zmap_end, obs_end[i].zmap_end) and catidx
+            // [obs_end[i-1].catidx_end, obs_end[i].catidx_end) (both 0 for i = 0).
+            // zmap_obs: the row's PRESENT columns [0, min(fielddata_size, tracked_column_count)), row-major.
+            std::vector<ZoneMapObservation> zmap_obs;
+            // Packed catidx values, row-major, present-and-set columns only: per value [u32 column_idx][u32 len]
+            // [len bytes of AppendFDataForCatIdx] (kCatIdxEntryHeaderBytes header, read with memcpy: unaligned). A
+            // u32 len is enough: one encoded value is at most 1 + row_length (u16) bytes; offsets into the arena,
+            // which can exceed 4 GiB, are size_t.
+            std::string catidx;
+            // Empty (WAL replay: no observations) or exactly row_count entries.
+            struct ObsEnd {
+                size_t zmap_end;     // into zmap_obs
+                size_t catidx_end;   // byte offset into catidx
+            };
+            std::vector<ObsEnd> obs_end;
             // One per REQUEST, not per row -- null for ASYNC (nobody
             // waits). Carries whether this record was actually durably
             // fsync'd AND applied (true) or not (false on any failure --
@@ -336,12 +339,41 @@ class XStore {
             // cross-producer enqueue ordering: each caller only ever waits
             // on its own record's flag.
             WalCompletion *completion = nullptr;
+
+            size_t RowStride() const { return sizeof(uint64_t) + row_length; }
+            uint64_t EpochAt(size_t i) const {
+                uint64_t epoch;
+                std::memcpy(&epoch, wire.data() + i * RowStride(), sizeof(epoch));   // unaligned: row_length is arbitrary
+                return epoch;
+            }
+            const char *RowAt(size_t i) const { return wire.data() + i * RowStride() + sizeof(uint64_t); }
+
+            // A WAL-replayed record: no observations, pad_to 0 (the record object is reused across a replay loop).
+            void ClearObservations() {
+                zmap_obs.clear();
+                catidx.clear();
+                obs_end.clear();
+                zone_map_pad_to = 0;
+            }
+
+            static constexpr size_t kCatIdxEntryHeaderBytes = 2 * sizeof(uint32_t);
+            // Reserves for `rows` rows of at most `widest_fields` columns: exact for wire, zmap_obs and obs_end (only
+            // rejected or narrower rows leave slack); catidx at the size of numeric/bool values (header + case tag +
+            // 8 B), so only values longer than 8 B (strings, bytes) grow it. Defined in XStore_Internal.h.
+            void ReserveRows(size_t rows, size_t widest_fields);
+            // The one producer step shared by UnaryInsert and MultiRowInsert: appends the row's zero-padded slot to
+            // wire (epoch in front, serialized with the sizes the caller's ByteSizeLong() cached), its zone-map
+            // observations, its catidx values and its obs_end entry. Preconditions: data.ByteSizeLong() was called
+            // and is <= row_length, and every rejection of the row happens BEFORE this call (an appended row cannot
+            // be taken back). Defined in XStore_Internal.h; `store` only reaches GetFDataValue.
+            void AppendRow(XStore &store, uint64_t epoch, const XStore_Proto::RowData &data);
         };
 #if defined(__GLIBCXX__) && defined(__x86_64__) && (!defined(_GLIBCXX_USE_CXX11_ABI) || _GLIBCXX_USE_CXX11_ABI)
-        // std::string is 32 bytes only in libstdc++ with the C++11 ABI; guard so a layout change is noticed. WalRecord::year must keep
-        // fitting in the padding after row_length, and WalRecord::cfg_epoch in the one after tracked_column_count (record
-        // stays 120 bytes, two cache lines).
-        static_assert(sizeof(WalRecord) == 120, "WalRecord grew: WalRecord::year / cfg_epoch must fit in existing padding");
+        // std::string is 32 bytes only in libstdc++ with the C++11 ABI; guard so a layout change is noticed. 216 = the
+        // old 120 with the rows vector (24 B) replaced by wire (32 B) + zmap_obs (24 B) + catidx (32 B) + obs_end
+        // (24 B), plus zone_map_pad_to (4 B) and the 4 B of padding it leaves before wire (row_count fills the old
+        // padding after cfg_epoch). Paid once per record (moved twice), not per row.
+        static_assert(sizeof(WalRecord) == 216, "WalRecord layout changed: update this check deliberately");
 #endif
 
         struct WalShard {
@@ -428,7 +460,7 @@ class XStore {
                                                             const std::vector<std::string> &column_names = {});
 
         // The single place that decides "how many columns does this DB's
-        // zone map track," consumed by BuildZoneMapObservations, every
+        // zone map track," consumed by WalRecord::AppendRow, every
         // GetOrOpenZoneMap call site (insert/WAL-apply/aggregate-read) and
         // the startup rebuild scan. Returns
         // max(cfg.columncount(), ZONE_MAP_MAX_TRACKED_COLUMNS).
@@ -1439,24 +1471,10 @@ class XStore {
         static CatIdxFile& GetOrOpenCatIdxLocked(std::string_view db_base_path, unsigned short year, uint16_t row_length,
                                                  uint32_t tracked_column_count);
 
-        // Turns one row's proto fields into the zone map's per-column
-        // observations -- shared by Unary/Batch/RangeInsert (all three
-        // build a WalRow, see XStore_Internal.h for the definition and full
-        // rationale). Takes an XStore& purely to reach the private
-        // GetFDataValue overload below; touches no instance state of its
-        // own.
-        static std::vector<ZoneMapObservation> BuildZoneMapObservations(XStore &store, const XStore_Proto::RowData &row, uint32_t tracked_column_count);
-        // One column's observation as BuildZoneMapObservations builds it; shared with the rebuild's one-pass decoder.
+        // One column's zone-map observation, shared by the insert path (WalRecord::AppendRow, see XStore_Internal.h
+        // for the definition and full rationale) and the rebuild's one-pass decoder. Takes an XStore& purely to
+        // reach the private GetFDataValue overload below; touches no instance state of its own.
         static ZoneMapObservation ZoneMapObservationOf(XStore &store, const XStore_Proto::FData &f_data, uint32_t column_idx);
-
-        // Same purpose as BuildZoneMapObservations above but for the CatIdx
-        // bloom filter -- covers ALL FData oneof cases (no numeric-only
-        // gate), since bloom membership works on the encoded byte string
-        // regardless of type. Shared by Unary/Batch/RangeInsert, applied by
-        // ApplyWalRecord only after the corresponding row's pwrite succeeds
-        // (see WalRow::catidx_observations in XStore.h and XStore_Internal.h
-        // for the implementation).
-        static std::vector<CatIdxObservation> BuildCatIdxObservations(XStore &store, const XStore_Proto::RowData &row, uint32_t tracked_column_count);
 
         // Shared body of BatchInsert and RangeInsert (identical semantics; the
         // two RPCs differ only in proto message types and the log/status tag
@@ -1475,7 +1493,7 @@ class XStore {
         // of those only guard the WRITE side: a .CFG written by an older
         // binary, a restored backup, or a hand-edited/corrupt file still
         // feeds columnCount straight into EffectiveTrackedColumnCount ->
-        // RebuildOneYearZoneMap, where BuildZoneMapObservations' reserve()
+        // RebuildOneYearZoneMap, where the observation reserve()
         // and ZoneMapFile::EnsureBlockLoaded's std::vector<ZoneMapEntry>(n)
         // are both sized from it and an absurd n throws std::length_error.
         // That throw used to escape on an XStorePreadPool worker as a
@@ -1577,8 +1595,8 @@ class XStore {
         // independently-maintained copy.
         static bool ParseWalRecord(const char *data, size_t len, size_t &consumed, WalRecord &out_record);
 
-        // Writes every row in recordToApply.rows to its actual .XSTORE data
-        // file, at the offset each row's epoch_time (combined with
+        // Writes every row in recordToApply.wire to its actual .XSTORE data
+        // file, at the offset each row's epoch (combined with
         // recordToApply's time_resolution/row_length) computes to -- the
         // same logic UnaryInsert used to run inline, now shared between the
         // writer thread's normal path and ReplayWal's crash-recovery path
@@ -1638,11 +1656,11 @@ class XStore {
         // "(db, year) pairs WAL replay actually touched during one
         // InitDB() call", keyed by already-upper-cased dbName.
         //
-        // Why this has to exist at all: ParseWalRecord rebuilds a WalRow
+        // Why this has to exist at all: ParseWalRecord rebuilds a WalRecord
         // from the WAL's own bytes, and the WAL format deliberately does
         // NOT carry a row's ZoneMapObservations (they are derived state --
-        // see WalRow's comment), so every replayed row reaches
-        // ApplyWalRecord with an EMPTY observation vector and its
+        // see WalRecord::zmap_obs), so every replayed row reaches
+        // ApplyWalRecord with NO observations and its
         // zmap.UpdateRow call is a no-op. Replay therefore puts rows back
         // into the data file while folding nothing into the zone map.
         //
@@ -1771,7 +1789,7 @@ class XStore {
                              uint32_t tracked_column_count, ZoneMapFile *zmap, CatIdxFile *catidx, RebuildScratch &scratch);
         // Appends one row's zone-map observations and catidx values to the batches (either may be nullptr), parsing
         // the row once: one tag walk, each column decoded once. The result is the same as the per-row rebuild's
-        // (RowData parse + BuildZoneMapObservations for the zone map; ExtractColumnByIndexSkipParse +
+        // (RowData parse + ZoneMapObservationOf per column for the zone map; ExtractColumnByIndexSkipParse +
         // EncodeFDataForCatIdx per column for the catidx); a row whose bytes are not a plain run of well-formed
         // columns falls back to exactly those calls.
         void AppendRebuildObservations(uint64_t row_index, const char *row, uint16_t row_length,

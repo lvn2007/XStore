@@ -353,7 +353,7 @@ TEST_F(XStoreTest, CreateDBWithAbsurdColumnCountSeedIsRejected) {
 // -- written by a binary older than that check, restored from a backup, or
 // corrupted -- is parsed straight back into a ConfigStruct with no bound at
 // all, and flows into EffectiveTrackedColumnCount ->
-// RebuildOneYearZoneMap/BuildZoneMapObservations, where it sizes a
+// RebuildOneYearZoneMap/WalRecord::ReserveRows, where it sizes a
 // std::vector<ZoneMapEntry>/reserve and throws.
 //
 // The throw's landing site is what makes this worse than a bad request:

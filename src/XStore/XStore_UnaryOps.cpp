@@ -45,16 +45,6 @@ void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::R
         return;
     }
 
-    // Thread-local scratch buffer, grown once and reused across calls.
-    // Serialize first, then zero only the tail past the actual serialized
-    // size -- no stale bytes from a previous larger row leak through.
-    thread_local std::vector<char> row_buf;
-    if (row_buf.size() < static_cast<size_t>(cfg_struct.rowlength())) {
-        row_buf.resize(cfg_struct.rowlength());
-    }
-    data.SerializeToArray(row_buf.data(), cfg_struct.rowlength());
-    std::memset(row_buf.data() + serialized_size, 0, cfg_struct.rowlength() - serialized_size);
-
     // Hand off to the WAL instead of writing the data file directly here --
     // EnqueueWalRecord's shard writer thread fsyncs (for SYNC) and applies
     // this exact row before returning control (ASYNC returns immediately
@@ -87,10 +77,11 @@ void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::R
     // EffectiveTrackedColumnCount's pre-growth floor.
     record.tracked_column_count = std::max(EffectiveTrackedColumnCount(cfg_struct),
                                             std::min<uint32_t>(static_cast<uint32_t>(widest), XStoreTunables::MAX_TRACKED_COLUMN_COUNT));
-    record.rows.push_back(WalRow{unix_time, std::string(row_buf.data(), cfg_struct.rowlength()),
-                                  BuildZoneMapObservations(*this, data, record.tracked_column_count),
-                                  BuildCatIdxObservations(*this, data, record.tracked_column_count),
-                                  record.tracked_column_count});
+    record.zone_map_pad_to = record.tracked_column_count;
+    // Serialized straight into the record's zero-filled slot, reusing the sizes ByteSizeLong() cached above: no
+    // scratch buffer, no copy.
+    record.ReserveRows(1, static_cast<size_t>(widest));
+    record.AppendRow(*this, unix_time, data);
 
     if (durability_mode == XStore_Proto::BYPASS) {
         // Skip WAL entirely -- no queue, no CRC32, no second write. Applies

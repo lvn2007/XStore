@@ -6,13 +6,15 @@
 #include "XStore.pb.h"
 
 // Canonical byte encoding for an FData value, used identically at insert
-// time (BuildCatIdxObservations) and query time (FindByValue) so a bloom
+// time (WalRecord::AppendRow) and query time (FindByValue) so a bloom
 // bit set for a value at insert is found by the same value's lookup at
 // query time. Distinguishes oneof case explicitly (int64Data=5 and
 // doubleData=5.0 encode differently) -- this is exact-type equality, not
 // GetFDataValue's aggregate-style numeric coercion into one double.
-inline std::string EncodeFDataForCatIdx(const XStore_Proto::FData &f_data) {
-    std::string out;
+// Appends the encoding to `out`: the insert path writes it straight into a
+// record's packed catidx arena; EncodeFDataForCatIdx below wraps this one
+// implementation, so the two can never drift.
+inline void AppendFDataForCatIdx(std::string &out, const XStore_Proto::FData &f_data) {
     auto case_id = f_data.oneOfData_case();
     out.push_back(static_cast<char>(static_cast<uint8_t>(case_id)));
 
@@ -89,14 +91,19 @@ inline std::string EncodeFDataForCatIdx(const XStore_Proto::FData &f_data) {
             out.append(f_data.bytesdata());
             break;
         default:
-            // ONEOFDATA_NOT_SET -- a hole. Caller (BuildCatIdxObservations)
+            // ONEOFDATA_NOT_SET -- a hole. Caller (WalRecord::AppendRow)
             // is responsible for not emitting an observation for holes at
             // all; this function is never called on an unset FData in
-            // practice, but returns the tag-only bytes rather than
+            // practice, but appends the tag-only bytes rather than
             // asserting, matching the codebase's existing "hole is not an
-            // error" precedent (see BuildZoneMapObservations).
+            // error" precedent (see ZoneMapObservationOf).
             break;
     }
+}
+
+inline std::string EncodeFDataForCatIdx(const XStore_Proto::FData &f_data) {
+    std::string out;
+    AppendFDataForCatIdx(out, f_data);
     return out;
 }
 
@@ -165,10 +172,10 @@ struct CatIdxFoldBatch {
     std::vector<size_t> value_end;
     std::vector<Value> values;
     void Clear() { row_index.clear(); value_end.clear(); values.clear(); }
-    void Add(uint32_t column_idx, const std::string &encoded_value) {
-        values.push_back({Crc32c(encoded_value.data(), encoded_value.size()),
-                          Fnv1a64(encoded_value.data(), encoded_value.size()), column_idx});
+    void Add(uint32_t column_idx, const char *encoded_value, size_t len) {
+        values.push_back({Crc32c(encoded_value, len), Fnv1a64(encoded_value, len), column_idx});
     }
+    void Add(uint32_t column_idx, const std::string &encoded_value) { Add(column_idx, encoded_value.data(), encoded_value.size()); }
     // Closes the row whose values were added since the previous EndRow.
     void EndRow(uint64_t row) { row_index.push_back(row); value_end.push_back(values.size()); }
 };

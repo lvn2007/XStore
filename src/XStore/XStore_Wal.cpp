@@ -125,16 +125,10 @@ bool XStore::ParseWalRecord(const char *data, size_t len, size_t &consumed, XSto
 
     out_record.row_length = row_length;
     out_record.time_resolution = static_cast<XStore_Proto::TimeUnit>(time_res);
-    out_record.rows.clear();
-    out_record.rows.reserve(row_count);
-    for (uint32_t i = 0; i < row_count; ++i) {
-        uint64_t epoch_time; std::memcpy(&epoch_time, payload + off, 8); off += 8;
-        XStore::WalRow row;
-        row.epoch_time = epoch_time;
-        row.row_bytes.assign(payload + off, row_length);
-        off += row_length;
-        out_record.rows.push_back(std::move(row));
-    }
+    // The rows section is already WalRecord::wire's layout: one copy, no per-row allocation. No observations.
+    out_record.wire.assign(payload + off, expected_rows_bytes);
+    out_record.row_count = row_count;
+    out_record.ClearObservations();
 
     consumed = 4 + record_len;
     return true;
@@ -186,15 +180,10 @@ XStore::RingParse XStore::ParseWalRecordV2(const char *data, size_t len, uint64_
     off += db_name_len;
     out_record.row_length = row_length;
     out_record.time_resolution = static_cast<XStore_Proto::TimeUnit>(time_res);
-    out_record.rows.clear();
-    out_record.rows.reserve(row_count);
-    for (uint32_t i = 0; i < row_count; ++i) {
-        XStore::WalRow row;
-        std::memcpy(&row.epoch_time, payload + off, 8); off += 8;
-        row.row_bytes.assign(payload + off, row_length);
-        off += row_length;
-        out_record.rows.push_back(std::move(row));
-    }
+    // Same single copy of the rows section as ParseWalRecord.
+    out_record.wire.assign(payload + off, expected_rows_bytes);
+    out_record.row_count = row_count;
+    out_record.ClearObservations();
     consumed = 4 + static_cast<size_t>(record_len);
     damaged = false;
     return RingParse::kOk;
@@ -246,6 +235,33 @@ struct SubBatchFile {
 // could be opened, or a single-row record larger than half the ring); failed without touching any file.
 enum class WalRecordKind : uint8_t { kRing, kLarge, kFail };
 
+// The observation arrays agree with row_count and with each other: no ends (replay) and no observations, or one end
+// per row, non-decreasing, the last one exactly at each array's size, and every packed catidx header and value inside
+// its row's range. One sequential walk of the catidx headers per record, so ApplyWalRecord's per-run reads can trust
+// every offset and a malformed record fails before any byte is written.
+bool ObservationsWellFormed(const XStore::WalRecord &record) {
+    if (record.obs_end.empty()) return record.zmap_obs.empty() && record.catidx.empty();
+    if (record.obs_end.size() != record.row_count) return false;
+    constexpr size_t kHeader = XStore::WalRecord::kCatIdxEntryHeaderBytes;
+    size_t zmap_prev = 0;
+    size_t catidx_pos = 0;
+    for (const XStore::WalRecord::ObsEnd &end : record.obs_end) {
+        if (end.zmap_end < zmap_prev || end.zmap_end > record.zmap_obs.size() || end.catidx_end < catidx_pos ||
+            end.catidx_end > record.catidx.size()) {
+            return false;
+        }
+        while (catidx_pos < end.catidx_end) {
+            if (end.catidx_end - catidx_pos < kHeader) return false;
+            uint32_t len;
+            std::memcpy(&len, record.catidx.data() + catidx_pos + sizeof(uint32_t), sizeof(len));
+            if (end.catidx_end - catidx_pos - kHeader < len) return false;
+            catidx_pos += kHeader + len;
+        }
+        zmap_prev = end.zmap_end;
+    }
+    return zmap_prev == record.zmap_obs.size() && catidx_pos == record.catidx.size();
+}
+
 } // namespace
 
 bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_ptr<walring::Ring> &ring, uint64_t ring_lsn_end) {
@@ -256,9 +272,26 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
     // year-bucket group (see XStore_BatchOps.cpp/XStore_RangeOps.cpp),
     // sorted ascending before being handed off here (undocumented-
     // enforcement, same style as the rest of this precondition).
-    if (record_to_apply.rows.empty()) return true;
+    const size_t row_count = record_to_apply.row_count;
+    if (row_count == 0) return true;
+    // Every accessor below reads wire and the observation arrays by row index and offset: a record whose containers
+    // disagree with row_count is a producer bug, refused before anything is read or written. (A ring record never
+    // gets here with a mismatched wire: framing checks its size against the planned ring size first.)
+    if (record_to_apply.wire.size() != row_count * record_to_apply.RowStride() || !ObservationsWellFormed(record_to_apply)) {
+        spdlog::error("[WAL APPLY] [DB: {}] - malformed record ({} rows, {} wire bytes, {} observation ends, {} zone-map "
+                      "observations, {} catidx bytes): not applied",
+                      record_to_apply.db_name, row_count, record_to_apply.wire.size(), record_to_apply.obs_end.size(),
+                      record_to_apply.zmap_obs.size(), record_to_apply.catidx.size());
+        // A failed apply of a durable ring record still notes its file dirty (see XStore_WalCheckpoint.h), like
+        // drop_stale below; the file is derived from the first epoch, which exists whenever the wire holds a row slot.
+        if (record_to_apply.wire.size() >= sizeof(uint64_t)) {
+            const TimeStruct bad_first_ts(record_to_apply.EpochAt(0), record_to_apply.time_resolution);
+            walring::Dirty().NoteRingMarkOnly(ring, CachedYearFilePath(record_to_apply.db_base_path, bad_first_ts.year), ring_lsn_end);
+        }
+        return false;
+    }
 
-    TimeStruct first_ts(record_to_apply.rows.front().epoch_time, record_to_apply.time_resolution);
+    TimeStruct first_ts(record_to_apply.EpochAt(0), record_to_apply.time_resolution);
     const std::string &target_file = CachedYearFilePath(record_to_apply.db_base_path, first_ts.year);
 
     // The DB was removed (and maybe re-created, with another row length) since this record's cfg was read: nothing of
@@ -266,7 +299,7 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
     // stale does not create (or size, at its old geometry) the re-created DB's year file. Again after the open (below).
     const auto drop_stale = [&]() {
         spdlog::warn("[WAL APPLY] [DB: {}] - The DB was removed after this record was built; its {} row(s) are dropped",
-                     record_to_apply.db_name, record_to_apply.rows.size());
+                     record_to_apply.db_name, row_count);
         walring::Dirty().NoteRingMarkOnly(ring, target_file, ring_lsn_end);
         return false;
     };
@@ -307,7 +340,7 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
     // instead of eliminated.
     //
     // tracked_column_count comes off the RECORD, not the global default:
-    // it is the exact width this record's zone_map_observations were built
+    // it is the exact width this record's zmap_obs were built
     // at (captured alongside them at enqueue time, before the .CFG's
     // columnCount could move underneath), so the file this creates can
     // never claim to track more columns than were actually folded into it.
@@ -335,9 +368,9 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
     ZoneMapFile &zmap = *zmap_pin;
     CatIdxFile &catidx = *catidx_pin;
 
-    std::vector<unsigned long long> offsets(record_to_apply.rows.size());
-    for (size_t i = 0; i < record_to_apply.rows.size(); ++i) {
-        offsets[i] = (record_to_apply.rows[i].epoch_time - first_ts.first_epoch) * record_to_apply.row_length;
+    std::vector<unsigned long long> offsets(row_count);
+    for (size_t i = 0; i < row_count; ++i) {
+        offsets[i] = (record_to_apply.EpochAt(i) - first_ts.first_epoch) * record_to_apply.row_length;
     }
 
     // WRITE locks on exactly the record's runs (contiguous rows; a duplicate row joins its run), taken all at once, so
@@ -378,6 +411,10 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
     // lock: a widen begun after this read only widens the file and starts it at F = 0, and the builder cannot fold
     // these rows (it needs a READ lock on them) before this record is applied, so no folded row needs a dropped value.
     const uint32_t catidx_width = catidx.TrackedColumnCount();
+    // A replayed record has no observations: every row still goes through UpdateRows, as empty observations with
+    // pad_to 0, which folds nothing (the calls and their side effects, such as the dirty mark, are kept as they were).
+    const bool has_obs = !record_to_apply.obs_end.empty();
+    const std::vector<WalRecord::ObsEnd> &obs_end = record_to_apply.obs_end;
     bool all_rows_ok = true;
 
     for (size_t run_start = 0; run_start < offsets.size(); ) {
@@ -393,8 +430,7 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
         }
 
         for (size_t i = run_start; i < run_end; ++i) {
-            const std::string &row_bytes = record_to_apply.rows[i].row_bytes;
-            std::memcpy(run_buf.data() + (i - run_start) * record_to_apply.row_length, row_bytes.data(), record_to_apply.row_length);
+            std::memcpy(run_buf.data() + (i - run_start) * record_to_apply.row_length, record_to_apply.RowAt(i), record_to_apply.row_length);
         }
 
         // Overwrite detection: UpdateRow below only ADDS, so a run replacing a row already folded into its zone-map
@@ -403,7 +439,7 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
         // read the old bytes (a never-written or deleted row has first byte 0, the same hole test the scans use).
         // An empty RowData also serializes to a zero first byte, so replacing one is not detected; it only leaves
         // that row's null_count counted twice (no aggregate reads null_count).
-        const uint64_t run_first_row = record_to_apply.rows[run_start].epoch_time - first_ts.first_epoch;
+        const uint64_t run_first_row = record_to_apply.EpochAt(run_start) - first_ts.first_epoch;
         if (zmap.NeedsOverwriteCheck(run_first_row, run_rows)) {
             thread_local std::vector<char> old_buf;
             if (old_buf.size() < run_bytes) old_buf.resize(run_bytes);
@@ -433,22 +469,37 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
             // touched), still before the next run's overwrite check reads the blocks.
             zmap_batch.Clear();
             catidx_batch.Clear();
-            zmap_batch.pad_to = record_to_apply.rows[run_start].zone_map_pad_to;
-            for (size_t i = run_start; i < run_end; ++i) {
-                const WalRow &row = record_to_apply.rows[i];
-                const uint64_t diff = row.epoch_time - first_ts.first_epoch;
-                if (row.zone_map_pad_to != zmap_batch.pad_to) { // a batch has one pad_to
-                    zmap.UpdateRows(zmap_batch);
-                    zmap_batch.Clear();
-                    zmap_batch.pad_to = row.zone_map_pad_to;
+            zmap_batch.pad_to = has_obs ? record_to_apply.zone_map_pad_to : 0;   // one pad_to per record
+            if (has_obs) {
+                // The run's observations are contiguous in the record: one copy for the whole run, then each row's
+                // end rebased to the batch. Offsets were checked by ObservationsWellFormed.
+                const size_t zmap_begin = run_start == 0 ? 0 : obs_end[run_start - 1].zmap_end;
+                const ZoneMapObservation *zmap_obs = record_to_apply.zmap_obs.data();
+                zmap_batch.observations.insert(zmap_batch.observations.end(), zmap_obs + zmap_begin,
+                                               zmap_obs + obs_end[run_end - 1].zmap_end);
+                const char *arena = record_to_apply.catidx.data();
+                size_t catidx_pos = run_start == 0 ? 0 : obs_end[run_start - 1].catidx_end;
+                for (size_t i = run_start; i < run_end; ++i) {
+                    const uint64_t diff = record_to_apply.EpochAt(i) - first_ts.first_epoch;
+                    zmap_batch.row_index.push_back(diff);
+                    zmap_batch.obs_end.push_back(obs_end[i].zmap_end - zmap_begin);
+                    for (const size_t catidx_end = obs_end[i].catidx_end; catidx_pos < catidx_end; ) {
+                        uint32_t column_idx;
+                        uint32_t len;
+                        std::memcpy(&column_idx, arena + catidx_pos, sizeof(column_idx));
+                        std::memcpy(&len, arena + catidx_pos + sizeof(column_idx), sizeof(len));
+                        const char *value = arena + catidx_pos + WalRecord::kCatIdxEntryHeaderBytes;
+                        if (column_idx < catidx_width) catidx_batch.Add(column_idx, value, len);
+                        catidx_pos += WalRecord::kCatIdxEntryHeaderBytes + len;
+                    }
+                    catidx_batch.EndRow(diff);
                 }
-                zmap_batch.observations.insert(zmap_batch.observations.end(), row.zone_map_observations.begin(),
-                                               row.zone_map_observations.end());
-                zmap_batch.EndRow(diff);
-                for (const CatIdxObservation &obs : row.catidx_observations) {
-                    if (obs.is_present && obs.column_idx < catidx_width) catidx_batch.Add(obs.column_idx, obs.encoded_value);
+            } else {
+                for (size_t i = run_start; i < run_end; ++i) {
+                    const uint64_t diff = record_to_apply.EpochAt(i) - first_ts.first_epoch;
+                    zmap_batch.EndRow(diff);
+                    catidx_batch.EndRow(diff);
                 }
-                catidx_batch.EndRow(diff);
             }
             zmap.UpdateRows(zmap_batch);
             catidx.UpdateRows(catidx_batch);
@@ -758,23 +809,20 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
     }
     // Per-file list of {pointer, length} pieces for one pwritev() call,
     // built to point DIRECTLY at each record's already-owned memory
-    // (db_base_path/rows[].row_bytes, both alive in `batch`, released at
+    // (each record's wire rows section, alive in `batch`, released at
     // the end of this iteration after completions are signalled) instead
     // of copying every record's bytes into one
     // concatenated buffer first -- the thing that used to cost a full
-    // extra payload-sized memcpy per record here. record_headers/
-    // extra_epoch_bufs below hold the small (tens of bytes) per-record
-    // metadata pieces that DO need their own scratch storage (they're
-    // computed values, not already-owned memory); everything else is a
-    // reference into memory the batch already owns.
+    // extra payload-sized memcpy per record here. record_headers below
+    // holds the small (tens of bytes) per-record header pieces that DO
+    // need their own scratch storage (they're computed values, not
+    // already-owned memory); everything else is a reference into memory
+    // the batch already owns.
     //
-    // iovec count per file is no longer assumed to fit in one pwritev call
-    // -- BatchInsert/RangeInsert can hand a single WalRecord hundreds of
-    // thousands of rows (2 iovecs/row: an epoch-time buffer + the row bytes
-    // for every row past the first), which routinely exceeds Linux's
-    // IOV_MAX/UIO_MAXIOV of 1024. The write loop below chunks into multiple
-    // pwritev calls per file (advancing the file offset between chunks)
-    // instead of relying on a single-call bound -- see
+    // Each record is at most 2 iovecs (header + rows section), so a full
+    // batch normally fits one pwritev call; the write loop below still
+    // chunks into multiple pwritev calls per file (advancing the file
+    // offset between chunks) instead of relying on that bound -- see
     // XStoreTunables::WAL_PWRITEV_MAX_IOVECS.
     std::unordered_map<walring::Ring *, SubBatchFile> sub_batch_files;   // keyed by Ring: two path spellings of one file are one entry
     // Deques, not vectors: push_back on a deque never invalidates
@@ -782,13 +830,10 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
     // -- iovecs above hold raw pointers into these, taken before all of
     // this sub-batch's records have been processed, so that stability
     // matters. Each entry: [recordLen(4)][crc32c(4)][lsn(8)][dbNameLen(2)]
-    // [rowLength(2)][timeResolution(4)][rowCount(4)][dbName][first row's
-    // epochTime(8) if any] -- everything on the wire except row bytes
-    // themselves (kept as separate iovec entries pointing straight at
-    // WalRow::row_bytes) and any 2nd-or-later row's epochTime (in
-    // extra_epoch_bufs).
+    // [rowLength(2)][timeResolution(4)][rowCount(4)][dbName] -- everything
+    // on the wire before the rows section (a separate iovec entry pointing
+    // straight at WalRecord::wire).
     std::deque<std::string> record_headers;
-    std::deque<std::array<char, sizeof(uint64_t)>> extra_epoch_bufs;
     // Memoizes WalFilePathFor within one batch: it's pure path computation
     // (filesystem::path construction + string concat, no syscalls) but
     // still real allocation work, and most records in one shard's batch
@@ -967,7 +1012,6 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                 seen_registry_epoch = epoch;
             }
             record_headers.clear();
-            extra_epoch_bufs.clear();
             wal_path_cache.clear();
 
             // Resolves record i exactly once: result, then wake the SYNC caller.
@@ -999,8 +1043,8 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
             auto decide_large = [&](size_t i) -> LargeRoute {
                 const WalRecord &record = batch[i];
                 const size_t ring_bytes = record_ring[i]->ring_bytes();
-                const size_t payload = record.rows.size() * (sizeof(uint64_t) + record.row_length);
-                const TimeStruct first_ts(record.rows.front().epoch_time, record.time_resolution);
+                const size_t payload = static_cast<size_t>(record.row_count) * record.RowStride();
+                const TimeStruct first_ts(record.EpochAt(0), record.time_resolution);
                 record_data_path[i] = CachedYearFilePath(record.db_base_path, first_ts.year);
                 const std::string &path = record_data_path[i];
                 auto file_clear = [&]() { return !walring::AnyFenced() && walring::Dirty().RingClear(path); };
@@ -1089,21 +1133,21 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                     record_ring[i] = ring_it != rings.end() ? ring_it->second.get() : nullptr;
                 }
                 record_total[i] = walring::RECORD_FIXED_BYTES + record.db_name.size()
-                                + record.rows.size() * (sizeof(uint64_t) + record.row_length);
+                                + static_cast<size_t>(record.row_count) * record.RowStride();
                 // Hot path: a small record pays one multiply-compare. Only multi-row records
                 // at/above the smaller direct threshold (or over half the ring) are kLarge; the
                 // dirty-tracker lookup happens later, in decide_large, for those alone.
                 const size_t ring_half = record_ring[i] != nullptr ? record_ring[i]->ring_bytes() / 2 : 0;
                 if (record_ring[i] == nullptr) {
                     record_kind[i] = WalRecordKind::kFail;
-                } else if (record.rows.size() == 1) {
+                } else if (record.row_count == 1) {
                     // Unary-sized: never direct. Only a (test-sized) tiny ring can make one not fit.
                     // WalRecord has no unary flag, so one row stands in for "unary"; rowLength is a u16, so
                     // a single row is at most 8 + 65535 bytes: below WAL_DIRECT_MIN_BYTES, and kept off the
                     // direct path regardless (it may still exceed WAL_DIRECT_PRESSURE_MIN_BYTES).
                     record_kind[i] = record_total[i] > ring_half ? WalRecordKind::kFail : WalRecordKind::kRing;
                 } else {
-                    const size_t payload = record.rows.size() * (sizeof(uint64_t) + record.row_length);
+                    const size_t payload = static_cast<size_t>(record.row_count) * record.RowStride();
                     record_kind[i] = (payload >= large_threshold || payload > ring_half) ? WalRecordKind::kLarge : WalRecordKind::kRing;
                 }
             }
@@ -1235,56 +1279,43 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                     file.cursor += record_total[i];
                     record_end_lsn[i] = file.cursor;
 
-                    // Header piece: everything on the wire except row bytes
-                    // (kept as separate iovecs below, no copy) -- recordLen and
-                    // crc32c are patched in after being computed further down,
-                    // but the iovec pointing at this buffer's final address can
-                    // be pushed now since pwritev only reads it after the patch.
+                    // Header piece: everything on the wire up to and including
+                    // dbName -- recordLen and crc32c are patched in after being
+                    // computed further down, but the iovec pointing at this
+                    // buffer's final address can be pushed now since pwritev
+                    // only reads it after the patch.
                     record_headers.emplace_back();
                     std::string &hdr = record_headers.back();
-                    hdr.reserve(XStoreTunables::WAL_RECORD_HEADER_BYTES + sizeof(uint64_t) + record.db_name.size() + sizeof(uint64_t));
+                    hdr.reserve(XStoreTunables::WAL_RECORD_HEADER_BYTES + sizeof(uint64_t) + record.db_name.size());
                     hdr.resize(16); // recordLen+crc32c placeholder (patched below), then the LSN
                     std::memcpy(hdr.data() + 8, &lsn, sizeof(lsn));
                     AppendPod<uint16_t>(hdr, static_cast<uint16_t>(record.db_name.size()));
                     AppendPod<uint16_t>(hdr, record.row_length);
                     AppendPod<int32_t>(hdr, static_cast<int32_t>(record.time_resolution));
-                    AppendPod<uint32_t>(hdr, static_cast<uint32_t>(record.rows.size()));
+                    AppendPod<uint32_t>(hdr, record.row_count);
                     hdr.append(record.db_name);
-                    if (!record.rows.empty()) {
-                        AppendPod<uint64_t>(hdr, record.rows[0].epoch_time);
-                    }
 
                     std::vector<struct iovec> &iov_list = file.iov;
                     iov_list.push_back({hdr.data(), hdr.size()});
 
-                    // CRC covers everything after itself (the LSN included).
+                    // CRC covers everything after itself (the LSN included). The rows section
+                    // ([u64 epoch][row bytes] x rowCount) is already one contiguous buffer in
+                    // record.wire, so it is one iovec (no copy) and one CRC update: CRC32C is
+                    // streaming, so the result equals the old per-piece chain over the same bytes.
                     uint32_t crc = Crc32cUpdate(Crc32cInit(), hdr.data() + 8, hdr.size() - 8);
                     size_t payload_size_after_header = hdr.size() - 8;
-                    if (!record.rows.empty()) {
-                        const std::string &row_bytes = record.rows[0].row_bytes;
-                        iov_list.push_back({const_cast<char *>(row_bytes.data()), row_bytes.size()});
-                        crc = Crc32cUpdate(crc, row_bytes.data(), row_bytes.size());
-                        payload_size_after_header += row_bytes.size();
-                    }
-                    for (size_t r = 1; r < record.rows.size(); ++r) {
-                        extra_epoch_bufs.emplace_back();
-                        auto &eb = extra_epoch_bufs.back();
-                        uint64_t epoch = record.rows[r].epoch_time;
-                        std::memcpy(eb.data(), &epoch, sizeof(epoch));
-                        iov_list.push_back({eb.data(), eb.size()});
-                        crc = Crc32cUpdate(crc, eb.data(), eb.size());
-
-                        const std::string &row_bytes = record.rows[r].row_bytes;
-                        iov_list.push_back({const_cast<char *>(row_bytes.data()), row_bytes.size()});
-                        crc = Crc32cUpdate(crc, row_bytes.data(), row_bytes.size());
-                        payload_size_after_header += eb.size() + row_bytes.size();
+                    if (!record.wire.empty()) {
+                        iov_list.push_back({const_cast<char *>(record.wire.data()), record.wire.size()});
+                        crc = Crc32cUpdate(crc, record.wire.data(), record.wire.size());
+                        payload_size_after_header += record.wire.size();
                     }
                     crc = Crc32cFinal(crc);
 
                     uint32_t record_len = static_cast<uint32_t>(4 + payload_size_after_header);
-                    // The LSNs handed out above assumed record_total[i]; a row
-                    // whose bytes are not row_length long would break that
-                    // contiguity, so fail the batch instead of writing it.
+                    // The LSNs handed out above assumed record_total[i]
+                    // (row_count rows of row_length); a wire buffer of any
+                    // other size would break that contiguity, so fail the
+                    // batch instead of writing it.
                     if (static_cast<size_t>(record_len) + 4 != record_total[i]) {
                         throw std::runtime_error("WAL record size differs from its planned ring size");
                     }

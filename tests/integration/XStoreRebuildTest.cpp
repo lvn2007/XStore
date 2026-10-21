@@ -13,6 +13,7 @@
 #include "XStoreTestSupport.h"
 #include "XStoreRebuildTestSupport.h"
 #include "XStoreSyscallFault.h"
+#include "include/XStore/XStore_Internal.h" // WalRecord::AppendRow / ReserveRows
 #include <cerrno>
 #include <cstring>
 #include <fstream>
@@ -309,6 +310,125 @@ TEST_F(XStoreRebuildTest, OnlyTheStaleIndexIsRebuilt) {
     EXPECT_TRUE(zmap_before == ReadFileBytes(YearPath(db, year, ".zmap"))) << "a healthy zone map was touched";
     EXPECT_EQ(ReadHeader<CatIdxFileHeader>(YearPath(db, year, ".catidx")).dirty, 0u);
     EXPECT_FALSE(XStore::GetOrOpenCatIdx(DbPath(db), year, kRowLength, width).HasBitmapSection());
+}
+
+// ---- Insert path (WalRecord::AppendRow + ApplyWalRecord) against the reference ---------------------------------------
+
+// The flat observations AppendRow builds, entry by entry, against the per-row reference: the zone map's present
+// columns with the independent numeric coercion, and the catidx value each set column encodes to (EncodeFDataForCatIdx,
+// unset columns skipped). At width 64, and at 3, which clamps the wider rows. Also the row slot itself.
+TEST_F(XStoreRebuildTest, AppendRowObservationsMatchThePerRowReference) {
+    XStore store;
+    std::vector<XStore_Proto::RowData> rows;
+    rows.push_back(MakeRow({FDouble(-2.5), FFloat(0.75f), FInt32(-123456), FInt64(int64_t{1} << 40), FUInt32(4000000000u),
+                            FUInt64(0xFFFFFFFFFFFF0001ULL), FSInt32(-77), FSInt64(-(int64_t{1} << 50)), FFixed32(12345u),
+                            FFixed64(0x123456789ULL), FSFixed32(-9), FSFixed64(-99999999999LL), FBool(true), FBool(false),
+                            XStore_Proto::FData(), FString(""), FString("sso-short"), FString(std::string(40, 'L') + "ong"),
+                            FBytes(std::string("\x00\x01\x00\xff", 4)), FDouble(9.0)}));                  // every kind, a hole
+    rows.push_back(MakeRow({FInt64(5), XStore_Proto::FData()}));                                       // narrow, unset last
+    rows.push_back(XStore_Proto::RowData{});                                                           // no column at all
+    rows.push_back(MakeRow({XStore_Proto::FData(), FString(std::string(100, 's')), FDouble(1.0), FBytes("b")}));
+    for (uint32_t width : {64u, 3u}) {
+        SCOPED_TRACE("width " + std::to_string(width));
+        XStore::WalRecord record;
+        record.row_length = kRowLength;
+        record.tracked_column_count = width;
+        record.ReserveRows(rows.size(), 20);
+        for (size_t i = 0; i < rows.size(); ++i) {
+            ASSERT_LE(rows[i].ByteSizeLong(), kRowLength);   // also caches the sizes AppendRow serializes with
+            record.AppendRow(store, 5000 + i, rows[i]);
+        }
+        ASSERT_EQ(record.row_count, rows.size());
+        ASSERT_EQ(record.obs_end.size(), rows.size());
+        ASSERT_EQ(record.wire.size(), rows.size() * record.RowStride());
+        size_t zmap_pos = 0;
+        size_t catidx_pos = 0;
+        for (size_t i = 0; i < rows.size(); ++i) {
+            SCOPED_TRACE("row " + std::to_string(i));
+            EXPECT_EQ(record.EpochAt(i), 5000 + i);
+            std::string slot = rows[i].SerializeAsString();
+            slot.resize(kRowLength, '\0');
+            EXPECT_TRUE(std::string(record.RowAt(i), kRowLength) == slot);
+
+            const std::vector<ZoneMapObservation> want_zmap = RefZoneMapObservations(rows[i], width);
+            ASSERT_EQ(record.obs_end[i].zmap_end - zmap_pos, want_zmap.size());
+            for (size_t k = 0; k < want_zmap.size(); ++k) {
+                const ZoneMapObservation &got = record.zmap_obs[zmap_pos + k];
+                EXPECT_EQ(got.column_idx, want_zmap[k].column_idx) << "observation " << k;
+                EXPECT_EQ(got.is_numeric, want_zmap[k].is_numeric) << "observation " << k;
+                EXPECT_EQ(std::memcmp(&got.value, &want_zmap[k].value, sizeof(double)), 0) << "observation " << k;
+            }
+            zmap_pos = record.obs_end[i].zmap_end;
+
+            std::vector<std::pair<uint32_t, std::string>> want_catidx;
+            const int tracked = std::min(static_cast<int>(width), rows[i].fielddata_size());
+            for (int c = 0; c < tracked; ++c) {
+                if (rows[i].fielddata(c).oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
+                    want_catidx.emplace_back(static_cast<uint32_t>(c), EncodeFDataForCatIdx(rows[i].fielddata(c)));
+                }
+            }
+            std::vector<std::pair<uint32_t, std::string>> got_catidx;
+            while (catidx_pos < record.obs_end[i].catidx_end) {
+                uint32_t column_idx = 0;
+                uint32_t len = 0;
+                std::memcpy(&column_idx, record.catidx.data() + catidx_pos, sizeof(column_idx));
+                std::memcpy(&len, record.catidx.data() + catidx_pos + sizeof(column_idx), sizeof(len));
+                catidx_pos += XStore::WalRecord::kCatIdxEntryHeaderBytes;
+                ASSERT_LE(catidx_pos + len, record.obs_end[i].catidx_end);
+                got_catidx.emplace_back(column_idx, record.catidx.substr(catidx_pos, len));
+                catidx_pos += len;
+            }
+            EXPECT_EQ(catidx_pos, record.obs_end[i].catidx_end);
+            EXPECT_TRUE(got_catidx == want_catidx) << got_catidx.size() << " catidx values, want " << want_catidx.size();
+        }
+        EXPECT_EQ(zmap_pos, record.zmap_obs.size());
+        EXPECT_EQ(catidx_pos, record.catidx.size());
+    }
+}
+
+// End to end: rows inserted through both producers (BatchInsert and UnaryInsert, SYNC) and folded by the writer from
+// the flat arrays leave .zmap and .catidx byte-identical to the per-row reference built from the same data file. Mixed
+// types, unset columns, narrow rows and string-heavy rows (long values in 8 of 16 columns, so the packed catidx arena
+// grows past its numeric-sized reserve).
+TEST_F(XStoreRebuildTest, LiveInsertIndexesMatchThePerRowReference) {
+    const std::string db = "LIVEREF";
+    const unsigned short year = 1982;
+    XStore store;
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    const auto string_heavy = [](uint64_t i) {
+        XStore_Proto::RowData row;
+        for (uint64_t c = 0; c < 16; ++c) {
+            if (c % 2 == 0) {
+                row.add_fielddata()->set_stringdata(std::string(24 + (i + c) % 41, static_cast<char>('a' + c)) + std::to_string(i));
+            } else {
+                row.add_fielddata()->set_doubledata(static_cast<double>(i * 16 + c));
+            }
+        }
+        return row;
+    };
+    std::vector<std::pair<unsigned long long, XStore_Proto::RowData>> rows;
+    for (uint64_t i = 0; i < 3000; ++i) {
+        rows.emplace_back(Jan1(year) + i, i % 5 == 0 ? string_heavy(i) : MixedRow(i, 1 + static_cast<int>(i % 40)));
+    }
+    Insert(store, db, rows);
+    for (uint64_t i : {4000ULL, 4001ULL, 6000ULL}) {
+        XStore_Proto::UnaryInsert_REP rep;
+        store.UnaryInsert(Jan1(year) + i, i == 4001 ? MixedRow(i, 33) : string_heavy(i), db, &rep, XStore_Proto::SYNC);
+        ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+    }
+    CleanRestartState(); // WAL checkpointed, both indexes clean on disk
+
+    const uint32_t width = ReadHeader<ZoneMapFileHeader>(YearPath(db, year, ".zmap")).tracked_column_count;
+    ASSERT_EQ(width, ReadHeader<CatIdxFileHeader>(YearPath(db, year, ".catidx")).tracked_column_count);
+    const std::string ref_zmap = (scratch->test_root / "live_ref.zmap").string();
+    const std::string ref_catidx = (scratch->test_root / "live_ref.catidx").string();
+    BuildReferenceIndexes(store, YearPath(db, year, ".XSTORE"), ref_zmap, ref_catidx, kRowLength, width);
+    const std::string got_zmap = ReadFileBytes(YearPath(db, year, ".zmap"));
+    const std::string got_catidx = ReadFileBytes(YearPath(db, year, ".catidx"));
+    EXPECT_EQ(got_zmap.size(), ReadFileBytes(ref_zmap).size());
+    EXPECT_TRUE(got_zmap == ReadFileBytes(ref_zmap)) << ".zmap of the live inserts differs from the per-row reference";
+    EXPECT_EQ(got_catidx.size(), ReadFileBytes(ref_catidx).size());
+    EXPECT_TRUE(got_catidx == ReadFileBytes(ref_catidx)) << ".catidx of the live inserts differs from the per-row reference";
 }
 
 // A failed index write part-way through the scan: that file stops behind its frontier (blocks it finished stay

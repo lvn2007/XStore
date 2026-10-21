@@ -60,8 +60,8 @@ inline constexpr size_t      WAL_BATCH_MAX_RECORDS       = 256;
 // one call. WalWriterLoop's per-file write step chunks into multiple
 // pwritev calls (same file, advancing offset) rather than assuming a
 // single call always fits, now that Batch/Range Insert can hand a single
-// WalRecord hundreds of thousands of rows (2 iovecs/row: an epoch-time
-// buffer + the row bytes for every row past the first).
+// WalRecord hundreds of thousands of rows (a record is now at most 2 iovecs:
+// the header + one rows section, so this only bounds a sub-batch of records).
 inline constexpr size_t      WAL_PWRITEV_MAX_IOVECS      = 1024;
 inline constexpr const char* WAL_DIR_NAME                = "WAL";
 
@@ -295,7 +295,7 @@ inline constexpr uint32_t ZONE_MAP_MAX_TRACKED_COLUMNS = 64;
 // client may pass to CreateDB and the high-water mark MaybeGrowColumnCount
 // will grow to from observed rows. columnCount directly sizes
 // std::vector<ZoneMapEntry> allocations (ZoneMapFile::EnsureBlockLoaded /
-// TryGetBlockStats) and BuildZoneMapObservations' reserve(), and it is
+// TryGetBlockStats) and WalRecord::ReserveRows' reserve(), and it is
 // persisted to .CFG, so an unvalidated value straight off the wire is a
 // durable remote denial of service: CreateDB(columnCount=0xFFFFFFFF) makes
 // every later insert on that DB throw std::length_error out of a ZMQ worker

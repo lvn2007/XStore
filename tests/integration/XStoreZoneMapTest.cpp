@@ -1445,10 +1445,10 @@ TEST_F(XStoreZoneMapTest, SumAndVarianceOnColumnAboveGrownColumnCountReadRealDat
 // Scoped re-review of the C1/C2 fix wave, finding (a) -- a SILENT,
 // PERMANENT wrong answer on the normal restart path, with no self-healing.
 //
-// Mechanism: ParseWalRecord rebuilds a WalRow out of the WAL's own bytes,
+// Mechanism: ParseWalRecord rebuilds a WalRecord out of the WAL's own bytes,
 // and the WAL format deliberately doesn't carry a row's
-// ZoneMapObservations (derived state -- see WalRow in XStore.h). So every
-// WAL-replayed row reaches ApplyWalRecord with an EMPTY observation vector,
+// ZoneMapObservations (derived state -- see WalRecord::zmap_obs in XStore.h). So
+// every WAL-replayed row reaches ApplyWalRecord with NO observations,
 // and its zmap.UpdateRow call is a no-op: replay puts the row back in the
 // DATA file and folds nothing into the zone map.
 //

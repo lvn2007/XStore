@@ -79,6 +79,18 @@ void ReportPerf(const PerfStats &stats) {
               << std::endl;
 }
 
+// After an ASYNC enqueue was timed: times the wait for the WAL writer to apply every queued row (the writer's drain
+// rate; untimed by the enqueue line) and prints the process peak RSS (ru_maxrss is a high-water mark, so it covers
+// the queued burst; run one test per process, --gtest_filter, for a clean number).
+void ReportDrainAndPeakRss(XStore &store, const std::string &name, unsigned long long n, unsigned long long sentinel_epoch) {
+    const auto start = std::chrono::steady_clock::now();
+    WaitForWalDrained(store, "PERFDB", sentinel_epoch);
+    ReportPerf({name + " drain", n, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count()});
+    rusage usage{};
+    getrusage(RUSAGE_SELF, &usage);
+    std::cout << "[PERF] " << name << " process peak RSS=" << usage.ru_maxrss << " KiB" << std::endl;
+}
+
 // A representative payload (not a single trivial column) so the timed loop
 // reflects realistic per-row serialize/copy cost, not a best case.
 XStore_Proto::RowData PerfRow(unsigned long long i) {
@@ -462,7 +474,106 @@ TEST_F(XStorePerfTest, BatchInsertThroughput) {
 
     EXPECT_NE(rep.insertstatus().find(fmt::format("Inserted {} elements", n)), std::string::npos) << rep.insertstatus();
     ReportPerf({"BatchInsert", n, elapsed});
-    WaitForWalDrained(store, "PERFDB", BASE_TS - 1);   // ASYNC times the enqueue only; see UnaryInsertThroughput_Async
+    ReportDrainAndPeakRss(store, "BatchInsert", n, BASE_TS - 1);   // ASYNC times the enqueue only; see UnaryInsertThroughput_Async
+}
+
+namespace {
+// 128 columns: a short string every 8th column, doubles elsewhere. A double column serializes to 11 B (field tag +
+// length + double tag + 8 B), so 128 doubles are exactly 1408 B and the strings ("sNN", 7 B) leave some slack.
+constexpr int kWideColumns = 128;
+constexpr short kWideRowLength = 1408;
+
+XStore_Proto::RowData WideRow(unsigned long long i) {
+    XStore_Proto::RowData row;
+    for (int c = 0; c < kWideColumns; ++c) {
+        XStore_Proto::FData *f = row.add_fielddata();
+        if (c % 8 == 7) {
+            f->set_stringdata(fmt::format("s{:02}", (i + static_cast<unsigned long long>(c)) % 100));
+        } else {
+            f->set_doubledata(static_cast<double>(i) * 0.5 + c);
+        }
+    }
+    return row;
+}
+}  // namespace
+
+// BatchInsertThroughput's ASYNC shape with BENCH_DB-like wide rows (128 columns, 1408 B): the producer's per-row
+// cost here is dominated by serialization and index observations, the writer's by queued bytes per row. Enqueue
+// time is the timed number; the drain (writer rate) and peak RSS lines follow. Memory: the request plus the queued
+// record hold roughly 10-15 KB per row, so keep XSTORE_PERF_N moderate (the 50k default is about 0.7 GB).
+TEST_F(XStorePerfTest, BatchInsertWideThroughput) {
+    XStore store;
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, kWideRowLength);
+    const unsigned long long n = PerfOpCount(50'000);
+
+    XStore_Proto::BatchInsert_REQ req;
+    req.set_dbname("PERFDB");
+    req.set_durabilitymode(XStore_Proto::ASYNC);
+    for (unsigned long long i = 0; i < n; i++) {
+        XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
+        entry->set_timestamp(BASE_TS + i);
+        *entry->mutable_data() = WideRow(i);
+    }
+    ASSERT_LE(req.batchinsert_data(0).data().ByteSizeLong(), static_cast<size_t>(kWideRowLength));
+
+    XStore_Proto::BatchInsert_REP rep;
+    auto start = std::chrono::steady_clock::now();
+    store.BatchInsert(&req, &rep);
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+    EXPECT_NE(rep.insertstatus().find(fmt::format("Inserted {} elements", n)), std::string::npos) << rep.insertstatus();
+    ReportPerf({"BatchInsertWide", n, elapsed});
+    ReportDrainAndPeakRss(store, "BatchInsertWide", n, BASE_TS - 1);
+}
+
+namespace {
+// 16 columns, the even ones strings of 24-64 B (unique per row), the odd ones doubles. A string column of L <= 125 B
+// serializes to L + 4 B, a double to 11 B: at most 8 * 68 + 8 * 11 = 632 B.
+constexpr int kStringHeavyColumns = 16;
+constexpr short kStringHeavyRowLength = 640;
+
+XStore_Proto::RowData StringHeavyRow(unsigned long long i) {
+    XStore_Proto::RowData row;
+    for (int c = 0; c < kStringHeavyColumns; ++c) {
+        XStore_Proto::FData *f = row.add_fielddata();
+        if (c % 2 == 0) {
+            std::string s = fmt::format("{}-{}-", c, i);
+            s.resize(24 + (i * 7 + static_cast<unsigned long long>(c)) % 41, static_cast<char>('a' + c));
+            f->set_stringdata(std::move(s));
+        } else {
+            f->set_doubledata(static_cast<double>(i) * 0.25 + c);
+        }
+    }
+    return row;
+}
+}  // namespace
+
+// BatchInsertWideThroughput's shape with catidx-heavy rows: long string values in half the columns, so the packed
+// catidx arena (and the bloom hashing on the writer) carries most of the observation bytes. Same lines: enqueue
+// (timed), drain, peak RSS.
+TEST_F(XStorePerfTest, BatchInsertStringHeavyThroughput) {
+    XStore store;
+    CreateTestDb(store, "PERFDB", XStore_Proto::SECOND, kStringHeavyRowLength);
+    const unsigned long long n = PerfOpCount(50'000);
+
+    XStore_Proto::BatchInsert_REQ req;
+    req.set_dbname("PERFDB");
+    req.set_durabilitymode(XStore_Proto::ASYNC);
+    for (unsigned long long i = 0; i < n; i++) {
+        XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
+        entry->set_timestamp(BASE_TS + i);
+        *entry->mutable_data() = StringHeavyRow(i);
+    }
+    ASSERT_LE(req.batchinsert_data(0).data().ByteSizeLong(), static_cast<size_t>(kStringHeavyRowLength));
+
+    XStore_Proto::BatchInsert_REP rep;
+    auto start = std::chrono::steady_clock::now();
+    store.BatchInsert(&req, &rep);
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+    EXPECT_NE(rep.insertstatus().find(fmt::format("Inserted {} elements", n)), std::string::npos) << rep.insertstatus();
+    ReportPerf({"BatchInsertStringHeavy", n, elapsed});
+    ReportDrainAndPeakRss(store, "BatchInsertStringHeavy", n, BASE_TS - 1);
 }
 
 // Same as BatchInsertThroughput but SYNC: the call returns only once every row is WAL-durable AND applied, so this

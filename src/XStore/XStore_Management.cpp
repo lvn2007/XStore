@@ -214,7 +214,7 @@ bool XStore::GetOrLoadCfg(const std::string &db_name, const std::string &db_base
     std::fclose(c_file);
 
     // Sanitize BEFORE this value is cached or handed back -- everything
-    // downstream (EffectiveTrackedColumnCount, BuildZoneMapObservations,
+    // downstream (EffectiveTrackedColumnCount, WalRecord::AppendRow,
     // every GetOrOpenZoneMap call site) treats a cached cfg as already
     // trustworthy. See ClampPersistedColumnCount's comment in XStore.h.
     ClampPersistedColumnCount(db_name, cfg_out);
@@ -1313,7 +1313,7 @@ void XStore::InitDB() {
         // Clamp on THIS local too, not just inside PutCfg's own copy: the
         // local is what flows into RebuildStaleZoneMapsForDb ->
         // EffectiveTrackedColumnCount -> RebuildOneYearZoneMap a few lines
-        // below, where BuildZoneMapObservations' reserve() and
+        // below, where the observation reserve() and
         // EnsureBlockLoaded's std::vector<ZoneMapEntry> are sized from it --
         // the allocations an out-of-bound on-disk value actually throws on.
         // See ClampPersistedColumnCount in XStore.h.
@@ -2745,7 +2745,7 @@ void XStore::AppendRebuildObservations(uint64_t row_index, const char *row, uint
     // the slot) and every column decodes. Then the per-row rebuild got exactly these columns: RowData parse of
     // [0, real_len) sees the same n columns in the same order (no unknown or mis-typed field to skip or keep), and
     // ExtractColumnByIndexSkipParse(c) skips the same c columns and decodes column c from the same bytes (an
-    // empty, unset column included: the zone map sees it as null; the catidx skips it, like BuildCatIdxObservations).
+    // empty, unset column included: the zone map sees it as null; the catidx skips it, like WalRecord::AppendRow).
     google::protobuf::io::CodedInputStream in(reinterpret_cast<const uint8_t *>(row), row_length);
     bool one_pass = true;
     uint32_t column = 0;
@@ -3040,7 +3040,7 @@ void XStore::ReplayRingShard(const std::string &wal_path, size_t shard_idx, int 
                                              geometry->second->second != static_cast<int>(record.time_resolution))) {
             spdlog::warn("[WAL REPLAY] [DB: {}] - Record at LSN {} ({} rows) has row length {} / time resolution {}, the DB has "
                          "{} / {}: a record of a removed DB of that name; skipped",
-                         record.db_name, lsn, record.rows.size(), record.row_length, static_cast<int>(record.time_resolution),
+                         record.db_name, lsn, record.row_count, record.row_length, static_cast<int>(record.time_resolution),
                          geometry->second->first, geometry->second->second);
             lsn += consumed;
             continue;
@@ -3049,7 +3049,7 @@ void XStore::ReplayRingShard(const std::string &wal_path, size_t shard_idx, int 
             if (DbStillExists(record.db_base_path, record.db_name)) {
                 spdlog::error("[WAL REPLAY] [DB: {}] - Record at LSN {} ({} rows) failed to apply although the DB is not gone (reason: see the "
                               "preceding [WAL APPLY] line); this shard's replay FAILS and the shard is fenced until restart",
-                              record.db_name, lsn, record.rows.size());
+                              record.db_name, lsn, record.row_count);
                 apply_failed = true;
             } else {
                 spdlog::error("[WAL REPLAY] [DB: {}] - One or more rows failed to apply (DB no longer exists; skipped)", record.db_name);
@@ -3058,12 +3058,12 @@ void XStore::ReplayRingShard(const std::string &wal_path, size_t shard_idx, int 
         // Recorded whether or not the apply fully succeeded: a partial apply still put SOME rows
         // into the data file with no zone-map fold. Same derivation as ApplyWalRecord (one (db, year)
         // per record); keyed by db_name so InitDB's lookup cannot be defeated by another spelling.
-        if (!record.rows.empty()) {
-            TimeStruct replayed_ts(static_cast<std::time_t>(record.rows.front().epoch_time), record.time_resolution);
+        if (record.row_count != 0) {
+            TimeStruct replayed_ts(static_cast<std::time_t>(record.EpochAt(0)), record.time_resolution);
             replayed_years[record.db_name].insert(replayed_ts.year);
             touched_paths.insert(CachedYearFilePath(record.db_base_path, replayed_ts.year));
         }
-        replayed_count += static_cast<unsigned>(record.rows.size());
+        replayed_count += static_cast<unsigned>(record.row_count);
         lsn += consumed;
     }
     const uint64_t end_lsn = lsn;
@@ -3250,7 +3250,7 @@ void XStore::ReplayLegacyShard(const std::string &wal_path, size_t shard_idx, Re
             if (DbStillExists(record.db_base_path, record.db_name)) {
                 spdlog::error("[WAL REPLAY] [DB: {}] - Legacy record ({} rows) failed to apply although the DB is not gone (reason: see the "
                               "preceding [WAL APPLY] line); the file is NOT converted and the shard is fenced until restart",
-                              record.db_name, record.rows.size());
+                              record.db_name, record.row_count);
                 apply_failed = true;
             } else {
                 spdlog::error("[WAL REPLAY] [DB: {}] - One or more rows failed to apply (DB no longer exists; skipped)", record.db_name);
@@ -3262,13 +3262,13 @@ void XStore::ReplayLegacyShard(const std::string &wal_path, size_t shard_idx, Re
         // Year is derived the exact same way ApplyWalRecord derives it. Keyed by db_name rather
         // than record.db_base_path so InitDB's lookup can't be defeated by a second spelling of
         // the same directory.
-        if (!record.rows.empty()) {
-            TimeStruct replayed_ts(static_cast<std::time_t>(record.rows.front().epoch_time), record.time_resolution);
+        if (record.row_count != 0) {
+            TimeStruct replayed_ts(static_cast<std::time_t>(record.EpochAt(0)), record.time_resolution);
             replayed_years[record.db_name].insert(replayed_ts.year);
             touched_paths.insert(CachedYearFilePath(record.db_base_path, replayed_ts.year));
         }
 
-        replayed_count += static_cast<unsigned>(record.rows.size());
+        replayed_count += static_cast<unsigned>(record.row_count);
         buffer.erase(0, consumed);
     }
     in.close();

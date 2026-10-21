@@ -82,7 +82,7 @@ inline void BuildReferenceIndexes(XStore &store, const std::string &data_path, c
         std::vector<CatIdxObservation> observations;
         for (uint32_t c = 0; c < width; ++c) {
             XStore_Proto::FData f;
-            // An unset (null) column is skipped, like BuildCatIdxObservations (live inserts).
+            // An unset (null) column is skipped, like WalRecord::AppendRow (live inserts).
             if (store.ExtractColumnByIndexSkipParse(buf, row_length, static_cast<unsigned short>(c), f) &&
                 f.oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
                 observations.push_back({c, EncodeFDataForCatIdx(f), true});
