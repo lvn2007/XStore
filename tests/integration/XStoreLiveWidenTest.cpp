@@ -4829,7 +4829,9 @@ TEST_F(XStoreLiveWidenTest, ACancelMidPassStopsItAndTheNextStartRebuilds) {
     BuildStartupReference(store, db, "LWTRIGSTOPREF", 70); // its InitDB also rebuilds LWTRIGSTOP's dirty files
     ExpectSameFilesAs(db, "LWTRIGSTOPREF");
     ExpectAnswersMatchTheData(store, db, 0, kRows - 1, {0, 65});
-    EXPECT_EQ(YearsAndResults(store.RunLiveWidenPass(g + seconds(31))), (PassResult{{kYear, Result::kNothingToDo}}));
+    // Exactly the end of this DB's quiet period: the reference DB's growth was recorded after g, so it is not due yet
+    // however fast the build runs (a pass at g + 31 s also took it when less than a second had gone by).
+    EXPECT_EQ(YearsAndResults(store.RunLiveWidenPass(g + seconds(30))), (PassResult{{kYear, Result::kNothingToDo}}));
     EXPECT_FALSE(XStore::LiveWidenLastGrowthForTests(path).has_value()); // (the reference DB's own growth is recorded)
 }
 
