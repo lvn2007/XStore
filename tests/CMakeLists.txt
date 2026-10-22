@@ -129,6 +129,14 @@ if(XSTORE_USE_JEMALLOC)
     target_link_options(xstore_zmq_perf_tests PRIVATE "-Wl,--whole-archive,$<TARGET_FILE:jemalloc::jemalloc>,--no-whole-archive")
 endif()
 
+# xstore_zmq_insert_client: the same BatchInsert load as xstore_zmq_perf_tests, but a standalone program for a real
+# XStore server on another process or machine (see the file header). Not part of any test run.
+add_executable(xstore_zmq_insert_client
+        perf/XStoreZmqInsertClient.cpp
+)
+target_include_directories(xstore_zmq_insert_client PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(xstore_zmq_insert_client PRIVATE xstore_network)
+
 # tests/local_bench: opt-in, single-machine benchmark harness (pure Python
 # driver around the real XStore server + the XBench binary -- see
 # tests/local_bench/README.md). Same "not part of the default build" stance

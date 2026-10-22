@@ -26,17 +26,14 @@
 #include <spdlog/fmt/fmt.h>
 #include "include/Logger/Logger.h"
 #include "tests/integration/XStoreTestSupport.h"
+#include "tests/perf/ZmqInsertPayload.h"
 #include "tests/integration/XStoreZmqTestSupport.h"
 
 using namespace xstore_test;
 
 namespace {
 
-constexpr int kColumns = 128;
-constexpr short kRowLength = kColumns * 11;   // a double column serializes to 11 B
-constexpr size_t kRowsPerCall = 1000;
-constexpr unsigned long long kBaseTs = 946684800ULL;        // 2000-01-01
-constexpr unsigned long long kThreadStride = 10'000'000ULL; // seconds between client threads' ranges
+using namespace zmq_insert_payload;
 
 int EnvInt(const char *name, int fallback) {
     const char *v = std::getenv(name);
@@ -50,30 +47,6 @@ std::vector<int> Tiers() {
         if (std::atoi(item.c_str()) > 0) tiers.push_back(std::atoi(item.c_str()));
     }
     return tiers;
-}
-
-XStore_Proto::RowData WideRow(unsigned long long i) {
-    XStore_Proto::RowData row;
-    for (int c = 0; c < kColumns; ++c) row.add_fielddata()->set_doubledata(static_cast<double>(i) * 0.5 + c);
-    return row;
-}
-
-// One serialized Request envelope holding a BatchInsert of `kRowsPerCall` rows starting at `first_ts`.
-std::string BuildPayload(const std::string &db, XStore_Proto::WalDurabilityMode mode, unsigned long long first_ts,
-                         bool shuffle, std::mt19937_64 &rng) {
-    std::vector<size_t> order(kRowsPerCall);
-    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
-    if (shuffle) std::shuffle(order.begin(), order.end(), rng);
-    XStore_Proto::Request request;
-    XStore_Proto::BatchInsert_REQ *batch = request.mutable_batchinsert();
-    batch->set_dbname(db);
-    batch->set_durabilitymode(mode);
-    for (const size_t i : order) {
-        XStore_Proto::BatchInsert_DATA *entry = batch->add_batchinsert_data();
-        entry->set_timestamp(first_ts + i);
-        *entry->mutable_data() = WideRow(first_ts + i);
-    }
-    return request.SerializeAsString();
 }
 
 using SteadyClock = std::chrono::steady_clock;
@@ -114,8 +87,7 @@ void RunTiers(const std::string &label, bool shuffle, XStore_Proto::WalDurabilit
                 std::mt19937_64 rng(1000 + static_cast<unsigned>(t));
                 for (int c = 0; c < calls; ++c) {
                     payloads[static_cast<size_t>(t)].push_back(
-                        BuildPayload(db, mode, kBaseTs + static_cast<unsigned long long>(t) * kThreadStride +
-                                                   static_cast<unsigned long long>(c) * kRowsPerCall, shuffle, rng));
+                        BuildPayload(db, mode, FirstTs(static_cast<unsigned long long>(t), static_cast<unsigned long long>(c)), shuffle, rng));
                 }
             });
         }
