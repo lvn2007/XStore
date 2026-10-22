@@ -8,7 +8,10 @@ project(XStore)
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
-set(CMAKE_CXX_FLAGS_RELEASE "-O3")
+# -DNDEBUG is CMake's own Release default and also reaches protobuf and abseil: without it their internal
+# consistency checks (e.g. TcParser::VerifyHasBitConsistency, ~6% of the server's CPU on a BatchInsert) run in
+# production. Our own checks that must survive it are runtime throws, not assert() (ZMQ_Server.cpp, XStore_SysStats.cpp).
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 
 # Warnings. -Wall -Wextra for all targets in this tree; in practice the
 # generated protobuf translation units and the vendored third-party headers

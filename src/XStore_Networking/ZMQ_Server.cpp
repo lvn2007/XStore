@@ -130,8 +130,8 @@ void ZmqServer::Serve(const std::string &listen_addr, const std::string &listen_
                       const std::optional<XStoreCurveKeyPair> &curve_identity,
                       const std::shared_ptr<KeyStore> &curve_keystore) {
     // Deliberately a runtime throw, not assert(): this project's Release
-    // build happens not to define NDEBUG today (see CMakeLists.txt), but
-    // relying on that staying true would make the failure mode for a caller
+    // build defines NDEBUG (see CMakeLists.txt), which compiles an assert()
+    // out, and that would make the failure mode for a caller
     // bug a silent one -- passing only one of the two params would fall
     // through to the plain NULL-mechanism bind below with no CURVE, no ZAP,
     // and nothing logged about it, i.e. an unauthenticated/unencrypted
