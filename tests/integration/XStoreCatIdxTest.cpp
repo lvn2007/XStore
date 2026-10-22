@@ -5,7 +5,12 @@
 #include "XStore.pb.h"
 #include "XStoreSyscallFault.h"
 #include "XStoreTestSupport.h"
+#include "XStoreRebuildTestSupport.h"
 #include <algorithm>
+#include <cstring>
+#include <functional>
+#include <limits>
+#include <random>
 #include <filesystem>
 #include <optional>
 #include <vector>
@@ -1181,6 +1186,306 @@ TEST_F(XStoreCatIdxTestFixture, CompactionSkipsAnIndexBeingRebuilt) {
     EXPECT_TRUE(catidx.FinishRebuild());
     store.CompactOneYearCatIdx(db, year, 64, 64);
     EXPECT_TRUE(catidx.HasBitmapSection());
+}
+
+} // namespace
+
+// Bloom bit positions computed on the producer (BloomValueOf) against the old fold-time formula, and the three ways a
+// value reaches a file (the writer's view, CatIdxFoldBatch::Add, the per-row UpdateRow) against each other and against
+// an image built bit by bit with the old formula.
+namespace {
+using xstore_rebuild_test::Positions;
+using xstore_rebuild_test::ReadFileBytes;
+using xstore_rebuild_test::RefBloomPositions;
+
+constexpr uint16_t kDiffRowLength = 16384;   // RowsPerBlock == 128
+constexpr size_t kMaxValueBytes = kDiffRowLength - 8;   // a value's bytes inside one row slot (tags and lengths aside)
+
+std::string RandomBytes(std::mt19937_64 &rng, size_t n) {
+    std::string s(n, '\0');
+    for (char &c : s) c = static_cast<char>(rng() % 4 == 0 ? 0 : rng());   // NULs included
+    return s;
+}
+
+double DoubleBits(uint64_t bits) {
+    double d;
+    std::memcpy(&d, &bits, sizeof(d));
+    return d;
+}
+
+// Every FData type with its edge values, then random values of each.
+std::vector<XStore_Proto::FData> EveryTypeValues(std::mt19937_64 &rng) {
+    using namespace xstore_test;
+    using L64 = std::numeric_limits<int64_t>;
+    using L32 = std::numeric_limits<int32_t>;
+    using LD = std::numeric_limits<double>;
+    using LF = std::numeric_limits<float>;
+    std::vector<XStore_Proto::FData> v;
+    for (int64_t x : {L64::min(), L64::max(), int64_t{0}, int64_t{-1}, int64_t{1}}) {
+        v.push_back(FInt64(x));
+        v.push_back(FSInt64(x));
+        v.push_back(FSFixed64(x));
+    }
+    for (int32_t x : {L32::min(), L32::max(), 0, -1, 1}) {
+        v.push_back(FInt32(x));
+        v.push_back(FSInt32(x));
+        v.push_back(FSFixed32(x));
+    }
+    for (uint64_t x : {uint64_t{0}, std::numeric_limits<uint64_t>::max()}) {
+        v.push_back(FUInt64(x));
+        v.push_back(FFixed64(x));
+    }
+    for (uint32_t x : {0u, std::numeric_limits<uint32_t>::max()}) {
+        v.push_back(FUInt32(x));
+        v.push_back(FFixed32(x));
+    }
+    for (double d : {LD::quiet_NaN(), -LD::quiet_NaN(), DoubleBits(0x7ff8000000000001ULL), LD::signaling_NaN(), 0.0, -0.0,
+                     LD::infinity(), -LD::infinity(), LD::denorm_min(), -LD::denorm_min(), LD::min(), LD::max(), LD::lowest()}) {
+        v.push_back(FDouble(d));
+    }
+    for (float f : {LF::quiet_NaN(), 0.0f, -0.0f, LF::infinity(), -LF::infinity(), LF::denorm_min(), LF::max()}) v.push_back(FFloat(f));
+    v.push_back(FBool(true));
+    v.push_back(FBool(false));
+    for (size_t n : {size_t{0}, size_t{1}, size_t{7}, size_t{8}, size_t{15}, size_t{16}, size_t{200}, kMaxValueBytes}) {
+        v.push_back(FString(std::string(n, 'q')));
+        v.push_back(FBytes(RandomBytes(rng, n)));
+    }
+    v.push_back(FBytes(std::string("\0", 1)));
+    v.push_back(FBytes(std::string("\0\0\xff\0", 4)));
+    for (int i = 0; i < 300; ++i) {
+        v.push_back(FInt64(static_cast<int64_t>(rng())));
+        v.push_back(FInt32(static_cast<int32_t>(rng())));
+        v.push_back(FUInt64(rng()));
+        v.push_back(FSInt64(static_cast<int64_t>(rng())));
+        v.push_back(FFixed32(static_cast<uint32_t>(rng())));
+        v.push_back(FDouble(DoubleBits(rng())));   // any bit pattern: NaN payloads, denormals, infinities
+        v.push_back(FFloat(static_cast<float>(DoubleBits(rng()))));
+        v.push_back(FBool(rng() % 2 == 0));
+        v.push_back(FString(std::string(rng() % 64, static_cast<char>('a' + rng() % 26))));
+        v.push_back(FBytes(RandomBytes(rng, rng() % (i % 10 == 0 ? kMaxValueBytes : 300))));
+    }
+    return v;
+}
+
+TEST(CatIdxBloomPositionTest, PositionsMatchTheOldFormulaForEveryFDataType) {
+    std::mt19937_64 rng(20261022);
+    const std::vector<XStore_Proto::FData> values = EveryTypeValues(rng);
+    for (size_t i = 0; i < values.size(); ++i) {
+        SCOPED_TRACE(i);
+        const std::string enc = EncodeFDataForCatIdx(values[i]);
+        ASSERT_LE(enc.size(), 1 + kMaxValueBytes);
+        const uint32_t col = static_cast<uint32_t>(i % 4096);
+        const CatIdxBloomValue v = BloomValueOfEncoded(col, enc.data(), enc.size());
+        EXPECT_EQ(v.ColumnIdx(), col);
+        EXPECT_EQ(Positions(v), RefBloomPositions(enc));
+        for (const uint16_t bit : v.Bits()) EXPECT_LT(bit, XStoreTunables::CATIDX_BLOOM_BYTES_PER_ENTRY * 8);
+    }
+}
+
+TEST(CatIdxBloomPositionTest, PositionsMatchTheOldFormulaForRawHashes) {
+    std::mt19937_64 rng(7);
+    std::vector<std::pair<uint64_t, uint64_t>> hashes = {{0, 0}, {0, 1}, {UINT64_MAX, UINT64_MAX}, {UINT64_MAX, 1},
+                                                         {1279, 1280}, {1280, 1279}, {0xFFFFFFFFULL, UINT64_MAX / 3}};
+    for (int i = 0; i < 20000; ++i) hashes.emplace_back(rng(), rng());
+    volatile size_t entry_bytes = XStoreTunables::CATIDX_BLOOM_BYTES_PER_ENTRY;   // a runtime modulus, as the old fold had
+    for (const auto &[h1, h2] : hashes) {
+        const CatIdxBloomValue v = BloomValueOf(3, h1, h2);
+        for (size_t i = 0; i < XStoreTunables::CATIDX_BLOOM_HASH_COUNT; ++i) {
+            const uint64_t combined = h1 + i * h2;
+            ASSERT_EQ(v.Bits()[i], combined % (entry_bytes * 8)) << h1 << " " << h2 << " " << i;
+        }
+    }
+}
+
+struct DiffRow {
+    uint64_t row;
+    std::vector<CatIdxObservation> obs;   // absent ones included (UpdateRow skips them)
+};
+
+TEST(CatIdxBloomPositionTest, ViewAddAndUpdateRowWriteIdenticalBytesMatchingTheOldFormula) {
+    xstore_test::ScratchDir scratch("catidx_bloom_diff");
+    constexpr uint32_t kWidth = 6;
+    constexpr uint64_t kRpb = 128;
+    std::mt19937_64 rng(555);
+    const std::vector<XStore_Proto::FData> pool = EveryTypeValues(rng);
+
+    std::vector<DiffRow> rows;
+    uint64_t r = 0;
+    for (int i = 0; i < 1200; ++i) {
+        r += i % 11 == 0 ? rng() % 300 : 1;   // gaps, block edges, a duplicate row now and then (+0)
+        DiffRow row{i % 17 == 0 ? rng() % (r + 1) : r, {}};   // and some rows out of order
+        for (uint32_t c = 0; c < kWidth + 2; ++c) {   // columns past the width: dropped by every path
+            if (rng() % 4 == 0) {
+                row.obs.push_back({c, std::string(), false});
+            } else {
+                row.obs.push_back({c, EncodeFDataForCatIdx(pool[rng() % pool.size()]), true});
+            }
+        }
+        if (i % 50 == 0) row.obs.clear();   // a row with no value
+        rows.push_back(std::move(row));
+    }
+
+    const std::string view_path = (scratch.test_root / "view.catidx").string();
+    const std::string add_path = (scratch.test_root / "add.catidx").string();
+    const std::string per_row_path = (scratch.test_root / "per_row.catidx").string();
+    {
+        CatIdxFile view_file;
+        CatIdxFile add_file;
+        CatIdxFile per_row_file;
+        ASSERT_TRUE(view_file.Open(view_path, kDiffRowLength, kWidth));
+        ASSERT_TRUE(add_file.Open(add_path, kDiffRowLength, kWidth));
+        ASSERT_TRUE(per_row_file.Open(per_row_path, kDiffRowLength, kWidth));
+        // (a) the writer's shape: one value array, folded through views over chunks of rows with chunk-relative ends.
+        std::vector<CatIdxBloomValue> values;
+        std::vector<size_t> row_value_end;
+        for (const DiffRow &row : rows) {
+            for (const CatIdxObservation &o : row.obs) {
+                if (o.is_present) values.push_back(BloomValueOfEncoded(o.column_idx, o.encoded_value.data(), o.encoded_value.size()));
+            }
+            row_value_end.push_back(values.size());
+        }
+        for (size_t begin = 0; begin < rows.size();) {
+            const size_t end = std::min(rows.size(), begin + 1 + rng() % 200);
+            const size_t value_begin = begin == 0 ? 0 : row_value_end[begin - 1];
+            std::vector<uint64_t> row_index;
+            std::vector<size_t> value_end;
+            for (size_t i = begin; i < end; ++i) {
+                row_index.push_back(rows[i].row);
+                value_end.push_back(row_value_end[i] - value_begin);
+            }
+            view_file.UpdateRows(CatIdxFoldView{row_index.data(), value_end.data(), row_index.size(), values.data() + value_begin});
+            begin = end;
+        }
+        // (b) CatIdxFoldBatch::Add, one batch.
+        CatIdxFoldBatch batch;
+        for (const DiffRow &row : rows) {
+            for (const CatIdxObservation &o : row.obs) {
+                if (o.is_present) batch.Add(o.column_idx, o.encoded_value);
+            }
+            batch.EndRow(row.row);
+        }
+        add_file.UpdateRows(batch);
+        // (c) the per-row API.
+        for (const DiffRow &row : rows) per_row_file.UpdateRow(row.row, row.obs);
+
+        for (CatIdxFile *f : {&view_file, &add_file, &per_row_file}) {
+            for (const DiffRow &row : rows) {
+                for (const CatIdxObservation &o : row.obs) {
+                    if (o.is_present && o.column_idx < kWidth) {
+                        ASSERT_TRUE(f->MightContain(row.row / kRpb, o.column_idx, o.encoded_value)) << "a false negative";
+                    }
+                }
+            }
+        }
+    }
+
+    const std::string view_bytes = ReadFileBytes(view_path);
+    EXPECT_TRUE(view_bytes == ReadFileBytes(add_path)) << "the view path and Add differ";
+    EXPECT_TRUE(view_bytes == ReadFileBytes(per_row_path)) << "the view path and UpdateRow differ";
+
+    // The bloom section, bit by bit with the old formula: blocks 0..last, each kWidth entries.
+    uint64_t last_block = 0;
+    for (const DiffRow &row : rows) last_block = std::max(last_block, row.row / kRpb);
+    constexpr size_t kEntry = XStoreTunables::CATIDX_BLOOM_BYTES_PER_ENTRY;
+    std::string image((last_block + 1) * kWidth * kEntry, '\0');
+    for (const DiffRow &row : rows) {
+        for (const CatIdxObservation &o : row.obs) {
+            if (!o.is_present || o.column_idx >= kWidth) continue;
+            const size_t base = ((row.row / kRpb) * kWidth + o.column_idx) * kEntry;
+            for (const uint16_t bit : RefBloomPositions(o.encoded_value)) image[base + bit / 8] |= static_cast<char>(1u << (bit % 8));
+        }
+    }
+    CatIdxFileHeader header{};
+    ASSERT_GE(view_bytes.size(), sizeof(header));
+    std::memcpy(&header, view_bytes.data(), sizeof(header));
+    EXPECT_EQ(header.tracked_column_count, kWidth);
+    EXPECT_EQ(header.block_count, last_block + 1);
+    EXPECT_GT(last_block, 5u);
+    EXPECT_TRUE(view_bytes.substr(sizeof(header)) == image) << "the bloom section differs from the old formula's image";
+}
+
+// The snapshot width: a view folds no value at or past its column_limit, even into a file wider than that (the writer's
+// catidx width was read before its run loop; a widen since must not get these values from this record). A limit past
+// the file's width changes nothing.
+TEST(CatIdxBloomPositionTest, ColumnLimitSkipsValuesPastTheSnapshotWidth) {
+    xstore_test::ScratchDir scratch("catidx_column_limit");
+    constexpr uint32_t kWidth = 6;
+    std::vector<CatIdxBloomValue> values;
+    std::vector<uint64_t> row_index;
+    std::vector<size_t> value_end;
+    CatIdxFoldBatch narrow;   // the reference: only columns < 3, via Add
+    CatIdxFoldBatch all;      // every column, via Add
+    for (uint64_t r = 0; r < 300; r += 7) {
+        for (uint32_t c = 0; c < kWidth + 2; ++c) {
+            const std::string enc = EncodeFDataForCatIdx(xstore_test::FInt64(static_cast<int64_t>(r * 10 + c)));
+            values.push_back(BloomValueOfEncoded(c, enc.data(), enc.size()));
+            if (c < 3) narrow.Add(c, enc);
+            all.Add(c, enc);
+        }
+        row_index.push_back(r);
+        value_end.push_back(values.size());
+        narrow.EndRow(r);
+        all.EndRow(r);
+    }
+    const auto fold = [&](const std::string &name, const std::function<void(CatIdxFile &)> &write) {
+        const std::string path = (scratch.test_root / name).string();
+        CatIdxFile f;
+        EXPECT_TRUE(f.Open(path, kDiffRowLength, kWidth));
+        write(f);
+        return ReadFileBytes(path);
+    };
+    const std::string limited = fold("limited.catidx", [&](CatIdxFile &f) {
+        f.UpdateRows(CatIdxFoldView{row_index.data(), value_end.data(), row_index.size(), values.data(), 3});
+    });
+    EXPECT_TRUE(limited == fold("narrow.catidx", [&](CatIdxFile &f) { f.UpdateRows(narrow); }))
+        << "a value at or past column_limit was folded";
+    const std::string wide_limit = fold("wide_limit.catidx", [&](CatIdxFile &f) {
+        f.UpdateRows(CatIdxFoldView{row_index.data(), value_end.data(), row_index.size(), values.data(), kWidth + 10});
+    });
+    EXPECT_TRUE(wide_limit == fold("all.catidx", [&](CatIdxFile &f) { f.UpdateRows(all); }));
+    EXPECT_FALSE(limited == wide_limit) << "precondition: columns 3..5 hold values";
+}
+
+// A keep-old rebuild: the old index gets every row of the view under the same column_limit (rows below F go to the new
+// index too); without a limit both get the value.
+TEST(CatIdxBloomPositionTest, KeepOldRebuildSharesTheViewAndItsColumnLimit) {
+    xstore_test::ScratchDir scratch("catidx_keep_old_view");
+    constexpr uint64_t kRpb = 128;
+    const std::string path = (scratch.test_root / "keep_old.catidx").string();
+    CatIdxFile f;
+    ASSERT_TRUE(f.Open(path, kDiffRowLength, 4));
+    ASSERT_EQ(f.BeginLiveRebuild(8, /*keep_old=*/true), BeginRebuildResult::kStarted);
+    ASSERT_EQ(f.OldWidth(), 4u);
+    f.AdvanceFrontier(2 * kRpb);   // blocks 0 and 1 rebuilt (new index), blocks 2.. answered by the old one
+    const auto enc = [](int64_t v) { return EncodeFDataForCatIdx(xstore_test::FInt64(v)); };
+    const auto apply = [&](uint64_t row_low, uint64_t row_high, uint32_t column_limit) {
+        std::vector<CatIdxBloomValue> values;
+        for (int row = 0; row < 2; ++row) {   // the same three values for both rows
+            for (const auto &[c, v] : std::vector<std::pair<uint32_t, int64_t>>{{0, 1}, {2, 2}, {5, 5}}) {
+                const std::string e = enc(v);
+                values.push_back(BloomValueOfEncoded(c, e.data(), e.size()));
+            }
+        }
+        const std::vector<uint64_t> row_index = {row_low, row_high};
+        const std::vector<size_t> value_end = {3, 6};
+        f.UpdateRows(CatIdxFoldView{row_index.data(), value_end.data(), 2, values.data(), column_limit});
+    };
+    apply(5, 3 * kRpb + 5, 2);           // blocks 0 (new) and 3 (old), limit 2
+    apply(kRpb + 5, 4 * kRpb + 5, UINT32_MAX);   // blocks 1 (new) and 4 (old), no limit
+
+    EXPECT_TRUE(f.MightContain(0, 0, enc(1)));
+    EXPECT_FALSE(f.MightContain(0, 2, enc(2))) << "new index: column 2 is past the limit";
+    EXPECT_FALSE(f.MightContain(0, 5, enc(5))) << "new index: column 5 is past the limit";
+    EXPECT_TRUE(f.MightContain(3, 0, enc(1)));
+    EXPECT_FALSE(f.MightContain(3, 2, enc(2))) << "old index: column 2 is past the limit";
+    EXPECT_TRUE(f.MightContain(3, 5, enc(5))) << "past the old width: maybe";
+
+    EXPECT_TRUE(f.MightContain(1, 0, enc(1)));
+    EXPECT_TRUE(f.MightContain(1, 2, enc(2)));
+    EXPECT_TRUE(f.MightContain(1, 5, enc(5)));
+    EXPECT_TRUE(f.MightContain(4, 0, enc(1)));
+    EXPECT_TRUE(f.MightContain(4, 2, enc(2))) << "old index: no limit";
+    ASSERT_TRUE(f.FinishRebuild());
 }
 
 } // namespace

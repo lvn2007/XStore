@@ -236,30 +236,23 @@ struct SubBatchFile {
 enum class WalRecordKind : uint8_t { kRing, kLarge, kFail };
 
 // The observation arrays agree with row_count and with each other: no ends (replay) and no observations, or one end
-// per row, non-decreasing, the last one exactly at each array's size, and every packed catidx header and value inside
-// its row's range. One sequential walk of the catidx headers per record, so ApplyWalRecord's per-run reads can trust
-// every offset and a malformed record fails before any byte is written.
+// per row, non-decreasing, the last one exactly at each array's size. Counts only (one pass over the ends, none over
+// the values: a CatIdxBloomValue's bit positions are in range by construction, only BloomValueOf creates one), so
+// ApplyWalRecord's per-run reads can trust every index and a malformed record fails before any byte is written.
 bool ObservationsWellFormed(const XStore::WalRecord &record) {
-    if (record.obs_end.empty()) return record.zmap_obs.empty() && record.catidx.empty();
+    if (record.obs_end.empty()) return record.zmap_obs.empty() && record.catidx_vals.empty();
     if (record.obs_end.size() != record.row_count) return false;
-    constexpr size_t kHeader = XStore::WalRecord::kCatIdxEntryHeaderBytes;
     size_t zmap_prev = 0;
-    size_t catidx_pos = 0;
+    size_t catidx_prev = 0;
     for (const XStore::WalRecord::ObsEnd &end : record.obs_end) {
-        if (end.zmap_end < zmap_prev || end.zmap_end > record.zmap_obs.size() || end.catidx_end < catidx_pos ||
-            end.catidx_end > record.catidx.size()) {
+        if (end.zmap_end < zmap_prev || end.zmap_end > record.zmap_obs.size() || end.catidx_end < catidx_prev ||
+            end.catidx_end > record.catidx_vals.size()) {
             return false;
         }
-        while (catidx_pos < end.catidx_end) {
-            if (end.catidx_end - catidx_pos < kHeader) return false;
-            uint32_t len;
-            std::memcpy(&len, record.catidx.data() + catidx_pos + sizeof(uint32_t), sizeof(len));
-            if (end.catidx_end - catidx_pos - kHeader < len) return false;
-            catidx_pos += kHeader + len;
-        }
         zmap_prev = end.zmap_end;
+        catidx_prev = end.catidx_end;
     }
-    return zmap_prev == record.zmap_obs.size() && catidx_pos == record.catidx.size();
+    return zmap_prev == record.zmap_obs.size() && catidx_prev == record.catidx_vals.size();
 }
 
 } // namespace
@@ -279,9 +272,9 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
     // gets here with a mismatched wire: framing checks its size against the planned ring size first.)
     if (record_to_apply.wire.size() != row_count * record_to_apply.RowStride() || !ObservationsWellFormed(record_to_apply)) {
         spdlog::error("[WAL APPLY] [DB: {}] - malformed record ({} rows, {} wire bytes, {} observation ends, {} zone-map "
-                      "observations, {} catidx bytes): not applied",
+                      "observations, {} catidx values): not applied",
                       record_to_apply.db_name, row_count, record_to_apply.wire.size(), record_to_apply.obs_end.size(),
-                      record_to_apply.zmap_obs.size(), record_to_apply.catidx.size());
+                      record_to_apply.zmap_obs.size(), record_to_apply.catidx_vals.size());
         // A failed apply of a durable ring record still notes its file dirty (see XStore_WalCheckpoint.h), like
         // drop_stale below; the file is derived from the first epoch, which exists whenever the wire holds a row slot.
         if (record_to_apply.wire.size() >= sizeof(uint64_t)) {
@@ -404,10 +397,12 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
     // Thread-local scratch buffer, grown to fit the largest run applied so
     // far and reused across calls -- avoids a heap allocation per run.
     thread_local std::vector<char> run_buf;
-    // One batch per run for each index (reused: no allocation once grown), folded under one mutex hold per file.
+    // One batch per run for each index (reused: no allocation once grown), folded under one mutex hold per file. The
+    // catidx fold reads the record's own values in place through a view: its rows are zmap_batch.row_index, its ends
+    // the run-relative catidx_value_end (both alive until UpdateRows returns).
     thread_local ZoneMapFoldBatch zmap_batch;
-    thread_local CatIdxFoldBatch catidx_batch;
-    // Values in columns past the catidx width are never folded, so they are not hashed. Read once, under the range
+    thread_local std::vector<size_t> catidx_value_end;
+    // Values in columns past the catidx width are never folded (the view's column_limit). Read once, under the range
     // lock: a widen begun after this read only widens the file and starts it at F = 0, and the builder cannot fold
     // these rows (it needs a READ lock on them) before this record is applied, so no folded row needs a dropped value.
     const uint32_t catidx_width = catidx.TrackedColumnCount();
@@ -468,41 +463,31 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
             // The run's rows go to each index as one batch (UpdateRows: one mutex hold, one block write per block
             // touched), still before the next run's overwrite check reads the blocks.
             zmap_batch.Clear();
-            catidx_batch.Clear();
+            catidx_value_end.clear();
             zmap_batch.pad_to = has_obs ? record_to_apply.zone_map_pad_to : 0;   // one pad_to per record
+            // A replayed record has no values: every row's end is 0 and values is never read.
+            const size_t catidx_begin = has_obs && run_start != 0 ? obs_end[run_start - 1].catidx_end : 0;
             if (has_obs) {
                 // The run's observations are contiguous in the record: one copy for the whole run, then each row's
-                // end rebased to the batch. Offsets were checked by ObservationsWellFormed.
+                // end rebased to the batch. Indexes were checked by ObservationsWellFormed.
                 const size_t zmap_begin = run_start == 0 ? 0 : obs_end[run_start - 1].zmap_end;
                 const ZoneMapObservation *zmap_obs = record_to_apply.zmap_obs.data();
                 zmap_batch.observations.insert(zmap_batch.observations.end(), zmap_obs + zmap_begin,
                                                zmap_obs + obs_end[run_end - 1].zmap_end);
-                const char *arena = record_to_apply.catidx.data();
-                size_t catidx_pos = run_start == 0 ? 0 : obs_end[run_start - 1].catidx_end;
                 for (size_t i = run_start; i < run_end; ++i) {
-                    const uint64_t diff = record_to_apply.EpochAt(i) - first_ts.first_epoch;
-                    zmap_batch.row_index.push_back(diff);
+                    zmap_batch.row_index.push_back(record_to_apply.EpochAt(i) - first_ts.first_epoch);
                     zmap_batch.obs_end.push_back(obs_end[i].zmap_end - zmap_begin);
-                    for (const size_t catidx_end = obs_end[i].catidx_end; catidx_pos < catidx_end; ) {
-                        uint32_t column_idx;
-                        uint32_t len;
-                        std::memcpy(&column_idx, arena + catidx_pos, sizeof(column_idx));
-                        std::memcpy(&len, arena + catidx_pos + sizeof(column_idx), sizeof(len));
-                        const char *value = arena + catidx_pos + WalRecord::kCatIdxEntryHeaderBytes;
-                        if (column_idx < catidx_width) catidx_batch.Add(column_idx, value, len);
-                        catidx_pos += WalRecord::kCatIdxEntryHeaderBytes + len;
-                    }
-                    catidx_batch.EndRow(diff);
+                    catidx_value_end.push_back(obs_end[i].catidx_end - catidx_begin);
                 }
             } else {
                 for (size_t i = run_start; i < run_end; ++i) {
-                    const uint64_t diff = record_to_apply.EpochAt(i) - first_ts.first_epoch;
-                    zmap_batch.EndRow(diff);
-                    catidx_batch.EndRow(diff);
+                    zmap_batch.EndRow(record_to_apply.EpochAt(i) - first_ts.first_epoch);
+                    catidx_value_end.push_back(0);
                 }
             }
             zmap.UpdateRows(zmap_batch);
-            catidx.UpdateRows(catidx_batch);
+            catidx.UpdateRows(CatIdxFoldView{zmap_batch.row_index.data(), catidx_value_end.data(), run_rows,
+                                             record_to_apply.catidx_vals.data() + catidx_begin, catidx_width});
         }
         run_start = run_end;
     }
@@ -515,7 +500,7 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
     // after a very large run: above ~6 MB a batch is freed rather than kept per applying thread.
     constexpr size_t kKeepBatchValues = size_t{1} << 18;
     if (zmap_batch.observations.capacity() > kKeepBatchValues) zmap_batch = ZoneMapFoldBatch{};
-    if (catidx_batch.values.capacity() > kKeepBatchValues) catidx_batch = CatIdxFoldBatch{};
+    if (catidx_value_end.capacity() > kKeepBatchValues) catidx_value_end = std::vector<size_t>{};
     return all_rows_ok;
 }
 

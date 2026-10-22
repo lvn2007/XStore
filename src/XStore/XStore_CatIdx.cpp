@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cstring>
 #include <ctime>
@@ -20,20 +21,15 @@
 #include "include/DataStructs/TimeStruct.h"
 
 namespace {
-void BloomSetBit(unsigned char *entry, size_t entry_size, uint64_t h1, uint64_t h2, size_t k) {
-    size_t total_bits = entry_size * 8;
-    for (size_t i = 0; i < k; ++i) {
-        uint64_t combined = h1 + i * h2;
-        size_t bit = combined % total_bits;
-        entry[bit / 8] |= static_cast<unsigned char>(1u << (bit % 8));
+void BloomSetBits(unsigned char *entry, const CatIdxBloomValue &value) {
+    for (const uint16_t bit : value.Bits()) {
+        assert(bit < kCatIdxBloomBits);
+        entry[bit >> 3] |= static_cast<unsigned char>(1u << (bit & 7u));
     }
 }
-bool BloomCheckBit(const unsigned char *entry, size_t entry_size, uint64_t h1, uint64_t h2, size_t k) {
-    size_t total_bits = entry_size * 8;
-    for (size_t i = 0; i < k; ++i) {
-        uint64_t combined = h1 + i * h2;
-        size_t bit = combined % total_bits;
-        if ((entry[bit / 8] & static_cast<unsigned char>(1u << (bit % 8))) == 0) return false;
+bool BloomCheckBits(const unsigned char *entry, const CatIdxBloomValue &value) {
+    for (const uint16_t bit : value.Bits()) {
+        if ((entry[bit >> 3] & static_cast<unsigned char>(1u << (bit & 7u))) == 0) return false;
     }
     return true;
 }
@@ -227,38 +223,37 @@ void CatIdxFile::UpdateRowLocked(uint64_t row_index, const std::vector<CatIdxObs
     auto &entries = cache_[block_index];
     for (const auto &obs : observations) {
         if (!obs.is_present || obs.column_idx >= header_.tracked_column_count) continue;
-        uint64_t h1 = Crc32c(obs.encoded_value.data(), obs.encoded_value.size());
-        uint64_t h2 = Fnv1a64(obs.encoded_value.data(), obs.encoded_value.size());
-        BloomSetBit(entries[obs.column_idx].data(), entries[obs.column_idx].size(),
-                    h1, h2, XStoreTunables::CATIDX_BLOOM_HASH_COUNT);
+        BloomSetBits(entries[obs.column_idx].data(),
+                     BloomValueOfEncoded(obs.column_idx, obs.encoded_value.data(), obs.encoded_value.size()));
     }
     static_cast<void>(FlushBlock(block_index)); // write-through, same immediacy as ZoneMapFile::UpdateRow
 }
 
-void CatIdxFile::UpdateRows(const CatIdxFoldBatch &batch) {
+void CatIdxFile::UpdateRows(const CatIdxFoldView &view) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (__builtin_expect(frontier_ != kNoRebuild, 0)) { // same rules as UpdateRow, row by row
-        if (old_ != nullptr) old_->UpdateRows(batch);
-        static_cast<void>(FoldBatchLocked(batch, [this](uint64_t row) { return row < frontier_ || fold_.FoldedEnd(row) > row; }));
+        if (old_ != nullptr) old_->UpdateRows(view);
+        static_cast<void>(FoldBatchLocked(view, [this](uint64_t row) { return row < frontier_ || fold_.FoldedEnd(row) > row; }));
         return;
     }
-    static_cast<void>(FoldBatchLocked(batch, [](uint64_t) { return true; })); // a failed write is logged in FlushBlock
+    static_cast<void>(FoldBatchLocked(view, [](uint64_t) { return true; })); // a failed write is logged in FlushBlock
 }
 
 bool CatIdxFile::RebuildFoldRows(const CatIdxFoldBatch &batch) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (frontier_ == kNoRebuild) return true;
-    return FoldBatchLocked(batch, [this](uint64_t row) { return row >= frontier_; }); // below F: already folded
+    return FoldBatchLocked(batch.View(), [this](uint64_t row) { return row >= frontier_; }); // below F: already folded
 }
 
 template <class Keep>
-bool CatIdxFile::FoldBatchLocked(const CatIdxFoldBatch &batch, Keep keep) {
+bool CatIdxFile::FoldBatchLocked(const CatIdxFoldView &view, Keep keep) {
     bool all_written = true;
     std::vector<BloomEntry> *entries = nullptr;
     uint64_t block_index = 0;
+    const uint32_t column_limit = std::min(view.column_limit, header_.tracked_column_count);
     size_t value_begin = 0;
-    for (size_t i = 0; i < batch.row_index.size(); value_begin = batch.value_end[i], ++i) {
-        const uint64_t row_index = batch.row_index[i];
+    for (size_t i = 0; i < view.rows; value_begin = view.value_end[i], ++i) {
+        const uint64_t row_index = view.row_index[i];
         if (!keep(row_index)) continue;
         const uint64_t b = BlockIndexForRow(row_index, rows_per_block_);
         if (entries == nullptr || b != block_index) {
@@ -268,11 +263,10 @@ bool CatIdxFile::FoldBatchLocked(const CatIdxFoldBatch &batch, Keep keep) {
             entries = &cache_[b];
             block_index = b;
         }
-        for (size_t v = value_begin; v < batch.value_end[i]; ++v) {
-            const CatIdxFoldBatch::Value &value = batch.values[v];
-            if (value.column_idx >= header_.tracked_column_count) continue;
-            BloomEntry &entry = (*entries)[value.column_idx];
-            BloomSetBit(entry.data(), entry.size(), value.h1, value.h2, XStoreTunables::CATIDX_BLOOM_HASH_COUNT);
+        for (size_t v = value_begin; v < view.value_end[i]; ++v) {
+            const CatIdxBloomValue &value = view.values[v];
+            if (value.ColumnIdx() >= column_limit) continue;
+            BloomSetBits((*entries)[value.ColumnIdx()].data(), value);
         }
     }
     if (entries != nullptr) all_written &= FlushBlock(block_index);
@@ -287,10 +281,8 @@ bool CatIdxFile::MightContain(uint64_t block_index, uint32_t column_idx, const s
     }
     EnsureBlockLoaded(block_index);
     auto &entries = cache_[block_index];
-    uint64_t h1 = Crc32c(encoded_value.data(), encoded_value.size());
-    uint64_t h2 = Fnv1a64(encoded_value.data(), encoded_value.size());
-    return BloomCheckBit(entries[column_idx].data(), entries[column_idx].size(),
-                          h1, h2, XStoreTunables::CATIDX_BLOOM_HASH_COUNT);
+    return BloomCheckBits(entries[column_idx].data(),
+                          BloomValueOfEncoded(column_idx, encoded_value.data(), encoded_value.size()));
 }
 
 void CatIdxFile::AppendBitmapSection(const std::unordered_map<uint32_t, std::map<std::string, std::vector<uint64_t>>> &columns) {

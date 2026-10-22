@@ -14,6 +14,7 @@
 #include "XStoreRebuildTestSupport.h"
 #include "XStoreSyscallFault.h"
 #include "include/XStore/XStore_Internal.h" // WalRecord::AppendRow / ReserveRows
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <fstream>
@@ -315,8 +316,8 @@ TEST_F(XStoreRebuildTest, OnlyTheStaleIndexIsRebuilt) {
 // ---- Insert path (WalRecord::AppendRow + ApplyWalRecord) against the reference ---------------------------------------
 
 // The flat observations AppendRow builds, entry by entry, against the per-row reference: the zone map's present
-// columns with the independent numeric coercion, and the catidx value each set column encodes to (EncodeFDataForCatIdx,
-// unset columns skipped). At width 64, and at 3, which clamps the wider rows. Also the row slot itself.
+// columns with the independent numeric coercion, and for each set column the old bloom bit positions of its
+// EncodeFDataForCatIdx bytes (RefBloomPositions; unset columns skipped). At width 64, and at 3, which clamps the wider rows. Also the row slot itself.
 TEST_F(XStoreRebuildTest, AppendRowObservationsMatchThePerRowReference) {
     XStore store;
     std::vector<XStore_Proto::RowData> rows;
@@ -342,7 +343,7 @@ TEST_F(XStoreRebuildTest, AppendRowObservationsMatchThePerRowReference) {
         ASSERT_EQ(record.obs_end.size(), rows.size());
         ASSERT_EQ(record.wire.size(), rows.size() * record.RowStride());
         size_t zmap_pos = 0;
-        size_t catidx_pos = 0;
+        size_t catidx_pos = 0;   // into catidx_vals
         for (size_t i = 0; i < rows.size(); ++i) {
             SCOPED_TRACE("row " + std::to_string(i));
             EXPECT_EQ(record.EpochAt(i), 5000 + i);
@@ -360,36 +361,32 @@ TEST_F(XStoreRebuildTest, AppendRowObservationsMatchThePerRowReference) {
             }
             zmap_pos = record.obs_end[i].zmap_end;
 
-            std::vector<std::pair<uint32_t, std::string>> want_catidx;
+            // Each set column's value, as the old bloom positions of its EncodeFDataForCatIdx bytes.
+            std::vector<std::pair<uint32_t, std::vector<uint16_t>>> want_catidx;
             const int tracked = std::min(static_cast<int>(width), rows[i].fielddata_size());
             for (int c = 0; c < tracked; ++c) {
                 if (rows[i].fielddata(c).oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
-                    want_catidx.emplace_back(static_cast<uint32_t>(c), EncodeFDataForCatIdx(rows[i].fielddata(c)));
+                    want_catidx.emplace_back(static_cast<uint32_t>(c), RefBloomPositions(EncodeFDataForCatIdx(rows[i].fielddata(c))));
                 }
             }
-            std::vector<std::pair<uint32_t, std::string>> got_catidx;
-            while (catidx_pos < record.obs_end[i].catidx_end) {
-                uint32_t column_idx = 0;
-                uint32_t len = 0;
-                std::memcpy(&column_idx, record.catidx.data() + catidx_pos, sizeof(column_idx));
-                std::memcpy(&len, record.catidx.data() + catidx_pos + sizeof(column_idx), sizeof(len));
-                catidx_pos += XStore::WalRecord::kCatIdxEntryHeaderBytes;
-                ASSERT_LE(catidx_pos + len, record.obs_end[i].catidx_end);
-                got_catidx.emplace_back(column_idx, record.catidx.substr(catidx_pos, len));
-                catidx_pos += len;
+            ASSERT_GE(record.obs_end[i].catidx_end, catidx_pos);
+            ASSERT_LE(record.obs_end[i].catidx_end, record.catidx_vals.size());
+            std::vector<std::pair<uint32_t, std::vector<uint16_t>>> got_catidx;
+            for (; catidx_pos < record.obs_end[i].catidx_end; ++catidx_pos) {
+                const CatIdxBloomValue &v = record.catidx_vals[catidx_pos];
+                got_catidx.emplace_back(v.ColumnIdx(), Positions(v));
             }
-            EXPECT_EQ(catidx_pos, record.obs_end[i].catidx_end);
             EXPECT_TRUE(got_catidx == want_catidx) << got_catidx.size() << " catidx values, want " << want_catidx.size();
         }
         EXPECT_EQ(zmap_pos, record.zmap_obs.size());
-        EXPECT_EQ(catidx_pos, record.catidx.size());
+        EXPECT_EQ(catidx_pos, record.catidx_vals.size());
     }
 }
 
 // End to end: rows inserted through both producers (BatchInsert and UnaryInsert, SYNC) and folded by the writer from
 // the flat arrays leave .zmap and .catidx byte-identical to the per-row reference built from the same data file. Mixed
-// types, unset columns, narrow rows and string-heavy rows (long values in 8 of 16 columns, so the packed catidx arena
-// grows past its numeric-sized reserve).
+// types, unset columns, narrow rows and string-heavy rows (long values in 8 of 16 columns, so the producer's reused
+// encoding buffer grows).
 TEST_F(XStoreRebuildTest, LiveInsertIndexesMatchThePerRowReference) {
     const std::string db = "LIVEREF";
     const unsigned short year = 1982;
@@ -429,6 +426,50 @@ TEST_F(XStoreRebuildTest, LiveInsertIndexesMatchThePerRowReference) {
     EXPECT_TRUE(got_zmap == ReadFileBytes(ref_zmap)) << ".zmap of the live inserts differs from the per-row reference";
     EXPECT_EQ(got_catidx.size(), ReadFileBytes(ref_catidx).size());
     EXPECT_TRUE(got_catidx == ReadFileBytes(ref_catidx)) << ".catidx of the live inserts differs from the per-row reference";
+}
+
+// The writer's per-run views over one record: a request with timestamp gaps (many runs), duplicate timestamps (a run
+// boundary on the same row; both values are folded, as before), rows out of order (sorted by MultiRowInsert), block
+// edges and rows with no set column. The oracle is UpdateRow (the per-row API) over EVERY request row, duplicates
+// included, at the file's width: the bloom ORs, so the fold order does not matter and the bytes must be identical.
+TEST_F(XStoreRebuildTest, LiveInsertRunsGapsAndDuplicatesMatchPerRowFolds) {
+    const std::string db = "LIVERUNS";
+    const unsigned short year = 1983;
+    XStore store;
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    std::vector<std::pair<unsigned long long, XStore_Proto::RowData>> rows;
+    std::mt19937_64 rng(4242);
+    uint64_t r = 0;
+    for (int i = 0; i < 2500; ++i) {
+        r += (i % 9 == 0) ? 1 + rng() % 700 : 1;   // gaps, some across a block edge (2048 rows per block)
+        rows.emplace_back(Jan1(year) + r, MixedRow(r, 1 + static_cast<int>(rng() % 30)));
+        if (i % 13 == 0) rows.emplace_back(Jan1(year) + r, MixedRow(r + 7777, 1 + static_cast<int>(rng() % 30)));   // duplicate
+        if (i % 101 == 0) rows.emplace_back(Jan1(year) + r + 1, XStore_Proto::RowData{});   // no column at all
+    }
+    std::shuffle(rows.begin() + 100, rows.begin() + 200, rng);   // out of order (a stable sort keeps duplicates in order)
+    Insert(store, db, rows);
+    CleanRestartState();
+
+    const uint32_t width = ReadHeader<CatIdxFileHeader>(YearPath(db, year, ".catidx")).tracked_column_count;
+    const std::string ref_path = (scratch->test_root / "runs_ref.catidx").string();
+    {
+        CatIdxFile ref;
+        ASSERT_TRUE(ref.Open(ref_path, kRowLength, width));
+        for (const auto &[ts, row] : rows) {
+            std::vector<CatIdxObservation> obs;
+            for (int c = 0; c < std::min(static_cast<int>(width), row.fielddata_size()); ++c) {
+                const bool set = row.fielddata(c).oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET;
+                obs.push_back({static_cast<uint32_t>(c), set ? EncodeFDataForCatIdx(row.fielddata(c)) : std::string(), set});
+            }
+            ref.UpdateRow(ts - Jan1(year), obs);
+        }
+        ASSERT_TRUE(ref.MarkClean());
+    }
+    const std::string got = ReadFileBytes(YearPath(db, year, ".catidx"));
+    const std::string want = ReadFileBytes(ref_path);
+    ASSERT_GT(ReadHeader<CatIdxFileHeader>(ref_path).block_count, 2u);
+    EXPECT_EQ(got.size(), want.size());
+    EXPECT_TRUE(got == want) << ".catidx of the live insert differs from the per-row folds";
 }
 
 // A failed index write part-way through the scan: that file stops behind its frontier (blocks it finished stay

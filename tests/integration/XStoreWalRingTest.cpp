@@ -109,12 +109,13 @@ TEST(WalRingFormatTest, RecordV2RoundTripRejectsStaleLapAndBadCrc) {
     std::string rec = BuildRecordV2ForTest(/*lsn=*/5000, "DB1", /*row_length=*/8, {{10, "AAAAAAAA"}, {11, "BBBBBBBB"}});
     XStore::WalRecord out; size_t used = 0;
     // A reused record (replay loops reuse one): the parse must drop the previous record's observations and pad_to.
-    out.zmap_obs.push_back({0, 1.0, true}); out.catidx = "stale"; out.obs_end.push_back({1, 5}); out.zone_map_pad_to = 64;
+    out.zmap_obs.push_back({0, 1.0, true}); out.catidx_vals.push_back(BloomValueOf(0, 1, 2)); out.obs_end.push_back({1, 1});
+    out.zone_map_pad_to = 64;
     EXPECT_EQ(XStore::ParseWalRecordV2(rec.data(), rec.size(), 5000, used, out), XStore::RingParse::kOk);
     EXPECT_EQ(used, rec.size()); EXPECT_EQ(out.row_count, 2u); EXPECT_EQ(out.db_name, "DB1");
     EXPECT_EQ(out.row_length, 8u);
     EXPECT_EQ(out.EpochAt(1), 11u); EXPECT_EQ(std::string(out.RowAt(1), out.row_length), "BBBBBBBB");
-    EXPECT_TRUE(out.zmap_obs.empty()); EXPECT_TRUE(out.catidx.empty()); EXPECT_TRUE(out.obs_end.empty());
+    EXPECT_TRUE(out.zmap_obs.empty()); EXPECT_TRUE(out.catidx_vals.empty()); EXPECT_TRUE(out.obs_end.empty());
     EXPECT_EQ(out.zone_map_pad_to, 0u);
     EXPECT_EQ(XStore::ParseWalRecordV2(rec.data(), rec.size(), 5000 + 4096, used, out), XStore::RingParse::kEnd);  // stale lap
     EXPECT_EQ(XStore::ParseWalRecordV2(rec.data(), rec.size() - 1, 5000, used, out), XStore::RingParse::kEnd);     // torn tail
@@ -2613,21 +2614,23 @@ TEST_F(WalReplayTest, MalformedObservationsFailTheRecordBeforeAnyWrite) {
     ASSERT_EQ(XStore::ParseWalRecordV2(bytes.data(), bytes.size(), 0, used, good), XStore::RingParse::kOk);
     good.db_base_path = db_base;
     good.zone_map_pad_to = good.tracked_column_count;
-    std::string entry(XStore::WalRecord::kCatIdxEntryHeaderBytes, '\0');
-    const uint32_t len = static_cast<uint32_t>(key.size());
-    std::memcpy(&entry[sizeof(uint32_t)], &len, sizeof(len));   // column 0
-    entry += key;
     for (size_t i = 1; i <= 2; ++i) {
         good.zmap_obs.push_back({0, kValue, true});
-        good.catidx += entry;
-        good.obs_end.push_back({i, good.catidx.size()});
+        good.catidx_vals.push_back(BloomValueOfEncoded(0, key.data(), key.size()));
+        good.obs_end.push_back({i, good.catidx_vals.size()});
     }
 
+    const auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
     const auto variant = [&](const char *name, const std::function<void(XStore::WalRecord &)> &corrupt) {
         SCOPED_TRACE(name);
         XStore::WalRecord bad = good;
         corrupt(bad);
-        EXPECT_FALSE(ApplyWalRecordPtr()(bad, nullptr, 0));
+        // Refused as a durable ring record: its ring mark is still noted (RingClear must not call the file clean).
+        walring::ClearDirtyForTests();
+        ASSERT_TRUE(walring::Dirty().RingClear(YearFile())) << "precondition";
+        EXPECT_FALSE(ApplyWalRecordPtr()(bad, ring, ring->HeadLsn() + 1));
+        EXPECT_FALSE(walring::Dirty().RingClear(YearFile())) << "a refused record must note its ring mark";
         EXPECT_FALSE(RowPresent(1));
         EXPECT_FALSE(RowPresent(2));
         const auto after = zmap.TryGetBlockStats(block);
@@ -2640,12 +2643,10 @@ TEST_F(WalReplayTest, MalformedObservationsFailTheRecordBeforeAnyWrite) {
     variant("zone-map end past the array", [](XStore::WalRecord &r) { r.obs_end.back().zmap_end = 3; });
     variant("zone-map ends decreasing", [](XStore::WalRecord &r) { r.obs_end.front().zmap_end = 2; r.obs_end.back().zmap_end = 1; });
     variant("zone-map observations past the last end", [](XStore::WalRecord &r) { r.zmap_obs.push_back({0, 1.0, true}); });
-    variant("catidx end past the arena", [](XStore::WalRecord &r) { r.obs_end.back().catidx_end += 1; });
-    variant("catidx value past its row", [](XStore::WalRecord &r) {
-        const uint32_t long_len = 1000;
-        std::memcpy(&r.catidx[sizeof(uint32_t)], &long_len, sizeof(long_len));
-    });
-    variant("catidx header split across rows", [](XStore::WalRecord &r) { r.obs_end.front().catidx_end = 3; });
+    variant("catidx end past the values", [](XStore::WalRecord &r) { r.obs_end.back().catidx_end += 1; });
+    variant("catidx ends decreasing", [](XStore::WalRecord &r) { r.obs_end.front().catidx_end = 2; r.obs_end.back().catidx_end = 1; });
+    variant("catidx last end short of the values", [](XStore::WalRecord &r) { r.obs_end.back().catidx_end = 1; });
+    variant("catidx values past the last end", [](XStore::WalRecord &r) { r.catidx_vals.push_back(r.catidx_vals.back()); });
     variant("observations without ends", [](XStore::WalRecord &r) { r.obs_end.clear(); });
 
     // The same record, well formed, applies: both rows and their value reach the data file and the indexes.
@@ -2657,6 +2658,33 @@ TEST_F(WalReplayTest, MalformedObservationsFailTheRecordBeforeAnyWrite) {
     ASSERT_TRUE(applied.has_value());
     EXPECT_EQ((*applied)[0].valid_count, (*before)[0].valid_count + 2);
     EXPECT_EQ((*applied)[0].max_value, kValue);
+
+    // Well formed with no zone-map observation at all (every zmap_end 0) while the catidx counts agree: accepted, the
+    // catidx values are folded and the zone map gets no value.
+    constexpr double kOther = 913.5;   // above kValue: a zone-map fold would move max_value
+    const std::string other_key = EncodeFDataForCatIdx(xstore_test::FDouble(kOther));
+    ASSERT_FALSE(catidx.MightContain(block, 0, other_key)) << "precondition (a bloom false positive would make this vacuous)";
+    XStore_Proto::RowData other_row;
+    other_row.add_fielddata()->set_doubledata(kOther);
+    std::string other_bytes(row_length, '\0');
+    ASSERT_TRUE(other_row.SerializeToArray(other_bytes.data(), static_cast<int>(other_row.ByteSizeLong())));
+    const std::string other_rec = BuildRecordV2ForTest(/*lsn=*/0, db_name, row_length, {{kEpoch0 + 3, other_bytes}, {kEpoch0 + 4, other_bytes}});
+    XStore::WalRecord catidx_only;
+    ASSERT_EQ(XStore::ParseWalRecordV2(other_rec.data(), other_rec.size(), 0, used, catidx_only), XStore::RingParse::kOk);
+    catidx_only.db_base_path = db_base;
+    catidx_only.zone_map_pad_to = catidx_only.tracked_column_count;
+    for (size_t i = 1; i <= 2; ++i) {
+        catidx_only.catidx_vals.push_back(BloomValueOfEncoded(0, other_key.data(), other_key.size()));
+        catidx_only.obs_end.push_back({0, catidx_only.catidx_vals.size()});
+    }
+    ASSERT_TRUE(ApplyWalRecordPtr()(catidx_only, nullptr, 0));
+    EXPECT_TRUE(RowPresent(3));
+    EXPECT_TRUE(RowPresent(4));
+    EXPECT_TRUE(catidx.MightContain(block, 0, other_key));
+    const auto after_catidx_only = zmap.TryGetBlockStats(block);
+    ASSERT_TRUE(after_catidx_only.has_value());
+    EXPECT_EQ((*after_catidx_only)[0].valid_count, (*applied)[0].valid_count);
+    EXPECT_EQ((*after_catidx_only)[0].max_value, kValue);
 }
 
 // WalRecord::wire keeps the rows section in memory exactly as the ring carries it, and the writer frames it as one
@@ -2735,7 +2763,7 @@ protected:
         EXPECT_EQ(used, bytes.size());
         ASSERT_EQ(record.row_count, rows.size());
         ASSERT_EQ(record.wire.size(), rows.size() * record.RowStride());
-        EXPECT_TRUE(record.obs_end.empty() && record.zmap_obs.empty() && record.catidx.empty())
+        EXPECT_TRUE(record.obs_end.empty() && record.zmap_obs.empty() && record.catidx_vals.empty())
             << "a replayed record carries no observations";
         EXPECT_EQ(record.zone_map_pad_to, 0u);
         for (size_t i = 0; i < rows.size(); ++i) {

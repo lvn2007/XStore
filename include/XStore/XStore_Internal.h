@@ -122,11 +122,10 @@ inline ZoneMapObservation XStore::ZoneMapObservationOf(XStore &store, const XSto
 }
 
 inline void XStore::WalRecord::ReserveRows(size_t rows, size_t widest_fields) {
-    constexpr size_t kNumericCatIdxEntryBytes = kCatIdxEntryHeaderBytes + 1 + sizeof(uint64_t);
     const size_t columns = std::min<size_t>(tracked_column_count, widest_fields);
     wire.reserve(rows * RowStride());
     zmap_obs.reserve(rows * columns);
-    catidx.reserve(rows * columns * kNumericCatIdxEntryBytes);
+    catidx_vals.reserve(rows * columns);
     obs_end.reserve(rows);
 }
 
@@ -145,7 +144,8 @@ inline void XStore::WalRecord::ReserveRows(size_t rows, size_t widest_fields) {
 // - catidx: ALL FData oneof cases (no numeric gate: the bloom works on
 //   AppendFDataForCatIdx's bytes regardless of type), but only columns that
 //   are also SET -- CatIdxFile always skipped unset ones, so omitting them is
-//   the same effect as passing them as not present.
+//   the same effect as passing them as not present. Each value is hashed here
+//   into its bloom bit positions (BloomValueOfEncoded), off the writer thread.
 // tracked_column_count is max(EffectiveTrackedColumnCount(cfg_struct), the
 // request's widest accepted row) at every call site.
 inline void XStore::WalRecord::AppendRow(XStore &store, uint64_t epoch, const XStore_Proto::RowData &data) {
@@ -155,22 +155,19 @@ inline void XStore::WalRecord::AppendRow(XStore &store, uint64_t epoch, const XS
     // Reuses the sizes the caller's ByteSizeLong() cached (SerializeToArray would recompute them), as SendProto in
     // ZMQ_Server.cpp.
     (void)data.SerializeWithCachedSizesToArray(reinterpret_cast<uint8_t *>(&wire[at + sizeof(uint64_t)]));
+    // col < fielddata_size, and a column takes at least 2 of the row's u16 row_length bytes: it fits column_idx.
     const int tracked = std::min(static_cast<int>(tracked_column_count), data.fielddata_size());
+    thread_local std::string encoded;   // reused: no allocation per value once grown
     for (int col = 0; col < tracked; ++col) {
         const XStore_Proto::FData &f_data = data.fielddata(col);
         zmap_obs.push_back(ZoneMapObservationOf(store, f_data, static_cast<uint32_t>(col)));
         if (f_data.oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
-            // Header first, patched once the value's length is known.
-            const size_t entry = catidx.size();
-            catidx.resize(entry + kCatIdxEntryHeaderBytes);
-            AppendFDataForCatIdx(catidx, f_data);
-            const uint32_t column_idx = static_cast<uint32_t>(col);
-            const uint32_t len = static_cast<uint32_t>(catidx.size() - entry - kCatIdxEntryHeaderBytes);
-            std::memcpy(&catidx[entry], &column_idx, sizeof(column_idx));
-            std::memcpy(&catidx[entry + sizeof(column_idx)], &len, sizeof(len));
+            encoded.clear();
+            AppendFDataForCatIdx(encoded, f_data);
+            catidx_vals.push_back(BloomValueOfEncoded(static_cast<uint32_t>(col), encoded.data(), encoded.size()));
         }
     }
-    obs_end.push_back({zmap_obs.size(), catidx.size()});
+    obs_end.push_back({zmap_obs.size(), catidx_vals.size()});
     ++row_count;
 }
 

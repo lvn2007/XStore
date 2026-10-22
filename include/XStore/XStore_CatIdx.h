@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <type_traits>
 
 #include "XStore.pb.h"
 
@@ -11,8 +12,8 @@
 // query time. Distinguishes oneof case explicitly (int64Data=5 and
 // doubleData=5.0 encode differently) -- this is exact-type equality, not
 // GetFDataValue's aggregate-style numeric coercion into one double.
-// Appends the encoding to `out`: the insert path writes it straight into a
-// record's packed catidx arena; EncodeFDataForCatIdx below wraps this one
+// Appends the encoding to `out`: the insert path encodes into a reused
+// scratch buffer and hashes it there; EncodeFDataForCatIdx below wraps this one
 // implementation, so the two can never drift.
 inline void AppendFDataForCatIdx(std::string &out, const XStore_Proto::FData &f_data) {
     auto case_id = f_data.oneOfData_case();
@@ -158,26 +159,79 @@ inline uint64_t Fnv1a64(const void *data, size_t len) {
     return hash;
 }
 
-// Rows for CatIdxFile::RebuildFoldRows in a flat layout a caller reuses across chunks: row i is row_index[i], with
-// values [value_end[i-1], value_end[i]) (value_end[-1] = 0). A value is kept as the two bloom hashes of its
-// EncodeFDataForCatIdx bytes (computed by Add, outside the file mutex), the same hashes UpdateRow computes, so the fold
-// itself only sets bits. A row with no values still counts: its block is written, as UpdateRow writes it.
+inline constexpr size_t kCatIdxBloomBits = XStoreTunables::CATIDX_BLOOM_BYTES_PER_ENTRY * 8;
+static_assert(XStoreTunables::CATIDX_BLOOM_HASH_COUNT <= 8);
+static_assert(kCatIdxBloomBits <= 65536, "a bit position must fit a uint16_t");
+static_assert(XStoreTunables::CATIDX_MAX_TRACKED_COLUMNS <= 65535 && XStoreTunables::MAX_TRACKED_COLUMN_COUNT <= 65535,
+              "a column index must fit a uint16_t");
+
+// Bit i of a value's bloom entry: Kirsch-Mitzenmacher g_i = h1 + i*h2 (h1 = Crc32c, h2 = Fnv1a64 of the
+// EncodeFDataForCatIdx bytes). The ONE position function: insert (every path) and MightContain use it, so the bits
+// written and the bits checked cannot drift. kCatIdxBloomBits is constexpr, so the % compiles to a multiply.
+inline constexpr size_t BloomBitPosition(uint64_t h1, uint64_t h2, size_t i) { return (h1 + i * h2) % kCatIdxBloomBits; }
+
+class CatIdxBloomValue;
+inline CatIdxBloomValue BloomValueOf(uint32_t column_idx, uint64_t h1, uint64_t h2);
+
+// One value ready to fold: its column and its k bit positions inside the column's entry. The positions are in range
+// (< kCatIdxBloomBits) by construction: BloomValueOf is the only writer, and a default value is column 0 with every
+// position 0. So the fold and ObservationsWellFormed need no per-value check; the fold sets entry[bit >> 3] |=
+// 1 << (bit & 7) and nothing else.
+class CatIdxBloomValue {
+public:
+    CatIdxBloomValue() = default;
+    [[nodiscard]] uint16_t ColumnIdx() const { return column_idx_; }
+    [[nodiscard]] const uint16_t (&Bits() const)[XStoreTunables::CATIDX_BLOOM_HASH_COUNT] { return bit_; }
+
+private:
+    friend CatIdxBloomValue BloomValueOf(uint32_t column_idx, uint64_t h1, uint64_t h2);
+    uint16_t column_idx_ = 0;
+    uint16_t bit_[XStoreTunables::CATIDX_BLOOM_HASH_COUNT] = {};
+};
+static_assert(XStoreTunables::CATIDX_BLOOM_HASH_COUNT != 7 || sizeof(CatIdxBloomValue) == 16);
+static_assert(std::is_trivially_copyable_v<CatIdxBloomValue>, "records are moved and copied in bulk");
+
+// column_idx must be < 65536 (every caller passes a column below a file width, see the static_assert above).
+inline CatIdxBloomValue BloomValueOf(uint32_t column_idx, uint64_t h1, uint64_t h2) {
+    CatIdxBloomValue out;
+    out.column_idx_ = static_cast<uint16_t>(column_idx);
+    for (size_t i = 0; i < XStoreTunables::CATIDX_BLOOM_HASH_COUNT; ++i) {
+        out.bit_[i] = static_cast<uint16_t>(BloomBitPosition(h1, h2, i));
+    }
+    return out;
+}
+
+inline CatIdxBloomValue BloomValueOfEncoded(uint32_t column_idx, const char *encoded_value, size_t len) {
+    return BloomValueOf(column_idx, Crc32c(encoded_value, len), Fnv1a64(encoded_value, len));
+}
+
+// Rows for a batch fold (UpdateRows / RebuildFoldRows), non-owning: row i is row_index[i], with values
+// [value_end[i-1], value_end[i]) (value_end[-1] = 0). A value whose column is >= column_limit is not folded (the writer
+// passes the catidx width it read before its run loop; see ApplyWalRecord), nor one past the file's own width. A row with
+// no values still counts: its block is written, as UpdateRow writes it. Everything pointed to must outlive the call.
+struct CatIdxFoldView {
+    const uint64_t *row_index = nullptr;
+    const size_t *value_end = nullptr;
+    size_t rows = 0;
+    const CatIdxBloomValue *values = nullptr;
+    uint32_t column_limit = UINT32_MAX;
+};
+
+// An owning CatIdxFoldView a caller reuses across chunks (the startup rebuild, the live widen). Add hashes the
+// EncodeFDataForCatIdx bytes into bit positions (outside the file mutex), the same positions UpdateRow computes.
 struct CatIdxFoldBatch {
-    struct Value {
-        uint64_t h1;
-        uint64_t h2;
-        uint32_t column_idx;
-    };
     std::vector<uint64_t> row_index;
     std::vector<size_t> value_end;
-    std::vector<Value> values;
+    std::vector<CatIdxBloomValue> values;
     void Clear() { row_index.clear(); value_end.clear(); values.clear(); }
     void Add(uint32_t column_idx, const char *encoded_value, size_t len) {
-        values.push_back({Crc32c(encoded_value, len), Fnv1a64(encoded_value, len), column_idx});
+        if (column_idx > UINT16_MAX) return; // no file is this wide (see the static_assert above): never folded anyway
+        values.push_back(BloomValueOfEncoded(column_idx, encoded_value, len));
     }
     void Add(uint32_t column_idx, const std::string &encoded_value) { Add(column_idx, encoded_value.data(), encoded_value.size()); }
     // Closes the row whose values were added since the previous EndRow.
     void EndRow(uint64_t row) { row_index.push_back(row); value_end.push_back(values.size()); }
+    [[nodiscard]] CatIdxFoldView View() const { return {row_index.data(), value_end.data(), row_index.size(), values.data()}; }
 };
 
 class CatIdxFile {
@@ -190,8 +244,10 @@ public:
     // The writer's path (ApplyWalRecord, once per run): UpdateRow for every row of the batch, in order, under ONE hold
     // of the mutex, with UpdateRow's per-row rules (the old index of a keep-old rebuild gets every row, sharing the
     // batch's hashes). Each block is flushed once per run of consecutive rows in it, before this returns; the bytes on
-    // disk are identical to UpdateRow row by row with the same values (a batch holds only present values).
-    void UpdateRows(const CatIdxFoldBatch &batch);
+    // disk are identical to UpdateRow row by row with the same values (a batch holds only present values), minus the
+    // values at or past view.column_limit.
+    void UpdateRows(const CatIdxFoldView &view);
+    void UpdateRows(const CatIdxFoldBatch &batch) { UpdateRows(batch.View()); }
 
     // True (scan the block) also for a column past this file's width and for a block a running rebuild has not
     // finished, unless a keep-old rebuild still has the old index: that block is then answered by the old bloom (true
@@ -359,7 +415,7 @@ private:
     void UpdateRowLocked(uint64_t row_index, const std::vector<CatIdxObservation> &observations);
     // The batch fold shared by UpdateRows and RebuildFoldRows: every row with keep(row) true. mutex_ held.
     template <class Keep>
-    [[nodiscard]] bool FoldBatchLocked(const CatIdxFoldBatch &batch, Keep keep);
+    [[nodiscard]] bool FoldBatchLocked(const CatIdxFoldView &view, Keep keep);
 
     int fd_ = -1;
     CatIdxFileHeader header_;

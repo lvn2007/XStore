@@ -61,6 +61,26 @@ inline std::vector<ZoneMapObservation> RefZoneMapObservations(const XStore_Proto
     return out;
 }
 
+// The bloom bit positions of one encoded value, computed the way the fold computed them before positions moved to the
+// producer (independently of BloomBitPosition / BloomValueOf / Fnv1a64): h1 = Crc32c, h2 = FNV-1a 64 of the bytes,
+// bit i = (h1 + i*h2) % (entry bytes * 8), with the entry size a runtime value.
+inline std::vector<uint16_t> RefBloomPositions(const std::string &encoded, size_t entry_bytes = XStoreTunables::CATIDX_BLOOM_BYTES_PER_ENTRY) {
+    const uint64_t h1 = Crc32c(encoded.data(), encoded.size());
+    uint64_t h2 = 0xcbf29ce484222325ULL;
+    for (const char c : encoded) {
+        h2 ^= static_cast<unsigned char>(c);
+        h2 *= 0x100000001b3ULL;
+    }
+    std::vector<uint16_t> out;
+    for (size_t i = 0; i < XStoreTunables::CATIDX_BLOOM_HASH_COUNT; ++i) {
+        uint64_t combined = h1 + i * h2;
+        out.push_back(static_cast<uint16_t>(combined % (entry_bytes * 8)));
+    }
+    return out;
+}
+
+inline std::vector<uint16_t> Positions(const CatIdxBloomValue &v) { return {std::begin(v.Bits()), std::end(v.Bits())}; }
+
 // The pre-stage-2a rebuild of one year, written to the given paths.
 inline void BuildReferenceIndexes(XStore &store, const std::string &data_path, const std::string &zmap_path,
                            const std::string &catidx_path, uint16_t row_length, uint32_t width) {

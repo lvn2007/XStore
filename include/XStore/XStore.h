@@ -314,19 +314,17 @@ class XStore {
             // serialized bytes, not the RowData, to derive column values from. Applied by ApplyWalRecord itself,
             // after the row's real pwrite succeeds and under the same check -- never eagerly at enqueue time -- so the
             // indexes are never ahead of what is actually written, ASYNC included. Never part of the ring bytes.
-            // Row i covers zmap_obs [obs_end[i-1].zmap_end, obs_end[i].zmap_end) and catidx
+            // Row i covers zmap_obs [obs_end[i-1].zmap_end, obs_end[i].zmap_end) and catidx_vals
             // [obs_end[i-1].catidx_end, obs_end[i].catidx_end) (both 0 for i = 0).
             // zmap_obs: the row's PRESENT columns [0, min(fielddata_size, tracked_column_count)), row-major.
             std::vector<ZoneMapObservation> zmap_obs;
-            // Packed catidx values, row-major, present-and-set columns only: per value [u32 column_idx][u32 len]
-            // [len bytes of AppendFDataForCatIdx] (kCatIdxEntryHeaderBytes header, read with memcpy: unaligned). A
-            // u32 len is enough: one encoded value is at most 1 + row_length (u16) bytes; offsets into the arena,
-            // which can exceed 4 GiB, are size_t.
-            std::string catidx;
+            // catidx values, row-major, present-and-set columns only, already hashed into their bloom bit positions
+            // (BloomValueOf) by the producer, so the writer's fold only sets bits.
+            std::vector<CatIdxBloomValue> catidx_vals;
             // Empty (WAL replay: no observations) or exactly row_count entries.
             struct ObsEnd {
                 size_t zmap_end;     // into zmap_obs
-                size_t catidx_end;   // byte offset into catidx
+                size_t catidx_end;   // into catidx_vals
             };
             std::vector<ObsEnd> obs_end;
             // One per REQUEST, not per row -- null for ASYNC (nobody
@@ -351,15 +349,14 @@ class XStore {
             // A WAL-replayed record: no observations, pad_to 0 (the record object is reused across a replay loop).
             void ClearObservations() {
                 zmap_obs.clear();
-                catidx.clear();
+                catidx_vals.clear();
                 obs_end.clear();
                 zone_map_pad_to = 0;
             }
 
-            static constexpr size_t kCatIdxEntryHeaderBytes = 2 * sizeof(uint32_t);
-            // Reserves for `rows` rows of at most `widest_fields` columns: exact for wire, zmap_obs and obs_end (only
-            // rejected or narrower rows leave slack); catidx at the size of numeric/bool values (header + case tag +
-            // 8 B), so only values longer than 8 B (strings, bytes) grow it. Defined in XStore_Internal.h.
+            // Reserves for `rows` rows of at most `widest_fields` columns: exact for wire and obs_end, an upper bound
+            // for zmap_obs and catidx_vals (only rejected, narrower or unset-column rows leave slack). Defined in
+            // XStore_Internal.h.
             void ReserveRows(size_t rows, size_t widest_fields);
             // The one producer step shared by UnaryInsert and MultiRowInsert: appends the row's zero-padded slot to
             // wire (epoch in front, serialized with the sizes the caller's ByteSizeLong() cached), its zone-map
@@ -369,11 +366,11 @@ class XStore {
             void AppendRow(XStore &store, uint64_t epoch, const XStore_Proto::RowData &data);
         };
 #if defined(__GLIBCXX__) && defined(__x86_64__) && (!defined(_GLIBCXX_USE_CXX11_ABI) || _GLIBCXX_USE_CXX11_ABI)
-        // std::string is 32 bytes only in libstdc++ with the C++11 ABI; guard so a layout change is noticed. 216 = the
-        // old 120 with the rows vector (24 B) replaced by wire (32 B) + zmap_obs (24 B) + catidx (32 B) + obs_end
+        // std::string is 32 bytes only in libstdc++ with the C++11 ABI; guard so a layout change is noticed. 208 = the
+        // old 120 with the rows vector (24 B) replaced by wire (32 B) + zmap_obs (24 B) + catidx_vals (24 B) + obs_end
         // (24 B), plus zone_map_pad_to (4 B) and the 4 B of padding it leaves before wire (row_count fills the old
         // padding after cfg_epoch). Paid once per record (moved twice), not per row.
-        static_assert(sizeof(WalRecord) == 216, "WalRecord layout changed: update this check deliberately");
+        static_assert(sizeof(WalRecord) == 208, "WalRecord layout changed: update this check deliberately");
 #endif
 
         struct WalShard {
