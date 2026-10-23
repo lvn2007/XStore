@@ -33,10 +33,11 @@ class ZmqServer {
 
         // Work routine run by each worker thread: counts the worker out of
         // latch_ on every exit path and swallows ETERM (server stopping).
-        void WorkerRoutine(std::string server_addr);
-        // The worker's request loop; throws zmq::error_t(ETERM) on shutdown.
-        void WorkerLoop(const std::string &server_addr);
-        // Sockets + proxy; throws zmq::error_t(ETERM) once RequestStop() ran.
+        void WorkerRoutine(std::string server_addr, int worker_index);
+        // The worker's request loop (DEALER with routing id "w<worker_index>"
+        // behind RunReadyBroker); throws zmq::error_t(ETERM) on shutdown.
+        void WorkerLoop(const std::string &server_addr, int worker_index);
+        // Sockets + broker; throws zmq::error_t(ETERM) once RequestStop() ran.
         void Serve(const std::string &listen_addr, const std::string &listen_port,
                    const std::optional<XStoreCurveKeyPair> &curve_identity,
                    const std::shared_ptr<KeyStore> &curve_keystore);
@@ -62,7 +63,7 @@ class ZmqServer {
                                       std::shared_ptr<KeyStore> curve_keystore = nullptr);
 
         // Thread-safe, idempotent, and valid at any time (even before
-        // StartServer): shuts down the ZMQ context, so the proxy and every
+        // StartServer): shuts down the ZMQ context, so the broker and every
         // worker's blocking recv fail with ETERM and StartServer winds down.
         // In-flight requests still execute, but their replies can no longer
         // be sent (a SYNC-acked insert may be durable yet unacknowledged).

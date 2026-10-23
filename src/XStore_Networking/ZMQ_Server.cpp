@@ -1,4 +1,5 @@
 #include "include/Networking/ZMQ_Server.h"
+#include "include/Networking/ZMQ_Broker.h"
 #include <google/protobuf/arena.h>
 #include <cerrno>
 #include <chrono>
@@ -72,10 +73,62 @@ int ZmqServer::DefaultThreadCount() {
 }
 
 namespace {
+// Every reply to one request leaves as ONE multipart message [client_id][empty]
+// [frame...] on the worker's DEALER socket: the broker counts the worker idle
+// again only after the reply's last frame, so a request must get exactly one
+// complete reply on every path, including after a handler threw mid-stream.
+// dontwait: a connected inproc DEALER with HWM 0 never blocks on send.
+class ReplyWriter {
+    public:
+        ReplyWriter(zmq::socket_t &socket, zmq::message_t &client_id) : socket(socket), client_id(client_id) {}
+
+        // A frame after the reply's last one is dropped: sent bare it would
+        // reach the broker as a second reply and queue this worker twice.
+        void Send(zmq::message_t &frame, bool last) {
+            if (state == State::DONE) return;
+            Open();
+            socket.send(frame, Flags(last));
+            state = last ? State::DONE : State::OPEN;
+        }
+
+        void Send(zmq::const_buffer frame, bool last) {
+            if (state == State::DONE) return;
+            Open();
+            socket.send(frame, Flags(last));
+            state = last ? State::DONE : State::OPEN;
+        }
+
+        // Completes the reply with an empty last frame unless it is already
+        // complete: a single empty frame if nothing was sent yet, or the
+        // terminator of a streamed reply cut short (same frames a REP socket
+        // used to send in that case).
+        void Finish() {
+            if (state == State::DONE) return;
+            zmq::message_t empty;
+            Send(empty, true);
+        }
+
+    private:
+        enum class State { NONE, OPEN, DONE };
+
+        static zmq::send_flags Flags(bool last) {
+            return last ? zmq::send_flags::dontwait : (zmq::send_flags::dontwait | zmq::send_flags::sndmore);
+        }
+
+        void Open() {
+            if (state != State::NONE) return;
+            socket.send(client_id, Flags(false));
+            socket.send(zmq::message_t(), Flags(false));
+            state = State::OPEN;
+        }
+
+        zmq::socket_t &socket;
+        zmq::message_t &client_id;
+        State state = State::NONE;
+};
+
 // Shared by every case below: serialize a response proto and dispatch it to
-// the CLIENT. REP sockets enforce recv-then-send ordering already, so
-// dontwait never actually blocks here -- kept only to match a fire-and-forget
-// send with no result check, same as before.
+// the CLIENT as the reply's only frame.
 //
 // SerializeWithCachedSizesToArray(), not SerializeToArray(): per
 // message_lite.h, SerializeToArray() is "just a simple wrapper around
@@ -87,11 +140,11 @@ namespace {
 // passes + 1 write pass down to 1 size-compute pass + 1 write pass -- safe
 // as long as msg isn't mutated between the two calls, which it isn't here.
 template <typename T>
-void SendProto(zmq::socket_t &socket, const T &msg) {
+void SendProto(ReplyWriter &writer, const T &msg) {
     size_t size = msg.ByteSizeLong();
     zmq::message_t reply(size);
     msg.SerializeWithCachedSizesToArray(static_cast<uint8_t*>(reply.data()));
-    socket.send(reply, zmq::send_flags::dontwait);
+    writer.Send(reply, true);
 }
 }  // namespace
 
@@ -182,8 +235,8 @@ void ZmqServer::Serve(const std::string &listen_addr, const std::string &listen_
     client_socket.bind(server_addr);
     spdlog::info("[NETWORKING] - Listening on: {}", server_addr);
 
-    //  Socket to talk to WORKERS
-    zmq::socket_t worker_socket(ctx, zmq::socket_type::dealer);
+    //  Socket to talk to WORKERS (DEALERs, addressed by routing id)
+    zmq::socket_t worker_socket(ctx, zmq::socket_type::router);
     worker_socket.set(zmq::sockopt::sndhwm, 0);
     worker_socket.set(zmq::sockopt::rcvhwm, 0);
     worker_socket.set(zmq::sockopt::linger, 0);
@@ -195,16 +248,17 @@ void ZmqServer::Serve(const std::string &listen_addr, const std::string &listen_
         latch_->running += num_threads;
     }
     for (int i = 0; i < num_threads; i++) {
-        std::thread worker(&ZmqServer::WorkerRoutine, this, server_addr.substr(6));
+        std::thread worker(&ZmqServer::WorkerRoutine, this, server_addr.substr(6), i);
         worker.detach();
     }
     spdlog::info("[NETWORKING] - Launched: {0:d} worker thread", num_threads);
 
-    // socket_t overload (void* one deprecated since cppzmq 4.3.1); same as previous nullptr capture.
-    zmq::proxy(client_socket, worker_socket);
+    // Dispatches each request only to an idle worker (zmq::proxy's DEALER
+    // round-robin queued requests behind a busy worker).
+    RunReadyBroker(client_socket, worker_socket, static_cast<size_t>(num_threads));
 }
 
-void ZmqServer::WorkerRoutine(std::string server_addr) {
+void ZmqServer::WorkerRoutine(std::string server_addr, int worker_index) {
     // Declared first => destroyed last: the count drops only after every
     // worker-owned socket/XStore below is gone, so StartServer's return (and
     // the context teardown after it) never races a live worker socket.
@@ -217,23 +271,27 @@ void ZmqServer::WorkerRoutine(std::string server_addr) {
         }
     } guard{latch_};
     try {
-        WorkerLoop(server_addr);
+        WorkerLoop(server_addr, worker_index);
     } catch (const zmq::error_t &e) {
         if (e.num() != ETERM) throw;  // anything else is a real bug: keep the old terminate-loudly behavior
     }
 }
 
-void ZmqServer::WorkerLoop(const std::string &server_addr) {
+void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
     // Instantiate XStore for each thread
     XStore my_store;
 
     // Each thread shares the server's ZMQ context. No queue-depth cap, same
     // reasoning as ClientSocket/WorkerSocket in StartServer.
-    zmq::socket_t socket(ctx, zmq::socket_type::rep);
+    zmq::socket_t socket(ctx, zmq::socket_type::dealer);
     socket.set(zmq::sockopt::sndhwm, 0);
     socket.set(zmq::sockopt::rcvhwm, 0);
     socket.set(zmq::sockopt::linger, 0);
+    // The broker's handle for this worker; a leading 0 byte is reserved for
+    // ROUTER-generated ids.
+    socket.set(zmq::sockopt::routing_id, "w" + std::to_string(worker_index));
     socket.connect("inproc://workers");
+    socket.send(zmq::message_t(), zmq::send_flags::none);  // READY
 
     // One arena per worker thread, reused for every request via Reset()
     // rather than constructed fresh each time. Reset() keeps the arena's
@@ -248,14 +306,15 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
     google::protobuf::Arena arena;
 
     // Reused across iterations (this function IS the per-thread loop, so a
-    // plain local -- no thread_local needed) instead of a fresh
-    // zmq::message_t constructed every request. A single message_t, not a
-    // vector: this REP socket only ever sees one body frame per request --
-    // the client (XStore_Client.h) always does a single-frame Sock.send(),
-    // never send_multipart -- so the more()-check loop and back_inserter
-    // machinery recv_multipart pays for a possible second/third frame was
-    // pure overhead here, never exercised in practice.
+    // plain local -- no thread_local needed) instead of fresh message_t
+    // objects every request. A request is [client_id][empty][body]: the
+    // client (XStore_Client.h) is a REQ socket that always sends a single
+    // body frame. Frames past the body land in extra_frame and make the
+    // request malformed.
+    zmq::message_t client_id;
+    zmq::message_t delimiter;
     zmq::message_t client_msg;
+    zmq::message_t extra_frame;
 
     // Same adaptive-poll idea as the WAL writer's own queue wait (see
     // ZMQ_ADAPTIVE_POLL_WINDOW_US, XStore_Tunables.h): epoch (not "now") so
@@ -276,17 +335,31 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                 // blocking path on the next outer-loop iteration.
                 bool got = false;
                 while (!got) {
-                    got = socket.recv(client_msg, zmq::recv_flags::dontwait).has_value();
+                    got = socket.recv(client_id, zmq::recv_flags::dontwait).has_value();
                     if (!got && std::chrono::steady_clock::now() - last_activity >= window) break;
                 }
                 if (!got) continue;
             } else {
-                (void) socket.recv(client_msg);
+                (void) socket.recv(client_id);
             }
         } else {
-            (void) socket.recv(client_msg);
+            (void) socket.recv(client_id);
         }
         last_activity = std::chrono::steady_clock::now();
+
+        // The rest of the multipart request arrived with its first frame.
+        int frame_count = 1;
+        for (bool more = client_id.more(); more; ++frame_count) {
+            zmq::message_t &dst = frame_count == 1 ? delimiter : (frame_count == 2 ? client_msg : extra_frame);
+            (void) socket.recv(dst);
+            more = dst.more();
+        }
+        ReplyWriter writer(socket, client_id);
+        if (frame_count != 3 || delimiter.size() != 0) {
+            spdlog::warn("[NETWORKING] - Malformed request envelope ({} frames), dropping", frame_count);
+            writer.Finish();
+            continue;
+        }
 
         // Free everything the previous iteration allocated in one shot --
         // safe here because that request's response was already serialized
@@ -299,7 +372,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
         auto *client_request = google::protobuf::Arena::Create<XStore_Proto::Request>(&arena);
         if (!client_request->ParseFromArray(client_msg.data(), client_msg.size())) {
             spdlog::warn("[NETWORKING] - Failed to parse request, dropping");
-            socket.send(zmq::message_t(0), zmq::send_flags::dontwait);
+            writer.Finish();
             continue;
         }
 
@@ -317,26 +390,25 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
         // same as surviving an unknown one).
         //
         // Deliberately just a net, not an error-handling redesign: reply
-        // the same way this loop's other two "can't produce a real answer"
+        // the same way this loop's other "can't produce a real answer"
         // paths already do -- a single empty frame, which unblocks the
         // client's REQ socket instead of leaving it waiting forever -- log,
-        // and keep serving. The inner catch around the send covers the one
-        // case where the throw happened AFTER a reply was already sent, in
-        // which case this second send is an EFSM error on the REP socket
-        // and there is nothing further to do about it.
+        // and keep serving. ReplyWriter::Finish sends nothing if the reply
+        // was already complete and only the terminating frame if a streamed
+        // reply was cut short, so the request still gets exactly one reply.
         try {
             switch (client_request->payload_case()) {
                 // INFO
                 case XStore_Proto::Request::kInfo: {
                     XStore_Proto::SysInfo_REP rep = my_store.InfoQuery(server_addr, num_threads);
-                    SendProto(socket, rep);
+                    SendProto(writer, rep);
                     break;
                 }
 
                 // PING -- warmup/liveness probe, no XStore work, just the round trip
                 case XStore_Proto::Request::kPing: {
                     XStore_Proto::Ping_REP rep;
-                    SendProto(socket, rep);
+                    SendProto(writer, rep);
                     break;
                 }
 
@@ -345,7 +417,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                     const auto &req = client_request->createdb();
                     const std::vector<std::string> column_names(req.columnnames().begin(), req.columnnames().end());
                     XStore_Proto::CreateDB_REP rep = my_store.CreateDB(req.dbname(), req.timeresolution(), req.rowlength(), req.columncount(), column_names);
-                    SendProto(socket, rep);
+                    SendProto(writer, rep);
                     break;
                 }
 
@@ -353,7 +425,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                 case XStore_Proto::Request::kRemovedb: {
                     const auto &req = client_request->removedb();
                     XStore_Proto::RemoveDB_REP rep = my_store.RemoveDB(req.dbname());
-                    SendProto(socket, rep);
+                    SendProto(writer, rep);
                     break;
                 }
 
@@ -361,7 +433,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                 case XStore_Proto::Request::kRemovedbfiles: {
                     auto *req = client_request->mutable_removedbfiles();
                     XStore_Proto::RemoveDBFiles_REP rep = my_store.RemoveDBFiles(req, req->dbname());
-                    SendProto(socket, rep);
+                    SendProto(writer, rep);
                     break;
                 }
 
@@ -370,7 +442,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                     const auto &req = client_request->unaryinsert();
                     XStore_Proto::UnaryInsert_REP rep;
                     my_store.UnaryInsert(req.timestamp(), req.data(), req.dbname(), &rep, req.durabilitymode());
-                    SendProto(socket, rep);
+                    SendProto(writer, rep);
                     break;
                 }
 
@@ -384,7 +456,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                     // paid on every call with no reuse across calls.
                     auto *rep = google::protobuf::Arena::Create<XStore_Proto::UnaryQuery_REP>(&arena);
                     my_store.UnaryQuery(req.timestamp(), req.dbname(), rep);
-                    SendProto(socket, *rep);
+                    SendProto(writer, *rep);
                     break;
                 }
 
@@ -392,7 +464,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                 case XStore_Proto::Request::kUnarydelete: {
                     const auto &req = client_request->unarydelete();
                     XStore_Proto::UnaryDelete_REP rep = my_store.UnaryDelete(req.timestamp(), req.dbname());
-                    SendProto(socket, rep);
+                    SendProto(writer, rep);
                     break;
                 }
 
@@ -406,7 +478,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                     auto *req = client_request->mutable_batchinsert();
                     XStore_Proto::BatchInsert_REP rep;
                     my_store.BatchInsert(req, &rep);
-                    SendProto(socket, rep);
+                    SendProto(writer, rep);
                     break;
                 }
 
@@ -421,11 +493,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                     // reassembled transparently by the client library.
                     auto *req = client_request->mutable_batchquery();
                     my_store.BatchQuery(req, /*sort_time=*/true, XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
-                        [&](std::string &&chunk, bool is_last) {
-                            socket.send(zmq::buffer(chunk),
-                                        is_last ? zmq::send_flags::dontwait
-                                                : (zmq::send_flags::dontwait | zmq::send_flags::sndmore));
-                        });
+                        [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); });
                     break;
                 }
 
@@ -433,7 +501,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                 case XStore_Proto::Request::kBatchdelete: {
                     auto *req = client_request->mutable_batchdelete();
                     XStore_Proto::BatchDelete_REP rep = my_store.BatchDelete(req);
-                    SendProto(socket, rep);
+                    SendProto(writer, rep);
                     break;
                 }
 
@@ -448,7 +516,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                     auto *req = client_request->mutable_rangeinsert();   // non-const: RangeInsert sorts an unsorted request in place
                     XStore_Proto::RangeInsert_REP rep;
                     my_store.RangeInsert(req, &rep);
-                    SendProto(socket, rep);
+                    SendProto(writer, rep);
                     break;
                 }
 
@@ -468,11 +536,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                     const auto &req = client_request->rangequery();
                     my_store.RangeQuery(req.starttime(), req.endtime(), req.dbname(),
                         XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
-                        [&](std::string &&chunk, bool is_last) {
-                            socket.send(zmq::buffer(chunk),
-                                        is_last ? zmq::send_flags::dontwait
-                                                : (zmq::send_flags::dontwait | zmq::send_flags::sndmore));
-                        });
+                        [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); });
                     break;
                 }
 
@@ -481,11 +545,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                     const auto &req = client_request->findbyvalue();
                     my_store.FindByValue(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), req.value(),
                         XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
-                        [&](std::string &&chunk, bool is_last) {
-                            socket.send(zmq::buffer(chunk),
-                                        is_last ? zmq::send_flags::dontwait
-                                                : (zmq::send_flags::dontwait | zmq::send_flags::sndmore));
-                        });
+                        [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); });
                     break;
                 }
 
@@ -496,11 +556,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                     my_store.FindByPattern(req.starttime(), req.endtime(), req.dbname(), req.columnidx(),
                         req.pattern(), req.mode(), req.caseinsensitive(),
                         XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
-                        [&](std::string &&chunk, bool is_last) {
-                            socket.send(zmq::buffer(chunk),
-                                        is_last ? zmq::send_flags::dontwait
-                                                : (zmq::send_flags::dontwait | zmq::send_flags::sndmore));
-                        });
+                        [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); });
                     break;
                 }
 
@@ -508,7 +564,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                 case XStore_Proto::Request::kRangedelete: {
                     const auto &req = client_request->rangedelete();
                     XStore_Proto::RangeDelete_REP rep = my_store.RangeDelete(req.starttime(), req.endtime(), req.dbname());
-                    SendProto(socket, rep);
+                    SendProto(writer, rep);
                     break;
                 }
 
@@ -517,7 +573,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                     const auto &req = client_request->min();
                     XStore_Proto::Min_REP rep;
                     my_store.MinAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
-                    SendProto(socket, rep);
+                    SendProto(writer, rep);
                     break;
                 }
 
@@ -526,7 +582,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                     const auto &req = client_request->max();
                     XStore_Proto::Max_REP rep;
                     my_store.MaxAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
-                    SendProto(socket, rep);
+                    SendProto(writer, rep);
                     break;
                 }
 
@@ -535,7 +591,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                     const auto &req = client_request->sum();
                     XStore_Proto::Sum_REP rep;
                     my_store.SumAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
-                    SendProto(socket, rep);
+                    SendProto(writer, rep);
                     break;
                 }
 
@@ -544,7 +600,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                     const auto &req = client_request->avg();
                     XStore_Proto::Avg_REP rep;
                     my_store.AvgAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
-                    SendProto(socket, rep);
+                    SendProto(writer, rep);
                     break;
                 }
 
@@ -553,7 +609,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                     const auto &req = client_request->variance();
                     XStore_Proto::Variance_REP rep;
                     my_store.VarianceAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
-                    SendProto(socket, rep);
+                    SendProto(writer, rep);
                     break;
                 }
 
@@ -562,7 +618,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                     const auto &req = client_request->stddev();
                     XStore_Proto::Stddev_REP rep;
                     my_store.StddevAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
-                    SendProto(socket, rep);
+                    SendProto(writer, rep);
                     break;
                 }
 
@@ -571,7 +627,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                     const auto &req = client_request->exists();
                     XStore_Proto::Exists_REP rep;
                     my_store.ExistsAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
-                    SendProto(socket, rep);
+                    SendProto(writer, rep);
                     break;
                 }
 
@@ -580,7 +636,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                     const auto &req = client_request->ohlc();
                     XStore_Proto::Ohlc_REP rep;
                     my_store.OhlcAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
-                    SendProto(socket, rep);
+                    SendProto(writer, rep);
                     break;
                 }
 
@@ -589,7 +645,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                     const auto &req = client_request->percentile();
                     XStore_Proto::Percentile_REP rep;
                     my_store.PercentileAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), req.percentile(), &rep);
-                    SendProto(socket, rep);
+                    SendProto(writer, rep);
                     break;
                 }
 
@@ -598,7 +654,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                     const auto &req = client_request->distinctcount();
                     XStore_Proto::DistinctCount_REP rep;
                     my_store.DistinctCountAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
-                    SendProto(socket, rep);
+                    SendProto(writer, rep);
                     break;
                 }
 
@@ -607,7 +663,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                     const auto &req = client_request->topk();
                     XStore_Proto::TopK_REP rep;
                     my_store.TopKAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), req.k(), &rep);
-                    SendProto(socket, rep);
+                    SendProto(writer, rep);
                     break;
                 }
 
@@ -617,19 +673,22 @@ void ZmqServer::WorkerLoop(const std::string &server_addr) {
                 case XStore_Proto::Request::PAYLOAD_NOT_SET:
                 default: {
                     spdlog::warn("[NETWORKING] - Received request with no payload set, dropping");
-                    socket.send(zmq::message_t(0), zmq::send_flags::dontwait);
+                    writer.Finish();
                     break;
                 }
             }
+            // No-op once the handler completed its reply; otherwise the
+            // request still gets its one reply.
+            writer.Finish();
         } catch (const std::exception &e) {
             // Context shut down mid-request (the reply send failed): not an
             // error, unwind to WorkerRoutine.
             if (auto *ze = dynamic_cast<const zmq::error_t *>(&e); ze != nullptr && ze->num() == ETERM) throw;
             spdlog::error("[NETWORKING] - Request handler threw ({}), replying empty and continuing", e.what());
-            try { socket.send(zmq::message_t(0), zmq::send_flags::dontwait); } catch (...) {}
+            try { writer.Finish(); } catch (...) {}
         } catch (...) {
             spdlog::error("[NETWORKING] - Request handler threw a non-std exception, replying empty and continuing");
-            try { socket.send(zmq::message_t(0), zmq::send_flags::dontwait); } catch (...) {}
+            try { writer.Finish(); } catch (...) {}
         }
     }
 }

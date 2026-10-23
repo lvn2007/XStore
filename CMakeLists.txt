@@ -521,6 +521,7 @@ target_link_libraries(xstore_curve PUBLIC zmq "stdc++fs")
 # The ZMQ wire-protocol server. Needs the core (XStore class) + curve keys.
 add_library(xstore_network STATIC
         include/Networking/ZMQ_Server.h src/XStore_Networking/ZMQ_Server.cpp
+        include/Networking/ZMQ_Broker.h src/XStore_Networking/ZMQ_Broker.cpp
         third_party/zmq.hpp third_party/zhelpers.hpp)
 target_link_libraries(xstore_network PUBLIC xstore_core xstore_curve zmq)
 

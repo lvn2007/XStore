@@ -29,8 +29,9 @@ High-level components:
    Client (C++/Python)   │        ZMQ_Server           │
    XStore_Client  ─req──►│  ROUTER (clients)           │
                          │     ⇅ inproc queue          │
-                         │  DEALER → N worker threads  │
-                         │     each: REP socket        │
+                         │  ready-based broker (§7.1)  │
+                         │  → N worker threads         │
+                         │     each: DEALER socket     │
                          │           + XStore instance │
                          └──────────┬──────────────────┘
                                     │ pread/pwrite/mmap/fallocate/pwritev
@@ -388,7 +389,7 @@ XStore's zone map (§4.14) accelerates `MIN`/`MAX`/`SUM`/`AVG`/`VARIANCE`/`STDDE
 - **Graceful server shutdown sequence** (`src/main.cpp`, `ZmqServer`, `XStore_Curve.cpp`):
   1. `main` blocks SIGINT/SIGTERM with `pthread_sigmask` as its first statement, so every later thread (spdlog, ZMQ I/O threads, WAL writers, stats) inherits the mask and no default handler can kill the process with indexes dirty.
   2. `ZmqServer` is constructed early (before the slow `InitDB`/WAL-replay boot) and one detached thread `sigwait`s. First signal: log, then `ZmqServer::RequestStop()` (`zmq_ctx_shutdown`, valid before `StartServer` — a signal during boot is remembered and acted on once boot finishes). **Second signal: flush the log and `_exit(1)`**, leaving the dirty flags set (safe; the next start rebuilds). A mutex-guarded `g_server` pointer, nulled after `StartServer` returns, keeps a late signal from touching a destroyed server.
-  3. `zmq::proxy` returns on ETERM; worker `recv` calls (and a reply `send` in flight) throw/return ETERM and each worker leaves its loop (`WorkerRoutine` catches ETERM; the generic handler rethrows it so no spurious "handler threw" is logged). `XStoreZapHandler::Loop` also catches ETERM. Client-facing and worker sockets get explicit linger values so context teardown cannot block on an unread client.
+  3. The broker (`RunReadyBroker`) throws ETERM out of its poll/recv/send; worker `recv` calls (and a reply `send` in flight) throw/return ETERM and each worker leaves its loop (`WorkerRoutine` catches ETERM; the generic handler rethrows it so no spurious "handler threw" is logged). `XStoreZapHandler::Loop` also catches ETERM. Client-facing and worker sockets get explicit linger values so context teardown cannot block on an unread client.
   4. `StartServer` returns `bool`: it waits up to `ZMQ_SHUTDOWN_DRAIN_TIMEOUT_S` (10 s) on a worker-exit latch (mutex + cv + counter in a `shared_ptr`, since the workers are detached and their final decrement can outlive the `ZmqServer`) for every worker to finish.
   5. Drained: `main` calls `StopCatIdxCompactionThread()` (so compaction cannot re-dirty an index), then `Shutdown()`, logs, returns 0 (atexit hooks then stop the stats thread and the already-stopped WAL writers).
   6. **Deviation from the original design text (plan DD7):** the plan said to proceed to `Shutdown()` after the bounded wait. If workers fail to drain within 10 s, `main` instead `_exit(1)`s **without** calling `Shutdown()`: `Shutdown()` requires a quiescent server, so running it beside a live worker could mark an index clean over an in-flight write. The indexes simply stay dirty and the next start rebuilds.
@@ -765,14 +766,16 @@ All three are **deliberately exact**, not approximate: no t-digest/KLL, HyperLog
 ### 7.1 ZeroMQ broker topology
 
 ```cpp
-zmq::socket_t ClientSocket(Ctx, zmq::socket_type::router);  // faces clients, tcp://<addr>:<port>
-zmq::socket_t WorkerSocket(Ctx, zmq::socket_type::dealer);  // faces workers, inproc://workers
-zmq::proxy(ClientSocket, WorkerSocket, nullptr);            // broker: load-balances client reqs across workers
+zmq::socket_t client_socket(ctx, zmq::socket_type::router);  // faces clients, tcp://<addr>:<port>
+zmq::socket_t worker_socket(ctx, zmq::socket_type::router);  // faces workers, inproc://workers
+RunReadyBroker(client_socket, worker_socket, num_threads);    // ZMQ_Broker.cpp: dispatch only to idle workers
 ```
 
-Each of `NumThreads` worker threads connects a `REP` socket to `inproc://workers` and runs an independent `recv → dispatch → send` loop. This is the classic ZeroMQ **ROUTER-DEALER broker / REP worker pool** pattern: the broker transparently multiplexes many concurrent client `REQ` connections onto a fixed worker pool, and `zmq::proxy` handles the envelope routing so individual workers never see client identity framing directly — they just `recv`/`send` one request/response per REP-socket round trip.
+Each of `NumThreads` worker threads connects a `DEALER` socket with routing id `w<index>` to `inproc://workers`, sends one single-frame READY, then runs an independent `recv → dispatch → send` loop. A request reaches a worker as `[client_id][empty][body]`; every reply leaves as ONE multipart message `[client_id][empty][frame...]` (`ReplyWriter` in ZMQ_Server.cpp: single frame for `SendProto`, SNDMORE chunks for the streamed Range/Batch/FindBy* replies, and exactly one reply on every path, incl. a handler that throws mid-stream, which gets an empty terminating frame).
 
-**Graceful stop (2026-10, §4.18):** `ZmqServer::RequestStop()` calls `zmq_ctx_shutdown`; the proxy and every worker's blocking `recv`/`send` then fail with `ETERM` and the workers exit. `StartServer` returns `bool`: true once all (detached) workers have left, within a 10 s bound (`ZMQ_SHUTDOWN_DRAIN_TIMEOUT_S`); false on timeout, in which case `main` exits 1 without running `XStore::Shutdown()`.
+`RunReadyBroker` (2026-10-23, replaces `zmq::proxy(ROUTER, DEALER)` + `REP` workers) keeps a LIFO stack of idle worker ids (the most recently freed, still-spinning worker first). It polls the worker ROUTER always and the client ROUTER only while a worker is idle, so a request waits in the client ROUTER's queue instead of behind a busy worker: the old DEALER round-robin queued ~1/N of requests behind a long SYNC writer (read p99 37 ms vs 0.46 ms readers-alone, 16 workers). A worker message with only the id frame is READY; otherwise its frames are relayed to the client ROUTER and the worker is idle again after the last one. After each poll wake it drains with `dontwait` (up to 256 rounds). Direct `REQ` clients (every client in this repo) see no change: same frontend ROUTER, CURVE/ZAP, HWMs and wire frames. A request whose envelope is not exactly `[client_id][empty][body]` (e.g. a client behind its own ROUTER/DEALER relay, which `REP` used to accept) now gets one empty reply and a warning.
+
+**Graceful stop (2026-10, §4.18):** `ZmqServer::RequestStop()` calls `zmq_ctx_shutdown`; the broker and every worker's blocking `recv`/`send` then fail with `ETERM` and the workers exit. `StartServer` returns `bool`: true once all (detached) workers have left, within a 10 s bound (`ZMQ_SHUTDOWN_DRAIN_TIMEOUT_S`); false on timeout, in which case `main` exits 1 without running `XStore::Shutdown()`.
 
 ### 7.2 Per-request allocation strategy — Arena
 
