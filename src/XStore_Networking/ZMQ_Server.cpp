@@ -254,8 +254,10 @@ void ZmqServer::Serve(const std::string &listen_addr, const std::string &listen_
     spdlog::info("[NETWORKING] - Launched: {0:d} worker thread", num_threads);
 
     // Dispatches each request only to an idle worker (zmq::proxy's DEALER
-    // round-robin queued requests behind a busy worker).
-    RunReadyBroker(client_socket, worker_socket, static_cast<size_t>(num_threads));
+    // round-robin queued requests behind a busy worker). Spins like the
+    // workers after activity; a 0 tunable means it always blocks in poll.
+    RunReadyBroker(client_socket, worker_socket, static_cast<size_t>(num_threads),
+                   std::chrono::microseconds(XStoreTunables::ZMQ_ADAPTIVE_POLL_WINDOW_US));
 }
 
 void ZmqServer::WorkerRoutine(std::string server_addr, int worker_index) {

@@ -1,13 +1,14 @@
 // RunReadyBroker (ZMQ_Broker.h) on a private context with fake DEALER workers: requests go only to idle workers,
 // wait when every worker is busy, multi-frame replies are relayed intact, and ctx.shutdown() ends the broker with
 // ETERM. Negative "nothing arrived" checks use a short receive timeout; every positive step is synchronised by a
-// message actually arriving.
+// message actually arriving. Every broker test runs with spin window 0 (block in poll) and 50 ms (spin first).
 #include "include/Networking/ZMQ_Broker.h"
 
 #include <gtest/gtest.h>
 
 #include <cerrno>
 #include <chrono>
+#include <ctime>
 #include <future>
 #include <memory>
 #include <string>
@@ -18,6 +19,7 @@ namespace {
 
 constexpr int RECV_TIMEOUT_MS = 5000;
 constexpr int NEGATIVE_CHECK_MS = 100;
+constexpr std::chrono::microseconds SPIN_WINDOW{50000};
 
 std::vector<std::string> RecvFrames(zmq::socket_t &socket) {
     std::vector<std::string> frames;
@@ -58,7 +60,7 @@ struct FakeWorker {
     }
 };
 
-class XStoreZmqBrokerTest : public ::testing::Test {
+class XStoreZmqBrokerTest : public ::testing::TestWithParam<std::chrono::microseconds> {
   protected:
     zmq::context_t ctx;
     zmq::socket_t frontend{ctx, zmq::socket_type::router};
@@ -74,7 +76,7 @@ class XStoreZmqBrokerTest : public ::testing::Test {
         backend.bind("inproc://broker-test-backend");
         broker_exit = std::async(std::launch::async, [this] {
             try {
-                RunReadyBroker(frontend, backend, 4);
+                RunReadyBroker(frontend, backend, 4, GetParam());
             } catch (const zmq::error_t &e) {
                 return e.num();
             }
@@ -118,7 +120,7 @@ class XStoreZmqBrokerTest : public ::testing::Test {
     }
 };
 
-TEST_F(XStoreZmqBrokerTest, RequestReachesAnIdleWorkerWithClientEnvelope) {
+TEST_P(XStoreZmqBrokerTest, RequestReachesAnIdleWorkerWithClientEnvelope) {
     FakeWorker &worker = AddWorker("wA");
     zmq::socket_t &client = AddClient();
     client.send(zmq::str_buffer("hello"), zmq::send_flags::none);
@@ -135,7 +137,7 @@ TEST_F(XStoreZmqBrokerTest, RequestReachesAnIdleWorkerWithClientEnvelope) {
     EXPECT_EQ(reply[0], "world");
 }
 
-TEST_F(XStoreZmqBrokerTest, BusyWorkerGetsNoFurtherRequests) {
+TEST_P(XStoreZmqBrokerTest, BusyWorkerGetsNoFurtherRequests) {
     std::vector<FakeWorker *> all = {&AddWorker("wA"), &AddWorker("wB"), &AddWorker("wC")};
     AddClient().send(zmq::str_buffer("hold"), zmq::send_flags::none);
     std::vector<std::string> held;
@@ -164,7 +166,7 @@ TEST_F(XStoreZmqBrokerTest, BusyWorkerGetsNoFurtherRequests) {
     EXPECT_TRUE(all[static_cast<size_t>(busy)]->Take(NEGATIVE_CHECK_MS).empty());
 }
 
-TEST_F(XStoreZmqBrokerTest, RequestWaitsWhileAllBusyThenGoesToFirstWorkerThatReplies) {
+TEST_P(XStoreZmqBrokerTest, RequestWaitsWhileAllBusyThenGoesToFirstWorkerThatReplies) {
     std::vector<FakeWorker *> all = {&AddWorker("wA"), &AddWorker("wB")};
     zmq::socket_t &c1 = AddClient();
     zmq::socket_t &c2 = AddClient();
@@ -194,7 +196,7 @@ TEST_F(XStoreZmqBrokerTest, RequestWaitsWhileAllBusyThenGoesToFirstWorkerThatRep
     EXPECT_TRUE(all[static_cast<size_t>(first)]->Take(NEGATIVE_CHECK_MS).empty());
 }
 
-TEST_F(XStoreZmqBrokerTest, MultiFrameReplyIsRelayedIntactAndInOrder) {
+TEST_P(XStoreZmqBrokerTest, MultiFrameReplyIsRelayedIntactAndInOrder) {
     FakeWorker &worker = AddWorker("wA");
     zmq::socket_t &client = AddClient();
     client.send(zmq::str_buffer("stream"), zmq::send_flags::none);
@@ -212,11 +214,60 @@ TEST_F(XStoreZmqBrokerTest, MultiFrameReplyIsRelayedIntactAndInOrder) {
     EXPECT_EQ(again.back(), "again");
 }
 
-TEST_F(XStoreZmqBrokerTest, ContextShutdownEndsBrokerWithEterm) {
-    AddWorker("wA");
+TEST_P(XStoreZmqBrokerTest, ContextShutdownEndsBrokerWithEterm) {
+    // A round trip first, so a spinning broker is inside its window when the context goes away.
+    FakeWorker &worker = AddWorker("wA");
+    zmq::socket_t &client = AddClient();
+    client.send(zmq::str_buffer("ping"), zmq::send_flags::none);
+    const auto request = worker.Take();
+    ASSERT_EQ(request.size(), 3u);
+    worker.Reply(request, {"pong"});
+    ASSERT_EQ(RecvFrames(client), std::vector<std::string>{"pong"});
     ctx.shutdown();
     ASSERT_EQ(broker_exit.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     EXPECT_EQ(broker_exit.get(), ETERM);
+}
+
+// With the only worker busy the frontend is not polled; the spin on the backend alone must still lapse with the
+// window and fall back to the blocking poll (no CPU burnt afterwards).
+TEST_P(XStoreZmqBrokerTest, SpinEndsAfterWindowEvenWithNoIdleWorker) {
+    FakeWorker &worker = AddWorker("wA");
+    zmq::socket_t &client = AddClient();
+    client.send(zmq::str_buffer("hold"), zmq::send_flags::none);
+    const auto request = worker.Take();
+    ASSERT_EQ(request.size(), 3u);
+
+    std::this_thread::sleep_for(SPIN_WINDOW + std::chrono::milliseconds(50));
+    const std::clock_t cpu_before = std::clock();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const double cpu_ms = 1000.0 * static_cast<double>(std::clock() - cpu_before) / CLOCKS_PER_SEC;
+    EXPECT_LT(cpu_ms, 100.0) << "broker still spinning after its window";
+
+    // And it still wakes from the blocking poll for the reply.
+    worker.Reply(request, {"done"});
+    EXPECT_EQ(RecvFrames(client), std::vector<std::string>{"done"});
+}
+
+INSTANTIATE_TEST_SUITE_P(SpinWindow, XStoreZmqBrokerTest,
+                         ::testing::Values(std::chrono::microseconds(0), SPIN_WINDOW),
+                         [](const ::testing::TestParamInfo<std::chrono::microseconds> &info) {
+                             return info.param.count() == 0 ? std::string("NoSpin") : std::string("Spin50ms");
+                         });
+
+// The spin loop relies on this: a zero-timeout poll on a shut-down context throws ETERM instead of returning 0.
+TEST(XStoreZmqBrokerPollTest, ZeroTimeoutPollOnShutDownContextThrowsEterm) {
+    zmq::context_t ctx;
+    zmq::socket_t socket(ctx, zmq::socket_type::router);
+    socket.set(zmq::sockopt::linger, 0);
+    socket.bind("inproc://broker-test-eterm");
+    zmq::pollitem_t items[] = {{socket.handle(), 0, ZMQ_POLLIN, 0}};
+    ctx.shutdown();
+    try {
+        (void)zmq::poll(items, 1, std::chrono::milliseconds(0));
+        FAIL() << "zero-timeout poll returned instead of throwing";
+    } catch (const zmq::error_t &e) {
+        EXPECT_EQ(e.num(), ETERM);
+    }
 }
 
 }  // namespace

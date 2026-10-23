@@ -44,21 +44,30 @@ bool RelayRequest(zmq::socket_t &frontend, zmq::socket_t &backend, std::vector<z
 
 }  // namespace
 
-void RunReadyBroker(zmq::socket_t &frontend, zmq::socket_t &backend, size_t max_workers) {
+void RunReadyBroker(zmq::socket_t &frontend, zmq::socket_t &backend, size_t max_workers,
+                    std::chrono::microseconds spin_window) {
     // LIFO: the most recently freed worker is the one still spinning in its adaptive-poll window, with a warm cache.
     std::vector<zmq::message_t> idle;
     idle.reserve(max_workers);
     zmq::message_t worker_id;
     zmq::message_t frame;
     zmq::pollitem_t items[] = {{backend.handle(), 0, ZMQ_POLLIN, 0}, {frontend.handle(), 0, ZMQ_POLLIN, 0}};
+    // Epoch, not now: the first iteration blocks. A zero-timeout poll still throws ETERM after shutdown.
+    auto last_activity = std::chrono::steady_clock::time_point{};
 
     while (true) {
         // Frontend polled only while a worker is idle: otherwise requests stay queued in the frontend ROUTER.
-        zmq::poll(items, idle.empty() ? 1 : 2, std::chrono::milliseconds(-1));
+        const size_t n_items = idle.empty() ? 1 : 2;
+        int ready = 0;
+        while (ready == 0 && std::chrono::steady_clock::now() - last_activity < spin_window) {
+            ready = zmq::poll(items, n_items, std::chrono::milliseconds(0));
+        }
+        if (ready == 0) zmq::poll(items, n_items, std::chrono::milliseconds(-1));
         for (int round = 0; round < MAX_DRAIN_ROUNDS; ++round) {
             const bool replied = RelayReply(backend, frontend, idle, worker_id, frame);
             const bool requested = !idle.empty() && RelayRequest(frontend, backend, idle, frame);
             if (!replied && !requested) break;
+            last_activity = std::chrono::steady_clock::now();
         }
     }
 }
