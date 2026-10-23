@@ -137,6 +137,12 @@ add_executable(xstore_zmq_insert_client
 target_include_directories(xstore_zmq_insert_client PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(xstore_zmq_insert_client PRIVATE xstore_network)
 
+# xstore_zmq_mixed_client: SYNC scattered BatchInserts next to random point reads, from another machine (see the file header).
+add_executable(xstore_zmq_mixed_client
+        perf/XStoreZmqMixedClient.cpp
+)
+target_link_libraries(xstore_zmq_mixed_client PRIVATE xstore_network)
+
 # tests/local_bench: opt-in, single-machine benchmark harness (pure Python
 # driver around the real XStore server + the XBench binary -- see
 # tests/local_bench/README.md). Same "not part of the default build" stance
