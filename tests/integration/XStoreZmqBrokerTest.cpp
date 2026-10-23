@@ -248,11 +248,72 @@ TEST_P(XStoreZmqBrokerTest, SpinEndsAfterWindowEvenWithNoIdleWorker) {
     EXPECT_EQ(RecvFrames(client), std::vector<std::string>{"done"});
 }
 
+// Same as above with an idle worker: the frontend is polled too, and the spin must still lapse with the window.
+TEST_P(XStoreZmqBrokerTest, SpinEndsAfterWindowWithAnIdleWorker) {
+    FakeWorker &worker = AddWorker("wA");
+    zmq::socket_t &client = AddClient();
+    client.send(zmq::str_buffer("ping"), zmq::send_flags::none);
+    const auto request = worker.Take();
+    ASSERT_EQ(request.size(), 3u);
+    worker.Reply(request, {"pong"});
+    ASSERT_EQ(RecvFrames(client), std::vector<std::string>{"pong"});
+
+    std::this_thread::sleep_for(SPIN_WINDOW + std::chrono::milliseconds(50));
+    const std::clock_t cpu_before = std::clock();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const double cpu_ms = 1000.0 * static_cast<double>(std::clock() - cpu_before) / CLOCKS_PER_SEC;
+    EXPECT_LT(cpu_ms, 100.0) << "broker still spinning after its window";
+}
+
 INSTANTIATE_TEST_SUITE_P(SpinWindow, XStoreZmqBrokerTest,
                          ::testing::Values(std::chrono::microseconds(0), SPIN_WINDOW),
                          [](const ::testing::TestParamInfo<std::chrono::microseconds> &info) {
                              return info.param.count() == 0 ? std::string("NoSpin") : std::string("Spin50ms");
                          });
+
+// ETERM must come out of the zero-timeout polls of the spin itself: with a window far longer than the bound below, a
+// spin that kept polling after shutdown would only end after 30 s, whereas falling through to the blocking poll
+// (which would throw) is not reachable until the window lapses.
+TEST(XStoreZmqBrokerSpinShutdownTest, ShutdownInsideALongSpinWindowEndsWithEterm) {
+    zmq::context_t ctx;
+    zmq::socket_t frontend(ctx, zmq::socket_type::router);
+    zmq::socket_t backend(ctx, zmq::socket_type::router);
+    frontend.set(zmq::sockopt::linger, 0);
+    backend.set(zmq::sockopt::linger, 0);
+    frontend.bind("inproc://broker-test-long-spin-frontend");
+    backend.bind("inproc://broker-test-long-spin-backend");
+    std::future<int> broker_exit = std::async(std::launch::async, [&] {
+        try {
+            RunReadyBroker(frontend, backend, 1, std::chrono::seconds(30));
+        } catch (const zmq::error_t &e) {
+            return e.num();
+        }
+        return 0;
+    });
+    // Destroyed before broker_exit: a failed ASSERT below must not leave the future waiting for a live broker.
+    struct ShutdownGuard {
+        zmq::context_t &context;
+        ~ShutdownGuard() { context.shutdown(); }
+    } guard{ctx};
+    {
+        FakeWorker worker(ctx, "wA", "inproc://broker-test-long-spin-backend");
+        zmq::socket_t client(ctx, zmq::socket_type::req);
+        client.set(zmq::sockopt::linger, 0);
+        client.set(zmq::sockopt::rcvtimeo, RECV_TIMEOUT_MS);
+        client.connect("inproc://broker-test-long-spin-frontend");
+        client.send(zmq::str_buffer("ping"), zmq::send_flags::none);
+        const auto request = worker.Take();
+        ASSERT_EQ(request.size(), 3u);
+        worker.Reply(request, {"pong"});
+        ASSERT_EQ(RecvFrames(client), std::vector<std::string>{"pong"});
+        // The client has its reply while the broker may still be draining (a dontwait recv there would throw ETERM
+        // too): give it time to finish the drain and enter the 30 s spin before shutting down.
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        ctx.shutdown();
+        EXPECT_EQ(broker_exit.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    }
+    if (broker_exit.valid()) EXPECT_EQ(broker_exit.get(), ETERM);
+}
 
 // The spin loop relies on this: a zero-timeout poll on a shut-down context throws ETERM instead of returning 0.
 TEST(XStoreZmqBrokerPollTest, ZeroTimeoutPollOnShutDownContextThrowsEterm) {

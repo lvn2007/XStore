@@ -44,10 +44,10 @@ inline constexpr size_t      WAL_SHARD_COUNT            = 8;
 // consistent delta beyond run-to-run noise). Only other place this value
 // matters at all: how long StartWalWriters' atexit-registered shutdown
 // waits for an idle shard's writer thread to notice stop_flag and join --
-// irrelevant for the server binary itself (zmq::proxy() never returns
-// under normal operation, and there's no SIGTERM handler, so the server is
-// always killed abruptly and this atexit path never runs in practice for
-// it); does apply once per process for the GoogleTest binaries (each test
+// paid once per server stop (a stop signal makes the ZMQ broker loop
+// return and main exit normally after a graceful drain, so this atexit path
+// does run for the server, once, never in steady state); and once per process
+// for the GoogleTest binaries (each test
 // case is its own subprocess under ctest, and each exits normally,
 // triggering it) -- measured negligible in practice: two controlled
 // back-to-back full xstore_tests suite runs (102 tests, 102 subprocesses)
