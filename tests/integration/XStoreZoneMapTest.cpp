@@ -3503,6 +3503,144 @@ TEST_F(BatchFoldIdentityTest, UpdateRowsWritesTheBytesOfUpdateRowWithAndWithoutA
     ExpectSameFiles("after the rebuild");
 }
 
+// ---- The writer's in-place fold (UpdateRows(ZoneMapFoldView)) == UpdateRows(ZoneMapFoldBatch) == UpdateRow ------------
+// Three files fed the same rows: per_row through UpdateRow, batched through a ZoneMapFoldBatch, viewed through a
+// ZoneMapFoldView built the way ApplyWalRecord builds one: its observations start inside a larger "record" array (junk
+// observations before and after the run, which a wrong rebase would fold) and its ends are relative to that start.
+class ZoneMapFoldViewTest : public ::testing::Test {
+protected:
+    static constexpr uint64_t kRpb = kLwRpb;
+    static constexpr uint32_t kWidth = 6;
+    static constexpr uint32_t kNewWidth = 9; // the keep-old rebuild's width
+    std::unique_ptr<ScratchDir> scratch;
+    ZoneMapFile per_row, batched, viewed;
+    std::mt19937_64 rng{20261023};
+
+    std::string Path(const std::string &name) const { return (scratch->test_root / name).string(); }
+    std::vector<ZoneMapFile *> Files() { return {&per_row, &batched, &viewed}; }
+
+    void SetUp() override {
+        scratch = std::make_unique<ScratchDir>("zmap_fold_view");
+        ASSERT_TRUE(per_row.Open(Path("a.zmap"), kWideRowLength, kWidth));
+        ASSERT_TRUE(batched.Open(Path("b.zmap"), kWideRowLength, kWidth));
+        ASSERT_TRUE(viewed.Open(Path("c.zmap"), kWideRowLength, kWidth));
+    }
+
+    double Value() {
+        static constexpr double kSpecial[] = {std::numeric_limits<double>::quiet_NaN(),
+                                              std::numeric_limits<double>::infinity(),
+                                              -std::numeric_limits<double>::infinity(),
+                                              -0.0, 0.0, 1e300, -1e300, 18446744073709551615.0,
+                                              std::numeric_limits<double>::denorm_min()};
+        if (rng() % 4 == 0) return kSpecial[rng() % std::size(kSpecial)];
+        return static_cast<double>(static_cast<int64_t>(rng() % 20001) - 10000) / 16.0;
+    }
+    // 0..kNewWidth+3 leading columns (holes, non-numeric values), sometimes a column at or far past both widths.
+    std::vector<ZoneMapObservation> Obs() {
+        std::vector<ZoneMapObservation> obs;
+        const uint32_t n = static_cast<uint32_t>(rng() % (kNewWidth + 4));
+        for (uint32_t c = 0; c < n; ++c) obs.push_back({c, Value(), rng() % 5 != 0});
+        if (rng() % 6 == 0) obs.push_back({rng() % 2 == 0 ? kNewWidth : UINT32_MAX, Value(), true});
+        return obs;
+    }
+
+    void Write(const std::vector<uint64_t> &rows, uint32_t pad_to) {
+        ZoneMapFoldBatch batch;
+        batch.pad_to = pad_to;
+        std::vector<ZoneMapObservation> record(1 + rng() % 5, ZoneMapObservation{0, 1e9, true}); // before the run
+        const size_t begin = record.size();
+        std::vector<uint64_t> row_index;
+        std::vector<size_t> obs_end;
+        for (const uint64_t r : rows) {
+            const std::vector<ZoneMapObservation> obs = Obs();
+            per_row.UpdateRow(r, obs, pad_to);
+            batch.observations.insert(batch.observations.end(), obs.begin(), obs.end());
+            batch.EndRow(r);
+            record.insert(record.end(), obs.begin(), obs.end());
+            row_index.push_back(r);
+            obs_end.push_back(record.size() - begin);
+        }
+        record.insert(record.end(), 3, ZoneMapObservation{1, -1e9, true}); // after the run
+        batched.UpdateRows(batch);
+        viewed.UpdateRows(ZoneMapFoldView{row_index.data(), obs_end.data(), rows.size(), record.data() + begin, pad_to});
+    }
+    void WriteRange(uint64_t first, uint64_t end, uint32_t pad_to) {
+        std::vector<uint64_t> rows;
+        for (uint64_t r = first; r < end; ++r) rows.push_back(r);
+        Write(rows, pad_to);
+    }
+
+    void ExpectSameFiles(const std::string &step) {
+        SCOPED_TRACE(step);
+        for (const char *ext : {".zmap", ".zmap.keep"}) {
+            if (!fs::exists(Path(std::string("a") + ext))) continue; // no keep-old rebuild yet
+            const std::string want = WholeFile(Path(std::string("a") + ext));
+            EXPECT_GT(want.size(), sizeof(ZoneMapFileHeader) + kWidth * sizeof(ZoneMapEntry)) << ext;
+            EXPECT_TRUE(WholeFile(Path(std::string("b") + ext)) == want) << ext << ": batch differs from UpdateRow";
+            EXPECT_TRUE(WholeFile(Path(std::string("c") + ext)) == want) << ext << ": view differs from UpdateRow";
+        }
+    }
+};
+
+TEST_F(ZoneMapFoldViewTest, ViewBatchAndUpdateRowWriteIdenticalBytesWithAndWithoutAKeepOldRebuild) {
+    // No rebuild: a run across blocks, pads 0 / at / past the width, out-of-order rows across blocks with a duplicate
+    // row inside one batch, rows with no observation, an empty batch.
+    WriteRange(100, 3 * kRpb + 7, kWidth);
+    WriteRange(5, 9, 0);
+    WriteRange(3 * kRpb + 7, 3 * kRpb + 20, kWidth + 5);
+    std::vector<uint64_t> rows;
+    for (int i = 0; i < 300; ++i) rows.push_back(rng() % (8 * kRpb));
+    const uint64_t duplicate = rows[17];
+    rows.push_back(duplicate);
+    Write(rows, kWidth);
+    Write({}, kWidth);
+    Write({4 * kRpb + 1, 4 * kRpb + 1, 2}, 3);
+    ExpectSameFiles("no rebuild");
+
+    // Keep-old rebuild to kNewWidth in groups of 2 blocks: F = 200 (group 0 partly folded), group 2 folded to 600. The
+    // old index (".keep" still names it) gets every writer row through the same view.
+    for (const char *name : {"a.zmap", "b.zmap", "c.zmap"}) {
+        ASSERT_EQ(link(Path(name).c_str(), Path(std::string(name) + ".keep").c_str()), 0);
+    }
+    const std::string old_before = WholeFile(Path("a.zmap.keep"));
+    for (ZoneMapFile *z : Files()) {
+        ASSERT_EQ(z->BeginLiveRebuild(kNewWidth, /*keep_old=*/true), BeginRebuildResult::kStarted);
+        z->SetLiveFoldGroups(2 * kRpb, 8 * kRpb);
+    }
+    const auto builder_fold = [&](uint64_t begin, uint64_t end) {
+        ZoneMapFoldBatch batch;
+        batch.pad_to = kNewWidth;
+        for (uint64_t r = begin; r < end; ++r) {
+            const std::vector<ZoneMapObservation> obs = Obs();
+            batch.observations.insert(batch.observations.end(), obs.begin(), obs.end());
+            batch.EndRow(r);
+        }
+        for (ZoneMapFile *z : Files()) {
+            ASSERT_TRUE(z->RebuildFoldRows(batch));
+            z->MarkFolded(begin, end);
+        }
+    };
+    builder_fold(0, 200);
+    builder_fold(4 * kRpb, 600);
+    ASSERT_EQ(viewed.FrontierForTests(), 200u);
+    WriteRange(150, 700, kNewWidth);   // below F, across F, unfolded, a folded prefix and past it
+    rows.clear();
+    for (int i = 0; i < 400; ++i) rows.push_back(rng() % (9 * kRpb));
+    const uint64_t duplicate_2 = rows[3];
+    rows.push_back(duplicate_2);
+    Write(rows, kNewWidth + 2);
+    Write(rows, 0);
+    builder_fold(200, 2 * kRpb);       // group 0 done: F jumps to 2 * kRpb
+    WriteRange(2 * kRpb - 10, 2 * kRpb + 60, kWidth);
+    ASSERT_FALSE(WholeFile(Path("a.zmap.keep")) == old_before) << "test too weak: the old index got no forwarded row";
+    ExpectSameFiles("keep-old rebuild running");
+
+    for (ZoneMapFile *z : Files()) ASSERT_TRUE(z->FinishRebuild());
+    WriteRange(0, 3 * kRpb, kNewWidth);
+    Write(rows, kNewWidth);
+    ExpectSameFiles("after the rebuild");
+}
+
 // A live insert skips an unset column in the .catidx bloom; the startup/live rebuild (FoldChunk) must too. Rows with
 // unset columns in the middle and at the end (RowData keeps a trailing empty column), inserted live, then the sidecar
 // is rebuilt from the data file: the bloom blocks (everything after the header, whose dirty flag differs) must match.

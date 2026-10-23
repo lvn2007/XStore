@@ -187,30 +187,30 @@ void ZoneMapFile::UpdateRowLocked(uint64_t row_index, const std::vector<ZoneMapO
     static_cast<void>(WriteBlock(block_index, block));
 }
 
-void ZoneMapFile::UpdateRows(const ZoneMapFoldBatch &batch) {
+void ZoneMapFile::UpdateRows(const ZoneMapFoldView &view) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (__builtin_expect(frontier_ != kNoRebuild, 0)) { // same rules as UpdateRow, row by row
-        if (old_ != nullptr) old_->UpdateRows(batch);
-        static_cast<void>(FoldBatchLocked(batch, [this](uint64_t row) { return row < frontier_ || fold_.FoldedEnd(row) > row; }));
+        if (old_ != nullptr) old_->UpdateRows(view);
+        static_cast<void>(FoldBatchLocked(view, [this](uint64_t row) { return row < frontier_ || fold_.FoldedEnd(row) > row; }));
         return;
     }
-    static_cast<void>(FoldBatchLocked(batch, [](uint64_t) { return true; })); // a failed write is logged in WriteBlock
+    static_cast<void>(FoldBatchLocked(view, [](uint64_t) { return true; })); // a failed write is logged in WriteBlock
 }
 
 bool ZoneMapFile::RebuildFoldRows(const ZoneMapFoldBatch &batch) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (frontier_ == kNoRebuild) return true;
-    return FoldBatchLocked(batch, [this](uint64_t row) { return row >= frontier_; }); // below F: already folded
+    return FoldBatchLocked(batch.View(), [this](uint64_t row) { return row >= frontier_; }); // below F: already folded
 }
 
 template <class Keep>
-bool ZoneMapFile::FoldBatchLocked(const ZoneMapFoldBatch &batch, Keep keep) {
+bool ZoneMapFile::FoldBatchLocked(const ZoneMapFoldView &view, Keep keep) {
     bool all_written = true;
     CachedBlock *block = nullptr;
     uint64_t block_index = 0;
     size_t obs_begin = 0;
-    for (size_t i = 0; i < batch.row_index.size(); obs_begin = batch.obs_end[i], ++i) {
-        const uint64_t row_index = batch.row_index[i];
+    for (size_t i = 0; i < view.rows; obs_begin = view.obs_end[i], ++i) {
+        const uint64_t row_index = view.row_index[i];
         if (!keep(row_index)) continue;
         const uint64_t b = BlockIndexForRow(row_index, header_.rows_per_block);
         if (block == nullptr || b != block_index) {
@@ -222,8 +222,7 @@ bool ZoneMapFile::FoldBatchLocked(const ZoneMapFoldBatch &batch, Keep keep) {
             TouchLru(b);
             block_index = b;
         }
-        FoldRowIntoBlock(*block, row_index, batch.observations.data() + obs_begin, batch.obs_end[i] - obs_begin,
-                         batch.pad_to);
+        FoldRowIntoBlock(*block, row_index, view.observations + obs_begin, view.obs_end[i] - obs_begin, view.pad_to);
     }
     if (block != nullptr) all_written &= WriteBlock(block_index, *block);
     return all_written;

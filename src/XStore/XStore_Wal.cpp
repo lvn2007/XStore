@@ -397,10 +397,12 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
     // Thread-local scratch buffer, grown to fit the largest run applied so
     // far and reused across calls -- avoids a heap allocation per run.
     thread_local std::vector<char> run_buf;
-    // One batch per run for each index (reused: no allocation once grown), folded under one mutex hold per file. The
-    // catidx fold reads the record's own values in place through a view: its rows are zmap_batch.row_index, its ends
-    // the run-relative catidx_value_end (both alive until UpdateRows returns).
-    thread_local ZoneMapFoldBatch zmap_batch;
+    // One batch per run for each index, folded under one mutex hold per file. Both folds read the record's own
+    // observations and values in place through views; only the run's rows and its run-relative ends are built, in
+    // these reused vectors (no allocation once grown). The record is const for the whole call and outlives both
+    // UpdateRows calls, and the vectors are not touched between building a run's views and those calls.
+    thread_local std::vector<uint64_t> run_row_index;      // shared by both views
+    thread_local std::vector<size_t> zmap_obs_end;
     thread_local std::vector<size_t> catidx_value_end;
     // Values in columns past the catidx width are never folded (the view's column_limit). Read once, under the range
     // lock: a widen begun after this read only widens the file and starts it at F = 0, and the builder cannot fold
@@ -462,31 +464,31 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
             // real write just failed.
             // The run's rows go to each index as one batch (UpdateRows: one mutex hold, one block write per block
             // touched), still before the next run's overwrite check reads the blocks.
-            zmap_batch.Clear();
+            run_row_index.clear();
+            zmap_obs_end.clear();
             catidx_value_end.clear();
-            zmap_batch.pad_to = has_obs ? record_to_apply.zone_map_pad_to : 0;   // one pad_to per record
-            // A replayed record has no values: every row's end is 0 and values is never read.
+            // The run's observations and values are contiguous in the record: each view starts at the run's first one
+            // and each row's end is rebased to it. Indexes were checked by ObservationsWellFormed. A replayed record
+            // has none: every row's end is 0 and neither array is read.
+            const size_t zmap_begin = has_obs && run_start != 0 ? obs_end[run_start - 1].zmap_end : 0;
             const size_t catidx_begin = has_obs && run_start != 0 ? obs_end[run_start - 1].catidx_end : 0;
             if (has_obs) {
-                // The run's observations are contiguous in the record: one copy for the whole run, then each row's
-                // end rebased to the batch. Indexes were checked by ObservationsWellFormed.
-                const size_t zmap_begin = run_start == 0 ? 0 : obs_end[run_start - 1].zmap_end;
-                const ZoneMapObservation *zmap_obs = record_to_apply.zmap_obs.data();
-                zmap_batch.observations.insert(zmap_batch.observations.end(), zmap_obs + zmap_begin,
-                                               zmap_obs + obs_end[run_end - 1].zmap_end);
                 for (size_t i = run_start; i < run_end; ++i) {
-                    zmap_batch.row_index.push_back(record_to_apply.EpochAt(i) - first_ts.first_epoch);
-                    zmap_batch.obs_end.push_back(obs_end[i].zmap_end - zmap_begin);
+                    run_row_index.push_back(record_to_apply.EpochAt(i) - first_ts.first_epoch);
+                    zmap_obs_end.push_back(obs_end[i].zmap_end - zmap_begin);
                     catidx_value_end.push_back(obs_end[i].catidx_end - catidx_begin);
                 }
             } else {
                 for (size_t i = run_start; i < run_end; ++i) {
-                    zmap_batch.EndRow(record_to_apply.EpochAt(i) - first_ts.first_epoch);
+                    run_row_index.push_back(record_to_apply.EpochAt(i) - first_ts.first_epoch);
+                    zmap_obs_end.push_back(0);
                     catidx_value_end.push_back(0);
                 }
             }
-            zmap.UpdateRows(zmap_batch);
-            catidx.UpdateRows(CatIdxFoldView{zmap_batch.row_index.data(), catidx_value_end.data(), run_rows,
+            zmap.UpdateRows(ZoneMapFoldView{run_row_index.data(), zmap_obs_end.data(), run_rows,
+                                            record_to_apply.zmap_obs.data() + zmap_begin,
+                                            has_obs ? record_to_apply.zone_map_pad_to : 0});   // one pad_to per record
+            catidx.UpdateRows(CatIdxFoldView{run_row_index.data(), catidx_value_end.data(), run_rows,
                                              record_to_apply.catidx_vals.data() + catidx_begin, catidx_width});
         }
         run_start = run_end;
@@ -496,10 +498,11 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
         // RingClear needs, the range makes the checkpointer sync it). The checkpoint is NOT held.
         walring::Dirty().Note(ring, target_file, offsets.front(), offsets.back() + record_to_apply.row_length, ring_lsn_end);
     }
-    // The batches keep their capacity for the next record (24 B per observation of the largest run so far), except
-    // after a very large run: above ~6 MB a batch is freed rather than kept per applying thread.
+    // The run vectors keep their capacity for the next record (8 B per row each of the largest run so far), except
+    // after a very large run: above 2 MB a vector is freed rather than kept per applying thread.
     constexpr size_t kKeepBatchValues = size_t{1} << 18;
-    if (zmap_batch.observations.capacity() > kKeepBatchValues) zmap_batch = ZoneMapFoldBatch{};
+    if (run_row_index.capacity() > kKeepBatchValues) run_row_index = std::vector<uint64_t>{};
+    if (zmap_obs_end.capacity() > kKeepBatchValues) zmap_obs_end = std::vector<size_t>{};
     if (catidx_value_end.capacity() > kKeepBatchValues) catidx_value_end = std::vector<size_t>{};
     return all_rows_ok;
 }

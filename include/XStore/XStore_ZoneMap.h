@@ -96,9 +96,18 @@ struct ZoneMapObservation {
     bool     is_numeric;
 };
 
-// Rows for ZoneMapFile::RebuildFoldRows in a flat layout a caller reuses across chunks (no allocation per row once the
-// vectors have grown): row i is row_index[i], with observations [obs_end[i-1], obs_end[i]) (obs_end[-1] = 0), each row
-// folded exactly as UpdateRow(row_index[i], <its observations>, pad_to) would fold it.
+// Rows for a batch fold (UpdateRows / RebuildFoldRows), non-owning: row i is row_index[i], with observations
+// [obs_end[i-1], obs_end[i]) of `observations` (obs_end[-1] = 0), each row folded exactly as
+// UpdateRow(row_index[i], <its observations>, pad_to) would fold it. Everything pointed to must outlive the call.
+struct ZoneMapFoldView {
+    const uint64_t *row_index = nullptr;
+    const size_t *obs_end = nullptr;
+    size_t rows = 0;
+    const ZoneMapObservation *observations = nullptr;
+    uint32_t pad_to = 0;
+};
+
+// An owning ZoneMapFoldView a caller reuses across chunks (no allocation per row once the vectors have grown).
 struct ZoneMapFoldBatch {
     std::vector<uint64_t> row_index;
     std::vector<size_t> obs_end;
@@ -107,6 +116,9 @@ struct ZoneMapFoldBatch {
     void Clear() { row_index.clear(); obs_end.clear(); observations.clear(); }
     // Closes the row whose observations were appended since the previous EndRow.
     void EndRow(uint64_t row) { row_index.push_back(row); obs_end.push_back(observations.size()); }
+    [[nodiscard]] ZoneMapFoldView View() const {
+        return {row_index.data(), obs_end.data(), row_index.size(), observations.data(), pad_to};
+    }
 };
 
 enum class BeginRebuildResult { kStarted, kFailed, kAlreadyRebuilding };
@@ -202,7 +214,8 @@ public:
     // of the mutex, with the same per-row rules (while a rebuild runs: the old index of a keep-old rebuild gets every
     // row, this file only rows below F or in a folded group prefix). Each block is written once per run of consecutive
     // rows in it, before this returns; the bytes on disk are identical to UpdateRow row by row.
-    void UpdateRows(const ZoneMapFoldBatch &batch);
+    void UpdateRows(const ZoneMapFoldView &view);
+    void UpdateRows(const ZoneMapFoldBatch &batch) { UpdateRows(batch.View()); }
 
     // True when a write of rows [first_row, first_row + row_count) might replace a row already folded into an
     // exact block, so the caller must read the old bytes and call MarkInexact for any it finds. False (no I/O
@@ -415,7 +428,7 @@ private:
                           uint32_t pad_to);
     // The batch fold shared by UpdateRows and RebuildFoldRows: every row with keep(row) true. mutex_ held.
     template <class Keep>
-    [[nodiscard]] bool FoldBatchLocked(const ZoneMapFoldBatch &batch, Keep keep);
+    [[nodiscard]] bool FoldBatchLocked(const ZoneMapFoldView &view, Keep keep);
     [[nodiscard]] bool WriteBlock(uint64_t block_index, const CachedBlock &block);
     void TouchLru(uint64_t block_index);
     void MarkInexactLocked(uint64_t first_row, uint64_t last_row);

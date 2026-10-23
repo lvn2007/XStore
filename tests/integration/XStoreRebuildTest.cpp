@@ -472,6 +472,40 @@ TEST_F(XStoreRebuildTest, LiveInsertRunsGapsAndDuplicatesMatchPerRowFolds) {
     EXPECT_TRUE(got == want) << ".catidx of the live insert differs from the per-row folds";
 }
 
+// The writer's per-run zone-map view over one record: many runs per record (timestamp gaps, some across a block edge),
+// rows out of order (sorted by MultiRowInsert), narrow and wide rows. Each run's view starts at the end of the previous
+// run's observations in the record (zmap_begin): the .zmap and .catidx must be byte-identical to the per-row reference
+// built from the data file. No duplicate timestamps (the reference folds each row once) and no empty RowData (its zero
+// first byte makes the reference skip a row the writer pads).
+TEST_F(XStoreRebuildTest, LiveInsertRunsAndGapsZoneMapMatchesThePerRowReference) {
+    const std::string db = "LIVEZRUNS";
+    const unsigned short year = 1984;
+    XStore store;
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    std::vector<std::pair<unsigned long long, XStore_Proto::RowData>> rows;
+    std::mt19937_64 rng(20261023);
+    uint64_t r = 0;
+    for (int i = 0; i < 2500; ++i) {
+        r += (i % 7 == 0) ? 2 + rng() % 900 : 1;   // gaps: about 360 runs
+        rows.emplace_back(Jan1(year) + r, MixedRow(r, 1 + static_cast<int>(rng() % 40)));
+    }
+    std::shuffle(rows.begin() + 100, rows.begin() + 300, rng);
+    Insert(store, db, rows);
+    CleanRestartState();
+
+    const uint32_t width = ReadHeader<ZoneMapFileHeader>(YearPath(db, year, ".zmap")).tracked_column_count;
+    ASSERT_EQ(width, ReadHeader<CatIdxFileHeader>(YearPath(db, year, ".catidx")).tracked_column_count);
+    const std::string ref_zmap = (scratch->test_root / "zruns_ref.zmap").string();
+    const std::string ref_catidx = (scratch->test_root / "zruns_ref.catidx").string();
+    BuildReferenceIndexes(store, YearPath(db, year, ".XSTORE"), ref_zmap, ref_catidx, kRowLength, width);
+    ASSERT_GT(ReadHeader<CatIdxFileHeader>(ref_catidx).block_count, 2u);
+    const std::string got_zmap = ReadFileBytes(YearPath(db, year, ".zmap"));
+    EXPECT_EQ(got_zmap.size(), ReadFileBytes(ref_zmap).size());
+    EXPECT_TRUE(got_zmap == ReadFileBytes(ref_zmap)) << ".zmap of the live insert differs from the per-row reference";
+    EXPECT_TRUE(ReadFileBytes(YearPath(db, year, ".catidx")) == ReadFileBytes(ref_catidx))
+        << ".catidx of the live insert differs from the per-row reference";
+}
+
 // A failed index write part-way through the scan: that file stops behind its frontier (blocks it finished stay
 // trusted, the rest are scanned, answers stay right), stays DIRTY, and the next start rebuilds it to the reference.
 class XStoreRebuildWriteFaultTest : public XStoreRebuildTest {
