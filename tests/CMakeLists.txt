@@ -139,6 +139,14 @@ add_executable(xstore_zmq_insert_client
 target_include_directories(xstore_zmq_insert_client PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(xstore_zmq_insert_client PRIVATE xstore_network)
 
+# xstore_zmq_fault_client: SYNC BatchInserts with an acknowledgement log + a post-restart verifier, for the
+# I/O-error injection run (dm-flakey under the server's data directory; see the file header). Not part of any test run.
+add_executable(xstore_zmq_fault_client
+        perf/XStoreZmqFaultClient.cpp
+)
+target_include_directories(xstore_zmq_fault_client PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(xstore_zmq_fault_client PRIVATE xstore_network)
+
 # xstore_zmq_mixed_client: SYNC scattered BatchInserts next to random point reads, from another machine (see the file header).
 add_executable(xstore_zmq_mixed_client
         perf/XStoreZmqMixedClient.cpp
