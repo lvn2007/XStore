@@ -173,11 +173,18 @@ bool Checkpointer::StopAfterFinalCycle() {
 }
 
 Checkpointer::SyncResult Checkpointer::SyncDataFile(const std::string &path) {
+    // Held across the syscall AND the Poison() below: the kernel reports a writeback error to ONE sync, so a
+    // second sync of this file must not run in the gap between the failing call and the poison flag.
+    std::lock_guard<std::mutex> path_lock(PathSyncMutex(path));
+    if (poisoned_.load(std::memory_order_acquire)) return SyncResult::kPoisoned;
     const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         if (errno == ENOENT) return SyncResult::kSkipped;   // DB deleted: nothing left to make durable
         spdlog::error("[WAL CKPT] - Cannot open {} for sync: {}", path, std::strerror(errno));
         return SyncResult::kRetryable;
+    }
+    if (const unsigned delay_ms = data_sync_delay_ms_.load(std::memory_order_relaxed); delay_ms != 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
     }
     int err = 0;
     bool sticky = false;
@@ -204,11 +211,16 @@ Checkpointer::SyncResult Checkpointer::SyncDataFile(const std::string &path) {
 }
 
 Checkpointer::SyncResult Checkpointer::SyncDirectory(const std::string &dir) {
+    std::lock_guard<std::mutex> path_lock(PathSyncMutex(dir));   // as in SyncDataFile: held across the fsync and Poison()
+    if (poisoned_.load(std::memory_order_acquire)) return SyncResult::kPoisoned;
     const int dfd = open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (dfd < 0) {
         if (errno == ENOENT) return SyncResult::kSkipped;
         spdlog::error("[WAL CKPT] - Cannot open directory {}: {}", dir, std::strerror(errno));
         return SyncResult::kRetryable;
+    }
+    if (const unsigned delay_ms = dir_sync_delay_ms_.load(std::memory_order_relaxed); delay_ms != 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
     }
     int err = 0;
     bool sticky = false;
@@ -252,7 +264,10 @@ bool Checkpointer::SyncPathsForReplay(const std::set<std::string> &paths) {
         std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
         replay_window_cycles_.store(cycles_.load(std::memory_order_relaxed) - before, std::memory_order_relaxed);
     }
-    std::lock_guard<std::mutex> cycle(cycle_mutex_);   // hooks are consumed by exactly one party at a time
+    // No cycle_mutex_: that lock guards the cycle's own state (carried_, flushed_, the checkpoint advance), which
+    // this function never touches, and holding it here made every shard's direct-write sync queue behind one
+    // process-wide lock. What must stay exclusive is the sync of ONE path against any other sync of that path
+    // (cycle, paced flush, replay): SyncDataFile / SyncDirectory take that per-path lock themselves.
     if (poisoned_.load(std::memory_order_acquire)) return false;
     std::set<std::string> synced;
     for (const std::string &path : paths) {
@@ -271,7 +286,9 @@ bool Checkpointer::SyncPathsForReplay(const std::set<std::string> &paths) {
         const SyncResult r = SyncDirectory(dir);
         if (r == SyncResult::kRetryable || r == SyncResult::kPoisoned) return false;
     }
-    return true;
+    // A real error elsewhere (another shard's sync, a cycle, the ring writer) may have poisoned the checkpointer
+    // while these syncs ran: nothing may be reported durable once it has.
+    return !poisoned_.load(std::memory_order_acquire);
 }
 
 void Checkpointer::StopWithoutFinalCycleForTests() {
@@ -397,6 +414,8 @@ bool Checkpointer::PacedFlushStep() {
             uint64_t begin = 0, end = 0;
             if (!FirstGap(done, r.begin, r.end, begin, end)) continue;
             end = std::min<uint64_t>(end, begin + XStoreTunables::WAL_FLUSH_CHUNK_BYTES);
+            // sync_file_range consumes the file's writeback error like an fdatasync does: same per-path rule.
+            std::lock_guard<std::mutex> path_lock(PathSyncMutex(path));
             const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
             if (fd < 0) {
                 // Missing/unopenable file (deleted DB; the cycle skips ENOENT too): mark the whole

@@ -6,7 +6,8 @@
 // completed. A ring's checkpoint_lsn (the space the writer may reuse) therefore
 // moves only after the data files it covers were fdatasync'd.
 //
-// RunCycle ordering (all under one cycle mutex):
+// RunCycle ordering (all under one cycle mutex; each file / directory sync additionally takes that path's own
+// sync lock, which is what keeps it exclusive with a direct-path or replay sync of the same path):
 //   1. snapshot every ring's AppliedLsn()           (acquire)
 //   2. Dirty().Take()  -> merged into the carried set of unsynced files
 //   3. fdatasync every carried file (opened by path; ENOENT = deleted DB, skip)
@@ -50,6 +51,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <set>
 #include <mutex>
@@ -112,7 +114,7 @@ public:
     // Boot hold: while at least one hold is taken (XStore::ReplayWal takes one for its whole duration)
     // the loop's IDLE trigger does not fire -- replay Notes files while last_writer_activity_ns is
     // still 0, which would otherwise look like "dirty and idle for decades" and cycle every
-    // millisecond, contending with SyncPathsForReplay on cycle_mutex_. The fill, max-age and retry
+    // millisecond, contending with the replay's syncs on the per-path sync locks. The fill, max-age and retry
     // triggers keep working. Prefer the RAII BootHold above.
     void HoldForBoot() { boot_holds_.fetch_add(1, std::memory_order_acq_rel); }
     void ReleaseBoot() { boot_holds_.fetch_sub(1, std::memory_order_acq_rel); }
@@ -131,7 +133,10 @@ public:
     // (by path) and fsync their parent directories, through the SAME fault hooks / poison rule as RunCycle. Touches no ring,
     // no dirty state. true = everything durable (ENOENT = deleted DB is skipped, as in a cycle).
     // false = nothing may be checkpointed over these records: a hook/open failure (retryable) or a
-    // real sync error (poisons). Always false once poisoned.
+    // real sync error (poisons). Always false once poisoned, and false if the checkpointer was poisoned
+    // (by any thread) while these syncs ran.
+    // Does NOT take cycle_mutex_: concurrent calls (one per WAL shard) and a running cycle overlap, except that
+    // syncs of one path (file or directory) are mutually exclusive, each held across its Poison().
     [[nodiscard]] bool SyncPathsForReplay(const std::set<std::string> &paths);
 
     // Data files fdatasync'd by the last successful cycle. Only files dirtied since the cycle before it,
@@ -160,6 +165,12 @@ public:
     void StopWithoutFinalCycleForTests();
     // Every cycle sleeps `ms` (under the cycle mutex) before it starts; 0 = off. Lets a test hold a cycle in flight.
     void SetCycleDelayMsForTests(unsigned ms) { cycle_delay_ms_.store(ms, std::memory_order_relaxed); }
+    // Every data-file fdatasync / directory fsync sleeps `ms` right before the syscall, inside the lock that
+    // covers it (whichever that is); 0 = off. Lets a test hold one sync in flight and observe what else runs.
+    void SetDataSyncDelayMsForTests(unsigned ms) { data_sync_delay_ms_.store(ms, std::memory_order_relaxed); }
+    // Which per-path sync lock a data file / directory path maps to (two paths with the same value share a lock).
+    static size_t SyncStripeForTests(const std::string &path) { return SyncStripe(path); }
+    void SetDirSyncDelayMsForTests(unsigned ms) { dir_sync_delay_ms_.store(ms, std::memory_order_relaxed); }
     void SetPausedForTests(bool paused);          // waits for an in-flight cycle/flush; RunCycle() still works
     void FailNextDataSyncsForTests(int n);        // next n data-file fdatasyncs report failure
     void FailNextDirSyncsForTests(int n);         // next n directory fsyncs report failure
@@ -176,13 +187,22 @@ private:
     bool RunCycleLocked();                        // cycle_mutex_ held
     bool PacedFlushStep();                        // one <= WAL_FLUSH_CHUNK_BYTES sync_file_range; true if it did work
     static bool ConsumeFailure(std::atomic<int> &counter);
-    // One data-file fdatasync / directory fsync with the hooks and poison rule (cycle_mutex_ held).
+    static constexpr size_t SYNC_STRIPES = 256;
+    static size_t SyncStripe(const std::string &path) { return std::hash<std::string>{}(path) % SYNC_STRIPES; }
+    // One data-file fdatasync / directory fsync with the hooks and poison rule. Takes the path's own sync lock
+    // (PathSyncMutex) for the whole call; kPoisoned if the checkpointer is, or becomes, poisoned.
     enum class SyncResult { kOk, kSkipped, kRetryable, kPoisoned };
+    std::mutex &PathSyncMutex(const std::string &path) { return path_sync_mutex_[SyncStripe(path)]; }
     SyncResult SyncDataFile(const std::string &path);
     SyncResult SyncDirectory(const std::string &dir);
     void Poison(const char *what, const std::string &path, int err);
 
     std::mutex cycle_mutex_;                      // one cycle / paced step at a time
+    // Syncs of one path (a data file, a directory) are mutually exclusive across every caller (cycle, paced
+    // flush, replay, the WAL writer's direct path); syncs of different paths overlap. Striped by path hash: two
+    // paths on one stripe merely serialize. Lock order: cycle_mutex_ then a path lock; a path lock is never held
+    // while taking another lock.
+    std::mutex path_sync_mutex_[SYNC_STRIPES];
     std::unordered_set<std::string> carried_;     // unsynced data files (guarded by cycle_mutex_)
     std::unordered_map<std::string, std::map<uint64_t, uint64_t>> flushed_;   // paced-flushed ranges (guarded by cycle_mutex_)
     mutable std::mutex synced_mutex_;
@@ -221,6 +241,8 @@ private:
     std::atomic<uint64_t> paced_bytes_{0};
     std::atomic<uint64_t> advances_{0};           // rings advanced, ever (progress detector for back-to-back cycles)
     std::atomic<unsigned> cycle_delay_ms_{0};
+    std::atomic<unsigned> data_sync_delay_ms_{0};
+    std::atomic<unsigned> dir_sync_delay_ms_{0};
     std::atomic<unsigned> idle_ms_override_{0};
     std::atomic<unsigned> max_age_override_{0};
 };
