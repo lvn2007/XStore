@@ -205,7 +205,8 @@ void ThrowInNextWriterApplyForTests(int n);
 bool ConsumeInjectedWriterApplyThrow();
 // Tests: a request "in flight". Stage 1 parks a WAL writer right after it dequeued a batch (before it checks, routes or
 // appends anything); stage 2 after the per-record checks, just before the first ring append; stage 3 parks the REQUEST thread
-// at the start of EnqueueWalRecord (its record is built, not queued). 0 releases. WriterParkedForTests() is true while one is parked.
+// at the start of EnqueueWalRecord (its record is built, not queued); stage 4 parks a RemoveDBFiles thread after its in-scope
+// drain, with the year's removal scope still registered. 0 releases. WriterParkedForTests() is true while one is parked.
 void PauseWriterForTests(int stage);
 [[nodiscard]] bool WriterParkedForTests();
 void ParkWriterIfPausedForTests(int stage);   // the writer's call; one relaxed load when not paused

@@ -1908,6 +1908,35 @@ TEST_P(WalRemovalRaceTest, ARecordInFlightDuringRemoveDbFilesNeverBringsTheYearF
     EXPECT_FALSE(std::filesystem::exists(YearFile())) << "replay re-created the removed year file from the in-flight record";
 }
 
+// A record a writer takes AFTER the removal drained its writers but while the year scope is still registered is refused
+// at apply and stays in the ring: the checkpoint that covers it must come after the scope is gone.
+TEST_F(WalReplayTest, ARecordTakenWhileTheYearScopeIsRegisteredIsPastACheckpointWhenRemoveDbFilesReturns) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    for (uint64_t i = 0; i < 5; ++i) ASSERT_TRUE(InsertAt(store, i));
+    ASSERT_TRUE(std::filesystem::exists(YearFile()));
+    walring::PauseWriterForTests(4);
+    std::thread remover([&] {
+        XStore_Proto::RemoveDBFiles_REQ req;
+        req.set_dbname(db_name);
+        req.add_filename(std::filesystem::path(YearFile()).filename().string());
+        (void)store.RemoveDBFiles(&req, db_name);
+    });
+    ASSERT_TRUE(WaitFor([] { return walring::WriterParkedForTests(); }, std::chrono::milliseconds(5000))) << "the removal never reached its scope";
+    EXPECT_FALSE(InsertAt(store, 7)) << "an insert while the year is being removed must be refused";
+    walring::PauseWriterForTests(0);
+    remover.join();
+    EXPECT_FALSE(std::filesystem::exists(YearFile()));
+    auto ring = BusyRing();
+    ASSERT_NE(ring, nullptr);
+    EXPECT_EQ(ring->CheckpointLsn(), ring->HeadLsn()) << "the refused record is still ahead of the checkpoint";
+
+    ring.reset();
+    Crash();
+    store.InitDB();
+    EXPECT_FALSE(std::filesystem::exists(YearFile())) << "replay re-created the removed year file from the refused record";
+}
+
 INSTANTIATE_TEST_SUITE_P(Stages, WalRemovalRaceTest, ::testing::Values(1, 2, 3));
 
 // RemoveDB must not hang or throw when the checkpoint cannot be taken (poisoned checkpointer).

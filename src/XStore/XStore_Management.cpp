@@ -1188,6 +1188,7 @@ XStore_Proto::RemoveDBFiles_REP XStore::RemoveDBFiles(XStore_Proto::RemoveDBFile
         return true;
     };
 
+    bool removed_a_year = false;
     // Loop through each requested file name
     for (int i = 0; i < proto_from_client->filename_size(); i++) {
         const std::string &file_name = proto_from_client->filename(i);
@@ -1269,13 +1270,23 @@ XStore_Proto::RemoveDBFiles_REP XStore::RemoveDBFiles(XStore_Proto::RemoveDBFile
         if (data_removed) {
             remove_one(std::to_string(*year) + ".zmap", /*report_missing=*/false, /*empty_if_stuck=*/true);
             remove_one(std::to_string(*year) + ".catidx", /*report_missing=*/false, /*empty_if_stuck=*/true);
-            // As in RemoveDB: records the writers had already taken are in a ring by the time they drained, and the
-            // checkpoint puts them past it, so replay cannot bring the file back. (Left open: a record a writer takes
-            // while this checkpoint runs is refused at apply by the scope but stays in the ring until the next checkpoint;
-            // a crash in exactly that window re-creates the file. A year-scope refusal before the append would close it.)
+            // Every batch a writer had in flight finishes while the scope is still registered, so the records in it are
+            // refused at apply (a scope-less apply would re-create the year file, which is a legal later insert but not
+            // one that was in flight during the removal). The checkpoint that puts them past a crash comes after the
+            // loop, once the scope is gone (see there).
             DrainWalWriters();
-            CheckpointBeforeRemoval(db_name);
+            walring::ParkWriterIfPausedForTests(4);   // tests only: scope registered, writers drained, a record can still arrive
+            removed_a_year = true;
         }
+    }
+    // Records a writer took while a year scope was registered were refused at apply but sit in the ring. The scope is
+    // released now, so a batch that starts from here applies its records for real (a later insert); the batches that were
+    // running at the release finish in the drain, and the checkpoint after it is past every refused record: a crash
+    // cannot replay one and re-create a removed year file. (A checkpoint taken while the scope was still registered
+    // would leave the records taken after its snapshot uncovered.)
+    if (removed_a_year) {
+        DrainWalWriters();
+        CheckpointBeforeRemoval(db_name);
     }
     return to_return;
 }
