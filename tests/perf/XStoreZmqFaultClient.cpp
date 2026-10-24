@@ -3,7 +3,7 @@
 // really there with the right values. Run it against a server whose data directory sits on a device that starts
 // failing writes (dm-flakey) to prove that no acknowledged SYNC write is lost.
 //
-//   xstore_zmq_fault_client run <host:port> <db> <threads> <seconds> <log_path> [rows_per_call[,rows...] [SYNC|ASYNC]]
+//   xstore_zmq_fault_client run <host:port> <db> <threads> <seconds> <log_path> [rows_per_call[,rows...] [SYNC|ASYNC [first_thread]]]
 //   xstore_zmq_fault_client verify <host:port> <db> <log_path> [fault_start_epoch_ms]
 //
 // `run` (the DB must exist: xstore_zmq_insert_client create) drives <threads> threads, each on its own timestamp
@@ -63,7 +63,7 @@ std::vector<size_t> ParseRows(const std::string &arg) {
 }
 
 int Run(const std::string &addr, const std::string &db, int threads, int seconds, const std::string &log_path, const std::string &rows_arg,
-        const std::vector<size_t> &rows, XStore_Proto::WalDurabilityMode mode) {
+        const std::vector<size_t> &rows, XStore_Proto::WalDurabilityMode mode, int first_thread) {
     std::FILE *log = std::fopen(log_path.c_str(), "w");
     if (log == nullptr) {
         std::cerr << "cannot open " << log_path << "\n";
@@ -80,7 +80,8 @@ int Run(const std::string &addr, const std::string &db, int threads, int seconds
     const auto deadline = WallClock::now() + std::chrono::seconds(seconds);
     std::atomic<unsigned long long> acks{0}, fails{0}, timeouts{0};
     std::vector<std::thread> workers;
-    for (int t = 0; t < threads; ++t) {
+    // Thread ids (timestamp range, log lines) start at first_thread: several client nodes use disjoint ranges.
+    for (int t = first_thread; t < first_thread + threads; ++t) {
         workers.emplace_back([&, t] {
             zmq::socket_t sock(ctx, zmq::socket_type::req);
             sock.set(zmq::sockopt::linger, 0);
@@ -215,7 +216,7 @@ int Verify(const std::string &addr, const std::string &db, const std::string &lo
 }  // namespace
 
 int main(int argc, char **argv) {
-    if ((argc >= 7 && argc <= 9) && std::string(argv[1]) == "run") {
+    if ((argc >= 7 && argc <= 10) && std::string(argv[1]) == "run") {
         const std::string rows_arg = argc >= 8 ? argv[7] : std::to_string(kRowsPerCall);
         const std::vector<size_t> rows = ParseRows(rows_arg);
         const std::string mode = argc == 9 ? argv[8] : "SYNC";
@@ -224,11 +225,11 @@ int main(int argc, char **argv) {
             return 2;
         }
         return Run(argv[2], argv[3], std::atoi(argv[4]), std::atoi(argv[5]), argv[6], rows_arg, rows,
-                   mode == "SYNC" ? XStore_Proto::SYNC : XStore_Proto::ASYNC);
+                   mode == "SYNC" ? XStore_Proto::SYNC : XStore_Proto::ASYNC, argc == 10 ? std::atoi(argv[9]) : 0);
     }
     if ((argc == 5 || argc == 6) && std::string(argv[1]) == "verify") {
         return Verify(argv[2], argv[3], argv[4], argc == 6 ? std::atoll(argv[5]) : 0);
     }
-    std::cerr << "usage: " << argv[0] << " run <host:port> <db> <threads> <seconds> <log_path> [rows_per_call[,rows...] [SYNC|ASYNC]] | verify <host:port> <db> <log_path> [fault_start_epoch_ms]\n";
+    std::cerr << "usage: " << argv[0] << " run <host:port> <db> <threads> <seconds> <log_path> [rows_per_call[,rows...] [SYNC|ASYNC [first_thread]]] | verify <host:port> <db> <log_path> [fault_start_epoch_ms]\n";
     return 2;
 }

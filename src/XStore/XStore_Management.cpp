@@ -1025,11 +1025,12 @@ XStore_Proto::CreateDB_REP XStore::CreateDB(std::string_view db_name_view, XStor
 }
 
 namespace {
-// Runs one synchronous checkpoint cycle ahead of a removal (see RemoveDB). A failed or refused cycle (poisoned
-// checkpointer, sync error) must not hang or block the removal: warn and proceed.
+// Runs one synchronous checkpoint cycle around a removal (see RemoveDB): before the files go, and again after the WAL
+// writers drained (DrainWalWriters). A failed or refused cycle (poisoned checkpointer, sync error) must not hang or
+// block the removal: warn and proceed.
 void CheckpointBeforeRemoval(const std::string &db_name) {
     if (!walring::Checkpointer::Instance().RunCycle()) {
-        spdlog::warn("[REMOVE DB] [DB: {}] - Could not checkpoint the WAL before removing files (checkpointer poisoned or a sync "
+        spdlog::warn("[REMOVE DB] [DB: {}] - Could not checkpoint the WAL around removing files (checkpointer poisoned or a sync "
                      "failed); un-checkpointed WAL records for this DB may be replayed into a DB re-created under the same name",
                      db_name);
     }
@@ -1107,6 +1108,12 @@ XStore_Proto::RemoveDB_REP XStore::RemoveDB(std::string_view db_name_view) {
     }
     // A pending widen of the removed DB is dropped (a DB re-created under the name records its own growth).
     DropLiveWidenRequest(db_loc);
+
+    // The cfg is erased, so from here the WAL writers refuse every record of this DB before it reaches a ring (stale cfg
+    // epoch). Records they had already taken are appended before the drain below returns, and the second checkpoint puts
+    // them past it: a crash can no longer replay one into a DB re-created under the name.
+    DrainWalWriters();
+    CheckpointBeforeRemoval(db_name);
 
     if (remove_ec) {
         remove_status = fmt::format("[REMOVE DB] [DB: {}] - Unable to remove every file of the DB ({}). Its .CFG is gone, "
@@ -1262,6 +1269,12 @@ XStore_Proto::RemoveDBFiles_REP XStore::RemoveDBFiles(XStore_Proto::RemoveDBFile
         if (data_removed) {
             remove_one(std::to_string(*year) + ".zmap", /*report_missing=*/false, /*empty_if_stuck=*/true);
             remove_one(std::to_string(*year) + ".catidx", /*report_missing=*/false, /*empty_if_stuck=*/true);
+            // As in RemoveDB: records the writers had already taken are in a ring by the time they drained, and the
+            // checkpoint puts them past it, so replay cannot bring the file back. (Left open: a record a writer takes
+            // while this checkpoint runs is refused at apply by the scope but stays in the ring until the next checkpoint;
+            // a crash in exactly that window re-creates the file. A year-scope refusal before the append would close it.)
+            DrainWalWriters();
+            CheckpointBeforeRemoval(db_name);
         }
     }
     return to_return;

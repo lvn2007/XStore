@@ -377,6 +377,10 @@ class XStore {
             moodycamel::BlockingConcurrentQueue<WalRecord> queue;
             std::thread writer_thread;
             std::atomic<bool> stop_flag{false};
+            // The writer holds a dequeued batch from just after the dequeue to the end of its iteration (RAII in
+            // WalWriterLoop): busy for that span, batches_done counted at the end. DrainWalWriters waits on them.
+            std::atomic<bool> busy{false};
+            std::atomic<uint64_t> batches_done{0};
 #ifdef XSTORE_WAL_STATS_ENABLED
             // Batching observability -- compile-time debug/benchmark tool
             // only (XSTORE_WAL_STATS CMake option), not permanent
@@ -1454,6 +1458,12 @@ class XStore {
         // cannot reach the index lookup after Resume (it would get a fresh index for its write into the deleted
         // file), and nothing still writes into an index file the removal empties or leaves on disk.
         [[nodiscard]] static bool RemovalCovers(const std::string &year_key);
+        // Returns once every WAL writer has finished the batch it was in (bounded by BACKGROUND_REMOVE_WAIT_MS). Called by a
+        // removal AFTER its cfg erase: a record the writers take later is refused before the ring append (stale cfg epoch,
+        // WalWriterLoop pass A), one they already took is appended by the time this returns, so a checkpoint taken next
+        // covers every record of the removed DB that reached a ring. (Once appended, such a record is only dropped at apply
+        // and would stay in the ring until the next checkpoint, where a crash replays it into a DB re-created under the name.)
+        static void DrainWalWriters();
         // A registry entry the scope covers is in rebuild (a cancelled widen, or untrusted until the next start). Then
         // the removal retires only after its files are gone: retiring an untrusted object whose files stay (a failed
         // unlink) would let a cold reopen trust a half-built index. Stable once StopBackgroundWork returned (only the

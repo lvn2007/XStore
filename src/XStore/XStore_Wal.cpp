@@ -233,7 +233,7 @@ struct SubBatchFile {
 // writer reaches it (not at gather time: earlier records of the same batch must have been applied first,
 // or RingClear would miss them); the decision rewrites it to kRing. kFail: can never be handled (no ring
 // could be opened, or a single-row record larger than half the ring); failed without touching any file.
-enum class WalRecordKind : uint8_t { kRing, kLarge, kFail };
+enum class WalRecordKind : uint8_t { kRing, kLarge, kFail, kStale };
 
 // The observation arrays agree with row_count and with each other: no ends (replay) and no observations, or one end
 // per row, non-decreasing, the last one exactly at each array's size. Counts only (one pass over the ends, none over
@@ -510,6 +510,7 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
 bool XStore::EnqueueWalRecord(WalRecord record, bool *overloaded) {
     // Writers are stopped after Shutdown(); a SYNC wait here would never wake.
     if (IsShutDown()) return false;
+    walring::ParkWriterIfPausedForTests(3);   // tests only: a request thread that built its record before a removal and queues it after
     // Shard = f(db, year) only, never the calling thread: every write to a given row (one (db, year) file) goes
     // through one shard's queue and one writer thread. For SYNC inserts that makes ring order == acknowledgment order
     // (an acknowledged record is already dequeued before a later one starts), so replay (one ring at a time)
@@ -777,6 +778,23 @@ void XStore::WalStatsReporterLoop() {
 }
 #endif
 
+void XStore::DrainWalWriters() {
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(XStoreTunables::BACKGROUND_REMOVE_WAIT_MS);
+    const size_t shards = std::min(active_wal_shard_count.load(std::memory_order_relaxed), wal_shards.size());
+    for (size_t i = 0; i < shards; ++i) {
+        const uint64_t seen = wal_shards[i].batches_done.load(std::memory_order_acquire);
+        while (wal_shards[i].busy.load(std::memory_order_acquire) && wal_shards[i].batches_done.load(std::memory_order_acquire) == seen) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                spdlog::error("[REMOVE] - WAL writer shard {} did not finish its batch within {} ms; continuing", i,
+                              XStoreTunables::BACKGROUND_REMOVE_WAIT_MS);
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+}
+
 void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preopened_ring) {
     WalShard &shard = wal_shards[shard_idx];
     std::vector<WalRecord> batch(XStoreTunables::WAL_BATCH_MAX_RECORDS);
@@ -904,6 +922,21 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
         walring::last_writer_activity_ns.store(
             std::chrono::duration_cast<std::chrono::nanoseconds>(last_activity.time_since_epoch()).count(),
             std::memory_order_relaxed);
+        // Marks this batch in flight for DrainWalWriters. busy is stored before the fence, the record checks of Pass A come
+        // after it; a removal erases its cfg / registers its scope, fences, then reads busy: either it sees the batch (and
+        // waits for it) or the batch's checks see the removal.
+        struct BatchInFlight {
+            WalShard &s;
+            explicit BatchInFlight(WalShard &sh) : s(sh) {
+                s.busy.store(true, std::memory_order_relaxed);
+                std::atomic_thread_fence(std::memory_order_seq_cst);
+            }
+            ~BatchInFlight() {
+                s.batches_done.fetch_add(1, std::memory_order_release);
+                s.busy.store(false, std::memory_order_release);
+            }
+        } batch_in_flight(shard);
+        walring::ParkWriterIfPausedForTests(1);   // tests only: one relaxed load
 
         // Group-commit gather: the blocking wait above returns the instant
         // the first record arrives, which alone gives near-zero batching
@@ -1126,7 +1159,9 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                 // at/above the smaller direct threshold (or over half the ring) are kLarge; the
                 // dirty-tracker lookup happens later, in decide_large, for those alone.
                 const size_t ring_half = record_ring[i] != nullptr ? record_ring[i]->ring_bytes() / 2 : 0;
-                if (record_ring[i] == nullptr) {
+                if (!CfgEpochCurrent(record.db_name, record.cfg_epoch)) {   // refused BEFORE the ring append, see DrainWalWriters
+                    record_kind[i] = WalRecordKind::kStale;
+                } else if (record_ring[i] == nullptr) {
                     record_kind[i] = WalRecordKind::kFail;
                 } else if (record.row_count == 1) {
                     // Unary-sized: never direct. Only a (test-sized) tiny ring can make one not fit.
@@ -1140,11 +1175,20 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                 }
             }
 
+            walring::ParkWriterIfPausedForTests(2);   // tests only: the checks above passed, nothing appended yet
+
             // Records are handled in queue order so same-timestamp writes
             // apply in order: a maximal run of ring records forms one
             // sub-batch (byte-bounded per ring); a non-ring record is its own
             // step.
             for (size_t pos = 0; pos < count; ) {
+                if (record_kind[pos] == WalRecordKind::kStale) {
+                    spdlog::warn("[WAL] [DB: {}] - The DB was removed after this record was built; its {} row(s) are refused before the ring append",
+                                 batch[pos].db_name, batch[pos].row_count);
+                    complete(pos, false);
+                    ++pos;
+                    continue;
+                }
                 if (record_kind[pos] == WalRecordKind::kFail) {
                     if (record_ring[pos] == nullptr) {
                         spdlog::error("[WAL] [DB: {}] - Unable to open the WAL ring {}", batch[pos].db_name, record_wal_path[pos]);

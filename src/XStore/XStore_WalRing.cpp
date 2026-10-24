@@ -7,9 +7,11 @@
 #include <cassert>
 #include <cerrno>
 #include <cstddef>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <iterator>
+#include <thread>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -191,6 +193,16 @@ size_t DirectPressureMinBytes() {
 }
 void ThrowInNextWriterApplyForTests(int n) { g_throw_in_writer_apply.store(n, std::memory_order_relaxed); }
 bool ConsumeInjectedWriterApplyThrow() { return ConsumeCounter(g_throw_in_writer_apply); }
+static std::atomic<int> g_pause_writer{0};
+static std::atomic<int> g_writers_parked{0};
+void PauseWriterForTests(int stage) { g_pause_writer.store(stage, std::memory_order_release); }
+bool WriterParkedForTests() { return g_writers_parked.load(std::memory_order_acquire) > 0; }
+void ParkWriterIfPausedForTests(int stage) {
+    if (g_pause_writer.load(std::memory_order_relaxed) != stage) return;
+    g_writers_parked.fetch_add(1, std::memory_order_release);
+    while (g_pause_writer.load(std::memory_order_acquire) == stage) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    g_writers_parked.fetch_sub(1, std::memory_order_release);
+}
 void FailNextDirectSyncsForTests(int n) { g_fail_direct_syncs.store(n, std::memory_order_relaxed); }
 bool ConsumeInjectedDirectSyncFailure() {
     int n = g_fail_direct_syncs.load(std::memory_order_relaxed);

@@ -1605,6 +1605,7 @@ protected:
     }
     static void Crash() { XStore::WalSimulateRestartForTests(); }
     void TearDown() override {
+        walring::PauseWriterForTests(0);
         walring::FailNextReplayReadsForTests(0);
         walring::FailNextReplayZeroingsForTests(0);
         walring::StopReplayZeroingAfterTailForTests(false);
@@ -1848,6 +1849,66 @@ TEST_F(WalReplayTest, RemoveDbFilesCheckpointsFirstSoReplayCannotResurrectTheFil
     store.InitDB();
     EXPECT_FALSE(std::filesystem::exists(YearFile())) << "replay re-created the removed year file from un-checkpointed records";
 }
+
+// A record that is IN FLIGHT in a WAL writer (dequeued, not yet routed or appended) while its DB is removed must never be
+// appended to the ring: the removal's checkpoint cannot cover a record that is appended after it, and a crash before the
+// next regular checkpoint would replay it into a DB re-created under the name (same geometry cannot be told apart).
+// Parameter = where the record is held: 1 in a writer before its checks, 2 in a writer after them (about to be appended),
+// 3 in the request thread before it queues the record.
+class WalRemovalRaceTest : public WalReplayTest, public ::testing::WithParamInterface<int> {};
+
+TEST_P(WalRemovalRaceTest, ARecordInFlightDuringRemoveDbIsNeverAppendedSoReplayCannotReachARecreatedDb) {
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    walring::PauseWriterForTests(GetParam());
+    std::atomic<bool> insert_ok{true};
+    std::thread inserter([&] { insert_ok = InsertAt(store, 3); });
+    ASSERT_TRUE(WaitFor([] { return walring::WriterParkedForTests(); }, std::chrono::milliseconds(5000))) << "the writer never took the record";
+    std::thread remover([&] { (void)store.RemoveDB(db_name); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));   // the removal gets as far as it can with the record held
+    walring::PauseWriterForTests(0);
+    inserter.join();
+    remover.join();
+    EXPECT_FALSE(insert_ok.load()) << "an insert that raced the removal of its DB must be refused, not acknowledged";
+
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);   // the same geometry
+    Crash();
+    store.InitDB();
+    EXPECT_FALSE(std::filesystem::exists(YearFile())) << "replay applied a removed DB's in-flight record to the re-created DB";
+}
+
+// Same for RemoveDBFiles: a record in flight for the year being removed is refused before it reaches the ring, so neither
+// the live server nor a replay after a crash brings the removed year file back.
+TEST_P(WalRemovalRaceTest, ARecordInFlightDuringRemoveDbFilesNeverBringsTheYearFileBack) {
+    // Stage 3 would queue the record after the removal finished: a plain insert after it, free to re-create the year.
+    if (GetParam() == 3) GTEST_SKIP() << "a request that queues after RemoveDBFiles returned is an ordinary later insert";
+    XStore store;
+    xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
+    for (uint64_t i = 0; i < 5; ++i) ASSERT_TRUE(InsertAt(store, i));
+    ASSERT_TRUE(std::filesystem::exists(YearFile()));
+    walring::PauseWriterForTests(GetParam());
+    std::atomic<bool> insert_ok{true};
+    std::thread inserter([&] { insert_ok = InsertAt(store, 7); });
+    ASSERT_TRUE(WaitFor([] { return walring::WriterParkedForTests(); }, std::chrono::milliseconds(5000))) << "the writer never took the record";
+    std::thread remover([&] {
+        XStore_Proto::RemoveDBFiles_REQ req;
+        req.set_dbname(db_name);
+        req.add_filename(std::filesystem::path(YearFile()).filename().string());
+        (void)store.RemoveDBFiles(&req, db_name);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    walring::PauseWriterForTests(0);
+    inserter.join();
+    remover.join();
+    EXPECT_FALSE(insert_ok.load()) << "an insert that raced the removal of its year must be refused";
+    EXPECT_FALSE(std::filesystem::exists(YearFile())) << "the in-flight record re-created the removed year file";
+
+    Crash();
+    store.InitDB();
+    EXPECT_FALSE(std::filesystem::exists(YearFile())) << "replay re-created the removed year file from the in-flight record";
+}
+
+INSTANTIATE_TEST_SUITE_P(Stages, WalRemovalRaceTest, ::testing::Values(1, 2, 3));
 
 // RemoveDB must not hang or throw when the checkpoint cannot be taken (poisoned checkpointer).
 TEST_F(WalReplayTest, RemoveDbProceedsWhenTheCheckpointerIsPoisoned) {

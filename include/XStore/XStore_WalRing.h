@@ -203,6 +203,12 @@ void SetDirectPressureMinBytesForTests(size_t bytes);   // 0 restores the tunabl
 // record is applied (n = 0 clears): exercises the writer's exception path. Consumed only by the writer's apply step.
 void ThrowInNextWriterApplyForTests(int n);
 bool ConsumeInjectedWriterApplyThrow();
+// Tests: a request "in flight". Stage 1 parks a WAL writer right after it dequeued a batch (before it checks, routes or
+// appends anything); stage 2 after the per-record checks, just before the first ring append; stage 3 parks the REQUEST thread
+// at the start of EnqueueWalRecord (its record is built, not queued). 0 releases. WriterParkedForTests() is true while one is parked.
+void PauseWriterForTests(int stage);
+[[nodiscard]] bool WriterParkedForTests();
+void ParkWriterIfPausedForTests(int stage);   // the writer's call; one relaxed load when not paused
 // The next n direct-path sync steps fail retryably (n = 0 clears): the record is not acknowledged, nothing poisons.
 void FailNextDirectSyncsForTests(int n);
 bool ConsumeInjectedDirectSyncFailure();
