@@ -3,18 +3,23 @@
 // really there with the right values. Run it against a server whose data directory sits on a device that starts
 // failing writes (dm-flakey) to prove that no acknowledged SYNC write is lost.
 //
-//   xstore_zmq_fault_client run <host:port> <db> <threads> <seconds> <log_path>
+//   xstore_zmq_fault_client run <host:port> <db> <threads> <seconds> <log_path> [rows_per_call [SYNC|ASYNC]]
 //   xstore_zmq_fault_client verify <host:port> <db> <log_path> [fault_start_epoch_ms]
 //
 // `run` (the DB must exist: xstore_zmq_insert_client create) drives <threads> threads, each on its own timestamp
-// range, one SYNC BatchInsert (1000 wide rows, ZmqInsertPayload.h) after the other until <seconds> elapsed. Each
+// range, one BatchInsert (rows_per_call wide rows, default 1000 = ZmqInsertPayload.h; a call of 1000 rows is ~1.4 MB and
+// takes the direct path, fewer than ~700 rows (under WAL_DIRECT_MIN_BYTES, and under 45 rows to stay on the ring even
+// under ring pressure) takes the WAL ring) after the other until <seconds> elapsed; the mode defaults to SYNC. The log's
+// first line "# rows=<n> mode=<SYNC|ASYNC>" tells `verify` what was run. Each
 // call appends one line to <log_path>: "ACK|FAIL|TIMEOUT <thread> <call> <epoch_ms>"; only ACK means the server
 // said "successfully". A thread stops at its first TIMEOUT (a REQ socket cannot continue after one). Row i of a
 // call holds the doubles i*0.5 + column, so `verify` checks the value as well as the presence of 8 sampled rows
 // (first, last, middle, 5 random) of every ACKed call, and prints
 //   VERIFY acked=<n> missing=<calls with a missing sample> wrong=<calls with a wrong value> acks_after_fault=<n>
-// (acks_after_fault counts ACK lines stamped at or after fault_start_epoch_ms; 0 if the argument is absent).
-// Exit status is non-zero if any acknowledged call is missing or wrong.
+// (a log with more than 30000 ACKs is thinned to every k-th call: "checked=" says how many were looked at;
+// acks_after_fault counts ACK lines stamped at or after fault_start_epoch_ms; 0 if the argument is absent).
+// Exit status is non-zero if any acknowledged call is wrong, or missing in SYNC mode. An ASYNC ack promises no
+// durability, so there a missing call is only reported (the exit status then checks that the survivors are right).
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -42,12 +47,14 @@ long long EpochMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(WallClock::now().time_since_epoch()).count();
 }
 
-int Run(const std::string &addr, const std::string &db, int threads, int seconds, const std::string &log_path) {
+int Run(const std::string &addr, const std::string &db, int threads, int seconds, const std::string &log_path, size_t rows,
+        XStore_Proto::WalDurabilityMode mode) {
     std::FILE *log = std::fopen(log_path.c_str(), "w");
     if (log == nullptr) {
         std::cerr << "cannot open " << log_path << "\n";
         return 2;
     }
+    std::fprintf(log, "# rows=%zu mode=%s\n", rows, mode == XStore_Proto::SYNC ? "SYNC" : "ASYNC");
     std::mutex log_mu;
     auto record = [&](const char *what, int t, int c) {
         std::lock_guard<std::mutex> lock(log_mu);
@@ -66,8 +73,8 @@ int Run(const std::string &addr, const std::string &db, int threads, int seconds
             sock.connect("tcp://" + addr);
             std::mt19937_64 rng(1000 + static_cast<unsigned long long>(t));
             for (int c = 0; WallClock::now() < deadline; ++c) {
-                const std::string payload = BuildPayload(db, XStore_Proto::SYNC, FirstTs(static_cast<unsigned long long>(t),
-                                                         static_cast<unsigned long long>(c)), false, rng);
+                const std::string payload = BuildPayload(db, mode, FirstTs(static_cast<unsigned long long>(t),
+                                                         static_cast<unsigned long long>(c)), false, rng, rows);
                 zmq::message_t reply;
                 if (!sock.send(zmq::buffer(payload), zmq::send_flags::none) || !sock.recv(reply, zmq::recv_flags::none)) {
                     record("TIMEOUT", t, c);
@@ -125,6 +132,16 @@ int Verify(const std::string &addr, const std::string &db, const std::string &lo
     struct Call { int t, c; };
     std::vector<Call> acked;
     unsigned long long after_fault = 0;
+    size_t rows = kRowsPerCall;
+    bool sync = true;
+    std::string line;
+    if (std::getline(in, line) && line.rfind("# rows=", 0) == 0) {
+        rows = std::strtoull(line.c_str() + 7, nullptr, 10);
+        sync = line.find("mode=ASYNC") == std::string::npos;
+    } else {
+        in.clear();
+        in.seekg(0);
+    }
     std::string kind;
     int t = 0, c = 0;
     long long ms = 0;
@@ -132,6 +149,15 @@ int Verify(const std::string &addr, const std::string &db, const std::string &lo
         if (kind != "ACK") continue;
         acked.push_back({t, c});
         if (fault_start_ms > 0 && ms >= fault_start_ms) ++after_fault;
+    }
+    // A very long log (fast ASYNC acks) would take hours of point queries: check every k-th call once past the cap.
+    constexpr size_t kMaxChecked = 30000;
+    const size_t total_acked = acked.size();
+    if (total_acked > kMaxChecked) {
+        const size_t stride = (total_acked + kMaxChecked - 1) / kMaxChecked;
+        size_t kept = 0;
+        for (size_t i = 0; i < total_acked; i += stride) acked[kept++] = acked[i];
+        acked.resize(kept);
     }
     zmq::context_t ctx(2);
     std::atomic<size_t> next{0};
@@ -143,8 +169,8 @@ int Verify(const std::string &addr, const std::string &db, const std::string &lo
                 const unsigned long long first =
                     FirstTs(static_cast<unsigned long long>(acked[i].t), static_cast<unsigned long long>(acked[i].c));
                 std::mt19937_64 rng(first);
-                std::vector<unsigned long long> samples = {first, first + kRowsPerCall - 1, first + kRowsPerCall / 2};
-                for (int k = 0; k < 5; ++k) samples.push_back(first + rng() % kRowsPerCall);
+                std::vector<unsigned long long> samples = {first, first + rows - 1, first + rows / 2};
+                for (int k = 0; k < 5; ++k) samples.push_back(first + rng() % rows);
                 bool is_missing = false, is_wrong = false, no_reply = false;
                 for (const unsigned long long ts : samples) {
                     const int r = CheckRow(ctx, addr, db, ts);
@@ -159,20 +185,27 @@ int Verify(const std::string &addr, const std::string &db, const std::string &lo
         });
     }
     for (std::thread &w : checkers) w.join();
-    std::printf("VERIFY acked=%zu missing=%llu wrong=%llu unanswered=%llu acks_after_fault=%llu\n", acked.size(), missing.load(),
-                wrong.load(), unanswered.load(), after_fault);
-    return missing.load() == 0 && wrong.load() == 0 && unanswered.load() == 0 ? 0 : 1;
+    std::printf("VERIFY mode=%s rows=%zu acked=%zu checked=%zu missing=%llu wrong=%llu unanswered=%llu acks_after_fault=%llu\n",
+                sync ? "SYNC" : "ASYNC", rows, total_acked, acked.size(), missing.load(), wrong.load(), unanswered.load(), after_fault);
+    return (!sync || missing.load() == 0) && wrong.load() == 0 && unanswered.load() == 0 ? 0 : 1;
 }
 
 }  // namespace
 
 int main(int argc, char **argv) {
-    if (argc == 7 && std::string(argv[1]) == "run") {
-        return Run(argv[2], argv[3], std::atoi(argv[4]), std::atoi(argv[5]), argv[6]);
+    if ((argc >= 7 && argc <= 9) && std::string(argv[1]) == "run") {
+        const size_t rows = argc >= 8 ? std::strtoull(argv[7], nullptr, 10) : kRowsPerCall;
+        const std::string mode = argc == 9 ? argv[8] : "SYNC";
+        if (rows == 0 || (mode != "SYNC" && mode != "ASYNC")) {
+            std::cerr << "rows_per_call must be > 0 and mode SYNC or ASYNC\n";
+            return 2;
+        }
+        return Run(argv[2], argv[3], std::atoi(argv[4]), std::atoi(argv[5]), argv[6], rows,
+                   mode == "SYNC" ? XStore_Proto::SYNC : XStore_Proto::ASYNC);
     }
     if ((argc == 5 || argc == 6) && std::string(argv[1]) == "verify") {
         return Verify(argv[2], argv[3], argv[4], argc == 6 ? std::atoll(argv[5]) : 0);
     }
-    std::cerr << "usage: " << argv[0] << " run <host:port> <db> <threads> <seconds> <log_path> | verify <host:port> <db> <log_path> [fault_start_epoch_ms]\n";
+    std::cerr << "usage: " << argv[0] << " run <host:port> <db> <threads> <seconds> <log_path> [rows_per_call [SYNC|ASYNC]] | verify <host:port> <db> <log_path> [fault_start_epoch_ms]\n";
     return 2;
 }

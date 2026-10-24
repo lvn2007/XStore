@@ -28,10 +28,10 @@ inline unsigned long long FirstTs(unsigned long long thread_id, unsigned long lo
     return kBaseTs + thread_id * kThreadStride + call * kRowsPerCall;
 }
 
-// One serialized Request envelope holding a BatchInsert of `kRowsPerCall` rows starting at `first_ts`.
+// One serialized Request envelope holding a BatchInsert of `rows` (default `kRowsPerCall`) rows starting at `first_ts`.
 inline std::string BuildPayload(const std::string &db, XStore_Proto::WalDurabilityMode mode, unsigned long long first_ts,
-                                bool shuffle, std::mt19937_64 &rng) {
-    std::vector<size_t> order(kRowsPerCall);
+                                bool shuffle, std::mt19937_64 &rng, size_t rows = kRowsPerCall) {
+    std::vector<size_t> order(rows);
     for (size_t i = 0; i < order.size(); ++i) order[i] = i;
     if (shuffle) std::shuffle(order.begin(), order.end(), rng);
     XStore_Proto::Request request;
