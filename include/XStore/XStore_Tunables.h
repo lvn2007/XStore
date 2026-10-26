@@ -462,6 +462,13 @@ inline constexpr uint64_t LIVE_WIDEN_TIMEOUT_WARN_AFTER = 100;
 // chunk is small; the maximum is LIVE_WIDEN_MAX_CHUNK_BYTES worth of rows.
 inline constexpr uint64_t LIVE_WIDEN_MIN_CHUNK_ROWS = 1;
 inline constexpr uint64_t LIVE_WIDEN_INITIAL_CHUNK_ROWS = 256;
+// Floor of the hold-time adaptation only (livewiden::NextChunkRows): a chunk whose hold ran past the target shrinks, but
+// never below this many rows. The hold includes the chunk's lseek(SEEK_DATA/SEEK_HOLE) calls, which cost 4-32 ms each
+// under an insert load (Mystic 2026-10-26) and are paid per chunk, not per row: without this floor every chunk halved
+// down to ONE row and a year widened at ~30 rows/s instead of ~175K rows/s. A lock TIMEOUT still shrinks the chunk
+// to LIVE_WIDEN_MIN_CHUNK_ROWS, and the next chunk after it is at least this big again.
+inline constexpr uint64_t LIVE_WIDEN_HOLD_ADAPT_FLOOR_ROWS = 256;
+static_assert(LIVE_WIDEN_HOLD_ADAPT_FLOOR_ROWS >= LIVE_WIDEN_MIN_CHUNK_ROWS, "the adaptation floor is a chunk size");
 // Cap on the rows read under one lock hold: 1 MiB worth of rows (512 rows of
 // 2 KiB, about 6-7 ms of decode and fold at the ~13 us/row measured for 100
 // double columns), so the row count alone cannot stretch a hold to tens of

@@ -26,6 +26,7 @@ add_executable(xstore_tests
         integration/XStoreRebuildProgressTest.cpp
         integration/XStoreLiveWidenTest.cpp
         integration/XStoreLiveWidenGovernorTest.cpp
+        integration/XStoreLiveWidenChunkTest.cpp
         integration/XStoreFileRangeLockTest.cpp
         integration/XStoreSyscallFault.cpp
 )
@@ -152,6 +153,12 @@ add_executable(xstore_zmq_mixed_client
         perf/XStoreZmqMixedClient.cpp
 )
 target_link_libraries(xstore_zmq_mixed_client PRIVATE xstore_network)
+
+# xstore_zmq_widen_client: queries and a grow insert for the live-widen study, from another machine (see the file header).
+add_executable(xstore_zmq_widen_client
+        perf/XStoreZmqWidenClient.cpp
+)
+target_link_libraries(xstore_zmq_widen_client PRIVATE xstore_network)
 
 # tests/local_bench: opt-in, single-machine benchmark harness (pure Python
 # driver around the real XStore server + the XBench binary -- see

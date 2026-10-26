@@ -7,6 +7,7 @@
 #include "include/XStore/XStore_WalRing.h"
 #include "include/XStore/XStore_WalCheckpoint.h"
 #include "include/XStore/XStore_LiveWidenGovernor.h"
+#include "include/XStore/XStore_LiveWidenChunk.h"
 #include "include/XStore/XStore_LiveWidenLoadSource.h"
 #include <spdlog/fmt/fmt.h>
 #include "include/Logger/Logger.h"
@@ -2254,10 +2255,8 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
                             span_rows = std::max(span_rows, data_rows);
                             continue; // the lock was held for microseconds: no pause owed
                         }
-                        const double factor = std::clamp(static_cast<double>(XStoreTunables::LIVE_WIDEN_LOCK_HOLD_TARGET_US) /
-                                                             static_cast<double>(std::max<uint64_t>(hold_us, 1)), 0.5, 2.0);
-                        data_rows = std::clamp<uint64_t>(static_cast<uint64_t>(static_cast<double>(data_rows) * factor),
-                                                         XStoreTunables::LIVE_WIDEN_MIN_CHUNK_ROWS, max_data_rows);
+                        data_rows = livewiden::NextChunkRows(data_rows, hold_us, XStoreTunables::LIVE_WIDEN_LOCK_HOLD_TARGET_US,
+                                                             XStoreTunables::LIVE_WIDEN_HOLD_ADAPT_FLOOR_ROWS, max_data_rows);
                         span_rows = data_rows;
                     } else {
                         // A group's folded part is one contiguous prefix: a busy chunk cannot be skipped, only shrunk
