@@ -1,6 +1,7 @@
 #include "include/Networking/ZMQ_Server.h"
 #include "include/Networking/ZMQ_Broker.h"
 #include <google/protobuf/arena.h>
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <fstream>
@@ -12,22 +13,10 @@
 
 namespace {
 
-// Physical core count, not std::thread::hardware_concurrency()'s logical
-// (SMT-inclusive) count. Measured on real hardware (torusnode15: 16
-// physical cores, 2 SMT threads/core = 32 logical): running one spinning
-// ZMQ worker per LOGICAL core (32 workers) under real concurrent load
-// (t=64) was ~6% SLOWER at the p50 than one per PHYSICAL core (16
-// workers) -- going past physical-core count leaves no free SMT sibling
-// lane for the WAL writer threads (also spinning, WAL_ADAPTIVE_POLL_
-// WINDOW_US) to run relatively uncontended on, forcing genuine execution-
-// resource contention between front-end and back-end threads that doesn't
-// exist when worker count matches physical cores. Parses /proc/cpuinfo
-// (Linux-only -- consistent with this project's existing POSIX/Linux-only
-// assumptions elsewhere: pwritev, posix_fallocate) by counting distinct
-// (physical id, core id) pairs, since neither hardware_concurrency() nor
-// std::thread::hardware_concurrency() report physical topology, only
-// logical CPU count.
-int PhysicalCoreCount() {
+// Physical core count from /proc/cpuinfo (Linux-only, like the rest of this project: pwritev, posix_fallocate) by counting
+// distinct (physical id, core id) pairs; hardware_concurrency() only reports the logical CPU count. Used to charge the
+// BatchQuery pread pool (ZmqServer::PreadPoolReserved), not to size the worker pool: see DefaultThreadCount.
+int ReadPhysicalCoreCount() {
     std::ifstream cpuinfo("/proc/cpuinfo");
     if (!cpuinfo.is_open()) return 0;
 
@@ -59,17 +48,31 @@ int PhysicalCoreCount() {
 
 }  // namespace
 
-int ZmqServer::DefaultThreadCount() {
-    int physical = PhysicalCoreCount();
+int ZmqServer::PhysicalCoreCount() {
+    const int physical = ReadPhysicalCoreCount();
     if (physical > 0) return physical;
+    // /proc/cpuinfo unavailable or unparseable (non-Linux, containerized/restricted environment): assume SMT2.
+    const unsigned logical = std::thread::hardware_concurrency();
+    return logical >= 2 ? static_cast<int>(logical / 2) : 1;
+}
 
-    // /proc/cpuinfo unavailable or unparseable (non-Linux, containerized/
-    // restricted environment, etc.) -- assume SMT2 as a reasonable guess
-    // rather than defaulting to the (measurably worse, per the comment
-    // above) logical count outright.
-    unsigned logical = std::thread::hardware_concurrency();
-    if (logical >= 2) return static_cast<int>(logical / 2);
+// One worker per LOGICAL core. A SYNC insert holds its worker for the whole fsync, so this is also the number of SYNC
+// calls in flight, and group commit batches more records per fsync the more there are. Measured on Mystic (16 physical
+// cores, 32 logical; real server alone, 8 client nodes, rotated arms with a baseline-vs-baseline control), 32 workers
+// against 16: 20-row SYNC inserts 1.45x (32 client threads) to 1.64x (128), inserts next to light range queries 2.0x
+// inserts / 2.0x queries (query p99 0.63x), next to CPU-saturating queries 1.18x / 1.24x (p99 0.85x); bulk 1000-row
+// SYNC, queries alone and reads next to one writer unchanged within noise. 64 workers (past the logical count) cost
+// inserts ~9% when the cores were saturated, so this stops at the logical count. An earlier measurement (before the
+// ready-based broker) found 32 workers ~6% worse at p50 under concurrent load because the WAL writers lost their free
+// SMT siblings; the numbers above supersede it for the workloads tested, but it is a reason to check other hardware.
+// Still overridable with -t/--threads.
+int ZmqServer::DefaultThreadCount() {
+    const unsigned logical = std::thread::hardware_concurrency();
     return logical > 0 ? static_cast<int>(logical) : 1;
+}
+
+size_t ZmqServer::PreadPoolReserved(int workers, int physical_cores) {
+    return static_cast<size_t>(std::max(0, std::min(workers, physical_cores)));
 }
 
 namespace {

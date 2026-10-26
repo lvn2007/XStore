@@ -6,6 +6,15 @@
 //   xstore_zmq_mixed_client seed    <host:port> <db>
 //   xstore_zmq_mixed_client scatter <host:port> <db> <threads> <duration_s> <start_epoch_s> <seed>
 //   xstore_zmq_mixed_client read    <host:port> <db> <threads> <duration_s> <start_epoch_s> <seed>
+//   xstore_zmq_mixed_client fill    <host:port> <db> <calls>
+//   xstore_zmq_mixed_client range   <host:port> <db> <threads> <duration_s> <start_epoch_s> <seed> <width_s> <span_s>
+//   xstore_zmq_mixed_client batch   <host:port> <db> <threads> <duration_s> <start_epoch_s> <seed> <count> <span_s>
+//
+// `fill` writes <calls> SYNC BatchInserts of 1000 CONTIGUOUS seconds from the start of 2024 (a dense block to query).
+// `range` is `read` with RangeQuerys of <width_s> seconds starting at a random second of the first <span_s> seconds:
+// CPU-heavy replies (the rows are read, copied and serialized), for checking that more server workers than cores do
+// not hurt queries that keep cores busy. `batch` is `read` with BatchQuerys of <count> random seconds of the first
+// <span_s> seconds (the server fans the preads out over its pread pool).
 //
 // `scatter` and `read` wait for the wall-clock start epoch (NTP-synced nodes start together), run for exactly
 // <duration_s>, and print one RESULT line. Scatter sends 1000-row BatchInserts (SYNC) of distinct random seconds of
@@ -93,6 +102,30 @@ int Seed(const std::string &addr, const std::string &db) {
     return rep.insertstatus().find("[INFO]") != std::string::npos ? 0 : 1;
 }
 
+int Fill(const std::string &addr, const std::string &db, int calls) {
+    zmq::context_t ctx(1);
+    for (int c = 0; c < calls; ++c) {
+        XStore_Proto::Request request;
+        XStore_Proto::BatchInsert_REQ *batch = request.mutable_batchinsert();
+        batch->set_dbname(db);
+        batch->set_durabilitymode(XStore_Proto::SYNC);
+        for (size_t i = 0; i < kRowsPerCall; ++i) {
+            XStore_Proto::BatchInsert_DATA *entry = batch->add_batchinsert_data();
+            const unsigned long long r = static_cast<unsigned long long>(c) * kRowsPerCall + i;
+            entry->set_timestamp(kYearStart + r);
+            *entry->mutable_data() = ScatterRow(r);
+        }
+        XStore_Proto::BatchInsert_REP rep;
+        const std::string reply = Call(ctx, addr, request.SerializeAsString(), 60000);
+        if (reply.empty() || !rep.ParseFromString(reply) || rep.insertstatus().find("successfully") == std::string::npos) {
+            std::cerr << "fill call " << c << " failed\n";
+            return 1;
+        }
+    }
+    std::cout << "filled " << calls * kRowsPerCall << " rows" << std::endl;
+    return 0;
+}
+
 void WaitUntilEpoch(double start_epoch_s) {
     const long long target = static_cast<long long>(start_epoch_s * 1e9);
     while (EpochNs() < target) std::this_thread::sleep_for(std::chrono::microseconds(200));
@@ -171,7 +204,8 @@ int Scatter(const std::string &addr, const std::string &db, int threads, double 
 }
 
 int Read(const std::string &addr, const std::string &db, int threads, double duration_s, double start_epoch_s,
-         unsigned long long seed) {
+         unsigned long long seed, unsigned long long range_width = 0, unsigned long long range_span = 0,
+         unsigned long long batch_count = 0) {
     zmq::context_t ctx(2);
     std::atomic<int> ready{0};
     std::atomic<bool> go{false};
@@ -190,14 +224,33 @@ int Read(const std::string &addr, const std::string &db, int threads, double dur
             std::vector<double> mine;
             mine.reserve(1 << 20);
             XStore_Proto::Request request;
-            XStore_Proto::UnaryQuery_REQ *query = request.mutable_unaryquery();
-            query->set_rtype(XStore_Proto::UNARYQUERY);
-            query->set_dbname(db);
+            XStore_Proto::UnaryQuery_REQ *query = (range_width == 0 && batch_count == 0) ? request.mutable_unaryquery() : nullptr;
+            XStore_Proto::RangeQuery_REQ *range = range_width != 0 ? request.mutable_rangequery() : nullptr;
+            XStore_Proto::BatchQuery_REQ *batch = batch_count != 0 ? request.mutable_batchquery() : nullptr;
+            if (batch != nullptr) {
+                batch->set_rtype(XStore_Proto::BATCHQUERY);
+                batch->set_dbname(db);
+            } else if (query != nullptr) {
+                query->set_rtype(XStore_Proto::UNARYQUERY);
+                query->set_dbname(db);
+            } else {
+                range->set_rtype(XStore_Proto::RANGEQUERY);
+                range->set_dbname(db);
+            }
             ready.fetch_add(1);
             while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
             std::string payload;
             while (EpochNs() < deadline_ns) {
-                query->set_timestamp(kYearStart + rng() % kYearSeconds);
+                if (batch != nullptr) {
+                    batch->clear_timestamp();
+                    for (unsigned long long i = 0; i < batch_count; ++i) batch->add_timestamp(kYearStart + rng() % range_span);
+                } else if (query != nullptr) {
+                    query->set_timestamp(kYearStart + rng() % kYearSeconds);
+                } else {
+                    const unsigned long long from = kYearStart + rng() % (range_span - range_width);
+                    range->set_starttime(from);
+                    range->set_endtime(from + range_width);
+                }
                 request.SerializeToString(&payload);
                 const SteadyClock::time_point t0 = SteadyClock::now();
                 zmq::message_t reply;
@@ -231,6 +284,19 @@ int main(int argc, char **argv) {
     const std::string cmd = argc > 1 ? argv[1] : "";
     if (cmd == "create" && argc == 4) return Create(argv[2], argv[3]);
     if (cmd == "seed" && argc == 4) return Seed(argv[2], argv[3]);
+    if (cmd == "fill" && argc == 5) return Fill(argv[2], argv[3], std::atoi(argv[4]));
+    if (cmd == "batch" && argc == 10) {
+        const unsigned long long count = std::strtoull(argv[8], nullptr, 10), span = std::strtoull(argv[9], nullptr, 10);
+        if (count == 0 || span == 0) return 2;
+        return Read(argv[2], argv[3], std::atoi(argv[4]), std::atof(argv[5]), std::atof(argv[6]),
+                    std::strtoull(argv[7], nullptr, 10), 0, span, count);
+    }
+    if (cmd == "range" && argc == 10) {
+        const unsigned long long width = std::strtoull(argv[8], nullptr, 10), span = std::strtoull(argv[9], nullptr, 10);
+        if (width == 0 || span <= width) return 2;
+        return Read(argv[2], argv[3], std::atoi(argv[4]), std::atof(argv[5]), std::atof(argv[6]),
+                    std::strtoull(argv[7], nullptr, 10), width, span);
+    }
     if ((cmd == "scatter" || cmd == "read") && argc == 8) {
         const int threads = std::atoi(argv[4]);
         const double duration_s = std::atof(argv[5]), start_epoch_s = std::atof(argv[6]);

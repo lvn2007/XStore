@@ -69,13 +69,21 @@ class ZmqServer {
         // be sent (a SYNC-acked insert may be durable yet unacknowledged).
         void RequestStop();
 
-        // Physical (not logical/SMT) CPU core count on this host, with a
-        // graceful fallback -- see the .cpp definition for why this, not
-        // std::thread::hardware_concurrency(), is the right default worker
-        // count for production. Callers needing a SPECIFIC count for other
-        // reasons (tests wanting a small, deterministic pool) should keep
-        // passing an explicit value to the constructor instead of this.
+        // Default ZMQ worker count: one per LOGICAL core (hardware_concurrency()), at least 1. A SYNC insert holds its
+        // worker for the whole fsync, so the number of workers is the number of SYNC calls in flight, and more in flight
+        // means bigger group commits. Callers needing a SPECIFIC count (tests wanting a small, deterministic pool) should
+        // keep passing an explicit value to the constructor instead of this. See the .cpp for the measurements.
         static int DefaultThreadCount();
+
+        // Physical (not logical/SMT) CPU core count on this host, from /proc/cpuinfo; half the logical count (at least 1)
+        // when that is unavailable. Used to charge the BatchQuery pread pool, see PreadPoolReserved.
+        static int PhysicalCoreCount();
+
+        // How many threads to tell XStorePreadPool::Init the ZMQ server claims: the worker count, but never more than the
+        // physical core count. The pool is sized as cores minus this; workers beyond the physical cores mostly wait in
+        // fsync, and charging them would shrink the pool (32 workers on 32 logical cores left it at its floor of 2:
+        // -60% BatchQuery throughput, measured).
+        [[nodiscard]] static size_t PreadPoolReserved(int workers, int physical_cores);
 };
 
 #endif //XSTORE_ZMQ_SERVER_H

@@ -78,7 +78,7 @@ int main(int argc, char *argv[]) {
     program.add_argument("-t", "--threads")
         .default_value(0)
         .scan<'i', int>()
-        .help("worker thread count (<=0 or omitted defaults to one per physical core)");
+        .help("worker thread count (<=0 or omitted defaults to one per logical core)");
 
     program.add_argument("-s", "--stats-port")
         .default_value(0)
@@ -126,17 +126,12 @@ int main(int argc, char *argv[]) {
     std::string port = program.get<std::string>("--port");
     int thread_count = program.get<int>("--threads");
     if (thread_count <= 0) {
-        // Default to one worker per PHYSICAL core (not this host's
-        // logical/SMT-inclusive hardware_concurrency()) -- measured best
-        // on real hardware: going past physical core count leaves no free
-        // SMT sibling lane for the WAL writer threads to run on relatively
-        // uncontended, ~6% worse p50 under real concurrent load in that
-        // configuration (see ZmqServer::DefaultThreadCount()'s comment,
-        // ZMQ_Server.cpp). Still user-overridable via -t/--threads --
-        // don't assume this default is right for every deployment's own
+        // Default to one worker per LOGICAL core: SYNC inserts hold a worker through the fsync, so more workers mean
+        // more SYNC calls in flight and bigger group commits (measured, see ZmqServer::DefaultThreadCount()). Still
+        // user-overridable via -t/--threads -- don't assume this default is right for every deployment's own
         // hardware/workload without benchmarking it there too.
         thread_count = ZmqServer::DefaultThreadCount();
-        spdlog::info("[BOOT] - No/invalid thread count given, defaulting to {} (one per physical core)", thread_count);
+        spdlog::info("[BOOT] - No/invalid thread count given, defaulting to {} (one per logical core)", thread_count);
     }
 
     int stats_port = program.get<int>("--stats-port");
@@ -189,8 +184,9 @@ int main(int argc, char *argv[]) {
     // BatchQuery starts the pread pool's threads on first use, and
     // that count is fixed from then on). See XStore_Tunables.h's
     // BATCH_QUERY_PREAD_POOL_SIZE_CAP comment for the regression this
-    // fixes.
-    XStorePreadPool::Init(static_cast<size_t>(thread_count));
+    // fixes. Charged at most the PHYSICAL core count (PreadPoolReserved): workers beyond it mostly wait in fsync, and
+    // charging them left the pool at its floor of 2 (-60% BatchQuery throughput with 32 workers on 32 logical cores).
+    XStorePreadPool::Init(ZmqServer::PreadPoolReserved(thread_count, ZmqServer::PhysicalCoreCount()));
 
     // Constructed (not started) before the slow boot work below so that a
     // signal arriving during InitDB/WAL replay is remembered: RequestStop()

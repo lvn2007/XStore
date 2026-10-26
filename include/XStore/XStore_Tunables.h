@@ -649,7 +649,10 @@ inline constexpr unsigned CURVE_ALLOWLIST_MIN_CHECK_INTERVAL_MS = 1000;
 // the pool's own worker threads were competing with the ZMQ worker threads
 // (also sized from hardware_concurrency()) for the same physical cores,
 // two independently-sized consumers oversubscribing one budget. Sizing off
-// "cores minus what ZMQ already claimed" fixes this on ANY machine
+// "cores minus what ZMQ already claimed" (charged at most the PHYSICAL core count,
+// ZmqServer::PreadPoolReserved: the default worker count is the LOGICAL count, and
+// workers beyond the physical cores mostly wait in fsync; charging them all left
+// the pool at its floor of 2, -60% BatchQuery throughput) fixes this on ANY machine
 // automatically -- a small box naturally gets a small pool, a big box a
 // big one, without a manual per-deployment multiplier. This cap remains a
 // hard ceiling on top of that (mainly relevant on a very large box, where

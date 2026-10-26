@@ -1169,3 +1169,29 @@ TEST_F(XStoreZmqConcurrentTest, ConcurrentClientsUnaryInsertAndQueryOverWireDoNo
     EXPECT_EQ(failure_count.load(), 0)
         << "one or more concurrent clients saw a failed/incorrect request through the multi-worker server";
 }
+
+// Worker-count defaults. SYNC inserts hold a worker for the whole fsync, so the default is one worker per LOGICAL core
+// (measured: more in-flight SYNC calls mean bigger group commits, with and without concurrent CPU-heavy queries). The
+// BatchQuery pread pool is sized off cores minus what ZMQ claims: it must be charged the PHYSICAL core count at most,
+// not the (larger) default worker count, or the pool collapses to its floor (measured: -60% BatchQuery throughput).
+TEST(ZmqServerDefaultsTest, DefaultWorkerCountIsTheLogicalCoreCount) {
+    const unsigned logical = std::thread::hardware_concurrency();
+    if (logical == 0) GTEST_SKIP() << "hardware_concurrency() is undetermined here";
+    EXPECT_EQ(ZmqServer::DefaultThreadCount(), static_cast<int>(logical));
+}
+
+TEST(ZmqServerDefaultsTest, PhysicalCoreCountIsPositiveAndNotAboveTheLogicalCount) {
+    const int physical = ZmqServer::PhysicalCoreCount();
+    EXPECT_GE(physical, 1);
+    const unsigned logical = std::thread::hardware_concurrency();
+    if (logical != 0) EXPECT_LE(physical, static_cast<int>(logical));
+}
+
+TEST(ZmqServerDefaultsTest, PreadPoolIsChargedAtMostThePhysicalCoreCount) {
+    EXPECT_EQ(ZmqServer::PreadPoolReserved(/*workers=*/32, /*physical=*/16), 16u);   // more workers than physical cores: capped
+    EXPECT_EQ(ZmqServer::PreadPoolReserved(16, 16), 16u);
+    EXPECT_EQ(ZmqServer::PreadPoolReserved(8, 16), 8u);                              // fewer workers: the pool keeps growing as before
+    EXPECT_EQ(ZmqServer::PreadPoolReserved(1, 16), 1u);
+    EXPECT_EQ(ZmqServer::PreadPoolReserved(0, 16), 0u);                              // never negative or wrapped
+    EXPECT_EQ(ZmqServer::PreadPoolReserved(-3, 16), 0u);
+}
