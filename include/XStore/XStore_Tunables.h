@@ -487,15 +487,6 @@ inline constexpr uint64_t LIVE_WIDEN_MAX_HOLE_SPAN_ROWS = 1ull << 20;
 // its own timed READ range lock. The load governor (S3) is meant to raise N when the machine is idle.
 inline constexpr unsigned LIVE_WIDEN_WORKERS = 1;
 inline constexpr uint64_t LIVE_WIDEN_GROUP_BYTES = 8 * LIVE_WIDEN_MAX_CHUNK_BYTES;
-// Keep the old index while a year is widened (Tech Reference 4.18 "Keep the old index"). true: the live builder writes
-// the new .zmap/.catidx into "<file>.new", renames it over the old name and keeps the old file open (unlinked) inside
-// the same registry object; blocks not yet rebuilt are answered from the old file at its old width instead of being
-// scanned, and every writer updates both files until the build finishes. Default ON since 2026-10-17: on Mystic,
-// whole-year aggregates on the widening year went from p50 2.7 s to 0.38 s (p99 28 s to 1.5 s), insert latency is
-// unchanged, no cost without a widen running; the accepted trade-off is a widen about 60% longer under 8-thread random
-// batch inserts. Other costs: index writes doubled for those writes during a widen, the old index's cache memory, the
-// old inode's disk space (about 1 GB per year) until the build ends. false restores the in-place rebuild.
-inline constexpr bool LIVE_WIDEN_KEEP_OLD_INDEX = true;
 // Live-widen load governor (XStore_LiveWidenGovernor.h, Tech Reference 4.18 "Governor"). These are the defaults of
 // GovernorParams. LIVE_WIDEN_GOVERNOR true: RunLiveWidenPass gives every DB's years one governor (cores - headroom
 // workers, parked between groups while the governor denies them) instead of the fixed LIVE_WIDEN_WORKERS.

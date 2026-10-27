@@ -507,11 +507,10 @@ bool ZoneMapFile::BeginRebuild(uint32_t new_tracked_column_count) {
     return BeginRebuildLocked(new_tracked_column_count);
 }
 
-BeginRebuildResult ZoneMapFile::BeginLiveRebuild(uint32_t new_tracked_column_count, bool keep_old) {
+BeginRebuildResult ZoneMapFile::BeginLiveRebuild(uint32_t new_tracked_column_count) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (frontier_ != kNoRebuild) return BeginRebuildResult::kAlreadyRebuilding; // another builder owns it: touch nothing
-    const bool began = keep_old ? BeginKeepOldLocked(new_tracked_column_count) : BeginRebuildLocked(new_tracked_column_count);
-    return began ? BeginRebuildResult::kStarted : BeginRebuildResult::kFailed;
+    return BeginKeepOldLocked(new_tracked_column_count) ? BeginRebuildResult::kStarted : BeginRebuildResult::kFailed;
 }
 
 void ZoneMapFile::AdoptOpenState(ZoneMapFile &from) noexcept {

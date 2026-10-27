@@ -251,18 +251,16 @@ public:
     // file the next start rebuilds (dirty, or too short to hold a header). Same object, same fd: references held by
     // in-flight queries stay valid. False also if the truncate fails (the old index is then still whole and served).
     [[nodiscard]] bool BeginRebuild(uint32_t new_tracked_column_count);
-    // Live builder only: BeginRebuild, unless a rebuild already runs on this file -- then kAlreadyRebuilding with nothing
-    // touched. The check and the begin are one step under the file mutex, so two builders on one file cannot both begin
-    // (the second would truncate the first's work while the first keeps advancing F).
-    // keep_old (LIVE_WIDEN_KEEP_OLD_INDEX, Tech Reference 4.18 "Keep the old index"): instead of emptying the file in
-    // place, the old index is marked dirty (durably; on failure nothing changes), the new one is created as
+    // Live builder only: kAlreadyRebuilding with nothing touched if a rebuild already runs on this file. The check and
+    // the begin are one step under the file mutex, so two builders on one file cannot both begin.
+    // Keeps the old index (Tech Reference 4.18 "Keep the old index") instead of emptying the file in place: the old index is marked dirty (durably; on failure nothing changes), the new one is created as
     // "<path>.new" at the new width (dirty header, same rows_per_block, fdatasync), renamed over path and the directory
     // fsynced; any failure of those steps returns kFailed with the old index unchanged, trusted and not rebuilding. On
     // success THIS object (same pins, same registry entry) moves to the new file at F = 0 and keeps the old file's
     // state (fd, header, cache) in an inner object until FinishRebuild: blocks not yet complete are answered from the
     // old file at its old width, and every writer call is applied to both files (old first under this mutex; lock order
     // this file's mutex -> the old one's). A stopped or failed build keeps the old file serving.
-    [[nodiscard]] BeginRebuildResult BeginLiveRebuild(uint32_t new_tracked_column_count, bool keep_old = false);
+    [[nodiscard]] BeginRebuildResult BeginLiveRebuild(uint32_t new_tracked_column_count);
     // Width of the old index a keep-old rebuild still serves blocks from; 0 when none. Lock-free.
     [[nodiscard]] uint32_t OldWidth() const { return old_width_.load(std::memory_order_acquire); }
     // Test-visible: TryGetBlockStats calls answered from the old index of a keep-old rebuild.

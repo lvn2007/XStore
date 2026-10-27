@@ -1948,7 +1948,7 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
                                                  bool widen_catidx, const std::atomic<bool> *stop,
                                                  LiveWidenStats *stats, unsigned workers, uint64_t group_bytes,
                                                  livewiden::LiveWidenGovernor *governor,
-                                                 livewiden::LiveWidenLoadSource *load, bool keep_old) try {
+                                                 livewiden::LiveWidenLoadSource *load) try {
     using Clock = std::chrono::steady_clock;
     LiveWidenStats local_stats;
     LiveWidenStats &st = stats != nullptr ? *stats : local_stats;
@@ -1978,7 +1978,7 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
     bool busy = false;
     const auto begin = [&](auto &pin, const char *ext, bool &began, bool &file_busy) {
         if (pin.get() == nullptr) return;
-        const BeginRebuildResult r = pin->BeginLiveRebuild(tracked_column_count, keep_old);
+        const BeginRebuildResult r = pin->BeginLiveRebuild(tracked_column_count);
         began = r == BeginRebuildResult::kStarted;
         file_busy = r == BeginRebuildResult::kAlreadyRebuilding;
         if (began) return;

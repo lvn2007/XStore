@@ -986,7 +986,7 @@ TEST_F(CatIdxLiveWidenTest, FailedDirtyMarkSyncLeavesTheOldIndexInPlace) {
 // Keep the old index (LIVE_WIDEN_KEEP_OLD_INDEX): blocks not yet rebuilt are answered by the old bloom, the old bitmap
 // section serves until the first write invalidates it, and every UpdateRow reaches the old file.
 TEST_F(CatIdxLiveWidenTest, KeepOldAnswersFromTheOldIndexUntilBlocksAreRebuilt) {
-    ASSERT_EQ(f.BeginLiveRebuild(4, /*keep_old=*/true), BeginRebuildResult::kStarted);
+    ASSERT_EQ(f.BeginLiveRebuild(4), BeginRebuildResult::kStarted);
     EXPECT_TRUE(f.Rebuilding());
     EXPECT_EQ(f.TrackedColumnCount(), 4u);
     EXPECT_EQ(f.OldWidth(), 2u);
@@ -1037,11 +1037,11 @@ TEST_F(CatIdxLiveWidenTest, KeepOldFailedBeginChangesNothing) {
     const off_t size_before = CatIdxFileSize(path);
     {
         xstore_fault::ScopedPathFault fault(tmp, false, EXDEV, xstore_fault::kRename);
-        EXPECT_EQ(f.BeginLiveRebuild(4, true), BeginRebuildResult::kFailed);
+        EXPECT_EQ(f.BeginLiveRebuild(4), BeginRebuildResult::kFailed);
     }
     {
         xstore_fault::ScopedFdFault fault(xstore_fault::FdOp::kSync, tmp, 0, 1, EIO);
-        EXPECT_EQ(f.BeginLiveRebuild(4, true), BeginRebuildResult::kFailed);
+        EXPECT_EQ(f.BeginLiveRebuild(4), BeginRebuildResult::kFailed);
     }
     EXPECT_FALSE(f.Rebuilding());
     EXPECT_EQ(f.OldWidth(), 0u);
@@ -1454,7 +1454,7 @@ TEST(CatIdxBloomPositionTest, KeepOldRebuildSharesTheViewAndItsColumnLimit) {
     const std::string path = (scratch.test_root / "keep_old.catidx").string();
     CatIdxFile f;
     ASSERT_TRUE(f.Open(path, kDiffRowLength, 4));
-    ASSERT_EQ(f.BeginLiveRebuild(8, /*keep_old=*/true), BeginRebuildResult::kStarted);
+    ASSERT_EQ(f.BeginLiveRebuild(8), BeginRebuildResult::kStarted);
     ASSERT_EQ(f.OldWidth(), 4u);
     f.AdvanceFrontier(2 * kRpb);   // blocks 0 and 1 rebuilt (new index), blocks 2.. answered by the old one
     const auto enc = [](int64_t v) { return EncodeFDataForCatIdx(xstore_test::FInt64(v)); };

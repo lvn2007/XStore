@@ -264,12 +264,10 @@ public:
     // header (new width, dirty=1, no blocks, no bitmap section) + fdatasync, cache dropped. A crash at any point leaves
     // a file the next start rebuilds (dirty, or too short to hold a header). False also if the truncate fails.
     [[nodiscard]] bool BeginRebuild(uint32_t new_tracked_column_count);
-    // Live builder only: BeginRebuild, unless a rebuild already runs on this file -- then kAlreadyRebuilding with nothing
-    // touched. The check and the begin are one step under the file mutex, so two builders on one file cannot both begin
-    // (the second would truncate the first's work while the first keeps advancing F).
-    // keep_old: same contract as ZoneMapFile::BeginLiveRebuild(width, true): the new file is created as "<path>.new" and
+    // Live builder only: kAlreadyRebuilding with nothing touched if a rebuild already runs on this file (check and begin
+    // are one step under the file mutex). Same contract as ZoneMapFile::BeginLiveRebuild: the new file is created as "<path>.new" and
     // renamed over; the old file (its bitmap section too) serves until FinishRebuild and gets every UpdateRow.
-    [[nodiscard]] BeginRebuildResult BeginLiveRebuild(uint32_t new_tracked_column_count, bool keep_old = false);
+    [[nodiscard]] BeginRebuildResult BeginLiveRebuild(uint32_t new_tracked_column_count);
     // Width of the old index a keep-old rebuild still serves; 0 when none. Lock-free.
     [[nodiscard]] uint32_t OldWidth() const { return old_width_.load(std::memory_order_acquire); }
 

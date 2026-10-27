@@ -2627,7 +2627,7 @@ protected:
 TEST_F(ZoneMapKeepOldTest, BlocksNotYetRebuiltAreAnsweredFromTheOldIndexAtItsWidth) {
     std::vector<std::optional<std::vector<ZoneMapEntry>>> before;
     for (uint64_t b = 0; b < 6; ++b) before.push_back(zmap.TryGetBlockStats(b));
-    ASSERT_EQ(zmap.BeginLiveRebuild(8, /*keep_old=*/true), BeginRebuildResult::kStarted);
+    ASSERT_EQ(zmap.BeginLiveRebuild(8), BeginRebuildResult::kStarted);
     EXPECT_TRUE(zmap.Rebuilding());
     EXPECT_EQ(zmap.TrackedColumnCount(), 8u);
     EXPECT_EQ(zmap.OldWidth(), 4u);
@@ -2667,7 +2667,7 @@ TEST_F(ZoneMapKeepOldTest, BlocksNotYetRebuiltAreAnsweredFromTheOldIndexAtItsWid
 }
 
 TEST_F(ZoneMapKeepOldTest, EveryWriterCallReachesTheOldIndexAboveBelowAndAcrossTheFrontier) {
-    ASSERT_EQ(zmap.BeginLiveRebuild(8, true), BeginRebuildResult::kStarted);
+    ASSERT_EQ(zmap.BeginLiveRebuild(8), BeginRebuildResult::kStarted);
     Fold(0, 200); // F = 200: block 0 complete, block 1 partly folded
     for (ZoneMapFile *z : {&zmap, &ref}) {
         z->UpdateRow(50, Obs(-5.0), 4);                  // below F
@@ -2709,7 +2709,7 @@ TEST_F(ZoneMapKeepOldTest, AFailedDirectorySyncAfterTheRenameIsLoggedAndTheRebui
     xstore_test::kLogCapture->Clear();
     {
         xstore_fault::ScopedFdFault fault(xstore_fault::FdOp::kSync, scratch->test_root.string(), 0, 1, EIO);
-        ASSERT_EQ(zmap.BeginLiveRebuild(8, true), BeginRebuildResult::kStarted);
+        ASSERT_EQ(zmap.BeginLiveRebuild(8), BeginRebuildResult::kStarted);
         EXPECT_EQ(fault.Failures(), 1) << "the directory fsync was the one failed";
     }
     EXPECT_TRUE(xstore_test::kLogCapture->Contains("Cannot sync directory"));
@@ -2738,30 +2738,30 @@ TEST_F(ZoneMapKeepOldTest, AFailedBeginChangesNothingAndLeavesNoNewFile) {
     };
     {
         xstore_fault::ScopedFdFault fault(xstore_fault::FdOp::kSync, path, 0, 1, EIO);
-        EXPECT_EQ(zmap.BeginLiveRebuild(8, true), BeginRebuildResult::kFailed) << "the clean old file's dirty mark failed";
+        EXPECT_EQ(zmap.BeginLiveRebuild(8), BeginRebuildResult::kFailed) << "the clean old file's dirty mark failed";
     }
     expect_unchanged("dirty mark");
     {
         xstore_fault::ScopedPathFault fault(tmp, false, EACCES, xstore_fault::kOpenWrite);
-        EXPECT_EQ(zmap.BeginLiveRebuild(8, true), BeginRebuildResult::kFailed);
+        EXPECT_EQ(zmap.BeginLiveRebuild(8), BeginRebuildResult::kFailed);
         EXPECT_EQ(fault.OpenHits(), 1u);
     }
     expect_unchanged("open");
     {
         xstore_fault::ScopedFdFault fault(xstore_fault::FdOp::kSync, tmp, 0, 1, EIO);
-        EXPECT_EQ(zmap.BeginLiveRebuild(8, true), BeginRebuildResult::kFailed);
+        EXPECT_EQ(zmap.BeginLiveRebuild(8), BeginRebuildResult::kFailed);
         EXPECT_EQ(fault.Failures(), 1);
     }
     expect_unchanged("fdatasync");
     {
         xstore_fault::ScopedPathFault fault(tmp, false, EXDEV, xstore_fault::kRename);
-        EXPECT_EQ(zmap.BeginLiveRebuild(8, true), BeginRebuildResult::kFailed);
+        EXPECT_EQ(zmap.BeginLiveRebuild(8), BeginRebuildResult::kFailed);
         EXPECT_EQ(fault.OpenHits(), 1u);
     }
     expect_unchanged("rename");
-    ASSERT_EQ(zmap.BeginLiveRebuild(8, true), BeginRebuildResult::kStarted) << "a retry goes through";
+    ASSERT_EQ(zmap.BeginLiveRebuild(8), BeginRebuildResult::kStarted) << "a retry goes through";
     EXPECT_EQ(zmap.OldWidth(), 4u);
-    EXPECT_EQ(zmap.BeginLiveRebuild(8, true), BeginRebuildResult::kAlreadyRebuilding);
+    EXPECT_EQ(zmap.BeginLiveRebuild(8), BeginRebuildResult::kAlreadyRebuilding);
     EXPECT_EQ(zmap.OldWidth(), 4u);
     Fold(0, 4 * kLwRpb);
     EXPECT_TRUE(zmap.FinishRebuild());
@@ -2883,7 +2883,7 @@ TEST_F(XStoreZoneMapTest, RegistryNeverEvictsAKeepOldRebuildAndItKeepsItsOldInde
     CreateTestDb(store, "ZMKOPIN", XStore_Proto::SECOND, 64);
     const std::string db = DbPath("ZMKOPIN");
     ZoneMapFile &widened = XStore::GetOrOpenZoneMap(db, 2000, 64, 64);
-    ASSERT_EQ(widened.BeginLiveRebuild(70, true), BeginRebuildResult::kStarted);
+    ASSERT_EQ(widened.BeginLiveRebuild(70), BeginRebuildResult::kStarted);
     for (unsigned short year = 2001; year < 2001 + XStoreTunables::ZONE_MAP_REGISTRY_CAP + 10; ++year) {
         XStore::GetOrOpenZoneMap(db, year, 64);
     }
@@ -3054,11 +3054,11 @@ TEST_F(XStoreZoneMapTest, KeepOldCrashImagesAreRebuiltAtTheNextStartAndOrphansRe
     // O: the begin failed at the rename: the old files (now dirty); the crash image adds the ".new" files back.
     {
         xstore_fault::ScopedPathFault fault(zmap_path + ".new", false, EXDEV, xstore_fault::kRename);
-        EXPECT_EQ(zmap.BeginLiveRebuild(70, true), BeginRebuildResult::kFailed);
+        EXPECT_EQ(zmap.BeginLiveRebuild(70), BeginRebuildResult::kFailed);
     }
     {
         xstore_fault::ScopedPathFault fault(catidx_path + ".new", false, EXDEV, xstore_fault::kRename);
-        EXPECT_EQ(catidx.BeginLiveRebuild(70, true), BeginRebuildResult::kFailed);
+        EXPECT_EQ(catidx.BeginLiveRebuild(70), BeginRebuildResult::kFailed);
     }
     EXPECT_FALSE(fs::exists(zmap_path + ".new"));
     EXPECT_EQ(zmap.OldWidth(), 0u) << "a failed begin keeps no old copy";
@@ -3068,8 +3068,8 @@ TEST_F(XStoreZoneMapTest, KeepOldCrashImagesAreRebuiltAtTheNextStartAndOrphansRe
     save("o");
 
     // A: begun -- the names hold the new, empty, dirty files; the old ones are open but unlinked.
-    ASSERT_EQ(zmap.BeginLiveRebuild(70, true), BeginRebuildResult::kStarted);
-    ASSERT_EQ(catidx.BeginLiveRebuild(70, true), BeginRebuildResult::kStarted);
+    ASSERT_EQ(zmap.BeginLiveRebuild(70), BeginRebuildResult::kStarted);
+    ASSERT_EQ(catidx.BeginLiveRebuild(70), BeginRebuildResult::kStarted);
     EXPECT_EQ(FileSize(zmap_path), static_cast<off_t>(sizeof(ZoneMapFileHeader)));
     EXPECT_EQ(ReadZmapHeader(zmap_path).tracked_column_count, 70u);
     EXPECT_EQ(ReadZmapHeader(zmap_path).dirty, 1u);
@@ -3470,11 +3470,11 @@ TEST_F(BatchFoldIdentityTest, UpdateRowsWritesTheBytesOfUpdateRowWithAndWithoutA
         ASSERT_EQ(link(Path(name).c_str(), Path(std::string(name) + ".keep").c_str()), 0);
     }
     for (ZoneMapFile *z : {&za, &zb}) {
-        ASSERT_EQ(z->BeginLiveRebuild(8, /*keep_old=*/true), BeginRebuildResult::kStarted);
+        ASSERT_EQ(z->BeginLiveRebuild(8), BeginRebuildResult::kStarted);
         z->SetLiveFoldGroups(2 * kRpb, 8 * kRpb);
     }
     for (CatIdxFile *c : {&ca, &cb}) {
-        ASSERT_EQ(c->BeginLiveRebuild(8, /*keep_old=*/true), BeginRebuildResult::kStarted);
+        ASSERT_EQ(c->BeginLiveRebuild(8), BeginRebuildResult::kStarted);
         c->SetLiveFoldGroups(2 * kRpb, 8 * kRpb);
     }
     BuilderFold(0, 200);
@@ -3604,7 +3604,7 @@ TEST_F(ZoneMapFoldViewTest, ViewBatchAndUpdateRowWriteIdenticalBytesWithAndWitho
     }
     const std::string old_before = WholeFile(Path("a.zmap.keep"));
     for (ZoneMapFile *z : Files()) {
-        ASSERT_EQ(z->BeginLiveRebuild(kNewWidth, /*keep_old=*/true), BeginRebuildResult::kStarted);
+        ASSERT_EQ(z->BeginLiveRebuild(kNewWidth), BeginRebuildResult::kStarted);
         z->SetLiveFoldGroups(2 * kRpb, 8 * kRpb);
     }
     const auto builder_fold = [&](uint64_t begin, uint64_t end) {
