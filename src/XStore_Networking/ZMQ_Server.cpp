@@ -71,6 +71,13 @@ int ZmqServer::DefaultThreadCount() {
     return logical > 0 ? static_cast<int>(logical) : 1;
 }
 
+size_t ZmqServer::HeavyRequestCap(int workers) {
+    if (workers < 1) return 1;
+    const size_t total = static_cast<size_t>(workers);
+    const size_t reserved = total * XStoreTunables::ZMQ_HEAVY_REQUEST_RESERVED_WORKERS_PERCENT / 100;
+    return std::max<size_t>(1, total - reserved);
+}
+
 size_t ZmqServer::PreadPoolReserved(int workers, int physical_cores) {
     return static_cast<size_t>(std::max(0, std::min(workers, physical_cores)));
 }
@@ -260,7 +267,8 @@ void ZmqServer::Serve(const std::string &listen_addr, const std::string &listen_
     // round-robin queued requests behind a busy worker). Spins like the
     // workers after activity; a 0 tunable means it always blocks in poll.
     RunReadyBroker(client_socket, worker_socket, static_cast<size_t>(num_threads),
-                   std::chrono::microseconds(XStoreTunables::ZMQ_ADAPTIVE_POLL_WINDOW_US));
+                   std::chrono::microseconds(XStoreTunables::ZMQ_ADAPTIVE_POLL_WINDOW_US),
+                   HeavyRequestLimit{XStoreTunables::ZMQ_HEAVY_REQUEST_BYTES, HeavyRequestCap(num_threads)});
 }
 
 void ZmqServer::WorkerRoutine(std::string server_addr, int worker_index) {

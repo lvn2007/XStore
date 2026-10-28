@@ -69,6 +69,8 @@ class XStoreZmqBrokerTest : public ::testing::TestWithParam<std::chrono::microse
     std::vector<std::unique_ptr<FakeWorker>> workers;
     std::vector<std::unique_ptr<zmq::socket_t>> clients;
 
+    virtual HeavyRequestLimit Heavy() const { return {}; }
+
     void SetUp() override {
         frontend.set(zmq::sockopt::linger, 0);
         backend.set(zmq::sockopt::linger, 0);
@@ -76,7 +78,7 @@ class XStoreZmqBrokerTest : public ::testing::TestWithParam<std::chrono::microse
         backend.bind("inproc://broker-test-backend");
         broker_exit = std::async(std::launch::async, [this] {
             try {
-                RunReadyBroker(frontend, backend, 4, GetParam());
+                RunReadyBroker(frontend, backend, 4, GetParam(), Heavy());
             } catch (const zmq::error_t &e) {
                 return e.num();
             }
@@ -196,6 +198,66 @@ TEST_P(XStoreZmqBrokerTest, RequestWaitsWhileAllBusyThenGoesToFirstWorkerThatRep
     EXPECT_TRUE(all[static_cast<size_t>(first)]->Take(NEGATIVE_CHECK_MS).empty());
 }
 
+// Heavy = 1000 bytes or more; at most one heavy request is served at a time, the rest wait in the broker.
+class XStoreZmqBrokerHeavyTest : public XStoreZmqBrokerTest {
+  protected:
+    HeavyRequestLimit Heavy() const override { return {1000, 1}; }
+    static std::string HeavyBody(char tag) { return std::string(2000, tag); }
+};
+
+TEST_P(XStoreZmqBrokerHeavyTest, ALightRequestIsServedWhileAHeavyOneHoldsTheOnlyHeavySlot) {
+    std::vector<FakeWorker *> all = {&AddWorker("wA"), &AddWorker("wB"), &AddWorker("wC")};
+    zmq::socket_t &h1 = AddClient();
+    zmq::socket_t &h2 = AddClient();
+    zmq::socket_t &light = AddClient();
+    h1.send(zmq::buffer(HeavyBody('1')), zmq::send_flags::none);
+    std::vector<std::string> first;
+    ASSERT_GE(TakeFromAny(all, first), 0);
+    ASSERT_EQ(first.back(), HeavyBody('1'));
+
+    h2.send(zmq::buffer(HeavyBody('2')), zmq::send_flags::none);
+    for (FakeWorker *w : all) EXPECT_TRUE(w->Take(NEGATIVE_CHECK_MS).empty()) << "a second heavy request was dispatched past the cap";
+
+    light.send(zmq::str_buffer("query"), zmq::send_flags::none);
+    std::vector<std::string> q;
+    const int got = TakeFromAny(all, q);
+    ASSERT_GE(got, 0) << "the light request waited behind the deferred heavy one";
+    EXPECT_EQ(q.back(), "query");
+    all[static_cast<size_t>(got)]->Reply(q, {"answer"});
+    EXPECT_EQ(RecvFrames(light), std::vector<std::string>{"answer"});
+}
+
+TEST_P(XStoreZmqBrokerHeavyTest, DeferredHeavyRequestsRunInArrivalOrderAsSlotsFree) {
+    std::vector<FakeWorker *> all = {&AddWorker("wA"), &AddWorker("wB"), &AddWorker("wC")};
+    zmq::socket_t &c1 = AddClient();
+    zmq::socket_t &c2 = AddClient();
+    zmq::socket_t &c3 = AddClient();
+    c1.send(zmq::buffer(HeavyBody('1')), zmq::send_flags::none);
+    std::vector<std::string> r1;
+    const int w1 = TakeFromAny(all, r1);
+    ASSERT_GE(w1, 0);
+    c2.send(zmq::buffer(HeavyBody('2')), zmq::send_flags::none);
+    c3.send(zmq::buffer(HeavyBody('3')), zmq::send_flags::none);
+    for (FakeWorker *w : all) EXPECT_TRUE(w->Take(NEGATIVE_CHECK_MS).empty());
+
+    all[static_cast<size_t>(w1)]->Reply(r1, {"done1"});
+    EXPECT_EQ(RecvFrames(c1), std::vector<std::string>{"done1"});
+    std::vector<std::string> r2;
+    const int w2 = TakeFromAny(all, r2);
+    ASSERT_GE(w2, 0);
+    EXPECT_EQ(r2.back(), HeavyBody('2')) << "the older deferred heavy request goes first";
+    for (FakeWorker *w : all) EXPECT_TRUE(w->Take(NEGATIVE_CHECK_MS).empty()) << "the third is still waiting for the slot";
+
+    all[static_cast<size_t>(w2)]->Reply(r2, {"done2"});
+    EXPECT_EQ(RecvFrames(c2), std::vector<std::string>{"done2"});
+    std::vector<std::string> r3;
+    const int w3 = TakeFromAny(all, r3);
+    ASSERT_GE(w3, 0);
+    EXPECT_EQ(r3.back(), HeavyBody('3'));
+    all[static_cast<size_t>(w3)]->Reply(r3, {"done3"});
+    EXPECT_EQ(RecvFrames(c3), std::vector<std::string>{"done3"});
+}
+
 TEST_P(XStoreZmqBrokerTest, MultiFrameReplyIsRelayedIntactAndInOrder) {
     FakeWorker &worker = AddWorker("wA");
     zmq::socket_t &client = AddClient();
@@ -266,6 +328,11 @@ TEST_P(XStoreZmqBrokerTest, SpinEndsAfterWindowWithAnIdleWorker) {
 }
 
 INSTANTIATE_TEST_SUITE_P(SpinWindow, XStoreZmqBrokerTest,
+                         ::testing::Values(std::chrono::microseconds(0), SPIN_WINDOW),
+                         [](const ::testing::TestParamInfo<std::chrono::microseconds> &info) {
+                             return info.param.count() == 0 ? std::string("NoSpin") : std::string("Spin50ms");
+                         });
+INSTANTIATE_TEST_SUITE_P(SpinWindow, XStoreZmqBrokerHeavyTest,
                          ::testing::Values(std::chrono::microseconds(0), SPIN_WINDOW),
                          [](const ::testing::TestParamInfo<std::chrono::microseconds> &info) {
                              return info.param.count() == 0 ? std::string("NoSpin") : std::string("Spin50ms");

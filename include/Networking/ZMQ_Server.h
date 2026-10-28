@@ -75,6 +75,11 @@ class ZmqServer {
         // keep passing an explicit value to the constructor instead of this. See the .cpp for the measurements.
         static int DefaultThreadCount();
 
+        // How many requests of XStoreTunables::ZMQ_HEAVY_REQUEST_BYTES or more the broker lets the workers serve at once:
+        // the worker count minus ZMQ_HEAVY_REQUEST_RESERVED_WORKERS_PERCENT of it (rounded down), at least 1. The reserved
+        // workers only ever take lighter requests, so a burst of huge inserts waiting for memory cannot starve a query.
+        static size_t HeavyRequestCap(int workers);
+
         // Physical (not logical/SMT) CPU core count on this host, from /proc/cpuinfo; half the logical count (at least 1)
         // when that is unavailable. Used to charge the BatchQuery pread pool, see PreadPoolReserved.
         static int PhysicalCoreCount();

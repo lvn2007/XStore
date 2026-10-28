@@ -147,6 +147,14 @@ inline constexpr unsigned    WAL_ADAPTIVE_POLL_WINDOW_US = 50000;
 // cores/SMT lanes for this to share with other work.
 inline constexpr unsigned    ZMQ_ADAPTIVE_POLL_WINDOW_US = 50000;
 
+// Heavy requests (ZmqServer::HeavyRequestCap, RunReadyBroker's HeavyRequestLimit): a request of this many bytes or more
+// (about 5,700 rows of 1.4 KB; an ordinary 1,000-row batch is ~1.4 MB and stays light) may occupy at most
+// (100 - PERCENT)% of the workers at a time, because such a request can sit in the memory pool's wait line for a long
+// time (XStore_MemoryPool.h) and would otherwise leave no worker for a query or a delete. The rest of the heavy requests
+// wait in the broker, oldest first; lighter requests are dispatched past them. 0 bytes turns the limit off.
+inline constexpr size_t      ZMQ_HEAVY_REQUEST_BYTES = 8u * 1024u * 1024u;
+inline constexpr unsigned    ZMQ_HEAVY_REQUEST_RESERVED_WORKERS_PERCENT = 25;
+
 // Graceful shutdown (ZmqServer::StartServer): after the ZMQ context is shut
 // down, how long to wait for the worker threads to finish their in-flight
 // request and exit before giving up. On timeout the process must NOT run

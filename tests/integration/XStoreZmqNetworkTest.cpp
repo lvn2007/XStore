@@ -1238,6 +1238,16 @@ TEST(ZmqServerDefaultsTest, PhysicalCoreCountIsPositiveAndNotAboveTheLogicalCoun
     if (logical != 0) EXPECT_LE(physical, static_cast<int>(logical));
 }
 
+TEST(ZmqServerDefaultsTest, HeavyRequestsLeaveAQuarterOfTheWorkersFreeButAlwaysAtLeastOneSlot) {
+    EXPECT_EQ(ZmqServer::HeavyRequestCap(32), 24u);
+    EXPECT_EQ(ZmqServer::HeavyRequestCap(16), 12u);
+    EXPECT_EQ(ZmqServer::HeavyRequestCap(4), 3u);
+    EXPECT_EQ(ZmqServer::HeavyRequestCap(3), 3u);    // too few workers to reserve one: no reserve
+    EXPECT_EQ(ZmqServer::HeavyRequestCap(1), 1u);    // never 0: heavy requests must be able to run
+    EXPECT_EQ(ZmqServer::HeavyRequestCap(0), 1u);
+    EXPECT_EQ(ZmqServer::HeavyRequestCap(-5), 1u);
+}
+
 TEST(ZmqServerDefaultsTest, PreadPoolIsChargedAtMostThePhysicalCoreCount) {
     EXPECT_EQ(ZmqServer::PreadPoolReserved(/*workers=*/32, /*physical=*/16), 16u);   // more workers than physical cores: capped
     EXPECT_EQ(ZmqServer::PreadPoolReserved(16, 16), 16u);
