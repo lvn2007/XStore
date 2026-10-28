@@ -4355,7 +4355,7 @@ TEST_F(XStoreLiveWidenTest, ProgressLogCountsTheYearsToWidenAndEndsAt100Percent)
     for (const std::string &line : lines) {
         SCOPED_TRACE(line);
         EXPECT_EQ(line.rfind("[LIVE WIDEN] [DB: LWPROG] - ", 0), 0u);
-        EXPECT_EQ(line.find(" | workers"), std::string::npos) << "ungoverned: no governor text";
+        EXPECT_NE(line.find(" | workers "), std::string::npos) << "governed by default: the governor text is there";
         const ParsedProgress p = ParseProgress(line);
         EXPECT_EQ(p.years_total, 3u) << "the years this pass widens";
         EXPECT_LE(p.rows_done, p.rows_total);
@@ -4367,6 +4367,35 @@ TEST_F(XStoreLiveWidenTest, ProgressLogCountsTheYearsToWidenAndEndsAt100Percent)
     const ParsedProgress last = ParseProgress(lines.back());
     EXPECT_EQ(last.percent, 100);
     EXPECT_EQ(last.years_done, 3u);
+}
+
+// The production default (no governor passed): the pass makes its own governor, so every progress line carries "workers
+// N/M" (Tech Reference 4.18 "Governor"; LIVE_WIDEN_GOVERNOR is on by default since 2026-10-27). Frozen by a WRITE lock on
+// one row until such a line was logged, so the check does not depend on how fast the widen is.
+TEST_F(XStoreLiveWidenTest, ThePassIsGovernedByDefault) {
+    XStore store;
+    const std::string db = "LWDEFGOV";
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    Insert(store, db, {{Epoch(0), ValueRow(1, 10)}}); // index files born 64 wide
+    Rows rows;
+    for (uint64_t r = 1; r < 4000; ++r) rows.emplace_back(Epoch(r), ValueRow((r * 7) % 100000, r % 5 == 0 ? 40 : 70));
+    Insert(store, db, rows); // growth 64 -> 70
+    const Clock::time_point g = *XStore::LiveWidenLastGrowthForTests(DbPath(db));
+    constexpr uint64_t kStuck = 2000;
+    FileRangeLock &lock = FileLockRegistry::Get(YearPath(db, ".XSTORE"));
+    lock.LockRange(kStuck * kRowLength, kRowLength, kWrite);
+    ProgressLines capture;
+    const rebuildprogress::Options options = capture.Options();
+    auto future = std::async(std::launch::async, [&] {
+        XStore b;
+        return b.RunLiveWidenPass(g + seconds(30), 1, nullptr, nullptr, &options);
+    });
+    // (no ASSERT while the lock is held: the pass would never end)
+    const bool governed = capture.WaitFor(" | workers ");
+    lock.UnlockRange(kStuck * kRowLength, kRowLength, kWrite);
+    EXPECT_TRUE(governed) << "no progress line carried the governor's workers: the pass ran ungoverned";
+    ASSERT_EQ(future.wait_for(seconds(60)), std::future_status::ready);
+    EXPECT_EQ(YearsAndResults(future.get()), (PassResult{{kYear, Result::kDone}}));
 }
 
 // Frozen mid-way by a WRITE lock on one row (the technique of the rebuild notice tests): the lines show the partial

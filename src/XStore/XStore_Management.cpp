@@ -2429,7 +2429,7 @@ std::vector<XStore::LiveWidenPassEntry> XStore::RunLiveWidenPass(std::chrono::st
         if (bg_cancel_.load(std::memory_order_relaxed)) break;
         spdlog::info("[LIVE WIDEN] [DB: {}] - Width stable for {} s; widening its year index files, newest year first",
                      d.db_name, XStoreTunables::LIVE_WIDEN_QUIET_PERIOD_SEC);
-        // Production governor (off by default): one per DB, shared by its years so the ramp-up carries over.
+        // Production governor (on by default, LIVE_WIDEN_GOVERNOR): one per DB, shared by its years so the ramp-up carries over.
         std::unique_ptr<livewiden::LiveWidenLoadSource> own_load;
         std::unique_ptr<livewiden::LiveWidenGovernor> own_governor;
         livewiden::LiveWidenGovernor *db_governor = governor;

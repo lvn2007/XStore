@@ -490,7 +490,10 @@ inline constexpr uint64_t LIVE_WIDEN_GROUP_BYTES = 8 * LIVE_WIDEN_MAX_CHUNK_BYTE
 // Live-widen load governor (XStore_LiveWidenGovernor.h, Tech Reference 4.18 "Governor"). These are the defaults of
 // GovernorParams. LIVE_WIDEN_GOVERNOR true: RunLiveWidenPass gives every DB's years one governor (cores - headroom
 // workers, parked between groups while the governor denies them) instead of the fixed LIVE_WIDEN_WORKERS.
-inline constexpr bool LIVE_WIDEN_GOVERNOR = false;                   // off: the fixed LIVE_WIDEN_WORKERS, as before
+// On by default since 2026-10-27 (owner decision; Tech Reference 4.18 "Governor Mystic study": it ramped to all 8 workers in
+// seconds and equalled fixed 8 workers, 4.5x faster than the fixed 1 worker; it never braked there, so the reduction under
+// heavy foreground load is covered by unit tests and a local calibration only). false: the fixed LIVE_WIDEN_WORKERS.
+inline constexpr bool LIVE_WIDEN_GOVERNOR = true;
 inline constexpr unsigned LIVE_WIDEN_FLOOR_WORKERS = 1;              // workers always allowed (0: the starvation guard)
 inline constexpr unsigned LIVE_WIDEN_HEADROOM_CORES = 2;             // logical CPUs kept free for foreground work
 inline constexpr unsigned LIVE_WIDEN_CPUS_PER_WORKER = 4;              // max workers = min(cores - headroom, max(1, cores / this)); Mystic (32 vCPU), quiet, one year: 8 workers 121 s, 16 workers 363 s; one machine's data, revisit
