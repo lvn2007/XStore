@@ -10,6 +10,9 @@
 //   * the OS reports at least `bytes + reserve` available, not counting reservations whose memory is not allocated yet
 //     (those have not reached the OS's figure; see MemoryLease::MarkResident).
 // so a reserve of 1-2 GB is always left for the host, and other processes using memory make inserts wait instead of fail.
+// The one exception is progress: with no other lease outstanding the front request is admitted without the second check. The
+// allocator keeps memory it has freed, so the OS's figure may never recover once the work that used it is done; waiting for it
+// then would never end. The pool limit still applies.
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -18,14 +21,25 @@
 #include <list>
 #include <memory>
 #include <mutex>
+#include <string>
 
 namespace xstore {
+
+// The memory limit and headroom of the cgroup (v2) the process runs in: `proc_cgroup_file` (/proc/self/cgroup) names it, and every
+// ancestor up to `cgroup_root` (/sys/fs/cgroup) is considered too. `max` is the tightest memory.max (0: no limit anywhere),
+// `headroom` the smallest memory.max - memory.current over the limited levels (UINT64_MAX: no limit anywhere).
+struct CgroupMemory {
+    uint64_t max = 0;
+    uint64_t headroom = UINT64_MAX;
+};
+CgroupMemory ReadCgroupMemory(const std::string &cgroup_root, const std::string &proc_cgroup_file);
 
 class MemoryPool;
 
 class MemoryLease {
 public:
-    MemoryLease(MemoryPool &pool, uint64_t bytes) : pool_(pool), bytes_(bytes) {}
+    // `unseen`: the part of `bytes` the OS's available figure does not reflect yet (all of it, unless the caller already held some).
+    MemoryLease(MemoryPool &pool, uint64_t bytes, uint64_t unseen) : pool_(pool), bytes_(bytes), unseen_(unseen) {}
     ~MemoryLease();
     MemoryLease(const MemoryLease &) = delete;
     MemoryLease &operator=(const MemoryLease &) = delete;
@@ -37,6 +51,7 @@ public:
 private:
     MemoryPool &pool_;
     const uint64_t bytes_;
+    const uint64_t unseen_;
     std::atomic<bool> resident_{false};
 };
 
@@ -49,14 +64,17 @@ public:
     static constexpr uint64_t kUnknown = UINT64_MAX;
 
     // `limit`: most the leases may add up to. `reserve`: left to the host. `available`: nullptr = read /proc/meminfo and the cgroup.
-    MemoryPool(uint64_t limit, uint64_t reserve, AvailableFn available = nullptr);
+    // `host_cache`: how long a reading of `available` is reused (zero: read it for every decision).
+    MemoryPool(uint64_t limit, uint64_t reserve, AvailableFn available = nullptr, Clock::duration host_cache = Clock::duration::zero());
     // The pool the server uses; sized on first use from the machine/container memory (env XSTORE_MEMORY_LIMIT_MB,
     // XSTORE_MEMORY_RESERVE_MB override). Never destroyed: a WAL record may outlive static destruction.
     static MemoryPool &Instance();
 
     // Reserves `bytes`, waiting first come, first served until the pool has room or `deadline` passes (Clock::time_point::max():
     // wait as long as it takes). kTooLarge: more than the pool's limit, it could never be admitted (nothing was reserved).
-    Result Acquire(uint64_t bytes, Clock::time_point deadline, std::shared_ptr<MemoryLease> &lease);
+    // `already_resident`: bytes of `bytes` the caller already holds in memory (a request's received message), so the OS's figure has
+    // them already; they count against the pool limit but not against the host's available memory.
+    Result Acquire(uint64_t bytes, Clock::time_point deadline, std::shared_ptr<MemoryLease> &lease, uint64_t already_resident = 0);
 
     uint64_t Limit() const { return limit_; }
     uint64_t Reserve() const { return reserve_; }
@@ -67,18 +85,23 @@ public:
 
 private:
     friend class MemoryLease;
-    void Release(uint64_t bytes, bool resident);
-    void ResidentNow(uint64_t bytes);
-    bool FitsLocked(uint64_t bytes);
+    void Release(uint64_t bytes, uint64_t unseen, bool resident);
+    void ResidentNow(uint64_t unseen);
+    bool FitsLocked(uint64_t bytes, uint64_t unseen);
+    uint64_t HostAvailableLocked();
 
     const uint64_t limit_;
     const uint64_t reserve_;
+    const Clock::duration host_cache_;
     AvailableFn available_;
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     uint64_t used_ = 0;
     uint64_t pending_ = 0;
     uint64_t peak_ = 0;
+    bool host_cached_ = false;
+    uint64_t host_available_ = 0;
+    Clock::time_point host_cached_at_;
     uint64_t next_ticket_ = 0;
     std::list<uint64_t> waiting_;   // tickets in arrival order; only the front may be admitted
 };

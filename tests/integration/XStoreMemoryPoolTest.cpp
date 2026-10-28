@@ -4,11 +4,14 @@
 #include "include/XStore/XStore_MemoryPool.h"
 #include <atomic>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <future>
 #include <memory>
 #include <random>
 #include <thread>
 #include <vector>
+#include <unistd.h>
 
 namespace {
 
@@ -29,6 +32,61 @@ std::shared_ptr<MemoryLease> MustAcquire(MemoryPool &pool, uint64_t bytes) {
     std::shared_ptr<MemoryLease> lease;
     EXPECT_EQ(pool.Acquire(bytes, kForever, lease), MemoryPool::Result::kGranted);
     return lease;
+}
+
+// A fake cgroup v2 tree: the pool must read the limit of the cgroup the process is IN (named by /proc/self/cgroup), not of the root
+// (a systemd-run scope or a container slice has no limit file at the root at all).
+class FakeCgroups {
+public:
+    FakeCgroups() : root_(std::filesystem::temp_directory_path() / ("xstore_cgroup_test_" + std::to_string(::getpid()) + "_" + std::to_string(counter_++))) {
+        std::filesystem::create_directories(root_);
+    }
+    ~FakeCgroups() { std::error_code ec; std::filesystem::remove_all(root_, ec); }
+    void Set(const std::string &cgroup, const std::string &max, uint64_t current) {
+        std::filesystem::create_directories(root_ / cgroup.substr(1));
+        std::ofstream((root_ / cgroup.substr(1) / "memory.max").string()) << max << "\n";
+        std::ofstream((root_ / cgroup.substr(1) / "memory.current").string()) << current << "\n";
+    }
+    std::string ProcFile(const std::string &cgroup) {
+        const std::string path = (root_ / "proc_self_cgroup").string();
+        std::ofstream(path) << "0::" << cgroup << "\n";
+        return path;
+    }
+    std::string Root() const { return root_.string(); }
+
+private:
+    static inline int counter_ = 0;
+    std::filesystem::path root_;
+};
+constexpr uint64_t GB = 1024 * MB;
+
+TEST(MemoryPoolTest, TheCgroupLimitIsReadFromTheProcessOwnCgroupNotTheRoot) {
+    FakeCgroups cg;   // no memory.max at the root, like /sys/fs/cgroup on a systemd host
+    cg.Set("/system.slice/run-1.scope", std::to_string(8 * GB), 3 * GB);
+    const xstore::CgroupMemory m = xstore::ReadCgroupMemory(cg.Root(), cg.ProcFile("/system.slice/run-1.scope"));
+    EXPECT_EQ(m.max, 8 * GB);
+    EXPECT_EQ(m.headroom, 5 * GB);
+}
+
+TEST(MemoryPoolTest, ATighterLimitOnAnAncestorWins) {
+    FakeCgroups cg;
+    cg.Set("/system.slice/run-1.scope", std::to_string(8 * GB), 1 * GB);
+    cg.Set("/system.slice", std::to_string(4 * GB), 4 * GB - 512 * MB);
+    const xstore::CgroupMemory m = xstore::ReadCgroupMemory(cg.Root(), cg.ProcFile("/system.slice/run-1.scope"));
+    EXPECT_EQ(m.max, 4 * GB);
+    EXPECT_EQ(m.headroom, 512 * MB);
+}
+
+TEST(MemoryPoolTest, NoLimitAnywhereMeansUnlimited) {
+    FakeCgroups cg;
+    cg.Set("/system.slice/run-1.scope", "max", 3 * GB);
+    cg.Set("/system.slice", "max", 3 * GB);
+    const xstore::CgroupMemory m = xstore::ReadCgroupMemory(cg.Root(), cg.ProcFile("/system.slice/run-1.scope"));
+    EXPECT_EQ(m.max, 0u);
+    EXPECT_EQ(m.headroom, MemoryPool::kUnknown);
+    const xstore::CgroupMemory missing = xstore::ReadCgroupMemory(cg.Root(), cg.Root() + "/no_such_file");
+    EXPECT_EQ(missing.max, 0u);
+    EXPECT_EQ(missing.headroom, MemoryPool::kUnknown);
 }
 
 TEST(MemoryPoolTest, GrantsWithinTheLimitAndGivesBackWhenTheLastOwnerLetsGo) {
@@ -119,19 +177,66 @@ TEST(MemoryPoolTest, ARequestThatGaveUpDoesNotBlockTheOnesBehindIt) {
 }
 
 TEST(MemoryPoolTest, TheHostReserveIsKeptEvenWhenThePoolHasRoom) {
-    std::atomic<uint64_t> available{50 * MB};
+    std::atomic<uint64_t> available{60 * MB};
     MemoryPool pool(1000 * MB, 20 * MB, [&] { return available.load(); });
+    auto other_work = MustAcquire(pool, 1 * MB);   // something else is running, so the nothing-else-running rule does not apply
     std::shared_ptr<MemoryLease> lease;
-    EXPECT_EQ(pool.Acquire(40 * MB, Clock::now() + 150ms, lease), MemoryPool::Result::kTimedOut) << "40 MB + the 20 MB reserve > the 50 MB available";
-    EXPECT_EQ(pool.Acquire(30 * MB, Clock::now() + 150ms, lease), MemoryPool::Result::kGranted) << "30 MB + 20 MB reserve fits in 50 MB";
+    EXPECT_EQ(pool.Acquire(40 * MB, Clock::now() + 150ms, lease), MemoryPool::Result::kTimedOut) << "40 MB + the 20 MB reserve > the 59 MB left";
+    EXPECT_EQ(pool.Acquire(30 * MB, Clock::now() + 150ms, lease), MemoryPool::Result::kGranted) << "30 MB + 20 MB reserve fits in 59 MB";
     // Other processes freeing memory lets a waiting request in without anyone calling Release.
     std::shared_ptr<MemoryLease> second;
     std::thread t([&] { EXPECT_EQ(pool.Acquire(100 * MB, kForever, second), MemoryPool::Result::kGranted); });
     std::this_thread::sleep_for(200ms);
-    EXPECT_EQ(pool.UsedBytes(), 30 * MB);
+    EXPECT_EQ(pool.UsedBytes(), 31 * MB);
     available = 500 * MB;
     t.join();
-    EXPECT_EQ(pool.UsedBytes(), 130 * MB);
+    EXPECT_EQ(pool.UsedBytes(), 131 * MB);
+}
+
+// The server keeps memory it has freed (the allocator does not hand it back), so the OS figure can stay low for good after every
+// lease is gone. With nothing else running no memory is coming back, so waiting would never end: the front request goes ahead.
+TEST(MemoryPoolTest, WithNothingElseRunningTheFrontRequestIsAdmittedEvenWhenTheHostFigureSaysNo) {
+    MemoryPool pool(1000 * MB, 20 * MB, [] { return 50 * MB; });
+    std::shared_ptr<MemoryLease> lease;
+    EXPECT_EQ(pool.Acquire(100 * MB, Clock::now() + 500ms, lease), MemoryPool::Result::kGranted) << "100 MB + 20 MB reserve > 50 MB, but nothing is running";
+    std::shared_ptr<MemoryLease> second;
+    EXPECT_EQ(pool.Acquire(10 * MB, Clock::now() + 150ms, second), MemoryPool::Result::kTimedOut) << "the rule is only for the one running alone";
+    lease.reset();
+    EXPECT_EQ(pool.Acquire(10 * MB, Clock::now() + 500ms, second), MemoryPool::Result::kGranted);
+}
+
+// A request's own received bytes are already in the OS figure by the time it asks; counting them again in the host check makes a
+// request wait for memory it is already holding.
+TEST(MemoryPoolTest, BytesTheRequestAlreadyHoldsAreNotCountedAgainstTheHostFigure) {
+    MemoryPool pool(1000 * MB, 20 * MB, [] { return 100 * MB; });
+    auto other_work = MustAcquire(pool, 1 * MB);
+    std::shared_ptr<MemoryLease> lease;
+    EXPECT_EQ(pool.Acquire(150 * MB, Clock::now() + 150ms, lease), MemoryPool::Result::kTimedOut) << "without the hint: 150 + 20 > 99";
+    EXPECT_EQ(pool.Acquire(150 * MB, Clock::now() + 500ms, lease, 100 * MB), MemoryPool::Result::kGranted) << "50 new + 20 reserve fits in 99";
+    EXPECT_EQ(pool.UsedBytes(), 151 * MB) << "the pool limit still counts the whole estimate";
+    EXPECT_EQ(pool.PendingBytes(), 51 * MB) << "only the part not yet in the OS figure is pending";
+    lease->MarkResident();
+    EXPECT_EQ(pool.PendingBytes(), 1 * MB);
+    lease.reset();
+    EXPECT_EQ(pool.PendingBytes(), 1 * MB);
+    EXPECT_EQ(pool.UsedBytes(), 1 * MB);
+}
+
+// Reading the host figure means opening /proc/meminfo and the cgroup files; done once per request under the pool's one mutex it
+// would serialize every small insert. The figure is reused for `host_cache` instead.
+TEST(MemoryPoolTest, TheHostFigureIsReadAtMostOncePerCacheIntervalNotOncePerRequest) {
+    std::atomic<int> reads{0};
+    std::atomic<uint64_t> available{1000 * MB};
+    MemoryPool pool(10000 * MB, 0, [&] { ++reads; return available.load(); }, 300ms);
+    auto other_work = MustAcquire(pool, 1 * MB);   // something running, so the host figure is consulted
+    reads = 0;
+    std::vector<std::shared_ptr<MemoryLease>> leases;
+    for (int i = 0; i < 100; ++i) leases.push_back(MustAcquire(pool, 1 * MB));
+    EXPECT_LE(reads.load(), 2) << "the host figure was read for every request";
+    available = 0;
+    std::this_thread::sleep_for(400ms);
+    std::shared_ptr<MemoryLease> blocked;
+    EXPECT_EQ(pool.Acquire(1 * MB, Clock::now() + 150ms, blocked), MemoryPool::Result::kTimedOut) << "a changed figure was never picked up";
 }
 
 TEST(MemoryPoolTest, AReservationNotYetAllocatedIsSubtractedFromTheHostsFigureUntilMarkedResident) {

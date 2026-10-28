@@ -12,6 +12,8 @@ namespace {
 
 constexpr uint64_t kBytesPerKB = 1024;
 constexpr uint64_t kDefaultReserveMB = 2048;
+// Waiters re-check every 50 ms anyway, so a reading this old changes no decision that was not already that slow to notice.
+constexpr std::chrono::milliseconds kHostFigureCache{50};
 
 uint64_t EnvOverrideMB(const char *name) {
     const char *value = std::getenv(name);
@@ -39,45 +41,62 @@ uint64_t ReadMeminfoField(const std::string &key) {
 uint64_t ReadMemTotalBytes() { return ReadMeminfoField("MemTotal:"); }
 uint64_t ReadMemAvailableBytes() { return ReadMeminfoField("MemAvailable:"); }
 
-// cgroup v2 memory.max; 0 when unreadable or "max" (unlimited).
-uint64_t ReadCgroupMaxBytes() {
-    std::ifstream f("/sys/fs/cgroup/memory.max");
-    if (!f) return 0;
+// /proc/self/cgroup of a cgroup v2 process holds "0::<path>"; "" when absent (cgroup v1 or unreadable).
+std::string OwnCgroupPath(const std::string &proc_cgroup_file) {
+    std::ifstream f(proc_cgroup_file);
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.rfind("0::", 0) == 0) return line.substr(3);
+    }
+    return "";
+}
+
+// A cgroup file holding one number; false when absent or "max" (no limit).
+bool ReadCgroupNumber(const std::string &path, uint64_t &out) {
+    std::ifstream f(path);
     std::string value;
-    f >> value;
-    if (value.empty() || value == "max") return 0;
-    return std::strtoull(value.c_str(), nullptr, 10);
+    if (!(f >> value) || value == "max") return false;
+    char *end = nullptr;
+    out = std::strtoull(value.c_str(), &end, 10);
+    return end && *end == '\0';
 }
 
-uint64_t ReadCgroupCurrentBytes() {
-    std::ifstream f("/sys/fs/cgroup/memory.current");
-    if (!f) return 0;
-    uint64_t value = 0;
-    f >> value;
-    return value;
-}
-
-// /proc/meminfo MemAvailable, capped by the cgroup v2 headroom (memory.max - memory.current) when a limit is set.
+// /proc/meminfo MemAvailable, capped by the headroom of the process's own cgroup (and its ancestors) when a limit is set.
 uint64_t ReadHostAvailableBytes() {
     const uint64_t available = ReadMemAvailableBytes();
     if (available == 0) return MemoryPool::kUnknown;
-    const uint64_t cgroup_max = ReadCgroupMaxBytes();
-    if (cgroup_max == 0) return available;
-    const uint64_t current = ReadCgroupCurrentBytes();
-    const uint64_t headroom = cgroup_max > current ? cgroup_max - current : 0;
-    return std::min(available, headroom);
+    return std::min(available, ReadCgroupMemory("/sys/fs/cgroup", "/proc/self/cgroup").headroom);
 }
 
 }  // namespace
 
-MemoryLease::~MemoryLease() { pool_.Release(bytes_, resident_.load()); }
-
-void MemoryLease::MarkResident() {
-    if (!resident_.exchange(true)) pool_.ResidentNow(bytes_);
+CgroupMemory ReadCgroupMemory(const std::string &cgroup_root, const std::string &proc_cgroup_file) {
+    CgroupMemory result;
+    std::string path = OwnCgroupPath(proc_cgroup_file);
+    for (;;) {
+        const std::string dir = cgroup_root + path;
+        uint64_t max = 0, current = 0;
+        if (ReadCgroupNumber(dir + "/memory.max", max)) {
+            ReadCgroupNumber(dir + "/memory.current", current);
+            result.max = result.max == 0 ? max : std::min(result.max, max);
+            result.headroom = std::min(result.headroom, max > current ? max - current : 0);
+        }
+        const size_t slash = path.rfind('/');
+        if (path.empty() || slash == std::string::npos) break;
+        path.resize(slash);   // "/a/b" -> "/a" -> "" (the root itself)
+    }
+    return result;
 }
 
-MemoryPool::MemoryPool(uint64_t limit, uint64_t reserve, AvailableFn available)
-    : limit_(limit), reserve_(reserve), available_(available ? std::move(available) : AvailableFn(ReadHostAvailableBytes)) {}
+MemoryLease::~MemoryLease() { pool_.Release(bytes_, unseen_, resident_.load()); }
+
+void MemoryLease::MarkResident() {
+    if (!resident_.exchange(true)) pool_.ResidentNow(unseen_);
+}
+
+MemoryPool::MemoryPool(uint64_t limit, uint64_t reserve, AvailableFn available, Clock::duration host_cache)
+    : limit_(limit), reserve_(reserve), host_cache_(host_cache),
+      available_(available ? std::move(available) : AvailableFn(ReadHostAvailableBytes)) {}
 
 MemoryPool &MemoryPool::Instance() {
     static MemoryPool *pool = [] {
@@ -92,33 +111,46 @@ MemoryPool &MemoryPool::Instance() {
         } else {
             uint64_t total = ReadMemTotalBytes();
             if (total == 0) total = reserve * 2;  // unreadable host figure: fall back to a small, safe pool
-            const uint64_t cgroup_max = ReadCgroupMaxBytes();
+            const uint64_t cgroup_max = ReadCgroupMemory("/sys/fs/cgroup", "/proc/self/cgroup").max;
             if (cgroup_max > 0) total = std::min(total, cgroup_max);
             limit = total > reserve ? total - reserve : total;
         }
-        return new MemoryPool(limit, reserve);
+        return new MemoryPool(limit, reserve, nullptr, kHostFigureCache);
     }();
     return *pool;
 }
 
-bool MemoryPool::FitsLocked(uint64_t bytes) {
-    if (used_ + bytes > limit_) return false;
-    const uint64_t host_available = available_();
-    if (host_available == kUnknown) return true;
-    const uint64_t effective = host_available > pending_ ? host_available - pending_ : 0;
-    return effective >= bytes + reserve_;
+uint64_t MemoryPool::HostAvailableLocked() {
+    if (host_cache_ <= Clock::duration::zero()) return available_();
+    const Clock::time_point now = Clock::now();
+    if (!host_cached_ || now - host_cached_at_ >= host_cache_) {
+        host_available_ = available_();
+        host_cached_at_ = now;
+        host_cached_ = true;
+    }
+    return host_available_;
 }
 
-MemoryPool::Result MemoryPool::Acquire(uint64_t bytes, Clock::time_point deadline, std::shared_ptr<MemoryLease> &lease) {
+bool MemoryPool::FitsLocked(uint64_t bytes, uint64_t unseen) {
+    if (used_ + bytes > limit_) return false;
+    if (used_ == 0) return true;   // nothing running: no memory is coming back, see the header
+    const uint64_t host_available = HostAvailableLocked();
+    if (host_available == kUnknown) return true;
+    const uint64_t effective = host_available > pending_ ? host_available - pending_ : 0;
+    return effective >= unseen + reserve_;
+}
+
+MemoryPool::Result MemoryPool::Acquire(uint64_t bytes, Clock::time_point deadline, std::shared_ptr<MemoryLease> &lease, uint64_t already_resident) {
     lease.reset();
     if (bytes > limit_) return Result::kTooLarge;
+    const uint64_t unseen = bytes - std::min(bytes, already_resident);
 
     constexpr auto kPollInterval = std::chrono::milliseconds(50);
     std::unique_lock<std::mutex> lk(mutex_);
 
-    if (waiting_.empty() && FitsLocked(bytes)) {
+    if (waiting_.empty() && FitsLocked(bytes, unseen)) {
         used_ += bytes;
-        pending_ += bytes;
+        pending_ += unseen;
         peak_ = std::max(peak_, used_);
     } else {
         const uint64_t ticket = next_ticket_++;
@@ -130,10 +162,10 @@ MemoryPool::Result MemoryPool::Acquire(uint64_t bytes, Clock::time_point deadlin
                 cv_.notify_all();
                 return Result::kTimedOut;
             }
-            if (waiting_.front() == ticket && FitsLocked(bytes)) {
+            if (waiting_.front() == ticket && FitsLocked(bytes, unseen)) {
                 waiting_.pop_front();
                 used_ += bytes;
-                pending_ += bytes;
+                pending_ += unseen;
                 peak_ = std::max(peak_, used_);
                 cv_.notify_all();
                 break;
@@ -145,7 +177,7 @@ MemoryPool::Result MemoryPool::Acquire(uint64_t bytes, Clock::time_point deadlin
     }
 
     lk.unlock();
-    lease = std::make_shared<MemoryLease>(*this, bytes);
+    lease = std::make_shared<MemoryLease>(*this, bytes, unseen);
     return Result::kGranted;
 }
 
@@ -166,16 +198,16 @@ size_t MemoryPool::WaitingCount() const {
     return waiting_.size();
 }
 
-void MemoryPool::Release(uint64_t bytes, bool resident) {
+void MemoryPool::Release(uint64_t bytes, uint64_t unseen, bool resident) {
     std::lock_guard<std::mutex> lk(mutex_);
     used_ -= bytes;
-    if (!resident) pending_ -= bytes;
+    if (!resident) pending_ -= unseen;
     cv_.notify_all();
 }
 
-void MemoryPool::ResidentNow(uint64_t bytes) {
+void MemoryPool::ResidentNow(uint64_t unseen) {
     std::lock_guard<std::mutex> lk(mutex_);
-    pending_ -= bytes;
+    pending_ -= unseen;
     cv_.notify_all();
 }
 

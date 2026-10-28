@@ -254,9 +254,9 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
     // Estimate: rows * (8 [timestamp] + row_length [stored bytes]) + total_fields * 40 (ZoneMapObservation 24 B +
     // CatIdxBloomValue 16 B per observed column) + wire_bytes (the received message, or its parsed-tree
     // equivalent) + rows * 64 (misc per-row vector/allocator overhead) -- a rough budget, not an exact accounting.
-    // `memory_lease` is handler-scope only, released by RAII when this function returns: an ASYNC backlog is NOT
-    // covered by it (that needs a WalRecord-owned lease -- the owner has not approved touching WalRecord or the
-    // WAL writer loop for this, see docs/superpowers/specs/2026-10-28-memory-guard-handoff.md item 5).
+    // `wire_bytes` is already in memory (the OS's figure has it), so it is passed as already-held: it counts against the pool
+    // limit but not again against the host's available memory. An ASYNC record co-owns `memory_lease` (set where the records
+    // are enqueued below), so the reservation outlives this function until the WAL writer is done with the rows.
     int widest = 0;
     uint64_t total_fields = 0;
     for (int i = 0; i < row_count; i++) {
@@ -269,7 +269,8 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
     const uint64_t memory_estimate = static_cast<uint64_t>(row_count) * (8 + static_cast<uint64_t>(cfg_struct.rowlength()))
                                     + total_fields * 40 + static_cast<uint64_t>(wire_bytes) + static_cast<uint64_t>(row_count) * 64;
     std::shared_ptr<xstore::MemoryLease> memory_lease;
-    const xstore::MemoryPool::Result pool_result = xstore::MemoryPool::Instance().Acquire(memory_estimate, deadline, memory_lease);
+    const xstore::MemoryPool::Result pool_result = xstore::MemoryPool::Instance().Acquire(memory_estimate, deadline, memory_lease,
+                                                                                               static_cast<uint64_t>(wire_bytes));
     if (pool_result != xstore::MemoryPool::Result::kGranted) {
         const char *why = pool_result == xstore::MemoryPool::Result::kTooLarge
                               ? "larger than the server's whole memory pool"
