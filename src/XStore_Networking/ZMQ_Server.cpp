@@ -371,6 +371,40 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
         // and sent by SendProto before the loop came back around.
         arena.Reset();
 
+        //  BatchInsert / RangeInsert are first offered to the wire path: the rows are read from the received bytes one at a time
+        //  instead of being parsed into an object tree of the whole request (about 6 KB per 1.4 KB row, alive until the reply,
+        //  and the parse itself is ~2x slower). It declines (nothing done) anything but a plain well-formed insert, and that
+        //  request then takes the normal parse + dispatch below, which also gives the old behaviour for bad input.
+        //  The first byte of a Request holding one is the tag of field 8 (BatchInsert) / 11 (RangeInsert), wire type 2.
+        if (client_msg.size() > 1) {
+            const uint8_t first_byte = *static_cast<const uint8_t *>(client_msg.data());
+            if (first_byte == 0x42 || first_byte == 0x5A) {
+                bool replied = false;
+                try {
+                    if (first_byte == 0x42) {
+                        XStore_Proto::BatchInsert_REP rep;
+                        replied = my_store.BatchInsertFromWire(static_cast<const char *>(client_msg.data()), client_msg.size(), &rep);
+                        if (replied) SendProto(writer, rep);
+                    } else {
+                        XStore_Proto::RangeInsert_REP rep;
+                        replied = my_store.RangeInsertFromWire(static_cast<const char *>(client_msg.data()), client_msg.size(), &rep);
+                        if (replied) SendProto(writer, rep);
+                    }
+                    if (replied) writer.Finish();
+                } catch (const std::exception &e) {
+                    if (auto *ze = dynamic_cast<const zmq::error_t *>(&e); ze != nullptr && ze->num() == ETERM) throw;
+                    spdlog::error("[NETWORKING] - Request handler threw ({}), replying empty and continuing", e.what());
+                    try { writer.Finish(); } catch (...) {}
+                    replied = true;
+                } catch (...) {
+                    spdlog::error("[NETWORKING] - Request handler threw a non-std exception, replying empty and continuing");
+                    try { writer.Finish(); } catch (...) {}
+                    replied = true;
+                }
+                if (replied) continue;
+            }
+        }
+
         //  Parse the envelope once -- the oneof case (payload_case()) below
         //  is the dispatch tag, so there's no separate lightweight parse
         //  followed by a second full parse of the same bytes.

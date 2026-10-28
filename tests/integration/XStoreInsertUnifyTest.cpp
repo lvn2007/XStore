@@ -180,15 +180,21 @@ protected:
     // BatchInsert on one fresh DB, RangeInsert on another (same cfg, same rows, same mode): the statuses differ only
     // by the tag (and the DB name), and every file of the two DB directories is byte-identical. Returns the batch status.
     std::string RunEquivalence(XStore &store, XStore_Proto::TimeUnit unit, const std::vector<Row> &rows,
-                               XStore_Proto::WalDurabilityMode mode = XStore_Proto::SYNC) {
-        xstore_test::CreateTestDb(store, kBatchDb, unit, kRowLength);
-        xstore_test::CreateTestDb(store, kRangeDb, unit, kRowLength);
+                               XStore_Proto::WalDurabilityMode mode = XStore_Proto::SYNC, short row_length = kRowLength) {
+        xstore_test::CreateTestDb(store, kBatchDb, unit, row_length);
+        xstore_test::CreateTestDb(store, kRangeDb, unit, row_length);
         const std::string batch_status = Batch(store, kBatchDb, rows, mode);
         const std::string range_status = Range(store, kRangeDb, rows, mode);
         EXPECT_EQ(batch_status, fmt::format("[INFO] [BATCH INSERT] [DB: {}] - Inserted {} elements successfully", kBatchDb, rows.size()));
         EXPECT_EQ(Replace(Replace(batch_status, "[BATCH INSERT]", "[RANGE INSERT]"), "[DB: " + kBatchDb + "]", "[DB: " + kRangeDb + "]"),
                   range_status);
 
+        ExpectSameDirectories(store);
+        return batch_status;
+    }
+
+    // Every file of the two DB directories is byte-identical (the .CFG compared with its dbName cleared).
+    static void ExpectSameDirectories(XStore &store) {
         const std::string dir_batch = store.data_store_dir + "/" + kBatchDb;
         const std::string dir_range = store.data_store_dir + "/" + kRangeDb;
         std::set<std::string> names_batch = FileNames(dir_batch), names_range = FileNames(dir_range);
@@ -201,7 +207,93 @@ protected:
         for (const std::string &name : names_batch) {
             if (names_range.count(name) != 0) ExpectSameBytes(dir_batch + "/" + name, dir_range + "/" + name);
         }
-        return batch_status;
+    }
+
+    static XStore_Proto::BatchInsert_REQ BatchReq(const std::string &db, const std::vector<Row> &rows, XStore_Proto::WalDurabilityMode mode) {
+        XStore_Proto::BatchInsert_REQ req;
+        req.set_dbname(db);
+        req.set_durabilitymode(mode);
+        for (const Row &row : rows) {
+            XStore_Proto::BatchInsert_DATA *entry = req.add_batchinsert_data();
+            entry->set_timestamp(row.ts);
+            *entry->mutable_data() = row.data;
+        }
+        return req;
+    }
+    static XStore_Proto::RangeInsert_REQ RangeReq(const std::string &db, const std::vector<Row> &rows, XStore_Proto::WalDurabilityMode mode) {
+        XStore_Proto::RangeInsert_REQ req;
+        req.set_dbname(db);
+        req.set_durabilitymode(mode);
+        for (const Row &row : rows) {
+            XStore_Proto::RangeInsert_DATA *entry = req.add_rangeinsert_data();
+            entry->set_timestamp(row.ts);
+            *entry->mutable_data() = row.data;
+        }
+        return req;
+    }
+    // The same rows through BatchInsertFromWire / RangeInsertFromWire: the request is serialized into the Request envelope
+    // exactly as a client sends it. Returns whether the wire path handled it; `status` is its reply text.
+    static bool BatchViaWire(XStore &store, const std::string &db, const std::vector<Row> &rows, XStore_Proto::WalDurabilityMode mode, std::string &status) {
+        XStore_Proto::Request envelope;
+        *envelope.mutable_batchinsert() = BatchReq(db, rows, mode);
+        const std::string bytes = envelope.SerializeAsString();
+        XStore_Proto::BatchInsert_REP rep;
+        const bool handled = store.BatchInsertFromWire(bytes.data(), bytes.size(), &rep);
+        status = rep.insertstatus();
+        return handled;
+    }
+    static bool RangeViaWire(XStore &store, const std::string &db, const std::vector<Row> &rows, XStore_Proto::WalDurabilityMode mode, std::string &status) {
+        XStore_Proto::Request envelope;
+        *envelope.mutable_rangeinsert() = RangeReq(db, rows, mode);
+        const std::string bytes = envelope.SerializeAsString();
+        XStore_Proto::RangeInsert_REP rep;
+        const bool handled = store.RangeInsertFromWire(bytes.data(), bytes.size(), &rep);
+        status = rep.insertstatus();
+        return handled;
+    }
+
+    // The parsed path on kBatchDb, the wire path on kRangeDb (same cfg, rows and mode; BatchInsert on both, or RangeInsert on
+    // both): the wire path must handle the request, give the same reply (modulo the DB name) and leave byte-identical files.
+    std::string RunWireEquivalence(XStore &store, XStore_Proto::TimeUnit unit, const std::vector<Row> &rows,
+                                   XStore_Proto::WalDurabilityMode mode = XStore_Proto::SYNC, short row_length = kRowLength, bool range_rpc = false) {
+        xstore_test::CreateTestDb(store, kBatchDb, unit, row_length);
+        xstore_test::CreateTestDb(store, kRangeDb, unit, row_length);
+        const std::string parsed_status = range_rpc ? Range(store, kBatchDb, rows, mode) : Batch(store, kBatchDb, rows, mode);
+        std::string wire_status;
+        const bool handled = range_rpc ? RangeViaWire(store, kRangeDb, rows, mode, wire_status) : BatchViaWire(store, kRangeDb, rows, mode, wire_status);
+        EXPECT_TRUE(handled) << "the wire path declined a plain well-formed request";
+        EXPECT_EQ(Replace(parsed_status, "[DB: " + kBatchDb + "]", "[DB: " + kRangeDb + "]"), wire_status);
+        ExpectSameDirectories(store);
+        return wire_status;
+    }
+
+    // ASYNC and BYPASS do not wait for the apply the way SYNC does: the rows are compared through reads, after the writers drained.
+    void RunWireModeCase(XStore_Proto::WalDurabilityMode mode) {
+        XStore store;
+        std::vector<uint64_t> ts;
+        for (uint64_t i = 0; i < 100; ++i) ts.push_back(kBoundarySeconds + 5000 + i);
+        const std::vector<Row> rows = RowsFor(ts);
+        xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
+        xstore_test::CreateTestDb(store, kRangeDb, XStore_Proto::SECOND, kRowLength);
+        EXPECT_FALSE(Batch(store, kBatchDb, rows, mode).empty());
+        std::string status;
+        EXPECT_TRUE(BatchViaWire(store, kRangeDb, rows, mode, status));
+        EXPECT_NE(status.find("Inserted 100 elements successfully"), std::string::npos) << status;
+        if (mode == XStore_Proto::ASYNC) {   // the sentinel is a timestamp no row uses
+            xstore_test::WaitForWalDrained(store, kBatchDb, kBoundarySeconds + 9000);
+            xstore_test::WaitForWalDrained(store, kRangeDb, kBoundarySeconds + 9000);
+        }
+        ExpectLastOccurrenceWins(store, rows);
+    }
+
+    // A request the wire path must decline: nothing handled, no reply text, and nothing written (no year file, no row).
+    static void ExpectDeclinedAndUntouched(XStore &store, const std::string &db, const std::string &request_bytes) {
+        XStore_Proto::BatchInsert_REP rep;
+        EXPECT_FALSE(store.BatchInsertFromWire(request_bytes.data(), request_bytes.size(), &rep));
+        EXPECT_TRUE(rep.insertstatus().empty()) << rep.insertstatus();
+        for (const std::string &name : FileNames(store.data_store_dir + "/" + db)) {
+            EXPECT_TRUE(name.size() < 7 || name.compare(name.size() - 7, 7, ".XSTORE") != 0) << "a declined request created " << name;
+        }
     }
 
     // On both DBs, every timestamp reads back the value of its LAST occurrence in `rows` (absent when that occurrence
@@ -351,4 +443,233 @@ TEST_F(InsertUnifyTest, NonexistentDbStatusIsIdenticalModuloTag) {
     EXPECT_EQ(Batch(store, "NOPE", rows, XStore_Proto::SYNC), "[WARNING] [BATCH INSERT] [DB: NOPE] - DB does not exist");
     EXPECT_EQ(Range(store, "NOPE", rows, XStore_Proto::SYNC), "[WARNING] [RANGE INSERT] [DB: NOPE] - DB does not exist");
     EXPECT_FALSE(fs::exists(store.data_store_dir + "/NOPE"));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// BatchInsertFromWire / RangeInsertFromWire: the same request, handled from the received bytes, must give the same reply and
+// byte-identical files as the parsed path (data, .zmap, .catidx, .CFG), and anything that is not a plain well-formed insert
+// must be declined with nothing done (the caller then takes the parsed path).
+// ---------------------------------------------------------------------------------------------------------------------
+namespace {
+std::string Varint(uint64_t v) {
+    std::string out;
+    for (; v >= 128; v >>= 7) out.push_back(static_cast<char>(v | 128));
+    out.push_back(static_cast<char>(v));
+    return out;
+}
+std::string LenField(uint32_t number, const std::string &payload) { return Varint((number << 3) | 2) + Varint(payload.size()) + payload; }
+std::string VarintField(uint32_t number, uint64_t v) { return Varint(number << 3) + Varint(v); }
+// One BatchInsert_DATA (field 3 of BatchInsert_REQ): timestamp (1) + the raw RowData bytes (2).
+std::string RawData(uint64_t ts, const std::string &row_bytes) { return LenField(3, VarintField(1, ts) + LenField(2, row_bytes)); }
+// A whole Request holding a BatchInsert_REQ (field 8) built from raw pieces.
+std::string RawBatchRequest(const std::string &body) { return LenField(8, body); }
+std::string RawDoubleEntry() { return std::string("\x0A\x09\x09", 3) + std::string(8, '\x11'); }   // RowData.fielddata{doubleData}: tag, len 9, tag, 8 bytes
+}  // namespace
+
+TEST_F(InsertUnifyTest, WireSortedRequestIsIdentical) {
+    XStore store;
+    std::vector<uint64_t> ts;
+    for (uint64_t i = 0; i < 300; ++i) ts.push_back(kBoundarySeconds + 1000 + i);
+    const std::vector<Row> rows = RowsFor(ts);
+    RunWireEquivalence(store, XStore_Proto::SECOND, rows);
+    ExpectLastOccurrenceWins(store, rows);
+}
+
+TEST_F(InsertUnifyTest, WireFullyReversedRequestIsIdentical) {
+    XStore store;
+    std::vector<uint64_t> ts;
+    for (uint64_t i = 300; i-- > 0;) ts.push_back(kBoundarySeconds + 1000 + i);
+    const std::vector<Row> rows = RowsFor(ts);
+    RunWireEquivalence(store, XStore_Proto::SECOND, rows);
+    ExpectLastOccurrenceWins(store, rows);
+}
+
+TEST_F(InsertUnifyTest, WireDuplicateTimestampsKeepTheLastOccurrence) {
+    XStore store;
+    std::vector<uint64_t> ts;
+    for (uint64_t i = 0; i < 200; ++i) ts.push_back(kBoundarySeconds + 1000 + (i * 7) % 40);   // 40 timestamps, each ~5 times, unsorted
+    const std::vector<Row> rows = RowsFor(ts);
+    RunWireEquivalence(store, XStore_Proto::SECOND, rows);
+    ExpectLastOccurrenceWins(store, rows);
+}
+
+TEST_F(InsertUnifyTest, WireFiveYearsInterleavedIsIdentical) {
+    XStore store;
+    std::vector<uint64_t> ts;
+    for (uint64_t i = 0; i < 200; ++i) ts.push_back(kBoundarySeconds - 2 * kSecondsPerYear + (i % 5) * kSecondsPerYear + 10 * 86400 + i);
+    const std::vector<Row> rows = RowsFor(ts);
+    RunWireEquivalence(store, XStore_Proto::SECOND, rows);
+    ExpectLastOccurrenceWins(store, rows);
+}
+
+TEST_F(InsertUnifyTest, WireMillisecondDbIsIdentical) {
+    XStore store;
+    std::vector<uint64_t> ts;
+    for (uint64_t i = 0; i < 150; ++i) ts.push_back((kBoundarySeconds - kSecondsPerYear + 86400) * 1000 + (i % 3) * kSecondsPerYear * 1000 + i);
+    const std::vector<Row> rows = RowsFor(ts);
+    RunWireEquivalence(store, XStore_Proto::MILLISECOND, rows);
+}
+
+TEST_F(InsertUnifyTest, WireOversizedRowsAreRejectedLikeTheParsedPath) {
+    XStore store;
+    std::vector<uint64_t> ts;
+    for (uint64_t i = 0; i < 60; ++i) ts.push_back(kBoundarySeconds + 1000 + i);
+    std::vector<Row> rows = RowsFor(ts);
+    std::set<uint64_t> rejected;
+    for (size_t i : {3u, 17u, 59u}) {   // a row that does not fit its 48-byte slot is dropped, never truncated
+        rows[i].data = MakeRow({FDouble(1.0), FString(std::string(100, 'x'))});
+        rejected.insert(rows[i].ts);
+    }
+    RunWireEquivalence(store, XStore_Proto::SECOND, rows);
+    ExpectLastOccurrenceWins(store, rows, rejected);
+}
+
+TEST_F(InsertUnifyTest, WireEveryColumnTypeIsIdentical) {
+    XStore store;
+    std::vector<Row> rows;
+    for (uint64_t i = 0; i < 80; ++i) {
+        rows.push_back({kBoundarySeconds + 2000 + i,
+                        MakeRow({xstore_test::FDouble(i * 0.25), xstore_test::FFloat(static_cast<float>(i)), xstore_test::FInt32(-static_cast<int32_t>(i)),
+                                 xstore_test::FInt64(static_cast<int64_t>(i) << 33), xstore_test::FFixed32(static_cast<uint32_t>(i)),
+                                 xstore_test::FFixed64(i << 40), xstore_test::FBool(i % 2 == 0), xstore_test::FString("é" + std::to_string(i)),
+                                 xstore_test::FBytes(std::string(1, static_cast<char>(i)) + "\xff")})});
+    }
+    RunWireEquivalence(store, XStore_Proto::SECOND, rows, XStore_Proto::SYNC, /*row_length=*/200);
+}
+
+TEST_F(InsertUnifyTest, WireWideRowsGrowTheIndexLikeTheParsedPath) {
+    XStore store;
+    std::vector<Row> rows;
+    for (uint64_t i = 0; i < 40; ++i) {
+        std::vector<XStore_Proto::FData> fields;
+        for (int c = 0; c < 45 + static_cast<int>(i % 5); ++c) fields.push_back(FDouble(static_cast<double>(i) * 0.5 + c));   // 45..49 columns
+        rows.push_back({kBoundarySeconds + 3000 + i, MakeRow(fields)});
+    }
+    RunWireEquivalence(store, XStore_Proto::SECOND, rows, XStore_Proto::SYNC, /*row_length=*/700);
+}
+
+TEST_F(InsertUnifyTest, WireEmptyRowsAndAnEmptyRequestAreIdentical) {
+    XStore store;
+    std::vector<Row> rows;
+    for (uint64_t i = 0; i < 10; ++i) rows.push_back({kBoundarySeconds + 4000 + i, i % 2 == 0 ? MakeRow({}) : MakeRow({FDouble(1.0)})});
+    RunWireEquivalence(store, XStore_Proto::SECOND, rows);
+}
+
+TEST_F(InsertUnifyTest, WireAnEmptyRequestIsHandledLikeTheParsedPath) {
+    XStore store;
+    xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
+    std::string status;
+    EXPECT_TRUE(BatchViaWire(store, kBatchDb, {}, XStore_Proto::SYNC, status));
+    EXPECT_EQ(status, Batch(store, kBatchDb, {}, XStore_Proto::SYNC));
+}
+
+TEST_F(InsertUnifyTest, WireAMissingDbGivesTheSameReplyAsTheParsedPath) {
+    XStore store;
+    const std::vector<Row> rows = RowsFor({kBoundarySeconds + 1, kBoundarySeconds + 2});
+    std::string wire_status;
+    EXPECT_TRUE(BatchViaWire(store, "NOSUCHDB", rows, XStore_Proto::SYNC, wire_status));
+    EXPECT_EQ(wire_status, Batch(store, "NOSUCHDB", rows, XStore_Proto::SYNC));
+    EXPECT_NE(wire_status.find("DB does not exist"), std::string::npos) << wire_status;
+}
+
+TEST_F(InsertUnifyTest, WireRangeInsertIsIdentical) {
+    XStore store;
+    std::vector<uint64_t> ts;
+    for (uint64_t i = 0; i < 200; ++i) ts.push_back(kBoundarySeconds - kSecondsPerYear + (i % 3) * kSecondsPerYear + 10 * 86400 + (199 - i));
+    const std::vector<Row> rows = RowsFor(ts);
+    RunWireEquivalence(store, XStore_Proto::SECOND, rows, XStore_Proto::SYNC, kRowLength, /*range_rpc=*/true);
+}
+
+TEST_F(InsertUnifyTest, WireAsyncModeGivesTheSameRowsAsTheParsedPath) { RunWireModeCase(XStore_Proto::ASYNC); }
+TEST_F(InsertUnifyTest, WireBypassModeGivesTheSameRowsAsTheParsedPath) { RunWireModeCase(XStore_Proto::BYPASS); }
+
+// --- requests the wire path must decline, with nothing done ---------------------------------------------------------
+
+TEST_F(InsertUnifyTest, WireDeclinesAnExtraFieldAfterTheEnvelope) {
+    XStore store;
+    xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
+    XStore_Proto::Request envelope;
+    *envelope.mutable_batchinsert() = BatchReq(kBatchDb, RowsFor({kBoundarySeconds + 1}), XStore_Proto::SYNC);
+    ExpectDeclinedAndUntouched(store, kBatchDb, envelope.SerializeAsString() + VarintField(100, 1));
+}
+
+TEST_F(InsertUnifyTest, WireDeclinesTwoEnvelopesInOneMessage) {
+    XStore store;
+    xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
+    XStore_Proto::Request envelope;
+    *envelope.mutable_batchinsert() = BatchReq(kBatchDb, RowsFor({kBoundarySeconds + 1}), XStore_Proto::SYNC);
+    const std::string one = envelope.SerializeAsString();
+    ExpectDeclinedAndUntouched(store, kBatchDb, one + one);   // protobuf would merge the two; the scan does not guess
+}
+
+TEST_F(InsertUnifyTest, WireDeclinesAnUnknownFieldInsideTheRequest) {
+    XStore store;
+    xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
+    XStore_Proto::BatchInsert_REQ req = BatchReq(kBatchDb, RowsFor({kBoundarySeconds + 1}), XStore_Proto::SYNC);
+    req.GetReflection()->MutableUnknownFields(&req)->AddVarint(100, 1);
+    XStore_Proto::Request envelope;
+    *envelope.mutable_batchinsert() = req;
+    ExpectDeclinedAndUntouched(store, kBatchDb, envelope.SerializeAsString());
+}
+
+TEST_F(InsertUnifyTest, WireDeclinesARepeatedDbNameField) {
+    XStore store;
+    xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
+    const std::string body = LenField(2, kBatchDb) + LenField(2, kBatchDb) + RawData(kBoundarySeconds + 1, "") + VarintField(4, XStore_Proto::SYNC);
+    ExpectDeclinedAndUntouched(store, kBatchDb, RawBatchRequest(body));
+}
+
+TEST_F(InsertUnifyTest, WireDeclinesANonAsciiDbName) {
+    XStore store;
+    xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
+    const std::string body = LenField(2, "\xC3\x89QBATCH") + RawData(kBoundarySeconds + 1, "") + VarintField(4, XStore_Proto::SYNC);
+    ExpectDeclinedAndUntouched(store, kBatchDb, RawBatchRequest(body));
+}
+
+TEST_F(InsertUnifyTest, WireDeclinesATruncatedRequest) {
+    XStore store;
+    xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
+    XStore_Proto::Request envelope;
+    *envelope.mutable_batchinsert() = BatchReq(kBatchDb, RowsFor({kBoundarySeconds + 1, kBoundarySeconds + 2, kBoundarySeconds + 3}), XStore_Proto::SYNC);
+    const std::string bytes = envelope.SerializeAsString();
+    ExpectDeclinedAndUntouched(store, kBatchDb, bytes.substr(0, bytes.size() / 2));
+    ExpectDeclinedAndUntouched(store, kBatchDb, bytes.substr(0, bytes.size() - 1));
+}
+
+TEST_F(InsertUnifyTest, WireDeclinesARowWithAnUnknownField) {
+    XStore store;
+    xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
+    const std::string body = LenField(2, kBatchDb) + RawData(kBoundarySeconds + 1, RawDoubleEntry() + VarintField(2, 7)) + VarintField(4, XStore_Proto::SYNC);
+    ExpectDeclinedAndUntouched(store, kBatchDb, RawBatchRequest(body));
+}
+
+TEST_F(InsertUnifyTest, WireDeclinesARowInNonCanonicalEncoding) {
+    XStore store;
+    xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
+    // The FData length written with a redundant second byte (0x89 0x00 = 9): protobuf accepts it, but re-serializing would give 1 byte
+    // less than the slice, so the stored bytes would not be the received ones.
+    const std::string non_canonical = std::string("\x0A\x89\x00\x09", 4) + std::string(8, '\x11');
+    const std::string body = LenField(2, kBatchDb) + RawData(kBoundarySeconds + 1, non_canonical) + VarintField(4, XStore_Proto::SYNC);
+    ExpectDeclinedAndUntouched(store, kBatchDb, RawBatchRequest(body));
+}
+
+// Nothing is enqueued until every row has been read: a row that fails late (here an invalid UTF-8 string in the LAST year group) must not
+// leave the earlier year groups applied. The parsed path drops such a request when parsing it, before any effect.
+TEST_F(InsertUnifyTest, WireAMalformedLateRowLeavesNothingApplied) {
+    XStore store;
+    xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
+    const std::string good_row = RawDoubleEntry() + RawDoubleEntry() + RawDoubleEntry() + RawDoubleEntry();   // wider than the DB's columns: growing the width for it would be visible
+    const std::string cfg_path = store.data_store_dir + "/" + kBatchDb + "/" + kBatchDb + ".CFG";
+    const uint32_t columns_before = ReadCfgWithoutName(cfg_path).columncount();
+    const std::string bad_row = LenField(1, std::string("\x72\x01\xFF", 3));   // FData.stringData = 0xFF: not valid UTF-8
+    const std::string body = LenField(2, kBatchDb) + RawData(kBoundarySeconds - 3 * kSecondsPerYear, good_row) + RawData(kBoundarySeconds - 2 * kSecondsPerYear, good_row) +
+                             RawData(kBoundarySeconds + 10, bad_row) + VarintField(4, XStore_Proto::SYNC);
+    const std::string bytes = RawBatchRequest(body);
+    XStore_Proto::Request parsed;
+    if (!parsed.ParseFromString(bytes)) {
+        ExpectDeclinedAndUntouched(store, kBatchDb, bytes);   // the parsed path fails the whole request; so must the wire path, before any effect
+        EXPECT_EQ(ReadCfgWithoutName(cfg_path).columncount(), columns_before) << "a declined request grew the index width";
+    } else {
+        GTEST_SKIP() << "this protobuf build accepts the invalid string, nothing to compare with";
+    }
 }

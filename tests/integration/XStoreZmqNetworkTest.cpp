@@ -480,6 +480,57 @@ TEST_F(XStoreZmqNetworkTest, BatchInsertThenBatchQueryOverWireOmitsHoles) {
     EXPECT_EQ(by_ts[ts2].data().fielddata(1).bytesdata(), "two-cols");
 }
 
+// The worker offers a BatchInsert to the wire path first; a request it declines (here an unknown field, which protobuf accepts and
+// keeps) must still be inserted by the normal parsed path, with the same reply and the rows readable.
+TEST_F(XStoreZmqNetworkTest, BatchInsertWithAnUnknownFieldIsDeclinedByTheWirePathAndStillInserted) {
+    XStore_Proto::CreateDB_REQ create_req;
+    create_req.set_rtype(XStore_Proto::CREATEDB);
+    create_req.set_dbname("ZMQ_BATCH_UNKNOWN_DB");
+    create_req.set_timeresolution(XStore_Proto::SECOND);
+    create_req.set_rowlength(128);
+    SendRequest<XStore_Proto::CreateDB_REP>(Wrap(create_req));
+
+    XStore_Proto::BatchInsert_REQ insert_req;
+    insert_req.set_rtype(XStore_Proto::BATCHINSERT);
+    insert_req.set_dbname("ZMQ_BATCH_UNKNOWN_DB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
+    XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
+    entry->set_timestamp(TS_2012_MID);
+    *entry->mutable_data() = MakeRow({FInt32(77)});
+    insert_req.GetReflection()->MutableUnknownFields(&insert_req)->AddVarint(100, 1);
+
+    auto insert_rep = SendRequest<XStore_Proto::BatchInsert_REP>(Wrap(insert_req));
+    EXPECT_NE(insert_rep.insertstatus().find("Inserted 1 elements"), std::string::npos) << insert_rep.insertstatus();
+
+    XStore_Proto::UnaryQuery_REQ query_req;
+    query_req.set_rtype(XStore_Proto::UNARYQUERY);
+    query_req.set_dbname("ZMQ_BATCH_UNKNOWN_DB");
+    query_req.set_timestamp(TS_2012_MID);
+    auto query_rep = SendRequest<XStore_Proto::UnaryQuery_REP>(Wrap(query_req));
+    ASSERT_EQ(query_rep.data().fielddata_size(), 1);
+    EXPECT_EQ(query_rep.data().fielddata(0).int32data(), 77);
+}
+
+// A request that starts like a BatchInsert but is cut short: the wire path declines it, the parse fails, the reply is empty and the
+// worker keeps serving (the same outcome as any other unparseable bytes).
+TEST_F(XStoreZmqNetworkTest, TruncatedBatchInsertGetsAnEmptyReplyAndServerKeepsServing) {
+    XStore_Proto::BatchInsert_REQ insert_req;
+    insert_req.set_rtype(XStore_Proto::BATCHINSERT);
+    insert_req.set_dbname("ZMQ_NOPE_AFTER_TRUNCATED_DB");
+    XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
+    entry->set_timestamp(TS_2012_MID);
+    *entry->mutable_data() = MakeRow({FInt32(1), FInt32(2), FInt32(3)});
+    const std::string bytes = Wrap(insert_req).SerializeAsString();
+    EXPECT_EQ(SendRawExpectReply(bytes.substr(0, bytes.size() - 3)), 0);
+
+    XStore_Proto::UnaryQuery_REQ query_req;
+    query_req.set_rtype(XStore_Proto::UNARYQUERY);
+    query_req.set_dbname("ZMQ_NOPE_AFTER_TRUNCATED_DB");
+    query_req.set_timestamp(TS_2005_MID);
+    auto query_rep = SendRequest<XStore_Proto::UnaryQuery_REP>(Wrap(query_req));
+    EXPECT_FALSE(query_rep.querystatus().empty());
+}
+
 // ---------------------------------------------------------------------
 // RANGE INSERT / QUERY -- contiguous range with an internal hole, over the wire
 // ---------------------------------------------------------------------

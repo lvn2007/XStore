@@ -21,6 +21,169 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStor
     MultiRowInsert(proto_from_client, return_data, "BATCH INSERT");
 }
 
+// BATCH INSERT / RANGE INSERT straight from the received bytes -- see the declaration in XStore.h for the contract.
+//
+// A Request holding one BatchInsert_REQ (Request field 8) or RangeInsert_REQ (field 11; the same layout):
+//   BatchInsert_REQ { RType (1, varint), dbName (2, string), repeated Data (3), durabilityMode (4, varint) }
+//   Data            { timestamp (1, varint), data (2, RowData) }          RowData { repeated FData fieldData (1) }
+// ScanInsertRequest walks only this framing. Every row stays a slice of the received bytes (offset, length, number of fields);
+// the rows are parsed later, one at a time, into ONE reused RowData (WireRows::AppendTo), so no object tree of the whole request
+// exists. Anything the scan does not recognise (a field it does not know, a singular field twice, a non-ASCII DB name, broken
+// framing, a row that is not a plain run of FData entries) makes it return false and the caller uses the parsed path, so the
+// behaviour for such input, including failing it, is the old code's.
+namespace {
+
+struct WireRef {
+    uint64_t timestamp = 0;
+    uint32_t offset = 0;   // of the RowData bytes, from the start of the Request
+    uint32_t length = 0;
+    uint32_t fields = 0;   // number of FData entries in the slice, counted by the scan
+};
+
+bool ReadVarint(const uint8_t *&p, const uint8_t *end, uint64_t &value) {
+    value = 0;
+    for (int shift = 0; shift < 64 && p < end; shift += 7) {
+        const uint8_t byte = *p++;
+        value |= static_cast<uint64_t>(byte & 0x7F) << shift;
+        if ((byte & 0x80) == 0) return true;
+    }
+    return false;
+}
+
+// RowData bytes -> the number of entries; false unless the slice is exactly a run of `fieldData` (tag 0x0A) entries.
+bool CountRowFields(const uint8_t *p, const uint8_t *end, uint32_t &fields) {
+    fields = 0;
+    while (p < end) {
+        if (*p++ != 0x0A) return false;
+        uint64_t length = 0;
+        if (!ReadVarint(p, end, length) || length > static_cast<uint64_t>(end - p)) return false;
+        p += length;
+        ++fields;
+    }
+    return true;
+}
+
+bool ScanData(const uint8_t *base, const uint8_t *p, const uint8_t *end, WireRef &ref) {
+    bool seen_timestamp = false, seen_row = false;
+    const uint8_t *row = base;
+    size_t row_length = 0;
+    while (p < end) {
+        uint64_t tag = 0, value = 0;
+        if (!ReadVarint(p, end, tag)) return false;
+        if (tag == 0x08) {   // timestamp
+            if (seen_timestamp || !ReadVarint(p, end, value)) return false;
+            seen_timestamp = true;
+            ref.timestamp = value;
+        } else if (tag == 0x12) {   // data (RowData)
+            if (seen_row || !ReadVarint(p, end, value) || value > static_cast<uint64_t>(end - p)) return false;
+            seen_row = true;
+            row = p;
+            row_length = static_cast<size_t>(value);
+            p += row_length;
+        } else {
+            return false;
+        }
+    }
+    if (!CountRowFields(row, row + row_length, ref.fields)) return false;
+    ref.offset = static_cast<uint32_t>(row - base);
+    ref.length = static_cast<uint32_t>(row_length);
+    return true;
+}
+
+bool ScanInsertRequest(const char *request, size_t size, uint8_t envelope_tag, std::string &db_name,
+                       XStore_Proto::WalDurabilityMode &mode, std::vector<WireRef> &refs) {
+    if (size < 2 || size > static_cast<size_t>(std::numeric_limits<int>::max())) return false;
+    const uint8_t *base = reinterpret_cast<const uint8_t *>(request);
+    const uint8_t *p = base, *end = base + size;
+    if (*p++ != envelope_tag) return false;
+    uint64_t body_length = 0;
+    if (!ReadVarint(p, end, body_length) || body_length != static_cast<uint64_t>(end - p)) return false;   // the envelope is the whole message
+    bool seen_rtype = false, seen_name = false, seen_mode = false;
+    while (p < end) {
+        uint64_t tag = 0, value = 0;
+        if (!ReadVarint(p, end, tag)) return false;
+        if (tag == 0x08) {   // RType: not used by the insert, only checked to be a lone varint
+            if (seen_rtype || !ReadVarint(p, end, value)) return false;
+            seen_rtype = true;
+        } else if (tag == 0x12) {   // dbName
+            if (seen_name || !ReadVarint(p, end, value) || value > static_cast<uint64_t>(end - p)) return false;
+            seen_name = true;
+            // proto3 strings are validated as UTF-8 when parsed; plain ASCII is trivially valid, anything else is left to the parsed path.
+            for (uint64_t i = 0; i < value; ++i) {
+                if (p[i] >= 0x80) return false;
+            }
+            db_name.assign(reinterpret_cast<const char *>(p), static_cast<size_t>(value));
+            p += value;
+        } else if (tag == 0x1A) {   // one Data entry
+            if (!ReadVarint(p, end, value) || value > static_cast<uint64_t>(end - p)) return false;
+            WireRef ref;
+            if (!ScanData(base, p, p + value, ref)) return false;
+            refs.push_back(ref);
+            p += value;
+        } else if (tag == 0x20) {   // durabilityMode
+            if (seen_mode || !ReadVarint(p, end, value) || value > 0x7FFFFFFF || !XStore_Proto::WalDurabilityMode_IsValid(static_cast<int>(value))) return false;
+            seen_mode = true;
+            mode = static_cast<XStore_Proto::WalDurabilityMode>(value);
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The rows of a scanned request. A row is parsed only when its record is built, into one RowData that ParseFromArray clears and refills
+// for the next row (the clear keeps the FData objects, so nothing is allocated per row once it has grown to the widest row). The row must
+// parse, hold exactly the counted number of fields and re-serialize to exactly its slice: only then are the bytes the record stores
+// (the re-serialization, as ever) the received bytes, and the size checks made on the slice length (oversized row, widest row) the
+// ones the parsed path makes on ByteSizeLong().
+class WireRows {
+public:
+    WireRows(const char *base, std::vector<WireRef> refs) : base_(base), refs_(std::move(refs)) {}
+    int Size() const { return static_cast<int>(refs_.size()); }
+    uint64_t Timestamp(int i) const { return refs_[static_cast<size_t>(i)].timestamp; }
+    int FieldCount(int i) const { return static_cast<int>(refs_[static_cast<size_t>(i)].fields); }
+    size_t RowBytes(int i) const { return refs_[static_cast<size_t>(i)].length; }
+    // Stable, like the parsed path: the last occurrence of a duplicate timestamp wins.
+    void SortByTimestamp() {
+        std::stable_sort(refs_.begin(), refs_.end(), [](const WireRef &a, const WireRef &b) { return a.timestamp < b.timestamp; });
+    }
+    template <typename Record>
+    bool AppendTo(XStore &store, Record &record, int i) {
+        const WireRef &ref = refs_[static_cast<size_t>(i)];
+        if (!scratch_.ParseFromArray(base_ + ref.offset, static_cast<int>(ref.length)) ||
+            scratch_.fielddata_size() != static_cast<int>(ref.fields) || scratch_.ByteSizeLong() != ref.length) {   // ByteSizeLong also caches the sizes AppendRow serializes with
+            return false;
+        }
+        record.AppendRow(store, ref.timestamp, scratch_);
+        return true;
+    }
+
+private:
+    const char *base_;
+    std::vector<WireRef> refs_;
+    XStore_Proto::RowData scratch_;
+};
+
+}  // namespace
+
+template <typename Rep>
+bool XStore::InsertFromWire(const char *request, size_t size, uint8_t envelope_tag, Rep *return_data, const char *op) {
+    std::string db_name;
+    XStore_Proto::WalDurabilityMode mode = XStore_Proto::ASYNC;   // the proto default when the field is absent
+    std::vector<WireRef> refs;
+    if (!ScanInsertRequest(request, size, envelope_tag, db_name, mode, refs)) return false;
+    WireRows rows(request, std::move(refs));
+    return MultiRowInsertRows(rows, db_name, mode, return_data, op);
+}
+
+bool XStore::BatchInsertFromWire(const char *request, size_t size, XStore_Proto::BatchInsert_REP *return_data) {
+    return InsertFromWire(request, size, /*Request.batchInsert = 8: (8 << 3) | 2*/ 0x42, return_data, "BATCH INSERT");
+}
+
+bool XStore::RangeInsertFromWire(const char *request, size_t size, XStore_Proto::RangeInsert_REP *return_data) {
+    return InsertFromWire(request, size, /*Request.rangeInsert = 11: (11 << 3) | 2*/ 0x5A, return_data, "RANGE INSERT");
+}
+
 namespace {
 // BatchQuery's thread_local lock list is released above this many entries (512 KB) instead of kept for the next call.
 constexpr size_t BATCH_LOCK_OFFSETS_KEEP = 65536;

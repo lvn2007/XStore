@@ -171,6 +171,35 @@ inline void XStore::WalRecord::AppendRow(XStore &store, uint64_t epoch, const XS
     ++row_count;
 }
 
+// The rows of an insert request as MultiRowInsertRows consumes them. ParsedRows wraps the repeated field of a request that was
+// parsed into an object tree (the normal path); WireRows (XStore_BatchOps.cpp) reads them from the received bytes instead.
+// AppendTo returns false only for a row that cannot be read (never for ParsedRows).
+template <typename Data>
+class ParsedRows {
+public:
+    explicit ParsedRows(google::protobuf::RepeatedPtrField<Data> &rows) : rows_(rows) {}
+    int Size() const { return rows_.size(); }
+    uint64_t Timestamp(int i) const { return rows_.Get(i).timestamp(); }
+    int FieldCount(int i) const { return rows_.Get(i).data().fielddata_size(); }
+    size_t RowBytes(int i) const { return rows_.Get(i).data().ByteSizeLong(); }   // also caches the sizes AppendTo serializes with
+    // STABLE on purpose: for duplicate timestamps the last occurrence in the request must win (it is applied last, as a series of
+    // UnaryInserts would do). Sorts the field's element pointers (no message copies); serial, because without TBB par_unseq is
+    // serial too. Physically reorders the caller's rows in place: an index array instead was benchmarked SLOWER (every per-row
+    // lookup became a random access into the pointer array, losing hardware prefetch).
+    void SortByTimestamp() {
+        std::stable_sort(rows_.pointer_begin(), rows_.pointer_end(), [](const Data *a, const Data *b) { return a->timestamp() < b->timestamp(); });
+    }
+    template <typename Record>
+    bool AppendTo(XStore &store, Record &record, int i) {
+        const Data &entry = rows_.Get(i);
+        record.AppendRow(store, entry.timestamp(), entry.data());
+        return true;
+    }
+
+private:
+    google::protobuf::RepeatedPtrField<Data> &rows_;
+};
+
 // Definition of XStore::MultiRowInsert (declared in XStore.h, private): the
 // one body behind BatchInsert and RangeInsert. op is the log/status tag
 // ("BATCH INSERT" / "RANGE INSERT"); InsertRows resolves the request's rows
@@ -178,10 +207,20 @@ inline void XStore::WalRecord::AppendRow(XStore &store, uint64_t epoch, const XS
 // hand-written copies were.
 template <typename Req, typename Rep>
 void XStore::MultiRowInsert(Req *proto_from_client, Rep *return_data, const char *op) {
-    using Data = typename std::remove_reference_t<decltype(InsertRows(proto_from_client))>::value_type;
-    if (RejectInsertIfShutDown(return_data->mutable_insertstatus(), op)) return;
+    ParsedRows<typename std::remove_reference_t<decltype(InsertRows(proto_from_client))>::value_type> rows(InsertRows(proto_from_client));
+    (void)MultiRowInsertRows(rows, proto_from_client->dbname(), proto_from_client->durabilitymode(), return_data, op);
+}
+
+// The body of MultiRowInsert over any source of rows (ParsedRows above, or WireRows for a request still in its received bytes).
+// Every WalRecord is built BEFORE the index width is grown and before any record is enqueued: a request whose rows cannot all
+// be read (AppendTo false, WireRows only) has then had no effect at all and returns false, and the caller takes the parsed path,
+// which fails such a request when it parses it, before any effect, exactly as it always did. true = handled (the reply is set).
+template <typename Rows, typename Rep>
+bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name, XStore_Proto::WalDurabilityMode durability_mode,
+                                Rep *return_data, const char *op) {
+    if (RejectInsertIfShutDown(return_data->mutable_insertstatus(), op)) return true;
     // Ensure DB Name string is all capitalized
-    std::string db_name = proto_from_client->dbname();
+    std::string db_name = requested_db_name;
     ToUpperCase(db_name.begin(), db_name.end());
 
     // Base directory of a DB
@@ -198,10 +237,8 @@ void XStore::MultiRowInsert(Req *proto_from_client, Rep *return_data, const char
         std::string err_msg = fmt::format("[{}] [DB: {}] - DB does not exist", op, db_name);
         SetTaggedStatus(return_data->mutable_insertstatus(), "[WARNING] ", err_msg);
         spdlog::warn(err_msg);
-        return;
+        return true;
     }
-
-    google::protobuf::RepeatedPtrField<Data> &rows = InsertRows(proto_from_client);
 
     // Incoming data is expected ascending, so the common case never sorts.
     // The bucketing loop below notices the first inversion (one compare per
@@ -224,14 +261,14 @@ void XStore::MultiRowInsert(Req *proto_from_client, Rep *return_data, const char
     // TimeStruct's [FirstEpoch, LastEpoch] window via one comparison
     // instead of rerunning the full calendar decomposition on every row.
     // Returns false at the first row older than its predecessor.
-    const int row_count = rows.size();
+    const int row_count = rows.Size();
     auto bucket_ascending_rows = [&]() -> bool {
         bool have_window = false;
         unsigned short int curr_year = 0;
         int64_t window_last_epoch = 0;
         unsigned long long int prev_ts = 0;
         for (int i = 0; i < row_count; i++) {
-            unsigned long long int ts = rows.Get(i).timestamp();
+            unsigned long long int ts = rows.Timestamp(i);
             if (ts < prev_ts) return false;   // cold: the C++17 build has no [[unlikely]]
             prev_ts = ts;
             if (!have_window || static_cast<int64_t>(ts) > window_last_epoch) {
@@ -245,15 +282,9 @@ void XStore::MultiRowInsert(Req *proto_from_client, Rep *return_data, const char
         return true;
     };
     if (!bucket_ascending_rows()) {
-        // STABLE on purpose: for duplicate timestamps the last occurrence in the request must win (it is applied
-        // last, as a series of UnaryInserts would do; sorted input never reaches this branch and keeps that order).
-        // Sorts the field's element pointers (no message copies); serial, because without TBB par_unseq is serial too.
-        // Physically reorders the caller's rows in place: an index array instead was benchmarked SLOWER (every
-        // per-row lookup below became a random access into the pointer array, losing hardware prefetch).
-        std::stable_sort(rows.pointer_begin(), rows.pointer_end(),
-                         [](const Data *a, const Data *b) {
-                             return a->timestamp() < b->timestamp();
-                         });
+        // Stable (see ParsedRows::SortByTimestamp): the last occurrence of a duplicate timestamp wins; sorted input never
+        // reaches this branch and keeps its order.
+        rows.SortByTimestamp();
         data_map.clear();
         [[maybe_unused]] const bool ascending_now = bucket_ascending_rows();
     }
@@ -263,27 +294,25 @@ void XStore::MultiRowInsert(Req *proto_from_client, Rep *return_data, const char
 
     // durabilityMode now routes through the WAL -- see the field's comment
     // on BatchInsert_REQ / RangeInsert_REQ in XStore.proto.
-    const XStore_Proto::WalDurabilityMode durability_mode = proto_from_client->durabilitymode();
     bool any_sync_failed = false;
     bool any_overloaded = false;   // a SYNC group failed because the WAL ring was full
 
-    // Grow the index width to this request's widest row BEFORE any
-    // WalRecord/zone-map file is created for it -- one pass over the whole
-    // request, done once (not per year-bucket group, not per row), so a
-    // fresh DB's first batch is born at its true width instead of staying
-    // at the floor until a restart picks up the grown column count.
+    // The widest ACCEPTED row of the whole request, found in one pass (not per year-bucket group, not per row). The index width
+    // is grown to it (MaybeGrowColumnCount below) BEFORE any WalRecord/zone-map file is created for it -- i.e. before the first
+    // record is enqueued -- so a fresh DB's first batch is born at its true width instead of staying at the floor until a restart
+    // picks up the grown column count.
     int widest = 0;
     for (int i = 0; i < row_count; i++) {
         // Rejected oversized rows must not grow the persisted width.
-        const auto &row_data = rows.Get(i).data();
-        if (row_data.fielddata_size() > widest &&
-            row_data.ByteSizeLong() <= static_cast<size_t>(cfg_struct.rowlength())) {
-            widest = row_data.fielddata_size();
+        const int fields = rows.FieldCount(i);
+        if (fields > widest && rows.RowBytes(i) <= static_cast<size_t>(cfg_struct.rowlength())) {
+            widest = fields;
         }
     }
-    MaybeGrowColumnCount(db_name, db_base_path_str, widest);
 
-    // Iterate through each key (year) of dataMap
+    // Build the record of every year group first (no side effect yet), then grow the width and enqueue them.
+    std::vector<WalRecord> records;
+    records.reserve(data_map.size());
     for (const std::pair<unsigned short int, std::vector<unsigned long long int>> &pair : data_map) {
         unsigned short int year_key = pair.first;
         const std::vector<unsigned long long int> &indices = pair.second;
@@ -314,8 +343,7 @@ void XStore::MultiRowInsert(Req *proto_from_client, Rep *return_data, const char
         record.ReserveRows(indices.size(), static_cast<size_t>(widest));
 
         for (unsigned long long int idx : indices) {
-            const Data &entry = rows.Get(static_cast<int>(idx));
-            size_t serialized_size = entry.data().ByteSizeLong();
+            size_t serialized_size = rows.RowBytes(static_cast<int>(idx));
             // Reject-not-truncate, same guarantee as UnaryInsert: a row
             // that doesn't fit its slot is dropped rather than silently
             // corrupting whatever follows it. Before AppendRow: a row once
@@ -323,7 +351,7 @@ void XStore::MultiRowInsert(Req *proto_from_client, Rep *return_data, const char
             if (serialized_size > static_cast<size_t>(cfg_struct.rowlength())) {
                 continue;
             }
-            record.AppendRow(*this, entry.timestamp(), entry.data());
+            if (!rows.AppendTo(*this, record, static_cast<int>(idx))) return false;   // WireRows only: nothing enqueued or grown yet
         }
 
         if (record.row_count == 0) {
@@ -331,7 +359,13 @@ void XStore::MultiRowInsert(Req *proto_from_client, Rep *return_data, const char
             // nothing to write, not a failure of the write path itself.
             continue;
         }
+        records.push_back(std::move(record));
+    }
 
+    MaybeGrowColumnCount(db_name, db_base_path_str, widest);
+
+    for (WalRecord &record : records) {
+        const unsigned short int year_key = record.year;   // the record is moved away below
         // BYPASS applies straight to the data file on this thread, same as
         // UnaryInsert's BYPASS path -- no WAL record ever written for it.
         // Everything else (SYNC/ASYNC) hands off to the WAL: EnqueueWalRecord
@@ -358,11 +392,12 @@ void XStore::MultiRowInsert(Req *proto_from_client, Rep *return_data, const char
         if (any_overloaded) err_msg += std::string("; ") + kWalOverloadedText;
         SetTaggedStatus(return_data->mutable_insertstatus(), "[ERROR] ", err_msg);
         spdlog::error(err_msg);
-        return;
+        return true;
     }
     std::string success_msg = fmt::format("[{}] [DB: {}] - Inserted {} elements successfully", op, db_name, row_count);
     SetTaggedStatus(return_data->mutable_insertstatus(), "[INFO] ", success_msg);
     spdlog::info(success_msg);
+    return true;
 }
 
 #endif //XSTORE_XSTORE_INTERNAL_H

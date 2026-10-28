@@ -538,6 +538,16 @@ class XStore {
         // An alias RPC of BatchInsert: both run MultiRowInsert.
         void RangeInsert(XStore_Proto::RangeInsert_REQ *proto_from_client, XStore_Proto::RangeInsert_REP *return_data);
 
+        // BatchInsert / RangeInsert for a Request that is still in the bytes the server received: the rows are never
+        // materialised as a parsed object tree (about 6 KB per 1.4 KB row, all alive until the request ends) but read
+        // from the bytes and parsed one at a time into one reused RowData. `request` is the whole serialized Request.
+        // Returns true when the request was handled (return_data holds the reply, the same one the parsed path gives);
+        // false when it is not a plain well-formed insert (an unknown or repeated field, a non-ASCII DB name, broken
+        // framing, a row that is not in canonical encoding or does not parse): then NOTHING was done, nothing was
+        // enqueued, and the caller takes the normal parsed path, which also gives the error behaviour for bad input.
+        [[nodiscard]] bool BatchInsertFromWire(const char *request, size_t size, XStore_Proto::BatchInsert_REP *return_data);
+        [[nodiscard]] bool RangeInsertFromWire(const char *request, size_t size, XStore_Proto::RangeInsert_REP *return_data);
+
         // RANGE QUERY (streamed, wire-format encode -- the only RangeQuery
         // path; the network server is the only production caller. Never
         // builds a UnaryQuery_REP/RowData/FData object tree: each row's
@@ -1486,6 +1496,13 @@ class XStore {
         // `op`, e.g. "BATCH INSERT"). Defined in XStore_Internal.h.
         template <typename Req, typename Rep>
         void MultiRowInsert(Req *proto_from_client, Rep *return_data, const char *op);
+        // MultiRowInsert's body over any source of rows (ParsedRows / WireRows); false = a row could not be read and nothing was done.
+        template <typename Rows, typename Rep>
+        bool MultiRowInsertRows(Rows &rows, const std::string &requested_db_name, XStore_Proto::WalDurabilityMode durability_mode,
+                                Rep *return_data, const char *op);
+        // BatchInsertFromWire / RangeInsertFromWire: `envelope_tag` is the Request field (BatchInsert 8, RangeInsert 11) as a tag byte.
+        template <typename Rep>
+        bool InsertFromWire(const char *request, size_t size, uint8_t envelope_tag, Rep *return_data, const char *op);
         // MultiRowInsert's rows accessor: resolved by overload at compile time, inlines to the generated mutable_*_data().
         static google::protobuf::RepeatedPtrField<XStore_Proto::BatchInsert_DATA>& InsertRows(XStore_Proto::BatchInsert_REQ *req) { return *req->mutable_batchinsert_data(); }
         static google::protobuf::RepeatedPtrField<XStore_Proto::RangeInsert_DATA>& InsertRows(XStore_Proto::RangeInsert_REQ *req) { return *req->mutable_rangeinsert_data(); }
