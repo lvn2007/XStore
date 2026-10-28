@@ -3519,15 +3519,22 @@ TEST_F(WalDirectPathTest, DirectPathAlsoFsyncsParentDirectory) {
     XStore store;
     xstore_test::CreateTestDb(store, db_name, XStore_Proto::SECOND, row_length);
     const uint64_t dir_syncs0 = Ckpt().DirSyncsForTests();
-    const std::string status = BigBatch(store, 1.0);   // creates the year file
-    ASSERT_FALSE(Failed(status)) << status;
-    EXPECT_EQ(Ckpt().DirSyncsForTests(), dir_syncs0 + 1) << "one distinct parent directory => one directory fsync";
 
-    // And the directory fsync is on the ack path: failing it fails the caller.
+    // The directory fsync is on the ack path: failing the first one (this batch creates the year file) fails the caller.
     Ckpt().FailNextDirSyncsForTests(1);
-    EXPECT_TRUE(Failed(BigBatch(store, 2.0)));
+    EXPECT_TRUE(Failed(BigBatch(store, 1.0)));
     EXPECT_FALSE(Ckpt().Poisoned());
+    EXPECT_EQ(Ckpt().DirSyncsForTests(), dir_syncs0);
+
+    // The retry syncs it: one distinct parent directory => one directory fsync.
+    const std::string status = BigBatch(store, 2.0);
+    ASSERT_FALSE(Failed(status)) << status;
+    EXPECT_EQ(Ckpt().DirSyncsForTests(), dir_syncs0 + 1);
+
+    // The year file's directory entry is durable now: later batches into it do not fsync the directory again.
     EXPECT_FALSE(Failed(BigBatch(store, 3.0)));
+    EXPECT_FALSE(Failed(BigBatch(store, 4.0)));
+    EXPECT_EQ(Ckpt().DirSyncsForTests(), dir_syncs0 + 1);
 }
 
 TEST_F(WalDirectPathTest, LargeBatchGoesThroughRingWhenSmallRecordPending) {

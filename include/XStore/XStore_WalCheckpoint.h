@@ -195,6 +195,20 @@ private:
     std::mutex &PathSyncMutex(const std::string &path) { return path_sync_mutex_[SyncStripe(path)]; }
     SyncResult SyncDataFile(const std::string &path);
     SyncResult SyncDirectory(const std::string &dir);
+    // A directory fsync only makes directory ENTRIES durable. Once one has succeeded while a file existed, that file's
+    // entry stays durable, so later syncs of the same file need not fsync its directory again (the direct path did, once
+    // per record). The file is recognised by device + inode + inode generation: ext4 gives a deleted file's inode number
+    // to the next file created, but never its generation, so a recreated or renamed-over file does not match and its
+    // directory is synced again. A filesystem that reports no generation (0 or an error) is never skipped.
+    struct FileId {
+        uint64_t dev = 0, ino = 0, generation = 0;
+        bool operator==(const FileId &o) const { return dev == o.dev && ino == o.ino && generation == o.generation; }
+    };
+    static bool ReadFileId(const std::string &path, FileId &id);
+    // Fsyncs the parent directory of every file in `files` (data files just fdatasync'd) that holds an entry not yet known
+    // durable; remembers the entries once their directory fsync succeeded. Worst outcome of the directory syncs;
+    // `synced_dirs` (optional) receives the directories actually fsync'd.
+    SyncResult SyncDirectoriesOf(const std::vector<std::string> &files, std::unordered_set<std::string> *synced_dirs);
     void Poison(const char *what, const std::string &path, int err);
 
     std::mutex cycle_mutex_;                      // one cycle / paced step at a time
@@ -203,6 +217,8 @@ private:
     // paths on one stripe merely serialize. Lock order: cycle_mutex_ then a path lock; a path lock is never held
     // while taking another lock.
     std::mutex path_sync_mutex_[SYNC_STRIPES];
+    std::mutex dirent_mutex_;
+    std::unordered_map<std::string, FileId> dirent_durable_;   // path -> the file whose directory entry is durable (dirent_mutex_)
     std::unordered_set<std::string> carried_;     // unsynced data files (guarded by cycle_mutex_)
     std::unordered_map<std::string, std::map<uint64_t, uint64_t>> flushed_;   // paced-flushed ranges (guarded by cycle_mutex_)
     mutable std::mutex synced_mutex_;

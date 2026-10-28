@@ -15,6 +15,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <unistd.h>
 #include <vector>
 
@@ -205,6 +206,92 @@ TEST_F(WalCheckpointSyncTest, OneCallSyncsEveryFileAndDirectory) {
     EXPECT_TRUE(Ckpt().SyncPathsForReplay({A(), B(), C()}));
     EXPECT_EQ(Ckpt().DataSyncsForTests(), data_before + 3);
     EXPECT_EQ(Ckpt().DirSyncsForTests(), dir_before + 2);
+}
+
+// A retryable failure of one file in a cycle over several files advances nothing and keeps every file for the retry,
+// including the ones whose sync succeeded.
+TEST_F(WalCheckpointSyncTest, OneFailedSyncInACycleKeepsEveryFileForTheRetry) {
+    for (const std::string &p : {A(), B(), C()}) walring::Dirty().Note(nullptr, p, 0, 4096, 0);
+    Ckpt().FailNextDataSyncsForTests(1);
+    EXPECT_FALSE(Ckpt().RunCycle());
+    EXPECT_FALSE(Ckpt().Poisoned());
+    EXPECT_TRUE(Ckpt().RunCycle());
+    EXPECT_EQ(Ckpt().LastCycleSyncedPaths(), (std::unordered_set<std::string>{A(), B(), C()}));
+}
+
+// A real (sticky) error in one file of a cycle poisons and fails the cycle.
+TEST_F(WalCheckpointSyncTest, AStickyFailureInACyclePoisonsAndFailsIt) {
+    for (const std::string &p : {A(), B(), C()}) walring::Dirty().Note(nullptr, p, 0, 4096, 0);
+    Ckpt().FailNextDataSyncsStickyForTests(1);
+    EXPECT_FALSE(Ckpt().RunCycle());
+    EXPECT_TRUE(Ckpt().Poisoned());
+}
+
+// A directory fsync only makes directory ENTRIES durable. Once one succeeded while a file existed, syncing that same
+// file again must not fsync its directory again (the writer's direct path does this once per record, ~3.5 ms each).
+TEST_F(WalCheckpointSyncTest, TheDirectoryOfAFileWhoseEntryIsDurableIsNotSyncedAgain) {
+    const uint64_t dir_before = Ckpt().DirSyncsForTests();
+    const uint64_t data_before = Ckpt().DataSyncsForTests();
+    EXPECT_TRUE(Sync(A()));
+    EXPECT_EQ(Ckpt().DirSyncsForTests(), dir_before + 1);
+    EXPECT_TRUE(Sync(A()));
+    EXPECT_TRUE(Sync(A()));
+    EXPECT_EQ(Ckpt().DataSyncsForTests(), data_before + 3) << "the data file itself is synced every time";
+    EXPECT_EQ(Ckpt().DirSyncsForTests(), dir_before + 1) << "the directory was synced again for an unchanged file";
+}
+
+// A file deleted and created again at the same path gets the same inode number back on ext4 but is a new directory
+// entry: its directory must be synced again.
+TEST_F(WalCheckpointSyncTest, ARecreatedFileHasItsDirectorySyncedAgain) {
+    EXPECT_TRUE(Sync(A()));
+    const uint64_t dir_before = Ckpt().DirSyncsForTests();
+    std::filesystem::remove(A());
+    std::ofstream(A()) << std::string(4096, 'y');
+    EXPECT_TRUE(Sync(A()));
+    EXPECT_EQ(Ckpt().DirSyncsForTests(), dir_before + 1);
+}
+
+// A file renamed over the path (how an index or a restored file is put in place) is a new entry too.
+TEST_F(WalCheckpointSyncTest, AFileRenamedOverTheOldOneHasItsDirectorySyncedAgain) {
+    EXPECT_TRUE(Sync(A()));
+    const std::string incoming = (root_ / "d1" / "incoming.XSTORE").string();
+    std::ofstream(incoming) << std::string(4096, 'z');
+    std::filesystem::rename(incoming, A());
+    const uint64_t dir_before = Ckpt().DirSyncsForTests();
+    EXPECT_TRUE(Sync(A()));
+    EXPECT_EQ(Ckpt().DirSyncsForTests(), dir_before + 1);
+}
+
+// The entry counts as durable only after the directory fsync SUCCEEDED: a failed one is retried by the next sync.
+TEST_F(WalCheckpointSyncTest, AFailedDirectorySyncIsNotRememberedAsDone) {
+    const uint64_t dir_before = Ckpt().DirSyncsForTests();
+    Ckpt().FailNextDirSyncsForTests(1);
+    EXPECT_FALSE(Sync(A()));
+    EXPECT_EQ(Ckpt().DirSyncsForTests(), dir_before);
+    EXPECT_TRUE(Sync(A()));
+    EXPECT_EQ(Ckpt().DirSyncsForTests(), dir_before + 1) << "the retry skipped the directory sync that had failed";
+}
+
+// One durable entry says nothing about its neighbours: another file of the same directory still needs the sync.
+TEST_F(WalCheckpointSyncTest, ANewFileInADirectoryWithADurableEntryStillGetsTheDirectorySynced) {
+    const uint64_t dir_before = Ckpt().DirSyncsForTests();
+    EXPECT_TRUE(Sync(A()));
+    EXPECT_TRUE(Sync(C()));   // same directory as A
+    EXPECT_EQ(Ckpt().DirSyncsForTests(), dir_before + 2);
+    EXPECT_TRUE(Sync(A()));
+    EXPECT_TRUE(Sync(C()));
+    EXPECT_EQ(Ckpt().DirSyncsForTests(), dir_before + 2);
+}
+
+// The checkpoint cycle takes the same shortcut.
+TEST_F(WalCheckpointSyncTest, ACycleDoesNotSyncTheDirectoryOfAFileItAlreadySynced) {
+    walring::Dirty().Note(nullptr, A(), 0, 4096, 0);
+    EXPECT_TRUE(Ckpt().RunCycle());
+    EXPECT_EQ(Ckpt().LastCycleSyncedDirsForTests().count(Dir1()), 1u) << "a first sync of A must sync its directory";
+    walring::Dirty().Note(nullptr, A(), 0, 4096, 0);
+    EXPECT_TRUE(Ckpt().RunCycle());
+    EXPECT_EQ(Ckpt().LastCycleSyncedPaths(), (std::unordered_set<std::string>{A()}));
+    EXPECT_TRUE(Ckpt().LastCycleSyncedDirsForTests().empty()) << "the second cycle synced the directory again";
 }
 
 // Already poisoned: nothing is synced and the call fails.

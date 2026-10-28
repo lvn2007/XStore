@@ -12,8 +12,12 @@
 #include <utility>
 #include <filesystem>
 #include <limits>
+#include <map>
 #include <vector>
 #include <fcntl.h>
+#include <linux/fs.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace walring {
@@ -258,6 +262,55 @@ Checkpointer::SyncResult Checkpointer::SyncDirectory(const std::string &dir) {
     return SyncResult::kRetryable;
 }
 
+bool Checkpointer::ReadFileId(const std::string &path, FileId &id) {
+    const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    struct stat st{};
+    long generation = 0;   // FS_IOC_GETVERSION stores the 32-bit generation
+    const bool ok = fstat(fd, &st) == 0 && ioctl(fd, FS_IOC_GETVERSION, &generation) == 0;
+    close(fd);
+    const uint32_t gen = static_cast<uint32_t>(generation);
+    if (!ok || gen == 0) return false;   // 0: a filesystem without generations, an inode reuse could not be told apart
+    id = {static_cast<uint64_t>(st.st_dev), static_cast<uint64_t>(st.st_ino), gen};
+    return true;
+}
+
+Checkpointer::SyncResult Checkpointer::SyncDirectoriesOf(const std::vector<std::string> &files,
+                                                         std::unordered_set<std::string> *synced_dirs) {
+    struct Entry { std::string path; FileId id; bool known; };
+    std::map<std::string, std::vector<Entry>> by_dir;   // directory -> its files whose entry is not known durable
+    for (const std::string &path : files) {
+        FileId id;
+        const bool known = ReadFileId(path, id);
+        if (known) {
+            std::lock_guard<std::mutex> lock(dirent_mutex_);
+            const auto it = dirent_durable_.find(path);
+            if (it != dirent_durable_.end() && it->second == id) continue;
+        }
+        std::string dir = std::filesystem::path(path).parent_path().string();
+        if (dir.empty()) dir = ".";
+        by_dir[dir].push_back({path, id, known});
+    }
+    SyncResult worst = SyncResult::kOk;
+    for (const auto &[dir, entries] : by_dir) {
+        switch (SyncDirectory(dir)) {
+            case SyncResult::kOk: {
+                if (synced_dirs != nullptr) synced_dirs->insert(dir);
+                std::lock_guard<std::mutex> lock(dirent_mutex_);
+                if (dirent_durable_.size() > 65536) dirent_durable_.clear();   // deleted DBs leave entries behind; they never match again
+                for (const Entry &e : entries) {
+                    if (e.known) dirent_durable_[e.path] = e.id;
+                }
+                break;
+            }
+            case SyncResult::kSkipped: break;
+            case SyncResult::kRetryable: worst = SyncResult::kRetryable; break;
+            case SyncResult::kPoisoned: return SyncResult::kPoisoned;
+        }
+    }
+    return worst;
+}
+
 bool Checkpointer::SyncPathsForReplay(const std::set<std::string> &paths) {
     if (const unsigned delay_ms = replay_sync_delay_ms_.load(std::memory_order_relaxed); delay_ms != 0) {
         const uint64_t before = cycles_.load(std::memory_order_relaxed);
@@ -278,14 +331,8 @@ bool Checkpointer::SyncPathsForReplay(const std::set<std::string> &paths) {
             case SyncResult::kPoisoned: return false;
         }
     }
-    std::set<std::string> dirs;
-    for (const std::string &path : synced) {
-        std::string dir = std::filesystem::path(path).parent_path().string();
-        if (dir.empty()) dir = ".";
-        if (!dirs.insert(dir).second) continue;
-        const SyncResult r = SyncDirectory(dir);
-        if (r == SyncResult::kRetryable || r == SyncResult::kPoisoned) return false;
-    }
+    const SyncResult dir_result = SyncDirectoriesOf(std::vector<std::string>(synced.begin(), synced.end()), nullptr);
+    if (dir_result == SyncResult::kRetryable || dir_result == SyncResult::kPoisoned) return false;
     // A real error elsewhere (another shard's sync, a cycle, the ring writer) may have poisoned the checkpointer
     // while these syncs ran: nothing may be reported durable once it has.
     return !poisoned_.load(std::memory_order_acquire);
@@ -359,18 +406,12 @@ bool Checkpointer::RunCycleLocked() {
 
     // (4) The directory entry of a newly created year file is not made durable by
     // fdatasync of the file itself.
-    std::unordered_set<std::string> dirs, synced_dirs;
+    std::unordered_set<std::string> synced_dirs;
     if (ok) {
-        for (const std::string &path : synced) {
-            std::string dir = std::filesystem::path(path).parent_path().string();
-            if (dir.empty()) dir = ".";
-            if (!dirs.insert(dir).second) continue;
-            switch (SyncDirectory(dir)) {
-                case SyncResult::kOk: synced_dirs.insert(dir); break;
-                case SyncResult::kSkipped: break;
-                case SyncResult::kRetryable: ok = false; break;
-                case SyncResult::kPoisoned: return false;
-            }
+        switch (SyncDirectoriesOf(std::vector<std::string>(synced.begin(), synced.end()), &synced_dirs)) {
+            case SyncResult::kOk: case SyncResult::kSkipped: break;
+            case SyncResult::kRetryable: ok = false; break;
+            case SyncResult::kPoisoned: return false;
         }
     }
     if (!ok) return false;   // carried_ kept for the retry; nothing advances
