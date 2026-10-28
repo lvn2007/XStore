@@ -35,6 +35,7 @@
 #include "include/XStore/XStore_ZoneMap.h"
 #include "include/XStore/XStore_CatIdx.h"
 #include "include/XStore/XStore_RebuildProgress.h"
+#include "include/XStore/XStore_MemoryPool.h"
 
 // Length of msg header
 #define TRACE_LEN 8
@@ -337,6 +338,10 @@ class XStore {
             // cross-producer enqueue ordering: each caller only ever waits
             // on its own record's flag.
             WalCompletion *completion = nullptr;
+            // ASYNC inserts only: the memory-pool reservation of the request this record came from, shared by all its
+            // records and released when the writer clears the last one (end of the batch), so a queued backlog stays
+            // counted. Null for every other producer.
+            std::shared_ptr<xstore::MemoryLease> memory_lease;
 
             size_t RowStride() const { return sizeof(uint64_t) + row_length; }
             uint64_t EpochAt(size_t i) const {
@@ -369,8 +374,8 @@ class XStore {
         // std::string is 32 bytes only in libstdc++ with the C++11 ABI; guard so a layout change is noticed. 208 = the
         // old 120 with the rows vector (24 B) replaced by wire (32 B) + zmap_obs (24 B) + catidx_vals (24 B) + obs_end
         // (24 B), plus zone_map_pad_to (4 B) and the 4 B of padding it leaves before wire (row_count fills the old
-        // padding after cfg_epoch). Paid once per record (moved twice), not per row.
-        static_assert(sizeof(WalRecord) == 208, "WalRecord layout changed: update this check deliberately");
+        // padding after cfg_epoch), plus memory_lease (16 B). Paid once per record (moved twice), not per row.
+        static_assert(sizeof(WalRecord) == 224, "WalRecord layout changed: update this check deliberately");
 #endif
 
         struct WalShard {
@@ -514,7 +519,8 @@ class XStore {
         // BATCH INSERT. Same implementation as RangeInsert (see below): input
         // that is not ascending is stable-sorted in place, so for duplicate
         // timestamps the last occurrence in the request wins.
-        void BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStore_Proto::BatchInsert_REP *return_data);
+        void BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStore_Proto::BatchInsert_REP *return_data,
+                          xstore::MemoryPool::Clock::time_point deadline = xstore::MemoryPool::Clock::time_point::max());
 
         // BATCH QUERY (streamed, wire-format encode -- the only BatchQuery
         // path; the network server is the only production caller and it
@@ -536,7 +542,8 @@ class XStore {
         // RANGE INSERT. Takes the request non-const because input that is not
         // ascending is sorted in place (only then; sorted input is never sorted).
         // An alias RPC of BatchInsert: both run MultiRowInsert.
-        void RangeInsert(XStore_Proto::RangeInsert_REQ *proto_from_client, XStore_Proto::RangeInsert_REP *return_data);
+        void RangeInsert(XStore_Proto::RangeInsert_REQ *proto_from_client, XStore_Proto::RangeInsert_REP *return_data,
+                          xstore::MemoryPool::Clock::time_point deadline = xstore::MemoryPool::Clock::time_point::max());
 
         // BatchInsert / RangeInsert for a Request that is still in the bytes the server received: the rows are never
         // materialised as a parsed object tree (about 6 KB per 1.4 KB row, all alive until the request ends) but read
@@ -545,8 +552,12 @@ class XStore {
         // false when it is not a plain well-formed insert (an unknown or repeated field, a non-ASCII DB name, broken
         // framing, a row that is not in canonical encoding or does not parse): then NOTHING was done, nothing was
         // enqueued, and the caller takes the normal parsed path, which also gives the error behaviour for bad input.
-        [[nodiscard]] bool BatchInsertFromWire(const char *request, size_t size, XStore_Proto::BatchInsert_REP *return_data);
-        [[nodiscard]] bool RangeInsertFromWire(const char *request, size_t size, XStore_Proto::RangeInsert_REP *return_data);
+        // `pickup`: when the caller received the request's bytes, defaulted to "now" for existing callers that pass no
+        // timeoutMs (the wire scan then always reads timeout_ms == 0, making pickup's value moot).
+        [[nodiscard]] bool BatchInsertFromWire(const char *request, size_t size, XStore_Proto::BatchInsert_REP *return_data,
+                                                xstore::MemoryPool::Clock::time_point pickup = xstore::MemoryPool::Clock::now());
+        [[nodiscard]] bool RangeInsertFromWire(const char *request, size_t size, XStore_Proto::RangeInsert_REP *return_data,
+                                                xstore::MemoryPool::Clock::time_point pickup = xstore::MemoryPool::Clock::now());
 
         // RANGE QUERY (streamed, wire-format encode -- the only RangeQuery
         // path; the network server is the only production caller. Never
@@ -1493,16 +1504,23 @@ class XStore {
 
         // Shared body of BatchInsert and RangeInsert (identical semantics; the
         // two RPCs differ only in proto message types and the log/status tag
-        // `op`, e.g. "BATCH INSERT"). Defined in XStore_Internal.h.
+        // `op`, e.g. "BATCH INSERT"). Defined in XStore_Internal.h. `deadline`
+        // is the memory pool's wait limit (see MultiRowInsertRows) -- forever
+        // by default, same as before the memory guard existed.
         template <typename Req, typename Rep>
-        void MultiRowInsert(Req *proto_from_client, Rep *return_data, const char *op);
+        void MultiRowInsert(Req *proto_from_client, Rep *return_data, const char *op,
+                             xstore::MemoryPool::Clock::time_point deadline = xstore::MemoryPool::Clock::time_point::max());
         // MultiRowInsert's body over any source of rows (ParsedRows / WireRows); false = a row could not be read and nothing was done.
+        // `wire_bytes` is the received message's size (or its re-serialized equivalent for the parsed path), one term of the
+        // memory estimate reserved from the process-wide xstore::MemoryPool before any record is built.
         template <typename Rows, typename Rep>
         bool MultiRowInsertRows(Rows &rows, const std::string &requested_db_name, XStore_Proto::WalDurabilityMode durability_mode,
-                                Rep *return_data, const char *op);
+                                Rep *return_data, const char *op, xstore::MemoryPool::Clock::time_point deadline, size_t wire_bytes);
         // BatchInsertFromWire / RangeInsertFromWire: `envelope_tag` is the Request field (BatchInsert 8, RangeInsert 11) as a tag byte.
+        // `pickup` is when the caller received the request's bytes, used to turn a scanned timeoutMs into a deadline.
         template <typename Rep>
-        bool InsertFromWire(const char *request, size_t size, uint8_t envelope_tag, Rep *return_data, const char *op);
+        bool InsertFromWire(const char *request, size_t size, uint8_t envelope_tag, Rep *return_data, const char *op,
+                             xstore::MemoryPool::Clock::time_point pickup);
         // MultiRowInsert's rows accessor: resolved by overload at compile time, inlines to the generated mutable_*_data().
         static google::protobuf::RepeatedPtrField<XStore_Proto::BatchInsert_DATA>& InsertRows(XStore_Proto::BatchInsert_REQ *req) { return *req->mutable_batchinsert_data(); }
         static google::protobuf::RepeatedPtrField<XStore_Proto::RangeInsert_DATA>& InsertRows(XStore_Proto::RangeInsert_REQ *req) { return *req->mutable_rangeinsert_data(); }

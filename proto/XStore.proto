@@ -461,6 +461,12 @@ message Request {
     FindByValue_REQ findbyvalue = 26;
     FindByPattern_REQ findbypattern = 27;
   }
+  // Client's remaining patience for this call, filled from XStoreClient's timeout_ms when >= 0 (0 = none sent).
+  // The server turns this into a deadline when a worker picks the request up: a request whose deadline has
+  // already passed is abandoned unstarted, and the deadline doubles as the memory-pool wait limit.
+  // Field 50, not the more obvious 100: XStoreInsertUnifyTest's WireDeclinesAnExtraFieldAfterTheEnvelope already
+  // uses a literal field-100 varint as its "the scan does not recognise this" fixture.
+  uint32 timeoutMs = 50;
 }
 
 // ======== RESPONSE section ========

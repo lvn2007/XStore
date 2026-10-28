@@ -206,9 +206,13 @@ private:
 // field by overload, so each instantiation is the same code the two
 // hand-written copies were.
 template <typename Req, typename Rep>
-void XStore::MultiRowInsert(Req *proto_from_client, Rep *return_data, const char *op) {
+void XStore::MultiRowInsert(Req *proto_from_client, Rep *return_data, const char *op, xstore::MemoryPool::Clock::time_point deadline) {
     ParsedRows<typename std::remove_reference_t<decltype(InsertRows(proto_from_client))>::value_type> rows(InsertRows(proto_from_client));
-    (void)MultiRowInsertRows(rows, proto_from_client->dbname(), proto_from_client->durabilitymode(), return_data, op);
+    // ByteSizeLong() is cached from the parse (or recomputed cheaply): the closest thing to "the received message's
+    // size" available once a request has already gone through the object-tree parse, for the "message bytes" term
+    // of the memory estimate below.
+    (void)MultiRowInsertRows(rows, proto_from_client->dbname(), proto_from_client->durabilitymode(), return_data, op, deadline,
+                              proto_from_client->ByteSizeLong());
 }
 
 // The body of MultiRowInsert over any source of rows (ParsedRows above, or WireRows for a request still in its received bytes).
@@ -217,7 +221,7 @@ void XStore::MultiRowInsert(Req *proto_from_client, Rep *return_data, const char
 // which fails such a request when it parses it, before any effect, exactly as it always did. true = handled (the reply is set).
 template <typename Rows, typename Rep>
 bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name, XStore_Proto::WalDurabilityMode durability_mode,
-                                Rep *return_data, const char *op) {
+                                Rep *return_data, const char *op, xstore::MemoryPool::Clock::time_point deadline, size_t wire_bytes) {
     if (RejectInsertIfShutDown(return_data->mutable_insertstatus(), op)) return true;
     // Ensure DB Name string is all capitalized
     std::string db_name = requested_db_name;
@@ -236,6 +240,43 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
     if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
         std::string err_msg = fmt::format("[{}] [DB: {}] - DB does not exist", op, db_name);
         SetTaggedStatus(return_data->mutable_insertstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return true;
+    }
+
+    const int row_count = rows.Size();
+
+    // Memory guard (owner decision 2026-10-28): reserve an estimate of this request's in-flight memory from the
+    // process-wide pool BEFORE building anything -- a request the pool has no room for (or whose client has
+    // already given up, see `deadline`) is rejected/abandoned here instead of running the server out of memory.
+    // One pass over every row's field count and byte length also finds `widest` (the widest ACCEPTED row, used
+    // further down to grow the index width) and `total_fields`, so it is not a second scan later.
+    // Estimate: rows * (8 [timestamp] + row_length [stored bytes]) + total_fields * 40 (ZoneMapObservation 24 B +
+    // CatIdxBloomValue 16 B per observed column) + wire_bytes (the received message, or its parsed-tree
+    // equivalent) + rows * 64 (misc per-row vector/allocator overhead) -- a rough budget, not an exact accounting.
+    // `memory_lease` is handler-scope only, released by RAII when this function returns: an ASYNC backlog is NOT
+    // covered by it (that needs a WalRecord-owned lease -- the owner has not approved touching WalRecord or the
+    // WAL writer loop for this, see docs/superpowers/specs/2026-10-28-memory-guard-handoff.md item 5).
+    int widest = 0;
+    uint64_t total_fields = 0;
+    for (int i = 0; i < row_count; i++) {
+        const int fields = rows.FieldCount(i);
+        total_fields += static_cast<uint64_t>(fields);
+        if (fields > widest && rows.RowBytes(i) <= static_cast<size_t>(cfg_struct.rowlength())) {
+            widest = fields;
+        }
+    }
+    const uint64_t memory_estimate = static_cast<uint64_t>(row_count) * (8 + static_cast<uint64_t>(cfg_struct.rowlength()))
+                                    + total_fields * 40 + static_cast<uint64_t>(wire_bytes) + static_cast<uint64_t>(row_count) * 64;
+    std::shared_ptr<xstore::MemoryLease> memory_lease;
+    const xstore::MemoryPool::Result pool_result = xstore::MemoryPool::Instance().Acquire(memory_estimate, deadline, memory_lease);
+    if (pool_result != xstore::MemoryPool::Result::kGranted) {
+        const char *why = pool_result == xstore::MemoryPool::Result::kTooLarge
+                              ? "larger than the server's whole memory pool"
+                              : "the client's deadline passed while waiting for free memory";
+        std::string err_msg = fmt::format("[{}] [DB: {}] - rejected: {} (~{} bytes estimated, pool limit {} bytes)",
+                                           op, db_name, why, memory_estimate, xstore::MemoryPool::Instance().Limit());
+        SetTaggedStatus(return_data->mutable_insertstatus(), "[ERROR] ", err_msg);
         spdlog::warn(err_msg);
         return true;
     }
@@ -261,7 +302,6 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
     // TimeStruct's [FirstEpoch, LastEpoch] window via one comparison
     // instead of rerunning the full calendar decomposition on every row.
     // Returns false at the first row older than its predecessor.
-    const int row_count = rows.Size();
     auto bucket_ascending_rows = [&]() -> bool {
         bool have_window = false;
         unsigned short int curr_year = 0;
@@ -297,18 +337,11 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
     bool any_sync_failed = false;
     bool any_overloaded = false;   // a SYNC group failed because the WAL ring was full
 
-    // The widest ACCEPTED row of the whole request, found in one pass (not per year-bucket group, not per row). The index width
-    // is grown to it (MaybeGrowColumnCount below) BEFORE any WalRecord/zone-map file is created for it -- i.e. before the first
-    // record is enqueued -- so a fresh DB's first batch is born at its true width instead of staying at the floor until a restart
-    // picks up the grown column count.
-    int widest = 0;
-    for (int i = 0; i < row_count; i++) {
-        // Rejected oversized rows must not grow the persisted width.
-        const int fields = rows.FieldCount(i);
-        if (fields > widest && rows.RowBytes(i) <= static_cast<size_t>(cfg_struct.rowlength())) {
-            widest = fields;
-        }
-    }
+    // `widest` (the widest ACCEPTED row of the whole request) was already found above, together with
+    // `total_fields` for the memory estimate -- not recomputed here. The index width is grown to it
+    // (MaybeGrowColumnCount below) BEFORE any WalRecord/zone-map file is created for it -- i.e. before the first
+    // record is enqueued -- so a fresh DB's first batch is born at its true width instead of staying at the floor
+    // until a restart picks up the grown column count.
 
     // Build the record of every year group first (no side effect yet), then grow the width and enqueue them.
     std::vector<WalRecord> records;
@@ -362,6 +395,11 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
         records.push_back(std::move(record));
     }
 
+    // Every record's bytes (rows, zone-map/catidx observations) are now actually allocated, so the OS's own memory
+    // figure already reflects them -- the lease stops being counted as "pending" (still charged against the
+    // pool's own total, released in full when this function returns).
+    memory_lease->MarkResident();
+
     MaybeGrowColumnCount(db_name, db_base_path_str, widest);
 
     for (WalRecord &record : records) {
@@ -371,6 +409,9 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
         // Everything else (SYNC/ASYNC) hands off to the WAL: EnqueueWalRecord
         // blocks until durable+applied for SYNC, returns immediately after
         // the lock-free enqueue for ASYNC.
+        // An ASYNC record outlives this call (acknowledged before the writer has it), so it carries the memory lease until
+        // the writer clears it; SYNC/BYPASS callers wait here, the handler-scope lease already covers them.
+        if (durability_mode == XStore_Proto::ASYNC) record.memory_lease = memory_lease;
         bool ok = (durability_mode == XStore_Proto::BYPASS)
             ? ApplyWalRecord(record)
             : EnqueueWalRecord(std::move(record), &any_overloaded);

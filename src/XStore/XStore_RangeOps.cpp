@@ -14,8 +14,9 @@
 using namespace XStoreWireEncode;
 
 // RANGE INSERT -- shared body with BatchInsert, see MultiRowInsert in XStore_Internal.h.
-void XStore::RangeInsert(XStore_Proto::RangeInsert_REQ *proto_from_client, XStore_Proto::RangeInsert_REP *return_data) {
-    MultiRowInsert(proto_from_client, return_data, "RANGE INSERT");
+void XStore::RangeInsert(XStore_Proto::RangeInsert_REQ *proto_from_client, XStore_Proto::RangeInsert_REP *return_data,
+                          xstore::MemoryPool::Clock::time_point deadline) {
+    MultiRowInsert(proto_from_client, return_data, "RANGE INSERT", deadline);
 }
 
 // RANGE QUERY (streamed) -- see XStore.h's declaration comment for the

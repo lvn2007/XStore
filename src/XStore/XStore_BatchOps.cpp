@@ -17,8 +17,9 @@
 using namespace XStoreWireEncode;
 
 // BATCH INSERT -- shared body with RangeInsert, see MultiRowInsert in XStore_Internal.h.
-void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStore_Proto::BatchInsert_REP *return_data) {
-    MultiRowInsert(proto_from_client, return_data, "BATCH INSERT");
+void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStore_Proto::BatchInsert_REP *return_data,
+                          xstore::MemoryPool::Clock::time_point deadline) {
+    MultiRowInsert(proto_from_client, return_data, "BATCH INSERT", deadline);
 }
 
 // BATCH INSERT / RANGE INSERT straight from the received bytes -- see the declaration in XStore.h for the contract.
@@ -30,7 +31,9 @@ void XStore::BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStor
 // the rows are parsed later, one at a time, into ONE reused RowData (WireRows::AppendTo), so no object tree of the whole request
 // exists. Anything the scan does not recognise (a field it does not know, a singular field twice, a non-ASCII DB name, broken
 // framing, a row that is not a plain run of FData entries) makes it return false and the caller uses the parsed path, so the
-// behaviour for such input, including failing it, is the old code's.
+// behaviour for such input, including failing it, is the old code's. The ONE exception is Request.timeoutMs (field 50, varint):
+// a single well-formed trailing occurrence of it, and nothing else, is read out rather than declined -- see the 2026-10-28
+// memory-guard handoff item 4.
 namespace {
 
 struct WireRef {
@@ -91,22 +94,33 @@ bool ScanData(const uint8_t *base, const uint8_t *p, const uint8_t *end, WireRef
 }
 
 bool ScanInsertRequest(const char *request, size_t size, uint8_t envelope_tag, std::string &db_name,
-                       XStore_Proto::WalDurabilityMode &mode, std::vector<WireRef> &refs) {
+                       XStore_Proto::WalDurabilityMode &mode, std::vector<WireRef> &refs, uint32_t &timeout_ms) {
+    timeout_ms = 0;
     if (size < 2 || size > static_cast<size_t>(std::numeric_limits<int>::max())) return false;
     const uint8_t *base = reinterpret_cast<const uint8_t *>(request);
     const uint8_t *p = base, *end = base + size;
     if (*p++ != envelope_tag) return false;
     uint64_t body_length = 0;
-    if (!ReadVarint(p, end, body_length) || body_length != static_cast<uint64_t>(end - p)) return false;   // the envelope is the whole message
-    bool seen_rtype = false, seen_name = false, seen_mode = false;
-    while (p < end) {
+    if (!ReadVarint(p, end, body_length) || body_length > static_cast<uint64_t>(end - p)) return false;
+    const uint8_t *submsg_end = p + body_length;
+    // Everything after the one insert submessage must be nothing, or exactly one trailing timeoutMs (Request field
+    // 50, varint, tag byte (50<<3)|0 = 400): any other trailing bytes decline, same as any other field this scan
+    // does not recognise.
+    if (submsg_end != end) {
+        const uint8_t *q = submsg_end;
         uint64_t tag = 0, value = 0;
-        if (!ReadVarint(p, end, tag)) return false;
+        if (!ReadVarint(q, end, tag) || tag != 400 || !ReadVarint(q, end, value) || value > 0xFFFFFFFFULL || q != end) return false;
+        timeout_ms = static_cast<uint32_t>(value);
+    }
+    bool seen_rtype = false, seen_name = false, seen_mode = false;
+    while (p < submsg_end) {
+        uint64_t tag = 0, value = 0;
+        if (!ReadVarint(p, submsg_end, tag)) return false;
         if (tag == 0x08) {   // RType: not used by the insert, only checked to be a lone varint
-            if (seen_rtype || !ReadVarint(p, end, value)) return false;
+            if (seen_rtype || !ReadVarint(p, submsg_end, value)) return false;
             seen_rtype = true;
         } else if (tag == 0x12) {   // dbName
-            if (seen_name || !ReadVarint(p, end, value) || value > static_cast<uint64_t>(end - p)) return false;
+            if (seen_name || !ReadVarint(p, submsg_end, value) || value > static_cast<uint64_t>(submsg_end - p)) return false;
             seen_name = true;
             // proto3 strings are validated as UTF-8 when parsed; plain ASCII is trivially valid, anything else is left to the parsed path.
             for (uint64_t i = 0; i < value; ++i) {
@@ -115,13 +129,13 @@ bool ScanInsertRequest(const char *request, size_t size, uint8_t envelope_tag, s
             db_name.assign(reinterpret_cast<const char *>(p), static_cast<size_t>(value));
             p += value;
         } else if (tag == 0x1A) {   // one Data entry
-            if (!ReadVarint(p, end, value) || value > static_cast<uint64_t>(end - p)) return false;
+            if (!ReadVarint(p, submsg_end, value) || value > static_cast<uint64_t>(submsg_end - p)) return false;
             WireRef ref;
             if (!ScanData(base, p, p + value, ref)) return false;
             refs.push_back(ref);
             p += value;
         } else if (tag == 0x20) {   // durabilityMode
-            if (seen_mode || !ReadVarint(p, end, value) || value > 0x7FFFFFFF || !XStore_Proto::WalDurabilityMode_IsValid(static_cast<int>(value))) return false;
+            if (seen_mode || !ReadVarint(p, submsg_end, value) || value > 0x7FFFFFFF || !XStore_Proto::WalDurabilityMode_IsValid(static_cast<int>(value))) return false;
             seen_mode = true;
             mode = static_cast<XStore_Proto::WalDurabilityMode>(value);
         } else {
@@ -167,21 +181,33 @@ private:
 }  // namespace
 
 template <typename Rep>
-bool XStore::InsertFromWire(const char *request, size_t size, uint8_t envelope_tag, Rep *return_data, const char *op) {
+bool XStore::InsertFromWire(const char *request, size_t size, uint8_t envelope_tag, Rep *return_data, const char *op,
+                            xstore::MemoryPool::Clock::time_point pickup) {
     std::string db_name;
     XStore_Proto::WalDurabilityMode mode = XStore_Proto::ASYNC;   // the proto default when the field is absent
     std::vector<WireRef> refs;
-    if (!ScanInsertRequest(request, size, envelope_tag, db_name, mode, refs)) return false;
+    uint32_t timeout_ms = 0;
+    if (!ScanInsertRequest(request, size, envelope_tag, db_name, mode, refs, timeout_ms)) return false;
+    const auto deadline = timeout_ms > 0 ? pickup + std::chrono::milliseconds(timeout_ms) : xstore::MemoryPool::Clock::time_point::max();
+    if (timeout_ms > 0 && xstore::MemoryPool::Clock::now() >= deadline) {
+        // The client had already given up by the time this request's bytes were picked up: handled (a reply is
+        // still produced), but nothing is read any further, parsed, or enqueued.
+        SetTaggedStatus(return_data->mutable_insertstatus(), "[ERROR] ",
+                         fmt::format("[{}] - abandoned: the client's {} ms deadline had already passed", op, timeout_ms));
+        return true;
+    }
     WireRows rows(request, std::move(refs));
-    return MultiRowInsertRows(rows, db_name, mode, return_data, op);
+    return MultiRowInsertRows(rows, db_name, mode, return_data, op, deadline, size);
 }
 
-bool XStore::BatchInsertFromWire(const char *request, size_t size, XStore_Proto::BatchInsert_REP *return_data) {
-    return InsertFromWire(request, size, /*Request.batchInsert = 8: (8 << 3) | 2*/ 0x42, return_data, "BATCH INSERT");
+bool XStore::BatchInsertFromWire(const char *request, size_t size, XStore_Proto::BatchInsert_REP *return_data,
+                                  xstore::MemoryPool::Clock::time_point pickup) {
+    return InsertFromWire(request, size, /*Request.batchInsert = 8: (8 << 3) | 2*/ 0x42, return_data, "BATCH INSERT", pickup);
 }
 
-bool XStore::RangeInsertFromWire(const char *request, size_t size, XStore_Proto::RangeInsert_REP *return_data) {
-    return InsertFromWire(request, size, /*Request.rangeInsert = 11: (11 << 3) | 2*/ 0x5A, return_data, "RANGE INSERT");
+bool XStore::RangeInsertFromWire(const char *request, size_t size, XStore_Proto::RangeInsert_REP *return_data,
+                                  xstore::MemoryPool::Clock::time_point pickup) {
+    return InsertFromWire(request, size, /*Request.rangeInsert = 11: (11 << 3) | 2*/ 0x5A, return_data, "RANGE INSERT", pickup);
 }
 
 namespace {

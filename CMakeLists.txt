@@ -452,6 +452,8 @@ add_library(xstore_core STATIC
         src/XStore/XStore_PreadPool.cpp
         include/XStore/XStore_PreadPool.h
         src/XStore/XStore_BatchOps.cpp
+        src/XStore/XStore_MemoryPool.cpp
+        include/XStore/XStore_MemoryPool.h
         src/XStore/XStore_RangeOps.cpp
         src/XStore/XStore_Aggregates.cpp
         src/XStore/XStore_PatternOps.cpp

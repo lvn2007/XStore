@@ -371,6 +371,11 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
         // and sent by SendProto before the loop came back around.
         arena.Reset();
 
+        // When this request's bytes were picked up: the moment a client-given-up deadline (Request.timeoutMs) is
+        // measured from, below and inside BatchInsertFromWire/RangeInsertFromWire -- captured once, before either
+        // path's own parsing, so parsing a huge request doesn't eat into the client's patience unnoticed.
+        const auto pickup = xstore::MemoryPool::Clock::now();
+
         //  BatchInsert / RangeInsert are first offered to the wire path: the rows are read from the received bytes one at a time
         //  instead of being parsed into an object tree of the whole request (about 6 KB per 1.4 KB row, alive until the reply,
         //  and the parse itself is ~2x slower). It declines (nothing done) anything but a plain well-formed insert, and that
@@ -383,11 +388,11 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                 try {
                     if (first_byte == 0x42) {
                         XStore_Proto::BatchInsert_REP rep;
-                        replied = my_store.BatchInsertFromWire(static_cast<const char *>(client_msg.data()), client_msg.size(), &rep);
+                        replied = my_store.BatchInsertFromWire(static_cast<const char *>(client_msg.data()), client_msg.size(), &rep, pickup);
                         if (replied) SendProto(writer, rep);
                     } else {
                         XStore_Proto::RangeInsert_REP rep;
-                        replied = my_store.RangeInsertFromWire(static_cast<const char *>(client_msg.data()), client_msg.size(), &rep);
+                        replied = my_store.RangeInsertFromWire(static_cast<const char *>(client_msg.data()), client_msg.size(), &rep, pickup);
                         if (replied) SendProto(writer, rep);
                     }
                     if (replied) writer.Finish();
@@ -515,8 +520,10 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                     // repeated FData, was parsed straight into arena memory
                     // above with no extra work needed here.
                     auto *req = client_request->mutable_batchinsert();
+                    const uint32_t timeout_ms = client_request->timeoutms();
+                    const auto deadline = timeout_ms > 0 ? pickup + std::chrono::milliseconds(timeout_ms) : xstore::MemoryPool::Clock::time_point::max();
                     XStore_Proto::BatchInsert_REP rep;
-                    my_store.BatchInsert(req, &rep);
+                    my_store.BatchInsert(req, &rep, deadline);
                     SendProto(writer, rep);
                     break;
                 }
@@ -553,8 +560,10 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                     // response (RangeInsert_REP) is just a status string with
                     // nothing to arena.
                     auto *req = client_request->mutable_rangeinsert();   // non-const: RangeInsert sorts an unsorted request in place
+                    const uint32_t timeout_ms = client_request->timeoutms();
+                    const auto deadline = timeout_ms > 0 ? pickup + std::chrono::milliseconds(timeout_ms) : xstore::MemoryPool::Clock::time_point::max();
                     XStore_Proto::RangeInsert_REP rep;
-                    my_store.RangeInsert(req, &rep);
+                    my_store.RangeInsert(req, &rep, deadline);
                     SendProto(writer, rep);
                     break;
                 }

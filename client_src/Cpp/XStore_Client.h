@@ -136,13 +136,20 @@ class XStoreClient {
   // threads to begin with.
   std::vector<zmq::message_t> recv_buf;
 
+  // This client's own send/recv timeout (ctor/Reconnect's timeout_ms); -1 = wait forever. Filled into every
+  // Request's timeoutMs field (clamped to uint32, 0 = not sent) so the server can abandon a request this socket
+  // would already have given up waiting for, instead of a worker blocking on it (or the server's memory pool)
+  // forever. A plain member, not thread_local: this client's REQ socket is already single-threaded use only.
+  int timeout_ms_ = -1;
+
   // Every RPC is: serialize request, blocking send, blocking recv, parse
   // reply. Sharing that here means the 17 request types can't drift out of
   // sync with each other the way copy-pasted send/recv blocks do. ToServer
   // is always the Request envelope -- the oneof case tells the server which
   // payload it's holding, so it only has to parse the wire bytes once.
   template <typename RepT>
-  RepT SendRecv(const XStore_Proto::Request &to_server) {
+  RepT SendRecv(XStore_Proto::Request &to_server) {
+      if (timeout_ms_ >= 0) to_server.set_timeoutms(static_cast<uint32_t>(timeout_ms_));
       size_t byte_size = to_server.ByteSizeLong();
       zmq::message_t z_out(byte_size);
       to_server.SerializeToArray(z_out.data(), byte_size);
@@ -185,6 +192,7 @@ class XStoreClient {
   // clients that may never send a request) skip it.
   XStoreClient(std::string_view server_addr, std::string_view server_port, int timeout_ms = -1,
                bool warmup_on_init = true, std::optional<XStoreCurveClientAuth> curve_auth = std::nullopt) {
+      timeout_ms_ = timeout_ms;
       sock.set(zmq::sockopt::rcvtimeo, timeout_ms);
       sock.set(zmq::sockopt::sndtimeo, timeout_ms);
       sock.set(zmq::sockopt::linger, 0);
@@ -217,6 +225,7 @@ class XStoreClient {
   // catching a timeout exception from any RPC below before retrying.
   void Reconnect(std::string_view server_addr, std::string_view server_port, int timeout_ms = -1,
                  bool warmup_on_init = true, std::optional<XStoreCurveClientAuth> curve_auth = std::nullopt) {
+      timeout_ms_ = timeout_ms;
       sock = zmq::socket_t(ctx, zmq::socket_type::req);
       sock.set(zmq::sockopt::rcvtimeo, timeout_ms);
       sock.set(zmq::sockopt::sndtimeo, timeout_ms);

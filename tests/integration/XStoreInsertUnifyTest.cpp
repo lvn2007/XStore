@@ -5,10 +5,12 @@
 #include <gtest/gtest.h>
 #include "XStoreTestSupport.h"
 #include "include/XStore/XStore.h"
+#include "include/XStore/XStore_MemoryPool.h"
 #include "include/XStore/XStore_WalRing.h"
 #include <spdlog/fmt/fmt.h>
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -651,6 +653,93 @@ TEST_F(InsertUnifyTest, WireDeclinesARowInNonCanonicalEncoding) {
     const std::string non_canonical = std::string("\x0A\x89\x00\x09", 4) + std::string(8, '\x11');
     const std::string body = LenField(2, kBatchDb) + RawData(kBoundarySeconds + 1, non_canonical) + VarintField(4, XStore_Proto::SYNC);
     ExpectDeclinedAndUntouched(store, kBatchDb, RawBatchRequest(body));
+}
+
+// --- the Request envelope's timeoutMs field (50): a trailing field after the one insert submessage is otherwise
+// declined (WireDeclinesAnExtraFieldAfterTheEnvelope above, which deliberately uses field 100, not 50), but this
+// one specific field is read, not declined -- see docs/superpowers/specs/2026-10-28-memory-guard-handoff.md item 4.
+
+TEST_F(InsertUnifyTest, WireAcceptsATrailingTimeoutMsField) {
+    XStore store;
+    xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
+    XStore_Proto::Request envelope;
+    *envelope.mutable_batchinsert() = BatchReq(kBatchDb, RowsFor({kBoundarySeconds + 1}), XStore_Proto::SYNC);
+    const std::string bytes = envelope.SerializeAsString() + VarintField(50, 5000);
+    XStore_Proto::BatchInsert_REP rep;
+    EXPECT_TRUE(store.BatchInsertFromWire(bytes.data(), bytes.size(), &rep));
+    EXPECT_NE(rep.insertstatus().find("Inserted 1 elements successfully"), std::string::npos) << rep.insertstatus();
+}
+
+TEST_F(InsertUnifyTest, WireDeclinesATimeoutMsFieldWithTheWrongWireType) {
+    XStore store;
+    xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
+    XStore_Proto::Request envelope;
+    *envelope.mutable_batchinsert() = BatchReq(kBatchDb, RowsFor({kBoundarySeconds + 1}), XStore_Proto::SYNC);
+    ExpectDeclinedAndUntouched(store, kBatchDb, envelope.SerializeAsString() + LenField(50, "x"));
+}
+
+TEST_F(InsertUnifyTest, WireDeclinesAnOversizedTimeoutMsValue) {
+    XStore store;
+    xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
+    XStore_Proto::Request envelope;
+    *envelope.mutable_batchinsert() = BatchReq(kBatchDb, RowsFor({kBoundarySeconds + 1}), XStore_Proto::SYNC);
+    ExpectDeclinedAndUntouched(store, kBatchDb, envelope.SerializeAsString() + VarintField(50, 1ULL << 33));
+}
+
+TEST_F(InsertUnifyTest, WireDeclinesTrailingBytesAfterATimeoutMsField) {
+    XStore store;
+    xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
+    XStore_Proto::Request envelope;
+    *envelope.mutable_batchinsert() = BatchReq(kBatchDb, RowsFor({kBoundarySeconds + 1}), XStore_Proto::SYNC);
+    ExpectDeclinedAndUntouched(store, kBatchDb, envelope.SerializeAsString() + VarintField(50, 10) + VarintField(50, 20));
+}
+
+// A request whose client had already given up by the time the server picked it up (an explicit `pickup` far in the
+// past, paired with a real timeoutMs): handled (a reply is still produced) but ABANDONED -- nothing enqueued, no
+// year file, same effect as a declined request.
+TEST_F(InsertUnifyTest, WireAbandonsARequestWhoseDeadlineHasAlreadyPassed) {
+    XStore store;
+    xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
+    XStore_Proto::Request envelope;
+    *envelope.mutable_batchinsert() = BatchReq(kBatchDb, RowsFor({kBoundarySeconds + 1}), XStore_Proto::SYNC);
+    const std::string bytes = envelope.SerializeAsString() + VarintField(50, 10);   // 10 ms of patience
+    XStore_Proto::BatchInsert_REP rep;
+    const auto long_ago = xstore::MemoryPool::Clock::now() - std::chrono::hours(1);
+    EXPECT_TRUE(store.BatchInsertFromWire(bytes.data(), bytes.size(), &rep, long_ago));
+    EXPECT_NE(rep.insertstatus().find("abandoned"), std::string::npos) << rep.insertstatus();
+    for (const std::string &name : FileNames(store.data_store_dir + "/" + kBatchDb)) {
+        EXPECT_TRUE(name.size() < 7 || name.compare(name.size() - 7, 7, ".XSTORE") != 0) << "an abandoned request created " << name;
+    }
+}
+
+// The handler-scope memory lease is released (SYNC completes synchronously, so this covers MarkResident too) by the
+// time the call returns: an ordinary insert leaves the process-wide pool exactly as it found it.
+TEST_F(InsertUnifyTest, OrdinaryInsertLeavesTheMemoryPoolFullyReleased) {
+    XStore store;
+    xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
+    xstore::MemoryPool &pool = xstore::MemoryPool::Instance();
+    const uint64_t used_before = pool.UsedBytes(), pending_before = pool.PendingBytes();
+    EXPECT_FALSE(Batch(store, kBatchDb, RowsFor({kBoundarySeconds + 1}), XStore_Proto::SYNC).empty());
+    EXPECT_EQ(pool.UsedBytes(), used_before);
+    EXPECT_EQ(pool.PendingBytes(), pending_before);
+}
+
+// An ASYNC insert is acknowledged before its record is written, so its memory reservation must follow the record into the WAL
+// writer: still counted while the writer holds the record (parked after taking it), fully released once the batch is done.
+TEST_F(InsertUnifyTest, AsyncInsertKeepsItsMemoryLeaseUntilTheWriterIsDone) {
+    XStore store;
+    xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
+    xstore::MemoryPool &pool = xstore::MemoryPool::Instance();
+    const uint64_t used_before = pool.UsedBytes();
+    walring::PauseWriterForTests(1);
+    EXPECT_FALSE(Batch(store, kBatchDb, RowsFor({kBoundarySeconds + 1}), XStore_Proto::ASYNC).empty());
+    for (int i = 0; i < 5000 && !walring::WriterParkedForTests(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ASSERT_TRUE(walring::WriterParkedForTests());
+    EXPECT_GT(pool.UsedBytes(), used_before) << "the reservation was returned while the writer still held the record";
+    walring::PauseWriterForTests(0);
+    for (int i = 0; i < 5000 && pool.UsedBytes() != used_before; i++) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    EXPECT_EQ(pool.UsedBytes(), used_before);
+    EXPECT_EQ(pool.PendingBytes(), 0u);
 }
 
 // Nothing is enqueued until every row has been read: a row that fails late (here an invalid UTF-8 string in the LAST year group) must not
