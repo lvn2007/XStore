@@ -523,6 +523,10 @@ void XStore::ProcessFileRangeCollectValues(const char* rows_base, unsigned long 
 
     if (total_rows == 0) return;
 
+    // One reservation for the most this call can add, so the vector is never regrown (each regrowth copies it all and briefly
+    // holds the old and the new copy). Pages not written to are not resident, so a mostly empty year costs address space only.
+    values_out.reserve(values_out.size() + total_rows);
+
     XStore_Proto::FData curr_data;
     ValueStruct temp_value;
 

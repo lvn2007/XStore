@@ -163,6 +163,10 @@ inline constexpr unsigned    ZMQ_HEAVY_REQUEST_RESERVED_WORKERS_PERCENT = 25;
 // the pool's 2 GB host reserve.
 inline constexpr size_t      OPERATION_LEASE_MIN_BYTES = 8u * 1024u * 1024u;
 
+// DistinctCount counts in a flat table (9 bytes per slot, at most half full) while it has at most this many distinct values,
+// then sorts in place instead: the table stays under about 20 MB, and a column of mostly unique values pays no hash memory.
+inline constexpr size_t      EXACT_DISTINCT_TABLE_MAX_DISTINCT = 1u << 20;
+
 // Graceful shutdown (ZmqServer::StartServer): after the ZMQ context is shut
 // down, how long to wait for the worker threads to finish their in-flight
 // request and exit before giving up. On timeout the process must NOT run

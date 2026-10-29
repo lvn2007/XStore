@@ -1,5 +1,6 @@
 #include "include/XStore/XStore_Internal.h"
 #include "include/XStore/XStore_WireEncode.h"
+#include "include/XStore/XStore_ExactAggregates.h"
 #include "include/DataStructs/TimeStruct.h"
 #include "include/DataStructs/FileRangeLock.h"
 #include "include/XStore/XStore_PreadPool.h"
@@ -205,12 +206,26 @@ struct CollectPartial {
     std::vector<double> values;
 };
 
-// Peak bytes held per value of the range by an exact aggregate: Percentile has the per-segment vectors, their merged copy and
-// growth slack, then sorts in place; DistinctCount adds an unordered_set node (about 40 B) per distinct value to the vector;
-// TopK a frequency-map node (about 40 B) and a 16 B ranked pair. The range length is the (upper-bound) count of values.
-constexpr uint64_t PERCENTILE_BYTES_PER_VALUE = 24;
-constexpr uint64_t DISTINCTCOUNT_BYTES_PER_VALUE = 48;
-constexpr uint64_t TOPK_BYTES_PER_VALUE = 64;
+// Takes the first non-empty partial over as it is and frees each partial once it is appended, so the segments' vectors and
+// the merged one are not all alive together.
+void MergeCollected(CollectPartial &acc, CollectPartial &partial) {
+    if (acc.values.empty()) {
+        acc.values = std::move(partial.values);
+    } else {
+        acc.values.insert(acc.values.end(), partial.values.begin(), partial.values.end());
+    }
+    std::vector<double>().swap(partial.values);
+}
+
+// Bytes held per value of the range by an exact aggregate (the range length is the upper-bound count of values; see
+// XStore_ExactAggregates.h for the reductions). Measured on Mystic over 12M unique values, beyond the mapped file pages: a
+// call holds 8 bytes per value in its one vector (Percentile 8.0, TopK 8.0, DistinctCount 14.3 with its flat table, which is
+// at most about 28 MB, hence 24 for the sizes just above the threshold). 16 covers a range over 4 or more years, whose
+// per-year vectors are merged (appending can briefly hold the merged vector twice). TopK adds 16 bytes per entry kept.
+constexpr uint64_t PERCENTILE_BYTES_PER_VALUE = 16;
+constexpr uint64_t DISTINCTCOUNT_BYTES_PER_VALUE = 24;
+constexpr uint64_t TOPK_BYTES_PER_VALUE = 16;
+constexpr uint64_t TOPK_BYTES_PER_ENTRY = 16;
 
 uint64_t AggregateWorkingSetEstimate(unsigned long long start_epoch_t, unsigned long long end_epoch_t, uint64_t bytes_per_value) {
     const uint64_t values = end_epoch_t - start_epoch_t + 1;
@@ -922,9 +937,7 @@ void XStore::PercentileAggregate(unsigned long long int start_epoch_t, unsigned 
             unsigned short /*year*/, unsigned long long /*first_row_index*/) {
             ProcessFileRangeCollectValues(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.values);
         },
-        [](CollectPartial &acc, CollectPartial &partial) {
-            acc.values.insert(acc.values.end(), partial.values.begin(), partial.values.end());
-        });
+        MergeCollected);
     std::vector<double> all_values = std::move(final_state.values);
 
     if (all_values.empty()) {
@@ -935,12 +948,7 @@ void XStore::PercentileAggregate(unsigned long long int start_epoch_t, unsigned 
 
     // Exact, PERCENTILE_CONT (linear-interpolation) semantics -- same
     // interpolation numpy.percentile/most SQL engines default to.
-    std::sort(all_values.begin(), all_values.end());
-    double rank = percentile * static_cast<double>(all_values.size() - 1);
-    size_t lower = static_cast<size_t>(std::floor(rank));
-    size_t upper = static_cast<size_t>(std::ceil(rank));
-    double frac = rank - static_cast<double>(lower);
-    double value = all_values[lower] + frac * (all_values[upper] - all_values[lower]);
+    const double value = xstore::ExactPercentile(all_values, percentile);
 
     return_data->set_opstatus("SUCCESS");
     return_data->set_value(value);
@@ -984,16 +992,13 @@ void XStore::DistinctCountAggregate(unsigned long long int start_epoch_t, unsign
             unsigned short /*year*/, unsigned long long /*first_row_index*/) {
             ProcessFileRangeCollectValues(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.values);
         },
-        [](CollectPartial &acc, CollectPartial &partial) {
-            acc.values.insert(acc.values.end(), partial.values.begin(), partial.values.end());
-        });
+        MergeCollected);
     std::vector<double> all_values = std::move(final_state.values);
 
     // An empty range is a legitimate count of zero, not an error -- same
     // "absence is a real answer" precedent ExistsAggregate uses for false.
-    std::unordered_set<double> distinct(all_values.begin(), all_values.end());
     return_data->set_opstatus("SUCCESS");
-    return_data->set_count(distinct.size());
+    return_data->set_count(xstore::ExactDistinctCount(all_values));
 }
 
 void XStore::TopKAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
@@ -1018,7 +1023,9 @@ void XStore::TopKAggregate(unsigned long long int start_epoch_t, unsigned long l
         return;
     }
 
-    const uint64_t working_set = AggregateWorkingSetEstimate(start_epoch_t, end_epoch_t, TOPK_BYTES_PER_VALUE);
+    uint64_t working_set = AggregateWorkingSetEstimate(start_epoch_t, end_epoch_t, TOPK_BYTES_PER_VALUE);
+    const uint64_t kept = std::min<uint64_t>(k, end_epoch_t - start_epoch_t + 1) * TOPK_BYTES_PER_ENTRY;
+    working_set = working_set > UINT64_MAX - kept ? UINT64_MAX : working_set + kept;
     std::shared_ptr<xstore::MemoryLease> working_set_lease;
     if (const xstore::MemoryPool::Result leased = xstore::AcquireOperationLease(working_set, deadline, working_set_lease);
         leased != xstore::MemoryPool::Result::kGranted) {
@@ -1034,29 +1041,19 @@ void XStore::TopKAggregate(unsigned long long int start_epoch_t, unsigned long l
             unsigned short /*year*/, unsigned long long /*first_row_index*/) {
             ProcessFileRangeCollectValues(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.values);
         },
-        [](CollectPartial &acc, CollectPartial &partial) {
-            acc.values.insert(acc.values.end(), partial.values.begin(), partial.values.end());
-        });
+        MergeCollected);
     std::vector<double> all_values = std::move(final_state.values);
-
-    std::unordered_map<double, uint64_t> freq;
-    for (double v : all_values) freq[v]++;
-
-    std::vector<std::pair<double, uint64_t>> ranked(freq.begin(), freq.end());
-    std::sort(ranked.begin(), ranked.end(), [](const auto &a, const auto &b) {
-        if (a.second != b.second) return a.second > b.second; // most-frequent first
-        return a.first < b.first; // tie-break: ascending value, for determinism
-    });
 
     // Fewer than k distinct values in range returns however many exist --
     // same as SQL's GROUP BY ... ORDER BY COUNT(*) DESC LIMIT k. An empty
     // range is SUCCESS with zero entries, same precedent as DistinctCount.
-    size_t result_count = std::min(static_cast<size_t>(k), ranked.size());
+    // Most frequent first, ties by ascending value, for determinism.
+    const std::vector<std::pair<double, uint64_t>> ranked = xstore::ExactTopK(all_values, k);
     return_data->set_opstatus("SUCCESS");
-    for (size_t i = 0; i < result_count; ++i) {
+    for (const auto &[value, count] : ranked) {
         XStore_Proto::TopKEntry *entry = return_data->add_entries();
-        entry->set_value(ranked[i].first);
-        entry->set_count(ranked[i].second);
+        entry->set_value(value);
+        entry->set_count(count);
     }
 }
 
