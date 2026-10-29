@@ -546,8 +546,10 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                     // permanent per-worker RSS floor. Multi-frame reply,
                     // reassembled transparently by the client library.
                     auto *req = client_request->mutable_batchquery();
+                    const uint32_t timeout_ms = client_request->timeoutms();
+                    const auto deadline = timeout_ms > 0 ? pickup + std::chrono::milliseconds(timeout_ms) : xstore::MemoryPool::Clock::time_point::max();
                     my_store.BatchQuery(req, /*sort_time=*/true, XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
-                        [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); });
+                        [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); }, deadline);
                     break;
                 }
 
@@ -590,9 +592,11 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                     // library into one logical RangeQuery_REP -- transparent to
                     // whatever called RangeQuery at the API level.
                     const auto &req = client_request->rangequery();
+                    const uint32_t timeout_ms = client_request->timeoutms();
+                    const auto deadline = timeout_ms > 0 ? pickup + std::chrono::milliseconds(timeout_ms) : xstore::MemoryPool::Clock::time_point::max();
                     my_store.RangeQuery(req.starttime(), req.endtime(), req.dbname(),
                         XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
-                        [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); });
+                        [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); }, deadline);
                     break;
                 }
 

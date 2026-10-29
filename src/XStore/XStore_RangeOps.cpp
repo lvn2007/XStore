@@ -29,7 +29,8 @@ void XStore::RangeInsert(XStore_Proto::RangeInsert_REQ *proto_from_client, XStor
 // UnaryQuery_REP/RowData/FData tree.
 void XStore::RangeQuery(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
                                  std::string_view db_name_view, size_t chunk_size_bytes,
-                                 const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk) {
+                                 const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk,
+                                 xstore::MemoryPool::Clock::time_point deadline) {
     const std::string &db_name = UpperCaseInto(db_name_view);
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
@@ -88,6 +89,17 @@ void XStore::RangeQuery(unsigned long long int start_epoch_t, unsigned long long
 
     if (std::filesystem::is_directory(db_base_path_str) == 0) {
         set_warning("[WARNING] ", fmt::format("[RANGE QUERY] [DB: {}] - DB does not exist", db_name));
+        finish(std::string());
+        return;
+    }
+
+    // The whole reply stays in memory until its last chunk is sent (a multipart reply is delivered atomically): reserve it
+    // from the process-wide pool, an upper bound, as the 2 GB guard above also is (a sparse range encodes smaller).
+    const uint64_t reply_estimate = (end_epoch_t - start_epoch_t + 1) * (static_cast<uint64_t>(cfg_struct.rowlength()) + 16);
+    std::shared_ptr<xstore::MemoryLease> reply_lease;
+    if (const xstore::MemoryPool::Result leased = xstore::AcquireQueryReplyLease(reply_estimate, deadline, reply_lease);
+        leased != xstore::MemoryPool::Result::kGranted) {
+        set_warning("[ERROR] ", xstore::QueryReplyRejection("RANGE QUERY", db_name, leased, reply_estimate));
         finish(std::string());
         return;
     }

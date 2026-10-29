@@ -224,7 +224,8 @@ constexpr size_t BATCH_LOCK_OFFSETS_KEEP = 65536;
 // row: EncodeQueryResponseEntry writes its bytes straight into chunk_buf
 // instead of building a UnaryQuery_REP/RowData/FData tree.
 void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, bool sort_time, size_t chunk_size_bytes,
-                                 const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk) {
+                                 const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk,
+                                 xstore::MemoryPool::Clock::time_point deadline) {
     std::string db_name = proto_from_client->dbname();
     ToUpperCase(db_name.begin(), db_name.end());
 
@@ -253,6 +254,17 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, bool so
 
     if ((proto_from_client->timestamp_size() * cfg_struct.rowlength()) > 2'000'000'000 || proto_from_client->timestamp_size() < 0) {
         set_warning("[WARNING] ", fmt::format("[BATCH QUERY] [DB: {}] - Query results is larger than 2GB or empty", db_name));
+        finish(std::string());
+        return;
+    }
+
+    // The whole reply stays in memory until its last chunk is sent (a multipart reply is delivered atomically): reserve it
+    // from the process-wide pool, an upper bound (a requested row that does not exist is left out of the reply).
+    const uint64_t reply_estimate = static_cast<uint64_t>(proto_from_client->timestamp_size()) * (static_cast<uint64_t>(cfg_struct.rowlength()) + 16);
+    std::shared_ptr<xstore::MemoryLease> reply_lease;
+    if (const xstore::MemoryPool::Result leased = xstore::AcquireQueryReplyLease(reply_estimate, deadline, reply_lease);
+        leased != xstore::MemoryPool::Result::kGranted) {
+        set_warning("[ERROR] ", xstore::QueryReplyRejection("BATCH QUERY", db_name, leased, reply_estimate));
         finish(std::string());
         return;
     }

@@ -534,7 +534,8 @@ class XStore {
         // proto_from_client non-const since sort_time=true sorts the
         // request's timestamps in place.
         void BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, bool sort_time, size_t chunk_size_bytes,
-                                 const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk);
+                                 const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk,
+                                 xstore::MemoryPool::Clock::time_point deadline = xstore::MemoryPool::Clock::time_point::max());
 
         // BATCH DELETE
         [[nodiscard]] XStore_Proto::BatchDelete_REP BatchDelete(XStore_Proto::BatchDelete_REQ *proto_from_client);
@@ -578,7 +579,8 @@ class XStore {
         // result, just reassembled instead of built directly.
         void RangeQuery(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
                                  std::string_view db_name, size_t chunk_size_bytes,
-                                 const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk);
+                                 const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk,
+                                 xstore::MemoryPool::Clock::time_point deadline = xstore::MemoryPool::Clock::time_point::max());
 
         // FIND BY VALUE (streamed, wire-format encode -- same chunking
         // contract as RangeQuery above, same RangeQuery_REP wire shape on

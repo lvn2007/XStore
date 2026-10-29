@@ -155,6 +155,13 @@ inline constexpr unsigned    ZMQ_ADAPTIVE_POLL_WINDOW_US = 50000;
 inline constexpr size_t      ZMQ_HEAVY_REQUEST_BYTES = 8u * 1024u * 1024u;
 inline constexpr unsigned    ZMQ_HEAVY_REQUEST_RESERVED_WORKERS_PERCENT = 25;
 
+// RangeQuery/BatchQuery replies (XStore_QueryLease.h): a streamed reply is held in server memory until its last chunk is
+// sent, so one estimated at this many bytes or more reserves that estimate from the memory pool while it streams; a smaller
+// one skips the pool (no mutex, no host-figure read on the hot path of small queries). The same 8 MB as the broker's heavy
+// request: the replies that bypass the pool can add up to at most workers x this (32 x 8 MB = 256 MB) unaccounted, well inside
+// the pool's 2 GB host reserve.
+inline constexpr size_t      QUERY_REPLY_LEASE_MIN_BYTES = 8u * 1024u * 1024u;
+
 // Graceful shutdown (ZmqServer::StartServer): after the ZMQ context is shut
 // down, how long to wait for the worker threads to finish their in-flight
 // request and exit before giving up. On timeout the process must NOT run
