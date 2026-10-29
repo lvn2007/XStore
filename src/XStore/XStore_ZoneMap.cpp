@@ -179,7 +179,8 @@ void ZoneMapFile::UpdateRowLocked(uint64_t row_index, const std::vector<ZoneMapO
     uint64_t block_index = BlockIndexForRow(row_index, header_.rows_per_block);
     CachedBlock &block = EnsureBlockLoaded(block_index);
     TouchLru(block_index);
-    FoldRowIntoBlock(block, row_index, observations.data(), observations.size(), pad_to);
+    const ZoneMapObservation *obs = observations.data();
+    FoldRowIntoBlock(block, row_index, observations.size(), pad_to, [obs](size_t i) { return obs[i]; });
     // Write-through: durable before this call returns, no dirty state left
     // behind for a crash to lose. See the Task 2 design note for why.
     // UpdateRow's signature is fire-and-forget (no failure-reaction path), so
@@ -222,7 +223,16 @@ bool ZoneMapFile::FoldBatchLocked(const ZoneMapFoldView &view, Keep keep) {
             TouchLru(b);
             block_index = b;
         }
-        FoldRowIntoBlock(*block, row_index, view.observations + obs_begin, view.obs_end[i] - obs_begin, view.pad_to);
+        const size_t count = view.obs_end[i] - obs_begin;
+        if (view.values == nullptr) {
+            const ZoneMapObservation *obs = view.observations + obs_begin;
+            FoldRowIntoBlock(*block, row_index, count, view.pad_to, [obs](size_t j) { return obs[j]; });
+            continue;
+        }
+        const double *values = view.values + obs_begin;
+        const uint8_t *numeric = view.numeric->data() + view.numeric_base + obs_begin;
+        FoldRowIntoBlock(*block, row_index, count, view.pad_to,
+                         [values, numeric](size_t j) { return ZoneMapObservation{static_cast<uint32_t>(j), values[j], numeric[j] != 0}; });
     }
     if (block != nullptr) all_written &= WriteBlock(block_index, *block);
     return all_written;
@@ -233,14 +243,15 @@ void ZoneMapFile::TouchLru(uint64_t block_index) {
     lru_order_.push_back(block_index);
 }
 
-void ZoneMapFile::FoldRowIntoBlock(CachedBlock &block, uint64_t row_index, const ZoneMapObservation *observations,
-                                   size_t count, uint32_t pad_to) {
+// Kept out of line, as it was before the getter: inlined into UpdateRows the fold cost ~25 % more CPU (Mystic perf, 2026-10-29).
+template <class Get>
+__attribute__((noinline)) void ZoneMapFile::FoldRowIntoBlock(CachedBlock &block, uint64_t row_index, size_t count, uint32_t pad_to, Get get) {
     std::vector<ZoneMapEntry> &entries = block.entries;
     if (count > 0 || (pad_to > 0 && header_.tracked_column_count > 0)) {
         block.fold_end = std::max(block.fold_end, row_index + 1);
     }
     for (size_t i = 0; i < count; ++i) {
-        const ZoneMapObservation &obs = observations[i];
+        const ZoneMapObservation obs = get(i);
         if (obs.column_idx >= header_.tracked_column_count) continue; // beyond cap -- not tracked, always safe
         ZoneMapEntry &e = entries[obs.column_idx];
         if (obs.is_numeric) {

@@ -1447,7 +1447,7 @@ TEST_F(XStoreZoneMapTest, SumAndVarianceOnColumnAboveGrownColumnCountReadRealDat
 //
 // Mechanism: ParseWalRecord rebuilds a WalRecord out of the WAL's own bytes,
 // and the WAL format deliberately doesn't carry a row's
-// ZoneMapObservations (derived state -- see WalRecord::zmap_obs in XStore.h). So
+// ZoneMapObservations (derived state -- see WalRecord::zmap_values in XStore.h). So
 // every WAL-replayed row reaches ApplyWalRecord with NO observations,
 // and its zmap.UpdateRow call is a no-op: replay puts the row back in the
 // DATA file and folds nothing into the zone map.
@@ -3581,6 +3581,42 @@ protected:
         }
     }
 };
+
+// A view over the WAL record's compact observations (values + numeric flags, the column implied by the position inside
+// the row) writes the same bytes as the dense view of the same observations. The compact arrays start inside a larger
+// record (junk before and after the run, numeric flags at an offset).
+TEST_F(ZoneMapFoldViewTest, CompactViewWritesIdenticalBytesToTheDenseView) {
+    for (const uint32_t pad_to : {0u, kWidth, kNewWidth + 2}) {
+        SCOPED_TRACE(pad_to);
+        std::vector<uint64_t> row_index;
+        std::vector<size_t> obs_end;
+        std::vector<ZoneMapObservation> dense;
+        std::vector<double> values(1 + rng() % 70, 1e9);      // junk before the run
+        std::vector<uint8_t> numeric(values.size(), 1);
+        const size_t begin = values.size();
+        for (int i = 0; i < 400; ++i) {
+            row_index.push_back(rng() % (4 * kRpb));
+            const uint32_t n = static_cast<uint32_t>(rng() % (kNewWidth + 4));   // 0 .. past both widths
+            for (uint32_t c = 0; c < n; ++c) {
+                const ZoneMapObservation obs{c, Value(), rng() % 5 != 0};
+                dense.push_back(obs);
+                values.push_back(obs.value);
+                numeric.push_back(obs.is_numeric);
+            }
+            obs_end.push_back(dense.size());
+        }
+        values.insert(values.end(), 3, -1e9);                 // junk after the run
+        numeric.insert(numeric.end(), 3, 1);
+        ZoneMapFoldView compact{row_index.data(), obs_end.data(), row_index.size(), nullptr, pad_to};
+        compact.values = values.data() + begin;
+        compact.numeric = &numeric;
+        compact.numeric_base = begin;
+        batched.UpdateRows(ZoneMapFoldView{row_index.data(), obs_end.data(), row_index.size(), dense.data(), pad_to});
+        viewed.UpdateRows(compact);
+        EXPECT_TRUE(WholeFile(Path("b.zmap")) == WholeFile(Path("c.zmap"))) << "compact view differs from the dense view";
+        EXPECT_GT(WholeFile(Path("b.zmap")).size(), sizeof(ZoneMapFileHeader) + kWidth * sizeof(ZoneMapEntry));
+    }
+}
 
 TEST_F(ZoneMapFoldViewTest, ViewBatchAndUpdateRowWriteIdenticalBytesWithAndWithoutAKeepOldRebuild) {
     // No rebuild: a run across blocks, pads 0 / at / past the width, out-of-order rows across blocks with a duplicate

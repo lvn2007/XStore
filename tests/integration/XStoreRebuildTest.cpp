@@ -354,10 +354,10 @@ TEST_F(XStoreRebuildTest, AppendRowObservationsMatchThePerRowReference) {
             const std::vector<ZoneMapObservation> want_zmap = RefZoneMapObservations(rows[i], width);
             ASSERT_EQ(record.obs_end[i].zmap_end - zmap_pos, want_zmap.size());
             for (size_t k = 0; k < want_zmap.size(); ++k) {
-                const ZoneMapObservation &got = record.zmap_obs[zmap_pos + k];
-                EXPECT_EQ(got.column_idx, want_zmap[k].column_idx) << "observation " << k;
-                EXPECT_EQ(got.is_numeric, want_zmap[k].is_numeric) << "observation " << k;
-                EXPECT_EQ(std::memcmp(&got.value, &want_zmap[k].value, sizeof(double)), 0) << "observation " << k;
+                // The column is implied by the position inside the row.
+                EXPECT_EQ(k, want_zmap[k].column_idx) << "observation " << k;
+                EXPECT_EQ(static_cast<bool>(record.zmap_numeric[zmap_pos + k]), want_zmap[k].is_numeric) << "observation " << k;
+                EXPECT_EQ(std::memcmp(&record.zmap_values[zmap_pos + k], &want_zmap[k].value, sizeof(double)), 0) << "observation " << k;
             }
             zmap_pos = record.obs_end[i].zmap_end;
 
@@ -378,9 +378,51 @@ TEST_F(XStoreRebuildTest, AppendRowObservationsMatchThePerRowReference) {
             }
             EXPECT_TRUE(got_catidx == want_catidx) << got_catidx.size() << " catidx values, want " << want_catidx.size();
         }
-        EXPECT_EQ(zmap_pos, record.zmap_obs.size());
+        EXPECT_EQ(zmap_pos, record.zmap_values.size());
+        EXPECT_EQ(zmap_pos, record.zmap_numeric.size());
         EXPECT_EQ(catidx_pos, record.catidx_vals.size());
     }
+}
+
+// The insert path encodes a column into a small inline buffer instead of a std::string (the append calls were ~3 % of the
+// server's CPU). Same function template, so the same bytes: pinned for every kind, a hole, an empty string, and strings and
+// bytes both side of the buffer's inline capacity (the bloom bits of an insert must equal those of the query's lookup).
+TEST_F(XStoreRebuildTest, CatIdxEncodeBufferBytesEqualTheStringEncodingForEveryKind) {
+    const std::vector<XStore_Proto::FData> values = {
+        FDouble(-2.5), FFloat(0.75f), FInt32(-123456), FInt64(int64_t{1} << 40), FUInt32(4000000000u),
+        FUInt64(0xFFFFFFFFFFFF0001ULL), FSInt32(-77), FSInt64(-(int64_t{1} << 50)), FFixed32(12345u),
+        FFixed64(0x123456789ULL), FSFixed32(-9), FSFixed64(-99999999999LL), FBool(true), FBool(false),
+        XStore_Proto::FData(), FString(""), FString("sso"), FString(std::string(CatIdxEncodeBuffer::kInlineBytes - 1, 'a')),
+        FString(std::string(CatIdxEncodeBuffer::kInlineBytes, 'b')), FString(std::string(CatIdxEncodeBuffer::kInlineBytes + 1, 'c')),
+        FString(std::string(5000, 'd')), FBytes(std::string("\x00\x01\x00\xff", 4)), FBytes(std::string(300, '\0'))};
+    CatIdxEncodeBuffer buf;   // reused, as AppendRow does
+    for (size_t i = 0; i < values.size(); ++i) {
+        SCOPED_TRACE("value " + std::to_string(i));
+        buf.clear();
+        AppendFDataForCatIdx(buf, values[i]);
+        const std::string want = EncodeFDataForCatIdx(values[i]);
+        EXPECT_TRUE(std::string(buf.data(), buf.size()) == want);
+        EXPECT_EQ(BloomValueOfEncoded(3, buf.data(), buf.size()).Bits()[0], BloomValueOfEncoded(3, want.data(), want.size()).Bits()[0]);
+    }
+}
+
+// The zone-map observations of a record cost 8 B + 1 flag byte per column (they were 24 B): this is what an ASYNC backlog
+// is charged for them, so it is pinned. ReserveRows must reserve exactly that, not an upper bound of the old size.
+TEST_F(XStoreRebuildTest, ZoneMapObservationsOfARecordTakeNineBytesPerColumnAtMost) {
+    XStore store;
+    constexpr size_t kRows = 50, kColumns = 16;
+    XStore::WalRecord record;
+    record.row_length = kRowLength;
+    record.tracked_column_count = kColumns;
+    record.ReserveRows(kRows, kColumns);
+    for (size_t i = 0; i < kRows; ++i) {
+        XStore_Proto::RowData row = MixedRow(i, kColumns);
+        ASSERT_LE(row.ByteSizeLong(), kRowLength);
+        record.AppendRow(store, 7000 + i, row);
+    }
+    ASSERT_EQ(record.zmap_values.size(), kRows * kColumns);
+    const size_t bytes = record.zmap_values.capacity() * sizeof(double) + record.zmap_numeric.capacity();
+    EXPECT_LE(bytes, kRows * kColumns * 9);
 }
 
 // End to end: rows inserted through both producers (BatchInsert and UnaryInsert, SYNC) and folded by the writer from

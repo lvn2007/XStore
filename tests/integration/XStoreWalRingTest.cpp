@@ -109,13 +109,13 @@ TEST(WalRingFormatTest, RecordV2RoundTripRejectsStaleLapAndBadCrc) {
     std::string rec = BuildRecordV2ForTest(/*lsn=*/5000, "DB1", /*row_length=*/8, {{10, "AAAAAAAA"}, {11, "BBBBBBBB"}});
     XStore::WalRecord out; size_t used = 0;
     // A reused record (replay loops reuse one): the parse must drop the previous record's observations and pad_to.
-    out.zmap_obs.push_back({0, 1.0, true}); out.catidx_vals.push_back(BloomValueOf(0, 1, 2)); out.obs_end.push_back({1, 1});
+    out.AddZoneMapObs(1.0, true); out.catidx_vals.push_back(BloomValueOf(0, 1, 2)); out.obs_end.push_back({1, 1});
     out.zone_map_pad_to = 64;
     EXPECT_EQ(XStore::ParseWalRecordV2(rec.data(), rec.size(), 5000, used, out), XStore::RingParse::kOk);
     EXPECT_EQ(used, rec.size()); EXPECT_EQ(out.row_count, 2u); EXPECT_EQ(out.db_name, "DB1");
     EXPECT_EQ(out.row_length, 8u);
     EXPECT_EQ(out.EpochAt(1), 11u); EXPECT_EQ(std::string(out.RowAt(1), out.row_length), "BBBBBBBB");
-    EXPECT_TRUE(out.zmap_obs.empty()); EXPECT_TRUE(out.catidx_vals.empty()); EXPECT_TRUE(out.obs_end.empty());
+    EXPECT_EQ(out.ZoneMapObsCount(), 0u); EXPECT_TRUE(out.catidx_vals.empty()); EXPECT_TRUE(out.obs_end.empty());
     EXPECT_EQ(out.zone_map_pad_to, 0u);
     EXPECT_EQ(XStore::ParseWalRecordV2(rec.data(), rec.size(), 5000 + 4096, used, out), XStore::RingParse::kEnd);  // stale lap
     EXPECT_EQ(XStore::ParseWalRecordV2(rec.data(), rec.size() - 1, 5000, used, out), XStore::RingParse::kEnd);     // torn tail
@@ -2705,7 +2705,7 @@ TEST_F(WalReplayTest, MalformedObservationsFailTheRecordBeforeAnyWrite) {
     good.db_base_path = db_base;
     good.zone_map_pad_to = good.tracked_column_count;
     for (size_t i = 1; i <= 2; ++i) {
-        good.zmap_obs.push_back({0, kValue, true});
+        good.AddZoneMapObs(kValue, true);
         good.catidx_vals.push_back(BloomValueOfEncoded(0, key.data(), key.size()));
         good.obs_end.push_back({i, good.catidx_vals.size()});
     }
@@ -2732,7 +2732,8 @@ TEST_F(WalReplayTest, MalformedObservationsFailTheRecordBeforeAnyWrite) {
     variant("one end for two rows", [](XStore::WalRecord &r) { r.obs_end.pop_back(); });
     variant("zone-map end past the array", [](XStore::WalRecord &r) { r.obs_end.back().zmap_end = 3; });
     variant("zone-map ends decreasing", [](XStore::WalRecord &r) { r.obs_end.front().zmap_end = 2; r.obs_end.back().zmap_end = 1; });
-    variant("zone-map observations past the last end", [](XStore::WalRecord &r) { r.zmap_obs.push_back({0, 1.0, true}); });
+    variant("zone-map observations past the last end", [](XStore::WalRecord &r) { r.AddZoneMapObs(1.0, true); });
+    variant("zone-map numeric flags out of step with the values", [](XStore::WalRecord &r) { r.zmap_numeric.push_back(true); });
     variant("catidx end past the values", [](XStore::WalRecord &r) { r.obs_end.back().catidx_end += 1; });
     variant("catidx ends decreasing", [](XStore::WalRecord &r) { r.obs_end.front().catidx_end = 2; r.obs_end.back().catidx_end = 1; });
     variant("catidx last end short of the values", [](XStore::WalRecord &r) { r.obs_end.back().catidx_end = 1; });
@@ -2853,7 +2854,7 @@ protected:
         EXPECT_EQ(used, bytes.size());
         ASSERT_EQ(record.row_count, rows.size());
         ASSERT_EQ(record.wire.size(), rows.size() * record.RowStride());
-        EXPECT_TRUE(record.obs_end.empty() && record.zmap_obs.empty() && record.catidx_vals.empty())
+        EXPECT_TRUE(record.obs_end.empty() && record.ZoneMapObsCount() == 0 && record.catidx_vals.empty())
             << "a replayed record carries no observations";
         EXPECT_EQ(record.zone_map_pad_to, 0u);
         for (size_t i = 0; i < rows.size(); ++i) {

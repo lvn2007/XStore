@@ -315,16 +315,19 @@ class XStore {
             // serialized bytes, not the RowData, to derive column values from. Applied by ApplyWalRecord itself,
             // after the row's real pwrite succeeds and under the same check -- never eagerly at enqueue time -- so the
             // indexes are never ahead of what is actually written, ASYNC included. Never part of the ring bytes.
-            // Row i covers zmap_obs [obs_end[i-1].zmap_end, obs_end[i].zmap_end) and catidx_vals
+            // Row i covers zmap_values [obs_end[i-1].zmap_end, obs_end[i].zmap_end) and catidx_vals
             // [obs_end[i-1].catidx_end, obs_end[i].catidx_end) (both 0 for i = 0).
-            // zmap_obs: the row's PRESENT columns [0, min(fielddata_size, tracked_column_count)), row-major.
-            std::vector<ZoneMapObservation> zmap_obs;
+            // Zone-map observations, row-major: the row's PRESENT columns [0, min(fielddata_size, tracked_column_count)).
+            // The column is the position inside the row, so a value costs 9 B (a ZoneMapObservation was 24 B).
+            // zmap_numeric[k] is 0 for a hole or a non-numeric FData (its value is 0).
+            std::vector<double> zmap_values;
+            std::vector<uint8_t> zmap_numeric;
             // catidx values, row-major, present-and-set columns only, already hashed into their bloom bit positions
             // (BloomValueOf) by the producer, so the writer's fold only sets bits.
             std::vector<CatIdxBloomValue> catidx_vals;
             // Empty (WAL replay: no observations) or exactly row_count entries.
             struct ObsEnd {
-                size_t zmap_end;     // into zmap_obs
+                size_t zmap_end;     // into zmap_values
                 size_t catidx_end;   // into catidx_vals
             };
             std::vector<ObsEnd> obs_end;
@@ -352,15 +355,21 @@ class XStore {
             const char *RowAt(size_t i) const { return wire.data() + i * RowStride() + sizeof(uint64_t); }
 
             // A WAL-replayed record: no observations, pad_to 0 (the record object is reused across a replay loop).
+            size_t ZoneMapObsCount() const { return zmap_values.size(); }
+            void AddZoneMapObs(double value, bool is_numeric) {
+                zmap_values.push_back(value);
+                zmap_numeric.push_back(is_numeric ? 1 : 0);
+            }
             void ClearObservations() {
-                zmap_obs.clear();
+                zmap_values.clear();
+                zmap_numeric.clear();
                 catidx_vals.clear();
                 obs_end.clear();
                 zone_map_pad_to = 0;
             }
 
             // Reserves for `rows` rows of at most `widest_fields` columns: exact for wire and obs_end, an upper bound
-            // for zmap_obs and catidx_vals (only rejected, narrower or unset-column rows leave slack). Defined in
+            // for zmap_values, zmap_numeric and catidx_vals (only rejected, narrower or unset-column rows leave slack). Defined in
             // XStore_Internal.h.
             void ReserveRows(size_t rows, size_t widest_fields);
             // The one producer step shared by UnaryInsert and MultiRowInsert: appends the row's zero-padded slot to
@@ -372,10 +381,10 @@ class XStore {
         };
 #if defined(__GLIBCXX__) && defined(__x86_64__) && (!defined(_GLIBCXX_USE_CXX11_ABI) || _GLIBCXX_USE_CXX11_ABI)
         // std::string is 32 bytes only in libstdc++ with the C++11 ABI; guard so a layout change is noticed. 208 = the
-        // old 120 with the rows vector (24 B) replaced by wire (32 B) + zmap_obs (24 B) + catidx_vals (24 B) + obs_end
+        // old 120 with the rows vector (24 B) replaced by wire (32 B) + zmap_values (24 B) + zmap_numeric (24 B) + catidx_vals (24 B) + obs_end
         // (24 B), plus zone_map_pad_to (4 B) and the 4 B of padding it leaves before wire (row_count fills the old
-        // padding after cfg_epoch), plus memory_lease (16 B). Paid once per record (moved twice), not per row.
-        static_assert(sizeof(WalRecord) == 224, "WalRecord layout changed: update this check deliberately");
+        // padding after cfg_epoch), plus memory_lease (16 B); 248 with zmap_numeric. Paid once per record (moved twice), not per row.
+        static_assert(sizeof(WalRecord) == 248, "WalRecord layout changed: update this check deliberately");
 #endif
 
         struct WalShard {
@@ -1703,7 +1712,7 @@ class XStore {
         // Why this has to exist at all: ParseWalRecord rebuilds a WalRecord
         // from the WAL's own bytes, and the WAL format deliberately does
         // NOT carry a row's ZoneMapObservations (they are derived state --
-        // see WalRecord::zmap_obs), so every replayed row reaches
+        // see WalRecord::zmap_values), so every replayed row reaches
         // ApplyWalRecord with NO observations and its
         // zmap.UpdateRow call is a no-op. Replay therefore puts rows back
         // into the data file while folding nothing into the zone map.

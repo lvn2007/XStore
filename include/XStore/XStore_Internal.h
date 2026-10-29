@@ -124,7 +124,8 @@ inline ZoneMapObservation XStore::ZoneMapObservationOf(XStore &store, const XSto
 inline void XStore::WalRecord::ReserveRows(size_t rows, size_t widest_fields) {
     const size_t columns = std::min<size_t>(tracked_column_count, widest_fields);
     wire.reserve(rows * RowStride());
-    zmap_obs.reserve(rows * columns);
+    zmap_values.reserve(rows * columns);
+    zmap_numeric.reserve(rows * columns);
     catidx_vals.reserve(rows * columns);
     obs_end.reserve(rows);
 }
@@ -157,17 +158,18 @@ inline void XStore::WalRecord::AppendRow(XStore &store, uint64_t epoch, const XS
     (void)data.SerializeWithCachedSizesToArray(reinterpret_cast<uint8_t *>(&wire[at + sizeof(uint64_t)]));
     // col < fielddata_size, and a column takes at least 2 of the row's u16 row_length bytes: it fits column_idx.
     const int tracked = std::min(static_cast<int>(tracked_column_count), data.fielddata_size());
-    thread_local std::string encoded;   // reused: no allocation per value once grown
+    CatIdxEncodeBuffer encoded;   // inline storage: no allocation, no out-of-line append per value
     for (int col = 0; col < tracked; ++col) {
         const XStore_Proto::FData &f_data = data.fielddata(col);
-        zmap_obs.push_back(ZoneMapObservationOf(store, f_data, static_cast<uint32_t>(col)));
+        const ZoneMapObservation obs = ZoneMapObservationOf(store, f_data, static_cast<uint32_t>(col));
+        AddZoneMapObs(obs.value, obs.is_numeric);
         if (f_data.oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
             encoded.clear();
             AppendFDataForCatIdx(encoded, f_data);
             catidx_vals.push_back(BloomValueOfEncoded(static_cast<uint32_t>(col), encoded.data(), encoded.size()));
         }
     }
-    obs_end.push_back({zmap_obs.size(), catidx_vals.size()});
+    obs_end.push_back({zmap_values.size(), catidx_vals.size()});
     ++row_count;
 }
 
@@ -251,7 +253,7 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
     // already given up, see `deadline`) is rejected/abandoned here instead of running the server out of memory.
     // One pass over every row's field count and byte length also finds `widest` (the widest ACCEPTED row, used
     // further down to grow the index width) and `total_fields`, so it is not a second scan later.
-    // Estimate: rows * (8 [timestamp] + row_length [stored bytes]) + total_fields * 40 (ZoneMapObservation 24 B +
+    // Estimate: rows * (8 [timestamp] + row_length [stored bytes]) + total_fields * 25 (zone-map value 8 B + 1 bit +
     // CatIdxBloomValue 16 B per observed column) + wire_bytes (the received message, or its parsed-tree
     // equivalent) + rows * 64 (misc per-row vector/allocator overhead) -- a rough budget, not an exact accounting.
     // `wire_bytes` is already in memory (the OS's figure has it), so it is passed as already-held: it counts against the pool
@@ -267,7 +269,7 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
         }
     }
     const uint64_t memory_estimate = static_cast<uint64_t>(row_count) * (8 + static_cast<uint64_t>(cfg_struct.rowlength()))
-                                    + total_fields * 40 + static_cast<uint64_t>(wire_bytes) + static_cast<uint64_t>(row_count) * 64;
+                                    + total_fields * 25 + static_cast<uint64_t>(wire_bytes) + static_cast<uint64_t>(row_count) * 64;
     std::shared_ptr<xstore::MemoryLease> memory_lease;
     const xstore::MemoryPool::Result pool_result = xstore::MemoryPool::Instance().Acquire(memory_estimate, deadline, memory_lease,
                                                                                                static_cast<uint64_t>(wire_bytes));

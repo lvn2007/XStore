@@ -240,19 +240,20 @@ enum class WalRecordKind : uint8_t { kRing, kLarge, kFail, kStale };
 // the values: a CatIdxBloomValue's bit positions are in range by construction, only BloomValueOf creates one), so
 // ApplyWalRecord's per-run reads can trust every index and a malformed record fails before any byte is written.
 bool ObservationsWellFormed(const XStore::WalRecord &record) {
-    if (record.obs_end.empty()) return record.zmap_obs.empty() && record.catidx_vals.empty();
+    if (record.zmap_numeric.size() != record.zmap_values.size()) return false;
+    if (record.obs_end.empty()) return record.zmap_values.empty() && record.catidx_vals.empty();
     if (record.obs_end.size() != record.row_count) return false;
     size_t zmap_prev = 0;
     size_t catidx_prev = 0;
     for (const XStore::WalRecord::ObsEnd &end : record.obs_end) {
-        if (end.zmap_end < zmap_prev || end.zmap_end > record.zmap_obs.size() || end.catidx_end < catidx_prev ||
+        if (end.zmap_end < zmap_prev || end.zmap_end > record.zmap_values.size() || end.catidx_end < catidx_prev ||
             end.catidx_end > record.catidx_vals.size()) {
             return false;
         }
         zmap_prev = end.zmap_end;
         catidx_prev = end.catidx_end;
     }
-    return zmap_prev == record.zmap_obs.size() && catidx_prev == record.catidx_vals.size();
+    return zmap_prev == record.zmap_values.size() && catidx_prev == record.catidx_vals.size();
 }
 
 } // namespace
@@ -274,7 +275,7 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
         spdlog::error("[WAL APPLY] [DB: {}] - malformed record ({} rows, {} wire bytes, {} observation ends, {} zone-map "
                       "observations, {} catidx values): not applied",
                       record_to_apply.db_name, row_count, record_to_apply.wire.size(), record_to_apply.obs_end.size(),
-                      record_to_apply.zmap_obs.size(), record_to_apply.catidx_vals.size());
+                      record_to_apply.zmap_values.size(), record_to_apply.catidx_vals.size());
         // A failed apply of a durable ring record still notes its file dirty (see XStore_WalCheckpoint.h), like
         // drop_stale below; the file is derived from the first epoch, which exists whenever the wire holds a row slot.
         if (record_to_apply.wire.size() >= sizeof(uint64_t)) {
@@ -333,7 +334,7 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
     // instead of eliminated.
     //
     // tracked_column_count comes off the RECORD, not the global default:
-    // it is the exact width this record's zmap_obs were built
+    // it is the exact width this record's zmap_values were built
     // at (captured alongside them at enqueue time, before the .CFG's
     // columnCount could move underneath), so the file this creates can
     // never claim to track more columns than were actually folded into it.
@@ -485,9 +486,12 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
                     catidx_value_end.push_back(0);
                 }
             }
-            zmap.UpdateRows(ZoneMapFoldView{run_row_index.data(), zmap_obs_end.data(), run_rows,
-                                            record_to_apply.zmap_obs.data() + zmap_begin,
-                                            has_obs ? record_to_apply.zone_map_pad_to : 0});   // one pad_to per record
+            ZoneMapFoldView zmap_view{run_row_index.data(), zmap_obs_end.data(), run_rows, nullptr,
+                                      has_obs ? record_to_apply.zone_map_pad_to : 0};   // one pad_to per record
+            zmap_view.values = record_to_apply.zmap_values.data() + zmap_begin;
+            zmap_view.numeric = &record_to_apply.zmap_numeric;
+            zmap_view.numeric_base = zmap_begin;
+            zmap.UpdateRows(zmap_view);
             catidx.UpdateRows(CatIdxFoldView{run_row_index.data(), catidx_value_end.data(), run_rows,
                                              record_to_apply.catidx_vals.data() + catidx_begin, catidx_width});
         }

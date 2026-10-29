@@ -105,6 +105,11 @@ struct ZoneMapFoldView {
     size_t rows = 0;
     const ZoneMapObservation *observations = nullptr;
     uint32_t pad_to = 0;
+    // Compact form (the WAL record's): when `values` is set, `observations` is ignored and observation j of a row is
+    // {column j, values[begin + j], (*numeric)[numeric_base + begin + j] != 0}, begin = the row's start in obs_end terms.
+    const double *values = nullptr;
+    const std::vector<uint8_t> *numeric = nullptr;
+    size_t numeric_base = 0;
 };
 
 // An owning ZoneMapFoldView a caller reuses across chunks (no allocation per row once the vectors have grown).
@@ -422,8 +427,9 @@ private:
     CachedBlock &EnsureBlockLoaded(uint64_t block_index);
     void UpdateRowLocked(uint64_t row_index, const std::vector<ZoneMapObservation> &observations, uint32_t pad_to);
     // The fold of one row into its (loaded) block, shared by UpdateRowLocked and RebuildFoldRows.
-    void FoldRowIntoBlock(CachedBlock &block, uint64_t row_index, const ZoneMapObservation *observations, size_t count,
-                          uint32_t pad_to);
+    // get(i) returns observation i of the row by value (the dense array element, or one built from the compact arrays).
+    template <class Get>
+    void FoldRowIntoBlock(CachedBlock &block, uint64_t row_index, size_t count, uint32_t pad_to, Get get);
     // The batch fold shared by UpdateRows and RebuildFoldRows: every row with keep(row) true. mutex_ held.
     template <class Keep>
     [[nodiscard]] bool FoldBatchLocked(const ZoneMapFoldView &view, Keep keep);

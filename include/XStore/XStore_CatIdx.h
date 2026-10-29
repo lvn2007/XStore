@@ -15,7 +15,45 @@
 // Appends the encoding to `out`: the insert path encodes into a reused
 // scratch buffer and hashes it there; EncodeFDataForCatIdx below wraps this one
 // implementation, so the two can never drift.
-inline void AppendFDataForCatIdx(std::string &out, const XStore_Proto::FData &f_data) {
+// A reusable encoding sink for the insert path: the tag and every scalar (<= 9 bytes) live in the inline array, so the
+// per-column appends compile to a few stores instead of out-of-line std::string::_M_append calls. A longer encoding
+// (string / bytes value) moves to a heap string and stays there until clear(). Interface = the three std::string calls
+// AppendFDataForCatIdx makes.
+class CatIdxEncodeBuffer {
+public:
+    static constexpr size_t kInlineBytes = 64;
+    void clear() { size_ = 0; heap_.clear(); spilled_ = false; }
+    [[nodiscard]] const char *data() const { return spilled_ ? heap_.data() : inline_; }
+    [[nodiscard]] size_t size() const { return size_; }
+    void push_back(char c) { append(&c, 1); }
+    void append(const std::string &s) { append(s.data(), s.size()); }
+    void append(const char *bytes, size_t len) {
+        if (!spilled_ && size_ + len <= kInlineBytes) {
+            std::memcpy(inline_ + size_, bytes, len);
+            size_ += len;
+            return;
+        }
+        Spill(bytes, len);
+    }
+
+private:
+    void Spill(const char *bytes, size_t len) {
+        if (!spilled_) {
+            heap_.assign(inline_, size_);
+            spilled_ = true;
+        }
+        heap_.append(bytes, len);
+        size_ += len;
+    }
+    char inline_[kInlineBytes];
+    size_t size_ = 0;
+    bool spilled_ = false;
+    std::string heap_;
+};
+
+// Out is std::string (EncodeFDataForCatIdx, the query side) or CatIdxEncodeBuffer (the insert path).
+template <class Out>
+inline void AppendFDataForCatIdx(Out &out, const XStore_Proto::FData &f_data) {
     auto case_id = f_data.oneOfData_case();
     out.push_back(static_cast<char>(static_cast<uint8_t>(case_id)));
 
