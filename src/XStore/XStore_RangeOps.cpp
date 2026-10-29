@@ -97,9 +97,9 @@ void XStore::RangeQuery(unsigned long long int start_epoch_t, unsigned long long
     // from the process-wide pool, an upper bound, as the 2 GB guard above also is (a sparse range encodes smaller).
     const uint64_t reply_estimate = (end_epoch_t - start_epoch_t + 1) * (static_cast<uint64_t>(cfg_struct.rowlength()) + 16);
     std::shared_ptr<xstore::MemoryLease> reply_lease;
-    if (const xstore::MemoryPool::Result leased = xstore::AcquireQueryReplyLease(reply_estimate, deadline, reply_lease);
+    if (const xstore::MemoryPool::Result leased = xstore::AcquireOperationLease(reply_estimate, deadline, reply_lease);
         leased != xstore::MemoryPool::Result::kGranted) {
-        set_warning("[ERROR] ", xstore::QueryReplyRejection("RANGE QUERY", db_name, leased, reply_estimate));
+        set_warning("[ERROR] ", xstore::OperationLeaseRejection("RANGE QUERY", db_name, leased, reply_estimate));
         finish(std::string());
         return;
     }

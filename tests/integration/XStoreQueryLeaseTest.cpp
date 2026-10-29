@@ -1,7 +1,8 @@
 // A streamed RangeQuery/BatchQuery reply is held in server memory until its last chunk is sent (ZMQ delivers a multipart reply
-// atomically), so a reply estimated at XStoreTunables::QUERY_REPLY_LEASE_MIN_BYTES or more reserves that estimate from the
-// process-wide MemoryPool for as long as it streams: it waits its turn when the pool is full, is rejected when its deadline passes,
-// and returns the reservation afterwards. Smaller replies never touch the pool.
+// atomically), and an exact aggregate (Percentile/DistinctCount/TopK) holds every value in its range, so such an operation
+// estimated at XStoreTunables::OPERATION_LEASE_MIN_BYTES or more reserves that estimate from the process-wide MemoryPool for as
+// long as it runs: it waits its turn when the pool is full, is rejected when its deadline passes, and returns the reservation
+// afterwards. Smaller ones never touch the pool.
 #include <gtest/gtest.h>
 #include "XStoreTestSupport.h"
 #include "include/XStore/XStore.h"
@@ -9,6 +10,7 @@
 #include "include/XStore/XStore_Tunables.h"
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <future>
 #include <memory>
 #include <string>
@@ -56,6 +58,22 @@ protected:
         XStore_Proto::RangeQuery_REP rep;
         rep.ParseFromString(buffer);
         return rep.querystatus();
+    }
+    // The opstatus of an exact aggregate over `rows` seconds (no data stored: only the status matters here).
+    std::string PercentileStatus(uint64_t rows, MemoryPool::Clock::time_point deadline) {
+        XStore_Proto::Percentile_REP rep;
+        store->PercentileAggregate(kBoundarySeconds, kBoundarySeconds + rows - 1, kDb, 0, 0.5, &rep, deadline);
+        return rep.opstatus();
+    }
+    std::string DistinctStatus(uint64_t rows, MemoryPool::Clock::time_point deadline) {
+        XStore_Proto::DistinctCount_REP rep;
+        store->DistinctCountAggregate(kBoundarySeconds, kBoundarySeconds + rows - 1, kDb, 0, &rep, deadline);
+        return rep.opstatus();
+    }
+    std::string TopKStatus(uint64_t rows, MemoryPool::Clock::time_point deadline) {
+        XStore_Proto::TopK_REP rep;
+        store->TopKAggregate(kBoundarySeconds, kBoundarySeconds + rows - 1, kDb, 0, 3, &rep, deadline);
+        return rep.opstatus();
     }
     std::string BatchStatus(uint64_t rows, MemoryPool::Clock::time_point deadline) {
         XStore_Proto::BatchQuery_REQ req;
@@ -119,6 +137,65 @@ TEST_F(QueryLeaseTest, TheLeaseIsHeldWhileChunksStreamAndFullyReturnedAfterwards
     store->RangeQuery(kBoundarySeconds, kBoundarySeconds + kBigRows - 1, kDb, XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
                       [&](std::string &&, bool) { used_while_streaming = pool.UsedBytes(); });
     EXPECT_EQ(used_while_streaming, used_before + kBigRows * kBytesPerRow);
+    EXPECT_EQ(pool.UsedBytes(), used_before);
+    EXPECT_EQ(pool.PendingBytes(), 0u);
+}
+
+// ---- exact aggregates: 24 / 48 / 64 bytes per value of the range (Percentile / DistinctCount / TopK) ----
+constexpr uint64_t kAggRows = 1'000'000;   // over the threshold for all three (24 MB / 48 MB / 64 MB)
+
+TEST_F(QueryLeaseTest, ASmallAggregateNeverWaitsForThePool) {
+    HogThePool();
+    const auto start = MemoryPool::Clock::now();
+    const auto deadline = start + 1s;   // only so a failing run ends instead of waiting forever
+    EXPECT_EQ(PercentileStatus(kSmallRows, deadline).find("rejected"), std::string::npos);
+    EXPECT_EQ(DistinctStatus(kSmallRows, deadline).find("rejected"), std::string::npos);
+    EXPECT_EQ(TopKStatus(kSmallRows, deadline).find("rejected"), std::string::npos);
+    EXPECT_LT(MemoryPool::Clock::now() - start, 500ms) << "a small aggregate waited for the full pool";
+}
+
+TEST_F(QueryLeaseTest, ABigAggregateIsRejectedWhenItsDeadlinePassesWhileThePoolIsFull) {
+    HogThePool();
+    for (const auto &run : std::vector<std::pair<const char *, std::function<std::string(MemoryPool::Clock::time_point)>>>{
+             {"percentile", [&](auto d) { return PercentileStatus(kAggRows, d); }},
+             {"distinctcount", [&](auto d) { return DistinctStatus(kAggRows, d); }},
+             {"topk", [&](auto d) { return TopKStatus(kAggRows, d); }}}) {
+        const auto start = MemoryPool::Clock::now();
+        const std::string status = run.second(start + 300ms);
+        EXPECT_NE(status.find("rejected"), std::string::npos) << run.first << ": " << status;
+        EXPECT_NE(status.find("deadline"), std::string::npos) << run.first << ": " << status;
+        EXPECT_GE(MemoryPool::Clock::now() - start, 250ms) << run.first << " did not wait for its turn";
+    }
+}
+
+TEST_F(QueryLeaseTest, ABigAggregateWaitsForMemoryAndRunsOnceItIsReturned) {
+    HogThePool();
+    std::atomic<bool> finished{false};
+    std::string status = "not run";
+    std::thread aggregate([&] {
+        status = DistinctStatus(kAggRows, MemoryPool::Clock::time_point::max());
+        finished = true;
+    });
+    std::this_thread::sleep_for(300ms);
+    EXPECT_FALSE(finished) << "the aggregate ran although the pool was full";
+    hog.reset();
+    for (int i = 0; i < 5000 && !finished; ++i) std::this_thread::sleep_for(1ms);
+    aggregate.join();
+    EXPECT_TRUE(finished);
+    EXPECT_EQ(status.find("rejected"), std::string::npos) << status;
+}
+
+TEST_F(QueryLeaseTest, AnAggregateReservesPerValueBytesAndReturnsThemWhenDone) {
+    MemoryPool &pool = MemoryPool::Instance();
+    const uint64_t used_before = pool.UsedBytes();
+    // A lease for exactly (pool limit - used - 48 MB) leaves room for DistinctCount's 48 MB estimate but not for TopK's 64 MB:
+    // the first is admitted at once, the second has to wait (and is rejected at its short deadline).
+    MemoryPool::Instance().Acquire(pool.Limit() - used_before - 48'000'000, MemoryPool::Clock::now() + 5s, hog);
+    ASSERT_NE(hog, nullptr);
+    hog->MarkResident();   // otherwise the host check subtracts it as memory not allocated yet and nothing fits
+    EXPECT_EQ(DistinctStatus(kAggRows, MemoryPool::Clock::now() + 300ms).find("rejected"), std::string::npos) << "48 MB should fit";
+    EXPECT_NE(TopKStatus(kAggRows, MemoryPool::Clock::now() + 300ms).find("rejected"), std::string::npos) << "64 MB should not fit";
+    hog.reset();
     EXPECT_EQ(pool.UsedBytes(), used_before);
     EXPECT_EQ(pool.PendingBytes(), 0u);
 }

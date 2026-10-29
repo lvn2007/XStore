@@ -106,12 +106,13 @@ private:
     std::list<uint64_t> waiting_;   // tickets in arrival order; only the front may be admitted
 };
 
-// Reservation for a streamed query reply (RangeQuery/BatchQuery): the reply is held in server memory until its last chunk is
-// sent, so `estimate` is reserved for as long as the returned lease lives. An estimate below
-// XStoreTunables::QUERY_REPLY_LEASE_MIN_BYTES skips the pool (kGranted, `lease` empty). The memory is built gradually while the
-// reply streams, so the lease is marked resident at once: the pool limit bounds the sum, the OS figure follows by itself.
-MemoryPool::Result AcquireQueryReplyLease(uint64_t estimate, MemoryPool::Clock::time_point deadline, std::shared_ptr<MemoryLease> &lease);
-// The status text for a reply refused by AcquireQueryReplyLease, e.g. "[RANGE QUERY] [DB: X] - rejected: ...".
-std::string QueryReplyRejection(const char *op, const std::string &db_name, MemoryPool::Result result, uint64_t estimate);
+// Reservation for the memory a query-time operation holds while it runs: a streamed RangeQuery/BatchQuery reply (held in
+// memory until its last chunk is sent, ZMQ delivers a multipart reply atomically) or the working set of an exact aggregate
+// (every value in the range). `estimate` is reserved for as long as the returned lease lives. An estimate below
+// XStoreTunables::OPERATION_LEASE_MIN_BYTES skips the pool (kGranted, `lease` empty). The memory is built gradually while the
+// operation runs, so the lease is marked resident at once: the pool limit bounds the sum, the OS figure follows by itself.
+MemoryPool::Result AcquireOperationLease(uint64_t estimate, MemoryPool::Clock::time_point deadline, std::shared_ptr<MemoryLease> &lease);
+// The status text for an operation refused by AcquireOperationLease, e.g. "[RANGE QUERY] [DB: X] - rejected: ...".
+std::string OperationLeaseRejection(const char *op, const std::string &db_name, MemoryPool::Result result, uint64_t estimate);
 
 }  // namespace xstore

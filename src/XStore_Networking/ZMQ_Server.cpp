@@ -704,7 +704,9 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                 case XStore_Proto::Request::kPercentile: {
                     const auto &req = client_request->percentile();
                     XStore_Proto::Percentile_REP rep;
-                    my_store.PercentileAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), req.percentile(), &rep);
+                    const uint32_t timeout_ms = client_request->timeoutms();
+                    const auto deadline = timeout_ms > 0 ? pickup + std::chrono::milliseconds(timeout_ms) : xstore::MemoryPool::Clock::time_point::max();
+                    my_store.PercentileAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), req.percentile(), &rep, deadline);
                     SendProto(writer, rep);
                     break;
                 }
@@ -713,7 +715,9 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                 case XStore_Proto::Request::kDistinctcount: {
                     const auto &req = client_request->distinctcount();
                     XStore_Proto::DistinctCount_REP rep;
-                    my_store.DistinctCountAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep);
+                    const uint32_t timeout_ms = client_request->timeoutms();
+                    const auto deadline = timeout_ms > 0 ? pickup + std::chrono::milliseconds(timeout_ms) : xstore::MemoryPool::Clock::time_point::max();
+                    my_store.DistinctCountAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), &rep, deadline);
                     SendProto(writer, rep);
                     break;
                 }
@@ -722,7 +726,9 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                 case XStore_Proto::Request::kTopk: {
                     const auto &req = client_request->topk();
                     XStore_Proto::TopK_REP rep;
-                    my_store.TopKAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), req.k(), &rep);
+                    const uint32_t timeout_ms = client_request->timeoutms();
+                    const auto deadline = timeout_ms > 0 ? pickup + std::chrono::milliseconds(timeout_ms) : xstore::MemoryPool::Clock::time_point::max();
+                    my_store.TopKAggregate(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), req.k(), &rep, deadline);
                     SendProto(writer, rep);
                     break;
                 }

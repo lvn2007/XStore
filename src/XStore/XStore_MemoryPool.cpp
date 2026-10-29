@@ -212,15 +212,15 @@ void MemoryPool::ResidentNow(uint64_t unseen) {
     cv_.notify_all();
 }
 
-MemoryPool::Result AcquireQueryReplyLease(uint64_t estimate, MemoryPool::Clock::time_point deadline, std::shared_ptr<MemoryLease> &lease) {
+MemoryPool::Result AcquireOperationLease(uint64_t estimate, MemoryPool::Clock::time_point deadline, std::shared_ptr<MemoryLease> &lease) {
     lease.reset();
-    if (estimate < XStoreTunables::QUERY_REPLY_LEASE_MIN_BYTES) return MemoryPool::Result::kGranted;
+    if (estimate < XStoreTunables::OPERATION_LEASE_MIN_BYTES) return MemoryPool::Result::kGranted;
     const MemoryPool::Result result = MemoryPool::Instance().Acquire(estimate, deadline, lease);
     if (result == MemoryPool::Result::kGranted) lease->MarkResident();
     return result;
 }
 
-std::string QueryReplyRejection(const char *op, const std::string &db_name, MemoryPool::Result result, uint64_t estimate) {
+std::string OperationLeaseRejection(const char *op, const std::string &db_name, MemoryPool::Result result, uint64_t estimate) {
     const char *why = result == MemoryPool::Result::kTooLarge ? "larger than the server's whole memory pool"
                                                               : "the client's deadline passed while waiting for free memory";
     return std::string("[") + op + "] [DB: " + db_name + "] - rejected: " + why + " (~" + std::to_string(estimate) +

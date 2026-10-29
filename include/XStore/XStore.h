@@ -863,13 +863,13 @@ class XStore {
         // precedent as Min/Max/Sum/Avg/Variance/Stddev -- a percentile of
         // nothing is undefined, unlike Exists/DistinctCount below where
         // "nothing found" is itself a legitimate answer).
-        void PercentileAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, double percentile, XStore_Proto::Percentile_REP *return_data);
+        void PercentileAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, double percentile, XStore_Proto::Percentile_REP *return_data, xstore::MemoryPool::Clock::time_point deadline = xstore::MemoryPool::Clock::time_point::max());
 
         // DISTINCTCOUNT - AGGREGATE (exact, real hash-set over every value in
         // range -- same cost/memory tradeoff as SQL's COUNT(DISTINCT x)).
         // An empty range is SUCCESS with count=0, not an error -- same
         // "absence is a legitimate answer" precedent ExistsAggregate uses.
-        void DistinctCountAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::DistinctCount_REP *return_data);
+        void DistinctCountAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, XStore_Proto::DistinctCount_REP *return_data, xstore::MemoryPool::Clock::time_point deadline = xstore::MemoryPool::Clock::time_point::max());
 
         // TOPK - AGGREGATE (exact, real frequency hash-map over every value
         // in range; k=1 gives the mode -- one op, not a separate MODE op,
@@ -879,7 +879,7 @@ class XStore {
         // GROUP BY ... ORDER BY COUNT(*) DESC LIMIT k; an empty range is
         // SUCCESS with zero entries, not an error (same precedent as
         // DistinctCountAggregate above).
-        void TopKAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, uint32_t k, XStore_Proto::TopK_REP *return_data);
+        void TopKAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name, unsigned short int column_idx, uint32_t k, XStore_Proto::TopK_REP *return_data, xstore::MemoryPool::Clock::time_point deadline = xstore::MemoryPool::Clock::time_point::max());
 
         // Initialize DB. Loads every DB's ConfigStruct into the shared CfgMap,
         // then (Task 5) rebuilds any stale/missing zone map for that DB

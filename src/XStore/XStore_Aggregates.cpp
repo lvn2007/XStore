@@ -204,6 +204,18 @@ struct VariancePartial {
 struct CollectPartial {
     std::vector<double> values;
 };
+
+// Peak bytes held per value of the range by an exact aggregate: Percentile has the per-segment vectors, their merged copy and
+// growth slack, then sorts in place; DistinctCount adds an unordered_set node (about 40 B) per distinct value to the vector;
+// TopK a frequency-map node (about 40 B) and a 16 B ranked pair. The range length is the (upper-bound) count of values.
+constexpr uint64_t PERCENTILE_BYTES_PER_VALUE = 24;
+constexpr uint64_t DISTINCTCOUNT_BYTES_PER_VALUE = 48;
+constexpr uint64_t TOPK_BYTES_PER_VALUE = 64;
+
+uint64_t AggregateWorkingSetEstimate(unsigned long long start_epoch_t, unsigned long long end_epoch_t, uint64_t bytes_per_value) {
+    const uint64_t values = end_epoch_t - start_epoch_t + 1;
+    return values > UINT64_MAX / bytes_per_value ? UINT64_MAX : values * bytes_per_value;   // saturate: refused as too large
+}
 }  // namespace
 
 template <typename Cmp, typename PruneCheck>
@@ -867,7 +879,7 @@ void XStore::OhlcAggregate(unsigned long long int start_epoch_t, unsigned long l
 
 void XStore::PercentileAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
                                   std::string_view db_name_view, unsigned short int column_idx, double percentile,
-                                  XStore_Proto::Percentile_REP *return_data) {
+                                  XStore_Proto::Percentile_REP *return_data, xstore::MemoryPool::Clock::time_point deadline) {
 
     const std::string &db_name = UpperCaseInto(db_name_view);
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
@@ -890,6 +902,16 @@ void XStore::PercentileAggregate(unsigned long long int start_epoch_t, unsigned 
     if (percentile < 0.0 || percentile > 1.0) {
         std::string err_msg = fmt::format("[PERCENTILE AGGREGATE] [DB: {}] - percentile must be in [0.0, 1.0]", db_name);
         SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return;
+    }
+
+    const uint64_t working_set = AggregateWorkingSetEstimate(start_epoch_t, end_epoch_t, PERCENTILE_BYTES_PER_VALUE);
+    std::shared_ptr<xstore::MemoryLease> working_set_lease;
+    if (const xstore::MemoryPool::Result leased = xstore::AcquireOperationLease(working_set, deadline, working_set_lease);
+        leased != xstore::MemoryPool::Result::kGranted) {
+        const std::string err_msg = xstore::OperationLeaseRejection("PERCENTILE AGGREGATE", db_name, leased, working_set);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[ERROR] ", err_msg);
         spdlog::warn(err_msg);
         return;
     }
@@ -926,7 +948,7 @@ void XStore::PercentileAggregate(unsigned long long int start_epoch_t, unsigned 
 
 void XStore::DistinctCountAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
                                      std::string_view db_name_view, unsigned short int column_idx,
-                                     XStore_Proto::DistinctCount_REP *return_data) {
+                                     XStore_Proto::DistinctCount_REP *return_data, xstore::MemoryPool::Clock::time_point deadline) {
 
     const std::string &db_name = UpperCaseInto(db_name_view);
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
@@ -942,6 +964,16 @@ void XStore::DistinctCountAggregate(unsigned long long int start_epoch_t, unsign
     if (start_epoch_t > end_epoch_t) {
         std::string err_msg = fmt::format("[DISTINCTCOUNT AGGREGATE] [DB: {}] - Target end time must be after start time", db_name);
         SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return;
+    }
+
+    const uint64_t working_set = AggregateWorkingSetEstimate(start_epoch_t, end_epoch_t, DISTINCTCOUNT_BYTES_PER_VALUE);
+    std::shared_ptr<xstore::MemoryLease> working_set_lease;
+    if (const xstore::MemoryPool::Result leased = xstore::AcquireOperationLease(working_set, deadline, working_set_lease);
+        leased != xstore::MemoryPool::Result::kGranted) {
+        const std::string err_msg = xstore::OperationLeaseRejection("DISTINCTCOUNT AGGREGATE", db_name, leased, working_set);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[ERROR] ", err_msg);
         spdlog::warn(err_msg);
         return;
     }
@@ -966,7 +998,7 @@ void XStore::DistinctCountAggregate(unsigned long long int start_epoch_t, unsign
 
 void XStore::TopKAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
                             std::string_view db_name_view, unsigned short int column_idx, uint32_t k,
-                            XStore_Proto::TopK_REP *return_data) {
+                            XStore_Proto::TopK_REP *return_data, xstore::MemoryPool::Clock::time_point deadline) {
 
     const std::string &db_name = UpperCaseInto(db_name_view);
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
@@ -982,6 +1014,16 @@ void XStore::TopKAggregate(unsigned long long int start_epoch_t, unsigned long l
     if (start_epoch_t > end_epoch_t) {
         std::string err_msg = fmt::format("[TOPK AGGREGATE] [DB: {}] - Target end time must be after start time", db_name);
         SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return;
+    }
+
+    const uint64_t working_set = AggregateWorkingSetEstimate(start_epoch_t, end_epoch_t, TOPK_BYTES_PER_VALUE);
+    std::shared_ptr<xstore::MemoryLease> working_set_lease;
+    if (const xstore::MemoryPool::Result leased = xstore::AcquireOperationLease(working_set, deadline, working_set_lease);
+        leased != xstore::MemoryPool::Result::kGranted) {
+        const std::string err_msg = xstore::OperationLeaseRejection("TOPK AGGREGATE", db_name, leased, working_set);
+        SetTaggedStatus(return_data->mutable_opstatus(), "[ERROR] ", err_msg);
         spdlog::warn(err_msg);
         return;
     }

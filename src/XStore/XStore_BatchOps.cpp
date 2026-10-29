@@ -262,9 +262,9 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, bool so
     // from the process-wide pool, an upper bound (a requested row that does not exist is left out of the reply).
     const uint64_t reply_estimate = static_cast<uint64_t>(proto_from_client->timestamp_size()) * (static_cast<uint64_t>(cfg_struct.rowlength()) + 16);
     std::shared_ptr<xstore::MemoryLease> reply_lease;
-    if (const xstore::MemoryPool::Result leased = xstore::AcquireQueryReplyLease(reply_estimate, deadline, reply_lease);
+    if (const xstore::MemoryPool::Result leased = xstore::AcquireOperationLease(reply_estimate, deadline, reply_lease);
         leased != xstore::MemoryPool::Result::kGranted) {
-        set_warning("[ERROR] ", xstore::QueryReplyRejection("BATCH QUERY", db_name, leased, reply_estimate));
+        set_warning("[ERROR] ", xstore::OperationLeaseRejection("BATCH QUERY", db_name, leased, reply_estimate));
         finish(std::string());
         return;
     }
