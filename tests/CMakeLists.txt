@@ -13,6 +13,7 @@ add_executable(xstore_tests
         integration/XStoreZoneMapTest.cpp
         integration/XStoreCrc32cTest.cpp
         integration/XStoreCatIdxTest.cpp
+        integration/XStoreCompactionLeaseTest.cpp
         integration/XStorePatternTest.cpp
         integration/XStoreMemoryTest.cpp
         integration/XStoreMemoryPoolTest.cpp

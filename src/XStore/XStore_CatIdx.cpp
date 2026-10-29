@@ -654,22 +654,22 @@ void XStore::ClearCatIdxRegistryForTests() {
     catidx_registry_retired_.clear();
 }
 
-void XStore::CompactOneYearCatIdx(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+bool XStore::CompactOneYearCatIdx(const std::string &db_base_path, unsigned short year, uint16_t row_length,
                                    uint32_t tracked_column_count) {
     std::string data_path = fmt::format("{}/{}.XSTORE", db_base_path, year);
-    if (!std::filesystem::exists(data_path)) return;
+    if (!std::filesystem::exists(data_path)) return true;
 
     {
         // Pinned for this idempotency check only, not across the row scan below: the scan can run for minutes and
         // never needs the file, and a pin would keep the entry out of eviction that whole time.
         CatIdxFile::Pin catidx = PinCatIdx(db_base_path, year, row_length, tracked_column_count);
-        if (catidx->HasBitmapSection()) return; // already compacted, idempotent no-op
-        if (catidx->Rebuilding()) return; // retried next pass; AppendBitmapSection refuses too
+        if (catidx->HasBitmapSection()) return true; // already compacted, idempotent no-op
+        if (catidx->Rebuilding()) return true; // retried next pass; AppendBitmapSection refuses too
     }
 
     struct stat st{};
     int fd = open(data_path.c_str(), O_RDONLY);
-    if (fd < 0) return;
+    if (fd < 0) return true;
     fstat(fd, &st);
     uint64_t total_rows = row_length > 0 ? static_cast<uint64_t>(st.st_size) / row_length : 0;
 
@@ -681,6 +681,27 @@ void XStore::CompactOneYearCatIdx(const std::string &db_base_path, unsigned shor
     std::unordered_set<uint32_t> abandoned_columns;
     for (uint32_t c = 0; c < tracked_column_count; ++c) accumulators[c];
 
+    // The accumulators' bytes (upper bound) are reserved from the MemoryPool once they pass OPERATION_LEASE_MIN_BYTES, in
+    // steps held until this function returns. Background work does not queue behind foreground requests: a step the pool
+    // cannot give at once abandons the year (nothing appended; the caller retries soon).
+    std::vector<std::shared_ptr<xstore::MemoryLease>> leases;
+    std::vector<uint64_t> column_bytes(tracked_column_count, 0);
+    uint64_t accumulated_bytes = 0;
+    auto reserve_row = [&](uint32_t c) {
+        accumulated_bytes += XStoreTunables::CATIDX_COMPACTION_BYTES_PER_ROW;
+        column_bytes[c] += XStoreTunables::CATIDX_COMPACTION_BYTES_PER_ROW;
+        if (accumulated_bytes < XStoreTunables::OPERATION_LEASE_MIN_BYTES ||
+            accumulated_bytes <= leases.size() * XStoreTunables::CATIDX_COMPACTION_LEASE_STEP_BYTES) {
+            return true;
+        }
+        std::shared_ptr<xstore::MemoryLease> step;
+        const xstore::MemoryPool::Result got = xstore::AcquireOperationLease(
+            XStoreTunables::CATIDX_COMPACTION_LEASE_STEP_BYTES, xstore::MemoryPool::Clock::now(), step);
+        if (got != xstore::MemoryPool::Result::kGranted) return false;
+        leases.push_back(std::move(step));
+        return true;
+    };
+
     std::vector<char> row_buf(row_length);
     for (uint64_t r = 0; r < total_rows; ++r) {
         // Graceful shutdown must not wait out a multi-minute scan: abandon
@@ -691,13 +712,13 @@ void XStore::CompactOneYearCatIdx(const std::string &db_base_path, unsigned shor
             if (catidx_compaction_stop_flag_.load(std::memory_order_relaxed) ||
                 bg_cancel_.load(std::memory_order_relaxed)) {
                 close(fd);
-                return;
+                return true;
             }
             if (live_widen_pending_.load(std::memory_order_relaxed)) {
                 close(fd);
                 spdlog::info("[CATIDX] - Compaction of {}/{} stopped: a live widen is pending; resumes after it",
                              db_base_path, year);
-                return;
+                return true;
             }
         }
         [[maybe_unused]] ssize_t row_read = pread(fd, row_buf.data(), row_length, static_cast<off_t>(r) * row_length);
@@ -715,11 +736,20 @@ void XStore::CompactOneYearCatIdx(const std::string &db_base_path, unsigned shor
             // does not count towards CATIDX_MAX_BITMAP_DISTINCT_VALUES.
             if (f_data.oneOfData_case() == XStore_Proto::FData::ONEOFDATA_NOT_SET) continue;
             std::string enc = EncodeFDataForCatIdx(f_data);
+            if (!reserve_row(c)) {
+                close(fd);
+                spdlog::info("[CATIDX] - Compaction of {}/{} deferred: the memory pool has no room for its accumulators; "
+                             "retried in {} s", db_base_path, year, XStoreTunables::LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC);
+                return false;
+            }
             auto &bucket = accumulators[c][enc];
             bucket.push_back(r);
             if (accumulators[c].size() > XStoreTunables::CATIDX_MAX_BITMAP_DISTINCT_VALUES) {
                 accumulators[c].clear(); // free immediately, don't keep building a disqualified column
                 abandoned_columns.insert(c);
+                // Steps already taken stay held to the end (conservative); no further step is taken for the dropped rows.
+                accumulated_bytes -= column_bytes[c];
+                column_bytes[c] = 0;
             }
         }
     }
@@ -739,10 +769,11 @@ void XStore::CompactOneYearCatIdx(const std::string &db_base_path, unsigned shor
     // A cancel that came after the last check: the removal waiting for this year must not find a section appended. (The
     // background thread holds this year's key in bg_active_key_ throughout, so RemoveDB / RemoveDBFiles cannot remove and
     // re-create the year between the scan and the re-pin below: the bitmap always lands on the file that was scanned.)
-    if (bg_cancel_.load(std::memory_order_relaxed)) return;
+    if (bg_cancel_.load(std::memory_order_relaxed)) return true;
     // Re-acquired (and pinned) for the append.
     CatIdxFile::Pin catidx = PinCatIdx(db_base_path, year, row_length, tracked_column_count);
     catidx->AppendBitmapSection(surviving);
+    return true;
 }
 
 void XStore::RebuildOneYearCatIdxBloom(const std::string &db_base_path, unsigned short year, uint16_t row_length,
@@ -803,8 +834,10 @@ bool XStore::CompactColdCatIdxForAllDbs(const std::string &data_store_dir) {
                 complete = false;
                 break;
             }
-            CompactOneYearCatIdx(db_base_path, year, static_cast<uint16_t>(cfg_struct.rowlength()),
-                                  EffectiveTrackedColumnCount(cfg_struct));
+            if (!CompactOneYearCatIdx(db_base_path, year, static_cast<uint16_t>(cfg_struct.rowlength()),
+                                       EffectiveTrackedColumnCount(cfg_struct))) {
+                complete = false; // no room in the MemoryPool: this year runs again soon, the others go on
+            }
             // A cancel abandoned that year (its removal, or shutdown): the run is cut here, as the next Enter would.
             if (bg_cancel_.load(std::memory_order_relaxed)) return false;
         }

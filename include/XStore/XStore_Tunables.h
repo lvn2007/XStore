@@ -574,6 +574,14 @@ inline constexpr uint64_t CATIDX_MAX_BITMAP_DISTINCT_VALUES = 10000;
 // sub-millisecond polling.
 inline constexpr uint64_t CATIDX_COMPACTION_POLL_INTERVAL_SEC = 3600;
 
+// Compaction keeps, per tracked column, every row index of every value until the year's scan ends (a column is dropped only
+// past CATIDX_MAX_BITMAP_DISTINCT_VALUES), so a low-cardinality column holds one 8-byte index per row: BYTES_PER_ROW is that
+// plus the vector's growth slack (an upper bound). Once the accumulators pass OPERATION_LEASE_MIN_BYTES they are reserved
+// from xstore::MemoryPool in LEASE_STEP_BYTES steps; compaction is background work, so a step that cannot be had at once
+// abandons the year for this pass (retried LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC later) instead of waiting in the pool's line.
+inline constexpr uint64_t CATIDX_COMPACTION_BYTES_PER_ROW = 16;
+inline constexpr uint64_t CATIDX_COMPACTION_LEASE_STEP_BYTES = 64u * 1024u * 1024u;
+
 // RangeQuery and BatchQuery (XStore_RangeOps.cpp,
 // XStore_BatchOps.cpp): target size of each emitted wire-format chunk. A
 // query whose total output stays under this is sent as a single ZMQ frame

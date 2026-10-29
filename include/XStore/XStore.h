@@ -1106,7 +1106,9 @@ class XStore {
         // it's both the real internal entry point CompactColdCatIdxForAllDbs
         // calls, and the direct test entry point for exercising compaction
         // synchronously without waiting on the hourly background thread.
-        void CompactOneYearCatIdx(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+        // Returns false only when the year was abandoned because the MemoryPool had no room for the accumulators (nothing
+        // appended, retry soon); true otherwise, including a cancel or an already-compacted year.
+        bool CompactOneYearCatIdx(const std::string &db_base_path, unsigned short year, uint16_t row_length,
                                    uint32_t tracked_column_count);
 
         // Scans every DB directory under data_store_dir and compacts every
