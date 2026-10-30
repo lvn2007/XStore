@@ -137,31 +137,32 @@ void CatIdxFile::EvictIfOverCapacity() {
 bool CatIdxFile::FlushBlock(uint64_t block_index) {
     auto it = cache_.find(block_index);
     if (it == cache_.end()) return true;
+    ++write_count_;
     EnsureDirtyOnDisk(); // covers the invalidation, bloom-block and block_count header writes below
     off_t offset = BloomSectionFileOffset(block_index);
     size_t bytes = header_.tracked_column_count * sizeof(BloomEntry);
 
-    // The bitmap directory is a COMPACTION-TIME SNAPSHOT of real row data, so
-    // ANY bloom write to an already-compacted file means the underlying rows
+    // The bitmap directory is a BITMAP BUILD-TIME SNAPSHOT of real row data, so
+    // ANY bloom write to an already-bitmapped file means the underlying rows
     // changed since that snapshot was taken and the directory can no longer be
     // trusted -- it would report backfilled matches as absent (false negative)
     // and overwritten/deleted rows as still matching (false positive).
     // Invalidate on any write, not just one that would physically overlap the
     // directory bytes: an overlap-only check (what this used to do) never
-    // trips for a write into a block index that already existed at compaction
+    // trips for a write into a block index that already existed at bitmap build
     // time, since bitmap_section_offset sits past every such block, which is
     // exactly the common backfill/overwrite case. Self-heals the same way as
-    // before -- the next compaction pass sees HasBitmapSection() == false (its
+    // before -- the next bitmap build pass sees HasBitmapSection() == false (its
     // own idempotency check) and rebuilds the directory from scratch over the
     // now-current row data; until then queries correctly fall back to
     // bloom+real-scan. Same "always fully re-derivable from real row data"
     // precedent as the zone-map feature's version-bump-discards elsewhere in
-    // this codebase. UpdateRow/FlushBlock on an already-compacted cold year is
-    // rare (compaction only ever targets closed years), so the extra header
+    // this codebase. UpdateRow/FlushBlock on an already-bitmapped cold year is
+    // rare (bitmap build only ever targets closed years), so the extra header
     // rewrite is not a hot-path cost.
     if (header_.bitmap_section_offset != 0) {
-        spdlog::warn("[CATIDX] - Block {} write into an already-compacted file -- invalidating "
-                     "the bitmap section; next compaction pass will rebuild it", block_index);
+        spdlog::warn("[CATIDX] - Block {} write into an already-bitmapped file -- invalidating "
+                     "the bitmap section; next bitmap build pass will rebuild it", block_index);
         header_.bitmap_section_offset = 0;
         [[maybe_unused]] ssize_t invalidate_written = pwrite(fd_, &header_, sizeof(header_), 0);
         fdatasync(fd_);
@@ -285,11 +286,48 @@ bool CatIdxFile::MightContain(uint64_t block_index, uint32_t column_idx, const s
                           BloomValueOfEncoded(column_idx, encoded_value.data(), encoded_value.size()));
 }
 
-void CatIdxFile::AppendBitmapSection(const std::unordered_map<uint32_t, std::map<std::string, std::vector<uint64_t>>> &columns) {
+namespace {
+std::atomic<size_t> g_bitmap_write_cap_for_tests{SIZE_MAX};
+std::atomic<size_t> g_bitmap_write_fail_after_for_tests{SIZE_MAX};
+
+// Writes all of [data, data + len) at offset with as many pwrite calls as it takes (one call returns at most 0x7ffff000
+// bytes on Linux). total_written counts the bytes the caller has written so far (the test knob can fail the write at a
+// given point). false = a call failed or wrote nothing.
+bool PwriteAll(int fd, const char *data, size_t len, off_t offset, size_t &total_written) {
+    while (len > 0) {
+        size_t want = std::min(len, g_bitmap_write_cap_for_tests.load(std::memory_order_relaxed));
+        const size_t fail_after = g_bitmap_write_fail_after_for_tests.load(std::memory_order_relaxed);
+        if (fail_after != SIZE_MAX) {
+            if (total_written >= fail_after) return false;
+            want = std::min(want, fail_after - total_written);
+        }
+        const ssize_t n = pwrite(fd, data, want, offset);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return false;
+        data += n;
+        offset += n;
+        len -= static_cast<size_t>(n);
+        total_written += static_cast<size_t>(n);
+    }
+    return true;
+}
+} // namespace
+
+void CatIdxFile::SetBitmapWriteLimitsForTests(size_t max_bytes_per_call, size_t fail_after_bytes) {
+    g_bitmap_write_cap_for_tests.store(max_bytes_per_call, std::memory_order_relaxed);
+    g_bitmap_write_fail_after_for_tests.store(fail_after_bytes, std::memory_order_relaxed);
+}
+
+bool CatIdxFile::AppendBitmapSection(const std::unordered_map<uint32_t, std::map<std::string, std::vector<uint64_t>>> &columns,
+                                     std::optional<uint64_t> built_at_write_count) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (frontier_ != kNoRebuild) {
         spdlog::warn("[CATIDX] - Not appending a bitmap section while the index is being rebuilt");
-        return;
+        return false;
+    }
+    if (built_at_write_count.has_value() && *built_at_write_count != write_count_) {
+        spdlog::info("[CATIDX] - Not appending a bitmap section: the year was written to while its rows were scanned");
+        return false;
     }
     EnsureDirtyOnDisk(); // covers the bitmap-section append and its header commit
 
@@ -297,27 +335,29 @@ void CatIdxFile::AppendBitmapSection(const std::unordered_map<uint32_t, std::map
     if (fstat(fd_, &st) != 0) {
         // st.st_size is the append offset -- appending at a garbage offset
         // would land directory bytes on top of the bloom section. Bail; the
-        // next compaction pass retries (HasBitmapSection() is still false).
+        // next bitmap build pass retries (HasBitmapSection() is still false).
         spdlog::error("[CATIDX] - fstat failed before bitmap-section append; not committing");
-        return;
+        return false;
     }
-    off_t append_offset = st.st_size;
+    const off_t append_offset = st.st_size;
 
-    // One buffer holding every surviving column's directory back-to-back --
-    // deliberately ONE pwrite+fsync+header-commit for the whole compaction
-    // pass, not one per column. Committing after each column individually
-    // used to mean only the FIRST column's write was crash-safe: once
-    // header_.bitmap_section_offset went non-zero after that first commit,
-    // a crash during a LATER column's write left torn bytes INSIDE the
-    // already-committed, scannable range (LookupExact's scan loop has no way
-    // to tell a torn block from a real one).
+    // Every surviving column's directory back-to-back, ONE header commit for the whole bitmap build pass, not one per
+    // column. Committing after each column individually used to mean only the FIRST column's write was crash-safe: once
+    // header_.bitmap_section_offset went non-zero after that first commit, a crash during a LATER column's write left torn
+    // bytes INSIDE the already-committed, scannable range (LookupExact's scan loop has no way to tell a torn block from a
+    // real one). The header is still written last, after one fdatasync of everything. The column blocks themselves are
+    // written one at a time: the whole section as one string was a second copy of the accumulators (Mystic, 31.5M rows x
+    // 80 columns: peak 45.7 GB for a 20 GB section), and one pwrite of it was cut at 2 GB by the kernel.
     //
     // Per-column block layout (concatenated, LookupExact already scans
     // multiple such blocks until EOF): [columnIdx u32][entryCount u32]
     //   then per entry, sorted by encoded value bytes for binary search:
     //   [valueLen u32][valueBytes][rowCount u32][rowIndices: u64 * rowCount]
     std::string buf;
+    off_t position = append_offset;
+    size_t total_written = 0;
     for (const auto &[column_idx, value_to_rows] : columns) {
+        buf.clear();
         buf.append(reinterpret_cast<const char*>(&column_idx), sizeof(column_idx));
         uint32_t entry_count = static_cast<uint32_t>(value_to_rows.size());
         buf.append(reinterpret_cast<const char*>(&entry_count), sizeof(entry_count));
@@ -330,16 +370,14 @@ void CatIdxFile::AppendBitmapSection(const std::unordered_map<uint32_t, std::map
             buf.append(reinterpret_cast<const char*>(&row_count), sizeof(row_count));
             buf.append(reinterpret_cast<const char*>(rows.data()), rows.size() * sizeof(uint64_t));
         }
-    }
-
-    ssize_t data_written = pwrite(fd_, buf.data(), buf.size(), append_offset);
-    if (data_written != static_cast<ssize_t>(buf.size())) {
-        // pwrite() caps a single transfer at ~0x7ffff000 bytes on Linux, and a single
-        // compaction pass over a full year of low-cardinality columns can exceed that --
-        // don't let a short/failed write land inside the committed, scannable range.
-        spdlog::error("[CATIDX] - Short/failed bitmap-section write ({}/{}); not committing",
-                       data_written, buf.size());
-        return; // uncommitted tail, safely ignorable -- next compaction pass rebuilds from scratch
+        if (!PwriteAll(fd_, buf.data(), buf.size(), position, total_written)) {
+            // Cut back to the size before the append: nothing is committed, and the bytes written so far must not stay as
+            // dead space in the file (every later attempt would add its own).
+            spdlog::error("[CATIDX] - Failed bitmap-section write at {} bytes; not committing", total_written);
+            if (ftruncate(fd_, append_offset) != 0) spdlog::warn("[CATIDX] - Could not cut the partial bitmap section off the file");
+            return false;
+        }
+        position += static_cast<off_t>(buf.size());
     }
     fdatasync(fd_);
 
@@ -349,6 +387,7 @@ void CatIdxFile::AppendBitmapSection(const std::unordered_map<uint32_t, std::map
     }
     [[maybe_unused]] ssize_t header_written = pwrite(fd_, &header_, sizeof(header_), 0);
     fdatasync(fd_);
+    return true;
 }
 
 std::optional<std::vector<uint64_t>> CatIdxFile::LookupExact(uint32_t column_idx, const std::string &encoded_value) {
@@ -504,7 +543,7 @@ bool CatIdxFile::BeginRebuildLocked(uint32_t new_tracked_column_count) {
         return false;
     }
     // From here the old content is gone, so the rebuild state is entered whatever happens. The bitmap section goes
-    // with it; compaction rebuilds it once the rebuild is over.
+    // with it; bitmap build rebuilds it once the rebuild is over.
     header_ = CatIdxFileHeader{};
     header_.tracked_column_count = new_tracked_column_count;
     width_.store(header_.tracked_column_count, std::memory_order_release);
@@ -654,18 +693,19 @@ void XStore::ClearCatIdxRegistryForTests() {
     catidx_registry_retired_.clear();
 }
 
-bool XStore::CompactOneYearCatIdx(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+bool XStore::BuildOneYearBitmapSection(const std::string &db_base_path, unsigned short year, uint16_t row_length,
                                    uint32_t tracked_column_count) {
     std::string data_path = fmt::format("{}/{}.XSTORE", db_base_path, year);
     if (!std::filesystem::exists(data_path)) return true;
 
-    {
-        // Pinned for this idempotency check only, not across the row scan below: the scan can run for minutes and
-        // never needs the file, and a pin would keep the entry out of eviction that whole time.
-        CatIdxFile::Pin catidx = PinCatIdx(db_base_path, year, row_length, tracked_column_count);
-        if (catidx->HasBitmapSection()) return true; // already compacted, idempotent no-op
-        if (catidx->Rebuilding()) return true; // retried next pass; AppendBitmapSection refuses too
-    }
+    // Pinned for the whole scan: the section is a snapshot of the rows as the scan reads them, so it must be committed
+    // only if no bloom block was written meanwhile (a write into the year during the scan is in the bloom but not in the
+    // snapshot, and with no section yet nothing invalidates it). The write count is in memory; the pin keeps this object
+    // the one every writer uses. It costs one registry entry kept out of eviction for the scan.
+    CatIdxFile::Pin catidx = PinCatIdx(db_base_path, year, row_length, tracked_column_count);
+    if (catidx->HasBitmapSection()) return true; // already bitmapped, idempotent no-op
+    if (catidx->Rebuilding()) return true; // retried next pass; AppendBitmapSection refuses too
+    const uint64_t write_count_before_scan = catidx->WriteCount();
 
     struct stat st{};
     int fd = open(data_path.c_str(), O_RDONLY);
@@ -688,15 +728,15 @@ bool XStore::CompactOneYearCatIdx(const std::string &db_base_path, unsigned shor
     std::vector<uint64_t> column_bytes(tracked_column_count, 0);
     uint64_t accumulated_bytes = 0;
     auto reserve_row = [&](uint32_t c) {
-        accumulated_bytes += XStoreTunables::CATIDX_COMPACTION_BYTES_PER_ROW;
-        column_bytes[c] += XStoreTunables::CATIDX_COMPACTION_BYTES_PER_ROW;
+        accumulated_bytes += XStoreTunables::CATIDX_BITMAP_BUILD_BYTES_PER_ROW;
+        column_bytes[c] += XStoreTunables::CATIDX_BITMAP_BUILD_BYTES_PER_ROW;
         if (accumulated_bytes < XStoreTunables::OPERATION_LEASE_MIN_BYTES ||
-            accumulated_bytes <= leases.size() * XStoreTunables::CATIDX_COMPACTION_LEASE_STEP_BYTES) {
+            accumulated_bytes <= leases.size() * XStoreTunables::CATIDX_BITMAP_BUILD_LEASE_STEP_BYTES) {
             return true;
         }
         std::shared_ptr<xstore::MemoryLease> step;
         const xstore::MemoryPool::Result got = xstore::AcquireOperationLease(
-            XStoreTunables::CATIDX_COMPACTION_LEASE_STEP_BYTES, xstore::MemoryPool::Clock::now(), step);
+            XStoreTunables::CATIDX_BITMAP_BUILD_LEASE_STEP_BYTES, xstore::MemoryPool::Clock::now(), step);
         if (got != xstore::MemoryPool::Result::kGranted) return false;
         leases.push_back(std::move(step));
         return true;
@@ -707,16 +747,16 @@ bool XStore::CompactOneYearCatIdx(const std::string &db_base_path, unsigned shor
         // Graceful shutdown must not wait out a multi-minute scan: abandon
         // the year (nothing was appended, so it is simply retried next start).
         // bg_cancel_: also a RemoveDB / RemoveDBFiles of this year waiting for the background thread to let go.
-        // live_widen_pending_: a live widen was recorded; it runs on this thread, so compaction steps aside.
+        // live_widen_pending_: a live widen was recorded; it runs on this thread, so bitmap build steps aside.
         if ((r & 0xFFFFu) == 0) {
-            if (catidx_compaction_stop_flag_.load(std::memory_order_relaxed) ||
+            if (bitmap_build_stop_flag_.load(std::memory_order_relaxed) ||
                 bg_cancel_.load(std::memory_order_relaxed)) {
                 close(fd);
                 return true;
             }
             if (live_widen_pending_.load(std::memory_order_relaxed)) {
                 close(fd);
-                spdlog::info("[CATIDX] - Compaction of {}/{} stopped: a live widen is pending; resumes after it",
+                spdlog::info("[CATIDX] - Bitmap build of {}/{} stopped: a live widen is pending; resumes after it",
                              db_base_path, year);
                 return true;
             }
@@ -727,7 +767,7 @@ bool XStore::CompactOneYearCatIdx(const std::string &db_base_path, unsigned shor
             XStore_Proto::FData f_data;
             // Non-static member call, this XStore instance's own method --
             // ExtractColumnByIndexSkipParse is non-static (needs `this`),
-            // which is exactly why CompactOneYearCatIdx itself is a
+            // which is exactly why BuildOneYearBitmapSection itself is a
             // non-static instance method rather than the brief's original
             // static sketch. Signature: (row_ptr, row_len, unsigned short
             // column_idx, FData& out_data) -> bool.
@@ -738,8 +778,8 @@ bool XStore::CompactOneYearCatIdx(const std::string &db_base_path, unsigned shor
             std::string enc = EncodeFDataForCatIdx(f_data);
             if (!reserve_row(c)) {
                 close(fd);
-                spdlog::info("[CATIDX] - Compaction of {}/{} deferred: the memory pool has no room for its accumulators; "
-                             "retried in {} s", db_base_path, year, XStoreTunables::LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC);
+                spdlog::info("[CATIDX] - Bitmap build of {}/{} deferred: the memory pool has no room for its accumulators; "
+                             "retried in {} s", db_base_path, year, XStoreTunables::LIVE_WIDEN_BITMAP_BUILD_RESUME_DELAY_SEC);
                 return false;
             }
             auto &bucket = accumulators[c][enc];
@@ -761,7 +801,7 @@ bool XStore::CompactOneYearCatIdx(const std::string &db_base_path, unsigned shor
         surviving.emplace(col, std::move(value_map));
     }
     if (surviving.empty()) {
-        // Every column abandoned or empty -- still mark this year compacted
+        // Every column abandoned or empty -- still mark this year bitmapped
         // (empty directory) so it isn't re-scanned every restart.
         surviving[0] = {};
     }
@@ -770,9 +810,11 @@ bool XStore::CompactOneYearCatIdx(const std::string &db_base_path, unsigned shor
     // background thread holds this year's key in bg_active_key_ throughout, so RemoveDB / RemoveDBFiles cannot remove and
     // re-create the year between the scan and the re-pin below: the bitmap always lands on the file that was scanned.)
     if (bg_cancel_.load(std::memory_order_relaxed)) return true;
-    // Re-acquired (and pinned) for the append.
-    CatIdxFile::Pin catidx = PinCatIdx(db_base_path, year, row_length, tracked_column_count);
-    catidx->AppendBitmapSection(surviving);
+    if (!catidx->AppendBitmapSection(surviving, write_count_before_scan)) {
+        // Nothing was appended (the reason is logged by AppendBitmapSection: a write into the year during the scan, a
+        // rebuild that began, or a failed write). Not "retry soon": the next pass, a poll interval later, tries again.
+        spdlog::info("[CATIDX] - Bitmap build of {}/{} not appended; retried at the next pass", db_base_path, year);
+    }
     return true;
 }
 
@@ -781,7 +823,7 @@ void XStore::RebuildOneYearCatIdxBloom(const std::string &db_base_path, unsigned
     RebuildYearIndexes(db_base_path, year, row_length, tracked_column_count, /*need_zmap=*/false, /*need_catidx=*/true);
 }
 
-bool XStore::CompactColdCatIdxForAllDbs(const std::string &data_store_dir) {
+bool XStore::BuildColdBitmapSectionsForAllDbs(const std::string &data_store_dir) {
     unsigned short current_year = TimeStruct(static_cast<std::time_t>(std::time(nullptr)), XStore_Proto::SECOND).year;
     if (!std::filesystem::exists(data_store_dir)) return true;
     bool complete = true;
@@ -805,9 +847,9 @@ bool XStore::CompactColdCatIdxForAllDbs(const std::string &data_store_dir) {
             // Bound shutdown latency: stop starting new year-scans once a
             // shutdown has been signaled, rather than blocking the
             // atexit-registered thread join until the whole remaining
-            // corpus finishes. CompactOneYearCatIdx's row loop also checks
+            // corpus finishes. BuildOneYearBitmapSection's row loop also checks
             // the flag (every 64K rows) and abandons the year in progress.
-            if (catidx_compaction_stop_flag_.load(std::memory_order_relaxed)) return false;
+            if (bitmap_build_stop_flag_.load(std::memory_order_relaxed)) return false;
             std::string filename = f.path().filename().string();
             if (filename.size() < 7 || filename.substr(filename.size() - 7) != ".XSTORE") continue;
             unsigned short year;
@@ -815,7 +857,7 @@ bool XStore::CompactColdCatIdxForAllDbs(const std::string &data_store_dir) {
             catch (...) { continue; }
             if (year >= current_year) continue; // only cold (closed) years
             if (live_widen_pending_.load(std::memory_order_relaxed)) {
-                spdlog::info("[CATIDX] - Compaction of {}/{} stopped: a live widen is pending; resumes after it",
+                spdlog::info("[CATIDX] - Bitmap build of {}/{} stopped: a live widen is pending; resumes after it",
                              db_base_path, year);
                 return false;
             }
@@ -829,12 +871,12 @@ bool XStore::CompactColdCatIdxForAllDbs(const std::string &data_store_dir) {
                 ~Leave() { XStore::LeaveBackgroundYear(); }
             } leave;
             // As in LiveWidenDb: the cfg above was read before this DB's earlier years; a DB removed, re-created or
-            // grown since is not compacted with it (the next run reads it afresh).
+            // grown since is not bitmapped with it (the next run reads it afresh).
             if (!CfgStillMatches(db_name, db_base_path, cfg_struct)) {
                 complete = false;
                 break;
             }
-            if (!CompactOneYearCatIdx(db_base_path, year, static_cast<uint16_t>(cfg_struct.rowlength()),
+            if (!BuildOneYearBitmapSection(db_base_path, year, static_cast<uint16_t>(cfg_struct.rowlength()),
                                        EffectiveTrackedColumnCount(cfg_struct))) {
                 complete = false; // no room in the MemoryPool: this year runs again soon, the others go on
             }
@@ -845,35 +887,35 @@ bool XStore::CompactColdCatIdxForAllDbs(const std::string &data_store_dir) {
     return complete;
 }
 
-std::thread XStore::catidx_compaction_thread_;
-std::atomic<bool> XStore::catidx_compaction_stop_flag_{false};
+std::thread XStore::bitmap_build_thread_;
+std::atomic<bool> XStore::bitmap_build_stop_flag_{false};
 
-void XStore::StartCatIdxCompactionThread(const std::string &data_store_dir) {
+void XStore::StartBitmapBuildThread(const std::string &data_store_dir) {
     // Minor #5: idempotency guard -- unlike StartWalWriters (whose callers
     // wrap it in std::call_once, see XStore_Management.cpp), this has no
     // built-in guard against a second call, which would operator= onto an
     // already-joinable std::thread and crash via std::terminate.
     static std::atomic<bool> already_started{false};
     if (already_started.exchange(true, std::memory_order_relaxed)) {
-        spdlog::warn("[CATIDX] - StartCatIdxCompactionThread called more than once; ignoring");
+        spdlog::warn("[CATIDX] - StartBitmapBuildThread called more than once; ignoring");
         return;
     }
 
-    catidx_compaction_thread_ = std::thread([data_store_dir]() {
-        XStore compaction_store; // one instance for this thread's lifetime, same convention every ZMQ worker already follows
-        BackgroundIndexSchedule schedule; // first compaction at start, as before
+    bitmap_build_thread_ = std::thread([data_store_dir]() {
+        XStore bitmap_build_store; // one instance for this thread's lifetime, same convention every ZMQ worker already follows
+        BackgroundIndexSchedule schedule; // first bitmap build at start, as before
         const auto now = [] { return std::chrono::steady_clock::now(); };
-        while (!XStore::catidx_compaction_stop_flag_.load(std::memory_order_relaxed)) {
-            compaction_store.BackgroundIndexTick(data_store_dir, schedule, now);
+        while (!XStore::bitmap_build_stop_flag_.load(std::memory_order_relaxed)) {
+            bitmap_build_store.BackgroundIndexTick(data_store_dir, schedule, now);
             std::this_thread::sleep_for(std::chrono::seconds(XStoreTunables::LIVE_WIDEN_TICK_SEC));
         }
     });
     // Same atexit-at-spawn-time ordering argument as StartWalWriters: register
     // the join here so it runs before any static logger/queue teardown.
-    std::atexit([]() { XStore::StopCatIdxCompactionThread(); });
+    std::atexit([]() { XStore::StopBitmapBuildThread(); });
 }
 
-// Widening and compaction share this one thread, so they never overlap (AppendBitmapSection racing a widen's reset
+// Widening and bitmap build share this one thread, so they never overlap (AppendBitmapSection racing a widen's reset
 // would be unsafe); widening has priority. An exception must not end the thread (std::terminate): logged, retried next
 // tick / interval.
 void XStore::BackgroundIndexTick(const std::string &data_store_dir, BackgroundIndexSchedule &schedule,
@@ -883,55 +925,55 @@ void XStore::BackgroundIndexTick(const std::string &data_store_dir, BackgroundIn
     } catch (const std::exception &e) {
         spdlog::error("[LIVE WIDEN] - Pass failed: {}", e.what());
     }
-    if (catidx_compaction_stop_flag_.load(std::memory_order_relaxed)) return;
-    // A recorded widen (in its quiet period, or waiting to retry): compaction is not started, so a flood of growths
-    // costs nothing here. A record that outlives a pass keeps compaction waiting with it.
-    // Any widen, due compaction or not, brings the next compaction forward to shortly after it: a widen drops the
-    // widened years' bitmap sections, which only compaction rebuilds (until then FindByValue uses the bloom alone).
+    if (bitmap_build_stop_flag_.load(std::memory_order_relaxed)) return;
+    // A recorded widen (in its quiet period, or waiting to retry): bitmap build is not started, so a flood of growths
+    // costs nothing here. A record that outlives a pass keeps bitmap build waiting with it.
+    // Any widen, due bitmap build or not, brings the next bitmap build forward to shortly after it: a widen drops the
+    // widened years' bitmap sections, which only bitmap build rebuilds (until then FindByValue uses the bloom alone).
     if (live_widen_pending_.load(std::memory_order_relaxed)) {
-        if (!schedule.compaction_yielded) {
-            schedule.compaction_yielded = true;
-            if (now() >= schedule.next_compaction) {
-                spdlog::info("[CATIDX] - Compaction deferred: a live widen is pending; resumes after it");
+        if (!schedule.bitmap_build_yielded) {
+            schedule.bitmap_build_yielded = true;
+            if (now() >= schedule.next_bitmap_build) {
+                spdlog::info("[CATIDX] - Bitmap build deferred: a live widen is pending; resumes after it");
             }
         }
         return;
     }
-    if (schedule.compaction_yielded) {
-        schedule.compaction_yielded = false;
-        schedule.next_compaction = now() + std::chrono::seconds(XStoreTunables::LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC);
-        spdlog::info("[CATIDX] - No live widen pending any more; compaction resumes in {} s",
-                     XStoreTunables::LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC);
+    if (schedule.bitmap_build_yielded) {
+        schedule.bitmap_build_yielded = false;
+        schedule.next_bitmap_build = now() + std::chrono::seconds(XStoreTunables::LIVE_WIDEN_BITMAP_BUILD_RESUME_DELAY_SEC);
+        spdlog::info("[CATIDX] - No live widen pending any more; bitmap build resumes in {} s",
+                     XStoreTunables::LIVE_WIDEN_BITMAP_BUILD_RESUME_DELAY_SEC);
     }
-    if (now() < schedule.next_compaction) return;
+    if (now() < schedule.next_bitmap_build) return;
     bool complete = true;
     try {
-        complete = CompactColdCatIdxForAllDbs(data_store_dir);
+        complete = BuildColdBitmapSectionsForAllDbs(data_store_dir);
     } catch (const std::exception &e) {
-        spdlog::error("[CATIDX] - Compaction pass failed: {}", e.what());
+        spdlog::error("[CATIDX] - Bitmap build pass failed: {}", e.what());
     }
     // A widen recorded during the pass: it abandoned its year (and logged which), or it had just finished. Either way
     // it runs again soon after the widen, which drops the widened years' bitmap sections anyway.
     if (live_widen_pending_.load(std::memory_order_relaxed)) {
-        schedule.compaction_yielded = true;
+        schedule.bitmap_build_yielded = true;
     } else if (!complete) {
         // A removal's cancel (or a DB changed under it) cut the run short: what it had not reached runs soon, not an
         // interval later.
-        schedule.next_compaction = now() + std::chrono::seconds(XStoreTunables::LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC);
+        schedule.next_bitmap_build = now() + std::chrono::seconds(XStoreTunables::LIVE_WIDEN_BITMAP_BUILD_RESUME_DELAY_SEC);
     } else {
-        schedule.next_compaction = now() + std::chrono::seconds(XStoreTunables::CATIDX_COMPACTION_POLL_INTERVAL_SEC);
+        schedule.next_bitmap_build = now() + std::chrono::seconds(XStoreTunables::CATIDX_BITMAP_BUILD_POLL_INTERVAL_SEC);
     }
 }
 
-void XStore::StopCatIdxCompactionThread() {
+void XStore::StopBitmapBuildThread() {
     {
         // Both under bg_mutex_: a removal's ResumeBackgroundWork reads the stop flag and writes bg_cancel_ under it, so
         // it cannot clear this cancel.
         std::lock_guard<std::mutex> lock(bg_mutex_);
-        catidx_compaction_stop_flag_.store(true, std::memory_order_relaxed);
+        bitmap_build_stop_flag_.store(true, std::memory_order_relaxed);
         bg_cancel_.store(true, std::memory_order_relaxed); // a running widen stops at its next chunk (left dirty)
     }
-    if (catidx_compaction_thread_.joinable()) {
-        catidx_compaction_thread_.join();
+    if (bitmap_build_thread_.joinable()) {
+        bitmap_build_thread_.join();
     }
 }

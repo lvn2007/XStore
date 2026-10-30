@@ -219,12 +219,83 @@ TEST(CatIdxFileTest, AppendBitmapSectionThenExactLookupWorks) {
     EXPECT_FALSE(f.LookupExact(0, EncodeFDataForCatIdx(v138)).has_value());
 }
 
+// The scan that builds a bitmap section reads rows as they were; a bloom write while it runs (an insert into the cold year)
+// is not in it, and there is no section yet for that write to invalidate. So the build hands AppendBitmapSection the write
+// count it saw before its scan, and the section is refused when the count moved.
+TEST(CatIdxFileTest, AppendBitmapSectionIsRefusedWhenABloomBlockWasWrittenSinceTheScanBegan) {
+    std::string path = TempCatIdxPath("bitmap_stale_scan.catidx");
+    std::filesystem::remove(path);
+    CatIdxFile f;
+    ASSERT_TRUE(f.Open(path, 64, 1));
+    XStore_Proto::FData v; v.set_int64data(137);
+    const std::string enc = EncodeFDataForCatIdx(v);
+    f.UpdateRow(0, {CatIdxObservation{0, enc, true}});
+    const uint64_t scan_began = f.WriteCount();
+
+    f.UpdateRow(5, {CatIdxObservation{0, enc, true}});   // an insert during the scan
+    EXPECT_FALSE(f.AppendBitmapSection({{0, {{enc, {0}}}}}, scan_began));
+    EXPECT_FALSE(f.HasBitmapSection()) << "a snapshot older than a write was committed";
+
+    EXPECT_TRUE(f.AppendBitmapSection({{0, {{enc, {0, 5}}}}}, f.WriteCount())) << "a scan with no write since must commit";
+    EXPECT_TRUE(f.HasBitmapSection());
+}
+
+// Linux returns at most 0x7ffff000 bytes from one pwrite, and a dense low-cardinality year has a section of tens of GB
+// (Mystic, 31.5M rows x 80 columns: 20 GB): the section must be written with as many calls as it takes, not one.
+// The test makes every call short (4 KB) the way the kernel's cap does at 2 GB.
+TEST(CatIdxFileTest, AppendBitmapSectionSurvivesTheKernelsShortWrites) {
+    std::string path = TempCatIdxPath("bitmap_short_writes.catidx");
+    std::filesystem::remove(path);
+    CatIdxFile f;
+    ASSERT_TRUE(f.Open(path, 64, 3));
+    std::unordered_map<uint32_t, std::map<std::string, std::vector<uint64_t>>> columns;
+    for (uint32_t c = 0; c < 3; ++c) {
+        for (int v = 0; v < 5; ++v) {
+            XStore_Proto::FData d; d.set_int64data(v);
+            std::vector<uint64_t> rows;
+            for (uint64_t r = 0; r < 2000; ++r) rows.push_back(r * 5 + static_cast<uint64_t>(v) + c);
+            columns[c][EncodeFDataForCatIdx(d)] = rows;
+        }
+    }
+    CatIdxFile::SetBitmapWriteLimitsForTests(4096, SIZE_MAX);
+    const bool appended = f.AppendBitmapSection(columns);
+    CatIdxFile::SetBitmapWriteLimitsForTests(SIZE_MAX, SIZE_MAX);
+    ASSERT_TRUE(appended);
+    ASSERT_TRUE(f.HasBitmapSection());
+    for (const auto &[c, values] : columns) {
+        for (const auto &[enc, rows] : values) {
+            const auto got = f.LookupExact(c, enc);
+            ASSERT_TRUE(got.has_value()) << "column " << c;
+            EXPECT_EQ(*got, rows) << "column " << c;
+        }
+    }
+}
+
+// A write that fails part way leaves nothing behind: the file is cut back to its size before the append (it used to keep
+// the partial section as dead space, and every hourly retry added another).
+TEST(CatIdxFileTest, AFailedBitmapSectionWriteLeavesNoDeadTail) {
+    std::string path = TempCatIdxPath("bitmap_failed_write.catidx");
+    std::filesystem::remove(path);
+    CatIdxFile f;
+    ASSERT_TRUE(f.Open(path, 64, 1));
+    XStore_Proto::FData d; d.set_int64data(7);
+    std::vector<uint64_t> rows;
+    for (uint64_t r = 0; r < 5000; ++r) rows.push_back(r);
+    const auto size_before = std::filesystem::file_size(path);
+    CatIdxFile::SetBitmapWriteLimitsForTests(4096, 10000);   // fails once 10,000 bytes are down
+    const bool appended = f.AppendBitmapSection({{0, {{EncodeFDataForCatIdx(d), rows}}}});
+    CatIdxFile::SetBitmapWriteLimitsForTests(SIZE_MAX, SIZE_MAX);
+    EXPECT_FALSE(appended);
+    EXPECT_FALSE(f.HasBitmapSection());
+    EXPECT_EQ(std::filesystem::file_size(path), size_before) << "a partial section stayed in the file";
+}
+
 TEST(CatIdxFileTest, ColumnOverCardinalityCapHasNoDirectory) {
     std::string path = TempCatIdxPath("bitmap_over_cap.catidx");
     std::filesystem::remove(path);
     CatIdxFile f;
     ASSERT_TRUE(f.Open(path, 64, 1));
-    // Column 0 never gets AppendBitmapSection called (compaction abandoned
+    // Column 0 never gets AppendBitmapSection called (bitmap build abandoned
     // it mid-scan for exceeding CATIDX_MAX_BITMAP_DISTINCT_VALUES) --
     // LookupExact must report "no directory" (nullopt), distinct from
     // "directory exists but value absent" (also nullopt) -- both mean
@@ -274,7 +345,7 @@ protected:
         scratch = std::make_unique<ScratchDir>("xstore_catidx_test");
         for (auto &shard : XStore::cfg_shards) shard.map.clear();
         XStore::ClearCatIdxRegistryForTests();
-        XStore::ClearLiveWidenRequestsForTests(); // another test's growth would make compaction yield
+        XStore::ClearLiveWidenRequestsForTests(); // another test's growth would make bitmap build yield
     }
 
     void TearDown() override {
@@ -433,7 +504,7 @@ TEST_F(XStoreCatIdxTestFixture, FindByValueRefusesANullTargetOnIndexedAndUnindex
 
 // End-to-end regression test for Critical Finding #1 (task-9-report.md fix
 // round, see AppendBitmapSection/EnsureBlockLoaded/FlushBlock): a real
-// compaction, then a real backfill write into a never-touched block whose
+// bitmap build, then a real backfill write into a never-touched block whose
 // arithmetic bloom offset now falls inside (here, exactly at the start of)
 // the just-committed bitmap section directory. Before the fix,
 // EnsureBlockLoaded would misread the directory's bytes as "existing" bloom
@@ -454,17 +525,17 @@ TEST_F(XStoreCatIdxTestFixture, FindByValueRefusesANullTargetOnIndexedAndUnindex
 // 2. UnaryInsert's first write to a year preallocates (sparse) the ENTIRE
 //    year's row range at SECOND resolution (~31.5M rows -- the only
 //    resolution CreateDB permits that isn't even larger), and
-//    CompactOneYearCatIdx's row scan walks every one of those rows. Left
+//    BuildOneYearBitmapSection's row scan walks every one of those rows. Left
 //    alone that makes this test take minutes. Same fix precedent as
 //    XStoreWalTest.cpp's WAL-file resize_file tests: shrink the underlying
 //    file with resize_file (not a fake/synthetic file -- the same real file
 //    UnaryInsert just wrote into) down to just past the two blocks this
 //    test cares about, so the scan stays fast without touching production
 //    code.
-TEST_F(XStoreCatIdxTestFixture, CompactionThenBackfillIntoUntouchedBlockDoesNotCorruptBitmapSection) {
+TEST_F(XStoreCatIdxTestFixture, BitmapBuildThenBackfillIntoUntouchedBlockDoesNotCorruptBitmapSection) {
     constexpr uint16_t kWideRowLength = 16384; // -> RowsPerBlock == 128
     XStore store;
-    CreateTestDb(store, "CATIDXCOMPACT", XStore_Proto::SECOND, kWideRowLength);
+    CreateTestDb(store, "CATIDXBITMAP", XStore_Proto::SECOND, kWideRowLength);
     uint64_t rows_per_block = RowsPerBlock(kWideRowLength);
 
     // first_epoch (start of the calendar year, in SECOND units) is row 0 --
@@ -482,22 +553,22 @@ TEST_F(XStoreCatIdxTestFixture, CompactionThenBackfillIntoUntouchedBlockDoesNotC
         XStore_Proto::RowData row;
         row.add_fielddata()->set_int64data(i == 10 ? 555 : static_cast<int64_t>(i));
         XStore_Proto::UnaryInsert_REP rep;
-        store.UnaryInsert(base + i, row, "CATIDXCOMPACT", &rep, XStore_Proto::SYNC);
+        store.UnaryInsert(base + i, row, "CATIDXBITMAP", &rep, XStore_Proto::SYNC);
     }
 
-    // Bound the compaction scan to just past block 0 + block 1 -- see point
+    // Bound the bitmap build scan to just past block 0 + block 1 -- see point
     // 2 above. Real data already durably written above stays intact (it
     // lives at offsets [0, rows_per_block*row_length), well inside this
     // smaller size); only the ~31.5M-row trailing sparse region this test
     // doesn't care about is dropped.
-    std::string xstore_path = DbPath("CATIDXCOMPACT") + "/" + std::to_string(year) + ".XSTORE";
+    std::string xstore_path = DbPath("CATIDXBITMAP") + "/" + std::to_string(year) + ".XSTORE";
     std::error_code resize_ec;
     std::filesystem::resize_file(xstore_path, 2 * rows_per_block * kWideRowLength, resize_ec);
     ASSERT_FALSE(resize_ec) << resize_ec.message();
 
-    store.CompactOneYearCatIdx(DbPath("CATIDXCOMPACT"), year, kWideRowLength, /*tracked_column_count=*/1);
+    store.BuildOneYearBitmapSection(DbPath("CATIDXBITMAP"), year, kWideRowLength, /*tracked_column_count=*/1);
 
-    CatIdxFile &catidx = XStore::GetOrOpenCatIdx(DbPath("CATIDXCOMPACT"), year, kWideRowLength, 1);
+    CatIdxFile &catidx = XStore::GetOrOpenCatIdx(DbPath("CATIDXBITMAP"), year, kWideRowLength, 1);
     ASSERT_TRUE(catidx.HasBitmapSection());
 
     auto rows = catidx.LookupExact(/*column_idx=*/0, EncodeFDataForCatIdx(target));
@@ -505,17 +576,17 @@ TEST_F(XStoreCatIdxTestFixture, CompactionThenBackfillIntoUntouchedBlockDoesNotC
     EXPECT_EQ(*rows, (std::vector<uint64_t>{10}));
 
     // Insert one more row into a DIFFERENT, previously-untouched block (1)
-    // in this same, now-compacted year, via the normal UnaryInsert path.
+    // in this same, now-bitmapped year, via the normal UnaryInsert path.
     XStore_Proto::RowData backfill_row;
     backfill_row.add_fielddata()->set_int64data(777);
     XStore_Proto::UnaryInsert_REP backfill_rep;
-    store.UnaryInsert(base + rows_per_block, backfill_row, "CATIDXCOMPACT", &backfill_rep, XStore_Proto::SYNC);
+    store.UnaryInsert(base + rows_per_block, backfill_row, "CATIDXBITMAP", &backfill_rep, XStore_Proto::SYNC);
 
     XStore_Proto::FData backfill_val;
     backfill_val.set_int64data(777);
     uint64_t block1 = BlockIndexForRow(rows_per_block, rows_per_block);
     EXPECT_TRUE(catidx.MightContain(block1, /*column_idx=*/0, EncodeFDataForCatIdx(backfill_val)))
-        << "backfill insert into a never-touched block after compaction must still be found";
+        << "backfill insert into a never-touched block after bitmap build must still be found";
 
     // And the bitmap section must not have been silently corrupted by that
     // write. Two outcomes are both correct per the fix's contract: either
@@ -539,25 +610,25 @@ TEST_F(XStoreCatIdxTestFixture, CompactionThenBackfillIntoUntouchedBlockDoesNotC
 
 // FindByValue bitmap-aware query path (Task 10), corrected by the final
 // whole-branch review's Critical C1. The bitmap directory is a
-// COMPACTION-TIME SNAPSHOT -- a candidate filter, never an authority on
+// BITMAP BUILD-TIME SNAPSHOT -- a candidate filter, never an authority on
 // what the rows currently hold. This test's earlier version asserted the
-// opposite (that a post-compaction overwrite of 75 rows to the target value
+// opposite (that a post-bitmap build overwrite of 75 rows to the target value
 // must still return only the 25 rows the directory recorded), which locked
 // the C1 bug in as expected behavior: the true correct answer is 100, since
 // all 100 rows really do carry the target value by then.
 //
 // It now proves three separate things, without ever using a WRONG answer as
 // the discriminator for "the bitmap path ran":
-//   1. The bitmap path's preconditions genuinely hold after compaction --
+//   1. The bitmap path's preconditions genuinely hold after bitmap build --
 //      HasBitmapSection() is true and a direct LookupExact returns the 25
 //      recorded rows (asserted directly on the CatIdxFile, not inferred
 //      from an end-to-end result).
 //   2. With the directory live and the data untouched, FindByValue returns
 //      the correct 25.
-//   3. After a post-compaction overwrite through the normal write path, the
+//   3. After a post-bitmap build overwrite through the normal write path, the
 //      directory is invalidated (FlushBlock self-heal -- C1 part 2) and
 //      FindByValue returns the TRUE answer of 100, not the stale 25.
-TEST_F(XStoreCatIdxTestFixture, FindByValueUsesBitmapDirectoryNotRealScanAfterCompaction) {
+TEST_F(XStoreCatIdxTestFixture, FindByValueUsesBitmapDirectoryNotRealScanAfterBitmapBuild) {
     constexpr uint16_t kRowLength = 64;
     XStore store;
     CreateTestDb(store, "FINDBYVALUEBITMAP", XStore_Proto::SECOND, kRowLength);
@@ -572,8 +643,8 @@ TEST_F(XStoreCatIdxTestFixture, FindByValueUsesBitmapDirectoryNotRealScanAfterCo
 
     unsigned short year = TimeStruct(1000, XStore_Proto::SECOND).year;
 
-    // Bound CompactOneYearCatIdx's row scan to block 0 only -- same
-    // resize_file trick as CompactionThenBackfillIntoUntouchedBlockDoesNot
+    // Bound BuildOneYearBitmapSection's row scan to block 0 only -- same
+    // resize_file trick as BitmapBuildThenBackfillIntoUntouchedBlockDoesNot
     // CorruptBitmapSection above, avoids walking the full ~31.5M-row sparse
     // SECOND-resolution year. GetOrMapFile (queries) grows the file back
     // via ftruncate and UnaryInsert's pwrite extends it as needed once they
@@ -583,15 +654,15 @@ TEST_F(XStoreCatIdxTestFixture, FindByValueUsesBitmapDirectoryNotRealScanAfterCo
     std::filesystem::resize_file(xstore_path, rows_per_block * kRowLength, resize_ec);
     ASSERT_FALSE(resize_ec) << resize_ec.message();
 
-    store.CompactOneYearCatIdx(DbPath("FINDBYVALUEBITMAP"), year, kRowLength, /*tracked_column_count=*/1);
+    store.BuildOneYearBitmapSection(DbPath("FINDBYVALUEBITMAP"), year, kRowLength, /*tracked_column_count=*/1);
     CatIdxFile &catidx = XStore::GetOrOpenCatIdx(DbPath("FINDBYVALUEBITMAP"), year, kRowLength, 1);
     ASSERT_TRUE(catidx.HasBitmapSection());
 
     XStore_Proto::FData target;
     target.set_int64data(3);
-    auto rows_at_compaction = catidx.LookupExact(/*column_idx=*/0, EncodeFDataForCatIdx(target));
-    ASSERT_TRUE(rows_at_compaction.has_value());
-    ASSERT_EQ(rows_at_compaction->size(), 25u); // 100 rows / 4 values = 25 matches for value=3
+    auto rows_at_build = catidx.LookupExact(/*column_idx=*/0, EncodeFDataForCatIdx(target));
+    ASSERT_TRUE(rows_at_build.has_value());
+    ASSERT_EQ(rows_at_build->size(), 25u); // 100 rows / 4 values = 25 matches for value=3
 
     auto find = [&]() {
         std::string reassembled;
@@ -621,10 +692,10 @@ TEST_F(XStoreCatIdxTestFixture, FindByValueUsesBitmapDirectoryNotRealScanAfterCo
         store.UnaryInsert(1000 + i, row, "FINDBYVALUEBITMAP", &rep, XStore_Proto::SYNC);
     }
 
-    // (3) Any write into an already-compacted file invalidates the snapshot
+    // (3) Any write into an already-bitmapped file invalidates the snapshot
     // (C1 part 2), so the stale directory can't be trusted or consulted...
     EXPECT_FALSE(catidx.HasBitmapSection())
-        << "a post-compaction write must invalidate the bitmap section -- otherwise the "
+        << "a post-bitmap build write must invalidate the bitmap section -- otherwise the "
            "directory silently drifts from real row data";
     // ...and the answer is the TRUE one: all 100 rows now hold value 3.
     XStore_Proto::RangeQuery_REP after = find();
@@ -632,13 +703,13 @@ TEST_F(XStoreCatIdxTestFixture, FindByValueUsesBitmapDirectoryNotRealScanAfterCo
 }
 
 // C1 (final whole-branch review), the false-negative half: a row inserted
-// AFTER compaction must still be found by FindByValue. Under the old code
+// AFTER bitmap build must still be found by FindByValue. Under the old code
 // the bitmap directory stayed committed across such a backfill (its bloom
 // write never physically overlapped the directory bytes, so FlushBlock's
 // overlap-only invalidation check never tripped) and FindByValue trusted
-// LookupExact's compaction-time row list as complete -- so the new row was
+// LookupExact's bitmap build-time row list as complete -- so the new row was
 // never returned, directly violating this feature's own core invariant.
-TEST_F(XStoreCatIdxTestFixture, FindByValueFindsRowBackfilledAfterCompaction) {
+TEST_F(XStoreCatIdxTestFixture, FindByValueFindsRowBackfilledAfterBitmapBuild) {
     constexpr uint16_t kRowLength = 64;
     XStore store;
     CreateTestDb(store, "FINDBYVALUEBACKFILL", XStore_Proto::SECOND, kRowLength);
@@ -655,14 +726,14 @@ TEST_F(XStoreCatIdxTestFixture, FindByValueFindsRowBackfilledAfterCompaction) {
     TimeStruct ref_ts(static_cast<std::time_t>(1000), XStore_Proto::SECOND);
     unsigned short year = ref_ts.year;
     const uint64_t first_epoch = static_cast<uint64_t>(ref_ts.first_epoch);
-    // Bound the compaction scan to block 0, same resize_file trick the other
-    // compaction tests here use (see their comments).
+    // Bound the bitmap build scan to block 0, same resize_file trick the other
+    // bitmap build tests here use (see their comments).
     std::string xstore_path = DbPath("FINDBYVALUEBACKFILL") + "/" + std::to_string(year) + ".XSTORE";
     std::error_code resize_ec;
     std::filesystem::resize_file(xstore_path, rows_per_block * kRowLength, resize_ec);
     ASSERT_FALSE(resize_ec) << resize_ec.message();
 
-    store.CompactOneYearCatIdx(DbPath("FINDBYVALUEBACKFILL"), year, kRowLength, /*tracked_column_count=*/1);
+    store.BuildOneYearBitmapSection(DbPath("FINDBYVALUEBACKFILL"), year, kRowLength, /*tracked_column_count=*/1);
     CatIdxFile &catidx = XStore::GetOrOpenCatIdx(DbPath("FINDBYVALUEBACKFILL"), year, kRowLength, 1);
     ASSERT_TRUE(catidx.HasBitmapSection());
 
@@ -670,10 +741,10 @@ TEST_F(XStoreCatIdxTestFixture, FindByValueFindsRowBackfilledAfterCompaction) {
     target.set_int64data(909);
     auto snapshot = catidx.LookupExact(/*column_idx=*/0, EncodeFDataForCatIdx(target));
     ASSERT_TRUE(snapshot.has_value());
-    ASSERT_EQ(*snapshot, (std::vector<uint64_t>{1007ULL - first_epoch})); // only row 7 at compaction time
+    ASSERT_EQ(*snapshot, (std::vector<uint64_t>{1007ULL - first_epoch})); // only row 7 at bitmap build time
 
     // Backfill a NEW row carrying the target value, into the same already-
-    // compacted block the directory snapshot covers.
+    // bitmapped block the directory snapshot covers.
     XStore_Proto::RowData backfill;
     backfill.add_fielddata()->set_int64data(909);
     XStore_Proto::UnaryInsert_REP backfill_rep;
@@ -687,8 +758,8 @@ TEST_F(XStoreCatIdxTestFixture, FindByValueFindsRowBackfilledAfterCompaction) {
     ASSERT_TRUE(rep.ParseFromString(reassembled));
 
     ASSERT_EQ(rep.queryresponse_size(), 2)
-        << "a row backfilled after compaction must still be found -- the bitmap directory is a "
-           "compaction-time snapshot, not an authority on current row contents";
+        << "a row backfilled after bitmap build must still be found -- the bitmap directory is a "
+           "bitmap build-time snapshot, not an authority on current row contents";
     std::vector<unsigned long long> found;
     for (const auto &entry : rep.queryresponse()) found.push_back(entry.timestamp());
     std::sort(found.begin(), found.end());
@@ -943,7 +1014,7 @@ TEST_F(CatIdxLiveWidenTest, BeginRebuildWidensInPlaceAndAnswersMaybeUntilBlocksA
     EXPECT_FALSE(f.MightContain(3, 1, Enc(13)));
     EXPECT_TRUE(f.MightContain(1, 0, Enc(101)));
 
-    // Compaction is refused while rebuilding; MarkClean too.
+    // Bitmap build is refused while rebuilding; MarkClean too.
     f.AppendBitmapSection({{0, {{Enc(101), {kLwRpb + 2}}}}});
     EXPECT_FALSE(f.HasBitmapSection());
     EXPECT_FALSE(f.MarkClean());
@@ -1008,7 +1079,7 @@ TEST_F(CatIdxLiveWidenTest, KeepOldAnswersFromTheOldIndexUntilBlocksAreRebuilt) 
     ASSERT_TRUE(f.LookupExact(0, Enc(100)).has_value());
     EXPECT_EQ(*f.LookupExact(0, Enc(100)), std::vector<uint64_t>{1});
     f.AppendBitmapSection({{0, {{Enc(101), {kLwRpb + 2}}}}});
-    EXPECT_EQ(ReadCatIdxHeader(path).bitmap_section_offset, 0u) << "compaction is refused while rebuilding";
+    EXPECT_EQ(ReadCatIdxHeader(path).bitmap_section_offset, 0u) << "bitmap build is refused while rebuilding";
 
     // Builder: block 0 complete. A write above F reaches the old file (and invalidates its directory).
     f.RebuildFoldRow(5, CatObs(3, 33));
@@ -1028,7 +1099,7 @@ TEST_F(CatIdxLiveWidenTest, KeepOldAnswersFromTheOldIndexUntilBlocksAreRebuilt) 
     EXPECT_EQ(f.OldWidth(), 0u);
     EXPECT_FALSE(f.HasBitmapSection());
     f.AppendBitmapSection({{0, {{Enc(101), {kLwRpb + 2}}}}});
-    EXPECT_TRUE(f.HasBitmapSection()) << "compaction works again after the build";
+    EXPECT_TRUE(f.HasBitmapSection()) << "bitmap build works again after the build";
     EXPECT_TRUE(f.MarkClean());
 }
 
@@ -1159,19 +1230,19 @@ namespace {
 
 using xstore_test::CreateTestDb;
 
-// Compaction must not run on a year whose .catidx is being rebuilt (stage 3 serialises the two on the compaction
+// Bitmap build must not run on a year whose .catidx is being rebuilt (stage 3 serialises the two on the bitmap build
 // thread; this is the backstop).
-TEST_F(XStoreCatIdxTestFixture, CompactionSkipsAnIndexBeingRebuilt) {
+TEST_F(XStoreCatIdxTestFixture, BitmapBuildSkipsAnIndexBeingRebuilt) {
     XStore store;
-    CreateTestDb(store, "CATIDXLWCOMPACT", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "CATIDXLWBITMAP", XStore_Proto::SECOND, 64);
     XStore_Proto::RowData row;
     row.add_fielddata()->set_int64data(137);
     XStore_Proto::UnaryInsert_REP rep;
-    store.UnaryInsert(1000, row, "CATIDXLWCOMPACT", &rep, XStore_Proto::SYNC);
+    store.UnaryInsert(1000, row, "CATIDXLWBITMAP", &rep, XStore_Proto::SYNC);
     ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
     const unsigned short year = TimeStruct(1000, XStore_Proto::SECOND).year;
-    const std::string db = DbPath("CATIDXLWCOMPACT");
-    // Bound the compaction scan (same resize trick as FindByValueUsesBitmapDirectoryNotRealScanAfterCompaction).
+    const std::string db = DbPath("CATIDXLWBITMAP");
+    // Bound the bitmap build scan (same resize trick as FindByValueUsesBitmapDirectoryNotRealScanAfterBitmapBuild).
     std::error_code resize_ec;
     std::filesystem::resize_file(db + "/" + std::to_string(year) + ".XSTORE", 4096 * 64, resize_ec);
     ASSERT_FALSE(resize_ec) << resize_ec.message();
@@ -1179,12 +1250,12 @@ TEST_F(XStoreCatIdxTestFixture, CompactionSkipsAnIndexBeingRebuilt) {
     CatIdxFile &catidx = XStore::GetOrOpenCatIdx(db, year, 64);
     ASSERT_TRUE(catidx.BeginRebuild(64));
     xstore_test::kLogCapture->Clear();
-    store.CompactOneYearCatIdx(db, year, 64, 64);
+    store.BuildOneYearBitmapSection(db, year, 64, 64);
     EXPECT_FALSE(catidx.HasBitmapSection());
     // The early guard stopped it before the scan: AppendBitmapSection's own refusal (which logs this) never ran.
     EXPECT_FALSE(xstore_test::kLogCapture->Contains("Not appending a bitmap section"));
     EXPECT_TRUE(catidx.FinishRebuild());
-    store.CompactOneYearCatIdx(db, year, 64, 64);
+    store.BuildOneYearBitmapSection(db, year, 64, 64);
     EXPECT_TRUE(catidx.HasBitmapSection());
 }
 

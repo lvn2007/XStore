@@ -542,7 +542,7 @@ inline constexpr unsigned LIVE_WIDEN_GOVERNOR_SMOOTHING_TICKS = 3;   // window f
 // Owner-approved: 30 s.
 inline constexpr uint64_t LIVE_WIDEN_QUIET_PERIOD_SEC = 30;
 // How often the background index thread looks for due widening work (and
-// checks whether compaction is due). One second: a recorded DB is picked up
+// checks whether bitmap build is due). One second: a recorded DB is picked up
 // at most about a second after its quiet period ends.
 inline constexpr uint64_t LIVE_WIDEN_TICK_SEC = 1;
 // A year whose rebuild could not even begin (BeginRebuild failed: the old,
@@ -552,18 +552,18 @@ inline constexpr uint64_t LIVE_WIDEN_TICK_SEC = 1;
 // given up until its width grows again or the next start rebuilds it.
 inline constexpr uint32_t LIVE_WIDEN_MAX_ATTEMPTS = 3;
 inline constexpr uint64_t LIVE_WIDEN_RETRY_BASE_SEC = 60;
-// Compaction yields to live widening: while a widen is recorded, the
-// background index thread does not start compaction, and a running pass
+// Bitmap build yields to live widening: while a widen is recorded, the
+// background index thread does not start bitmap build, and a running pass
 // abandons its year at its next 64K-row check. Once no widen is recorded any
-// more, the next compaction after any live widen runs this long after
-// that tick instead of waiting out CATIDX_COMPACTION_POLL_INTERVAL_SEC.
-inline constexpr uint64_t LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC = 30;
+// more, the next bitmap build after any live widen runs this long after
+// that tick instead of waiting out CATIDX_BITMAP_BUILD_POLL_INTERVAL_SEC.
+inline constexpr uint64_t LIVE_WIDEN_BITMAP_BUILD_RESUME_DELAY_SEC = 30;
 // RemoveDB / RemoveDBFiles of a year file stop the background index thread's
-// work on that DB/year (widening or compaction) and wait at most this long for
+// work on that DB/year (widening or bitmap build) and wait at most this long for
 // it to let go, then remove anyway (with an error in the log).
 inline constexpr uint64_t BACKGROUND_REMOVE_WAIT_MS = 10000;
 
-// Cardinality cap for the compaction-built bitmap section: a column whose
+// Cardinality cap for the bitmap build-built bitmap section: a column whose
 // distinct-value count in a given year crosses this threshold never gets a
 // bitmap for that year (stays bloom+real-scan forever) -- this is what lets
 // "automatic for every column" coexist with continuous (near-unique-value)
@@ -572,19 +572,19 @@ inline constexpr uint64_t BACKGROUND_REMOVE_WAIT_MS = 10000;
 // a per-value roaring bitmap directory stops paying for itself.
 inline constexpr uint64_t CATIDX_MAX_BITMAP_DISTINCT_VALUES = 10000;
 
-// How often the compaction background thread checks for newly-cold year
-// files (year rolled over from current calendar year). Compaction is a
+// How often the bitmap build background thread checks for newly-cold year
+// files (year rolled over from current calendar year). Bitmap build is a
 // rare, low-frequency background job -- no need for WAL-writer-loop-style
 // sub-millisecond polling.
-inline constexpr uint64_t CATIDX_COMPACTION_POLL_INTERVAL_SEC = 3600;
+inline constexpr uint64_t CATIDX_BITMAP_BUILD_POLL_INTERVAL_SEC = 3600;
 
-// Compaction keeps, per tracked column, every row index of every value until the year's scan ends (a column is dropped only
+// Bitmap build keeps, per tracked column, every row index of every value until the year's scan ends (a column is dropped only
 // past CATIDX_MAX_BITMAP_DISTINCT_VALUES), so a low-cardinality column holds one 8-byte index per row: BYTES_PER_ROW is that
 // plus the vector's growth slack (an upper bound). Once the accumulators pass OPERATION_LEASE_MIN_BYTES they are reserved
-// from xstore::MemoryPool in LEASE_STEP_BYTES steps; compaction is background work, so a step that cannot be had at once
-// abandons the year for this pass (retried LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC later) instead of waiting in the pool's line.
-inline constexpr uint64_t CATIDX_COMPACTION_BYTES_PER_ROW = 16;
-inline constexpr uint64_t CATIDX_COMPACTION_LEASE_STEP_BYTES = 64u * 1024u * 1024u;
+// from xstore::MemoryPool in LEASE_STEP_BYTES steps; bitmap build is background work, so a step that cannot be had at once
+// abandons the year for this pass (retried LIVE_WIDEN_BITMAP_BUILD_RESUME_DELAY_SEC later) instead of waiting in the pool's line.
+inline constexpr uint64_t CATIDX_BITMAP_BUILD_BYTES_PER_ROW = 16;
+inline constexpr uint64_t CATIDX_BITMAP_BUILD_LEASE_STEP_BYTES = 64u * 1024u * 1024u;
 
 // RangeQuery and BatchQuery (XStore_RangeOps.cpp,
 // XStore_BatchOps.cpp): target size of each emitted wire-format chunk. A

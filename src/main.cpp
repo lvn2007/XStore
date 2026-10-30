@@ -254,7 +254,7 @@ int main(int argc, char *argv[]) {
     // StartWalWriters (via a process-wide once_flag) and runs InitDB for
     // data_store_dir -- neither is called directly from main.cpp elsewhere.
     // Reusing that same construction here (rather than duplicating
-    // GetBaseDir()'s cwd-based path logic) gives the compaction thread the
+    // GetBaseDir()'s cwd-based path logic) gives the bitmap build thread the
     // authoritative data_store_dir and is a harmless no-op duplicate of the
     // work every later ZmqServer worker's own XStore instance would trigger
     // anyway (InitDB's own once-per-directory guard makes this idempotent).
@@ -273,7 +273,7 @@ int main(int argc, char *argv[]) {
         spdlog::default_logger()->flush();
         _exit(1);
     }
-    XStore::StartCatIdxCompactionThread(bootstrap_store->data_store_dir);
+    XStore::StartBitmapBuildThread(bootstrap_store->data_store_dir);
 
     // Spin ZMQ Server. Returns after a stop signal, once the workers have
     // drained (or the drain timeout hit).
@@ -292,8 +292,8 @@ int main(int argc, char *argv[]) {
     }
 
     // Server quiescent: no request can mutate data from here on. The
-    // compaction thread is stopped first so it cannot re-dirty an index.
-    XStore::StopCatIdxCompactionThread();
+    // bitmap build thread is stopped first so it cannot re-dirty an index.
+    XStore::StopBitmapBuildThread();
     XStore::Shutdown();
     spdlog::info("[SHUTDOWN] - Clean shutdown complete");
     return 0;

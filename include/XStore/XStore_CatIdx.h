@@ -173,7 +173,7 @@ struct CatIdxFileHeader {
     uint32_t version               = XStoreTunables::CATIDX_VERSION;
     uint32_t tracked_column_count  = 0;
     uint32_t block_count           = 0;
-    uint64_t bitmap_section_offset = 0; // 0 = not compacted yet
+    uint64_t bitmap_section_offset = 0; // 0 = not bitmapped yet
     // 1 = may hold writes not yet synced alongside the data file (set before
     // the first write of a session, cleared only after data + index are
     // fsynced); 1 at startup => rebuild. See Durability A plan.
@@ -381,20 +381,36 @@ public:
     // header_.bitmap_section_offset ONCE -- a crash between the two leaves
     // harmless unreferenced bytes past the last known-good offset, same
     // "uncommitted tail is safely ignorable" shape the WAL itself relies
-    // on). Deliberately one call per compaction pass, not one per column:
+    // on). Deliberately one call per bitmap build pass, not one per column:
     // calling this once per column used to mean only the FIRST column's
     // write got crash-safe commit semantics -- header_.bitmap_section_offset
     // became non-zero after that first call, so a crash during a LATER
     // column's write left torn bytes INSIDE the already-committed,
     // scannable range. Row indices per value need not be pre-sorted --
-    // stored as given (compaction naturally produces them in scan order).
+    // stored as given (bitmap build naturally produces them in scan order).
     // Refused (nothing written) while a rebuild runs: the section would sit
     // where the builder's bloom blocks are about to go.
-    void AppendBitmapSection(const std::unordered_map<uint32_t, std::map<std::string, std::vector<uint64_t>>> &columns);
+    // Returns true when the section was committed. built_at_write_count: the WriteCount() the caller read before it began
+    // scanning the rows the section was built from; the section is a snapshot of those rows, so it is refused (false, nothing
+    // written) when a bloom block was written since -- that write is not in it and, with no section yet, invalidated nothing.
+    // nullopt = the caller knows no write can have happened (tests).
+    bool AppendBitmapSection(const std::unordered_map<uint32_t, std::map<std::string, std::vector<uint64_t>>> &columns,
+                             std::optional<uint64_t> built_at_write_count = std::nullopt);
+
+    // Test knobs for AppendBitmapSection's writes: every pwrite is cut to max_bytes_per_call (the kernel returns at most
+    // 0x7ffff000 per call), and the write fails once fail_after_bytes have been written. SIZE_MAX, SIZE_MAX = no limit.
+    static void SetBitmapWriteLimitsForTests(size_t max_bytes_per_call, size_t fail_after_bytes);
+
+    // Number of bloom blocks written (FlushBlock) through this object since it was opened; in memory only, so a caller that
+    // compares two readings must hold a Pin across them (the registry cannot then replace the object).
+    [[nodiscard]] uint64_t WriteCount() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return write_count_;
+    }
 
     // False while a rebuild runs (also the untrusted state of EnterUntrustedRebuildState, which keeps an old section
     // on disk): the directory is a snapshot of rows the rebuild is re-deriving, and rows written since are not in it.
-    // A keep-old rebuild answers from the old index, whose section any write since compaction has invalidated.
+    // A keep-old rebuild answers from the old index, whose section any write since bitmap build has invalidated.
     bool HasBitmapSection() const {
         std::lock_guard<std::mutex> lock(mutex_);
         if (frontier_ != kNoRebuild) return old_ != nullptr && old_->HasBitmapSection();
@@ -404,7 +420,7 @@ public:
     // Returns the exact row indices for (column_idx, encoded_value) if a
     // directory exists for that column AND the value is present in it.
     // nullopt covers BOTH "no directory for this column" (over cardinality
-    // cap, or year not compacted yet) and "directory exists but value
+    // cap, or year not bitmapped yet) and "directory exists but value
     // absent" -- both mean the same thing to the caller: fall back to
     // bloom+real-scan.
     std::optional<std::vector<uint64_t>> LookupExact(uint32_t column_idx, const std::string &encoded_value);
@@ -465,6 +481,7 @@ private:
     std::unordered_map<uint64_t, std::vector<BloomEntry>> cache_; // block_index -> per-column bloom bytes
     std::vector<uint64_t> lru_order_;
     mutable std::mutex mutex_;
+    uint64_t write_count_ = 0;   // FlushBlock calls, under mutex_
     // Appended last so every older member keeps its offset (hot-path layout unchanged by keep-old).
     std::string path_;                   // set by Open; the keep-old begin creates path_ + ".new"
     std::unique_ptr<CatIdxFile> old_;    // keep-old rebuild only: the old index, until FinishRebuild (under mutex_)

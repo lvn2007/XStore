@@ -140,7 +140,7 @@ protected:
         XStore::ClearZoneMapRegistryForTests();
         XStore::ClearCatIdxRegistryForTests();
         walring::ClearRingRegistryForTests();
-        XStore::ClearLiveWidenRequestsForTests(); // another test's growth would make compaction yield
+        XStore::ClearLiveWidenRequestsForTests(); // another test's growth would make bitmap build yield
     }
     void TearDown() override {
         XStore::ResetShutdownForTests();
@@ -270,7 +270,7 @@ TEST_F(XStoreRebuildTest, StartupRebuildMatchesThePerRowReferenceOnEveryDataShap
     EXPECT_GT(ReadHeader<CatIdxFileHeader>(YearPath(db, kDense, ".catidx")).block_count, 2u);
 }
 
-// Only the stale index is rebuilt: a healthy, compacted catidx (bitmap section) survives a zone-map-only rebuild
+// Only the stale index is rebuilt: a healthy, bitmapped catidx (bitmap section) survives a zone-map-only rebuild
 // byte for byte, and the reverse.
 TEST_F(XStoreRebuildTest, OnlyTheStaleIndexIsRebuilt) {
     const std::string db = "REBUILDONE";
@@ -281,16 +281,16 @@ TEST_F(XStoreRebuildTest, OnlyTheStaleIndexIsRebuilt) {
     for (uint64_t i = 0; i < 3000; ++i) rows.emplace_back(Jan1(year) + i, MixedRow(i, 16));
     Insert(store, db, rows);
     CleanRestartState();
-    {   // Keep the compaction scan short: it reads every row of the file.
+    {   // Keep the bitmap build scan short: it reads every row of the file.
         const int fd = open(YearPath(db, year, ".XSTORE").c_str(), O_WRONLY);
         ASSERT_GE(fd, 0);
         ASSERT_EQ(ftruncate(fd, 3000 * kRowLength), 0);
         close(fd);
     }
     const uint32_t width = ReadHeader<CatIdxFileHeader>(YearPath(db, year, ".catidx")).tracked_column_count;
-    store.CompactOneYearCatIdx(DbPath(db), year, kRowLength, width);
+    store.BuildOneYearBitmapSection(DbPath(db), year, kRowLength, width);
     ASSERT_TRUE(XStore::GetOrOpenCatIdx(DbPath(db), year, kRowLength, width).HasBitmapSection());
-    CleanRestartState(); // the compaction dirtied it: clean again
+    CleanRestartState(); // the bitmap build dirtied it: clean again
 
     const std::string catidx_before = ReadFileBytes(YearPath(db, year, ".catidx"));
     ASSERT_EQ(ReadHeader<CatIdxFileHeader>(YearPath(db, year, ".catidx")).dirty, 0u);
@@ -745,7 +745,7 @@ TEST_F(XStoreRebuildTest, CorruptRowsPerBlockInAnOldZoneMapIsNotKept) {
 }
 
 // SF-A2: an untrusted .catidx (BeginRebuild could not start: its dirty-mark fdatasync fails) that still holds an old
-// bitmap section must not serve it. A compacted, CLEAN year whose catidx is stale because the DB grew wider (a 70-column
+// bitmap section must not serve it. A bitmapped, CLEAN year whose catidx is stale because the DB grew wider (a 70-column
 // row in another year), and whose directory misses rows 3000..3009 (written straight into the data file, standing in
 // for rows whose index writes were lost). (A WAL replay of such rows does not reproduce it: a replayed row's FlushBlock
 // invalidates the section itself; a dirty header does not either: BeginRebuild then needs no sync and truncates.)
@@ -766,7 +766,7 @@ TEST_F(XStoreRebuildTest, AnUntrustedCatIdxDoesNotServeAStaleBitmapSection) {
     }
     const std::string catidx_path = YearPath(db, year, ".catidx");
     const uint32_t width = ReadHeader<CatIdxFileHeader>(catidx_path).tracked_column_count;
-    store.CompactOneYearCatIdx(DbPath(db), year, kRowLength, width);
+    store.BuildOneYearBitmapSection(DbPath(db), year, kRowLength, width);
     ASSERT_TRUE(XStore::GetOrOpenCatIdx(DbPath(db), year, kRowLength, width).HasBitmapSection());
     CleanRestartState();
     for (uint64_t i = 3000; i < 3010; ++i) PwriteRow(YearPath(db, year, ".XSTORE"), i, kRowLength, MixedRow(i, 16).SerializeAsString());

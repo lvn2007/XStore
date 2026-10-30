@@ -354,7 +354,7 @@ void WaitForCheckpointToSettle(const std::filesystem::path &dir) {
 }  // namespace
 
 // The server preallocates (sparsely) the whole calendar year: ~31.5M rows,
-// and every restart-time index rebuild / catidx compaction preads them all
+// and every restart-time index rebuild / catidx bitmap build preads them all
 // (tens of seconds). The server is dead when this runs; cutting the file to
 // the written rows leaves the data intact and keeps restarts fast. (A restart
 // that REPLAYS the WAL re-extends the file to its full length again.)

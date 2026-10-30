@@ -1180,7 +1180,7 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
         const uint64_t first_block = BlockIndexForRow(iter_epoch - curr_ts.first_epoch, rows_per_block);
         const uint64_t last_block = BlockIndexForRow(segment_end - curr_ts.first_epoch, rows_per_block);
         std::vector<char> block_might_contain;       // empty == no bloom for this column, every block must scan
-        std::vector<uint64_t> bitmap_candidate_rows; // sorted year-relative row indices, only if compacted
+        std::vector<uint64_t> bitmap_candidate_rows; // sorted year-relative row indices, only if bitmapped
         bool have_bitmap_candidates = false;
         if (column_idx >= 0 && static_cast<uint32_t>(column_idx) < tracked_column_count) {
             const CatIdxFile::Pin catidx_pin = PinCatIdx(db_base_path_str, curr_ts.year,
@@ -1284,7 +1284,7 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
                     block_might_contain[static_cast<size_t>(block_index - first_block)] == 0) {
                     must_scan = false;
                 } else if (have_bitmap_candidates) {
-                    // The bitmap directory is a COMPACTION-TIME SNAPSHOT, i.e.
+                    // The bitmap directory is a BITMAP BUILD-TIME SNAPSHOT, i.e.
                     // a candidate list, never an authority: rows it names may
                     // since have been overwritten or deleted. So every
                     // candidate is re-decoded and re-compared against the
@@ -1292,7 +1292,7 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
                     // real-scan path below -- still far cheaper than scanning
                     // the block, since only the rows the directory names get
                     // decoded. (The converse staleness -- rows backfilled
-                    // AFTER compaction that the directory never learned about
+                    // AFTER bitmap build that the directory never learned about
                     // -- is handled upstream: any such write invalidates the
                     // whole section in FlushBlock, so have_bitmap_candidates is
                     // false and this block real-scans instead.)
@@ -1308,8 +1308,8 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
                     must_scan = false;
                 }
                 // Neither tier above applied (bloom said maybe and no usable
-                // directory -- column over the cardinality cap at compaction,
-                // year not compacted yet, or directory invalidated since -- or
+                // directory -- column over the cardinality cap at bitmap build,
+                // year not bitmapped yet, or directory invalidated since -- or
                 // the column is past tracked_column_count): real-scan the
                 // block, which is always correct.
 

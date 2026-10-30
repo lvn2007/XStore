@@ -13,7 +13,7 @@ add_executable(xstore_tests
         integration/XStoreZoneMapTest.cpp
         integration/XStoreCrc32cTest.cpp
         integration/XStoreCatIdxTest.cpp
-        integration/XStoreCompactionLeaseTest.cpp
+        integration/XStoreBitmapBuildLeaseTest.cpp
         integration/XStoreExactAggregatesTest.cpp
         integration/XStorePatternTest.cpp
         integration/XStoreMemoryTest.cpp
@@ -163,6 +163,12 @@ add_executable(xstore_zmq_widen_client
         perf/XStoreZmqWidenClient.cpp
 )
 target_link_libraries(xstore_zmq_widen_client PRIVATE xstore_network)
+
+# xstore_zmq_find_client: timed FindByValue probe for the bitmap-section study, from another machine (see the file header).
+add_executable(xstore_zmq_find_client
+        perf/XStoreZmqFindClient.cpp
+)
+target_link_libraries(xstore_zmq_find_client PRIVATE xstore_network)
 
 # tests/local_bench: opt-in, single-machine benchmark harness (pure Python
 # driver around the real XStore server + the XBench binary -- see

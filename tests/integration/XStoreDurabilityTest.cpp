@@ -211,7 +211,7 @@ TEST(DurabilityMarkDirtyTest, CatIdxBitmapAppendMarksDirtyAndCommitCarriesIt) {
     CatIdxFile catidx;
     ASSERT_TRUE(catidx.Open(path, 64, 4));
 
-    // Compaction path alone (no prior UpdateRow in this session) must mark dirty.
+    // Bitmap build path alone (no prior UpdateRow in this session) must mark dirty.
     catidx.AppendBitmapSection({{0u, {{"a", {1, 2, 3}}}}});
     EXPECT_TRUE(catidx.HasBitmapSection());
     EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(path), 1u);
@@ -220,7 +220,7 @@ TEST(DurabilityMarkDirtyTest, CatIdxBitmapAppendMarksDirtyAndCommitCarriesIt) {
     ASSERT_TRUE(catidx.MarkClean());
     EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(path), 0u);
 
-    // A bloom write into the compacted file rewrites the header to invalidate
+    // A bloom write into the bitmapped file rewrites the header to invalidate
     // the bitmap section; that header must carry dirty=1.
     catidx.UpdateRow(0, CatObs(7));
     EXPECT_FALSE(catidx.HasBitmapSection());
@@ -233,7 +233,7 @@ TEST(DurabilityMarkDirtyTest, CatIdxBitmapAppendMarksDirtyAndCommitCarriesIt) {
     EXPECT_EQ(on_disk.bitmap_section_offset, 0u);
     EXPECT_EQ(catidx.DirtyMarkWritesForTests(), 2u);
 
-    // Re-compaction in the same dirty session adds no further mark.
+    // Re-bitmap build in the same dirty session adds no further mark.
     catidx.AppendBitmapSection({{0u, {{"b", {4}}}}});
     EXPECT_EQ(OnDiskDirty<CatIdxFileHeader>(path), 1u);
     EXPECT_EQ(catidx.DirtyMarkWritesForTests(), 2u);

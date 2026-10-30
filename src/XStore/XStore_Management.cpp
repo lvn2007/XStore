@@ -839,7 +839,7 @@ void XStore::LeaveBackgroundYear() {
         bg_active_key_.clear();
         if (bg_cancel_clear_on_leave_) { // a removal that timed out left its cancel set for this year (see Resume)
             bg_cancel_clear_on_leave_ = false;
-            bg_cancel_.store(catidx_compaction_stop_flag_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            bg_cancel_.store(bitmap_build_stop_flag_.load(std::memory_order_relaxed), std::memory_order_relaxed);
         }
     }
     bg_cv_.notify_all();
@@ -891,9 +891,9 @@ void XStore::ResumeBackgroundWork(const std::string &scope, bool cancelled) {
     // still active (the flag is only set while a key is), so a later Resume must not clear it.
     if (bg_cancel_clear_on_leave_) return;
     // Back to "only a shutdown cancels": the thread never starts a year while bg_cancel_ is set, so nothing else of
-    // its work was begun under this cancel. Read under bg_mutex_, which StopCatIdxCompactionThread sets both flags
+    // its work was begun under this cancel. Read under bg_mutex_, which StopBitmapBuildThread sets both flags
     // under, so a shutdown's cancel is never overwritten.
-    bg_cancel_.store(catidx_compaction_stop_flag_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    bg_cancel_.store(bitmap_build_stop_flag_.load(std::memory_order_relaxed), std::memory_order_relaxed);
 }
 
 bool XStore::EnterBackgroundYearForTests(const std::string &year_key) { return EnterBackgroundYear(year_key) == BgEnter::kGo; }
@@ -1064,7 +1064,7 @@ XStore_Proto::RemoveDB_REP XStore::RemoveDB(std::string_view db_name_view) {
     // safe against the background checkpointer.
     CheckpointBeforeRemoval(db_name);
 
-    // The background index thread (live widen, compaction) must let go of this DB first: it is cancelled if it works
+    // The background index thread (live widen, bitmap build) must let go of this DB first: it is cancelled if it works
     // on one of its years, and waited for (bounded). Until ResumeBackgroundWork it starts no year of this DB. A
     // cancelled widen leaves its files in rebuild state (dirty, untrusted); they are deleted and retired below.
     const std::string bg_scope = db_loc + "/";
@@ -1666,7 +1666,7 @@ void XStore::BeginYearRebuild(const std::string &db_base_path, uint16_t row_leng
                 catidx_registry_lru_.end());
         }
         y.catidx = PinCatIdx(db_base_path, year, row_length, tracked_column_count);
-        if (!y.catidx->BeginRebuild(tracked_column_count)) { // also drops the bitmap section; compaction rebuilds it
+        if (!y.catidx->BeginRebuild(tracked_column_count)) { // also drops the bitmap section; bitmap build rebuilds it
             spdlog::error("[CATIDX REBUILD] [{}/{}.catidx] - Cannot start the rebuild; the index is not trusted until "
                           "the next start", db_base_path, year);
             y.catidx->EnterUntrustedRebuildState();

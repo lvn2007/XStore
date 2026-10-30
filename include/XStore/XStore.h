@@ -445,7 +445,7 @@ class XStore {
         // checkpointer's final cycle: a simulated kill -9.
         static void StopWalWriters(bool final_checkpoint_cycle = true);
 
-        // CatIdx compaction background thread (Task 9): one process-wide
+        // CatIdx bitmap build background thread (Task 9): one process-wide
         // thread, started once from main.cpp (never from the XStore
         // constructor -- unlike wal_shards/StartWalWriters, this must NOT
         // fire during tests, since it owns a real background thread that
@@ -453,8 +453,8 @@ class XStore {
         // against ScratchDir teardown between tests). Mirrors WalShard's
         // stop_flag/thread shape one level up (one thread total here, not
         // one per shard).
-        static std::thread catidx_compaction_thread_;
-        static std::atomic<bool> catidx_compaction_stop_flag_;
+        static std::thread bitmap_build_thread_;
+        static std::atomic<bool> bitmap_build_stop_flag_;
 
         std::string permitted_time_resolution[3] = {"SECOND", "MILLISECOND", "MICROSECOND"};
 
@@ -985,7 +985,7 @@ class XStore {
 
         // Same lookup/open as GetOrOpenZoneMap, plus a pin taken under the registry mutex: the registry never evicts
         // or destroys the file while the returned Pin lives. Every production caller that uses the file after the
-        // lookup returns takes one (inserts, deletes, aggregates, FindByValue, compaction, the builders); the plain
+        // lookup returns takes one (inserts, deletes, aggregates, FindByValue, bitmap build, the builders); the plain
         // GetOrOpen* above are for tests and single-threaded setup only, where nothing can evict concurrently.
         // Explicit erases (RebuildYearIndexes at startup, Clear*RegistryForTests) ignore pins: never while a pin
         // holder is alive. RemoveDB/RemoveDBFiles retire a pinned entry instead of destroying it (see
@@ -1076,7 +1076,7 @@ class XStore {
         // leaves a previously-touched file fully resident.
         void EvictMappedFilesUnderPrefixForTests(const std::string &db_dir_prefix);
 
-        // Spawns the CatIdx compaction background thread (Task 9): once a
+        // Spawns the CatIdx bitmap build background thread (Task 9): once a
         // year file goes cold (year < current calendar year), scans it once
         // and builds an exact per-value bitmap directory, gated by
         // CATIDX_MAX_BITMAP_DISTINCT_VALUES so a high-cardinality/continuous
@@ -1089,15 +1089,15 @@ class XStore {
         // local XStore instance for its lifetime (this codebase's "one
         // XStore per worker thread" convention, see the data_store_dir
         // member comment above) so it can reach the non-static
-        // ExtractColumnByIndexSkipParse/CompactColdCatIdxForAllDbs path.
-        static void StartCatIdxCompactionThread(const std::string &data_store_dir);
-        // Stops + joins the compaction thread (no-op if never started or
+        // ExtractColumnByIndexSkipParse/BuildColdBitmapSectionsForAllDbs path.
+        static void StartBitmapBuildThread(const std::string &data_store_dir);
+        // Stops + joins the bitmap build thread (no-op if never started or
         // already stopped); the atexit hook runs the same code. main.cpp
-        // calls it before Shutdown() so a compaction cannot re-dirty an
+        // calls it before Shutdown() so a bitmap build cannot re-dirty an
         // index Shutdown just marked clean.
-        static void StopCatIdxCompactionThread();
+        static void StopBitmapBuildThread();
 
-        // CatIdx compaction (Task 9): scans one cold <YEAR>.XSTORE file
+        // CatIdx bitmap build (Task 9): scans one cold <YEAR>.XSTORE file
         // row-by-row and builds a bitmap section (value -> row indices) per
         // tracked column via CatIdxFile::AppendBitmapSection, abandoning any
         // column mid-scan the instant its distinct-value count crosses
@@ -1108,37 +1108,37 @@ class XStore {
         // Deliberately a non-static instance method, unlike
         // RebuildOneYearZoneMap below -- it must call the non-static
         // ExtractColumnByIndexSkipParse, which needs an XStore instance. The
-        // background thread in StartCatIdxCompactionThread owns one such
+        // background thread in StartBitmapBuildThread owns one such
         // instance for its lifetime.
         //
         // Public (like GetOrOpenCatIdx/ClearCatIdxRegistryForTests above):
-        // it's both the real internal entry point CompactColdCatIdxForAllDbs
-        // calls, and the direct test entry point for exercising compaction
+        // it's both the real internal entry point BuildColdBitmapSectionsForAllDbs
+        // calls, and the direct test entry point for exercising bitmap build
         // synchronously without waiting on the hourly background thread.
         // Returns false only when the year was abandoned because the MemoryPool had no room for the accumulators (nothing
-        // appended, retry soon); true otherwise, including a cancel or an already-compacted year.
-        bool CompactOneYearCatIdx(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+        // appended, retry soon); true otherwise, including a cancel or an already-bitmapped year.
+        bool BuildOneYearBitmapSection(const std::string &db_base_path, unsigned short year, uint16_t row_length,
                                    uint32_t tracked_column_count);
 
-        // Scans every DB directory under data_store_dir and compacts every
+        // Scans every DB directory under data_store_dir and builds the bitmap section of every
         // cold (year < current calendar year) .XSTORE file that doesn't
         // already have a bitmap section. Called once per poll interval by
-        // the background thread started from StartCatIdxCompactionThread.
+        // the background thread started from StartBitmapBuildThread.
         // Public since M4 stage 3 so tests can run it next to RunLiveWidenPass
         // (it takes part in the RemoveDB handshake, see bg_mutex_).
         // Returns false when the run stopped early (a cancel, shutdown, a pending widen, or a DB whose cfg changed
         // during the run), true when it went through.
-        bool CompactColdCatIdxForAllDbs(const std::string &data_store_dir);
+        bool BuildColdBitmapSectionsForAllDbs(const std::string &data_store_dir);
 
-        // One tick of the background index thread (StartCatIdxCompactionThread runs it every LIVE_WIDEN_TICK_SEC with
-        // the real clock; tests with a fake one). Due live widening first (RunLiveWidenPass). Compaction yields to
-        // widening: while a widen is recorded (live_widen_pending_) compaction is not started, and a running pass
+        // One tick of the background index thread (StartBitmapBuildThread runs it every LIVE_WIDEN_TICK_SEC with
+        // the real clock; tests with a fake one). Due live widening first (RunLiveWidenPass). Bitmap build yields to
+        // widening: while a widen is recorded (live_widen_pending_) bitmap build is not started, and a running pass
         // abandons its year at its next 64K-row check (nothing appended; retried later). Once no widen is recorded, a
-        // compaction after any widen runs LIVE_WIDEN_COMPACTION_RESUME_DELAY_SEC later; otherwise
-        // compaction runs CATIDX_COMPACTION_POLL_INTERVAL_SEC after the end of its previous run, as before.
+        // bitmap build after any widen runs LIVE_WIDEN_BITMAP_BUILD_RESUME_DELAY_SEC later; otherwise
+        // bitmap build runs CATIDX_BITMAP_BUILD_POLL_INTERVAL_SEC after the end of its previous run, as before.
         struct BackgroundIndexSchedule {
-            std::chrono::steady_clock::time_point next_compaction{}; // the clock's epoch: the first tick compacts
-            bool compaction_yielded = false; // a widen was pending: the next compaction is brought forward to after it
+            std::chrono::steady_clock::time_point next_bitmap_build{}; // the clock's epoch: the first tick builds the bitmap section of
+            bool bitmap_build_yielded = false; // a widen was pending: the next bitmap build is brought forward to after it
         };
         void BackgroundIndexTick(const std::string &data_store_dir, BackgroundIndexSchedule &schedule,
                                  const std::function<std::chrono::steady_clock::time_point()> &now);
@@ -1249,7 +1249,7 @@ class XStore {
 
         // Live widening trigger, M4 stage 3 (Tech Reference 4.18 "Live widening, stage 3"). MaybeGrowColumnCount's
         // rare path records a DB whose effective tracked width rose; the background index thread
-        // (StartCatIdxCompactionThread) calls RunLiveWidenPass once per LIVE_WIDEN_TICK_SEC with the current time.
+        // (StartBitmapBuildThread) calls RunLiveWidenPass once per LIVE_WIDEN_TICK_SEC with the current time.
         // A pass takes every recorded DB whose last growth is at least LIVE_WIDEN_QUIET_PERIOD_SEC before `now` (and
         // whose retry wait, if any, has passed), and widens its year files one at a time, NEWEST year first, to the
         // DB's exact effective width: the zone map when its width differs, the catidx when it is narrower (widths
@@ -1294,8 +1294,8 @@ class XStore {
             uint64_t group_bytes = XStoreTunables::REBUILD_PARALLEL_GROUP_BYTES,
             const rebuildprogress::Options &progress = rebuildprogress::Options{});
 
-        // Stops the background index thread's current work (the live builder and compaction check it): set by
-        // StopCatIdxCompactionThread for good, and by RemoveDB / RemoveDBFiles for the time they wait for the thread
+        // Stops the background index thread's current work (the live builder and bitmap build check it): set by
+        // StopBitmapBuildThread for good, and by RemoveDB / RemoveDBFiles for the time they wait for the thread
         // to let go of the DB/year they remove. Tests may set it to stop a running pass (and must reset it).
         static std::atomic<bool> bg_cancel_;
 
@@ -1462,7 +1462,7 @@ class XStore {
 
         // Background index thread vs RemoveDB / RemoveDBFiles. The thread publishes the year key it works on
         // ("<db_base_path>/<year>", the registry key format) in bg_active_key_ before it starts a year (widen or
-        // compaction) and clears it after; it refuses to start a year that a removal scope covers, or any year while
+        // bitmap build) and clears it after; it refuses to start a year that a removal scope covers, or any year while
         // bg_cancel_ is set. A removal adds its scope ("<db dir>/" for RemoveDB, "<db dir>/<year>" for RemoveDBFiles),
         // sets bg_cancel_ if the active key is covered, and waits (bounded) until it is not. Lock order: bg_mutex_ is a
         // leaf (nothing else is taken while it is held); the registries' cold-open check takes it under their mutex.
@@ -1809,7 +1809,7 @@ class XStore {
         static void RemoveIndexReplacementOrphans(const std::string &db_dir);
 
         // Startup rebuild of one year (Tech Reference 4.19): pins the selected index files (need_zmap / need_catidx; a
-        // healthy one is never opened, so a compacted catidx keeps its bitmap section), BeginRebuild()s them at
+        // healthy one is never opened, so a bitmapped catidx keeps its bitmap section), BeginRebuild()s them at
         // tracked_column_count (dirty on disk before the truncate; a wider or narrower old file is emptied either way),
         // reads total_rows once, scans the year file ONCE in REBUILD_CHUNK_BYTES chunks of whole blocks through
         // FoldChunk, advancing each file's frontier after every chunk. A complete build: FinishRebuild, fdatasync of the
