@@ -290,6 +290,62 @@ TEST(CatIdxFileTest, AFailedBitmapSectionWriteLeavesNoDeadTail) {
     EXPECT_EQ(std::filesystem::file_size(path), size_before) << "a partial section stayed in the file";
 }
 
+// A write into a year with a bitmap section drops the section by clearing its header pointer; its bytes used to stay in
+// the file, and the next build appended a second section after them (20 GB per write-and-rebuild cycle on a dense year,
+// Mystic study). Invalidating cuts the file back to the bloom blocks, and a build appends right after them.
+TEST(CatIdxFileTest, InvalidatingTheBitmapSectionGivesItsBytesBackAndTheNextSectionStartsAtTheBloomEnd) {
+    std::string path = TempCatIdxPath("bitmap_dead_space.catidx");
+    std::filesystem::remove(path);
+    CatIdxFile f;
+    ASSERT_TRUE(f.Open(path, 64, 1));
+    XStore_Proto::FData v; v.set_int64data(9);
+    const std::string enc = EncodeFDataForCatIdx(v);
+    f.UpdateRow(0, {CatIdxObservation{0, enc, true}});
+    const auto bloom_only = std::filesystem::file_size(path);
+
+    std::vector<uint64_t> rows;
+    for (uint64_t r = 0; r < 3000; ++r) rows.push_back(r);
+    ASSERT_TRUE(f.AppendBitmapSection({{0, {{enc, rows}}}}));
+    const auto with_section = std::filesystem::file_size(path);
+    ASSERT_GT(with_section, bloom_only + 3000 * sizeof(uint64_t));
+
+    f.UpdateRow(5, {CatIdxObservation{0, enc, true}});   // a write into the year: drops the section
+    EXPECT_FALSE(f.HasBitmapSection());
+    EXPECT_EQ(std::filesystem::file_size(path), bloom_only) << "the dropped section stayed in the file as dead space";
+
+    ASSERT_TRUE(f.AppendBitmapSection({{0, {{enc, rows}}}}));
+    EXPECT_EQ(std::filesystem::file_size(path), with_section) << "the next section did not start at the end of the bloom blocks";
+    const auto found = f.LookupExact(0, enc);
+    ASSERT_TRUE(found.has_value());
+    EXPECT_EQ(*found, rows);
+}
+
+// A file that an older build left with a dead tail (the section was dropped, its bytes were not cut): the next section
+// replaces the tail instead of going after it.
+TEST(CatIdxFileTest, AppendBitmapSectionReplacesADeadTailLeftByAnOlderBuild) {
+    std::string path = TempCatIdxPath("bitmap_old_dead_tail.catidx");
+    std::filesystem::remove(path);
+    XStore_Proto::FData v; v.set_int64data(9);
+    const std::string enc = EncodeFDataForCatIdx(v);
+    uintmax_t bloom_only = 0;
+    {
+        CatIdxFile f;
+        ASSERT_TRUE(f.Open(path, 64, 1));
+        f.UpdateRow(0, {CatIdxObservation{0, enc, true}});
+        bloom_only = std::filesystem::file_size(path);
+    }
+    { std::ofstream tail(path, std::ios::binary | std::ios::app); tail << std::string(100000, 'x'); }
+    ASSERT_EQ(std::filesystem::file_size(path), bloom_only + 100000);
+
+    CatIdxFile f;
+    ASSERT_TRUE(f.Open(path, 64, 1));
+    ASSERT_TRUE(f.AppendBitmapSection({{0, {{enc, {1, 2, 3}}}}}));
+    EXPECT_LT(std::filesystem::file_size(path), bloom_only + 100) << "the old dead tail was kept in front of the new section";
+    const auto found = f.LookupExact(0, enc);
+    ASSERT_TRUE(found.has_value());
+    EXPECT_EQ(*found, (std::vector<uint64_t>{1, 2, 3}));
+}
+
 TEST(CatIdxFileTest, ColumnOverCardinalityCapHasNoDirectory) {
     std::string path = TempCatIdxPath("bitmap_over_cap.catidx");
     std::filesystem::remove(path);

@@ -85,6 +85,12 @@ int main(int argc, char *argv[]) {
         .scan<'i', int>()
         .help("port for the host-stats PUB broadcast (<=0 or omitted defaults to --port minus 1)");
 
+    program.add_argument("--bitmap-build")
+        .default_value(false)
+        .implicit_value(true)
+        .help("build the per-year bitmap section of the catalog index in the background (opt-in, off by default: it can take "
+              "45% of the data size in space and makes most FindByValue queries slower; see Technical Reference 4.18)");
+
     program.add_argument("--curve")
         .default_value(false)
         .implicit_value(true)
@@ -273,6 +279,8 @@ int main(int argc, char *argv[]) {
         spdlog::default_logger()->flush();
         _exit(1);
     }
+    XStore::SetBitmapBuildEnabled(program.get<bool>("--bitmap-build"));
+    spdlog::info("[BOOT] - Bitmap build {} (--bitmap-build)", program.get<bool>("--bitmap-build") ? "ON" : "off");
     XStore::StartBitmapBuildThread(bootstrap_store->data_store_dir);
 
     // Spin ZMQ Server. Returns after a stop signal, once the workers have

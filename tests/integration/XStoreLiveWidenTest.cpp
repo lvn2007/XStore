@@ -5074,6 +5074,35 @@ constexpr const char *kResumeLine = "No live widen pending any more; bitmap buil
 // next 64K-row check (its catidx byte-for-byte as before, no section), a year bitmapped earlier keeps its section, and
 // the schedule is not pushed an hour out. The next ticks (fake clock) widen every year after the quiet period, then
 // build again LIVE_WIDEN_BITMAP_BUILD_RESUME_DELAY_SEC later; the result equals a startup rebuild plus a bitmap build.
+// The server starts with the bitmap build OFF (--bitmap-build turns it on): the study of a dense year (Tech Reference 4.18)
+// found it costs 45 % of the data in space and slows most queries. A tick with it off does the widen pass and nothing else;
+// turning it on makes the very next tick build.
+TEST_F(XStoreLiveWidenTest, ATickBuildsNoBitmapSectionWhileTheBuildIsSwitchedOff) {
+    XStore store;
+    const std::string db = "LWOFFSWITCH";
+    const std::string path = DbPath(db);
+    constexpr uint64_t kRows = 3000;
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    Rows rows;
+    for (uint64_t r = 0; r < kRows; ++r) rows.emplace_back(Jan1(1979) + r, ValueRow(r % 5, 10));
+    Insert(store, db, rows);
+    ASSERT_TRUE(walring::Checkpointer::Instance().RunCycle());
+    ASSERT_EQ(truncate(YearPath(db, ".XSTORE", 1979).c_str(), static_cast<off_t>(kRows + 1000) * kRowLength), 0);
+    XStore::ClearLiveWidenRequestsForTests();
+
+    XStore::BackgroundIndexSchedule schedule;
+    Clock::time_point fake = Clock::now();
+    const auto now = [&] { return fake; };
+    XStore::SetBitmapBuildEnabled(false);
+    store.BackgroundIndexTick(store.data_store_dir, schedule, now);
+    XStore::SetBitmapBuildEnabled(true);
+    EXPECT_FALSE(XStore::PinCatIdx(path, 1979, kRowLength)->HasBitmapSection()) << "a tick built a section while the build was switched off";
+    EXPECT_EQ(schedule.next_bitmap_build, Clock::time_point{}) << "a skipped tick must not push the build an hour out";
+
+    store.BackgroundIndexTick(store.data_store_dir, schedule, now);
+    EXPECT_TRUE(XStore::PinCatIdx(path, 1979, kRowLength)->HasBitmapSection()) << "switched on, the next tick must build";
+}
+
 TEST_F(XStoreLiveWidenTest, BitmapBuildYieldsToAWidenRecordedMidScanAndRunsSoonAfterIt) {
     static_assert(XStoreTunables::LIVE_WIDEN_BITMAP_BUILD_RESUME_DELAY_SEC == 30, "kResumeLine says 30 s");
     XStore store;

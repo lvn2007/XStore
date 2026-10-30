@@ -166,6 +166,12 @@ bool CatIdxFile::FlushBlock(uint64_t block_index) {
         header_.bitmap_section_offset = 0;
         [[maybe_unused]] ssize_t invalidate_written = pwrite(fd_, &header_, sizeof(header_), 0);
         fdatasync(fd_);
+        // The header no longer admits the section: give its bytes back (after the header, so a crash in between leaves
+        // only dead space, never a section the header still points at). Left in place they were dead weight, and the next
+        // build appended a second section after them.
+        if (ftruncate(fd_, BloomSectionFileOffset(header_.block_count)) != 0) {
+            spdlog::warn("[CATIDX] - Could not cut the dropped bitmap section off the file");
+        }
     }
 
     // pwrite past the current end-of-file is standard sparse-file growth on
@@ -339,7 +345,13 @@ bool CatIdxFile::AppendBitmapSection(const std::unordered_map<uint32_t, std::map
         spdlog::error("[CATIDX] - fstat failed before bitmap-section append; not committing");
         return false;
     }
-    const off_t append_offset = st.st_size;
+    // The section starts where the bloom blocks end. Anything past that is a dead section (dropped by a write; builds before
+    // 2026-10-30 left its bytes in the file): cut off, not built after.
+    const off_t append_offset = BloomSectionFileOffset(header_.block_count);
+    if (st.st_size > append_offset && ftruncate(fd_, append_offset) != 0) {
+        spdlog::error("[CATIDX] - Could not cut a dead bitmap section off the file before appending; not committing");
+        return false;
+    }
 
     // Every surviving column's directory back-to-back, ONE header commit for the whole bitmap build pass, not one per
     // column. Committing after each column individually used to mean only the FIRST column's write was crash-safe: once
@@ -889,6 +901,7 @@ bool XStore::BuildColdBitmapSectionsForAllDbs(const std::string &data_store_dir)
 
 std::thread XStore::bitmap_build_thread_;
 std::atomic<bool> XStore::bitmap_build_stop_flag_{false};
+std::atomic<bool> XStore::bitmap_build_enabled_{true};
 
 void XStore::StartBitmapBuildThread(const std::string &data_store_dir) {
     // Minor #5: idempotency guard -- unlike StartWalWriters (whose callers
@@ -926,6 +939,7 @@ void XStore::BackgroundIndexTick(const std::string &data_store_dir, BackgroundIn
         spdlog::error("[LIVE WIDEN] - Pass failed: {}", e.what());
     }
     if (bitmap_build_stop_flag_.load(std::memory_order_relaxed)) return;
+    if (!bitmap_build_enabled_.load(std::memory_order_relaxed)) return;   // widening is all this thread does then
     // A recorded widen (in its quiet period, or waiting to retry): bitmap build is not started, so a flood of growths
     // costs nothing here. A record that outlives a pass keeps bitmap build waiting with it.
     // Any widen, due bitmap build or not, brings the next bitmap build forward to shortly after it: a widen drops the

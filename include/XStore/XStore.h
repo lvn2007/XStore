@@ -455,6 +455,11 @@ class XStore {
         // one per shard).
         static std::thread bitmap_build_thread_;
         static std::atomic<bool> bitmap_build_stop_flag_;
+        // Whether the periodic tick builds bitmap sections. main() switches it off unless --bitmap-build is given (Tech Reference 4.18:
+        // 45 % of the data in space on a dense low-cardinality year, and most queries slower); the default here is on so the library
+        // and its tests behave as before. Sections already on disk are still used by FindByValue either way.
+        static std::atomic<bool> bitmap_build_enabled_;
+        static void SetBitmapBuildEnabled(bool enabled) { bitmap_build_enabled_.store(enabled, std::memory_order_relaxed); }
 
         std::string permitted_time_resolution[3] = {"SECOND", "MILLISECOND", "MICROSECOND"};
 
