@@ -1,17 +1,29 @@
 #ifndef XSTORE_CLIENTSRC_XSTORE_CLIENT_H_
 #define XSTORE_CLIENTSRC_XSTORE_CLIENT_H_
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <climits>
+#include <condition_variable>
+#include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <ctime>
+#include <exception>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -23,6 +35,355 @@
 #include <zmq.hpp>
 #include <zmq_addon.hpp>
 #include "XStore.pb.h"
+
+// ======================================================================================================================================
+// Part 1 of 3: a load-aware job runner (namespace xstore_client). Knows nothing about XStore, ZMQ or protobuf: lift this part as is for
+// any batch of independent jobs.
+//
+//   RunJobs(n, policy, fn)   runs fn(0) .. fn(n-1) and returns when all are done. The calling thread always works. With a fixed policy
+//                            the team is exactly that big. Otherwise it is adaptive: the team starts at the caller alone, a short-lived
+//                            controller thread looks at how many threads are runnable on the whole machine every `tick`, and
+//                            - while there is room it doubles the team (slow start), up to the cap;
+//                            - when the machine is over-subscribed the helpers above the surplus leave, each after its current job.
+//                            Independent processes never talk to each other: the machine's run queue is what they share, so a second
+//                            client that starts parsing makes the first one's helpers retreat within one job, and both settle.
+//
+// Jobs should be short (milliseconds to tens of milliseconds): that is the latency of the team reacting to the load.
+// ======================================================================================================================================
+namespace xstore_client {
+
+[[nodiscard]] inline size_t CoreCount() { return std::max<size_t>(1, std::thread::hardware_concurrency()); }
+
+// "0.20 0.18 0.15 3/1234 5678": the fourth field of /proc/loadavg is runnable/total scheduling entities right now.
+[[nodiscard]] inline std::optional<size_t> ParseRunnableFromLoadAvg(std::string_view text) {
+    size_t pos = 0;
+    for (int field = 0; field < 3; ++field) {
+        pos = text.find(' ', pos);
+        if (pos == std::string_view::npos) return std::nullopt;
+        ++pos;
+    }
+    size_t runnable = 0;
+    size_t digits = 0;
+    for (; pos < text.size() && text[pos] >= '0' && text[pos] <= '9'; ++pos, ++digits) runnable = runnable * 10 + static_cast<size_t>(text[pos] - '0');
+    if (digits == 0 || pos >= text.size() || text[pos] != '/') return std::nullopt;
+    return runnable;
+}
+
+// Threads runnable on this machine right now, this one included; nullopt where /proc/loadavg does not exist.
+[[nodiscard]] inline std::optional<size_t> ReadRunnableThreads() {
+    std::ifstream loadavg("/proc/loadavg");
+    char buffer[128];
+    loadavg.read(buffer, sizeof buffer);
+    const std::streamsize bytes = loadavg.gcount();
+    return bytes > 0 ? ParseRunnableFromLoadAvg(std::string_view(buffer, static_cast<size_t>(bytes))) : std::nullopt;
+}
+
+struct ParallelismPolicy {
+    size_t fixed_threads = 0;                 // > 0: exactly this many threads (at most one per job), the load is ignored
+    size_t max_threads = CoreCount();         // adaptive: the team never grows past this
+    size_t cores = CoreCount();               // what the runnable threads are compared with
+    size_t headroom = 1;                      // cores left free for everyone else
+    std::chrono::milliseconds tick{10};       // how often the controller looks at the load
+    std::function<std::optional<size_t>()> runnable = ReadRunnableThreads;
+};
+
+// The team size the controller wants next. `runnable` counts every runnable thread of the machine, this team's included.
+// Room (cores - runnable - headroom > 0) doubles the team, but never beyond that room, the cap, or the jobs left; more runnable
+// threads than cores sends the surplus home; in between the team holds, so it does not flap. Never below the calling thread.
+[[nodiscard]] inline size_t NextWorkerTarget(size_t target, size_t runnable, size_t cores, size_t headroom, size_t cap, size_t jobs_left) {
+    if (runnable > cores) {
+        const size_t surplus = runnable - cores;
+        return target > surplus ? target - surplus : 1;
+    }
+    const size_t room = cores > runnable + headroom ? cores - runnable - headroom : 0;
+    if (room == 0 || target >= jobs_left || target >= cap) return target;
+    return std::min({target + std::min(room, target), cap, jobs_left});
+}
+
+namespace detail {
+
+template <class Fn>
+class Team {
+ public:
+    Team(size_t jobs, size_t cap, const ParallelismPolicy &policy, Fn &fn)
+        : jobs_(jobs), cap_(cap), policy_(policy), fn_(fn), helpers_(cap), alive_(cap) {}
+
+    void Run() {
+        const bool adaptive = policy_.fixed_threads == 0;
+        target_ = adaptive ? 1 : cap_;
+        std::thread controller;
+        if (adaptive) {
+            try {
+                controller = std::thread([this] { Control(); });
+            } catch (const std::system_error &) {   // no controller: the caller alone
+            }
+        } else {
+            Grow();
+        }
+        Work(0);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            finished_ = true;
+        }
+        wake_.notify_all();
+        if (controller.joinable()) controller.join();
+        for (std::thread &helper : helpers_) {
+            if (helper.joinable()) helper.join();
+        }
+        if (error_) std::rethrow_exception(error_);
+    }
+
+ private:
+    // Slot 0 is the calling thread and never leaves. A helper works only while its slot is below the target.
+    void Work(size_t slot) {
+        try {
+            while (!stop_.load(std::memory_order_relaxed) && (slot == 0 || slot < target_.load(std::memory_order_relaxed))) {
+                const size_t job = next_.fetch_add(1, std::memory_order_relaxed);
+                if (job >= jobs_) return;
+                fn_(job);
+            }
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!error_) error_ = std::current_exception();
+            stop_.store(true, std::memory_order_relaxed);
+        }
+    }
+
+    // Starts (or restarts, after a retreat) the helper of every slot below the target. Only one thread calls this at a time.
+    void Grow() {
+        for (size_t slot = 1; slot < target_.load(); ++slot) {
+            if (alive_[slot].load()) continue;
+            if (helpers_[slot].joinable()) helpers_[slot].join();   // exited earlier
+            alive_[slot].store(true);
+            try {
+                helpers_[slot] = std::thread([this, slot] {
+                    Work(slot);
+                    alive_[slot].store(false);
+                });
+            } catch (const std::system_error &) {   // cannot start more threads: keep what runs
+                alive_[slot].store(false);
+                target_.store(slot);
+                return;
+            }
+        }
+    }
+
+    void Tick() {
+        const std::optional<size_t> runnable = policy_.runnable();
+        if (!runnable) return;
+        const size_t target = target_.load();
+        const size_t jobs_left = jobs_ - std::min(jobs_, next_.load(std::memory_order_relaxed));
+        const size_t wanted = NextWorkerTarget(target, *runnable, policy_.cores, policy_.headroom, cap_, jobs_left);
+        if (wanted == target) return;
+        target_.store(wanted);
+        if (wanted > target) Grow();
+    }
+
+    void Control() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        do {
+            lock.unlock();
+            Tick();
+            lock.lock();
+        } while (!wake_.wait_for(lock, policy_.tick, [this] { return finished_; }));
+    }
+
+    const size_t jobs_;
+    const size_t cap_;
+    const ParallelismPolicy &policy_;
+    Fn &fn_;
+    std::vector<std::thread> helpers_;          // by slot; slot 0 is unused
+    std::vector<std::atomic<bool>> alive_;
+    std::atomic<size_t> next_{0};
+    std::atomic<size_t> target_{1};
+    std::atomic<bool> stop_{false};
+    std::mutex mutex_;
+    std::condition_variable wake_;
+    bool finished_ = false;
+    std::exception_ptr error_;
+};
+
+}  // namespace detail
+
+// Runs fn(0) .. fn(jobs - 1) on a team the policy sizes, and returns when all are done. fn must be safe to call concurrently for
+// different jobs. The first exception fn throws stops the team taking jobs and is rethrown here once every thread has stopped.
+template <class Fn>
+void RunJobs(size_t jobs, ParallelismPolicy policy, Fn &&fn) {
+    if (jobs == 0) return;
+    // Where the load cannot be read (not Linux) an adaptive team has nothing to adapt to: a modest fixed one.
+    if (policy.fixed_threads == 0 && !(policy.runnable && policy.runnable())) policy.fixed_threads = std::max<size_t>(1, policy.cores / 2);
+    const size_t cap = std::max<size_t>(1, std::min(jobs, policy.fixed_threads != 0 ? policy.fixed_threads : policy.max_threads));
+    if (cap == 1) {
+        for (size_t job = 0; job < jobs; ++job) fn(job);
+        return;
+    }
+    detail::Team<std::remove_reference_t<Fn>> team(jobs, cap, policy, fn);
+    team.Run();
+}
+
+// ======================================================================================================================================
+// Part 2 of 3: parallel parse of a query reply (RangeQuery, BatchQuery, FindByValue, FindByPattern); uses part 1.
+//
+// The server cuts a reply into frames only between whole rows, and a reply is just its rows (field 1) plus an optional status (field 3),
+// so any run of whole top-level fields is a reply of its own: the reply is cut into pieces of a few MB at row boundaries, the pieces are
+// parsed by a team that sizes itself to the machine's load (part 1), and the rows are moved into the result in order. A reply that cannot
+// be split or parsed this way makes ParseFragmentsParallel return false with the result untouched; the caller parses it serially.
+// ======================================================================================================================================
+
+// Below this many reply bytes the serial parse is quicker than starting a team.
+inline constexpr size_t MIN_PARALLEL_PARSE_BYTES = 4ull * 1024 * 1024;
+inline constexpr size_t PARSE_PIECE_BYTES = 4ull * 1024 * 1024;
+
+[[nodiscard]] inline size_t PositiveFromEnv(const char *name) {
+    const char *env = std::getenv(name);
+    if (env == nullptr) return 0;
+    char *end = nullptr;
+    const unsigned long long n = std::strtoull(env, &end, 10);
+    return (end != env && *end == '\0' && n > 0) ? static_cast<size_t>(n) : 0;
+}
+
+// The policy for one parse. fixed_threads > 0 forces that team size; 0 reads XSTORE_CLIENT_PARSE_THREADS (a number forces it,
+// anything else is adaptive). XSTORE_CLIENT_PARSE_MAX caps an adaptive team (default the machine's hardware threads).
+[[nodiscard]] inline ParallelismPolicy ParsePolicy(size_t fixed_threads) {
+    ParallelismPolicy policy;
+    policy.fixed_threads = fixed_threads != 0 ? fixed_threads : PositiveFromEnv("XSTORE_CLIENT_PARSE_THREADS");
+    if (const size_t max_threads = PositiveFromEnv("XSTORE_CLIENT_PARSE_MAX"); max_threads != 0) policy.max_threads = max_threads;
+    return policy;
+}
+
+struct Fragment {
+    const void *data;
+    size_t size;
+};
+
+namespace detail {
+
+[[nodiscard]] inline bool ReadVarint(const uint8_t *&p, const uint8_t *end, uint64_t &value) {
+    value = 0;
+    for (int shift = 0; shift < 64 && p < end; shift += 7) {
+        const uint8_t byte = *p++;
+        value |= static_cast<uint64_t>(byte & 0x7F) << shift;
+        if ((byte & 0x80) == 0) return true;
+    }
+    return false;
+}
+
+// The end of the top-level field that starts at p, or nullptr if it is malformed (or a group, which a reply never has).
+[[nodiscard]] inline const uint8_t *FieldEnd(const uint8_t *p, const uint8_t *end) {
+    uint64_t tag = 0;
+    if (!ReadVarint(p, end, tag)) return nullptr;
+    uint64_t length = 0;
+    switch (tag & 7) {
+        case 0: return ReadVarint(p, end, length) ? p : nullptr;   // varint
+        case 1: length = 8; break;                                  // fixed64
+        case 2: if (!ReadVarint(p, end, length)) return nullptr; break;   // length-delimited
+        case 5: length = 4; break;                                  // fixed32
+        default: return nullptr;
+    }
+    return length <= static_cast<uint64_t>(end - p) ? p + length : nullptr;
+}
+
+}  // namespace detail
+
+namespace detail {
+
+// Appends the pieces of one fragment. False if the fragment is not well framed.
+[[nodiscard]] inline bool SplitFragment(const Fragment &fragment, size_t piece_bytes, std::vector<Fragment> &pieces) {
+    const auto *begin = static_cast<const uint8_t *>(fragment.data);
+    const uint8_t *end = begin + fragment.size;
+    const uint8_t *piece = begin;
+    for (const uint8_t *p = begin; p < end;) {
+        p = FieldEnd(p, end);
+        if (p == nullptr) return false;
+        if (static_cast<size_t>(p - piece) >= piece_bytes) {
+            pieces.push_back({piece, static_cast<size_t>(p - piece)});
+            piece = p;
+        }
+    }
+    if (piece < end) pieces.push_back({piece, static_cast<size_t>(end - piece)});
+    return true;
+}
+
+}  // namespace detail
+
+// Cuts every fragment into pieces of about piece_bytes (never shorter than one field) between top-level fields; a piece never spans
+// fragments. False if a fragment is not well framed.
+[[nodiscard]] inline bool SplitIntoPieces(const std::vector<Fragment> &fragments, size_t piece_bytes, std::vector<Fragment> &pieces) {
+    pieces.clear();
+    for (const Fragment &fragment : fragments) {
+        if (!detail::SplitFragment(fragment, piece_bytes, pieces)) return false;
+    }
+    return true;
+}
+
+// The same pieces in the same order, with the fragments split on the policy's team: walking the row headers of a big reply touches every
+// row's cache line, and a fragment start is always a row boundary, so the fragments are independent jobs.
+[[nodiscard]] inline bool SplitIntoPiecesParallel(const std::vector<Fragment> &fragments, size_t piece_bytes, const ParallelismPolicy &policy,
+                                                  std::vector<Fragment> &pieces) {
+    if (fragments.size() < 2) return SplitIntoPieces(fragments, piece_bytes, pieces);
+    std::vector<std::vector<Fragment>> by_fragment(fragments.size());
+    std::atomic<bool> well_framed{true};
+    RunJobs(fragments.size(), policy, [&](size_t k) {
+        if (!detail::SplitFragment(fragments[k], piece_bytes, by_fragment[k])) well_framed.store(false, std::memory_order_relaxed);
+    });
+    if (!well_framed.load()) return false;
+    pieces.clear();
+    for (const std::vector<Fragment> &one : by_fragment) pieces.insert(pieces.end(), one.begin(), one.end());
+    return true;
+}
+
+// True for the reply messages made of repeated queryResponse rows plus an optional queryStatus.
+template <class RepT, class = void>
+struct IsFragmentMergeable : std::false_type {};
+template <class RepT>
+struct IsFragmentMergeable<RepT, std::void_t<decltype(std::declval<RepT &>().mutable_queryresponse()),
+                                              decltype(std::declval<const RepT &>().has_querystatus())>> : std::true_type {};
+
+// Parses the fragments piece by piece on a team the policy sizes and appends the rows to `out` in order (moving the row objects, not
+// copying them), taking the last queryStatus. Returns false, with `out` untouched, when the reply is not worth splitting (fewer than two
+// pieces), not well framed, or a piece does not parse.
+template <class RepT>
+[[nodiscard]] bool ParseFragmentsParallel(const std::vector<Fragment> &fragments, RepT &out, const ParallelismPolicy &policy,
+                                          size_t piece_bytes = PARSE_PIECE_BYTES) {
+    static_assert(IsFragmentMergeable<RepT>::value, "RepT needs repeated queryResponse and optional queryStatus");
+    std::vector<Fragment> pieces;
+    std::vector<RepT> parts;
+    std::atomic<bool> failed{false};
+    try {
+        if (!SplitIntoPiecesParallel(fragments, piece_bytes, policy, pieces) || pieces.size() < 2) return false;
+        for (const Fragment &piece : pieces) {
+            if (piece.size > static_cast<size_t>(INT_MAX)) return false;
+        }
+        parts.resize(pieces.size());
+        RunJobs(parts.size(), policy, [&](size_t k) {
+            if (failed.load(std::memory_order_relaxed)) return;
+            if (!parts[k].ParseFromArray(pieces[k].data, static_cast<int>(pieces[k].size))) failed.store(true, std::memory_order_relaxed);
+        });
+    } catch (...) {   // out of memory in a worker: let the caller try the serial parse
+        return false;
+    }
+    if (failed.load()) return false;
+
+    using Row = typename std::remove_reference_t<decltype(*out.mutable_queryresponse())>::value_type;
+    int total_rows = out.queryresponse_size();
+    for (const RepT &part : parts) total_rows += part.queryresponse_size();
+    out.mutable_queryresponse()->Reserve(total_rows);
+    std::vector<Row *> moved;
+    for (RepT &part : parts) {
+        const int rows = part.queryresponse_size();
+        moved.resize(static_cast<size_t>(rows));
+        part.mutable_queryresponse()->ExtractSubrange(0, rows, moved.data());
+        for (Row *row : moved) out.mutable_queryresponse()->AddAllocated(row);
+        if (part.has_querystatus()) out.set_querystatus(std::move(*part.mutable_querystatus()));
+    }
+    return true;
+}
+
+}  // namespace xstore_client
+
+// ======================================================================================================================================
+// Part 3 of 3: the XStore client.
+// ======================================================================================================================================
 
 // Client-side CURVE identity: this client's own keypair plus the server's
 // public key (which the client must already know out-of-band -- see the
@@ -142,6 +503,9 @@ class XStoreClient {
   // forever. A plain member, not thread_local: this client's REQ socket is already single-threaded use only.
   int timeout_ms_ = -1;
 
+  // Threads used to parse a big reply of rows; 0 = adaptive. See SetParseThreads.
+  size_t parse_threads_ = 0;
+
   // Every RPC is: serialize request, blocking send, blocking recv, parse
   // reply. Sharing that here means the 17 request types can't drift out of
   // sync with each other the way copy-pasted send/recv blocks do. ToServer
@@ -163,14 +527,26 @@ class XStoreClient {
       }
 
       RepT from_server;
-      // Every existing RPC replies with exactly one frame -- this is the
-      // same single ParseFromArray as before, zero behavior change. A
-      // streamed reply (currently only RangeQuery, see RangeQuery)
-      // arrives as several frames that are pieces of ONE logical message's
-      // bytes (protobuf doesn't care where a message's serialized bytes get
-      // split, only that they're concatenated back in order before
-      // parsing) -- reassembled here so this stays invisible to every
-      // caller above SendRecv.
+      // A big reply of rows (RangeQuery, BatchQuery, FindByValue, FindByPattern) is cut at row boundaries and parsed on a team of threads
+      // that sizes itself to the machine's load (part 2 above) -- the single ParseFromArray was most of a big RangeQuery's time.
+      // Every other reply, and any reply that cannot be handled that way, takes the serial parse below.
+      if constexpr (xstore_client::IsFragmentMergeable<RepT>::value) {
+          std::vector<xstore_client::Fragment> fragments;
+          fragments.reserve(recv_buf.size());
+          size_t reply_bytes = 0;
+          for (const auto &part : recv_buf) {
+              fragments.push_back({part.data(), part.size()});
+              reply_bytes += part.size();
+          }
+          if (reply_bytes >= xstore_client::MIN_PARALLEL_PARSE_BYTES &&
+              xstore_client::ParseFragmentsParallel(fragments, from_server, xstore_client::ParsePolicy(parse_threads_))) {
+              return from_server;
+          }
+      }
+
+      // A streamed reply (currently RangeQuery and the like) arrives as several frames that are pieces of ONE logical message's bytes
+      // (protobuf doesn't care where a message's serialized bytes get split, only that they're concatenated back in order before
+      // parsing) -- reassembled here so this stays invisible to every caller above SendRecv.
       if (recv_buf.size() == 1) {
           from_server.ParseFromArray(recv_buf.front().data(), recv_buf.front().size());
       } else {
@@ -185,6 +561,12 @@ class XStoreClient {
   }
 
  public:
+  // Threads used to parse a big reply of rows -- RangeQuery, BatchQuery, FindByValue, FindByPattern. 0 (the default) is adaptive: the
+  // parse starts on the calling thread and adds helpers while the machine has idle cores, and they leave when other work needs the cores
+  // (cap: XSTORE_CLIENT_PARSE_MAX, default the machine's hardware threads). N > 0 forces N threads (XSTORE_CLIENT_PARSE_THREADS=N does the
+  // same for every client of a process); 1 parses on the calling thread only.
+  void SetParseThreads(size_t threads) { parse_threads_ = threads; }
+
   // timeoutMs < 0 (default) blocks forever, matching the previous behavior.
   // Pass a positive value so an unreachable/dead server raises instead of
   // hanging this REQ socket indefinitely. warmupOnInit lets callers who
