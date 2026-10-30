@@ -6,13 +6,23 @@
 //
 // `find` sends <repeat> FindByValue requests for `column == value` over [start, end] one after the other and prints one
 // line per call: wall milliseconds, rows returned, reply bytes and the first 100 characters of the queryStatus.
+//   xstore_zmq_find_client bload  <host:port> <db> <year_start_epoch> <year_seconds> <threads> <seconds> <rows> <sync|async>
+//   xstore_zmq_find_client scan   <host:port> <db> <start_epoch> <end_epoch> <column> <seconds>
+// `bload` runs <threads> threads of BatchInserts of <rows> rows (128 doubles each) at random seconds of the year for
+// <seconds>, and prints one line per wall second: second, acks, worst latency in ms. `scan` repeats a MAX over the range
+// (a column above the index width is read from the data) back to back for <seconds> and prints each call's milliseconds.
 // `put` sends <repeat> SYNC UnaryInserts of one row of <columns> doubles (all = value) at epoch, epoch+1, ... and prints
 // the wall milliseconds of each (an insert into a year whose bitmap section exists invalidates it).
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <iterator>
+#include <random>
 #include <string>
+#include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include <zmq.hpp>
@@ -109,6 +119,84 @@ int Put(const std::string &addr, const std::string &db, unsigned long long epoch
     return 0;
 }
 
+int Bload(const std::string &addr, const std::string &db, unsigned long long year_start, unsigned long long year_seconds,
+          int threads, int seconds, int rows, bool sync) {
+    struct Sample { int second; double ms; };
+    std::vector<std::vector<Sample>> samples(static_cast<size_t>(threads));
+    std::atomic<unsigned long long> failures{0};
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto deadline = t0 + std::chrono::seconds(seconds);
+    std::vector<std::thread> pool;
+    for (int t = 0; t < threads; ++t) {
+        pool.emplace_back([&, t] {
+            zmq::context_t ctx(1);
+            zmq::socket_t sock(ctx, zmq::socket_type::req);
+            sock.set(zmq::sockopt::linger, 0);
+            sock.set(zmq::sockopt::rcvtimeo, 600000);
+            sock.set(zmq::sockopt::sndtimeo, 600000);
+            sock.connect("tcp://" + addr);
+            std::mt19937_64 rng(1234567ULL + static_cast<unsigned long long>(t));
+            while (std::chrono::steady_clock::now() < deadline) {
+                XStore_Proto::Request request;
+                XStore_Proto::BatchInsert_REQ *batch = request.mutable_batchinsert();
+                batch->set_rtype(XStore_Proto::BATCHINSERT);
+                batch->set_dbname(db);
+                batch->set_durabilitymode(sync ? XStore_Proto::SYNC : XStore_Proto::ASYNC);
+                std::unordered_set<unsigned long long> used;
+                while (static_cast<int>(used.size()) < rows) used.insert(year_start + rng() % year_seconds);
+                for (unsigned long long ts : used) {
+                    XStore_Proto::BatchInsert_DATA *entry = batch->add_batchinsert_data();
+                    entry->set_timestamp(ts);
+                    for (int c = 0; c < 128; ++c) entry->mutable_data()->add_fielddata()->set_doubledata(static_cast<double>(ts % 1000 + c));
+                }
+                const std::string payload = request.SerializeAsString();
+                const auto start = std::chrono::steady_clock::now();
+                zmq::message_t reply;
+                if (!sock.send(zmq::buffer(payload), zmq::send_flags::none) || !sock.recv(reply, zmq::recv_flags::none)) { ++failures; return; }
+                const auto end = std::chrono::steady_clock::now();
+                samples[static_cast<size_t>(t)].push_back({static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(end - t0).count()),
+                                                           std::chrono::duration<double, std::milli>(end - start).count()});
+            }
+        });
+    }
+    for (std::thread &th : pool) th.join();
+    std::vector<unsigned long long> acks(static_cast<size_t>(seconds) + 2, 0);
+    std::vector<double> worst(static_cast<size_t>(seconds) + 2, 0.0);
+    unsigned long long total = 0;
+    for (const auto &per_thread : samples) {
+        for (const Sample &sample : per_thread) {
+            const size_t second = std::min(static_cast<size_t>(sample.second), acks.size() - 1);
+            ++acks[second];
+            worst[second] = std::max(worst[second], sample.ms);
+            ++total;
+        }
+    }
+    for (size_t i = 0; i < acks.size(); ++i) std::cout << "sec " << i << " acks=" << acks[i] << " worst_ms=" << worst[i] << "\n";
+    std::cout << "TOTAL acks=" << total << " rows=" << total * static_cast<unsigned long long>(rows) << " failures=" << failures.load() << std::endl;
+    return failures.load() == 0 ? 0 : 1;
+}
+
+int ScanLoop(const std::string &addr, const std::string &db, unsigned long long start, unsigned long long end, int column, int seconds) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+    int calls = 0;
+    do {
+        XStore_Proto::Request request;
+        XStore_Proto::Max_REQ *max = request.mutable_max();
+        max->set_rtype(XStore_Proto::MAX);
+        max->set_starttime(start);
+        max->set_endtime(end);
+        max->set_dbname(db);
+        max->set_columnidx(column);
+        std::string reply;
+        const auto t0 = std::chrono::steady_clock::now();
+        const bool ok = Exchange(addr, request, reply, 1800000);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        std::cout << "scan " << calls++ << ": " << ms << " ms " << (ok ? "ok" : "FAILED") << std::endl;
+        if (!ok) return 1;
+    } while (std::chrono::steady_clock::now() < deadline);
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -121,6 +209,14 @@ int main(int argc, char **argv) {
     }
     if (argc == 8 && std::string(argv[1]) == "put") {
         return Put(argv[2], argv[3], std::strtoull(argv[4], nullptr, 10), std::atoi(argv[5]), std::atof(argv[6]), std::atoi(argv[7]));
+    }
+    if (argc == 10 && std::string(argv[1]) == "bload") {
+        return Bload(argv[2], argv[3], std::strtoull(argv[4], nullptr, 10), std::strtoull(argv[5], nullptr, 10), std::atoi(argv[6]),
+                     std::atoi(argv[7]), std::atoi(argv[8]), std::string(argv[9]) == "sync");
+    }
+    if (argc == 8 && std::string(argv[1]) == "scan") {
+        return ScanLoop(argv[2], argv[3], std::strtoull(argv[4], nullptr, 10), std::strtoull(argv[5], nullptr, 10), std::atoi(argv[6]),
+                        std::atoi(argv[7]));
     }
     std::cerr << "usage: " << argv[0] << " create <host:port> <db> <row_length> <column_count>\n"
               << "       " << argv[0] << " find <host:port> <db> <start_epoch> <end_epoch> <column> <double_value> <repeat>\n"

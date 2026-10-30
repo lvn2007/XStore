@@ -163,6 +163,17 @@ inline constexpr unsigned    ZMQ_HEAVY_REQUEST_RESERVED_WORKERS_PERCENT = 25;
 // the pool's 2 GB host reserve.
 inline constexpr size_t      OPERATION_LEASE_MIN_BYTES = 8u * 1024u * 1024u;
 
+// Range scans (aggregates, RangeQuery, FindByValue, FindByPattern; xstore::scanlock::ScanUnderReadLock) hold their READ range
+// lock one chunk at a time instead of over the whole requested range, so a WRITE (the WAL apply of an insert) waits for at
+// most one chunk. A chunk is this many bytes rounded up to whole zone-map blocks (2 MiB). 0 = one lock over the whole range for
+// the whole scan (the behaviour until 2026-10-30). Mystic, 44.4 GB year, 8 threads of SYNC 1000-row random BatchInserts next
+// to a back-to-back whole-year scan, warm cache: whole-range lock 351 batches in 120 s (worst insert 131 s), 4 MiB chunks 3,866
+// (worst 0.4 s), no scan 3,932; the scan takes 52 s instead of 33 s. Cold cache 4/8/16/32 MiB gave 577-647 batches against 41
+// for the whole range; 256 MiB gave 33, because one 1000-row batch of scattered rows takes all its row locks at once and a
+// 256 MiB chunk holds nearly every batch off. Do not raise it much above 32 MiB. .superpowers/sdd/2026-10-30-scan-lock/.
+// Override at start with XSTORE_SCAN_LOCK_CHUNK_MB.
+inline constexpr uint64_t SCAN_READ_LOCK_CHUNK_BYTES = uint64_t{4} << 20;
+
 // DistinctCount counts in a flat table (9 bytes per slot, at most half full) while it has at most this many distinct values,
 // then sorts in place instead: the table stays under about 20 MB, and a column of mostly unique values pays no hash memory.
 inline constexpr size_t      EXACT_DISTINCT_TABLE_MAX_DISTINCT = 1u << 20;

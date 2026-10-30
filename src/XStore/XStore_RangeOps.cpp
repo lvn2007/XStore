@@ -1,4 +1,5 @@
 #include "include/XStore/XStore_Internal.h"
+#include "include/XStore/XStore_ScanLock.h"
 #include "include/XStore/XStore_WalRing.h"
 #include "include/XStore/XStore_WireEncode.h"
 #include "include/DataStructs/TimeStruct.h"
@@ -130,37 +131,36 @@ void XStore::RangeQuery(unsigned long long int start_epoch_t, unsigned long long
         const unsigned long long int first_offset = (iter_epoch - curr_ts.first_epoch) * cfg_struct.rowlength();
         const unsigned long long int region_length = (segment_end - iter_epoch + 1) * cfg_struct.rowlength();
 
-        {
-            FileRangeLockGuard guard(target_file_path, first_offset, region_length, FileRangeLock::LockType::READ);
+        // The rows are read under a READ lock one scan chunk at a time (xstore::scanlock), and a completed output buffer is
+        // held in `ready` until that chunk's lock is released: sending to a slow client must not hold off the inserts.
+        std::vector<std::string> ready;
+        xstore::scanlock::ScanUnderReadLock(
+            target_file_path, mapped_base, first_offset, region_length, cfg_struct.rowlength(), iter_epoch - curr_ts.first_epoch,
+            [&](const char *rows_base, unsigned long long rows, unsigned long long row_offset) {
+                for (unsigned long long i = 0; i < rows; ++i) {
+                    EncodeQueryResponseEntry(chunk_buf, iter_epoch + row_offset + i, rows_base + i * cfg_struct.rowlength(),
+                                             cfg_struct.rowlength());
 
-            {
-                static const long PAGE_SIZE = sysconf(_SC_PAGE_SIZE);
-                char *span_start = static_cast<char*>(mapped_base) + first_offset;
-                uintptr_t aligned_addr = reinterpret_cast<uintptr_t>(span_start) & ~(static_cast<uintptr_t>(PAGE_SIZE) - 1);
-                size_t align_slop = reinterpret_cast<uintptr_t>(span_start) - aligned_addr;
-                madvise(reinterpret_cast<void*>(aligned_addr), region_length + align_slop, MADV_WILLNEED);
-            }
-
-            for (unsigned long long int epoch_time = iter_epoch; epoch_time <= segment_end; epoch_time++) {
-                unsigned long long int offset = (epoch_time - curr_ts.first_epoch) * cfg_struct.rowlength();
-                const char *row_ptr = static_cast<const char*>(mapped_base) + offset;
-                EncodeQueryResponseEntry(chunk_buf, epoch_time, row_ptr, cfg_struct.rowlength());
-
-                // Flush whenever a completed row has pushed the buffer to
-                // (or past) the target -- never mid-row, so every emitted
-                // chunk's bytes still concatenate back into a stream of
-                // whole, valid queryresponse entries regardless of where
-                // the cut lands. Small queries never hit this at all: one
-                // buffer, one emit_chunk call at the end (see finish()) --
-                // chunking isn't a separate path, just what this becomes
-                // once a query is big enough to reach the target.
-                if (chunk_buf.size() >= chunk_size_bytes) {
-                    emit_chunk(std::move(chunk_buf), false);
-                    chunk_buf.clear();
-                    chunk_buf.reserve(chunk_size_bytes + 4096);
+                    // Flush whenever a completed row has pushed the buffer to
+                    // (or past) the target -- never mid-row, so every emitted
+                    // chunk's bytes still concatenate back into a stream of
+                    // whole, valid queryresponse entries regardless of where
+                    // the cut lands. Small queries never hit this at all: one
+                    // buffer, one emit_chunk call at the end (see finish()) --
+                    // chunking isn't a separate path, just what this becomes
+                    // once a query is big enough to reach the target.
+                    if (chunk_buf.size() >= chunk_size_bytes) {
+                        ready.push_back(std::move(chunk_buf));
+                        chunk_buf.clear();
+                        chunk_buf.reserve(chunk_size_bytes + 4096);
+                    }
                 }
-            }
-        }
+                return true;
+            },
+            [&] {
+                for (std::string &full : ready) emit_chunk(std::move(full), false);
+                ready.clear();
+            });
 
         iter_epoch = segment_end + 1;
     }

@@ -9,6 +9,7 @@
 #include "include/XStore/XStore_WireEncode.h"
 #include "include/DataStructs/TimeStruct.h"
 #include "include/DataStructs/FileRangeLock.h"
+#include "include/XStore/XStore_ScanLock.h"
 #include <spdlog/fmt/fmt.h>
 #include <cstring>
 #include <filesystem>
@@ -99,14 +100,9 @@ void XStore::FindByPattern(unsigned long long int start_epoch_t, unsigned long l
         const unsigned long long int region_length = (segment_end - iter_epoch + 1) * cfg_struct.rowlength();
 
         {
-            FileRangeLockGuard guard(target_file_path, first_offset, region_length, FileRangeLock::LockType::READ);
-            {
-                static const long PAGE_SIZE = sysconf(_SC_PAGE_SIZE);
-                const char *span_start = mapped_base + first_offset;
-                uintptr_t aligned_addr = reinterpret_cast<uintptr_t>(span_start) & ~(static_cast<uintptr_t>(PAGE_SIZE) - 1);
-                size_t align_slop = reinterpret_cast<uintptr_t>(span_start) - aligned_addr;
-                madvise(reinterpret_cast<void*>(aligned_addr), region_length + align_slop, MADV_WILLNEED);
-            }
+            // The rows are read under a READ lock one scan chunk at a time (xstore::scanlock); a completed output buffer waits
+            // in `ready` until that chunk's lock is released, so sending to a slow client never holds off the inserts.
+            std::vector<std::string> ready;
 
             // One row: decode the column, type-filter, match, emit. Returns false
             // once the 2GB guard trips.
@@ -134,7 +130,7 @@ void XStore::FindByPattern(unsigned long long int start_epoch_t, unsigned long l
                 XStoreWireEncode::EncodeQueryResponseEntry(chunk_buf, e, row_ptr, cfg_struct.rowlength());
                 total_emitted_bytes += static_cast<unsigned long long int>(chunk_buf.size() - size_before);
                 if (chunk_buf.size() >= chunk_size_bytes) {
-                    emit_chunk(std::move(chunk_buf), false);
+                    ready.push_back(std::move(chunk_buf));
                     chunk_buf.clear();
                     chunk_buf.reserve(chunk_size_bytes + 4096);
                 }
@@ -147,8 +143,15 @@ void XStore::FindByPattern(unsigned long long int start_epoch_t, unsigned long l
             };
 
             const std::string_view literal = matcher->PrefilterLiteral();
+            xstore::scanlock::ScanUnderReadLock(
+                target_file_path, const_cast<char *>(mapped_base), first_offset, region_length, cfg_struct.rowlength(),
+                iter_epoch - curr_ts.first_epoch,
+                [&](const char *chunk_rows, unsigned long long rows, unsigned long long row_offset) {
+            // This scan chunk: rows [chunk_lo, chunk_end]; the prefilter below starts afresh on each chunk.
+            const unsigned long long int chunk_lo = iter_epoch + row_offset;
+            const unsigned long long int chunk_end = chunk_lo + rows - 1;
             if (literal.empty()) {
-                for (unsigned long long int e = iter_epoch; e <= segment_end; ++e) {
+                for (unsigned long long int e = chunk_lo; e <= chunk_end; ++e) {
                     if (!test_row(e)) break;
                 }
             } else {
@@ -160,8 +163,8 @@ void XStore::FindByPattern(unsigned long long int start_epoch_t, unsigned long l
                 // ILIKE) searches ASCII case-insensitively for its lowercased literal.
                 const bool literal_ci = matcher->PrefilterCaseInsensitive();
                 const size_t row_len = cfg_struct.rowlength();
-                const char *span_begin = mapped_base + first_offset;
-                const char *span_end = span_begin + region_length;
+                const char *span_begin = chunk_rows;
+                const char *span_end = span_begin + rows * row_len;
                 const char *cursor = span_begin;
                 // Stateful across hits: it remembers each case's next memchr hit, so
                 // an anchor case that never occurs is scanned once per span, not per row.
@@ -173,14 +176,14 @@ void XStore::FindByPattern(unsigned long long int start_epoch_t, unsigned long l
                                                  : memmem(cursor, remaining, literal.data(), literal.size());
                     if (hit == nullptr) break;
                     const size_t row_in_span = static_cast<size_t>(static_cast<const char *>(hit) - span_begin) / row_len;
-                    if (!test_row(iter_epoch + row_in_span)) break;
+                    if (!test_row(chunk_lo + row_in_span)) break;
                     // Adaptive fallback: a literal in most rows skips nothing, so
                     // finish the segment with the plain loop (the span is exactly
                     // segment_end - iter_epoch + 1 rows; rows up to this hit's are done).
                     const size_t rows_covered = row_in_span + 1;
                     if (++hits * 100 > rows_covered * XStoreTunables::FIND_BY_PATTERN_PREFILTER_ADAPT_HIT_PERCENT &&
                         rows_covered >= XStoreTunables::FIND_BY_PATTERN_PREFILTER_ADAPT_MIN_ROWS) {
-                        for (unsigned long long int e = iter_epoch + rows_covered; e <= segment_end; ++e) {
+                        for (unsigned long long int e = chunk_lo + rows_covered; e <= chunk_end; ++e) {
                             if (!test_row(e)) break;
                         }
                         break;
@@ -188,6 +191,12 @@ void XStore::FindByPattern(unsigned long long int start_epoch_t, unsigned long l
                     cursor = span_begin + rows_covered * row_len;
                 }
             }
+            return !size_limit_exceeded;
+                },
+                [&] {
+                    for (std::string &full : ready) emit_chunk(std::move(full), false);
+                    ready.clear();
+                });
         }
         iter_epoch = segment_end + 1;
     }

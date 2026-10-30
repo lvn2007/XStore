@@ -4,6 +4,8 @@
 #include "include/DataStructs/TimeStruct.h"
 #include "include/DataStructs/FileRangeLock.h"
 #include "include/XStore/XStore_PreadPool.h"
+#include "include/XStore/XStore_ScanLock.h"
+#include "include/XStore/XStore_ZoneMap.h"
 #include <spdlog/fmt/fmt.h>
 #include "include/Logger/Logger.h"
 #include <algorithm>
@@ -46,27 +48,15 @@ void XStore::WalkYearSpan(const std::string &db_base_path, const XStore_Proto::C
                 unsigned long long first_offset = (iter_epoch - curr_ts.first_epoch) * cfg_struct.rowlength();
                 unsigned long long region_length = rows_to_process * cfg_struct.rowlength();
 
-                {
-                    FileRangeLockGuard guard(target_file_path, first_offset, region_length, FileRangeLock::LockType::READ);
-
-                    // Bulk prefetch hint before the kernel's row-by-row walk --
-                    // same rationale as RangeQuery (XStore_RangeOps.cpp): one
-                    // madvise() covering the whole segment instead of one page
-                    // fault per first-touched page as the kernel scans forward.
-                    // Matters more here than for RangeQuery -- aggregates walk
-                    // the full span with no early exit, so the whole region is
-                    // always going to be touched.
-                    {
-                        static const long PAGE_SIZE = sysconf(_SC_PAGE_SIZE);
-                        char *span_start = static_cast<char*>(mapped_base) + first_offset;
-                        uintptr_t aligned_addr = reinterpret_cast<uintptr_t>(span_start) & ~(static_cast<uintptr_t>(PAGE_SIZE) - 1);
-                        size_t align_slop = reinterpret_cast<uintptr_t>(span_start) - aligned_addr;
-                        madvise(reinterpret_cast<void*>(aligned_addr), region_length + align_slop, MADV_WILLNEED);
-                    }
-
-                    kernel(static_cast<const char*>(mapped_base) + first_offset, rows_to_process,
-                           curr_ts.year, iter_epoch - curr_ts.first_epoch);
-                }
+                // The READ lock (whole range or per chunk, see XStore_ScanLock.h) and the bulk prefetch hint before the kernel's
+                // row-by-row walk: aggregates walk the full span with no early exit, so the whole region is always touched.
+                xstore::scanlock::ScanUnderReadLock(target_file_path, mapped_base, first_offset, region_length, cfg_struct.rowlength(),
+                                  iter_epoch - curr_ts.first_epoch,
+                                  [&](const char *rows_base, unsigned long long rows, unsigned long long row_offset) {
+                                      kernel(rows_base, rows, curr_ts.year, iter_epoch - curr_ts.first_epoch + row_offset);
+                                      return true;
+                                  },
+                                  [] {});
             }
         }
 
@@ -1228,14 +1218,9 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
         const unsigned long long int region_length = (segment_end - iter_epoch + 1) * cfg_struct.rowlength();
 
         {
-            FileRangeLockGuard guard(target_file_path, first_offset, region_length, FileRangeLock::LockType::READ);
-            {
-                static const long PAGE_SIZE = sysconf(_SC_PAGE_SIZE);
-                char *span_start = static_cast<char*>(mapped_base) + first_offset;
-                uintptr_t aligned_addr = reinterpret_cast<uintptr_t>(span_start) & ~(static_cast<uintptr_t>(PAGE_SIZE) - 1);
-                size_t align_slop = reinterpret_cast<uintptr_t>(span_start) - aligned_addr;
-                madvise(reinterpret_cast<void*>(aligned_addr), region_length + align_slop, MADV_WILLNEED);
-            }
+            // The rows are read under a READ lock one scan chunk at a time (xstore::scanlock); a completed output buffer waits
+            // in `ready` until that chunk's lock is released, so sending to a slow client never holds off the inserts.
+            std::vector<std::string> ready;
 
             // One shared emitter for both the bitmap-candidate path and the
             // real-scan path -- they only ever differ in WHICH rows they
@@ -1246,7 +1231,7 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
                 XStoreWireEncode::EncodeQueryResponseEntry(chunk_buf, e, row_ptr, cfg_struct.rowlength());
                 total_emitted_bytes += static_cast<unsigned long long int>(chunk_buf.size() - size_before);
                 if (chunk_buf.size() >= chunk_size_bytes) {
-                    emit_chunk(std::move(chunk_buf), false);
+                    ready.push_back(std::move(chunk_buf));
                     chunk_buf.clear();
                     chunk_buf.reserve(chunk_size_bytes + 4096);
                 }
@@ -1267,12 +1252,18 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
                        && EncodeFDataForCatIdx(f_data) == encoded_target;
             };
 
-            unsigned long long int epoch_time = iter_epoch;
-            while (epoch_time <= segment_end) {
+            xstore::scanlock::ScanUnderReadLock(
+                target_file_path, mapped_base, first_offset, region_length, cfg_struct.rowlength(), iter_epoch - curr_ts.first_epoch,
+                [&](const char *, unsigned long long rows, unsigned long long row_offset) {
+            // This scan chunk's rows (whole zone-map blocks, except at the ends of the queried range).
+            const unsigned long long int chunk_lo = iter_epoch + row_offset;
+            const unsigned long long int chunk_hi = chunk_lo + rows - 1;
+            unsigned long long int epoch_time = chunk_lo;
+            while (epoch_time <= chunk_hi) {
                 uint64_t row_index = epoch_time - curr_ts.first_epoch;
                 uint64_t block_index = BlockIndexForRow(row_index, rows_per_block);
                 uint64_t block_start_row = block_index * rows_per_block;
-                unsigned long long int block_end_epoch = std::min(segment_end,
+                unsigned long long int block_end_epoch = std::min(chunk_hi,
                     static_cast<unsigned long long int>(curr_ts.first_epoch + block_start_row + rows_per_block - 1));
 
                 // Bloom said "definitely absent" for this whole block -- skip
@@ -1299,7 +1290,7 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
                     auto it = std::lower_bound(bitmap_candidate_rows.begin(), bitmap_candidate_rows.end(), block_start_row);
                     for (; it != bitmap_candidate_rows.end() && *it < block_start_row + rows_per_block; ++it) {
                         unsigned long long int e = curr_ts.first_epoch + *it;
-                        if (e < iter_epoch || e > segment_end) continue; // clip to the queried range too
+                        if (e < chunk_lo || e > chunk_hi) continue; // clip to this chunk (inside the queried range)
                         const char *row_ptr = static_cast<const char*>(mapped_base)
                                               + (e - curr_ts.first_epoch) * cfg_struct.rowlength();
                         if (!row_still_matches(row_ptr)) continue; // stale directory entry
@@ -1320,9 +1311,15 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
                         if (row_still_matches(row_ptr) && !emit_match(e, row_ptr)) break;
                     }
                 }
-                if (size_limit_exceeded) break;
+                if (size_limit_exceeded) return false;
                 epoch_time = block_end_epoch + 1;
             }
+            return true;
+                },
+                [&] {
+                    for (std::string &full : ready) emit_chunk(std::move(full), false);
+                    ready.clear();
+                });
         }
 
         if (size_limit_exceeded) break;
