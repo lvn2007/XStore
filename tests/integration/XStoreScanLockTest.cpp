@@ -13,7 +13,11 @@
 #include <filesystem>
 #include <functional>
 #include <future>
+#include <map>
+#include <mutex>
+#include <set>
 #include <string>
+#include <thread>
 
 namespace {
 
@@ -23,6 +27,15 @@ using namespace std::chrono_literals;
 constexpr uint16_t kRowLength = 512;              // a zone-map block is 2 MiB / 512 = 4096 rows: the 20,000 rows are 5 blocks
 constexpr uint64_t kRows = 20'000;
 constexpr uint64_t kBlockBytes = 4096ull * kRowLength;
+
+// The scans are adaptive and parallel by default. These tests need the plain sequential scan (a chunk hook that sees chunk 0, 1, 2 in
+// order, or the sequential answer to compare the parallel ones with), so they ask for it.
+xstore::scanlock::Config Sequential(uint64_t chunk_bytes) {
+    xstore::scanlock::Config config;
+    config.chunk_bytes = chunk_bytes;
+    config.parallel_threads = 1;
+    return config;
+}
 
 // What each op returns for the data below, as a number the tests can compare: a count of rows or distinct values.
 struct Op {
@@ -104,16 +117,162 @@ protected:
 
 TEST_F(ScanLockTest, EveryScanOpGivesTheSameAnswerWholeAndChunked) {
     for (const uint64_t chunk_bytes : {uint64_t{0}, kBlockBytes, 3 * kBlockBytes, uint64_t{4} << 20}) {
-        xstore::scanlock::Set({chunk_bytes});
+        xstore::scanlock::Set(Sequential(chunk_bytes));
         for (const Op &op : Ops()) {
             EXPECT_EQ(op.run(*store, db, base), op.expected) << op.name << " with chunks of " << chunk_bytes << " bytes";
         }
     }
 }
 
+// A year is cut into pieces that run in parallel (xstore::scanlock::Config::parallel_threads): the aggregates must give the same
+// answer for every number of threads, with pieces of one block (5 pieces here) and with one piece.
+TEST_F(ScanLockTest, TheExactAggregatesGiveTheSameAnswerForEveryParallelThreads) {
+    for (const uint32_t threads : {1u, 2u, 4u, 8u, 0u}) {   // 0 = adaptive
+        for (const uint64_t piece_bytes : {kBlockBytes, 2 * kBlockBytes, uint64_t{64} << 20}) {
+            xstore::scanlock::Config config;
+            config.chunk_bytes = kBlockBytes;
+            config.parallel_threads = threads;
+            config.piece_bytes = piece_bytes;
+            xstore::scanlock::Set(config);
+            std::mutex threads_mutex;
+            std::set<std::thread::id> threads_seen;
+            xstore::scanlock::SetChunkHookForTests([&](uint64_t) {
+                std::this_thread::sleep_for(20ms);   // long enough for the other pieces of the wave to be under way too
+                std::lock_guard<std::mutex> lock(threads_mutex);
+                threads_seen.insert(std::this_thread::get_id());
+            });
+            XStore_Proto::DistinctCount_REP distinct;
+            store->DistinctCountAggregate(base, base + kRows - 1, db, 0, &distinct);
+            xstore::scanlock::SetChunkHookForTests(nullptr);
+            EXPECT_EQ(distinct.count(), kRows) << "threads " << threads << " piece " << piece_bytes;
+            if (piece_bytes == kBlockBytes) {   // 5 pieces
+                if (threads == 1) EXPECT_EQ(threads_seen.size(), 1u) << "pieces ran on several threads with one thread";
+                else if (threads != 0) EXPECT_GE(threads_seen.size(), 2u) << "threads " << threads << ": the pieces did not run in parallel";
+            }
+            XStore_Proto::Percentile_REP median;
+            store->PercentileAggregate(base, base + kRows - 1, db, 0, 0.5, &median);
+            EXPECT_NEAR(median.value(), (kRows - 1) / 2.0, 1.0) << "threads " << threads << " piece " << piece_bytes;
+            XStore_Proto::TopK_REP top;
+            store->TopKAggregate(base, base + kRows - 1, db, 0, 3, &top);
+            EXPECT_EQ(top.entries_size(), 3) << "threads " << threads << " piece " << piece_bytes;
+        }
+    }
+}
+
+// FindByValue and FindByPattern scanned in parallel send their rows in time order: the reply bytes must be identical
+// to the sequential scan's for every number of threads and piece size (a match in every piece, and across the piece boundaries), and the
+// pieces must run on several threads.
+TEST_F(ScanLockTest, TheRowEmittingScansReturnTheSameBytesInTheSameOrderForEveryParallelThreads) {
+    const auto reply_bytes = [&](const char *which) {
+        std::string buf;
+        const auto sink = [&](std::string &&chunk, bool) { buf += chunk; };
+        if (std::string(which) == "value") store->FindByValue(base + 7, base + kRows - 9, db, 0, FDouble(12345.0), 1 << 20, sink);
+        else if (std::string(which) == "valuemany") store->FindByValue(base, base + kRows - 1, db, 1, FString("nope"), 1 << 20, sink);
+        else store->FindByPattern(base, base + kRows - 1, db, 1, "row-1%", XStore_Proto::PATTERN_LIKE, false, 1 << 20, sink);
+        return buf;
+    };
+    xstore::scanlock::Set(Sequential(kBlockBytes));
+    std::map<std::string, std::string> sequential;
+    for (const char *which : {"value", "valuemany", "pattern"}) sequential[which] = reply_bytes(which);
+    ASSERT_FALSE(sequential["value"].empty());
+    ASSERT_FALSE(sequential["pattern"].empty());
+    for (const uint32_t threads : {2u, 4u, 8u, 0u}) {   // 0 = adaptive
+        for (const uint64_t piece_bytes : {kBlockBytes, 2 * kBlockBytes, uint64_t{64} << 20}) {
+            xstore::scanlock::Config config;
+            config.chunk_bytes = kBlockBytes;
+            config.parallel_threads = threads;
+            config.ordered_piece_bytes = piece_bytes;
+            xstore::scanlock::Set(config);
+            std::mutex threads_mutex;
+            std::set<std::thread::id> threads_seen;
+            xstore::scanlock::SetChunkHookForTests([&](uint64_t) {
+                std::this_thread::sleep_for(10ms);
+                std::lock_guard<std::mutex> lock(threads_mutex);
+                threads_seen.insert(std::this_thread::get_id());
+            });
+            for (const char *which : {"value", "valuemany", "pattern"}) {
+                threads_seen.clear();
+                EXPECT_TRUE(reply_bytes(which) == sequential[which]) << which << " threads " << threads << " piece " << piece_bytes;
+                if (threads != 0 && piece_bytes == kBlockBytes && std::string(which) == "pattern") {
+                    EXPECT_GE(threads_seen.size(), 2u) << which << " threads " << threads << ": the pieces did not run in parallel";
+                }
+            }
+            xstore::scanlock::SetChunkHookForTests(nullptr);
+        }
+    }
+}
+
+// A client that is slow to take its reply must not park the shared pool: producers that find no room for 100 ms give their
+// thread back, the consumer starts new ones, and the output is still complete and in order.
+TEST_F(ScanLockTest, ASlowConsumerMakesTheProducersRetireAndTheScanStillFinishesInOrder) {
+    const auto run = [&](bool slow) {
+        std::string buf;
+        int sends = 0;
+        store->FindByPattern(base, base + kRows - 1, db, 1, "row-1%", XStore_Proto::PATTERN_LIKE, false, 1,   // every piece is sent
+                             [&](std::string &&chunk, bool) {
+                                 buf += chunk;
+                                 if (slow && ++sends <= 3) std::this_thread::sleep_for(250ms);
+                             });
+        return buf;
+    };
+    xstore::scanlock::Set(Sequential(kBlockBytes));
+    const std::string sequential = run(false);
+    ASSERT_FALSE(sequential.empty());
+    xstore::scanlock::Config config;
+    config.chunk_bytes = kBlockBytes;
+    config.parallel_threads = 2;
+    config.ordered_piece_bytes = kBlockBytes;   // 5 pieces, a window of 4
+    xstore::scanlock::Set(config);
+    const uint64_t relaunches_before = xstore::scanlock::ProducerRelaunchesForTests();
+    EXPECT_TRUE(run(true) == sequential);
+    EXPECT_GE(xstore::scanlock::ProducerRelaunchesForTests(), relaunches_before + 1) << "no producer retired and was started again";
+}
+
+// Out of the box a scan is adaptive (parallel_threads 0) and may use half of the machine's hardware threads at most; the environment
+// still forces a number or goes back to adaptive.
+TEST(ScanThreadsTest, TheDefaultIsAdaptiveCappedAtHalfTheCores) {
+    unsetenv("XSTORE_SCAN_PARALLEL_THREADS");
+    unsetenv("XSTORE_SCAN_ADAPTIVE_MAX");
+    const unsigned half = std::max(1u, std::thread::hardware_concurrency() / 2);
+    const xstore::scanlock::Config plain;
+    EXPECT_EQ(plain.parallel_threads, 0u);
+    EXPECT_EQ(plain.adaptive_max, half);
+    const xstore::scanlock::Config from_env = xstore::scanlock::detail::FromEnv();
+    EXPECT_EQ(from_env.parallel_threads, 0u);
+    EXPECT_EQ(from_env.adaptive_max, half);
+}
+
+TEST(ScanThreadsTest, TheEnvironmentForcesANumberOrTheCap) {
+    setenv("XSTORE_SCAN_PARALLEL_THREADS", "3", 1);
+    setenv("XSTORE_SCAN_ADAPTIVE_MAX", "5", 1);
+    EXPECT_EQ(xstore::scanlock::detail::FromEnv().parallel_threads, 3u);
+    EXPECT_EQ(xstore::scanlock::detail::FromEnv().adaptive_max, 5u);
+    setenv("XSTORE_SCAN_PARALLEL_THREADS", "1", 1);
+    EXPECT_EQ(xstore::scanlock::detail::FromEnv().parallel_threads, 1u);   // one thread = the sequential scan
+    setenv("XSTORE_SCAN_PARALLEL_THREADS", "adaptive", 1);
+    EXPECT_EQ(xstore::scanlock::detail::FromEnv().parallel_threads, 0u);
+    unsetenv("XSTORE_SCAN_PARALLEL_THREADS");
+    unsetenv("XSTORE_SCAN_ADAPTIVE_MAX");
+}
+
+// Adaptive threads (parallel_threads 0): the idle cores of the machine less a headroom, between 1 and the cap.
+TEST(ScanThreadsTest, AdaptiveThreadsFollowTheIdleCoresLessTheHeadroomWithinTheLimits) {
+    using xstore::scanlock::ThreadsFor;
+    EXPECT_EQ(ThreadsFor(0.0, 32, 2, 16), 16u) << "an idle 32-core machine: capped";
+    EXPECT_EQ(ThreadsFor(0.25, 32, 2, 16), 16u) << "24 idle cores less 2: still over the cap";
+    EXPECT_EQ(ThreadsFor(0.5, 32, 2, 16), 14u) << "16 idle cores less 2";
+    EXPECT_EQ(ThreadsFor(0.75, 32, 2, 16), 6u) << "8 idle cores less 2";
+    EXPECT_EQ(ThreadsFor(0.95, 32, 2, 16), 1u) << "1.6 idle cores: no room, sequential";
+    EXPECT_EQ(ThreadsFor(1.0, 32, 2, 16), 1u);
+    EXPECT_EQ(ThreadsFor(0.0, 4, 2, 16), 2u) << "a small machine";
+    EXPECT_EQ(ThreadsFor(0.0, 2, 2, 16), 1u) << "headroom takes it all: still 1";
+    EXPECT_EQ(ThreadsFor(-0.3, 8, 2, 16), 6u) << "a bad sample is clamped";
+    EXPECT_EQ(ThreadsFor(1.7, 8, 2, 16), 1u);
+}
+
 TEST_F(ScanLockTest, AWriterToAnUnscannedChunkGetsInMidScanForEveryScanOp) {
     FileRangeLock &lock = FileLockRegistry::Get(year_path);
-    xstore::scanlock::Set({kBlockBytes});   // one block per chunk: 5 chunks
+    xstore::scanlock::Set(Sequential(kBlockBytes));   // one block per chunk: 5 chunks
     for (const Op &op : Ops()) {
         SCOPED_TRACE(op.name);
         std::future<void> writer;
@@ -144,7 +303,7 @@ TEST_F(ScanLockTest, AWriterToAnUnscannedChunkGetsInMidScanForEveryScanOp) {
 // output callback, a WRITE to the rows already scanned (and to the ones not yet reached) must be granted at once.
 TEST_F(ScanLockTest, RangeQuerySendsItsOutputWithNoLockHeld) {
     FileRangeLock &lock = FileLockRegistry::Get(year_path);
-    xstore::scanlock::Set({kBlockBytes});
+    xstore::scanlock::Set(Sequential(kBlockBytes));
     int sends = 0;
     int writes_granted = 0;
     std::string buf;

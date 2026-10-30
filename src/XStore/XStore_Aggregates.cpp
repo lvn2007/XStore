@@ -82,17 +82,31 @@ PartialState XStore::WalkYearSpanParallel(const std::string &db_base_path, const
     // worth it before committing to any thread spawning.
     struct Segment { unsigned long long start; unsigned long long end; };
     std::vector<Segment> segments;
+    const xstore::scanlock::Config scan_config = xstore::scanlock::Get();
+    const bool split_years = scan_config.parallel_threads != 1;
+    // A year segment is cut into pieces of whole zone-map blocks (on the year's row numbering) when the scan may run parallel.
+    const unsigned long long rows_per_block = RowsPerBlock(static_cast<uint16_t>(cfg_struct.rowlength()));
+    const unsigned long long piece_rows = std::max<unsigned long long>(1, (std::max<unsigned long long>(1, scan_config.piece_bytes / cfg_struct.rowlength()) + rows_per_block - 1) / rows_per_block) * rows_per_block;
     {
         unsigned long long iter_epoch = start_epoch_t;
         while (iter_epoch <= end_epoch_t) {
             TimeStruct curr_ts(iter_epoch, cfg_struct.timeresolution());
             unsigned long long end_of_current_file = std::min(end_epoch_t, static_cast<unsigned long long>(curr_ts.last_epoch));
-            segments.push_back({iter_epoch, end_of_current_file});
+            if (!split_years) {
+                segments.push_back({iter_epoch, end_of_current_file});
+            } else {
+                for (unsigned long long piece_start = iter_epoch; piece_start <= end_of_current_file;) {
+                    const unsigned long long row = piece_start - curr_ts.first_epoch;
+                    const unsigned long long piece_end = std::min(end_of_current_file, curr_ts.first_epoch + (row / piece_rows + 1) * piece_rows - 1);
+                    segments.push_back({piece_start, piece_end});
+                    piece_start = piece_end + 1;
+                }
+            }
             iter_epoch = end_of_current_file + 1;
         }
     }
 
-    if (segments.size() < K_MIN_SEGMENTS_FOR_PARALLEL_WALK) {
+    if (segments.size() < (split_years ? 2 : K_MIN_SEGMENTS_FOR_PARALLEL_WALK)) {
         // Narrow span -- delegate straight to the existing sequential walk,
         // no threads, no merge step, byte-for-byte the same code path this
         // function used before parallelism existed.
@@ -118,7 +132,12 @@ PartialState XStore::WalkYearSpanParallel(const std::string &db_base_path, const
     // partial-state slot per segment (not per worker thread) since
     // ParallelFor doesn't expose which pool worker runs which index.
     std::vector<PartialState> partial_results(segments.size(), initial_state);
-    XStorePreadPool::ParallelFor(segments.size(), [&](size_t s) {
+    // At most parallel_threads pieces at a time (waves; a year-wide scan of several years with parallel_threads 1 is one wave).
+    // The number of threads is chosen again for every wave (adaptive: from the machine's load right now).
+    for (size_t wave_start = 0, wave = 0; wave_start < segments.size(); wave_start += wave) {
+    wave = split_years ? std::min<size_t>(xstore::scanlock::EffectiveThreads(scan_config), segments.size() - wave_start) : segments.size();
+    XStorePreadPool::ParallelFor(wave, [&](size_t in_wave) {
+        const size_t s = wave_start + in_wave;
         const Segment &seg = segments[s];
         // Each Segment already falls entirely within one year (built that
         // way above), so this WalkYearSpan call's internal loop runs
@@ -130,6 +149,7 @@ PartialState XStore::WalkYearSpanParallel(const std::string &db_base_path, const
                 segment_kernel(partial_results[s], rows_base, rows_to_process, year, first_row_index);
             });
     });
+    }
 
     PartialState result = initial_state;
     for (PartialState &partial : partial_results) {
@@ -1252,12 +1272,10 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
                        && EncodeFDataForCatIdx(f_data) == encoded_target;
             };
 
-            xstore::scanlock::ScanUnderReadLock(
-                target_file_path, mapped_base, first_offset, region_length, cfg_struct.rowlength(), iter_epoch - curr_ts.first_epoch,
-                [&](const char *, unsigned long long rows, unsigned long long row_offset) {
-            // This scan chunk's rows (whole zone-map blocks, except at the ends of the queried range).
-            const unsigned long long int chunk_lo = iter_epoch + row_offset;
-            const unsigned long long int chunk_hi = chunk_lo + rows - 1;
+            // The block loop over the rows [chunk_lo, chunk_hi] (whole zone-map blocks, except at the ends of the queried range);
+            // emit(e, row_ptr) returns false to stop the scan. It only reads shared state, so pieces may run it in parallel.
+            auto scan_rows = [&](unsigned long long int chunk_lo, unsigned long long int chunk_hi, auto &&emit) {
+            bool stop = false;
             unsigned long long int epoch_time = chunk_lo;
             while (epoch_time <= chunk_hi) {
                 uint64_t row_index = epoch_time - curr_ts.first_epoch;
@@ -1294,7 +1312,7 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
                         const char *row_ptr = static_cast<const char*>(mapped_base)
                                               + (e - curr_ts.first_epoch) * cfg_struct.rowlength();
                         if (!row_still_matches(row_ptr)) continue; // stale directory entry
-                        if (!emit_match(e, row_ptr)) break;
+                        if (!emit(e, row_ptr)) { stop = true; break; }
                     }
                     must_scan = false;
                 }
@@ -1308,18 +1326,52 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
                     for (unsigned long long int e = epoch_time; e <= block_end_epoch; e++) {
                         const char *row_ptr = static_cast<const char*>(mapped_base)
                                               + (e - curr_ts.first_epoch) * cfg_struct.rowlength();
-                        if (row_still_matches(row_ptr) && !emit_match(e, row_ptr)) break;
+                        if (row_still_matches(row_ptr) && !emit(e, row_ptr)) { stop = true; break; }
                     }
                 }
-                if (size_limit_exceeded) return false;
+                if (stop) return false;
                 epoch_time = block_end_epoch + 1;
             }
             return true;
-                },
-                [&] {
-                    for (std::string &full : ready) emit_chunk(std::move(full), false);
-                    ready.clear();
-                });
+            };
+
+            // Parallel (xstore::scanlock::Config::parallel_threads > 1 and at least two pieces): the pieces are scanned in parallel
+            // and their matches are appended here in order; otherwise the sequential scan.
+            if (!xstore::scanlock::ScanRegionOrdered(
+                    target_file_path, mapped_base, first_offset, region_length, cfg_struct.rowlength(), iter_epoch - curr_ts.first_epoch,
+                    [&](const char *, unsigned long long rows, unsigned long long row_offset, std::string &out) {
+                        const unsigned long long int lo = iter_epoch + row_offset;
+                        scan_rows(lo, lo + rows - 1, [&](unsigned long long int e, const char *row_ptr) {
+                            XStoreWireEncode::EncodeQueryResponseEntry(out, e, row_ptr, cfg_struct.rowlength());
+                            return true;
+                        });
+                    },
+                    [&](std::string &piece_out) {
+                        total_emitted_bytes += static_cast<unsigned long long int>(piece_out.size());
+                        chunk_buf.append(piece_out);
+                        if (chunk_buf.size() >= chunk_size_bytes) {
+                            emit_chunk(std::move(chunk_buf), false);
+                            chunk_buf.clear();
+                            chunk_buf.reserve(chunk_size_bytes + 4096);
+                        }
+                        if (total_emitted_bytes > 2'000'000'000) {
+                            set_warning("[WARNING] ", fmt::format("[FINDBYVALUE] [DB: {}] - Query results exceeded 2GB, results truncated", db_name));
+                            size_limit_exceeded = true;
+                            return false;
+                        }
+                        return true;
+                    })) {
+                xstore::scanlock::ScanUnderReadLock(
+                    target_file_path, mapped_base, first_offset, region_length, cfg_struct.rowlength(), iter_epoch - curr_ts.first_epoch,
+                    [&](const char *, unsigned long long rows, unsigned long long row_offset) {
+                        const unsigned long long int lo = iter_epoch + row_offset;
+                        return scan_rows(lo, lo + rows - 1, emit_match);
+                    },
+                    [&] {
+                        for (std::string &full : ready) emit_chunk(std::move(full), false);
+                        ready.clear();
+                    });
+            }
         }
 
         if (size_limit_exceeded) break;

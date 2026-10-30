@@ -7,10 +7,16 @@
 // `find` sends <repeat> FindByValue requests for `column == value` over [start, end] one after the other and prints one
 // line per call: wall milliseconds, rows returned, reply bytes and the first 100 characters of the queryStatus.
 //   xstore_zmq_find_client bload  <host:port> <db> <year_start_epoch> <year_seconds> <threads> <seconds> <rows> <sync|async>
+//   xstore_zmq_find_client range  <host:port> <db> <start_epoch> <end_epoch> <repeat>
+//   xstore_zmq_find_client pattern <host:port> <db> <start_epoch> <end_epoch> <column> <like_pattern> <repeat>
+//   xstore_zmq_find_client uq     <host:port> <db> <year_start_epoch> <year_seconds> <threads> <seconds>
 //   xstore_zmq_find_client scan   <host:port> <db> <start_epoch> <end_epoch> <column> <seconds>
 // `bload` runs <threads> threads of BatchInserts of <rows> rows (128 doubles each) at random seconds of the year for
 // <seconds>, and prints one line per wall second: second, acks, worst latency in ms. `scan` repeats a MAX over the range
 // (a column above the index width is read from the data) back to back for <seconds> and prints each call's milliseconds.
+// `range` and `pattern` time a RangeQuery / FindByPattern (LIKE) over the range: wall milliseconds until the last frame is in,
+// reply bytes (rows are not counted: parsing a GB reply would be timed too). `uq` runs <threads> threads of UnaryQuerys of
+// random seconds of the year for <seconds> and prints the latency count, p50, p99 and max in milliseconds.
 // `put` sends <repeat> SYNC UnaryInserts of one row of <columns> doubles (all = value) at epoch, epoch+1, ... and prints
 // the wall milliseconds of each (an insert into a year whose bitmap section exists invalidates it).
 #include <algorithm>
@@ -176,6 +182,84 @@ int Bload(const std::string &addr, const std::string &db, unsigned long long yea
     return failures.load() == 0 ? 0 : 1;
 }
 
+int Range(const std::string &addr, const std::string &db, unsigned long long start, unsigned long long end, int repeat) {
+    for (int i = 0; i < repeat; ++i) {
+        XStore_Proto::Request request;
+        XStore_Proto::RangeQuery_REQ *query = request.mutable_rangequery();
+        query->set_rtype(XStore_Proto::RANGEQUERY);
+        query->set_starttime(start);
+        query->set_endtime(end);
+        query->set_dbname(db);
+        std::string reply;
+        const auto t0 = std::chrono::steady_clock::now();
+        const bool ok = Exchange(addr, request, reply, 1800000);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        std::cout << "call " << i << ": " << ms << " ms bytes=" << reply.size() << (ok ? "" : " FAILED") << std::endl;
+        if (!ok) return 1;
+    }
+    return 0;
+}
+
+int Pattern(const std::string &addr, const std::string &db, unsigned long long start, unsigned long long end, int column,
+            const std::string &pattern, int repeat) {
+    for (int i = 0; i < repeat; ++i) {
+        XStore_Proto::Request request;
+        XStore_Proto::FindByPattern_REQ *query = request.mutable_findbypattern();
+        query->set_rtype(XStore_Proto::FINDBYPATTERN);
+        query->set_starttime(start);
+        query->set_endtime(end);
+        query->set_dbname(db);
+        query->set_columnidx(column);
+        query->set_pattern(pattern);
+        query->set_mode(XStore_Proto::PATTERN_LIKE);
+        std::string reply;
+        const auto t0 = std::chrono::steady_clock::now();
+        const bool ok = Exchange(addr, request, reply, 1800000);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        std::cout << "call " << i << ": " << ms << " ms bytes=" << reply.size() << (ok ? "" : " FAILED") << std::endl;
+        if (!ok) return 1;
+    }
+    return 0;
+}
+
+int PointReads(const std::string &addr, const std::string &db, unsigned long long year_start, unsigned long long year_seconds,
+               int threads, int seconds) {
+    std::vector<std::vector<double>> latencies(static_cast<size_t>(threads));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+    std::vector<std::thread> pool;
+    for (int t = 0; t < threads; ++t) {
+        pool.emplace_back([&, t] {
+            zmq::context_t ctx(1);
+            zmq::socket_t sock(ctx, zmq::socket_type::req);
+            sock.set(zmq::sockopt::linger, 0);
+            sock.set(zmq::sockopt::rcvtimeo, 600000);
+            sock.connect("tcp://" + addr);
+            std::mt19937_64 rng(777ULL + static_cast<unsigned long long>(t));
+            while (std::chrono::steady_clock::now() < deadline) {
+                XStore_Proto::Request request;
+                XStore_Proto::UnaryQuery_REQ *query = request.mutable_unaryquery();
+                query->set_rtype(XStore_Proto::UNARYQUERY);
+                query->set_timestamp(year_start + rng() % year_seconds);
+                query->set_dbname(db);
+                const std::string payload = request.SerializeAsString();
+                const auto start = std::chrono::steady_clock::now();
+                zmq::message_t reply;
+                if (!sock.send(zmq::buffer(payload), zmq::send_flags::none) || !sock.recv(reply, zmq::recv_flags::none)) return;
+                latencies[static_cast<size_t>(t)].push_back(
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+            }
+        });
+    }
+    for (std::thread &th : pool) th.join();
+    std::vector<double> all;
+    for (const auto &per_thread : latencies) all.insert(all.end(), per_thread.begin(), per_thread.end());
+    if (all.empty()) { std::cout << "uq: no replies\n"; return 1; }
+    std::sort(all.begin(), all.end());
+    std::cout << "uq count=" << all.size() << " p50_ms=" << all[all.size() / 2] << " p99_ms=" << all[all.size() * 99 / 100]
+              << " max_ms=" << all.back() << std::endl;
+    return 0;
+}
+
 int ScanLoop(const std::string &addr, const std::string &db, unsigned long long start, unsigned long long end, int column, int seconds) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
     int calls = 0;
@@ -213,6 +297,17 @@ int main(int argc, char **argv) {
     if (argc == 10 && std::string(argv[1]) == "bload") {
         return Bload(argv[2], argv[3], std::strtoull(argv[4], nullptr, 10), std::strtoull(argv[5], nullptr, 10), std::atoi(argv[6]),
                      std::atoi(argv[7]), std::atoi(argv[8]), std::string(argv[9]) == "sync");
+    }
+    if (argc == 7 && std::string(argv[1]) == "range") {
+        return Range(argv[2], argv[3], std::strtoull(argv[4], nullptr, 10), std::strtoull(argv[5], nullptr, 10), std::atoi(argv[6]));
+    }
+    if (argc == 9 && std::string(argv[1]) == "pattern") {
+        return Pattern(argv[2], argv[3], std::strtoull(argv[4], nullptr, 10), std::strtoull(argv[5], nullptr, 10), std::atoi(argv[6]),
+                       argv[7], std::atoi(argv[8]));
+    }
+    if (argc == 8 && std::string(argv[1]) == "uq") {
+        return PointReads(argv[2], argv[3], std::strtoull(argv[4], nullptr, 10), std::strtoull(argv[5], nullptr, 10),
+                          std::atoi(argv[6]), std::atoi(argv[7]));
     }
     if (argc == 8 && std::string(argv[1]) == "scan") {
         return ScanLoop(argv[2], argv[3], std::strtoull(argv[4], nullptr, 10), std::strtoull(argv[5], nullptr, 10), std::atoi(argv[6]),
