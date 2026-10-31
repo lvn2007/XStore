@@ -201,6 +201,18 @@ bool ScanRangeFrame(const std::string &frame, Visit visit) {
 
 }  // namespace
 
+namespace {
+constexpr size_t TWO_CHUNK_ENTRY_BYTES = 10;   // an empty (hole) entry of a RangeQuery reply
+constexpr unsigned long long TWO_CHUNK_T0 = TS_2020_MID;
+}  // namespace
+
+// A database whose range [T0, T0 + last] makes a reply of just over one chunk (two frames): one real row at T0, hole entries between, and
+// real rows on both sides of the cut that closes frame 0 (`cut`) and at the end.
+struct TwoChunkRange {
+    unsigned long long cut;
+    unsigned long long last;
+};
+
 class XStoreZmqNetworkTest : public ::testing::Test {
  protected:
   static ScratchDir *scratch;
@@ -285,6 +297,32 @@ class XStoreZmqNetworkTest : public ::testing::Test {
           if (!frame.more()) return true;
       }
   }
+
+  // A DEALER client: sends the empty delimiter a REQ would, and receives a reply as MESSAGES of [delimiter][frames...] until the one with
+  // an empty delimiter. `request.streamok` is the caller's to set. Returns false if a message did not arrive in `timeout_ms`.
+  bool SendRequestStreaming(const XStore_Proto::Request &req, std::vector<std::vector<std::string>> &messages, int timeout_ms) {
+      zmq::socket_t sock(*client_ctx, zmq::socket_type::dealer);
+      sock.set(zmq::sockopt::rcvtimeo, timeout_ms);
+      sock.set(zmq::sockopt::linger, 0);
+      sock.connect(server_addr);
+      const std::string payload = req.SerializeAsString();
+      if (!sock.send(zmq::message_t(), zmq::send_flags::sndmore) || !sock.send(zmq::buffer(payload), zmq::send_flags::none)) return false;
+      messages.clear();
+      while (true) {
+          std::vector<std::string> message;
+          while (true) {
+              zmq::message_t frame;
+              if (!sock.recv(frame, zmq::recv_flags::none)) return false;
+              message.emplace_back(static_cast<const char *>(frame.data()), frame.size());
+              if (!frame.more()) break;
+          }
+          messages.push_back(std::move(message));
+          if (messages.back().front().empty()) return true;   // the reply's last message
+      }
+  }
+
+  TwoChunkRange CreateTwoChunkRangeDb(const std::string &db);
+  XStore_Proto::Request RangeRequest(const std::string &db, unsigned long long start, unsigned long long end);
 };
 
 ScratchDir *XStoreZmqNetworkTest::scratch = nullptr;
@@ -1017,14 +1055,13 @@ TEST_F(XStoreZmqNetworkTest, FindByPatternRoundTripOverNetwork) {
 // The server flushes a chunk right after the first entry that brings the buffer to >= the limit, so the cut index is
 // computable: rows are planted on both sides of it, and the test checks the frame split falls exactly there and that
 // timestamps run contiguously across it.
-TEST_F(XStoreZmqNetworkTest, RangeQueryReplyLargerThanOneChunkArrivesAsContiguousFrames) {
+TwoChunkRange XStoreZmqNetworkTest::CreateTwoChunkRangeDb(const std::string &db) {
     constexpr size_t CHUNK = XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES;
-    constexpr size_t HOLE_ENTRY_BYTES = 10;
-    constexpr unsigned long long T0 = TS_2020_MID;
+    constexpr unsigned long long T0 = TWO_CHUNK_T0;
 
     XStore_Proto::CreateDB_REQ create_req;
     create_req.set_rtype(XStore_Proto::CREATEDB);
-    create_req.set_dbname("ZMQ_BIGRANGE_DB");
+    create_req.set_dbname(db);
     create_req.set_timeresolution(XStore_Proto::SECOND);
     create_req.set_rowlength(16);
     SendRequest<XStore_Proto::CreateDB_REP>(Wrap(create_req));
@@ -1032,7 +1069,7 @@ TEST_F(XStoreZmqNetworkTest, RangeQueryReplyLargerThanOneChunkArrivesAsContiguou
     const auto insert_rows = [&](const std::vector<std::pair<unsigned long long, int64_t>> &rows) {
         XStore_Proto::BatchInsert_REQ insert_req;
         insert_req.set_rtype(XStore_Proto::BATCHINSERT);
-        insert_req.set_dbname("ZMQ_BIGRANGE_DB");
+        insert_req.set_dbname(db);
         insert_req.set_durabilitymode(XStore_Proto::SYNC);
         for (const auto &[ts, value] : rows) {
             XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
@@ -1042,25 +1079,36 @@ TEST_F(XStoreZmqNetworkTest, RangeQueryReplyLargerThanOneChunkArrivesAsContiguou
         auto insert_rep = SendRequest<XStore_Proto::BatchInsert_REP>(Wrap(insert_req));
         EXPECT_NE(insert_rep.insertstatus().find("Inserted"), std::string::npos) << insert_rep.insertstatus();
     };
-    const auto range_request = [&](unsigned long long start, unsigned long long end) {
-        XStore_Proto::RangeQuery_REQ query_req;
-        query_req.set_rtype(XStore_Proto::RANGEQUERY);
-        query_req.set_dbname("ZMQ_BIGRANGE_DB");
-        query_req.set_starttime(start);
-        query_req.set_endtime(end);
-        return Wrap(query_req);
-    };
 
-    // Entry 0 (a real row) is the only one whose size is not HOLE_ENTRY_BYTES: measure it with a one-entry query.
+    // Entry 0 (a real row) is the only one whose size is not TWO_CHUNK_ENTRY_BYTES: measure it with a one-entry query.
     insert_rows({{T0, 7}});
     std::vector<std::string> frames;
-    ASSERT_TRUE(SendRequestMultipart(range_request(T0, T0), frames, 10000));
-    ASSERT_EQ(frames.size(), 1u);
-    const size_t first_entry_bytes = frames[0].size();
+    EXPECT_TRUE(SendRequestMultipart(RangeRequest(db, T0, T0), frames, 10000));
+    EXPECT_EQ(frames.size(), 1u);
+    const size_t first_entry_bytes = frames.empty() ? 0 : frames[0].size();
     // Smallest j with first_entry_bytes + 10 * j >= CHUNK: the entry at offset j closes frame 0.
-    const unsigned long long cut = (CHUNK - first_entry_bytes + HOLE_ENTRY_BYTES - 1) / HOLE_ENTRY_BYTES;
+    const unsigned long long cut = (CHUNK - first_entry_bytes + TWO_CHUNK_ENTRY_BYTES - 1) / TWO_CHUNK_ENTRY_BYTES;
     const unsigned long long last = cut + 1000;
     insert_rows({{T0 + cut, 8}, {T0 + cut + 1, 9}, {T0 + last, 10}});
+    return {cut, last};
+}
+
+XStore_Proto::Request XStoreZmqNetworkTest::RangeRequest(const std::string &db, unsigned long long start, unsigned long long end) {
+    XStore_Proto::RangeQuery_REQ query_req;
+    query_req.set_rtype(XStore_Proto::RANGEQUERY);
+    query_req.set_dbname(db);
+    query_req.set_starttime(start);
+    query_req.set_endtime(end);
+    return Wrap(query_req);
+}
+
+TEST_F(XStoreZmqNetworkTest, RangeQueryReplyLargerThanOneChunkArrivesAsContiguousFrames) {
+    constexpr size_t CHUNK = XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES;
+    constexpr unsigned long long T0 = TWO_CHUNK_T0;
+    const TwoChunkRange range = CreateTwoChunkRangeDb("ZMQ_BIGRANGE_DB");
+    const unsigned long long cut = range.cut, last = range.last;
+    const auto range_request = [&](unsigned long long start, unsigned long long end) { return RangeRequest("ZMQ_BIGRANGE_DB", start, end); };
+    std::vector<std::string> frames;
 
     const auto started = std::chrono::steady_clock::now();
     ASSERT_TRUE(SendRequestMultipart(range_request(T0, T0 + last), frames, 60000)) << "a frame did not arrive in 60 s";
@@ -1090,6 +1138,56 @@ TEST_F(XStoreZmqNetworkTest, RangeQueryReplyLargerThanOneChunkArrivesAsContiguou
     EXPECT_EQ(entries[0], cut + 1) << "frame 0 must end exactly at the entry that reached the chunk limit";
     const std::map<unsigned long long, int64_t> expected_rows = {{T0, 7}, {T0 + cut, 8}, {T0 + cut + 1, 9}, {T0 + last, 10}};
     EXPECT_EQ(rows_seen, expected_rows) << "rows on both sides of the frame boundary (8 closes frame 0, 9 opens frame 1)";
+}
+
+// A request with streamOk set may get its reply as separate MESSAGES, one per chunk, each [delimiter][chunk] with a non-empty delimiter
+// except the last (empty, like a REQ socket's): a client can use a chunk while the next is still being produced. Same bytes as the
+// single multipart message every other request gets.
+TEST_F(XStoreZmqNetworkTest, ARangeQueryThatAllowsStreamingArrivesAsOneMessagePerChunk) {
+    constexpr unsigned long long T0 = TWO_CHUNK_T0;
+    constexpr size_t CHUNK = XStoreTunables::STREAMED_REPLY_CHUNK_SIZE_BYTES;
+    const TwoChunkRange range = CreateTwoChunkRangeDb("ZMQ_STREAM_DB");
+    XStore_Proto::Request request = RangeRequest("ZMQ_STREAM_DB", T0, T0 + range.last);
+
+    std::vector<std::string> legacy;
+    ASSERT_TRUE(SendRequestMultipart(request, legacy, 60000));
+    ASSERT_EQ(legacy.size(), 2u);
+    std::string legacy_bytes;
+    for (const std::string &frame : legacy) legacy_bytes += frame;
+
+    request.set_streamok(true);
+    std::vector<std::vector<std::string>> messages;
+    ASSERT_TRUE(SendRequestStreaming(request, messages, 60000));
+    ASSERT_GT(messages.size(), 2u) << "the reply is cut into chunks of about " << CHUNK << " bytes, not the 64 MiB of a multipart reply";
+
+    std::string streamed_bytes;
+    for (size_t i = 0; i < messages.size(); ++i) {
+        ASSERT_EQ(messages[i].size(), 2u) << "message " << i << ": [delimiter][one chunk]";
+        const bool last = i + 1 == messages.size();
+        EXPECT_EQ(messages[i][0].empty(), last) << "only the last message has the empty delimiter (message " << i << ")";
+        if (!last) EXPECT_GE(messages[i][1].size(), CHUNK) << "a chunk closes when it has reached the chunk size (message " << i << ")";
+        streamed_bytes += messages[i][1];
+    }
+    EXPECT_TRUE(streamed_bytes == legacy_bytes) << "the same bytes as the multipart reply, in the same order";
+}
+
+TEST_F(XStoreZmqNetworkTest, RepliesThatAreOneFrameAreUnchangedWhenStreamingIsAllowed) {
+    constexpr unsigned long long T0 = TWO_CHUNK_T0;
+    (void)CreateTwoChunkRangeDb("ZMQ_STREAM_ONE_DB");
+    XStore_Proto::Request ping;
+    ping.mutable_ping()->set_rtype(XStore_Proto::PING);
+    for (XStore_Proto::Request request : {RangeRequest("ZMQ_STREAM_ONE_DB", T0, T0 + 5), ping}) {
+        std::vector<std::string> legacy;
+        ASSERT_TRUE(SendRequestMultipart(request, legacy, 10000));
+        ASSERT_EQ(legacy.size(), 1u);
+        request.set_streamok(true);
+        std::vector<std::vector<std::string>> messages;
+        ASSERT_TRUE(SendRequestStreaming(request, messages, 10000));
+        ASSERT_EQ(messages.size(), 1u);
+        ASSERT_EQ(messages[0].size(), 2u);
+        EXPECT_TRUE(messages[0][0].empty());
+        EXPECT_TRUE(messages[0][1] == legacy[0]);
+    }
 }
 
 // ---------------------------------------------------------------------

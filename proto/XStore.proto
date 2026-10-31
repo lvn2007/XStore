@@ -467,6 +467,9 @@ message Request {
   // Field 50, not the more obvious 100: XStoreInsertUnifyTest's WireDeclinesAnExtraFieldAfterTheEnvelope already
   // uses a literal field-100 varint as its "the scan does not recognise this" fixture.
   uint32 timeoutMs = 50;
+  // The client can receive a reply of several chunks as separate messages (see ZMQ_Server.cpp ReplyWriter). Unset (every older client): the reply is
+  // one multipart message, as always.
+  bool streamOk = 51;
 }
 
 // ======== RESPONSE section ========

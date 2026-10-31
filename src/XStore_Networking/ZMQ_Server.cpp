@@ -3,6 +3,7 @@
 #include <google/protobuf/arena.h>
 #include <algorithm>
 #include <cerrno>
+#include <cstdlib>
 #include <chrono>
 #include <fstream>
 #include <memory>
@@ -46,6 +47,18 @@ int ReadPhysicalCoreCount() {
     return static_cast<int>(cores.size());
 }
 
+// The chunk size of a reply sent as separate messages (Request.streamOk), XStoreTunables::STREAMED_REPLY_CHUNK_SIZE_BYTES unless
+// XSTORE_STREAM_CHUNK_BYTES overrides it (read once).
+size_t StreamChunkBytes() {
+    static const size_t chunk_bytes = [] {
+        const char *env = std::getenv("XSTORE_STREAM_CHUNK_BYTES");
+        char *end = nullptr;
+        const unsigned long long value = env != nullptr ? std::strtoull(env, &end, 10) : 0;
+        return (env != nullptr && end != env && *end == '\0' && value > 0) ? static_cast<size_t>(value) : XStoreTunables::STREAMED_REPLY_CHUNK_SIZE_BYTES;
+    }();
+    return chunk_bytes;
+}
+
 }  // namespace
 
 int ZmqServer::PhysicalCoreCount() {
@@ -83,30 +96,26 @@ size_t ZmqServer::PreadPoolReserved(int workers, int physical_cores) {
 }
 
 namespace {
-// Every reply to one request leaves as ONE multipart message [client_id][empty]
-// [frame...] on the worker's DEALER socket: the broker counts the worker idle
-// again only after the reply's last frame, so a request must get exactly one
-// complete reply on every path, including after a handler threw mid-stream.
+// A reply to one request leaves as ONE multipart message [client_id][empty][frame...] on the worker's DEALER socket: the
+// broker counts the worker idle again only after the reply's last frame, so a request must get exactly one complete reply on
+// every path, including after a handler threw mid-stream.
+//
+// A client that set Request.streamOk (AllowStreaming) gets the reply as MESSAGES, one per frame: [client_id][delimiter][frame],
+// with a 1-byte delimiter on every message but the last (whose delimiter is empty, like a REQ socket's). ZeroMQ delivers a
+// multipart message whole, so as one message the client could see no frame before the last was sent; as separate messages it
+// can parse chunk k while chunk k+1 is still being read and sent. The broker keeps the worker busy until the empty delimiter.
+// A reply of a single frame is byte for byte the same either way.
 // dontwait: a connected inproc DEALER with HWM 0 never blocks on send.
 class ReplyWriter {
     public:
         ReplyWriter(zmq::socket_t &socket, zmq::message_t &client_id) : socket(socket), client_id(client_id) {}
 
+        void AllowStreaming(bool allow) { streaming = allow; }
+
         // A frame after the reply's last one is dropped: sent bare it would
         // reach the broker as a second reply and queue this worker twice.
-        void Send(zmq::message_t &frame, bool last) {
-            if (state == State::DONE) return;
-            Open();
-            socket.send(frame, Flags(last));
-            state = last ? State::DONE : State::OPEN;
-        }
-
-        void Send(zmq::const_buffer frame, bool last) {
-            if (state == State::DONE) return;
-            Open();
-            socket.send(frame, Flags(last));
-            state = last ? State::DONE : State::OPEN;
-        }
+        void Send(zmq::message_t &frame, bool last) { SendFrame(frame, last); }
+        void Send(zmq::const_buffer frame, bool last) { SendFrame(frame, last); }
 
         // Completes the reply with an empty last frame unless it is already
         // complete: a single empty frame if nothing was sent yet, or the
@@ -121,6 +130,19 @@ class ReplyWriter {
     private:
         enum class State { NONE, OPEN, DONE };
 
+        template <typename Frame>
+        void SendFrame(Frame &&frame, bool last) {
+            if (state == State::DONE) return;
+            if (streaming) {
+                BeginStreamedMessage(last);
+                socket.send(frame, zmq::send_flags::dontwait);
+            } else {
+                Open();
+                socket.send(frame, Flags(last));
+            }
+            state = last ? State::DONE : State::OPEN;
+        }
+
         static zmq::send_flags Flags(bool last) {
             return last ? zmq::send_flags::dontwait : (zmq::send_flags::dontwait | zmq::send_flags::sndmore);
         }
@@ -132,9 +154,24 @@ class ReplyWriter {
             state = State::OPEN;
         }
 
+        // [client_id][delimiter], the front of one streamed message; the caller sends its frame next. client_id is copied (a
+        // reference-counted handle, not the bytes): sending a message empties it and every message needs it.
+        void BeginStreamedMessage(bool last) {
+            zmq::message_t id;
+            id.copy(client_id);
+            socket.send(id, zmq::send_flags::dontwait | zmq::send_flags::sndmore);
+            if (last) {
+                socket.send(zmq::message_t(), zmq::send_flags::dontwait | zmq::send_flags::sndmore);
+            } else {
+                constexpr char MORE_FOLLOWS = '\x01';
+                socket.send(zmq::buffer(&MORE_FOLLOWS, 1), zmq::send_flags::dontwait | zmq::send_flags::sndmore);
+            }
+        }
+
         zmq::socket_t &socket;
         zmq::message_t &client_id;
         State state = State::NONE;
+        bool streaming = false;
 };
 
 // Shared by every case below: serialize a response proto and dispatch it to
@@ -427,6 +464,8 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
             writer.Finish();
             continue;
         }
+        writer.AllowStreaming(client_request->streamok());
+        const size_t chunk_bytes = client_request->streamok() ? StreamChunkBytes() : XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES;
 
         // Safety net around the whole dispatch switch. Any handler below
         // that throws would otherwise unwind straight out of this worker
@@ -548,7 +587,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                     auto *req = client_request->mutable_batchquery();
                     const uint32_t timeout_ms = client_request->timeoutms();
                     const auto deadline = timeout_ms > 0 ? pickup + std::chrono::milliseconds(timeout_ms) : xstore::MemoryPool::Clock::time_point::max();
-                    my_store.BatchQuery(req, /*sort_time=*/true, XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                    my_store.BatchQuery(req, /*sort_time=*/true, chunk_bytes,
                         [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); }, deadline);
                     break;
                 }
@@ -595,7 +634,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                     const uint32_t timeout_ms = client_request->timeoutms();
                     const auto deadline = timeout_ms > 0 ? pickup + std::chrono::milliseconds(timeout_ms) : xstore::MemoryPool::Clock::time_point::max();
                     my_store.RangeQuery(req.starttime(), req.endtime(), req.dbname(),
-                        XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                        chunk_bytes,
                         [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); }, deadline);
                     break;
                 }
@@ -604,7 +643,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                 case XStore_Proto::Request::kFindbyvalue: {
                     const auto &req = client_request->findbyvalue();
                     my_store.FindByValue(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), req.value(),
-                        XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                        chunk_bytes,
                         [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); });
                     break;
                 }
@@ -615,7 +654,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                     const auto &req = client_request->findbypattern();
                     my_store.FindByPattern(req.starttime(), req.endtime(), req.dbname(), req.columnidx(),
                         req.pattern(), req.mode(), req.caseinsensitive(),
-                        XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                        chunk_bytes,
                         [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); });
                     break;
                 }

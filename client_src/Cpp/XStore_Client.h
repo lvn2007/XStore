@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
+#include <deque>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -223,6 +224,176 @@ void RunJobs(size_t jobs, ParallelismPolicy policy, Fn &&fn) {
     team.Run();
 }
 
+// JobStream: the same load-aware team for jobs that arrive one at a time from ONE producer thread (a reply being received, say) while
+// earlier ones are already being worked on.
+//
+//   Submit(job)   hands a job to the team; never blocks. Jobs are taken in submission order.
+//   Finish()      no more jobs: the calling thread joins the team for what is left and returns when every job is done. Rethrows the first
+//                 exception a job threw (after which jobs were no longer taken).
+//
+// The producer is usually busy (blocked in a recv), so the team is helpers only until Finish(): a fixed policy of N means N - 1 helpers
+// plus the caller at the end; an adaptive team starts with one helper and doubles while there is a backlog and the machine has room, and
+// retreats when it does not (the controller works exactly as in RunJobs, with the queue length as "jobs left"). A JobStream dropped
+// without Finish() (the producer failed) stops its helpers and discards the queued jobs.
+template <class Job, class Fn>
+class JobStream {
+ public:
+    JobStream(const ParallelismPolicy &policy, Fn &fn) : policy_(policy), fn_(fn) {
+        size_t fixed = policy_.fixed_threads;
+        if (fixed == 0 && !(policy_.runnable && policy_.runnable())) fixed = std::max<size_t>(1, policy_.cores / 2);   // load unreadable
+        adaptive_ = fixed == 0;
+        cap_ = std::max<size_t>(1, adaptive_ ? policy_.max_threads : fixed);
+        helpers_ = std::vector<std::thread>(cap_);
+        alive_ = std::vector<std::atomic<bool>>(cap_);
+        target_.store(cap_ > 1 ? (adaptive_ ? 2 : cap_) : 1);
+        Grow();
+        if (adaptive_ && cap_ > 1) {
+            try {
+                controller_ = std::thread([this] { Control(); });
+            } catch (const std::system_error &) {   // no controller: the helper it started and the caller
+            }
+        }
+    }
+
+    JobStream(const JobStream &) = delete;
+    JobStream &operator=(const JobStream &) = delete;
+
+    ~JobStream() {
+        if (shut_down_) return;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_ = true;
+        }
+        wake_.notify_all();
+        Shutdown();
+    }
+
+    void Submit(Job job) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stop_) return;
+            queue_.push_back(std::move(job));
+        }
+        wake_.notify_one();
+    }
+
+    void Finish() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            closed_ = true;
+        }
+        wake_.notify_all();
+        Work(0);
+        Shutdown();
+        if (error_) std::rethrow_exception(error_);
+    }
+
+ private:
+    // Slot 0 is the calling thread (only in Finish) and never leaves. A helper works only while its slot is below the target.
+    void Work(size_t slot) {
+        while (true) {
+            Job job;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                wake_.wait(lock, [&] { return stop_ || closed_ || !queue_.empty() || (slot != 0 && slot >= target_.load()); });
+                if (stop_ || (slot != 0 && slot >= target_.load())) return;
+                if (queue_.empty()) {
+                    if (closed_) return;
+                    continue;
+                }
+                job = std::move(queue_.front());
+                queue_.pop_front();
+            }
+            try {
+                fn_(job);
+            } catch (...) {
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (!error_) error_ = std::current_exception();
+                    stop_ = true;
+                }
+                wake_.notify_all();
+                return;
+            }
+        }
+    }
+
+    // Starts (or restarts, after a retreat) the helper of every slot below the target. Called by the constructor, then only by the controller.
+    void Grow() {
+        for (size_t slot = 1; slot < target_.load(); ++slot) {
+            if (alive_[slot].load()) continue;
+            if (helpers_[slot].joinable()) helpers_[slot].join();   // exited earlier
+            alive_[slot].store(true);
+            try {
+                helpers_[slot] = std::thread([this, slot] {
+                    Work(slot);
+                    alive_[slot].store(false);
+                });
+            } catch (const std::system_error &) {   // cannot start more threads: keep what runs
+                alive_[slot].store(false);
+                target_.store(slot);
+                return;
+            }
+        }
+    }
+
+    void Tick() {
+        const std::optional<size_t> runnable = policy_.runnable();
+        if (!runnable) return;
+        size_t pending = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            pending = queue_.size();
+        }
+        const size_t target = target_.load();
+        const size_t wanted = NextWorkerTarget(target, *runnable, policy_.cores, policy_.headroom, cap_, pending);
+        if (wanted == target) return;
+        target_.store(wanted);
+        if (wanted > target) Grow();
+        else wake_.notify_all();   // helpers above the new target see it and leave
+    }
+
+    void Control() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        while (!control_.wait_for(lock, policy_.tick, [this] { return finished_; })) {
+            lock.unlock();
+            Tick();
+            lock.lock();
+        }
+    }
+
+    void Shutdown() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            finished_ = true;
+        }
+        control_.notify_all();
+        if (controller_.joinable()) controller_.join();
+        for (std::thread &helper : helpers_) {
+            if (helper.joinable()) helper.join();
+        }
+        shut_down_ = true;
+    }
+
+    const ParallelismPolicy policy_;
+    Fn &fn_;
+    bool adaptive_ = false;
+    size_t cap_ = 1;                            // team size, the calling thread included
+    std::vector<std::thread> helpers_;          // by slot; slot 0 is unused
+    std::vector<std::atomic<bool>> alive_;
+    std::thread controller_;
+    std::atomic<size_t> target_{1};
+    std::mutex mutex_;
+    std::condition_variable wake_;              // work arrived, the stream closed or stopped, the target dropped
+    std::condition_variable control_;           // the controller's tick
+    std::deque<Job> queue_;
+    bool closed_ = false;
+    bool stop_ = false;
+    bool finished_ = false;
+    bool shut_down_ = false;
+    std::exception_ptr error_;
+};
+
 // ======================================================================================================================================
 // Part 2 of 3: parallel parse of a query reply (RangeQuery, BatchQuery, FindByValue, FindByPattern); uses part 1.
 //
@@ -341,6 +512,24 @@ template <class RepT>
 struct IsFragmentMergeable<RepT, std::void_t<decltype(std::declval<RepT &>().mutable_queryresponse()),
                                               decltype(std::declval<const RepT &>().has_querystatus())>> : std::true_type {};
 
+// Appends the rows of `parts` to `out` in order, moving the row objects (not copying them), and takes the last queryStatus. `out` and
+// every part must be on the same arena (or all on the heap): a row moved between two different owners would be freed twice.
+template <class RepT>
+void MergeParts(RepT &out, const std::vector<RepT *> &parts) {
+    using Row = typename std::remove_reference_t<decltype(*out.mutable_queryresponse())>::value_type;
+    int total_rows = out.queryresponse_size();
+    for (const RepT *part : parts) total_rows += part->queryresponse_size();
+    out.mutable_queryresponse()->Reserve(total_rows);
+    std::vector<Row *> moved;
+    for (RepT *part : parts) {
+        const int rows = part->queryresponse_size();
+        moved.resize(static_cast<size_t>(rows));
+        part->mutable_queryresponse()->UnsafeArenaExtractSubrange(0, rows, moved.data());   // same arena on both sides: no copy
+        for (Row *row : moved) out.mutable_queryresponse()->UnsafeArenaAddAllocated(row);
+        if (part->has_querystatus()) out.set_querystatus(*part->mutable_querystatus());
+    }
+}
+
 // Parses the fragments piece by piece on a team the policy sizes and appends the rows to `out` in order (moving the row objects, not
 // copying them), taking the last queryStatus. Returns false, with `out` untouched, when the reply is not worth splitting (fewer than two
 // pieces), not well framed, or a piece does not parse.
@@ -377,18 +566,7 @@ template <class RepT>
     }
     if (failed.load()) return false;
 
-    using Row = typename std::remove_reference_t<decltype(*out.mutable_queryresponse())>::value_type;
-    int total_rows = out.queryresponse_size();
-    for (const RepT *part : parts) total_rows += part->queryresponse_size();
-    out.mutable_queryresponse()->Reserve(total_rows);
-    std::vector<Row *> moved;
-    for (RepT *part : parts) {
-        const int rows = part->queryresponse_size();
-        moved.resize(static_cast<size_t>(rows));
-        part->mutable_queryresponse()->UnsafeArenaExtractSubrange(0, rows, moved.data());   // same arena on both sides: no copy
-        for (Row *row : moved) out.mutable_queryresponse()->UnsafeArenaAddAllocated(row);
-        if (part->has_querystatus()) out.set_querystatus(*part->mutable_querystatus());
-    }
+    MergeParts(out, parts);
     return true;
 }
 
@@ -419,6 +597,87 @@ class ArenaReply {
  private:
     std::unique_ptr<google::protobuf::Arena> arena_;
     RepT *rep_ = nullptr;
+};
+
+// The same parse for a reply that is still arriving: Add() takes the frames in order as they are received, cuts each into pieces and hands
+// them to a team (JobStream) that parses while the next frames are on the wire; Finish() joins the team and merges the rows into `out`.
+// Finish() returns false, with `out` untouched, when any frame is not well framed or a piece does not parse (or memory ran out): the caller
+// then parses the frames it kept serially. The frames' bytes must stay valid until Finish() returns.
+template <class RepT>
+class ReplyStreamParser {
+ public:
+    static_assert(IsFragmentMergeable<RepT>::value, "RepT needs repeated queryResponse and optional queryStatus");
+
+    // `arena`: the arena `out` was created on (nullptr when it lives on the heap); the pieces are created on it too.
+    ReplyStreamParser(RepT &out, google::protobuf::Arena *arena, const ParallelismPolicy &policy)
+        : out_(out), arena_(arena), parse_([this](Piece &piece) { Parse(piece); }), stream_(policy, parse_) {}
+
+    ReplyStreamParser(const ReplyStreamParser &) = delete;
+    ReplyStreamParser &operator=(const ReplyStreamParser &) = delete;
+
+    void Add(Fragment fragment) {
+        if (bad_) return;   // already going to be parsed serially: no point in more work
+        try {
+            std::vector<Fragment> cut;
+            if (!detail::SplitFragment(fragment, PARSE_PIECE_BYTES, cut)) {
+                bad_ = true;
+                return;
+            }
+            for (const Fragment &piece : cut) {
+                if (piece.size > static_cast<size_t>(INT_MAX)) {
+                    bad_ = true;
+                    return;
+                }
+                RepT *part = nullptr;
+                if (arena_ != nullptr) {
+                    part = google::protobuf::Arena::Create<RepT>(arena_);
+                } else {
+                    heap_parts_.push_back(std::make_unique<RepT>());
+                    part = heap_parts_.back().get();
+                }
+                parts_.push_back(part);
+                stream_.Submit(Piece{piece, part});
+            }
+        } catch (...) {   // out of memory: the serial parse will do
+            bad_ = true;
+        }
+    }
+
+    [[nodiscard]] bool Finish() {
+        try {
+            stream_.Finish();
+            if (bad_ || failed_.load()) return false;
+            MergeParts(out_, parts_);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    // Pieces parsed so far (for tests: parsing must not wait for Finish()).
+    [[nodiscard]] size_t PiecesParsed() const { return parsed_.load(); }
+
+ private:
+    struct Piece {
+        Fragment fragment;
+        RepT *part;
+    };
+
+    void Parse(Piece &piece) {
+        if (failed_.load(std::memory_order_relaxed)) return;
+        if (!piece.part->ParseFromArray(piece.fragment.data, static_cast<int>(piece.fragment.size))) failed_.store(true);
+        parsed_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    RepT &out_;
+    google::protobuf::Arena *arena_;
+    std::vector<std::unique_ptr<RepT>> heap_parts_;   // used when there is no arena; an arena owns its pieces
+    std::vector<RepT *> parts_;                        // in order, for the merge
+    bool bad_ = false;
+    std::atomic<bool> failed_{false};
+    std::atomic<size_t> parsed_{0};
+    std::function<void(Piece &)> parse_;
+    JobStream<Piece, std::function<void(Piece &)>> stream_;   // last: its helpers start working at once and use everything above
 };
 
 }  // namespace xstore_client
@@ -548,12 +807,36 @@ class XStoreClient {
   // Threads used to parse a big reply of rows; 0 = adaptive. See SetParseThreads.
   size_t parse_threads_ = 0;
 
-  // Every RPC is: serialize request, blocking send, blocking recv, parse
-  // reply. Sharing that here means the 17 request types can't drift out of
-  // sync with each other the way copy-pasted send/recv blocks do. ToServer
-  // is always the Request envelope -- the oneof case tells the server which
-  // payload it's holding, so it only has to parse the wire bytes once.
-  // Sends the request and leaves the reply's frames in recv_buf.
+  // What a stream socket needs to be (re)created, and the socket itself: a DEALER used by the calls that return rows, made on the first such
+  // call. A REQ socket delivers one multipart reply, whole, so it cannot show a chunk before the last is in; a DEALER receives a reply sent
+  // as separate messages (Request.streamOk) one at a time. It is lockstep by convention only, so any call that fails between its send and
+  // the last message of its reply drops the socket (a late message must never be taken for the next call's reply).
+  std::string endpoint_;
+  std::optional<XStoreCurveClientAuth> curve_auth_;
+  std::optional<zmq::socket_t> stream_sock_;
+  std::deque<zmq::message_t> stream_buf_;   // the frames of the reply being received; a deque never moves its elements
+  bool stream_replies_ = true;
+
+  using FragmentList = std::vector<xstore_client::Fragment>;
+
+  static size_t BytesOf(const FragmentList &fragments) {
+      size_t total = 0;
+      for (const auto &fragment : fragments) total += fragment.size;
+      return total;
+  }
+
+  static void ApplySocketOptions(zmq::socket_t &socket, int timeout_ms, const std::optional<XStoreCurveClientAuth> &curve_auth) {
+      socket.set(zmq::sockopt::rcvtimeo, timeout_ms);
+      socket.set(zmq::sockopt::sndtimeo, timeout_ms);
+      socket.set(zmq::sockopt::linger, 0);
+      if (curve_auth) {
+          socket.set(zmq::sockopt::curve_serverkey, curve_auth->server_public_key_z85);
+          socket.set(zmq::sockopt::curve_publickey, curve_auth->client_public_key_z85);
+          socket.set(zmq::sockopt::curve_secretkey, curve_auth->client_secret_key_z85);
+      }
+  }
+
+  // Sends the request on the REQ socket and leaves the reply's frames in recv_buf.
   void Exchange(XStore_Proto::Request &to_server) {
       if (timeout_ms_ >= 0) to_server.set_timeoutms(static_cast<uint32_t>(timeout_ms_));
       size_t byte_size = to_server.ByteSizeLong();
@@ -569,25 +852,24 @@ class XStoreClient {
       }
   }
 
-  size_t ReplyBytes() const {
-      size_t total = 0;
-      for (const auto &part : recv_buf) total += part.size();
-      return total;
+  FragmentList FragmentsOfRecvBuf() const {
+      FragmentList fragments;
+      fragments.reserve(recv_buf.size());
+      for (const auto &part : recv_buf) fragments.push_back({part.data(), part.size()});
+      return fragments;
   }
 
   // A big reply of rows (RangeQuery, BatchQuery, FindByValue, FindByPattern) is cut at row boundaries and parsed on a team of threads
   // that sizes itself to the machine's load (part 2 above) -- the single ParseFromArray was most of a big RangeQuery's time.
   // Returns false (`into` untouched) for every other reply and for any reply that cannot be handled that way.
   template <typename RepT>
-  bool TryParseInParallel(RepT &into, google::protobuf::Arena *arena) {
+  bool TryParseInParallel(const FragmentList &fragments, RepT &into, google::protobuf::Arena *arena) {
       if constexpr (xstore_client::IsFragmentMergeable<RepT>::value) {
-          if (ReplyBytes() < xstore_client::MIN_PARALLEL_PARSE_BYTES) return false;
-          std::vector<xstore_client::Fragment> fragments;
-          fragments.reserve(recv_buf.size());
-          for (const auto &part : recv_buf) fragments.push_back({part.data(), part.size()});
+          if (BytesOf(fragments) < xstore_client::MIN_PARALLEL_PARSE_BYTES) return false;
           return xstore_client::ParseFragmentsParallel(fragments, into, xstore_client::ParsePolicy(parse_threads_),
                                                         xstore_client::PARSE_PIECE_BYTES, arena);
       } else {
+          (void)fragments;
           (void)into;
           (void)arena;
           return false;
@@ -598,14 +880,14 @@ class XStoreClient {
   // (protobuf doesn't care where a message's serialized bytes get split, only that they're concatenated back in order before
   // parsing) -- reassembled here so this stays invisible to every caller above SendRecv.
   template <typename RepT>
-  void ParseSerially(RepT &into) {
-      if (recv_buf.size() == 1) {
-          into.ParseFromArray(recv_buf.front().data(), recv_buf.front().size());
-      } else {
+  static void ParseSerially(const FragmentList &fragments, RepT &into) {
+      if (fragments.size() == 1) {
+          into.ParseFromArray(fragments.front().data, static_cast<int>(fragments.front().size));
+      } else if (!fragments.empty()) {
           std::string joined;
-          joined.reserve(ReplyBytes());
-          for (const auto &part : recv_buf) joined.append(static_cast<const char *>(part.data()), part.size());
-          into.ParseFromArray(joined.data(), joined.size());
+          joined.reserve(BytesOf(fragments));
+          for (const auto &fragment : fragments) joined.append(static_cast<const char *>(fragment.data), fragment.size);
+          into.ParseFromArray(joined.data(), static_cast<int>(joined.size()));
       }
   }
 
@@ -617,25 +899,102 @@ class XStoreClient {
   template <typename RepT>
   RepT SendRecv(XStore_Proto::Request &to_server) {
       Exchange(to_server);
+      const FragmentList fragments = FragmentsOfRecvBuf();
       RepT from_server;
-      if (!TryParseInParallel(from_server, nullptr)) ParseSerially(from_server);
+      if (!TryParseInParallel(fragments, from_server, nullptr)) ParseSerially(fragments, from_server);
       return from_server;
   }
 
-  // The same for the calls that return rows: the reply is parsed onto one arena that the returned ArenaReply owns (see there for why).
-  // A big reply gets 1-8 MiB blocks (a few allocations for the whole reply); a small one keeps the default small blocks.
+  // A reply that is complete in `fragments`, parsed onto a new arena. A big reply gets 1-8 MiB blocks (a few allocations for the whole
+  // reply); a small one keeps the default small blocks.
   template <typename RepT>
-  xstore_client::ArenaReply<RepT> SendRecvOnArena(XStore_Proto::Request &to_server) {
-      Exchange(to_server);
+  xstore_client::ArenaReply<RepT> ParseOnArena(const FragmentList &fragments) {
       google::protobuf::ArenaOptions options;
-      if (ReplyBytes() >= xstore_client::MIN_PARALLEL_PARSE_BYTES) {
+      if (BytesOf(fragments) >= xstore_client::MIN_PARALLEL_PARSE_BYTES) {
           options.start_block_size = size_t{1} << 20;
           options.max_block_size = size_t{8} << 20;
       }
       auto arena = std::make_unique<google::protobuf::Arena>(options);
       RepT *from_server = google::protobuf::Arena::Create<RepT>(arena.get());
-      if (!TryParseInParallel(*from_server, arena.get())) ParseSerially(*from_server);
+      if (!TryParseInParallel(fragments, *from_server, arena.get())) ParseSerially(fragments, *from_server);
       return xstore_client::ArenaReply<RepT>(std::move(arena), from_server);
+  }
+
+  zmq::socket_t &StreamSocket() {
+      if (!stream_sock_) {
+          stream_sock_.emplace(ctx, zmq::socket_type::dealer);
+          ApplySocketOptions(*stream_sock_, timeout_ms_, curve_auth_);
+          stream_sock_->connect(endpoint_);
+      }
+      return *stream_sock_;
+  }
+
+  // One message of a reply: [delimiter][frame...]. Appends the frames to stream_buf_ and `fragments`; true when this was the reply's last
+  // message (empty delimiter, like a REQ socket's -- which is also what a server that does not stream sends, the whole reply in one message).
+  bool RecvStreamMessage(zmq::socket_t &socket, FragmentList &fragments) {
+      zmq::message_t delimiter;
+      if (!socket.recv(delimiter, zmq::recv_flags::none)) throw std::runtime_error("XStore_Client: recv failed/timed out");
+      for (bool more = delimiter.more(); more;) {
+          stream_buf_.emplace_back();
+          if (!socket.recv(stream_buf_.back(), zmq::recv_flags::none)) throw std::runtime_error("XStore_Client: recv failed/timed out");
+          more = stream_buf_.back().more();
+          fragments.push_back({stream_buf_.back().data(), stream_buf_.back().size()});
+      }
+      return delimiter.size() == 0;
+  }
+
+  // The calls that return rows. The request asks the server to send a reply of several chunks as separate messages, and each chunk is cut
+  // into pieces and handed to the parse team as soon as it is received, so the parse overlaps the rest of the transfer (and of the server's
+  // scan). A server that does not stream (older, or a small reply) answers with one message and this is the same as SendRecv.
+  template <typename RepT>
+  xstore_client::ArenaReply<RepT> SendRecvStreamed(XStore_Proto::Request &to_server) {
+      to_server.set_streamok(true);
+      if (timeout_ms_ >= 0) to_server.set_timeoutms(static_cast<uint32_t>(timeout_ms_));
+      try {
+          zmq::socket_t &socket = StreamSocket();
+          zmq::message_t z_out(to_server.ByteSizeLong());
+          to_server.SerializeToArray(z_out.data(), z_out.size());
+          if (!socket.send(zmq::message_t(), zmq::send_flags::sndmore) || !socket.send(z_out, zmq::send_flags::none)) {
+              throw std::runtime_error("XStore_Client: send failed/timed out");
+          }
+
+          stream_buf_.clear();
+          FragmentList fragments;
+          bool last = RecvStreamMessage(socket, fragments);
+          if (last) {
+              auto reply = ParseOnArena<RepT>(fragments);
+              stream_buf_.clear();
+              return reply;
+          }
+          // More than one message: the first is a chunk of 64 MiB or so, so the arena gets big blocks at once.
+          google::protobuf::ArenaOptions options;
+          options.start_block_size = size_t{1} << 20;
+          options.max_block_size = size_t{8} << 20;
+          auto arena = std::make_unique<google::protobuf::Arena>(options);
+          RepT *from_server = google::protobuf::Arena::Create<RepT>(arena.get());
+          xstore_client::ReplyStreamParser<RepT> parser(*from_server, arena.get(), xstore_client::ParsePolicy(parse_threads_));
+          size_t fed = 0;
+          while (true) {
+              for (; fed < fragments.size(); ++fed) parser.Add(fragments[fed]);
+              if (last) break;
+              last = RecvStreamMessage(socket, fragments);
+          }
+          if (!parser.Finish()) ParseSerially(fragments, *from_server);
+          stream_buf_.clear();
+          return xstore_client::ArenaReply<RepT>(std::move(arena), from_server);
+      } catch (...) {
+          stream_sock_.reset();   // whatever is still on its way belongs to this call, not to the next
+          stream_buf_.clear();
+          throw;
+      }
+  }
+
+  // The same calls with streaming switched off (SetStreamReplies(false)): the REQ socket, one multipart reply received whole.
+  template <typename RepT>
+  xstore_client::ArenaReply<RepT> SendRecvOnArena(XStore_Proto::Request &to_server) {
+      if (stream_replies_) return SendRecvStreamed<RepT>(to_server);
+      Exchange(to_server);
+      return ParseOnArena<RepT>(FragmentsOfRecvBuf());
   }
 
  public:
@@ -645,6 +1004,10 @@ class XStoreClient {
   // same for every client of a process); 1 parses on the calling thread only.
   void SetParseThreads(size_t threads) { parse_threads_ = threads; }
 
+  // true (the default): a reply of rows made of several chunks is parsed while it is still arriving (the server is asked to send each
+  // chunk as its own message). false: the whole reply is received first, as before -- the same data, only slower for big replies.
+  void SetStreamReplies(bool stream) { stream_replies_ = stream; }
+
   // timeoutMs < 0 (default) blocks forever, matching the previous behavior.
   // Pass a positive value so an unreachable/dead server raises instead of
   // hanging this REQ socket indefinitely. warmupOnInit lets callers who
@@ -653,16 +1016,10 @@ class XStoreClient {
   XStoreClient(std::string_view server_addr, std::string_view server_port, int timeout_ms = -1,
                bool warmup_on_init = true, std::optional<XStoreCurveClientAuth> curve_auth = std::nullopt) {
       timeout_ms_ = timeout_ms;
-      sock.set(zmq::sockopt::rcvtimeo, timeout_ms);
-      sock.set(zmq::sockopt::sndtimeo, timeout_ms);
-      sock.set(zmq::sockopt::linger, 0);
-      if (curve_auth) {
-          sock.set(zmq::sockopt::curve_serverkey, curve_auth->server_public_key_z85);
-          sock.set(zmq::sockopt::curve_publickey, curve_auth->client_public_key_z85);
-          sock.set(zmq::sockopt::curve_secretkey, curve_auth->client_secret_key_z85);
-      }
-      std::string full_addr = fmt::format("tcp://{}:{}", server_addr, server_port);
-      sock.connect(full_addr);
+      curve_auth_ = curve_auth;
+      ApplySocketOptions(sock, timeout_ms, curve_auth_);
+      endpoint_ = fmt::format("tcp://{}:{}", server_addr, server_port);
+      sock.connect(endpoint_);
       if (warmup_on_init) {
           Warmup();
       }
@@ -686,17 +1043,12 @@ class XStoreClient {
   void Reconnect(std::string_view server_addr, std::string_view server_port, int timeout_ms = -1,
                  bool warmup_on_init = true, std::optional<XStoreCurveClientAuth> curve_auth = std::nullopt) {
       timeout_ms_ = timeout_ms;
+      curve_auth_ = curve_auth;
       sock = zmq::socket_t(ctx, zmq::socket_type::req);
-      sock.set(zmq::sockopt::rcvtimeo, timeout_ms);
-      sock.set(zmq::sockopt::sndtimeo, timeout_ms);
-      sock.set(zmq::sockopt::linger, 0);
-      if (curve_auth) {
-          sock.set(zmq::sockopt::curve_serverkey, curve_auth->server_public_key_z85);
-          sock.set(zmq::sockopt::curve_publickey, curve_auth->client_public_key_z85);
-          sock.set(zmq::sockopt::curve_secretkey, curve_auth->client_secret_key_z85);
-      }
-      std::string full_addr = fmt::format("tcp://{}:{}", server_addr, server_port);
-      sock.connect(full_addr);
+      stream_sock_.reset();
+      ApplySocketOptions(sock, timeout_ms, curve_auth_);
+      endpoint_ = fmt::format("tcp://{}:{}", server_addr, server_port);
+      sock.connect(endpoint_);
       if (warmup_on_init) {
           Warmup();
       }

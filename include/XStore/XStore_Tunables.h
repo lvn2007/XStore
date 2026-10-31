@@ -624,6 +624,22 @@ inline constexpr uint64_t CATIDX_BITMAP_BUILD_LEASE_STEP_BYTES = 64u * 1024u * 1
 // RSS for comparison -- see the RangeQuery OOM handoff doc's history.
 inline constexpr size_t      STREAMED_QUERY_CHUNK_SIZE_BYTES = 64ull * 1024 * 1024;
 
+// Chunk size of a row reply sent as separate messages (Request.streamOk, ZMQ_Server.cpp ReplyWriter): the client cuts each chunk into pieces
+// and parses it as soon as it arrives, so the first chunk's size is how long the client waits to start and the number of chunks is the
+// per-message overhead. Measured on Mystic (client node 32 threads, RangeQuery of 1420-byte rows, steady calls, total call time including
+// freeing the reply; multipart = the whole reply received first; each cell the median of 4 calls over 2 runs):
+//   reply        multipart   256 KiB    512 KiB    1 MiB     2 MiB     4 MiB     64 MiB
+//   1.4 MB          20.4 ms   13.1 ms    16.4 ms   16.5 ms   21.3 ms   23.0 ms   18.5 ms
+//   4.3 MB          50.2      25.7       25.9      32.4      36.2      68.0      49.7
+//   28 MB          169.6      60.0       62.6      92.8     126.3     134.6     174.3
+//   142 MB          586       235        283       313       280       371       431
+//   284 MB        1,040       446        509       527       494       560       667
+//   1.42 GB       5,110     2,589      2,357     2,195     2,220     2,256     2,435
+// 256 KiB wins up to ~300 MB and loses ~15% on the largest reply (thousands of tiny pieces); 1-2 MiB is best for the largest and gives up
+// a half to a quarter of the gain on small ones; 512 KiB keeps at least 1.24x everywhere and about 2x from 4 MB up. Hardware-dependent:
+// XSTORE_STREAM_CHUNK_BYTES overrides it for a re-measurement.
+inline constexpr size_t      STREAMED_REPLY_CHUNK_SIZE_BYTES = 512ull * 1024;
+
 // SysStatsCollector (XStore_SysStats.*): how often the background host-metrics
 // thread samples /proc + statvfs and re-publishes on its dedicated PUB
 // socket. 2s matches the desktop viewer's poll/render cadence -- a shorter

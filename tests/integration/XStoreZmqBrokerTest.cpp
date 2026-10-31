@@ -51,8 +51,14 @@ struct FakeWorker {
     }
 
     void Reply(const std::vector<std::string> &request, const std::vector<std::string> &frames) {
+        ReplyWithDelimiter(request, "", frames);
+    }
+
+    // One message of a reply: [client_id][delimiter][frames...]. An empty delimiter is a reply's last message, a non-empty one means more
+    // messages of the same reply follow (a streamed reply).
+    void ReplyWithDelimiter(const std::vector<std::string> &request, const std::string &delimiter, const std::vector<std::string> &frames) {
         socket.send(zmq::buffer(request[0]), zmq::send_flags::sndmore);
-        socket.send(zmq::message_t(), zmq::send_flags::sndmore);
+        socket.send(zmq::buffer(delimiter), zmq::send_flags::sndmore);
         for (size_t i = 0; i < frames.size(); ++i) {
             socket.send(zmq::buffer(frames[i]),
                         i + 1 < frames.size() ? zmq::send_flags::sndmore : zmq::send_flags::none);
@@ -105,6 +111,21 @@ class XStoreZmqBrokerTest : public ::testing::TestWithParam<std::chrono::microse
         client->connect("inproc://broker-test-frontend");
         clients.push_back(std::move(client));
         return *clients.back();
+    }
+
+    // A DEALER client: what a streaming client is. It sends the empty delimiter a REQ would, and receives [delimiter][frames...] messages.
+    zmq::socket_t &AddDealerClient() {
+        auto client = std::make_unique<zmq::socket_t>(ctx, zmq::socket_type::dealer);
+        client->set(zmq::sockopt::linger, 0);
+        client->set(zmq::sockopt::rcvtimeo, RECV_TIMEOUT_MS);
+        client->connect("inproc://broker-test-frontend");
+        clients.push_back(std::move(client));
+        return *clients.back();
+    }
+
+    static void SendAsDealer(zmq::socket_t &client, const std::string &body) {
+        client.send(zmq::message_t(), zmq::send_flags::sndmore);
+        client.send(zmq::buffer(body), zmq::send_flags::none);
     }
 
     // Index of the worker that received the next request, with the request in `request` (-1 on timeout).
@@ -274,6 +295,70 @@ TEST_P(XStoreZmqBrokerTest, MultiFrameReplyIsRelayedIntactAndInOrder) {
     const auto again = worker.Take();
     ASSERT_EQ(again.size(), 3u);
     EXPECT_EQ(again.back(), "again");
+}
+
+TEST_P(XStoreZmqBrokerTest, AStreamedReplyKeepsItsWorkerBusyUntilTheMessageWithAnEmptyDelimiter) {
+    const std::string more(1, '\x01');
+    const std::string big(100000, 'x');
+    FakeWorker &worker = AddWorker("wA");
+    zmq::socket_t &first = AddDealerClient();
+    SendAsDealer(first, "stream");
+    const auto request = worker.Take();
+    ASSERT_EQ(request.size(), 3u);
+
+    worker.ReplyWithDelimiter(request, more, {"chunk-0"});
+    EXPECT_EQ(RecvFrames(first), (std::vector<std::string>{more, "chunk-0"}));
+
+    // Another client's request waits: the worker is still producing the first one's reply.
+    zmq::socket_t &second = AddDealerClient();
+    SendAsDealer(second, "other");
+    EXPECT_TRUE(worker.Take(NEGATIVE_CHECK_MS).empty());
+
+    worker.ReplyWithDelimiter(request, more, {big});
+    EXPECT_EQ(RecvFrames(first), (std::vector<std::string>{more, big}));
+    EXPECT_TRUE(worker.Take(NEGATIVE_CHECK_MS).empty());
+
+    worker.ReplyWithDelimiter(request, "", {"chunk-last"});   // the final message
+    EXPECT_EQ(RecvFrames(first), (std::vector<std::string>{"", "chunk-last"}));
+    const auto next = worker.Take();                           // idle again: the waiting request arrives
+    ASSERT_EQ(next.size(), 3u);
+    EXPECT_EQ(next.back(), "other");
+}
+
+TEST_P(XStoreZmqBrokerTest, TwoStreamedRepliesInterleavedThroughTheBrokerStayWithTheirOwnClients) {
+    const std::string more(1, '\x01');
+    FakeWorker &a = AddWorker("wA");
+    FakeWorker &b = AddWorker("wB");
+    zmq::socket_t &client_1 = AddDealerClient();
+    zmq::socket_t &client_2 = AddDealerClient();
+    SendAsDealer(client_1, "one");
+    SendAsDealer(client_2, "two");
+    std::vector<std::string> taken_first, taken_second;
+    const int first = TakeFromAny({&a, &b}, taken_first);
+    ASSERT_GE(first, 0);
+    FakeWorker &first_worker = first == 0 ? a : b;
+    FakeWorker &other_worker = first == 0 ? b : a;
+    ASSERT_GE(TakeFromAny({&other_worker}, taken_second), 0);
+    // The broker may hand the two requests out in either order: name the worker and request of each client by the body.
+    const bool first_is_one = taken_first.back() == "one";
+    FakeWorker &worker_1 = first_is_one ? first_worker : other_worker;
+    FakeWorker &worker_2 = first_is_one ? other_worker : first_worker;
+    const std::vector<std::string> &request_1 = first_is_one ? taken_first : taken_second;
+    const std::vector<std::string> &request_2 = first_is_one ? taken_second : taken_first;
+    ASSERT_EQ(request_1.back(), "one");
+    ASSERT_EQ(request_2.back(), "two");
+
+    // Both workers stream at once, their messages interleaved on the broker.
+    worker_1.ReplyWithDelimiter(request_1, more, {"1-a"});
+    worker_2.ReplyWithDelimiter(request_2, more, {"2-a"});
+    worker_1.ReplyWithDelimiter(request_1, more, {"1-b"});
+    worker_2.ReplyWithDelimiter(request_2, "", {"2-last"});
+    worker_1.ReplyWithDelimiter(request_1, "", {"1-last"});
+
+    const std::vector<std::vector<std::string>> expected_1 = {{more, "1-a"}, {more, "1-b"}, {"", "1-last"}};
+    const std::vector<std::vector<std::string>> expected_2 = {{more, "2-a"}, {"", "2-last"}};
+    for (const auto &message : expected_1) EXPECT_EQ(RecvFrames(client_1), message);
+    for (const auto &message : expected_2) EXPECT_EQ(RecvFrames(client_2), message);
 }
 
 TEST_P(XStoreZmqBrokerTest, ContextShutdownEndsBrokerWithEterm) {

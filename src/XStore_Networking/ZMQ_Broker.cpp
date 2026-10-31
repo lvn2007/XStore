@@ -30,19 +30,24 @@ class HeavyInFlight {
     std::vector<std::string> ids_;
 };
 
-// One worker message, if any: a lone id frame is READY; otherwise the id is followed by a whole reply, which goes to
-// the frontend frame by frame. Either way the worker is idle afterwards. Parked ids are moved, not copied: a short id
+// One worker message, if any: a lone id frame is READY; otherwise the id is followed by [client_id][delimiter][frames...],
+// which goes to the frontend frame by frame. The worker is idle afterwards, except after a message of a STREAMED reply that
+// is not its last: those carry a non-empty delimiter (a reply's last message, and every ordinary reply, has the empty one a
+// REQ socket expects), and the worker stays busy until the message that has it. Parked ids are moved, not copied: a short id
 // lives inline in the zmq_msg_t, so the stack never allocates past its reserve.
 bool RelayReply(zmq::socket_t &backend, zmq::socket_t &frontend, std::vector<zmq::message_t> &idle, HeavyInFlight &heavy,
                 zmq::message_t &worker_id, zmq::message_t &frame) {
     if (!backend.recv(worker_id, zmq::recv_flags::dontwait)) return false;
     // The rest of a multipart message is delivered atomically with its first frame: these recvs never block.
     bool more = worker_id.more();
-    while (more) {
+    bool more_messages_follow = false;
+    for (size_t index = 0; more; ++index) {
         (void)backend.recv(frame, zmq::recv_flags::none);
         more = frame.more();
+        if (index == 1) more_messages_follow = frame.size() != 0;   // before the send: it empties `frame`
         frontend.send(frame, more ? zmq::send_flags::sndmore : zmq::send_flags::none);
     }
+    if (more_messages_follow) return true;
     if (heavy.Count() > 0) heavy.Done(worker_id);
     idle.push_back(std::move(worker_id));
     return true;
