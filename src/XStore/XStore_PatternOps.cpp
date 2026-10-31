@@ -4,6 +4,7 @@
 // XStore::FindByValue (XStore_Aggregates.cpp) minus its catidx tiers.
 // A+ (2026-09-26): a raw-bytes memmem prefilter on the pattern's longest fixed
 // literal skips decoding rows that cannot match.
+#include "include/XStore/XStore_ReplyLimit.h"
 #include "include/XStore/XStore_Internal.h"
 #include "include/XStore/XStore_PatternMatch.h"
 #include "include/XStore/XStore_WireEncode.h"
@@ -21,7 +22,7 @@
 void XStore::FindByPattern(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
                            std::string_view db_name_view, int32_t column_idx, std::string_view pattern,
                            XStore_Proto::PatternMode mode, bool case_insensitive,
-                           size_t chunk_size_bytes, const std::function<void(std::string&&, bool)> &emit_chunk) {
+                           size_t chunk_size_bytes, const std::function<void(std::string&&, bool)> &emit_chunk, bool streamed_reply) {
     const std::string &db_name = UpperCaseInto(db_name_view);
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
@@ -70,8 +71,9 @@ void XStore::FindByPattern(unsigned long long int start_epoch_t, unsigned long l
 
     std::string chunk_buf;
     chunk_buf.reserve(chunk_size_bytes + 4096);
-    // Same 2GB client-reassembly guard as FindByValue: match count is unknown
-    // until scanned, so it's a running total checked after every match.
+    // Same 2GB client-reassembly guard as FindByValue (and the same exemption for a streamed_reply): match count is unknown until scanned,
+    // so it's a running total checked after every match.
+    const unsigned long long reply_limit = streamed_reply ? std::numeric_limits<unsigned long long>::max() : xstore::ReplyLimitBytes().load();
     unsigned long long int total_emitted_bytes = 0;
     bool size_limit_exceeded = false;
     // Hoisted out of the row loop so a string column's buffer is recycled
@@ -134,7 +136,7 @@ void XStore::FindByPattern(unsigned long long int start_epoch_t, unsigned long l
                     chunk_buf.clear();
                     chunk_buf.reserve(chunk_size_bytes + 4096);
                 }
-                if (total_emitted_bytes > 2'000'000'000) {
+                if (total_emitted_bytes > reply_limit) {
                     set_warning("[WARNING] ", fmt::format("[FINDBYPATTERN] [DB: {}] - Query results exceeded 2GB, results truncated", db_name));
                     size_limit_exceeded = true;
                     return false;
@@ -216,7 +218,7 @@ void XStore::FindByPattern(unsigned long long int start_epoch_t, unsigned long l
                             chunk_buf.clear();
                             chunk_buf.reserve(chunk_size_bytes + 4096);
                         }
-                        if (total_emitted_bytes > 2'000'000'000) {
+                        if (total_emitted_bytes > reply_limit) {
                             set_warning("[WARNING] ", fmt::format("[FINDBYPATTERN] [DB: {}] - Query results exceeded 2GB, results truncated", db_name));
                             size_limit_exceeded = true;
                             return false;

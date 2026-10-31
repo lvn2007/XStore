@@ -1,3 +1,5 @@
+#include <limits>
+#include "include/XStore/XStore_ReplyLimit.h"
 #include "include/XStore/XStore_Internal.h"
 #include "include/XStore/XStore_WireEncode.h"
 #include "include/XStore/XStore_ExactAggregates.h"
@@ -1086,7 +1088,7 @@ void XStore::TopKAggregate(unsigned long long int start_epoch_t, unsigned long l
 // sequential, same as RangeQuery's own incremental emit_chunk calls.
 void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
                           std::string_view db_name_view, int32_t column_idx, const XStore_Proto::FData &value,
-                          size_t chunk_size_bytes, const std::function<void(std::string&&, bool)> &emit_chunk) {
+                          size_t chunk_size_bytes, const std::function<void(std::string&&, bool)> &emit_chunk, bool streamed_reply) {
     const std::string &db_name = UpperCaseInto(db_name_view);
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
@@ -1148,13 +1150,14 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
     // ahead of a scan (it depends on how many rows actually match, not the
     // queried time range), so RangeQuery's pre-flight check-before-scanning
     // guard (XStore_RangeOps.cpp) doesn't apply here -- but the same
-    // underlying risk does: the client reassembles every streamed chunk into
-    // one buffer before ParseFromArray/ParseFromString (XStore_Client.h's
-    // SendRecv), so a >2GB reassembled result still corrupts on the client.
-    // Tracked as a running total across the whole query (not just the
-    // current chunk_buf) and checked after every match, so an unselective
-    // predicate over a wide range stops scanning instead of streaming past
-    // the limit.
+    // underlying risk does: a client that reassembles every streamed chunk
+    // into one buffer before ParseFromArray/ParseFromString cannot parse a
+    // >2GB result. Tracked as a running total across the whole query (not
+    // just the current chunk_buf) and checked after every match, so an
+    // unselective predicate over a wide range stops scanning instead of
+    // streaming past the limit. A streamed_reply (Request.streamOk) goes to
+    // a client that parses chunk by chunk, so it has no such limit.
+    const unsigned long long reply_limit = streamed_reply ? std::numeric_limits<unsigned long long>::max() : xstore::ReplyLimitBytes().load();
     unsigned long long int total_emitted_bytes = 0;
     bool size_limit_exceeded = false;
 
@@ -1255,7 +1258,7 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
                     chunk_buf.clear();
                     chunk_buf.reserve(chunk_size_bytes + 4096);
                 }
-                if (total_emitted_bytes > 2'000'000'000) {
+                if (total_emitted_bytes > reply_limit) {
                     set_warning("[WARNING] ", fmt::format("[FINDBYVALUE] [DB: {}] - Query results exceeded 2GB, results truncated", db_name));
                     size_limit_exceeded = true;
                     return false;
@@ -1354,7 +1357,7 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
                             chunk_buf.clear();
                             chunk_buf.reserve(chunk_size_bytes + 4096);
                         }
-                        if (total_emitted_bytes > 2'000'000'000) {
+                        if (total_emitted_bytes > reply_limit) {
                             set_warning("[WARNING] ", fmt::format("[FINDBYVALUE] [DB: {}] - Query results exceeded 2GB, results truncated", db_name));
                             size_limit_exceeded = true;
                             return false;

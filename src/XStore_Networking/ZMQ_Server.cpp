@@ -644,7 +644,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                     const auto &req = client_request->findbyvalue();
                     my_store.FindByValue(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), req.value(),
                         chunk_bytes,
-                        [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); });
+                        [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); }, client_request->streamok());
                     break;
                 }
 
@@ -655,7 +655,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                     my_store.FindByPattern(req.starttime(), req.endtime(), req.dbname(), req.columnidx(),
                         req.pattern(), req.mode(), req.caseinsensitive(),
                         chunk_bytes,
-                        [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); });
+                        [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); }, client_request->streamok());
                     break;
                 }
 

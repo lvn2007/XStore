@@ -378,6 +378,25 @@ TEST(ClientStreamedMessagesTest, TheRowCallsAskForStreamingAndOtherCallsDoNot) {
     EXPECT_FALSE(ParseRequest(requests[1]).streamok());
 }
 
+// A request protobuf cannot serialize (2 GB or more: SerializeToArray fails and leaves the buffer zeroed) must not be sent as that zeroed
+// buffer, which the server drops and answers with an empty reply the caller takes for a status. (The limit is lowered here so no 2 GB is built.)
+TEST(SerializeRequestTest, ARequestWithinTheLimitSerializesLikeSerializeAsString) {
+    XStore_Proto::Request request;
+    request.mutable_batchquery()->set_dbname("DB");
+    for (uint64_t t = 0; t < 100; ++t) request.mutable_batchquery()->add_timestamp(t);
+    const zmq::message_t message = xstore_client::SerializeRequest(request);
+    EXPECT_EQ(std::string(static_cast<const char *>(message.data()), message.size()), request.SerializeAsString());
+}
+
+TEST(SerializeRequestTest, ARequestOverTheLimitIsRefusedWithAnErrorNotSentZeroed) {
+    XStore_Proto::Request request;
+    request.mutable_batchquery()->set_dbname("DB");
+    for (uint64_t t = 0; t < 100; ++t) request.mutable_batchquery()->add_timestamp(t);
+    const size_t bytes = request.ByteSizeLong();
+    EXPECT_THROW((void)xstore_client::SerializeRequest(request, bytes - 1), std::length_error);
+    EXPECT_NO_THROW((void)xstore_client::SerializeRequest(request, bytes));
+}
+
 TEST(ParseFragmentsSeriallyTest, OneFragmentOrSeveralParseToTheSameMessage) {
     const std::vector<std::string> chunks = MakeChunks(3, 30, true);
     XStore_Proto::RangeQuery_REP expected;
@@ -416,6 +435,37 @@ TEST(ClientStreamedMessagesTest, ATimeoutInTheMiddleOfAReplyThrowsAndTheNextCall
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));   // the late messages are sent (to a connection that is gone)
     const auto reply = client.RangeQuery(0, 500, "ANY");
     EXPECT_TRUE(reply->SerializeAsString() == expected.SerializeAsString());
+}
+
+// ---- the memory budget ----
+
+TEST(MemoryBudgetTest, MemAvailableAndCgroupLimitsAreRead) {
+    EXPECT_EQ(xstore_client::ParseMemAvailableBytes("MemTotal:       65000000 kB\nMemFree:  1 kB\nMemAvailable:   61000000 kB\nBuffers: 3 kB\n"),
+              std::optional<size_t>(61000000ull * 1024));
+    EXPECT_EQ(xstore_client::ParseMemAvailableBytes("MemTotal: 1 kB\n"), std::nullopt);
+    EXPECT_EQ(xstore_client::ParseCgroupBytes("1073741824\n"), std::optional<size_t>(1073741824ull));
+    EXPECT_EQ(xstore_client::ParseCgroupBytes("max\n"), std::nullopt) << "no cgroup limit";
+    EXPECT_EQ(xstore_client::ParseCgroupBytes(""), std::nullopt);
+}
+
+TEST(MemoryBudgetTest, TheBudgetIsTheConfiguredBytesOrAFractionOfWhatIsAvailable) {
+    EXPECT_EQ(xstore_client::MemoryBudgetBytes(/*configured=*/1000, /*available=*/std::optional<size_t>(1'000'000), 0.95), std::optional<size_t>(1000));
+    EXPECT_EQ(xstore_client::MemoryBudgetBytes(0, std::optional<size_t>(1'000'000), 0.95), std::optional<size_t>(950'000));
+    EXPECT_EQ(xstore_client::MemoryBudgetBytes(0, std::nullopt, 0.95), std::nullopt) << "unknown memory: no limit";
+    EXPECT_EQ(xstore_client::MemoryBudgetBytes(xstore_client::NO_MEMORY_BUDGET, std::optional<size_t>(1'000'000), 0.95), std::nullopt) << "explicitly unlimited";
+}
+
+// A reply that has used its budget is refused while it is still arriving (the memory in use is what is counted, not a guess at the final size).
+TEST(ClientMemoryBudgetTest, AReplyThatUsesUpItsBudgetIsRefusedAndTheNextCallStillWorks) {
+    const auto big = ChunksOf<XStore_Proto::RangeQuery_REP>(8, 6000, false);   // ~6 MB in 8 chunks
+    const auto small = ChunksOf<XStore_Proto::RangeQuery_REP>(3, 90, false);
+    ScriptedServer server({Streamed(big), Streamed(small), Streamed(big)});
+    XStoreClient client("127.0.0.1", server.port(), 10000, /*warmup_on_init=*/false);
+    client.SetMemoryBudget(3 << 20);
+    EXPECT_THROW((void)client.RangeQuery(0, 6000, "ANY"), xstore_client::MemoryBudgetExceeded);
+    EXPECT_EQ(client.RangeQuery(0, 90, "ANY")->queryresponse_size(), 90) << "a fresh socket: nothing of the refused reply is left to confuse it";
+    client.SetMemoryBudget(xstore_client::NO_MEMORY_BUDGET);
+    EXPECT_EQ(client.RangeQuery(0, 6000, "ANY")->queryresponse_size(), 6000);
 }
 
 TEST(ClientStreamedMessagesTest, AReconnectedClientStreamsAgain) {

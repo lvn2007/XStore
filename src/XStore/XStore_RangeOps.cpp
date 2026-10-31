@@ -1,3 +1,4 @@
+#include "include/XStore/XStore_ReplyLimit.h"
 #include "include/XStore/XStore_Internal.h"
 #include "include/XStore/XStore_ScanLock.h"
 #include "include/XStore/XStore_WalRing.h"
@@ -78,7 +79,7 @@ void XStore::RangeQuery(unsigned long long int start_epoch_t, unsigned long long
     // held more than one chunk at a time. So the guard stays for them, checked before any chunk is sent (an abort partway through a reply
     // has no clean way to signal "actually, error" to a client already receiving it). A streamed_reply (Request.streamOk) goes to a client
     // that parses chunk by chunk and never holds one serialized message, so it is not limited here; the memory lease below still is.
-    if (!streamed_reply && (end_epoch_t - start_epoch_t) * cfg_struct.rowlength() > 2'000'000'000) {
+    if (!streamed_reply && (end_epoch_t - start_epoch_t) * cfg_struct.rowlength() > xstore::ReplyLimitBytes().load()) {
         set_warning("[WARNING] ", fmt::format("[RANGE QUERY] [DB: {}] - Query results is larger than 2GB", db_name));
         finish(std::string());
         return;

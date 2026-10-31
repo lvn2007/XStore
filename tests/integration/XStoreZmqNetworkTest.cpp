@@ -9,6 +9,7 @@
 // as the positive "this server is up" signal). They are started once in SetUpTestSuite() and deliberately never torn
 // down (their workers keep an XStore rooted in the scratch dir) -- the OS reclaims the socket/threads on process
 // exit. Only the on-disk scratch directory is cleaned up in TearDownTestSuite().
+#include "include/XStore/XStore_ReplyLimit.h"
 #include <gtest/gtest.h>
 #include <google/protobuf/io/coded_stream.h>
 #include <atomic>
@@ -1206,6 +1207,59 @@ TEST_F(XStoreZmqNetworkTest, ARangeQueryOverTwoGBIsRefusedUnlessTheClientAllowsS
     ASSERT_TRUE(served.ParseFromString(bytes));
     EXPECT_FALSE(served.has_querystatus()) << served.querystatus();
     EXPECT_EQ(served.queryresponse_size(), 63001);
+}
+
+// FindByValue stops at the reply limit for a client that joins the chunks and not for one that allows streaming (limit lowered to 8 KB).
+TEST_F(XStoreZmqNetworkTest, AFindByValueReplyIsCutAtTheLimitUnlessTheClientAllowsStreaming) {
+    XStore_Proto::CreateDB_REQ create_req;
+    create_req.set_rtype(XStore_Proto::CREATEDB);
+    create_req.set_dbname("ZMQ_FBV_LIMIT_DB");
+    create_req.set_timeresolution(XStore_Proto::SECOND);
+    create_req.set_rowlength(64);
+    SendRequest<XStore_Proto::CreateDB_REP>(Wrap(create_req));
+    XStore_Proto::BatchInsert_REQ insert_req;
+    insert_req.set_rtype(XStore_Proto::BATCHINSERT);
+    insert_req.set_dbname("ZMQ_FBV_LIMIT_DB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
+    for (int64_t i = 0; i < 600; ++i) {
+        XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
+        entry->set_timestamp(TWO_CHUNK_T0 + static_cast<unsigned long long>(i));
+        *entry->mutable_data() = MakeRow({FInt64(7), FInt64(i)});
+    }
+    EXPECT_NE(SendRequest<XStore_Proto::BatchInsert_REP>(Wrap(insert_req)).insertstatus().find("Inserted"), std::string::npos);
+
+    XStore_Proto::FindByValue_REQ find_req;
+    find_req.set_rtype(XStore_Proto::FINDBYVALUE);
+    find_req.set_dbname("ZMQ_FBV_LIMIT_DB");
+    find_req.set_starttime(TWO_CHUNK_T0);
+    find_req.set_endtime(TWO_CHUNK_T0 + 599);
+    find_req.set_columnidx(0);
+    *find_req.mutable_value() = FInt64(7);
+    XStore_Proto::Request request = Wrap(find_req);
+
+    const unsigned long long old_limit = xstore::ReplyLimitBytes().exchange(8000);   // the server runs in this process
+    std::vector<std::string> frames;
+    const bool got = SendRequestMultipart(request, frames, 30000);
+    request.set_streamok(true);
+    std::vector<std::vector<std::string>> messages;
+    const bool got_streamed = SendRequestStreaming(request, messages, 30000);
+    xstore::ReplyLimitBytes().store(old_limit);
+    ASSERT_TRUE(got);
+    ASSERT_TRUE(got_streamed);
+
+    std::string joined;
+    for (const std::string &frame : frames) joined += frame;
+    XStore_Proto::FindByValue_REP truncated;
+    ASSERT_TRUE(truncated.ParseFromString(joined));
+    EXPECT_LT(truncated.queryresponse_size(), 600);
+    EXPECT_NE(truncated.querystatus().find("truncated"), std::string::npos);
+
+    std::string streamed_bytes;
+    for (const auto &message : messages) streamed_bytes += message.at(1);
+    XStore_Proto::FindByValue_REP whole;
+    ASSERT_TRUE(whole.ParseFromString(streamed_bytes));
+    EXPECT_EQ(whole.queryresponse_size(), 600);
+    EXPECT_FALSE(whole.has_querystatus()) << whole.querystatus();
 }
 
 TEST_F(XStoreZmqNetworkTest, RepliesThatAreOneFrameAreUnchangedWhenStreamingIsAllowed) {

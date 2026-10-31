@@ -1,3 +1,4 @@
+#include "include/XStore/XStore_ReplyLimit.h"
 #include "include/XStore/XStore_Internal.h"
 #include "include/XStore/XStore_WalRing.h"
 #include "include/XStore/XStore_PreadPool.h"
@@ -254,7 +255,7 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, bool so
 
     // 64-bit product: timestamp_size() * rowlength() as two 32-bit ints wrapped negative past 2^31 bytes (70000 rows of 32000 bytes) and the request
     // was let through. As in RangeQuery, a streamed_reply is not limited to 2 GB (the lease below is).
-    if ((!streamed_reply && static_cast<int64_t>(proto_from_client->timestamp_size()) * cfg_struct.rowlength() > 2'000'000'000) ||
+    if ((!streamed_reply && static_cast<int64_t>(proto_from_client->timestamp_size()) * cfg_struct.rowlength() > static_cast<int64_t>(xstore::ReplyLimitBytes().load())) ||
         proto_from_client->timestamp_size() < 0) {
         set_warning("[WARNING] ", fmt::format("[BATCH QUERY] [DB: {}] - Query results is larger than 2GB or empty", db_name));
         finish(std::string());

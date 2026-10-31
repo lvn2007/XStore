@@ -9,13 +9,16 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <deque>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -620,6 +623,125 @@ void ParseFragmentsSerially(const std::vector<Fragment> &fragments, RepT &into) 
     }
 }
 
+// ---- memory budget ----
+// A received reply costs the client about 5 times its size on the wire (every value is an object), so a reply that is only a few GB on the
+// wire can take the machine's memory. A call that receives its reply as messages counts the memory it holds as it goes (the received frames
+// plus the arena of parsed objects) and stops with MemoryBudgetExceeded once that passes its budget, instead of running the machine out.
+// Default budget: 95% of the memory available when the reply turns out to be big (the smaller of MemAvailable and the cgroup headroom).
+
+inline constexpr size_t NO_MEMORY_BUDGET = std::numeric_limits<size_t>::max();   // XStoreClient::SetMemoryBudget(NO_MEMORY_BUDGET): no limit
+
+class MemoryBudgetExceeded : public std::runtime_error {
+ public:
+    using std::runtime_error::runtime_error;
+};
+
+// "MemAvailable:   61000000 kB" of /proc/meminfo, in bytes.
+[[nodiscard]] inline std::optional<size_t> ParseMemAvailableBytes(std::string_view meminfo) {
+    constexpr std::string_view KEY = "MemAvailable:";
+    const size_t at = meminfo.find(KEY);
+    if (at == std::string_view::npos) return std::nullopt;
+    size_t pos = at + KEY.size();
+    while (pos < meminfo.size() && meminfo[pos] == ' ') ++pos;
+    size_t kb = 0, digits = 0;
+    for (; pos < meminfo.size() && meminfo[pos] >= '0' && meminfo[pos] <= '9'; ++pos, ++digits) kb = kb * 10 + static_cast<size_t>(meminfo[pos] - '0');
+    return digits > 0 ? std::optional<size_t>(kb * 1024) : std::nullopt;
+}
+
+// The content of a cgroup v2 memory.max / memory.current file: a number of bytes, or "max" (no limit).
+[[nodiscard]] inline std::optional<size_t> ParseCgroupBytes(std::string_view text) {
+    size_t value = 0, digits = 0;
+    for (size_t pos = 0; pos < text.size() && text[pos] >= '0' && text[pos] <= '9'; ++pos, ++digits) value = value * 10 + static_cast<size_t>(text[pos] - '0');
+    return digits > 0 ? std::optional<size_t>(value) : std::nullopt;
+}
+
+namespace detail {
+[[nodiscard]] inline std::string ReadSmallFile(const char *path) {
+    std::ifstream in(path);
+    char buffer[8192];
+    in.read(buffer, sizeof buffer);
+    return std::string(buffer, static_cast<size_t>(in.gcount()));
+}
+}  // namespace detail
+
+// The memory this process can still use: the smaller of the machine's MemAvailable and, in a cgroup with a limit, what is left of it.
+[[nodiscard]] inline std::optional<size_t> AvailableMemoryBytes() {
+    std::optional<size_t> available = ParseMemAvailableBytes(detail::ReadSmallFile("/proc/meminfo"));
+    const auto limit = ParseCgroupBytes(detail::ReadSmallFile("/sys/fs/cgroup/memory.max"));
+    const auto current = ParseCgroupBytes(detail::ReadSmallFile("/sys/fs/cgroup/memory.current"));
+    if (limit && current) {
+        const size_t headroom = *limit > *current ? *limit - *current : 0;
+        available = available ? std::min(*available, headroom) : headroom;
+    }
+    return available;
+}
+
+// configured: 0 = automatic (`fraction` of `available`; no limit where that is unknown), NO_MEMORY_BUDGET = no limit, anything else = that many bytes.
+[[nodiscard]] inline std::optional<size_t> MemoryBudgetBytes(size_t configured, std::optional<size_t> available, double fraction) {
+    if (configured == NO_MEMORY_BUDGET) return std::nullopt;
+    if (configured != 0) return configured;
+    if (!available) return std::nullopt;
+    return static_cast<size_t>(static_cast<double>(*available) * fraction);
+}
+
+// ---- windows ----
+// A result bigger than memory is read as windows: successive ordinary (streamed) calls over slices of the range, each handed to the caller and
+// then dropped, the next one fetched on a second client while the caller works on the current one. A window of W bytes holds at most
+// W / (row length + 16) timestamps (an entry of a reply is never longer than a row plus its 16 bytes of framing), so its reply is bounded
+// whatever the data, and the memory it needs is about 6 times that on the client. Mystic, 1M rows of 1.42 GB: windows of 71-284 MB took
+// the time of one call (prefetched ones 8-10% less) in 4-11 times less memory; 28 MB windows were 26-35% slower.
+struct WindowOptions {
+    size_t window_bytes = 0;     // 0 = DefaultWindowBytes of the memory budget
+    bool prefetch = true;        // fetch the next window while the current one is consumed (two windows in memory)
+    int32_t row_length = 0;      // the database's row length; 0 = ask the server (one INFO call)
+};
+
+[[nodiscard]] inline uint64_t WindowTimestamps(size_t window_bytes, int32_t row_length) {
+    const uint64_t entry = static_cast<uint64_t>(std::max<int32_t>(row_length, 0)) + 16;
+    return std::max<uint64_t>(1, window_bytes / entry);
+}
+
+// Two windows in flight, each about 6 times its size in objects: a twelfth of the budget, between 4 and 256 MiB.
+[[nodiscard]] inline size_t DefaultWindowBytes(std::optional<size_t> budget) {
+    constexpr size_t FLOOR = 4ull << 20, CAP = 256ull << 20;
+    if (!budget) return CAP;
+    return std::clamp<size_t>(*budget / 12, FLOOR, CAP);
+}
+
+// ---- requests sent without waiting for each answer ----
+inline constexpr size_t PIPELINE_IN_FLIGHT = 4;                  // unanswered requests at most
+inline constexpr size_t PIPELINED_PART_BYTES = 64ull << 20;      // the size of a part of a pipelined BatchInsert (23-360 MB all measured alike)
+
+// Adds up the parts of a split call whose success status reads "<prefix> - <marker><count><suffix>" (Inserted N elements successfully,
+// Deleted N items): the first part that did not succeed is what the caller gets back instead.
+class SplitStatusTally {
+ public:
+    SplitStatusTally(std::string_view marker, std::string_view suffix) : marker_(marker), suffix_(suffix) {}
+
+    // false if this part did not succeed (its status is then `failure()`, the first one only)
+    bool Add(const std::string &status) {
+        const size_t at = status.find(marker_);
+        if (status.compare(0, 6, "[INFO]") != 0 || at == std::string::npos) {
+            if (failure_.empty()) failure_ = status.empty() ? std::string("(empty reply)") : status;
+            return false;
+        }
+        if (parts_ == 0) prefix_ = status.substr(0, at);
+        count_ += std::strtoull(status.c_str() + at + marker_.size(), nullptr, 10);
+        ++parts_;
+        return true;
+    }
+    [[nodiscard]] bool failed() const { return !failure_.empty(); }
+    [[nodiscard]] const std::string &failure() const { return failure_; }
+    [[nodiscard]] std::string Combined() const {
+        return prefix_ + std::string(marker_) + std::to_string(count_) + std::string(suffix_) + " (" + std::to_string(parts_) + " requests)";
+    }
+
+ private:
+    std::string marker_, suffix_, prefix_, failure_;
+    uint64_t count_ = 0;
+    size_t parts_ = 0;
+};
+
 // The same parse for a reply that is still arriving: Add() takes the frames in order as they are received, cuts each into pieces and hands
 // them to a team (JobStream) that parses while the next frames are on the wire; Finish() joins the team and merges the rows into `out`.
 // Finish() returns false, with `out` untouched, when any frame is not well framed or a piece does not parse (or memory ran out): the caller
@@ -706,6 +828,115 @@ class ReplyStreamParser {
 // ======================================================================================================================================
 // Part 3 of 3: the XStore client.
 // ======================================================================================================================================
+
+namespace xstore_client {
+
+// The request as a ZMQ message. Protobuf cannot serialize a message of 2 GB or more: SerializeToArray fails and leaves its buffer zeroed, and
+// sending that would make the server drop the request and answer with an empty reply the caller would take for a status. So a request over
+// `limit` (default: the most protobuf can serialize, 2^31 - 1) is refused with std::length_error before anything is sent. Only the calls that carry
+// many rows or timestamps (BatchInsert, BatchDelete, BatchQuery) can get that big: send them in several calls.
+[[nodiscard]] inline zmq::message_t SerializeRequest(const XStore_Proto::Request &request, size_t limit = static_cast<size_t>(INT_MAX)) {
+    const size_t byte_size = request.ByteSizeLong();
+    if (byte_size > limit) {
+        throw std::length_error("XStore_Client: the request is " + std::to_string(byte_size) + " bytes; protobuf cannot serialize a message larger than " +
+                                std::to_string(limit) + " bytes -- send the rows in several calls");
+    }
+    zmq::message_t message(byte_size);
+    if (!request.SerializeToArray(message.data(), static_cast<int>(byte_size))) {
+        throw std::runtime_error("XStore_Client: the request could not be serialized");
+    }
+    return message;
+}
+
+
+namespace detail {
+[[nodiscard]] inline size_t VarintLength(uint64_t value) {
+    size_t length = 1;
+    while (value >= 0x80) {
+        value >>= 7;
+        ++length;
+    }
+    return length;
+}
+inline uint8_t *PutVarint(uint8_t *out, uint64_t value) {
+    while (value >= 0x80) {
+        *out++ = static_cast<uint8_t>(value | 0x80);
+        value >>= 7;
+    }
+    *out++ = static_cast<uint8_t>(value);
+    return out;
+}
+}  // namespace detail
+
+// The BatchInsert request for rows [begin, end), written straight from the caller's rows into one buffer of exactly the right size: the bytes
+// protobuf would make of the same Request (batchInsert = field 8 of the envelope, timeoutMs = field 50), without copying every row into a
+// Request message (a heap object per value) and walking that twice. `sizes[i - begin]` must be rows[i].second.ByteSizeLong(), computed just
+// before by the caller (the row is then serialized with its cached size, as the server does). Refused with std::length_error over `limit`,
+// like SerializeRequest. Fields at their proto3 default (a zero timestamp, a zero durability mode, an empty database name, timeout_ms 0) are
+// left out, as protobuf leaves them out; a negative timeout_ms leaves the field out too.
+[[nodiscard]] inline zmq::message_t EncodeBatchInsert(std::string_view db_name, const std::vector<std::pair<uint64_t, XStore_Proto::RowData>> &rows,
+                                                      size_t begin, size_t end, const std::vector<uint32_t> &sizes,
+                                                      XStore_Proto::WalDurabilityMode durability_mode, int timeout_ms,
+                                                      size_t limit = static_cast<size_t>(INT_MAX)) {
+    using detail::PutVarint;
+    using detail::VarintLength;
+    const uint64_t durability = static_cast<uint64_t>(durability_mode);
+    const uint64_t rtype = static_cast<uint64_t>(XStore_Proto::BATCHINSERT);
+    size_t body = 0;   // the BatchInsert_REQ
+    if (rtype != 0) body += 1 + VarintLength(rtype);
+    if (!db_name.empty()) body += 1 + VarintLength(db_name.size()) + db_name.size();
+    for (size_t i = begin; i < end; ++i) {
+        const size_t row_bytes = sizes[i - begin];
+        const size_t entry = (rows[i].first != 0 ? 1 + VarintLength(rows[i].first) : 0) + 1 + VarintLength(row_bytes) + row_bytes;
+        body += 1 + VarintLength(entry) + entry;
+    }
+    if (durability != 0) body += 1 + VarintLength(durability);
+    const uint64_t timeout = timeout_ms > 0 ? static_cast<uint64_t>(timeout_ms) : 0;
+    const size_t total = 1 + VarintLength(body) + body + (timeout != 0 ? 2 + VarintLength(timeout) : 0);
+    if (total > limit) {
+        throw std::length_error("XStore_Client: the request is " + std::to_string(total) + " bytes; protobuf cannot serialize a message larger than " +
+                                std::to_string(limit) + " bytes -- send the rows in several calls");
+    }
+    zmq::message_t message(total);
+    uint8_t *out = static_cast<uint8_t *>(message.data());
+    *out++ = 0x42;   // Request.batchInsert (8), length-delimited
+    out = PutVarint(out, body);
+    if (rtype != 0) {
+        *out++ = 0x08;
+        out = PutVarint(out, rtype);
+    }
+    if (!db_name.empty()) {
+        *out++ = 0x12;
+        out = PutVarint(out, db_name.size());
+        std::memcpy(out, db_name.data(), db_name.size());
+        out += db_name.size();
+    }
+    for (size_t i = begin; i < end; ++i) {   // BatchInsert_DATA (3): timestamp (1), data (2)
+        const size_t row_bytes = sizes[i - begin];
+        const size_t entry = (rows[i].first != 0 ? 1 + VarintLength(rows[i].first) : 0) + 1 + VarintLength(row_bytes) + row_bytes;
+        *out++ = 0x1a;
+        out = PutVarint(out, entry);
+        if (rows[i].first != 0) {
+            *out++ = 0x08;
+            out = PutVarint(out, rows[i].first);
+        }
+        *out++ = 0x12;
+        out = PutVarint(out, row_bytes);
+        out = rows[i].second.SerializeWithCachedSizesToArray(out);
+    }
+    if (durability != 0) {
+        *out++ = 0x20;   // durabilityMode (4)
+        out = PutVarint(out, durability);
+    }
+    if (timeout != 0) {
+        *out++ = 0x90;   // Request.timeoutMs (50), varint
+        *out++ = 0x03;
+        out = PutVarint(out, timeout);
+    }
+    return message;
+}
+
+}  // namespace xstore_client
 
 // Client-side CURVE identity: this client's own keypair plus the server's
 // public key (which the client must already know out-of-band -- see the
@@ -828,11 +1059,17 @@ class XStoreClient {
   // Threads used to parse a big reply of rows; 0 = adaptive. See SetParseThreads.
   size_t parse_threads_ = 0;
 
+  // Memory a reply received as messages may hold: 0 = automatic. See SetMemoryBudget.
+  size_t memory_budget_ = 0;
+
+  // The size above which a BatchInsert is sent as several requests. See BatchInsert and SetMaxRequestBytes.
+  size_t max_request_bytes_ = 512ull << 20;
+
   // What a stream socket needs to be (re)created, and the socket itself: a DEALER used by the calls that return rows, made on the first such
   // call. A REQ socket delivers one multipart reply, whole, so it cannot show a chunk before the last is in; a DEALER receives a reply sent
   // as separate messages (Request.streamOk) one at a time. It is lockstep by convention only, so any call that fails between its send and
   // the last message of its reply drops the socket (a late message must never be taken for the next call's reply).
-  std::string endpoint_;
+  std::string endpoint_, server_addr_, server_port_;
   std::optional<XStoreCurveClientAuth> curve_auth_;
   std::optional<zmq::socket_t> stream_sock_;
   std::deque<zmq::message_t> stream_buf_;   // the frames of the reply being received; a deque never moves its elements
@@ -859,9 +1096,11 @@ class XStoreClient {
   // Sends the request on the REQ socket and leaves the reply's frames in recv_buf.
   void Exchange(XStore_Proto::Request &to_server) {
       if (timeout_ms_ >= 0) to_server.set_timeoutms(static_cast<uint32_t>(timeout_ms_));
-      size_t byte_size = to_server.ByteSizeLong();
-      zmq::message_t z_out(byte_size);
-      to_server.SerializeToArray(z_out.data(), byte_size);
+      ExchangeMessage(xstore_client::SerializeRequest(to_server));
+  }
+
+  // The same for a request already serialized (a BatchInsert encoded straight from the caller's rows).
+  void ExchangeMessage(zmq::message_t &&z_out) {
       if (!sock.send(z_out, zmq::send_flags::none)) {
           throw std::runtime_error("XStore_Client: send failed/timed out");
       }
@@ -896,6 +1135,183 @@ class XStoreClient {
       }
   }
 
+  // rows [begin, end) as ONE BatchInsert request, encoded straight from the rows. `sizes` (their serialized sizes) may be given by a caller that
+  // has just measured them; otherwise they are measured here.
+  std::string BatchInsertPart(std::string_view db_name, const std::vector<std::pair<uint64_t, XStore_Proto::RowData>> &rows, size_t begin,
+                              size_t end, XStore_Proto::WalDurabilityMode durability_mode, const std::vector<uint32_t> *sizes = nullptr) {
+      std::vector<uint32_t> measured;
+      if (sizes == nullptr) {
+          measured.reserve(end - begin);
+          for (size_t i = begin; i < end; ++i) measured.push_back(static_cast<uint32_t>(rows[i].second.ByteSizeLong()));
+          sizes = &measured;
+      }
+      return SendRecvMessage<XStore_Proto::BatchInsert_REP>(xstore_client::EncodeBatchInsert(db_name, rows, begin, end, *sizes, durability_mode, timeout_ms_))
+          .insertstatus();
+  }
+
+  // The next part of `rows` from `begin`: its end and the sizes of its rows, cut once the part would pass `part_bytes` (a row bigger than that
+  // still goes, alone).
+  size_t NextInsertPart(const std::vector<std::pair<uint64_t, XStore_Proto::RowData>> &rows, size_t begin, size_t part_bytes,
+                        std::vector<uint32_t> &sizes) const {
+      sizes.clear();
+      size_t end = begin, bytes = 0;
+      while (end < rows.size()) {
+          const size_t row_bytes = rows[end].second.ByteSizeLong();
+          if (end > begin && bytes + row_bytes + 16 > part_bytes) break;
+          bytes += row_bytes + 16;
+          sizes.push_back(static_cast<uint32_t>(row_bytes));
+          ++end;
+      }
+      return end;
+  }
+
+  // Could these rows come to a quarter of max_request_bytes_ or more? Judged from up to 32 evenly spaced rows, so a normal batch costs 32
+  // size computations (none under 16 rows); only a batch that might be big is measured exactly (and a request that still turns out too big is refused by
+  // xstore_client::SerializeRequest rather than sent).
+  bool MayNeedSplitting(const std::vector<std::pair<uint64_t, XStore_Proto::RowData>> &rows, size_t limit) const {
+      if (rows.size() < 16) return false;   // a request of fewer rows than this is never judged: it would need rows of tens of MB each
+      const size_t samples = std::min<size_t>(rows.size(), 32);
+      size_t sampled_bytes = 0;
+      for (size_t k = 0; k < samples; ++k) sampled_bytes += rows[k * rows.size() / samples].second.ByteSizeLong() + 16;
+      return sampled_bytes / samples * rows.size() >= limit / 4;
+  }
+
+  // Sends the requests `next_request` makes, already serialized (one at a time, until it returns nullopt), on the stream socket keeping at most `in_flight` unanswered,
+  // and gives each reply to `on_reply` as it arrives (they may come in any order; `on_reply` returns false to stop sending: the replies still
+  // owed are read before returning). A failure drops the socket, as for any call, since answers are still on their way.
+  template <typename RepT, typename Next, typename OnReply>
+  void SendPipelined(size_t in_flight, Next &&next_request, OnReply &&on_reply) {
+      try {
+          zmq::socket_t &socket = StreamSocket();
+          size_t outstanding = 0;
+          auto read_one = [&]() {
+              stream_buf_.clear();
+              FragmentList fragments;
+              (void)RecvStreamMessage(socket, fragments);
+              RepT reply;
+              xstore_client::ParseFragmentsSerially(fragments, reply);
+              stream_buf_.clear();
+              --outstanding;
+              return on_reply(reply);
+          };
+          bool more = true;
+          while (more) {
+              while (more && outstanding < in_flight) {
+                  std::optional<zmq::message_t> body = next_request();
+                  if (!body) {
+                      more = false;
+                      break;
+                  }
+                  if (!socket.send(zmq::message_t(), zmq::send_flags::sndmore) || !socket.send(*body, zmq::send_flags::none)) {
+                      throw std::runtime_error("XStore_Client: send failed/timed out");
+                  }
+                  ++outstanding;
+              }
+              if (outstanding == 0) break;
+              if (!read_one()) more = false;
+          }
+          while (outstanding > 0) (void)read_one();
+      } catch (...) {
+          stream_sock_.reset();
+          stream_buf_.clear();
+          throw;
+      }
+  }
+
+  // The row length of a database (one INFO call).
+  int32_t RowLengthOf(std::string_view db_name) {
+      auto upper = [](std::string_view name) {
+          std::string out(name);
+          std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+          return out;
+      };
+      const std::string wanted = upper(db_name);
+      for (const DbInfo &db : InfoRequest().db_info_list) {
+          if (upper(db.db_name) == wanted) return db.row_length;
+      }
+      throw std::runtime_error("XStore_Client: no database named '" + std::string(db_name) + "' on the server");
+  }
+
+  // Reads `total_units` units (timestamps, or the entries of a list) as windows of `per_window`: fetch(client, first_unit, count) makes one
+  // streamed call, on_window gets its reply and the reply is dropped. With prefetch the next window is fetched on a second client meanwhile;
+  // the memory budget is then shared by the two. Returns the rows delivered.
+  template <typename RepT, typename Fetch>
+  uint64_t ReadInWindows(uint64_t total_units, uint64_t per_window, bool prefetch, Fetch &&fetch,
+                         const std::function<void(const RepT &)> &on_window) {
+      const uint64_t windows = total_units / per_window + (total_units % per_window != 0 ? 1 : 0);
+      auto count_of = [&](uint64_t w) { return std::min(per_window, total_units - w * per_window); };
+      uint64_t rows = 0;
+      if (!prefetch || windows <= 1) {
+          for (uint64_t w = 0; w < windows; ++w) {
+              const xstore_client::ArenaReply<RepT> reply = fetch(*this, w * per_window, count_of(w));
+              rows += static_cast<uint64_t>(reply->queryresponse_size());
+              on_window(*reply);
+          }
+          return rows;
+      }
+      XStoreClient helper(server_addr_, server_port_, timeout_ms_, /*warmup_on_init=*/false, curve_auth_);
+      helper.parse_threads_ = parse_threads_;
+      const size_t saved_budget = memory_budget_;
+      const std::optional<size_t> budget =
+          xstore_client::MemoryBudgetBytes(memory_budget_, memory_budget_ == 0 ? xstore_client::AvailableMemoryBytes() : std::nullopt, 0.95);
+      if (budget) {
+          memory_budget_ = std::max<size_t>(1, *budget / 2);   // two windows in memory at once
+          helper.memory_budget_ = memory_budget_;
+      }
+      struct Restore {
+          size_t &target;
+          size_t value;
+          ~Restore() { target = value; }
+      } restore{memory_budget_, saved_budget};
+      XStoreClient *clients[2] = {this, &helper};
+      auto launch = [&](uint64_t w) {
+          return std::async(std::launch::async, [&, w] { return fetch(*clients[w % 2], w * per_window, count_of(w)); });
+      };
+      std::future<xstore_client::ArenaReply<RepT>> next = launch(0);
+      for (uint64_t w = 0; w < windows; ++w) {
+          const xstore_client::ArenaReply<RepT> current = next.get();
+          if (w + 1 < windows) next = launch(w + 1);
+          rows += static_cast<uint64_t>(current->queryresponse_size());
+          on_window(*current);
+      }
+      return rows;
+  }
+
+  // A range [start_time, end_time] read as windows of timestamps; fetch(client, from, to) makes one call for [from, to].
+  template <typename RepT, typename Fetch>
+  uint64_t ReadInTimeWindows(uint64_t start_time, uint64_t end_time, std::string_view db_name, const xstore_client::WindowOptions &options,
+                             Fetch &&fetch, const std::function<void(const RepT &)> &on_window) {
+      if (end_time < start_time) throw std::invalid_argument("XStore_Client: the end of the range is before its start");
+      const uint64_t span = end_time - start_time;
+      const uint64_t total = span == std::numeric_limits<uint64_t>::max() ? span : span + 1;
+      return ReadInWindows<RepT>(
+          total, WindowLength(db_name, options), options.prefetch,
+          [&](XStoreClient &c, uint64_t first, uint64_t count) { return fetch(c, start_time + first, start_time + first + count - 1); }, on_window);
+  }
+
+  // The window length in timestamps for these options (looks the row length up when it is not given).
+  uint64_t WindowLength(std::string_view db_name, const xstore_client::WindowOptions &options) {
+      const int32_t row_length = options.row_length > 0 ? options.row_length : RowLengthOf(db_name);
+      size_t window_bytes = options.window_bytes;
+      if (window_bytes == 0) {
+          const std::optional<size_t> budget =
+              xstore_client::MemoryBudgetBytes(memory_budget_, memory_budget_ == 0 ? xstore_client::AvailableMemoryBytes() : std::nullopt, 0.95);
+          window_bytes = xstore_client::DefaultWindowBytes(budget);
+      }
+      return xstore_client::WindowTimestamps(window_bytes, row_length);
+  }
+
+  // rows [begin, end) of a BatchDelete's timestamps as ONE request.
+  std::string BatchDeletePart(std::string_view db_name, const std::vector<uint64_t> &timestamps, size_t begin, size_t end) {
+      XStore_Proto::Request to_server;
+      auto *payload = to_server.mutable_batchdelete();
+      payload->set_rtype(XStore_Proto::BATCHDELETE);
+      payload->set_dbname(std::string(db_name));
+      payload->mutable_timestamp()->Reserve(static_cast<int>(end - begin));
+      for (size_t i = begin; i < end; ++i) payload->add_timestamp(timestamps[i]);
+      return SendRecv<XStore_Proto::BatchDelete_REP>(to_server).deletestatus();
+  }
+
   // Every RPC is: serialize request, blocking send, blocking recv, parse
   // reply. Sharing that here means the 17 request types can't drift out of
   // sync with each other the way copy-pasted send/recv blocks do. ToServer
@@ -904,6 +1320,18 @@ class XStoreClient {
   template <typename RepT>
   RepT SendRecv(XStore_Proto::Request &to_server) {
       Exchange(to_server);
+      return ParseReply<RepT>();
+  }
+
+  template <typename RepT>
+  RepT SendRecvMessage(zmq::message_t &&request) {
+      ExchangeMessage(std::move(request));
+      return ParseReply<RepT>();
+  }
+
+  // The reply now in recv_buf.
+  template <typename RepT>
+  RepT ParseReply() {
       const FragmentList fragments = FragmentsOfRecvBuf();
       RepT from_server;
       if (!TryParseInParallel(fragments, from_server, nullptr)) xstore_client::ParseFragmentsSerially(fragments, from_server);
@@ -957,8 +1385,7 @@ class XStoreClient {
       if (timeout_ms_ >= 0) to_server.set_timeoutms(static_cast<uint32_t>(timeout_ms_));
       try {
           zmq::socket_t &socket = StreamSocket();
-          zmq::message_t z_out(to_server.ByteSizeLong());
-          to_server.SerializeToArray(z_out.data(), z_out.size());
+          zmq::message_t z_out = xstore_client::SerializeRequest(to_server);
           if (!socket.send(zmq::message_t(), zmq::send_flags::sndmore) || !socket.send(z_out, zmq::send_flags::none)) {
               throw std::runtime_error("XStore_Client: send failed/timed out");
           }
@@ -978,9 +1405,19 @@ class XStoreClient {
           auto arena = std::make_unique<google::protobuf::Arena>(options);
           RepT *from_server = google::protobuf::Arena::Create<RepT>(arena.get());
           xstore_client::ReplyStreamParser<RepT> parser(*from_server, arena.get(), xstore_client::ParsePolicy(parse_threads_));
-          size_t fed = 0;
+          const std::optional<size_t> budget =
+              xstore_client::MemoryBudgetBytes(memory_budget_, memory_budget_ == 0 ? xstore_client::AvailableMemoryBytes() : std::nullopt, 0.95);
+          size_t fed = 0, received_bytes = 0;
           while (true) {
-              for (; fed < fragments.size(); ++fed) parser.Add(fragments[fed]);
+              for (; fed < fragments.size(); ++fed) {
+                  received_bytes += fragments[fed].size;
+                  parser.Add(fragments[fed]);
+              }
+              if (budget && received_bytes + arena->SpaceAllocated() > *budget) {
+                  throw xstore_client::MemoryBudgetExceeded(
+                      "XStore_Client: the reply holds " + std::to_string(received_bytes + arena->SpaceAllocated()) + " bytes of its " +
+                      std::to_string(*budget) + "-byte memory budget and was stopped; ask for a narrower range, or raise or lift the limit with SetMemoryBudget");
+              }
               if (last) break;
               last = RecvStreamMessage(socket, fragments);
           }
@@ -1001,6 +1438,16 @@ class XStoreClient {
   // same for every client of a process); 1 parses on the calling thread only.
   void SetParseThreads(size_t threads) { parse_threads_ = threads; }
 
+  // The memory a big reply may hold (received frames + parsed objects) before the call stops with xstore_client::MemoryBudgetExceeded rather
+  // than run the machine out of memory: a number of bytes, 0 (the default) for 95% of the memory available when the reply turns out to be big,
+  // or xstore_client::NO_MEMORY_BUDGET for no limit. Counted only for a reply that arrives as several messages (every big one from this
+  // server); a reply of one message is parsed whatever its size.
+  void SetMemoryBudget(size_t bytes) { memory_budget_ = bytes; }
+
+  // The most bytes one BatchInsert request may hold before the batch is split into several (default 512 MiB; protobuf's own limit is 2 GB).
+  // Smaller parts cost a round trip each; bigger ones need more client and server memory at once.
+  void SetMaxRequestBytes(size_t bytes) { max_request_bytes_ = std::max<size_t>(1, bytes); }
+
 
   // timeoutMs < 0 (default) blocks forever, matching the previous behavior.
   // Pass a positive value so an unreachable/dead server raises instead of
@@ -1012,6 +1459,8 @@ class XStoreClient {
       timeout_ms_ = timeout_ms;
       curve_auth_ = curve_auth;
       ApplySocketOptions(sock, timeout_ms, curve_auth_);
+      server_addr_ = std::string(server_addr);
+      server_port_ = std::string(server_port);
       endpoint_ = fmt::format("tcp://{}:{}", server_addr, server_port);
       sock.connect(endpoint_);
       if (warmup_on_init) {
@@ -1041,6 +1490,8 @@ class XStoreClient {
       sock = zmq::socket_t(ctx, zmq::socket_type::req);
       stream_sock_.reset();
       ApplySocketOptions(sock, timeout_ms, curve_auth_);
+      server_addr_ = std::string(server_addr);
+      server_port_ = std::string(server_port);
       endpoint_ = fmt::format("tcp://{}:{}", server_addr, server_port);
       sock.connect(endpoint_);
       if (warmup_on_init) {
@@ -1252,20 +1703,55 @@ class XStoreClient {
   // deferred to the server's WAL writer thread, so (unlike this client's
   // pre-WAL behavior) a read immediately after an ASYNC BatchInsert is not
   // guaranteed to see it yet.
+  // A batch too big for one request (protobuf cannot serialize 2 GB or more as one message) is sent as several, in order, each acknowledged
+  // before the next, each of at most about max_request_bytes_ (see SetMaxRequestBytes); the returned status is then one combined line, or the
+  // first part's that did not succeed (the rows of the parts before it are in, none after it were sent). A batch that fits is ONE request as
+  // always, atomic as the server makes it; a split batch is not one atomic batch any more. The size is estimated from a few rows first, so a
+  // normal batch pays for nothing but that.
   [[nodiscard]] std::string BatchInsert(std::string_view db_name, const std::vector<std::pair<uint64_t, XStore_Proto::RowData>> &rows,
                                          XStore_Proto::WalDurabilityMode durability_mode = XStore_Proto::ASYNC) {
-      XStore_Proto::Request to_server;
-      auto *payload = to_server.mutable_batchinsert();
-      payload->set_rtype(XStore_Proto::BATCHINSERT);
-      payload->set_dbname(std::string(db_name));
-      payload->set_durabilitymode(durability_mode);
-      payload->mutable_batchinsert_data()->Reserve(static_cast<int>(rows.size()));
-      for (const auto &row : rows) {
-          XStore_Proto::BatchInsert_DATA *entry = payload->add_batchinsert_data();
-          entry->set_timestamp(row.first);
-          *entry->mutable_data() = row.second;
+      if (!MayNeedSplitting(rows, max_request_bytes_)) return BatchInsertPart(db_name, rows, 0, rows.size(), durability_mode);
+
+      std::string first_status;
+      uint64_t inserted = 0;
+      size_t parts = 0;
+      std::vector<uint32_t> sizes;
+      for (size_t begin = 0; begin < rows.size();) {
+          const size_t end = NextInsertPart(rows, begin, max_request_bytes_, sizes);
+          const std::string status = BatchInsertPart(db_name, rows, begin, end, durability_mode, &sizes);
+          const size_t at = status.find(" - Inserted ");
+          if (status.compare(0, 6, "[INFO]") != 0 || at == std::string::npos) return status;   // this part failed: stop, say why
+          if (parts == 0) first_status = status.substr(0, at);
+          inserted += std::strtoull(status.c_str() + at + std::string_view(" - Inserted ").size(), nullptr, 10);
+          ++parts;
+          begin = end;
       }
-      return SendRecv<XStore_Proto::BatchInsert_REP>(to_server).insertstatus();
+      return fmt::format("{} - Inserted {} elements successfully ({} requests)", first_status, inserted, parts);
+  }
+
+  // BatchInsert for a bulk load: the parts (about 64 MiB each) are sent without waiting for each answer (at most PIPELINE_IN_FLIGHT unanswered),
+  // so the client builds the next part while the server applies the previous ones: on Mystic 1M rows (1.42 GB) took 15-18 s against 31 s. The
+  // price: different server workers apply the parts, so they may land in any order (the last of two rows with the same timestamp may not win
+  // across parts) and after a failure an arbitrary subset of the parts is in. Use it for distinct timestamps; BatchInsert keeps the order.
+  // A batch that is small (a quarter of a part or less, judged as in BatchInsert) is one request as always.
+  [[nodiscard]] std::string BatchInsertPipelined(std::string_view db_name, const std::vector<std::pair<uint64_t, XStore_Proto::RowData>> &rows,
+                                                  XStore_Proto::WalDurabilityMode durability_mode = XStore_Proto::ASYNC) {
+      const size_t part_bytes = std::min(max_request_bytes_, xstore_client::PIPELINED_PART_BYTES);
+      if (!MayNeedSplitting(rows, part_bytes)) return BatchInsertPart(db_name, rows, 0, rows.size(), durability_mode);
+      xstore_client::SplitStatusTally tally(" - Inserted ", " elements successfully");
+      size_t begin = 0;
+      std::vector<uint32_t> sizes;
+      SendPipelined<XStore_Proto::BatchInsert_REP>(
+          xstore_client::PIPELINE_IN_FLIGHT,
+          [&]() -> std::optional<zmq::message_t> {
+              if (begin >= rows.size() || tally.failed()) return std::nullopt;
+              const size_t end = NextInsertPart(rows, begin, part_bytes, sizes);
+              zmq::message_t body = xstore_client::EncodeBatchInsert(db_name, rows, begin, end, sizes, durability_mode, timeout_ms_);
+              begin = end;
+              return body;
+          },
+          [&](const XStore_Proto::BatchInsert_REP &reply) { return tally.Add(reply.insertstatus()); });
+      return tally.failed() ? tally.failure() : tally.Combined();
   }
 
   // Advanced/perf overload: build the request directly (e.g. reuse a
@@ -1289,15 +1775,31 @@ class XStoreClient {
       return SendRecvOnArena<XStore_Proto::BatchQuery_REP>(to_server);
   }
 
+  // A list of timestamps too long for one request (10 bytes each at most; max_request_bytes_ per request) is sent as several, pipelined: deleting
+  // is idempotent and the order of different timestamps does not matter, so the parts are sent without waiting for each answer (at most
+  // PIPELINE_IN_FLIGHT unanswered) and their counts are added up. A list that fits is ONE request as always.
   [[nodiscard]] std::string BatchDelete(std::string_view db_name, const std::vector<uint64_t> &timestamps) {
-      XStore_Proto::Request to_server;
-      auto *payload = to_server.mutable_batchdelete();
-      payload->set_rtype(XStore_Proto::BATCHDELETE);
-      payload->set_dbname(std::string(db_name));
-      for (uint64_t ts : timestamps) {
-          payload->add_timestamp(ts);
-      }
-      return SendRecv<XStore_Proto::BatchDelete_REP>(to_server).deletestatus();
+      const size_t per_part = std::max<size_t>(1, max_request_bytes_ / 10);
+      if (timestamps.size() <= per_part) return BatchDeletePart(db_name, timestamps, 0, timestamps.size());
+      xstore_client::SplitStatusTally tally(" - Deleted ", " items");
+      size_t begin = 0;
+      SendPipelined<XStore_Proto::BatchDelete_REP>(
+          xstore_client::PIPELINE_IN_FLIGHT,
+          [&]() -> std::optional<zmq::message_t> {
+              if (begin >= timestamps.size() || tally.failed()) return std::nullopt;
+              const size_t end = std::min(timestamps.size(), begin + per_part);
+              XStore_Proto::Request request;
+              auto *payload = request.mutable_batchdelete();
+              payload->set_rtype(XStore_Proto::BATCHDELETE);
+              payload->set_dbname(std::string(db_name));
+              payload->mutable_timestamp()->Reserve(static_cast<int>(end - begin));
+              for (size_t i = begin; i < end; ++i) payload->add_timestamp(timestamps[i]);
+              begin = end;
+              if (timeout_ms_ >= 0) request.set_timeoutms(static_cast<uint32_t>(timeout_ms_));
+              return xstore_client::SerializeRequest(request);
+          },
+          [&](const XStore_Proto::BatchDelete_REP &reply) { return tally.Add(reply.deletestatus()); });
+      return tally.failed() ? tally.failure() : tally.Combined();
   }
 
   // ==== Range (contiguous timestamp span) ====
@@ -1345,6 +1847,57 @@ class XStoreClient {
       payload->set_mode(mode);
       payload->set_caseinsensitive(case_insensitive);
       return SendRecvOnArena<XStore_Proto::FindByPattern_REP>(to_server);
+  }
+
+  // ==== reads bigger than memory: the same calls as windows ====
+  // Each reads its range (or list) as successive windows, in order, each an ordinary streamed call whose reply is handed to `on_window` (with
+  // its status, if any) and then dropped; with options.prefetch (the default) the next window arrives while on_window works on the current
+  // one, so memory stays at about two windows whatever the size of the result, and the time stays that of one call (see WindowOptions).
+  // Return the rows delivered. An exception from on_window or from a window's call stops the read and propagates.
+  uint64_t RangeQueryEach(uint64_t start_time, uint64_t end_time, std::string_view db_name,
+                          const std::function<void(const XStore_Proto::RangeQuery_REP &)> &on_window,
+                          const xstore_client::WindowOptions &options = {}) {
+      return ReadInTimeWindows<XStore_Proto::RangeQuery_REP>(
+          start_time, end_time, db_name, options,
+          [&](XStoreClient &c, uint64_t from, uint64_t to) { return c.RangeQuery(from, to, db_name); }, on_window);
+  }
+
+  uint64_t FindByValueEach(uint64_t start_time, uint64_t end_time, std::string_view db_name, int32_t column_idx, const XStore_Proto::FData &value,
+                           const std::function<void(const XStore_Proto::FindByValue_REP &)> &on_window,
+                           const xstore_client::WindowOptions &options = {}) {
+      return ReadInTimeWindows<XStore_Proto::FindByValue_REP>(
+          start_time, end_time, db_name, options,
+          [&](XStoreClient &c, uint64_t from, uint64_t to) { return c.FindByValue(from, to, db_name, column_idx, value); }, on_window);
+  }
+
+  uint64_t FindByPatternEach(uint64_t start_time, uint64_t end_time, std::string_view db_name, int32_t column_idx, std::string_view pattern,
+                             XStore_Proto::PatternMode mode, bool case_insensitive,
+                             const std::function<void(const XStore_Proto::FindByPattern_REP &)> &on_window,
+                             const xstore_client::WindowOptions &options = {}) {
+      return ReadInTimeWindows<XStore_Proto::FindByPattern_REP>(
+          start_time, end_time, db_name, options,
+          [&](XStoreClient &c, uint64_t from, uint64_t to) { return c.FindByPattern(from, to, db_name, column_idx, pattern, mode, case_insensitive); },
+          on_window);
+  }
+
+  // The windows are consecutive slices of `timestamps`; with sort_time they are sliced from the sorted list, so the order holds across windows.
+  uint64_t BatchQueryEach(std::string_view db_name, const std::vector<uint64_t> &timestamps, bool sort_time,
+                          const std::function<void(const XStore_Proto::BatchQuery_REP &)> &on_window,
+                          const xstore_client::WindowOptions &options = {}) {
+      if (timestamps.empty()) return 0;
+      std::vector<uint64_t> sorted;
+      if (sort_time) {
+          sorted = timestamps;
+          std::sort(sorted.begin(), sorted.end());
+      }
+      const std::vector<uint64_t> &list = sort_time ? sorted : timestamps;
+      return ReadInWindows<XStore_Proto::BatchQuery_REP>(
+          list.size(), WindowLength(db_name, options), options.prefetch,
+          [&](XStoreClient &c, uint64_t first, uint64_t count) {
+              const std::vector<uint64_t> slice(list.begin() + static_cast<std::ptrdiff_t>(first), list.begin() + static_cast<std::ptrdiff_t>(first + count));
+              return c.BatchQuery(db_name, slice, sort_time);
+          },
+          on_window);
   }
 
   [[nodiscard]] std::string RangeDelete(uint64_t start_time, uint64_t end_time, std::string_view db_name) {

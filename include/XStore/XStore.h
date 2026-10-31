@@ -536,9 +536,10 @@ class XStore {
         void BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStore_Proto::BatchInsert_REP *return_data,
                           xstore::MemoryPool::Clock::time_point deadline = xstore::MemoryPool::Clock::time_point::max());
 
-        // streamed_reply (RangeQuery and BatchQuery): the reply goes to a client that receives it as separate messages and parses it chunk by
-        // chunk (Request.streamOk). Such a reply is not limited by protobuf's 2 GB ceiling on one message, so the 2 GB size guard is skipped;
-        // the memory pool's lease is then the only limit. Left false, a request estimated over 2 GB is refused as always: the
+        // streamed_reply (RangeQuery, BatchQuery, FindByValue, FindByPattern): the reply goes to a client that receives it as separate messages
+        // and parses it chunk by chunk (Request.streamOk). Such a reply is not limited by protobuf's 2 GB ceiling on one message, so the size
+        // guard (xstore::ReplyLimitBytes: a refusal up front for RangeQuery/BatchQuery, a stop mid-scan for FindByValue/FindByPattern) is
+        // skipped; the memory pool's lease is then the only limit. Left false, a request estimated over 2 GB is refused as always: the
         // client of such a request joins the chunks and parses ONE message.
         // BATCH QUERY (streamed, wire-format encode -- the only BatchQuery
         // path; the network server is the only production caller and it
@@ -623,7 +624,8 @@ class XStore {
         // pruning speedup.
         void FindByValue(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
                           std::string_view db_name, int32_t column_idx, const XStore_Proto::FData &value,
-                          size_t chunk_size_bytes, const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk);
+                          size_t chunk_size_bytes, const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk,
+                          bool streamed_reply = false);
 
         // FIND BY PATTERN -- TEMPORARY IMPLEMENTATION (option A). Streams
         // every row in [startEpochT, endEpochT] whose column_idx holds a
@@ -637,7 +639,8 @@ class XStore {
         void FindByPattern(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
                            std::string_view db_name, int32_t column_idx, std::string_view pattern,
                            XStore_Proto::PatternMode mode, bool case_insensitive,
-                           size_t chunk_size_bytes, const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk);
+                           size_t chunk_size_bytes, const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk,
+                           bool streamed_reply = false);
 
         // RANGE DELETE
         [[nodiscard]] XStore_Proto::RangeDelete_REP RangeDelete(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name);

@@ -7,6 +7,7 @@
 // InfoQuery, CreateDB, RemoveDB, RemoveDBFiles, then each of Unary/Batch/Range
 // with its Insert+Query+Delete kept together, then the aggregates, then the
 // cross-cutting Concurrency section last.
+#include "include/XStore/XStore_ReplyLimit.h"
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <atomic>
@@ -2459,6 +2460,68 @@ TEST_F(XStoreTest, RangeDeleteMissingFinalYearFileReturnsInsteadOfHanging) {
     XStore_Proto::UnaryQuery_REP rep1998;
     store.UnaryQuery(ts_1998_last, "TESTDB", &rep1998);
     EXPECT_EQ(rep1998.data().fielddata_size(), 0);
+}
+
+// FindByValue and FindByPattern cannot know their reply size before scanning, so for a client that joins the chunks they stop at the reply limit
+// (2 GB; lowered to 8 KB here so the test needs no 2 GB of data) and say so in the status. A streamed reply is not limited.
+namespace {
+class ScopedReplyLimit {
+ public:
+    explicit ScopedReplyLimit(unsigned long long bytes) : old_(xstore::ReplyLimitBytes().exchange(bytes)) {}
+    ~ScopedReplyLimit() { xstore::ReplyLimitBytes().store(old_); }
+    ScopedReplyLimit(const ScopedReplyLimit &) = delete;
+    ScopedReplyLimit &operator=(const ScopedReplyLimit &) = delete;
+ private:
+    unsigned long long old_;
+};
+}  // namespace
+
+TEST_F(XStoreTest, FindByValueStopsAtTheReplyLimitUnlessTheReplyIsStreamed) {
+    XStore store;
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 64);
+    for (int64_t i = 0; i < 600; ++i) {
+        XStore_Proto::UnaryInsert_REP insert_rep;
+        store.UnaryInsert(TS_2016_MID + i, MakeRow({FInt64(7), FInt64(i)}), "TESTDB", &insert_rep, XStore_Proto::SYNC);
+    }
+    ScopedReplyLimit limit(8000);
+    const auto run = [&](bool streamed_reply) {
+        std::string joined;
+        store.FindByValue(TS_2016_MID, TS_2016_MID + 599, "TESTDB", 0, FInt64(7), XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
+                          [&](std::string &&chunk, bool) { joined += chunk; }, streamed_reply);
+        XStore_Proto::FindByValue_REP rep;
+        EXPECT_TRUE(rep.ParseFromString(joined));
+        return rep;
+    };
+    const auto truncated = run(false);
+    EXPECT_LT(truncated.queryresponse_size(), 600);
+    EXPECT_NE(truncated.querystatus().find("truncated"), std::string::npos) << truncated.querystatus();
+    const auto whole = run(true);
+    EXPECT_EQ(whole.queryresponse_size(), 600);
+    EXPECT_FALSE(whole.has_querystatus()) << whole.querystatus();
+}
+
+TEST_F(XStoreTest, FindByPatternStopsAtTheReplyLimitUnlessTheReplyIsStreamed) {
+    XStore store;
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 64);
+    for (int64_t i = 0; i < 600; ++i) {
+        XStore_Proto::UnaryInsert_REP insert_rep;
+        store.UnaryInsert(TS_2016_MID + i, MakeRow({FString("ab-" + std::to_string(i))}), "TESTDB", &insert_rep, XStore_Proto::SYNC);
+    }
+    ScopedReplyLimit limit(8000);
+    const auto run = [&](bool streamed_reply) {
+        std::string joined;
+        store.FindByPattern(TS_2016_MID, TS_2016_MID + 599, "TESTDB", 0, "ab%", XStore_Proto::PATTERN_LIKE, false,
+                            XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES, [&](std::string &&chunk, bool) { joined += chunk; }, streamed_reply);
+        XStore_Proto::FindByPattern_REP rep;
+        EXPECT_TRUE(rep.ParseFromString(joined));
+        return rep;
+    };
+    const auto truncated = run(false);
+    EXPECT_LT(truncated.queryresponse_size(), 600);
+    EXPECT_NE(truncated.querystatus().find("truncated"), std::string::npos) << truncated.querystatus();
+    const auto whole = run(true);
+    EXPECT_EQ(whole.queryresponse_size(), 600);
+    EXPECT_FALSE(whole.has_querystatus()) << whole.querystatus();
 }
 
 TEST_F(XStoreTest, RangeQueryRejectsRequestOver2GBLimit) {

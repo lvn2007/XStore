@@ -83,6 +83,9 @@ if(TARGET XStoreClient)
             integration/XStoreClientParallelTest.cpp
             integration/XStoreClientParallelParseTest.cpp
             integration/XStoreClientStreamTest.cpp
+            integration/XStoreClientSplitTest.cpp
+            integration/XStoreClientWindowTest.cpp
+            integration/XStoreClientEncodeTest.cpp
     )
     target_link_libraries(xstore_client_tests PRIVATE GTest::gtest_main XStoreClient)
 
