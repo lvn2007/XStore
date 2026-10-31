@@ -26,11 +26,13 @@ XStore_Proto::UnaryQuery_REP MakeRow(uint64_t ts) {
     return row;
 }
 
-// One RangeQuery_REP per frame, each cut on a row boundary like the server does; the status rides on the last one.
+// One reply message (RangeQuery_REP unless asked otherwise) per frame, each cut on a row boundary like the server does; the status rides on
+// the last one.
+template <class RepT = XStore_Proto::RangeQuery_REP>
 std::vector<std::string> MakeFrames(size_t frames, size_t rows, bool with_status) {
     std::vector<std::string> out;
     for (size_t f = 0; f < frames; ++f) {
-        XStore_Proto::RangeQuery_REP part;
+        RepT part;
         for (size_t r = f * rows / frames; r < (f + 1) * rows / frames; ++r) *part.add_queryresponse() = MakeRow(r);
         if (with_status && f + 1 == frames) part.set_querystatus(K_STATUS);
         out.push_back(part.SerializeAsString());
@@ -237,21 +239,75 @@ TEST(ParallelParseTest, OnlyRepliesWithRowsAreMergeable) {
     static_assert(!xstore_client::IsFragmentMergeable<XStore_Proto::Ping_REP>::value);
 }
 
-// ---- end to end through XStoreClient::RangeQuery ----
+// ---- end to end through the four calls that return rows ----
+
+// The reply a call gives for `frames`, as the bytes of one message, for each of the four row-returning calls.
+template <class RepT>
+std::string ViaTheCall(XStoreClient &client);
+template <>
+std::string ViaTheCall<XStore_Proto::RangeQuery_REP>(XStoreClient &client) {
+    return client.RangeQuery(0, K_ROWS, "ANY")->SerializeAsString();
+}
+template <>
+std::string ViaTheCall<XStore_Proto::BatchQuery_REP>(XStoreClient &client) {
+    return client.BatchQuery("ANY", {0, 1, 2}, true)->SerializeAsString();
+}
+template <>
+std::string ViaTheCall<XStore_Proto::FindByValue_REP>(XStoreClient &client) {
+    return client.FindByValue(0, K_ROWS, "ANY", 0, xstore_fdata::Double(1.0))->SerializeAsString();
+}
+template <>
+std::string ViaTheCall<XStore_Proto::FindByPattern_REP>(XStoreClient &client) {
+    return client.FindByPattern(0, K_ROWS, "ANY", 0, "a%")->SerializeAsString();
+}
+
+template <class RepT>
+void ExpectEveryShapeOfReplyGivesTheSameBytesAsASerialParse() {
+    struct Shape {
+        const char *name;
+        std::vector<std::string> frames;
+    };
+    const std::string all = Whole(MakeFrames<RepT>(1, K_ROWS, true));
+    const std::vector<Shape> shapes = {
+        {"streamed frames", MakeFrames<RepT>(K_FRAMES, K_ROWS, true)},
+        {"one big frame", MakeFrames<RepT>(1, K_ROWS, true)},
+        {"small reply (serial parse)", MakeFrames<RepT>(1, 3, true)},
+        {"small streamed reply (join)", MakeFrames<RepT>(3, 30, false)},
+        {"cut inside a row (join fallback)", {all.substr(0, 3), all.substr(3)}},
+    };
+    for (const Shape &shape : shapes) {
+        RepT expected;
+        ASSERT_TRUE(expected.ParseFromString(Whole(shape.frames))) << shape.name;
+        for (size_t threads : {size_t{1}, size_t{8}, size_t{0}}) {   // 0 = adaptive
+            OneShotServer server(shape.frames);
+            XStoreClient client("127.0.0.1", server.port(), 10000, /*warmup_on_init=*/false);
+            client.SetParseThreads(threads);
+            EXPECT_TRUE(ViaTheCall<RepT>(client) == expected.SerializeAsString()) << shape.name << " threads=" << threads;
+        }
+    }
+}
 
 TEST(ClientStreamedReplyTest, RangeQueryGivesTheSameReplyForEveryParseThreadSetting) {
+    ExpectEveryShapeOfReplyGivesTheSameBytesAsASerialParse<XStore_Proto::RangeQuery_REP>();
+}
+TEST(ClientStreamedReplyTest, BatchQueryGivesTheSameReplyForEveryParseThreadSetting) {
+    ExpectEveryShapeOfReplyGivesTheSameBytesAsASerialParse<XStore_Proto::BatchQuery_REP>();
+}
+TEST(ClientStreamedReplyTest, FindByValueGivesTheSameReplyForEveryParseThreadSetting) {
+    ExpectEveryShapeOfReplyGivesTheSameBytesAsASerialParse<XStore_Proto::FindByValue_REP>();
+}
+TEST(ClientStreamedReplyTest, FindByPatternGivesTheSameReplyForEveryParseThreadSetting) {
+    ExpectEveryShapeOfReplyGivesTheSameBytesAsASerialParse<XStore_Proto::FindByPattern_REP>();
+}
+
+TEST(ClientStreamedReplyTest, TheStatusAndTheRowCountComeThrough) {
     const std::vector<std::string> frames = MakeFrames(K_FRAMES, K_ROWS, true);
-    XStore_Proto::RangeQuery_REP expected;
-    ASSERT_TRUE(expected.ParseFromString(Whole(frames)));
-    for (size_t threads : {size_t{1}, size_t{8}, size_t{0}}) {   // 0 = adaptive
-        OneShotServer server(frames);
-        XStoreClient client("127.0.0.1", server.port(), 10000, /*warmup_on_init=*/false);
-        client.SetParseThreads(threads);
-        const XStore_Proto::RangeQuery_REP rep = client.RangeQuery(0, K_ROWS, "ANY");
-        ASSERT_EQ(rep.queryresponse_size(), static_cast<int>(K_ROWS)) << "threads=" << threads;
-        EXPECT_EQ(rep.querystatus(), K_STATUS);
-        EXPECT_TRUE(rep.SerializeAsString() == expected.SerializeAsString()) << "threads=" << threads;
-    }
+    OneShotServer server(frames);
+    XStoreClient client("127.0.0.1", server.port(), 10000, /*warmup_on_init=*/false);
+    client.SetParseThreads(8);
+    const auto rep = client.RangeQuery(0, K_ROWS, "ANY");
+    EXPECT_EQ(rep->queryresponse_size(), static_cast<int>(K_ROWS));
+    EXPECT_EQ(rep->querystatus(), K_STATUS);
 }
 
 TEST(ClientStreamedReplyTest, ASingleFrameReplyIsParsedInParallelToo) {
@@ -259,19 +315,80 @@ TEST(ClientStreamedReplyTest, ASingleFrameReplyIsParsedInParallelToo) {
     OneShotServer server(frames);
     XStoreClient client("127.0.0.1", server.port(), 10000, /*warmup_on_init=*/false);
     client.SetParseThreads(4);
-    const XStore_Proto::RangeQuery_REP rep = client.RangeQuery(0, K_ROWS * 4, "ANY");
+    const auto rep = client.RangeQuery(0, K_ROWS * 4, "ANY");
     XStore_Proto::RangeQuery_REP expected;
     ASSERT_TRUE(expected.ParseFromString(Whole(frames)));
-    EXPECT_TRUE(rep.SerializeAsString() == expected.SerializeAsString());
+    EXPECT_TRUE(rep->SerializeAsString() == expected.SerializeAsString());
 }
 
-TEST(ClientStreamedReplyTest, AReplyCutInsideARowStillParsesThroughTheJoinFallback) {
+// ---- the reply lives on one Arena, and the wrapper owns it ----
+
+// Every message of a reply must sit on the SAME arena: a row left on the heap (or on another arena) would be freed by whoever owns it
+// and again by the arena, or read after its owner is gone.
+void ExpectOneArena(const XStore_Proto::RangeQuery_REP &rep) {
+    ASSERT_NE(rep.GetArena(), nullptr);
+    for (const auto &row : rep.queryresponse()) {
+        ASSERT_EQ(row.GetArena(), rep.GetArena());
+        ASSERT_EQ(row.data().GetArena(), rep.GetArena());
+    }
+}
+
+TEST(ArenaReplyTest, EveryRowOfEveryShapeOfReplySitsOnTheRepliesArena) {
+    const std::string all = Whole(MakeFrames(1, K_ROWS, true));
+    const std::vector<std::vector<std::string>> shapes = {MakeFrames(K_FRAMES, K_ROWS, true), MakeFrames(1, K_ROWS, true), MakeFrames(1, 3, true),
+                                                          MakeFrames(3, 30, false), {all.substr(0, 3), all.substr(3)}};
+    for (const auto &frames : shapes) {
+        OneShotServer server(frames);
+        XStoreClient client("127.0.0.1", server.port(), 10000, /*warmup_on_init=*/false);
+        client.SetParseThreads(4);
+        const auto rep = client.RangeQuery(0, K_ROWS, "ANY");
+        ExpectOneArena(*rep);
+    }
+}
+
+TEST(ArenaReplyTest, TheReplyOutlivesTheClientAndSurvivesMoves) {
     const std::vector<std::string> frames = MakeFrames(K_FRAMES, K_ROWS, true);
-    const std::string all = Whole(frames);
-    OneShotServer server({all.substr(0, 3), all.substr(3)});
-    XStoreClient client("127.0.0.1", server.port(), 10000, /*warmup_on_init=*/false);
-    client.SetParseThreads(8);
-    const XStore_Proto::RangeQuery_REP rep = client.RangeQuery(0, K_ROWS, "ANY");
-    EXPECT_EQ(rep.queryresponse_size(), static_cast<int>(K_ROWS));
-    EXPECT_EQ(rep.querystatus(), K_STATUS);
+    XStore_Proto::RangeQuery_REP expected;
+    ASSERT_TRUE(expected.ParseFromString(Whole(frames)));
+    std::optional<xstore_client::ArenaReply<XStore_Proto::RangeQuery_REP>> kept;
+    {
+        OneShotServer server(frames);
+        XStoreClient client("127.0.0.1", server.port(), 10000, /*warmup_on_init=*/false);
+        kept.emplace(client.RangeQuery(0, K_ROWS, "ANY"));
+    }   // client and server gone: the frames the reply was parsed from are gone too
+    xstore_client::ArenaReply<XStore_Proto::RangeQuery_REP> moved(std::move(*kept));
+    EXPECT_EQ(kept->get(), nullptr);   // the moved-from wrapper owns nothing
+    EXPECT_TRUE(moved->SerializeAsString() == expected.SerializeAsString());
+    xstore_client::ArenaReply<XStore_Proto::RangeQuery_REP> assigned;
+    assigned = std::move(moved);       // frees the empty reply `assigned` held, takes the big one
+    EXPECT_EQ(moved.get(), nullptr);
+    EXPECT_TRUE(assigned->SerializeAsString() == expected.SerializeAsString());
+}
+
+TEST(ArenaReplyTest, AssigningOverAReplyFreesTheOldOneAndKeepsTheNewOne) {
+    xstore_client::ArenaReply<XStore_Proto::RangeQuery_REP> reply;
+    for (int round = 0; round < 3; ++round) {
+        const std::vector<std::string> frames = MakeFrames(K_FRAMES, K_ROWS + static_cast<size_t>(round), false);
+        OneShotServer server(frames);
+        XStoreClient client("127.0.0.1", server.port(), 10000, /*warmup_on_init=*/false);
+        reply = client.RangeQuery(0, K_ROWS, "ANY");   // the pattern a benchmark loop uses
+        EXPECT_EQ(reply->queryresponse_size(), static_cast<int>(K_ROWS) + round);
+    }
+}
+
+TEST(ArenaReplyTest, ParsingIntoAnArenaGivesTheHeapParseAndLeavesTheResultUntouchedOnFailure) {
+    const std::vector<std::string> frames = MakeFrames(4, 2000, true);
+    XStore_Proto::RangeQuery_REP expected;
+    ASSERT_TRUE(expected.ParseFromString(Whole(frames)));
+    google::protobuf::Arena arena;
+    auto *out = google::protobuf::Arena::Create<XStore_Proto::RangeQuery_REP>(&arena);
+    ASSERT_TRUE(xstore_client::ParseFragmentsParallel(Fragments(frames), *out, Policy(4), 1 << 14, &arena));
+    EXPECT_TRUE(out->SerializeAsString() == expected.SerializeAsString());
+    ExpectOneArena(*out);
+
+    auto *untouched = google::protobuf::Arena::Create<XStore_Proto::RangeQuery_REP>(&arena);
+    std::string bad = frames[0];
+    bad.resize(bad.size() - 5);   // cut mid-row
+    EXPECT_FALSE(xstore_client::ParseFragmentsParallel(Fragments({bad, frames[1]}), *untouched, Policy(4), 1 << 14, &arena));
+    EXPECT_EQ(untouched->queryresponse_size(), 0);
 }

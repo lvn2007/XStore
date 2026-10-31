@@ -194,7 +194,8 @@ TEST_F(XStoreClientLiveTest, BatchInsertedDataActuallyAppearsOnServer) {
     EXPECT_NE(insert_status.find("Inserted 3 elements"), std::string::npos) << insert_status;
 
     std::vector<uint64_t> query_timestamps = {ts1, ts_hole, ts2, ts3};
-    XStore_Proto::BatchQuery_REP rep = client->BatchQuery(db_name_arg, query_timestamps);
+    const auto reply = client->BatchQuery(db_name_arg, query_timestamps);
+    const XStore_Proto::BatchQuery_REP &rep = *reply;
 
     std::map<uint64_t, XStore_Proto::UnaryQuery_REP> by_ts;
     for (int i = 0; i < rep.queryresponse_size(); i++) {
@@ -238,7 +239,8 @@ TEST_F(XStoreClientLiveTest, BatchInsertedDataWithHolesIsReadBackByRangeQuery) {
     std::string insert_status = client->BatchInsert(db_name_arg, rows, XStore_Proto::SYNC);
     ASSERT_NE(insert_status.find("[INFO]"), std::string::npos) << insert_status;
 
-    XStore_Proto::RangeQuery_REP rep = client->RangeQuery(start, end, db_name_arg);
+    const auto reply = client->RangeQuery(start, end, db_name_arg);
+    const XStore_Proto::RangeQuery_REP &rep = *reply;
     ASSERT_EQ(rep.queryresponse_size(), 4);
     EXPECT_EQ(rep.queryresponse(0).data().fielddata(0).sfixed64data(), -4242);
     EXPECT_EQ(rep.queryresponse(1).data().fielddata_size(), 0) << "hole at Start+1";
@@ -297,8 +299,8 @@ TEST_F(XStoreClientLiveTest, FindByPatternReturnsOnlyMatchingRowsOnServer) {
         ASSERT_NE(status.find("[INFO]"), std::string::npos) << "UnaryInsert failed: " << status;
     }
 
-    XStore_Proto::FindByPattern_REP rep =
-        client->FindByPattern(1592222400, 1592222402, db_name, 0, "%-aapl-%", XStore_Proto::PATTERN_LIKE, true);
+    const auto reply = client->FindByPattern(1592222400, 1592222402, db_name, 0, "%-aapl-%", XStore_Proto::PATTERN_LIKE, true);
+    const XStore_Proto::FindByPattern_REP &rep = *reply;
     EXPECT_FALSE(rep.has_querystatus()) << rep.querystatus();
     ASSERT_EQ(rep.queryresponse_size(), 2);
     EXPECT_EQ(rep.queryresponse(0).data().fielddata(0).stringdata(), "order-AAPL-1");

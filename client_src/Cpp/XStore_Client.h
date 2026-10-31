@@ -15,6 +15,7 @@
 #include <fstream>
 #include <functional>
 #include <iomanip>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -32,6 +33,7 @@
 #endif
 #include "fmt/format.h"
 
+#include <google/protobuf/arena.h>
 #include <zmq.hpp>
 #include <zmq_addon.hpp>
 #include "XStore.pb.h"
@@ -342,22 +344,33 @@ struct IsFragmentMergeable<RepT, std::void_t<decltype(std::declval<RepT &>().mut
 // Parses the fragments piece by piece on a team the policy sizes and appends the rows to `out` in order (moving the row objects, not
 // copying them), taking the last queryStatus. Returns false, with `out` untouched, when the reply is not worth splitting (fewer than two
 // pieces), not well framed, or a piece does not parse.
+// `arena` is the arena `out` was created on (nullptr when `out` lives on the heap): the pieces are created on it too, so the rows move
+// between messages of ONE arena. A row moved between two different owners would be freed twice or read after its owner is gone.
 template <class RepT>
 [[nodiscard]] bool ParseFragmentsParallel(const std::vector<Fragment> &fragments, RepT &out, const ParallelismPolicy &policy,
-                                          size_t piece_bytes = PARSE_PIECE_BYTES) {
+                                          size_t piece_bytes = PARSE_PIECE_BYTES, google::protobuf::Arena *arena = nullptr) {
     static_assert(IsFragmentMergeable<RepT>::value, "RepT needs repeated queryResponse and optional queryStatus");
     std::vector<Fragment> pieces;
-    std::vector<RepT> parts;
+    std::vector<std::unique_ptr<RepT>> heap_parts;   // used when there is no arena; an arena owns its pieces
+    std::vector<RepT *> parts;
     std::atomic<bool> failed{false};
     try {
         if (!SplitIntoPiecesParallel(fragments, piece_bytes, policy, pieces) || pieces.size() < 2) return false;
         for (const Fragment &piece : pieces) {
             if (piece.size > static_cast<size_t>(INT_MAX)) return false;
         }
-        parts.resize(pieces.size());
+        parts.reserve(pieces.size());
+        for (size_t k = 0; k < pieces.size(); ++k) {
+            if (arena != nullptr) {
+                parts.push_back(google::protobuf::Arena::Create<RepT>(arena));
+            } else {
+                heap_parts.push_back(std::make_unique<RepT>());
+                parts.push_back(heap_parts.back().get());
+            }
+        }
         RunJobs(parts.size(), policy, [&](size_t k) {
             if (failed.load(std::memory_order_relaxed)) return;
-            if (!parts[k].ParseFromArray(pieces[k].data, static_cast<int>(pieces[k].size))) failed.store(true, std::memory_order_relaxed);
+            if (!parts[k]->ParseFromArray(pieces[k].data, static_cast<int>(pieces[k].size))) failed.store(true, std::memory_order_relaxed);
         });
     } catch (...) {   // out of memory in a worker: let the caller try the serial parse
         return false;
@@ -366,18 +379,47 @@ template <class RepT>
 
     using Row = typename std::remove_reference_t<decltype(*out.mutable_queryresponse())>::value_type;
     int total_rows = out.queryresponse_size();
-    for (const RepT &part : parts) total_rows += part.queryresponse_size();
+    for (const RepT *part : parts) total_rows += part->queryresponse_size();
     out.mutable_queryresponse()->Reserve(total_rows);
     std::vector<Row *> moved;
-    for (RepT &part : parts) {
-        const int rows = part.queryresponse_size();
+    for (RepT *part : parts) {
+        const int rows = part->queryresponse_size();
         moved.resize(static_cast<size_t>(rows));
-        part.mutable_queryresponse()->ExtractSubrange(0, rows, moved.data());
-        for (Row *row : moved) out.mutable_queryresponse()->AddAllocated(row);
-        if (part.has_querystatus()) out.set_querystatus(std::move(*part.mutable_querystatus()));
+        part->mutable_queryresponse()->UnsafeArenaExtractSubrange(0, rows, moved.data());   // same arena on both sides: no copy
+        for (Row *row : moved) out.mutable_queryresponse()->UnsafeArenaAddAllocated(row);
+        if (part->has_querystatus()) out.set_querystatus(*part->mutable_querystatus());
     }
     return true;
 }
+
+// A reply of rows together with the arena it lives on. Freeing a parsed reply message by message was the biggest cost left in a 1M-row
+// RangeQuery (4-7 s of 10-14 s: 128 million small objects, one free each); an arena hands its memory back in a few large blocks (about
+// 0.5 s) and also makes the parse itself cheaper. Move-only; use it like a pointer to the reply (`reply->queryresponse()`, `*reply`).
+// Everything read from it (rows, strings) stays valid exactly as long as the ArenaReply that produced it, and no longer.
+template <class RepT>
+class ArenaReply {
+ public:
+    ArenaReply() : arena_(std::make_unique<google::protobuf::Arena>()), rep_(google::protobuf::Arena::Create<RepT>(arena_.get())) {}
+    ArenaReply(std::unique_ptr<google::protobuf::Arena> arena, RepT *rep) : arena_(std::move(arena)), rep_(rep) {}
+    ArenaReply(ArenaReply &&other) noexcept : arena_(std::move(other.arena_)), rep_(std::exchange(other.rep_, nullptr)) {}
+    ArenaReply &operator=(ArenaReply &&other) noexcept {
+        if (this != &other) {
+            arena_ = std::move(other.arena_);   // frees the reply this one held
+            rep_ = std::exchange(other.rep_, nullptr);
+        }
+        return *this;
+    }
+    ArenaReply(const ArenaReply &) = delete;
+    ArenaReply &operator=(const ArenaReply &) = delete;
+
+    RepT *get() const noexcept { return rep_; }
+    RepT *operator->() const noexcept { return rep_; }
+    RepT &operator*() const noexcept { return *rep_; }
+
+ private:
+    std::unique_ptr<google::protobuf::Arena> arena_;
+    RepT *rep_ = nullptr;
+};
 
 }  // namespace xstore_client
 
@@ -511,8 +553,8 @@ class XStoreClient {
   // sync with each other the way copy-pasted send/recv blocks do. ToServer
   // is always the Request envelope -- the oneof case tells the server which
   // payload it's holding, so it only has to parse the wire bytes once.
-  template <typename RepT>
-  RepT SendRecv(XStore_Proto::Request &to_server) {
+  // Sends the request and leaves the reply's frames in recv_buf.
+  void Exchange(XStore_Proto::Request &to_server) {
       if (timeout_ms_ >= 0) to_server.set_timeoutms(static_cast<uint32_t>(timeout_ms_));
       size_t byte_size = to_server.ByteSizeLong();
       zmq::message_t z_out(byte_size);
@@ -525,39 +567,75 @@ class XStoreClient {
       if (!zmq::recv_multipart(sock, std::back_inserter(recv_buf)) || recv_buf.empty()) {
           throw std::runtime_error("XStore_Client: recv failed/timed out");
       }
+  }
 
-      RepT from_server;
-      // A big reply of rows (RangeQuery, BatchQuery, FindByValue, FindByPattern) is cut at row boundaries and parsed on a team of threads
-      // that sizes itself to the machine's load (part 2 above) -- the single ParseFromArray was most of a big RangeQuery's time.
-      // Every other reply, and any reply that cannot be handled that way, takes the serial parse below.
+  size_t ReplyBytes() const {
+      size_t total = 0;
+      for (const auto &part : recv_buf) total += part.size();
+      return total;
+  }
+
+  // A big reply of rows (RangeQuery, BatchQuery, FindByValue, FindByPattern) is cut at row boundaries and parsed on a team of threads
+  // that sizes itself to the machine's load (part 2 above) -- the single ParseFromArray was most of a big RangeQuery's time.
+  // Returns false (`into` untouched) for every other reply and for any reply that cannot be handled that way.
+  template <typename RepT>
+  bool TryParseInParallel(RepT &into, google::protobuf::Arena *arena) {
       if constexpr (xstore_client::IsFragmentMergeable<RepT>::value) {
+          if (ReplyBytes() < xstore_client::MIN_PARALLEL_PARSE_BYTES) return false;
           std::vector<xstore_client::Fragment> fragments;
           fragments.reserve(recv_buf.size());
-          size_t reply_bytes = 0;
-          for (const auto &part : recv_buf) {
-              fragments.push_back({part.data(), part.size()});
-              reply_bytes += part.size();
-          }
-          if (reply_bytes >= xstore_client::MIN_PARALLEL_PARSE_BYTES &&
-              xstore_client::ParseFragmentsParallel(fragments, from_server, xstore_client::ParsePolicy(parse_threads_))) {
-              return from_server;
-          }
+          for (const auto &part : recv_buf) fragments.push_back({part.data(), part.size()});
+          return xstore_client::ParseFragmentsParallel(fragments, into, xstore_client::ParsePolicy(parse_threads_),
+                                                        xstore_client::PARSE_PIECE_BYTES, arena);
+      } else {
+          (void)into;
+          (void)arena;
+          return false;
       }
+  }
 
-      // A streamed reply (currently RangeQuery and the like) arrives as several frames that are pieces of ONE logical message's bytes
-      // (protobuf doesn't care where a message's serialized bytes get split, only that they're concatenated back in order before
-      // parsing) -- reassembled here so this stays invisible to every caller above SendRecv.
+  // A streamed reply (currently RangeQuery and the like) arrives as several frames that are pieces of ONE logical message's bytes
+  // (protobuf doesn't care where a message's serialized bytes get split, only that they're concatenated back in order before
+  // parsing) -- reassembled here so this stays invisible to every caller above SendRecv.
+  template <typename RepT>
+  void ParseSerially(RepT &into) {
       if (recv_buf.size() == 1) {
-          from_server.ParseFromArray(recv_buf.front().data(), recv_buf.front().size());
+          into.ParseFromArray(recv_buf.front().data(), recv_buf.front().size());
       } else {
           std::string joined;
-          size_t total = 0;
-          for (const auto &part : recv_buf) total += part.size();
-          joined.reserve(total);
+          joined.reserve(ReplyBytes());
           for (const auto &part : recv_buf) joined.append(static_cast<const char *>(part.data()), part.size());
-          from_server.ParseFromArray(joined.data(), joined.size());
+          into.ParseFromArray(joined.data(), joined.size());
       }
+  }
+
+  // Every RPC is: serialize request, blocking send, blocking recv, parse
+  // reply. Sharing that here means the 17 request types can't drift out of
+  // sync with each other the way copy-pasted send/recv blocks do. ToServer
+  // is always the Request envelope -- the oneof case tells the server which
+  // payload it's holding, so it only has to parse the wire bytes once.
+  template <typename RepT>
+  RepT SendRecv(XStore_Proto::Request &to_server) {
+      Exchange(to_server);
+      RepT from_server;
+      if (!TryParseInParallel(from_server, nullptr)) ParseSerially(from_server);
       return from_server;
+  }
+
+  // The same for the calls that return rows: the reply is parsed onto one arena that the returned ArenaReply owns (see there for why).
+  // A big reply gets 1-8 MiB blocks (a few allocations for the whole reply); a small one keeps the default small blocks.
+  template <typename RepT>
+  xstore_client::ArenaReply<RepT> SendRecvOnArena(XStore_Proto::Request &to_server) {
+      Exchange(to_server);
+      google::protobuf::ArenaOptions options;
+      if (ReplyBytes() >= xstore_client::MIN_PARALLEL_PARSE_BYTES) {
+          options.start_block_size = size_t{1} << 20;
+          options.max_block_size = size_t{8} << 20;
+      }
+      auto arena = std::make_unique<google::protobuf::Arena>(options);
+      RepT *from_server = google::protobuf::Arena::Create<RepT>(arena.get());
+      if (!TryParseInParallel(*from_server, arena.get())) ParseSerially(*from_server);
+      return xstore_client::ArenaReply<RepT>(std::move(arena), from_server);
   }
 
  public:
@@ -853,7 +931,7 @@ class XStoreClient {
       return SendRecv<XStore_Proto::BatchInsert_REP>(to_server).insertstatus();
   }
 
-  [[nodiscard]] XStore_Proto::BatchQuery_REP BatchQuery(std::string_view db_name, const std::vector<uint64_t> &timestamps, bool sort_time = true) {
+  [[nodiscard]] xstore_client::ArenaReply<XStore_Proto::BatchQuery_REP> BatchQuery(std::string_view db_name, const std::vector<uint64_t> &timestamps, bool sort_time = true) {
       XStore_Proto::Request to_server;
       auto *payload = to_server.mutable_batchquery();
       payload->set_rtype(XStore_Proto::BATCHQUERY);
@@ -862,7 +940,7 @@ class XStoreClient {
       for (uint64_t ts : timestamps) {
           payload->add_timestamp(ts);
       }
-      return SendRecv<XStore_Proto::BatchQuery_REP>(to_server);
+      return SendRecvOnArena<XStore_Proto::BatchQuery_REP>(to_server);
   }
 
   [[nodiscard]] std::string BatchDelete(std::string_view db_name, const std::vector<uint64_t> &timestamps) {
@@ -880,19 +958,19 @@ class XStoreClient {
   // There is no RangeInsert here: BatchInsert takes timestamp-ordered, gapped or unordered rows alike (the server
   // detects order itself; the last duplicate wins). The RANGEINSERT wire message stays server-side for old clients.
 
-  [[nodiscard]] XStore_Proto::RangeQuery_REP RangeQuery(uint64_t start_time, uint64_t end_time, std::string_view db_name) {
+  [[nodiscard]] xstore_client::ArenaReply<XStore_Proto::RangeQuery_REP> RangeQuery(uint64_t start_time, uint64_t end_time, std::string_view db_name) {
       XStore_Proto::Request to_server;
       auto *payload = to_server.mutable_rangequery();
       payload->set_rtype(XStore_Proto::RANGEQUERY);
       payload->set_starttime(start_time);
       payload->set_endtime(end_time);
       payload->set_dbname(std::string(db_name));
-      return SendRecv<XStore_Proto::RangeQuery_REP>(to_server);
+      return SendRecvOnArena<XStore_Proto::RangeQuery_REP>(to_server);
   }
 
-  [[nodiscard]] XStore_Proto::FindByValue_REP FindByValue(uint64_t start_time, uint64_t end_time,
-                                                            std::string_view db_name, int32_t column_idx,
-                                                            const XStore_Proto::FData &value) {
+  [[nodiscard]] xstore_client::ArenaReply<XStore_Proto::FindByValue_REP> FindByValue(uint64_t start_time, uint64_t end_time,
+                                                                                  std::string_view db_name, int32_t column_idx,
+                                                                                  const XStore_Proto::FData &value) {
       XStore_Proto::Request to_server;
       auto *payload = to_server.mutable_findbyvalue();
       payload->set_rtype(XStore_Proto::FINDBYVALUE);
@@ -901,17 +979,15 @@ class XStoreClient {
       payload->set_dbname(std::string(db_name));
       payload->set_columnidx(column_idx);
       *payload->mutable_value() = value;
-      return SendRecv<XStore_Proto::FindByValue_REP>(to_server);
+      return SendRecvOnArena<XStore_Proto::FindByValue_REP>(to_server);
   }
 
   // Server side is a TEMPORARY IMPLEMENTATION (option A, brute-force scan);
   // this call's shape is stable. LIKE: % any run, _ one byte, \ escapes.
   // REGEX: RE2, unanchored. case_insensitive: ASCII fold for LIKE.
-  [[nodiscard]] XStore_Proto::FindByPattern_REP FindByPattern(uint64_t start_time, uint64_t end_time,
-                                                              std::string_view db_name, int32_t column_idx,
-                                                              std::string_view pattern,
-                                                              XStore_Proto::PatternMode mode = XStore_Proto::PATTERN_LIKE,
-                                                              bool case_insensitive = false) {
+  [[nodiscard]] xstore_client::ArenaReply<XStore_Proto::FindByPattern_REP> FindByPattern(
+      uint64_t start_time, uint64_t end_time, std::string_view db_name, int32_t column_idx, std::string_view pattern,
+      XStore_Proto::PatternMode mode = XStore_Proto::PATTERN_LIKE, bool case_insensitive = false) {
       XStore_Proto::Request to_server;
       auto *payload = to_server.mutable_findbypattern();
       payload->set_rtype(XStore_Proto::FINDBYPATTERN);
@@ -922,7 +998,7 @@ class XStoreClient {
       payload->set_pattern(std::string(pattern));
       payload->set_mode(mode);
       payload->set_caseinsensitive(case_insensitive);
-      return SendRecv<XStore_Proto::FindByPattern_REP>(to_server);
+      return SendRecvOnArena<XStore_Proto::FindByPattern_REP>(to_server);
   }
 
   [[nodiscard]] std::string RangeDelete(uint64_t start_time, uint64_t end_time, std::string_view db_name) {
