@@ -1171,6 +1171,43 @@ TEST_F(XStoreZmqNetworkTest, ARangeQueryThatAllowsStreamingArrivesAsOneMessagePe
     EXPECT_TRUE(streamed_bytes == legacy_bytes) << "the same bytes as the multipart reply, in the same order";
 }
 
+// The 2 GB guard stays for a request without streamOk (that client joins the frames into one protobuf message), and is skipped for one with it.
+TEST_F(XStoreZmqNetworkTest, ARangeQueryOverTwoGBIsRefusedUnlessTheClientAllowsStreaming) {
+    XStore_Proto::CreateDB_REQ create_req;
+    create_req.set_rtype(XStore_Proto::CREATEDB);
+    create_req.set_dbname("ZMQ_2GB_DB");
+    create_req.set_timeresolution(XStore_Proto::SECOND);
+    create_req.set_rowlength(32000);
+    SendRequest<XStore_Proto::CreateDB_REP>(Wrap(create_req));
+    XStore_Proto::BatchInsert_REQ insert_req;   // the year's file must exist
+    insert_req.set_rtype(XStore_Proto::BATCHINSERT);
+    insert_req.set_dbname("ZMQ_2GB_DB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
+    XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
+    entry->set_timestamp(TWO_CHUNK_T0);
+    *entry->mutable_data() = MakeRow({FInt64(7)});
+    EXPECT_NE(SendRequest<XStore_Proto::BatchInsert_REP>(Wrap(insert_req)).insertstatus().find("Inserted"), std::string::npos);
+
+    constexpr unsigned long long T0 = TWO_CHUNK_T0;
+    XStore_Proto::Request request = RangeRequest("ZMQ_2GB_DB", T0, T0 + 63000);   // 63000 * 32000 > 2,000,000,000
+
+    std::vector<std::string> frames;
+    ASSERT_TRUE(SendRequestMultipart(request, frames, 30000));
+    XStore_Proto::RangeQuery_REP refused;
+    ASSERT_TRUE(refused.ParseFromString(frames.at(0)));
+    EXPECT_NE(refused.querystatus().find("larger than 2GB"), std::string::npos);
+
+    request.set_streamok(true);
+    std::vector<std::vector<std::string>> messages;
+    ASSERT_TRUE(SendRequestStreaming(request, messages, 30000));
+    std::string bytes;
+    for (const auto &message : messages) bytes += message.at(1);
+    XStore_Proto::RangeQuery_REP served;
+    ASSERT_TRUE(served.ParseFromString(bytes));
+    EXPECT_FALSE(served.has_querystatus()) << served.querystatus();
+    EXPECT_EQ(served.queryresponse_size(), 63001);
+}
+
 TEST_F(XStoreZmqNetworkTest, RepliesThatAreOneFrameAreUnchangedWhenStreamingIsAllowed) {
     constexpr unsigned long long T0 = TWO_CHUNK_T0;
     (void)CreateTwoChunkRangeDb("ZMQ_STREAM_ONE_DB");

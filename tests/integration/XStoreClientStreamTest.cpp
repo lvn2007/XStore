@@ -378,14 +378,28 @@ TEST(ClientStreamedMessagesTest, TheRowCallsAskForStreamingAndOtherCallsDoNot) {
     EXPECT_FALSE(ParseRequest(requests[1]).streamok());
 }
 
-TEST(ClientStreamedMessagesTest, WithStreamingSwitchedOffTheRequestDoesNotAskForIt) {
-    const auto chunks = ChunksOf<XStore_Proto::RangeQuery_REP>(1, 10, false);
-    ScriptedServer server({Streamed(chunks)});
-    XStoreClient client("127.0.0.1", server.port(), 10000, /*warmup_on_init=*/false);
-    client.SetStreamReplies(false);
-    // The scripted ROUTER answers a REQ socket's [empty][body] with a single message, like a REP-based server.
-    EXPECT_EQ(client.RangeQuery(0, 9, "ANY")->queryresponse_size(), 10);
-    EXPECT_FALSE(ParseRequest(server.requests().at(0)).streamok());
+TEST(ParseFragmentsSeriallyTest, OneFragmentOrSeveralParseToTheSameMessage) {
+    const std::vector<std::string> chunks = MakeChunks(3, 30, true);
+    XStore_Proto::RangeQuery_REP expected;
+    ASSERT_TRUE(expected.ParseFromString(Whole(chunks)));
+    const std::string whole = Whole(chunks);
+    XStore_Proto::RangeQuery_REP from_one, from_three, from_none;
+    xstore_client::ParseFragmentsSerially({{whole.data(), whole.size()}}, from_one);
+    xstore_client::ParseFragmentsSerially({{chunks[0].data(), chunks[0].size()}, {chunks[1].data(), chunks[1].size()}, {chunks[2].data(), chunks[2].size()}}, from_three);
+    xstore_client::ParseFragmentsSerially({}, from_none);
+    EXPECT_TRUE(from_one.SerializeAsString() == expected.SerializeAsString());
+    EXPECT_TRUE(from_three.SerializeAsString() == expected.SerializeAsString());
+    EXPECT_EQ(from_none.queryresponse_size(), 0);
+}
+
+// Protobuf cannot parse a message of 2 GB or more as one: past that the serial parse must say so, not hand the size to ParseFromArray as a
+// wrapped int. (The bytes are never read: the sizes are checked first.)
+TEST(ParseFragmentsSeriallyTest, ARepliesOfTwoGBOrMoreIsRefusedRatherThanParsedWrongly) {
+    XStore_Proto::RangeQuery_REP out;
+    const void *nowhere = nullptr;
+    EXPECT_THROW(xstore_client::ParseFragmentsSerially({{nowhere, size_t{3} << 30}}, out), std::length_error);
+    EXPECT_THROW(xstore_client::ParseFragmentsSerially({{nowhere, size_t{1} << 30}, {nowhere, size_t{1} << 30}}, out), std::length_error);
+    EXPECT_EQ(out.queryresponse_size(), 0);
 }
 
 TEST(ClientStreamedMessagesTest, ATimeoutInTheMiddleOfAReplyThrowsAndTheNextCallGetsItsOwnReply) {

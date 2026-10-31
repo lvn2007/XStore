@@ -536,6 +536,10 @@ class XStore {
         void BatchInsert(XStore_Proto::BatchInsert_REQ *proto_from_client, XStore_Proto::BatchInsert_REP *return_data,
                           xstore::MemoryPool::Clock::time_point deadline = xstore::MemoryPool::Clock::time_point::max());
 
+        // streamed_reply (RangeQuery and BatchQuery): the reply goes to a client that receives it as separate messages and parses it chunk by
+        // chunk (Request.streamOk). Such a reply is not limited by protobuf's 2 GB ceiling on one message, so the 2 GB size guard is skipped;
+        // the memory pool's lease is then the only limit. Left false, a request estimated over 2 GB is refused as always: the
+        // client of such a request joins the chunks and parses ONE message.
         // BATCH QUERY (streamed, wire-format encode -- the only BatchQuery
         // path; the network server is the only production caller and it
         // needs this contract, not a materialized REP -- see
@@ -549,7 +553,8 @@ class XStore {
         // request's timestamps in place.
         void BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, bool sort_time, size_t chunk_size_bytes,
                                  const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk,
-                                 xstore::MemoryPool::Clock::time_point deadline = xstore::MemoryPool::Clock::time_point::max());
+                                 xstore::MemoryPool::Clock::time_point deadline = xstore::MemoryPool::Clock::time_point::max(),
+                                 bool streamed_reply = false);
 
         // BATCH DELETE
         [[nodiscard]] XStore_Proto::BatchDelete_REP BatchDelete(XStore_Proto::BatchDelete_REQ *proto_from_client);
@@ -594,7 +599,8 @@ class XStore {
         void RangeQuery(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
                                  std::string_view db_name, size_t chunk_size_bytes,
                                  const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk,
-                                 xstore::MemoryPool::Clock::time_point deadline = xstore::MemoryPool::Clock::time_point::max());
+                                 xstore::MemoryPool::Clock::time_point deadline = xstore::MemoryPool::Clock::time_point::max(),
+                                 bool streamed_reply = false);
 
         // FIND BY VALUE (streamed, wire-format encode -- same chunking
         // contract as RangeQuery above, same RangeQuery_REP wire shape on

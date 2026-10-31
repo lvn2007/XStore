@@ -2472,6 +2472,56 @@ TEST_F(XStoreTest, RangeQueryRejectsRequestOver2GBLimit) {
     EXPECT_EQ(query_rep.queryresponse_size(), 0);
 }
 
+// The 2 GB guard protects clients that join a reply's chunks and parse it as ONE protobuf message (protobuf's ceiling). A reply sent as
+// separate messages (streamed_reply: Request.streamOk, which only a client that parses chunk by chunk sets) is not limited by it.
+TEST_F(XStoreTest, RangeQueryOver2GBIsServedWhenTheReplyIsStreamed) {
+    XStore store;
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 32000);
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    store.UnaryInsert(TS_2016_MID, MakeRow({FInt64(7)}), "TESTDB", &insert_rep);   // the year's file must exist
+
+    // Same range as RangeQueryRejectsRequestOver2GBLimit: 63000 * 32000 > 2,000,000,000.
+    const auto refused = RangeQuery(store, TS_2016_MID, TS_2016_MID + 63000, "TESTDB");
+    EXPECT_NE(refused.querystatus().find("larger than 2GB"), std::string::npos);
+
+    const auto served = RangeQuery(store, TS_2016_MID, TS_2016_MID + 63000, "TESTDB", /*streamed_reply=*/true);
+    EXPECT_FALSE(served.has_querystatus()) << served.querystatus();
+    ASSERT_EQ(served.queryresponse_size(), 63001) << "an entry for every second of the range, empty or not, like any range";
+    EXPECT_EQ(served.queryresponse(0).data().fielddata(0).int64data(), 7);
+}
+
+TEST_F(XStoreTest, BatchQueryOver2GBIsServedWhenTheReplyIsStreamed) {
+    XStore store;
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 32000);
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    store.UnaryInsert(TS_2016_MID, MakeRow({FInt64(7)}), "TESTDB", &insert_rep);   // the year's file must exist
+
+    XStore_Proto::BatchQuery_REQ query_req;
+    query_req.set_dbname("TESTDB");
+    for (int i = 0; i < 63000; i++) query_req.add_timestamp(TS_2016_MID + i);   // 63000 * 32000 > 2,000,000,000
+
+    XStore_Proto::BatchQuery_REQ refused_req = query_req;
+    EXPECT_NE(BatchQuery(store, &refused_req).querystatus().find("larger than 2GB"), std::string::npos);
+
+    const auto served = BatchQuery(store, &query_req, /*sort_time=*/true, /*streamed_reply=*/true);
+    EXPECT_FALSE(served.has_querystatus()) << served.querystatus();
+    ASSERT_EQ(served.queryresponse_size(), 1) << "only the one inserted row: a missing row is omitted from a BatchQuery reply";
+    EXPECT_EQ(served.queryresponse(0).data().fielddata(0).int64data(), 7);
+}
+
+// The size check multiplied two 32-bit ints: past 2^31 bytes (70000 rows of 32000 bytes is 2.24e9) the product wrapped negative and the request
+// was let through instead of refused.
+TEST_F(XStoreTest, BatchQuerySizeCheckDoesNotOverflow) {
+    XStore store;
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 32000);
+
+    XStore_Proto::BatchQuery_REQ query_req;
+    query_req.set_dbname("TESTDB");
+    for (int i = 0; i < 70000; i++) query_req.add_timestamp(TS_2016_MID + i);
+
+    EXPECT_NE(BatchQuery(store, &query_req).querystatus().find("larger than 2GB"), std::string::npos);
+}
+
 TEST_F(XStoreTest, UnaryBatchAndRangeInsertQueryShareSameCachedMappingWithinAYear) {
     XStore store;
     CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 128);

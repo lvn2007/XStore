@@ -31,7 +31,7 @@ void XStore::RangeInsert(XStore_Proto::RangeInsert_REQ *proto_from_client, XStor
 void XStore::RangeQuery(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
                                  std::string_view db_name_view, size_t chunk_size_bytes,
                                  const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk,
-                                 xstore::MemoryPool::Clock::time_point deadline) {
+                                 xstore::MemoryPool::Clock::time_point deadline, bool streamed_reply) {
     const std::string &db_name = UpperCaseInto(db_name_view);
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
@@ -72,17 +72,13 @@ void XStore::RangeQuery(unsigned long long int start_epoch_t, unsigned long long
         return;
     }
 
-    // Chunking bounds THIS SERVER's peak memory (never more than
-    // ~chunk_size_bytes live at once) -- it does NOT lift protobuf's real
-    // ~2GB ceiling on a single message, because the client still
-    // concatenates every chunk back into one buffer before ParseFromArray/
-    // ParseFromString (see XStore_Client.h's SendRecv) -- a >2GB
-    // reassembled result would corrupt on the CLIENT side even though this
-    // server never held more than one chunk at a time. So this guard stays,
-    // unchanged from RangeQuery, checked before any chunk is sent (an abort
-    // partway through a multipart reply has no clean way to signal
-    // "actually, error" to a client already receiving frames).
-    if ((end_epoch_t - start_epoch_t) * cfg_struct.rowlength() > 2'000'000'000) {
+    // Chunking bounds THIS SERVER's peak memory (never more than ~chunk_size_bytes live at once) -- it does NOT lift protobuf's real ~2GB
+    // ceiling on a single message for a client that concatenates every chunk back into one buffer before ParseFromArray/ParseFromString
+    // (older C++ clients, the Python client): a >2GB reassembled result would corrupt on the CLIENT side even though this server never
+    // held more than one chunk at a time. So the guard stays for them, checked before any chunk is sent (an abort partway through a reply
+    // has no clean way to signal "actually, error" to a client already receiving it). A streamed_reply (Request.streamOk) goes to a client
+    // that parses chunk by chunk and never holds one serialized message, so it is not limited here; the memory lease below still is.
+    if (!streamed_reply && (end_epoch_t - start_epoch_t) * cfg_struct.rowlength() > 2'000'000'000) {
         set_warning("[WARNING] ", fmt::format("[RANGE QUERY] [DB: {}] - Query results is larger than 2GB", db_name));
         finish(std::string());
         return;

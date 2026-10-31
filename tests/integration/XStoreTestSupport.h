@@ -157,20 +157,21 @@ inline void CreateTestDb(XStore &store, std::string_view name, XStore_Proto::Tim
 // former behavior exactly (same checks, same wire shape, just reassembled
 // from the streamed implementation instead of a separate one).
 inline XStore_Proto::RangeQuery_REP RangeQuery(XStore &store, unsigned long long int start_epoch_t,
-                                                unsigned long long int end_epoch_t, std::string_view db_name) {
+                                                unsigned long long int end_epoch_t, std::string_view db_name,
+                                                bool streamed_reply = false) {
     std::string buffer;
     store.RangeQuery(start_epoch_t, end_epoch_t, db_name, XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
-        [&](std::string &&chunk, bool /*is_last*/) { buffer += chunk; });
+        [&](std::string &&chunk, bool /*is_last*/) { buffer += chunk; }, xstore::MemoryPool::Clock::time_point::max(), streamed_reply);
     XStore_Proto::RangeQuery_REP rep;
     rep.ParseFromString(buffer);
     return rep;
 }
 
 inline XStore_Proto::BatchQuery_REP BatchQuery(XStore &store, XStore_Proto::BatchQuery_REQ *proto_from_client,
-                                                bool sort_time = true) {
+                                                bool sort_time = true, bool streamed_reply = false) {
     std::string buffer;
     store.BatchQuery(proto_from_client, sort_time, XStoreTunables::STREAMED_QUERY_CHUNK_SIZE_BYTES,
-        [&](std::string &&chunk, bool /*is_last*/) { buffer += chunk; });
+        [&](std::string &&chunk, bool /*is_last*/) { buffer += chunk; }, xstore::MemoryPool::Clock::time_point::max(), streamed_reply);
     XStore_Proto::BatchQuery_REP rep;
     rep.ParseFromString(buffer);
     return rep;

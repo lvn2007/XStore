@@ -599,6 +599,27 @@ class ArenaReply {
     RepT *rep_ = nullptr;
 };
 
+// The reply's frames parsed as ONE message: a single frame as it is, several joined in order first. For every reply that is not worth (or not
+// fit for) the piece-by-piece parse. Protobuf cannot parse a message of 2 GB or more as one (its sizes are int): such a reply is refused
+// with std::length_error rather than parsed wrongly, and `into` is left untouched.
+template <class RepT>
+void ParseFragmentsSerially(const std::vector<Fragment> &fragments, RepT &into) {
+    size_t total = 0;
+    for (const Fragment &fragment : fragments) total += fragment.size;
+    if (total > static_cast<size_t>(INT_MAX)) {
+        throw std::length_error("XStore_Client: a reply of " + std::to_string(total) +
+                                " bytes cannot be parsed as one protobuf message (2 GB limit) and its frames could not be parsed piece by piece");
+    }
+    if (fragments.size() == 1) {
+        (void)into.ParseFromArray(fragments.front().data, static_cast<int>(fragments.front().size));
+    } else if (!fragments.empty()) {
+        std::string joined;
+        joined.reserve(total);
+        for (const Fragment &fragment : fragments) joined.append(static_cast<const char *>(fragment.data), fragment.size);
+        (void)into.ParseFromArray(joined.data(), static_cast<int>(joined.size()));
+    }
+}
+
 // The same parse for a reply that is still arriving: Add() takes the frames in order as they are received, cuts each into pieces and hands
 // them to a team (JobStream) that parses while the next frames are on the wire; Finish() joins the team and merges the rows into `out`.
 // Finish() returns false, with `out` untouched, when any frame is not well framed or a piece does not parse (or memory ran out): the caller
@@ -815,7 +836,6 @@ class XStoreClient {
   std::optional<XStoreCurveClientAuth> curve_auth_;
   std::optional<zmq::socket_t> stream_sock_;
   std::deque<zmq::message_t> stream_buf_;   // the frames of the reply being received; a deque never moves its elements
-  bool stream_replies_ = true;
 
   using FragmentList = std::vector<xstore_client::Fragment>;
 
@@ -876,21 +896,6 @@ class XStoreClient {
       }
   }
 
-  // A streamed reply (currently RangeQuery and the like) arrives as several frames that are pieces of ONE logical message's bytes
-  // (protobuf doesn't care where a message's serialized bytes get split, only that they're concatenated back in order before
-  // parsing) -- reassembled here so this stays invisible to every caller above SendRecv.
-  template <typename RepT>
-  static void ParseSerially(const FragmentList &fragments, RepT &into) {
-      if (fragments.size() == 1) {
-          into.ParseFromArray(fragments.front().data, static_cast<int>(fragments.front().size));
-      } else if (!fragments.empty()) {
-          std::string joined;
-          joined.reserve(BytesOf(fragments));
-          for (const auto &fragment : fragments) joined.append(static_cast<const char *>(fragment.data), fragment.size);
-          into.ParseFromArray(joined.data(), static_cast<int>(joined.size()));
-      }
-  }
-
   // Every RPC is: serialize request, blocking send, blocking recv, parse
   // reply. Sharing that here means the 17 request types can't drift out of
   // sync with each other the way copy-pasted send/recv blocks do. ToServer
@@ -901,7 +906,7 @@ class XStoreClient {
       Exchange(to_server);
       const FragmentList fragments = FragmentsOfRecvBuf();
       RepT from_server;
-      if (!TryParseInParallel(fragments, from_server, nullptr)) ParseSerially(fragments, from_server);
+      if (!TryParseInParallel(fragments, from_server, nullptr)) xstore_client::ParseFragmentsSerially(fragments, from_server);
       return from_server;
   }
 
@@ -916,7 +921,7 @@ class XStoreClient {
       }
       auto arena = std::make_unique<google::protobuf::Arena>(options);
       RepT *from_server = google::protobuf::Arena::Create<RepT>(arena.get());
-      if (!TryParseInParallel(fragments, *from_server, arena.get())) ParseSerially(fragments, *from_server);
+      if (!TryParseInParallel(fragments, *from_server, arena.get())) xstore_client::ParseFragmentsSerially(fragments, *from_server);
       return xstore_client::ArenaReply<RepT>(std::move(arena), from_server);
   }
 
@@ -947,7 +952,7 @@ class XStoreClient {
   // into pieces and handed to the parse team as soon as it is received, so the parse overlaps the rest of the transfer (and of the server's
   // scan). A server that does not stream (older, or a small reply) answers with one message and this is the same as SendRecv.
   template <typename RepT>
-  xstore_client::ArenaReply<RepT> SendRecvStreamed(XStore_Proto::Request &to_server) {
+  xstore_client::ArenaReply<RepT> SendRecvOnArena(XStore_Proto::Request &to_server) {
       to_server.set_streamok(true);
       if (timeout_ms_ >= 0) to_server.set_timeoutms(static_cast<uint32_t>(timeout_ms_));
       try {
@@ -966,7 +971,7 @@ class XStoreClient {
               stream_buf_.clear();
               return reply;
           }
-          // More than one message: the first is a chunk of 64 MiB or so, so the arena gets big blocks at once.
+          // More than one message: a reply of many chunks, so the arena gets big blocks at once.
           google::protobuf::ArenaOptions options;
           options.start_block_size = size_t{1} << 20;
           options.max_block_size = size_t{8} << 20;
@@ -979,7 +984,7 @@ class XStoreClient {
               if (last) break;
               last = RecvStreamMessage(socket, fragments);
           }
-          if (!parser.Finish()) ParseSerially(fragments, *from_server);
+          if (!parser.Finish()) xstore_client::ParseFragmentsSerially(fragments, *from_server);
           stream_buf_.clear();
           return xstore_client::ArenaReply<RepT>(std::move(arena), from_server);
       } catch (...) {
@@ -989,14 +994,6 @@ class XStoreClient {
       }
   }
 
-  // The same calls with streaming switched off (SetStreamReplies(false)): the REQ socket, one multipart reply received whole.
-  template <typename RepT>
-  xstore_client::ArenaReply<RepT> SendRecvOnArena(XStore_Proto::Request &to_server) {
-      if (stream_replies_) return SendRecvStreamed<RepT>(to_server);
-      Exchange(to_server);
-      return ParseOnArena<RepT>(FragmentsOfRecvBuf());
-  }
-
  public:
   // Threads used to parse a big reply of rows -- RangeQuery, BatchQuery, FindByValue, FindByPattern. 0 (the default) is adaptive: the
   // parse starts on the calling thread and adds helpers while the machine has idle cores, and they leave when other work needs the cores
@@ -1004,9 +1001,6 @@ class XStoreClient {
   // same for every client of a process); 1 parses on the calling thread only.
   void SetParseThreads(size_t threads) { parse_threads_ = threads; }
 
-  // true (the default): a reply of rows made of several chunks is parsed while it is still arriving (the server is asked to send each
-  // chunk as its own message). false: the whole reply is received first, as before -- the same data, only slower for big replies.
-  void SetStreamReplies(bool stream) { stream_replies_ = stream; }
 
   // timeoutMs < 0 (default) blocks forever, matching the previous behavior.
   // Pass a positive value so an unreachable/dead server raises instead of

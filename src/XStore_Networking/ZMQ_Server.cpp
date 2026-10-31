@@ -588,7 +588,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                     const uint32_t timeout_ms = client_request->timeoutms();
                     const auto deadline = timeout_ms > 0 ? pickup + std::chrono::milliseconds(timeout_ms) : xstore::MemoryPool::Clock::time_point::max();
                     my_store.BatchQuery(req, /*sort_time=*/true, chunk_bytes,
-                        [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); }, deadline);
+                        [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); }, deadline, client_request->streamok());
                     break;
                 }
 
@@ -635,7 +635,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                     const auto deadline = timeout_ms > 0 ? pickup + std::chrono::milliseconds(timeout_ms) : xstore::MemoryPool::Clock::time_point::max();
                     my_store.RangeQuery(req.starttime(), req.endtime(), req.dbname(),
                         chunk_bytes,
-                        [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); }, deadline);
+                        [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); }, deadline, client_request->streamok());
                     break;
                 }
 

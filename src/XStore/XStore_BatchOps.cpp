@@ -225,7 +225,7 @@ constexpr size_t BATCH_LOCK_OFFSETS_KEEP = 65536;
 // instead of building a UnaryQuery_REP/RowData/FData tree.
 void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, bool sort_time, size_t chunk_size_bytes,
                                  const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk,
-                                 xstore::MemoryPool::Clock::time_point deadline) {
+                                 xstore::MemoryPool::Clock::time_point deadline, bool streamed_reply) {
     std::string db_name = proto_from_client->dbname();
     ToUpperCase(db_name.begin(), db_name.end());
 
@@ -252,7 +252,10 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, bool so
         return;
     }
 
-    if ((proto_from_client->timestamp_size() * cfg_struct.rowlength()) > 2'000'000'000 || proto_from_client->timestamp_size() < 0) {
+    // 64-bit product: timestamp_size() * rowlength() as two 32-bit ints wrapped negative past 2^31 bytes (70000 rows of 32000 bytes) and the request
+    // was let through. As in RangeQuery, a streamed_reply is not limited to 2 GB (the lease below is).
+    if ((!streamed_reply && static_cast<int64_t>(proto_from_client->timestamp_size()) * cfg_struct.rowlength() > 2'000'000'000) ||
+        proto_from_client->timestamp_size() < 0) {
         set_warning("[WARNING] ", fmt::format("[BATCH QUERY] [DB: {}] - Query results is larger than 2GB or empty", db_name));
         finish(std::string());
         return;
