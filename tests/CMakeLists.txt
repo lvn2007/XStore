@@ -55,6 +55,7 @@ add_executable(xstore_network_tests
         integration/XStoreCurveTest.cpp
         integration/XStoreGracefulShutdownTest.cpp
         integration/XStoreZmqBrokerTest.cpp
+        integration/XStoreStreamFlowTest.cpp
 )
 # xstore_network brings the core (xstore_core) and curve-key handling
 # (xstore_curve) with it.

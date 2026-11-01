@@ -640,6 +640,25 @@ inline constexpr size_t      STREAMED_QUERY_CHUNK_SIZE_BYTES = 64ull * 1024 * 10
 // XSTORE_STREAM_CHUNK_BYTES overrides it for a re-measurement.
 inline constexpr size_t      STREAMED_REPLY_CHUNK_SIZE_BYTES = 512ull * 1024;
 
+// Flow control of a streamed reply (include/Networking/ZMQ_StreamFlow.h, ZMQ_Server.cpp ReplyWriter). The client-facing socket has no queue limit, so a
+// client that reads slowly (or not at all) used to make the server hold its WHOLE reply in memory (40 readers of a 426 MB reply: 17 GB on a 62 GB host).
+//  * STREAM_WINDOW_BYTES: the most bytes of ONE reply that may be queued and not yet written to the connection. When the next chunk would pass it the
+//    worker waits (until the queue is down to half the window, so it wakes once per half window and not once per chunk) -- but only while fewer than
+//    STREAM_WAITING_WORKERS_PERCENT of the workers are already waiting, so a crowd of slow readers cannot take every worker from the small queries
+//    (a reader beyond that goes on without waiting, as before). 0 turns the window off. Measured on Mystic (1M rows of 1.42 GB, 8 nodes x 4 threads
+//    next to one client): a 128 MiB window cost nothing in throughput or CPU, 40 slow readers pinned 5.6 GB instead of 15.5 GB; 32 and 8 MiB windows
+//    cost 55-65% more server CPU when the worker woke for every chunk (the half-window wake-up is the fix).
+//  * STREAM_QUEUE_LIMIT: the bytes queued for ALL clients together (0 = a quarter of the memory pool's limit). A reply that is already holding more than
+//    STREAM_SHARE_BYTES and would pass it is stopped with an explicit error status in its last frame; a reply holding less is never stopped, so a
+//    healthy client is not the one cut when stalled readers have filled the queue.
+//  * STREAM_STALL_SECONDS: a reply whose worker has waited this long without the client taking anything is stopped the same way.
+// Chunks below STREAM_MIN_ACCOUNTED_CHUNK_BYTES (all small replies) skip all of it.
+inline constexpr size_t      STREAM_WINDOW_BYTES = 64ull * 1024 * 1024;
+inline constexpr size_t      STREAM_SHARE_BYTES = 16ull * 1024 * 1024;
+inline constexpr unsigned    STREAM_STALL_SECONDS = 120;
+inline constexpr unsigned    STREAM_WAITING_WORKERS_PERCENT = 75;
+inline constexpr size_t      STREAM_MIN_ACCOUNTED_CHUNK_BYTES = 64ull * 1024;
+
 // SysStatsCollector (XStore_SysStats.*): how often the background host-metrics
 // thread samples /proc + statvfs and re-publishes on its dedicated PUB
 // socket. 2s matches the desktop viewer's poll/render cadence -- a shorter

@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "include/Networking/ZMQ_Server.h"
+#include "include/Networking/ZMQ_StreamFlow.h"
 #include "XStoreTestSupport.h"
 #include "XStoreZmqTestSupport.h"
 
@@ -1444,4 +1445,168 @@ TEST(ZmqServerDefaultsTest, PreadPoolIsChargedAtMostThePhysicalCoreCount) {
     EXPECT_EQ(ZmqServer::PreadPoolReserved(1, 16), 1u);
     EXPECT_EQ(ZmqServer::PreadPoolReserved(0, 16), 0u);                              // never negative or wrapped
     EXPECT_EQ(ZmqServer::PreadPoolReserved(-3, 16), 0u);
+}
+
+// ---------------------------------------------------------------------
+// Flow control of a streamed reply (include/Networking/ZMQ_StreamFlow.h): a client that reads slowly must not make the server queue its whole reply
+// ---------------------------------------------------------------------
+
+namespace {
+// What a client sees of one streamed RangeQuery read slowly: every payload byte, how many messages, the most bytes the server had queued for all
+// replies (xstore::streamflow::QueuedBytes) when a message arrived.
+struct SlowRead {
+    std::string payload;
+    size_t messages = 0;
+    uint64_t max_queued = 0;
+    bool complete = false;
+};
+}  // namespace
+
+class StreamFlowServerTest : public XStoreZmqNetworkTest {
+protected:
+    void SetUp() override { saved_ = xstore::streamflow::Get(); }
+    void TearDown() override { xstore::streamflow::Set(saved_); }
+
+    // ~40 MB of rows (more than the kernel's socket buffers take on loopback, so a slow reader makes the server queue).
+    static constexpr int ROWS = 28000;
+    void CreateBigDb(const std::string &db) {
+        XStore_Proto::CreateDB_REQ create_req;
+        create_req.set_rtype(XStore_Proto::CREATEDB);
+        create_req.set_dbname(db);
+        create_req.set_timeresolution(XStore_Proto::SECOND);
+        create_req.set_rowlength(1500);
+        SendRequest<XStore_Proto::CreateDB_REP>(Wrap(create_req));
+        const std::string text(1400, 'x');
+        for (int begin = 0; begin < ROWS; begin += 1000) {
+            XStore_Proto::BatchInsert_REQ insert_req;
+            insert_req.set_rtype(XStore_Proto::BATCHINSERT);
+            insert_req.set_dbname(db);
+            insert_req.set_durabilitymode(XStore_Proto::SYNC);
+            for (int i = begin; i < begin + 1000; ++i) {
+                XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
+                entry->set_timestamp(TWO_CHUNK_T0 + static_cast<unsigned long long>(i));
+                *entry->mutable_data() = MakeRow({FString(text)});
+            }
+            EXPECT_NE(SendRequest<XStore_Proto::BatchInsert_REP>(Wrap(insert_req)).insertstatus().find("Inserted"), std::string::npos);
+        }
+    }
+
+    // A streamed RangeQuery over the whole DB, read at one message per `delay`.
+    SlowRead ReadSlowly(const std::string &db, std::chrono::milliseconds delay) {
+        XStore_Proto::Request request = RangeRequest(db, TWO_CHUNK_T0, TWO_CHUNK_T0 + ROWS - 1);
+        request.set_streamok(true);
+        zmq::socket_t sock(*client_ctx, zmq::socket_type::dealer);
+        sock.set(zmq::sockopt::rcvtimeo, 60000);
+        sock.set(zmq::sockopt::linger, 0);
+        // A client's own libzmq reads the connection into its memory (up to its receive high-water mark, 1000 messages by default) whether or not the
+        // application is reading, so a slow application alone backs nothing up on the server. A client that stops taking data off the connection does.
+        sock.set(zmq::sockopt::rcvhwm, 2);
+        sock.connect(server_addr);
+        const std::string payload = request.SerializeAsString();
+        SlowRead read;
+        if (!sock.send(zmq::message_t(), zmq::send_flags::sndmore) || !sock.send(zmq::buffer(payload), zmq::send_flags::none)) return read;
+        while (true) {
+            zmq::message_t delimiter;
+            if (!sock.recv(delimiter, zmq::recv_flags::none)) return read;
+            for (bool more = delimiter.more(); more;) {
+                zmq::message_t frame;
+                if (!sock.recv(frame, zmq::recv_flags::none)) return read;
+                more = frame.more();
+                read.payload.append(static_cast<const char *>(frame.data()), frame.size());
+            }
+            ++read.messages;
+            read.max_queued = std::max(read.max_queued, xstore::streamflow::QueuedBytes());
+            if (delimiter.size() == 0) {
+                read.complete = true;
+                return read;
+            }
+            std::this_thread::sleep_for(delay);
+        }
+    }
+
+    // The queue is back to nothing once every connection has taken (or dropped) its chunks.
+    static bool QueueDrains() {
+        for (int i = 0; i < 200; ++i) {
+            if (xstore::streamflow::QueuedBytes() == 0) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+        return false;
+    }
+
+    xstore::streamflow::Config saved_;
+};
+
+TEST_F(StreamFlowServerTest, ASlowReaderHoldsAtMostItsWindowAndStillGetsTheSameBytes) {
+    CreateBigDb("ZMQ_FLOW_DB");
+    xstore::streamflow::Config config = saved_;
+    config.window_bytes = 0;
+    xstore::streamflow::Set(config);
+    ASSERT_TRUE(QueueDrains());
+    const SlowRead unlimited = ReadSlowly("ZMQ_FLOW_DB", std::chrono::milliseconds(15));
+    ASSERT_TRUE(unlimited.complete);
+    ASSERT_TRUE(QueueDrains());
+
+    config.window_bytes = 2u << 20;
+    config.max_waiting = 4;
+    config.min_chunk_bytes = 64u << 10;
+    xstore::streamflow::Set(config);
+    const SlowRead windowed = ReadSlowly("ZMQ_FLOW_DB", std::chrono::milliseconds(15));
+    ASSERT_TRUE(windowed.complete);
+
+    EXPECT_TRUE(windowed.payload == unlimited.payload) << "the same bytes with and without the window";
+    EXPECT_GT(unlimited.max_queued, 8u << 20) << "without the window the server queued most of the reply while the client slept";
+    EXPECT_LE(windowed.max_queued, (2u << 20) + XStoreTunables::STREAMED_REPLY_CHUNK_SIZE_BYTES + 65536) << "with it, a window and one chunk";
+    EXPECT_TRUE(QueueDrains());
+}
+
+TEST_F(StreamFlowServerTest, AReplyThatTheClientIsNotTakingIsStoppedWithAnErrorStatusAndTheServerKeepsServing) {
+    CreateBigDb("ZMQ_FLOW_STOP_DB");
+    xstore::streamflow::Config config = saved_;
+    config.window_bytes = 0;                  // no waiting: the queue limit is what applies
+    config.queue_limit_bytes = 3u << 20;
+    config.share_bytes = 1u << 20;
+    config.min_chunk_bytes = 64u << 10;
+    xstore::streamflow::Set(config);
+    ASSERT_TRUE(QueueDrains());
+
+    const SlowRead stopped = ReadSlowly("ZMQ_FLOW_STOP_DB", std::chrono::milliseconds(30));
+    ASSERT_TRUE(stopped.complete) << "a stopped reply still ends with the empty-delimiter message";
+    XStore_Proto::RangeQuery_REP reply;
+    ASSERT_TRUE(reply.ParseFromString(stopped.payload));
+    ASSERT_TRUE(reply.has_querystatus());
+    EXPECT_NE(reply.querystatus().find("[ERROR]"), std::string::npos) << reply.querystatus();
+    EXPECT_NE(reply.querystatus().find("queue is full"), std::string::npos) << reply.querystatus();
+    EXPECT_GT(reply.queryresponse_size(), 0) << "the rows before the stop were delivered";
+    EXPECT_LT(reply.queryresponse_size(), ROWS) << "and not all of them";
+    EXPECT_TRUE(QueueDrains());
+
+    // The server is unharmed: with the limit lifted the same read gets every row.
+    config.queue_limit_bytes = 1ull << 40;
+    xstore::streamflow::Set(config);
+    const SlowRead whole = ReadSlowly("ZMQ_FLOW_STOP_DB", std::chrono::milliseconds(1));
+    ASSERT_TRUE(whole.complete);
+    XStore_Proto::RangeQuery_REP all;
+    ASSERT_TRUE(all.ParseFromString(whole.payload));
+    EXPECT_EQ(all.queryresponse_size(), ROWS);
+    EXPECT_FALSE(all.has_querystatus() && all.querystatus().find("[ERROR]") != std::string::npos);
+}
+
+// Chunks below the minimum (every chunk of a small reply) skip the accounting: with a minimum above the chunk size, limits that would stop any counted
+// reply stop nothing, and nothing is ever counted.
+TEST_F(StreamFlowServerTest, ChunksBelowTheMinimumAreNeitherCountedNorLimited) {
+    CreateBigDb("ZMQ_FLOW_SMALL_DB");
+    xstore::streamflow::Config config = saved_;
+    config.queue_limit_bytes = 1;
+    config.share_bytes = 0;
+    config.window_bytes = 1;
+    config.min_chunk_bytes = 4u << 20;   // the chunks are 512 KiB
+    xstore::streamflow::Set(config);
+    ASSERT_TRUE(QueueDrains());
+    const SlowRead read = ReadSlowly("ZMQ_FLOW_SMALL_DB", std::chrono::milliseconds(5));
+    ASSERT_TRUE(read.complete);
+    EXPECT_EQ(read.max_queued, 0u) << "nothing was counted";
+    XStore_Proto::RangeQuery_REP reply;
+    ASSERT_TRUE(reply.ParseFromString(read.payload));
+    EXPECT_EQ(reply.queryresponse_size(), ROWS);
+    EXPECT_FALSE(reply.has_querystatus() && !reply.querystatus().empty()) << reply.querystatus();
 }

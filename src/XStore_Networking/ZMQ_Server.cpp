@@ -1,12 +1,16 @@
 #include "include/Networking/ZMQ_Server.h"
 #include "include/Networking/ZMQ_Broker.h"
+#include "include/Networking/ZMQ_StreamFlow.h"
 #include <google/protobuf/arena.h>
 #include <algorithm>
 #include <cerrno>
+#include <condition_variable>
 #include <cstdlib>
 #include <chrono>
 #include <fstream>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -112,6 +116,40 @@ class ReplyWriter {
 
         void AllowStreaming(bool allow) { streaming = allow; }
 
+        // The final frame of a reply this writer has to stop (a client that is not reading): a serialized REP of the call's type holding only the
+        // status text, which the client merges into the reply it parsed so far (queryStatus). Set by the four row calls.
+        void SetStopFrame(std::function<std::string(const std::string &)> make_frame) { make_stop_frame = std::move(make_frame); }
+
+        // A chunk of a row reply. A chunk of a streamed reply that is big enough is sent without a copy and counted against this reply's window and
+        // the server's queue limit (xstore::streamflow): the worker may wait here while the client is not taking the reply, and the reply is stopped
+        // with a status in its last frame if the client stalls or the server's queue is full. The chunks that follow a stopped reply are dropped.
+        void SendChunk(std::string &&chunk, bool last) {
+            if (stopped) return;
+            if (!streaming || chunk.size() < xstore::streamflow::Get().min_chunk_bytes) {
+                Send(zmq::buffer(chunk), last);
+                return;
+            }
+            if (!window) window = std::make_shared<xstore::streamflow::ReplyWindow>();
+            const xstore::streamflow::Verdict verdict = window->Admit(chunk.size());
+            if (verdict != xstore::streamflow::Verdict::kSend) {
+                Stop(verdict == xstore::streamflow::Verdict::kStalled ? "the client was not taking the reply" : "the server's reply queue is full");
+                return;
+            }
+            struct Holder {
+                std::string data;
+                std::shared_ptr<xstore::streamflow::ReplyWindow> window;
+                size_t size;
+            };
+            auto *holder = new Holder{std::move(chunk), window, 0};
+            holder->size = holder->data.size();
+            zmq::message_t message(holder->data.data(), holder->size, [](void *, void *hint) {
+                auto *h = static_cast<Holder *>(hint);
+                h->window->Done(h->size);
+                delete h;
+            }, holder);
+            SendFrame(message, last);
+        }
+
         // A frame after the reply's last one is dropped: sent bare it would
         // reach the broker as a second reply and queue this worker twice.
         void Send(zmq::message_t &frame, bool last) { SendFrame(frame, last); }
@@ -168,10 +206,28 @@ class ReplyWriter {
             }
         }
 
+        // Ends the reply with a status instead of the rest of its rows.
+        void Stop(const char *why) {
+            stopped = true;
+            spdlog::warn("[NETWORKING] - Streamed reply stopped: {}", why);
+            if (state == State::DONE) return;
+            const std::string status = std::string("[ERROR] The reply was stopped: ") + why + " (XSTORE_STREAM_* limits); the rows before this point were delivered";
+            if (make_stop_frame) {
+                const std::string frame = make_stop_frame(status);
+                zmq::message_t message(frame.data(), frame.size());
+                SendFrame(message, true);
+            } else {
+                Finish();
+            }
+        }
+
         zmq::socket_t &socket;
         zmq::message_t &client_id;
         State state = State::NONE;
         bool streaming = false;
+        bool stopped = false;
+        std::function<std::string(const std::string &)> make_stop_frame;
+        std::shared_ptr<xstore::streamflow::ReplyWindow> window;
 };
 
 // Shared by every case below: serialize a response proto and dispatch it to
@@ -288,6 +344,9 @@ void ZmqServer::Serve(const std::string &listen_addr, const std::string &listen_
     worker_socket.set(zmq::sockopt::rcvhwm, 0);
     worker_socket.set(zmq::sockopt::linger, 0);
     worker_socket.bind("inproc://workers");
+
+    // At most 75% of the workers may wait on a reply's window (xstore::streamflow); the rest stay free for small queries.
+    xstore::streamflow::SetDefaultMaxWaiting(num_threads);
 
     //  Launch pool of WORKER threads
     {
@@ -587,8 +646,9 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                     auto *req = client_request->mutable_batchquery();
                     const uint32_t timeout_ms = client_request->timeoutms();
                     const auto deadline = timeout_ms > 0 ? pickup + std::chrono::milliseconds(timeout_ms) : xstore::MemoryPool::Clock::time_point::max();
+                    writer.SetStopFrame([](const std::string &status) { XStore_Proto::BatchQuery_REP rep; rep.set_querystatus(status); return rep.SerializeAsString(); });
                     my_store.BatchQuery(req, /*sort_time=*/true, chunk_bytes,
-                        [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); }, deadline, client_request->streamok());
+                        [&](std::string &&chunk, bool is_last) { writer.SendChunk(std::move(chunk), is_last); }, deadline, client_request->streamok());
                     break;
                 }
 
@@ -633,18 +693,20 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                     const auto &req = client_request->rangequery();
                     const uint32_t timeout_ms = client_request->timeoutms();
                     const auto deadline = timeout_ms > 0 ? pickup + std::chrono::milliseconds(timeout_ms) : xstore::MemoryPool::Clock::time_point::max();
+                    writer.SetStopFrame([](const std::string &status) { XStore_Proto::RangeQuery_REP rep; rep.set_querystatus(status); return rep.SerializeAsString(); });
                     my_store.RangeQuery(req.starttime(), req.endtime(), req.dbname(),
                         chunk_bytes,
-                        [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); }, deadline, client_request->streamok());
+                        [&](std::string &&chunk, bool is_last) { writer.SendChunk(std::move(chunk), is_last); }, deadline, client_request->streamok());
                     break;
                 }
 
                 // FIND BY VALUE (categorical equality lookup)
                 case XStore_Proto::Request::kFindbyvalue: {
                     const auto &req = client_request->findbyvalue();
+                    writer.SetStopFrame([](const std::string &status) { XStore_Proto::FindByValue_REP rep; rep.set_querystatus(status); return rep.SerializeAsString(); });
                     my_store.FindByValue(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), req.value(),
                         chunk_bytes,
-                        [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); }, client_request->streamok());
+                        [&](std::string &&chunk, bool is_last) { writer.SendChunk(std::move(chunk), is_last); }, client_request->streamok());
                     break;
                 }
 
@@ -652,10 +714,11 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                 // behind it: brute-force scan, see XStore_PatternOps.cpp.
                 case XStore_Proto::Request::kFindbypattern: {
                     const auto &req = client_request->findbypattern();
+                    writer.SetStopFrame([](const std::string &status) { XStore_Proto::FindByPattern_REP rep; rep.set_querystatus(status); return rep.SerializeAsString(); });
                     my_store.FindByPattern(req.starttime(), req.endtime(), req.dbname(), req.columnidx(),
                         req.pattern(), req.mode(), req.caseinsensitive(),
                         chunk_bytes,
-                        [&](std::string &&chunk, bool is_last) { writer.Send(zmq::buffer(chunk), is_last); }, client_request->streamok());
+                        [&](std::string &&chunk, bool is_last) { writer.SendChunk(std::move(chunk), is_last); }, client_request->streamok());
                     break;
                 }
 
