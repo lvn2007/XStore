@@ -16,7 +16,7 @@ namespace xstore_test_client {
 class AnsweringServer {
  public:
     // answer(index, request) -> the serialized reply message (one message). At most `count` requests are answered; the thread ends when no
-    // request has come for 400 ms.
+    // request has come for 400 ms and no answer is being held back (held answers are sent after 400 ms of silence).
     AnsweringServer(size_t count, std::function<std::string(size_t index, const XStore_Proto::Request &)> answer, size_t hold = 1)
         : sock_(ctx_, zmq::socket_type::router) {
         sock_.set(zmq::sockopt::rcvtimeo, 400);
@@ -42,9 +42,15 @@ class AnsweringServer {
                 }
                 pending.clear();
             };
-            for (size_t i = 0; i < count; ++i) {
+            for (size_t i = 0; i < count;) {
                 std::vector<zmq::message_t> request;   // [identity][empty][body]
-                if (!zmq::recv_multipart(sock_, std::back_inserter(request)) || request.size() != 3) break;
+                if (!zmq::recv_multipart(sock_, std::back_inserter(request))) {
+                    if (pending.empty()) break;   // quiet and nothing owed: done
+                    flush();                      // quiet with answers held back: the client is waiting for them, answer and go on
+                    continue;
+                }
+                if (request.size() != 3) break;
+                ++i;
                 XStore_Proto::Request parsed;
                 if (!parsed.ParseFromArray(request[2].data(), static_cast<int>(request[2].size()))) break;
                 {
@@ -52,7 +58,7 @@ class AnsweringServer {
                     requests_.push_back(parsed);
                     sizes_.push_back(request[2].size());
                 }
-                pending.push_back({std::move(request[0]), answer(i, parsed)});
+                pending.push_back({std::move(request[0]), answer(i - 1, parsed)});
                 if (pending.size() >= hold) flush();
             }
             flush();   // nothing more is coming: answer what is waiting

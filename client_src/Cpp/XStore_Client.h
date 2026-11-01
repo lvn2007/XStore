@@ -418,12 +418,12 @@ inline constexpr size_t PARSE_PIECE_BYTES = 4ull * 1024 * 1024;
     return (end != env && *end == '\0' && n > 0) ? static_cast<size_t>(n) : 0;
 }
 
-// The policy for one parse. fixed_threads > 0 forces that team size; 0 reads XSTORE_CLIENT_PARSE_THREADS (a number forces it,
-// anything else is adaptive). XSTORE_CLIENT_PARSE_MAX caps an adaptive team (default the machine's hardware threads).
-[[nodiscard]] inline ParallelismPolicy ParsePolicy(size_t fixed_threads) {
+// The policy for one team (a parse, and the encoding of a big request). fixed_threads > 0 forces that team size; 0 reads XSTORE_CLIENT_THREADS (a number forces it,
+// anything else is adaptive). XSTORE_CLIENT_THREADS_MAX caps an adaptive team (default the machine's hardware threads).
+[[nodiscard]] inline ParallelismPolicy TeamPolicy(size_t fixed_threads) {
     ParallelismPolicy policy;
-    policy.fixed_threads = fixed_threads != 0 ? fixed_threads : PositiveFromEnv("XSTORE_CLIENT_PARSE_THREADS");
-    if (const size_t max_threads = PositiveFromEnv("XSTORE_CLIENT_PARSE_MAX"); max_threads != 0) policy.max_threads = max_threads;
+    policy.fixed_threads = fixed_threads != 0 ? fixed_threads : PositiveFromEnv("XSTORE_CLIENT_THREADS");
+    if (const size_t max_threads = PositiveFromEnv("XSTORE_CLIENT_THREADS_MAX"); max_threads != 0) policy.max_threads = max_threads;
     return policy;
 }
 
@@ -694,6 +694,7 @@ struct WindowOptions {
     size_t window_bytes = 0;     // 0 = DefaultWindowBytes of the memory budget
     bool prefetch = true;        // fetch the next window while the current one is consumed (two windows in memory)
     int32_t row_length = 0;      // the database's row length; 0 = ask the server (one INFO call)
+    bool adaptive = true;        // FindByValueEach / FindByPatternEach: grow the time window while the matches are sparse (see WindowPlan)
 };
 
 [[nodiscard]] inline uint64_t WindowTimestamps(size_t window_bytes, int32_t row_length) {
@@ -702,14 +703,54 @@ struct WindowOptions {
 }
 
 // Two windows in flight, each about 6 times its size in objects: a twelfth of the budget, between 4 and 256 MiB.
+inline constexpr size_t WINDOW_CAP_BYTES = 256ull << 20;   // the biggest window a default or a grown window holds
 [[nodiscard]] inline size_t DefaultWindowBytes(std::optional<size_t> budget) {
-    constexpr size_t FLOOR = 4ull << 20, CAP = 256ull << 20;
+    constexpr size_t FLOOR = 4ull << 20, CAP = WINDOW_CAP_BYTES;
     if (!budget) return CAP;
     return std::clamp<size_t>(*budget / 12, FLOOR, CAP);
 }
 
+// How big the windows of one windowed read are. A window is sized for a reply in which EVERY row of its timestamps comes back (`units` timestamps:
+// window_bytes / (row_length + 16)); that is the memory bound. A FindBy* answer holds only the matching rows, so when the matches are sparse the
+// same bytes could cover far more timestamps, and a small window then costs the server far more per timestamp scanned (4-16 MiB windows were
+// 6-15x slower than one call on a sparse read). NextUnits grows the window from what the last one returned: the timestamps whose expected reply
+// (the last window's density, counting one match more than it had) still fits window_bytes, at most twice the last window, never past
+// `max_units` (the window of a quarter of the memory budget, 256 MiB at most, at the rows' full size, so even an answer in which every row
+// matches stays within half the budget with two windows in flight), never below `units`. And only when that is at least
+// WINDOW_GROWTH_MIN_FACTOR times `units`: the server cuts a row-emitting scan into pieces (8 MiB of the file by default) that run in parallel, so
+// its cost per timestamp is not monotonic in the window length -- measured on a 128-double table with 8 MiB pieces it rose from 7.5 us (2.9k
+// timestamps, one piece) to 8.9 us (8k, two unequal pieces) before falling to 1.7 us (187k) -- and a growth of 2-3x from a small window can
+// land on the slow side (FindByValue at 43% matches, 4 MiB windows: 22% slower grown 2.3x than not grown). A growth of 4x or more is worth the risk.
+inline constexpr uint64_t WINDOW_GROWTH_MIN_FACTOR = 4;
+
+struct WindowPlan {
+    uint64_t units;
+    uint64_t max_units;
+    size_t window_bytes;
+    uint64_t entry_bytes;
+
+    [[nodiscard]] uint64_t NextUnits(uint64_t rows_last, uint64_t units_last) const {
+        const double per_unit = (static_cast<double>(rows_last) + 1.0) / static_cast<double>(std::max<uint64_t>(units_last, 1));
+        const double fit = static_cast<double>(window_bytes) / (per_unit * static_cast<double>(entry_bytes));
+        const uint64_t fit_units = fit >= static_cast<double>(max_units) ? max_units : static_cast<uint64_t>(fit);
+        if (fit_units / WINDOW_GROWTH_MIN_FACTOR < units) return units;   // not worth it (see above); fit_units is within max_units
+        const uint64_t doubled = 2 * units_last;   // units_last <= 2^60, no overflow
+        return std::max(units, std::min(fit_units, doubled));
+    }
+};
+
+[[nodiscard]] inline WindowPlan MakeWindowPlan(size_t window_bytes, int32_t row_length, std::optional<size_t> budget) {
+    WindowPlan plan;
+    plan.window_bytes = window_bytes;
+    plan.entry_bytes = static_cast<uint64_t>(std::max<int32_t>(row_length, 0)) + 16;
+    plan.units = WindowTimestamps(window_bytes, row_length);
+    const size_t max_bytes = budget ? std::min<size_t>(WINDOW_CAP_BYTES, *budget / 4) : WINDOW_CAP_BYTES;
+    plan.max_units = std::max(plan.units, WindowTimestamps(max_bytes, row_length));
+    return plan;
+}
+
 // ---- requests sent without waiting for each answer ----
-inline constexpr size_t PIPELINE_IN_FLIGHT = 4;                  // unanswered requests at most
+inline constexpr size_t PIPELINE_IN_FLIGHT = 8;                  // unanswered requests at most (1M rows, Mystic: 4 -> 8 takes ASYNC 5.1 -> 3.3 s and SYNC 6.9 -> 5.3 s; 16 only helps ASYNC)
 inline constexpr size_t PIPELINED_PART_BYTES = 64ull << 20;      // the size of a part of a pipelined BatchInsert (23-360 MB all measured alike)
 
 // Adds up the parts of a split call whose success status reads "<prefix> - <marker><count><suffix>" (Inserted N elements successfully,
@@ -868,28 +909,53 @@ inline uint8_t *PutVarint(uint8_t *out, uint64_t value) {
 }
 }  // namespace detail
 
+// The serialized size of rows [begin, end) (ByteSizeLong of each, which is also cached in the row for the serialize that follows), measured on
+// a team in chunks of MEASURE_CHUNK_ROWS rows. That many rows or fewer are measured on the calling thread with no team at all.
+inline constexpr size_t MEASURE_CHUNK_ROWS = 4096;
+[[nodiscard]] inline std::vector<uint32_t> MeasureRowSizes(const std::vector<std::pair<uint64_t, XStore_Proto::RowData>> &rows, size_t begin, size_t end,
+                                                           const ParallelismPolicy &policy) {
+    std::vector<uint32_t> sizes(end - begin);
+    auto measure = [&](size_t from, size_t to) {
+        for (size_t i = from; i < to; ++i) sizes[i - begin] = static_cast<uint32_t>(rows[i].second.ByteSizeLong());
+    };
+    if (sizes.size() <= MEASURE_CHUNK_ROWS) {
+        measure(begin, end);
+        return sizes;
+    }
+    const size_t chunks = (sizes.size() + MEASURE_CHUNK_ROWS - 1) / MEASURE_CHUNK_ROWS;
+    RunJobs(chunks, policy, [&](size_t k) { measure(begin + k * MEASURE_CHUNK_ROWS, std::min(end, begin + (k + 1) * MEASURE_CHUNK_ROWS)); });
+    return sizes;
+}
+
 // The BatchInsert request for rows [begin, end), written straight from the caller's rows into one buffer of exactly the right size: the bytes
 // protobuf would make of the same Request (batchInsert = field 8 of the envelope, timeoutMs = field 50), without copying every row into a
 // Request message (a heap object per value) and walking that twice. `sizes[i - begin]` must be rows[i].second.ByteSizeLong(), computed just
 // before by the caller (the row is then serialized with its cached size, as the server does). Refused with std::length_error over `limit`,
 // like SerializeRequest. Fields at their proto3 default (a zero timestamp, a zero durability mode, an empty database name, timeout_ms 0) are
 // left out, as protobuf leaves them out; a negative timeout_ms leaves the field out too.
+inline constexpr size_t ENCODE_CHUNK_BYTES = 1ull << 20;   // the share of a big request that one job of the encoding writes
+
 [[nodiscard]] inline zmq::message_t EncodeBatchInsert(std::string_view db_name, const std::vector<std::pair<uint64_t, XStore_Proto::RowData>> &rows,
                                                       size_t begin, size_t end, const std::vector<uint32_t> &sizes,
                                                       XStore_Proto::WalDurabilityMode durability_mode, int timeout_ms,
-                                                      size_t limit = static_cast<size_t>(INT_MAX)) {
+                                                      size_t limit = static_cast<size_t>(INT_MAX), const ParallelismPolicy &policy = TeamPolicy(1)) {
     using detail::PutVarint;
     using detail::VarintLength;
     const uint64_t durability = static_cast<uint64_t>(durability_mode);
     const uint64_t rtype = static_cast<uint64_t>(XStore_Proto::BATCHINSERT);
+    // BatchInsert_DATA (3) of row i: the length of its content (timestamp (1), data (2)), and the whole entry with its tag and length
+    auto content_bytes = [&](size_t i) {
+        const size_t row_bytes = sizes[i - begin];
+        return (rows[i].first != 0 ? 1 + VarintLength(rows[i].first) : 0) + 1 + VarintLength(row_bytes) + row_bytes;
+    };
+    auto entry_bytes = [&](size_t i) {
+        const size_t content = content_bytes(i);
+        return 1 + VarintLength(content) + content;
+    };
     size_t body = 0;   // the BatchInsert_REQ
     if (rtype != 0) body += 1 + VarintLength(rtype);
     if (!db_name.empty()) body += 1 + VarintLength(db_name.size()) + db_name.size();
-    for (size_t i = begin; i < end; ++i) {
-        const size_t row_bytes = sizes[i - begin];
-        const size_t entry = (rows[i].first != 0 ? 1 + VarintLength(rows[i].first) : 0) + 1 + VarintLength(row_bytes) + row_bytes;
-        body += 1 + VarintLength(entry) + entry;
-    }
+    for (size_t i = begin; i < end; ++i) body += entry_bytes(i);
     if (durability != 0) body += 1 + VarintLength(durability);
     const uint64_t timeout = timeout_ms > 0 ? static_cast<uint64_t>(timeout_ms) : 0;
     const size_t total = 1 + VarintLength(body) + body + (timeout != 0 ? 2 + VarintLength(timeout) : 0);
@@ -898,7 +964,8 @@ inline uint8_t *PutVarint(uint8_t *out, uint64_t value) {
                                 std::to_string(limit) + " bytes -- send the rows in several calls");
     }
     zmq::message_t message(total);
-    uint8_t *out = static_cast<uint8_t *>(message.data());
+    uint8_t *const base = static_cast<uint8_t *>(message.data());
+    uint8_t *out = base;
     *out++ = 0x42;   // Request.batchInsert (8), length-delimited
     out = PutVarint(out, body);
     if (rtype != 0) {
@@ -911,18 +978,40 @@ inline uint8_t *PutVarint(uint8_t *out, uint64_t value) {
         std::memcpy(out, db_name.data(), db_name.size());
         out += db_name.size();
     }
-    for (size_t i = begin; i < end; ++i) {   // BatchInsert_DATA (3): timestamp (1), data (2)
-        const size_t row_bytes = sizes[i - begin];
-        const size_t entry = (rows[i].first != 0 ? 1 + VarintLength(rows[i].first) : 0) + 1 + VarintLength(row_bytes) + row_bytes;
-        *out++ = 0x1a;
-        out = PutVarint(out, entry);
-        if (rows[i].first != 0) {
-            *out++ = 0x08;
-            out = PutVarint(out, rows[i].first);
+    auto put_rows = [&](uint8_t *to, size_t from_row, size_t to_row) {
+        for (size_t i = from_row; i < to_row; ++i) {
+            const size_t row_bytes = sizes[i - begin];
+            *to++ = 0x1a;
+            to = PutVarint(to, content_bytes(i));
+            if (rows[i].first != 0) {
+                *to++ = 0x08;
+                to = PutVarint(to, rows[i].first);
+            }
+            *to++ = 0x12;
+            to = PutVarint(to, row_bytes);
+            to = rows[i].second.SerializeWithCachedSizesToArray(to);
         }
-        *out++ = 0x12;
-        out = PutVarint(out, row_bytes);
-        out = rows[i].second.SerializeWithCachedSizesToArray(out);
+        return to;
+    };
+    if (total < MIN_PARALLEL_PARSE_BYTES) {
+        out = put_rows(out, begin, end);
+    } else {
+        // Where each job starts: the first row and the byte it is written at (every entry's size is known, so each job writes its own part of the buffer)
+        std::vector<std::pair<size_t, size_t>> starts{{begin, static_cast<size_t>(out - base)}};
+        size_t offset = starts[0].second, since_start = 0;
+        for (size_t i = begin; i < end; ++i) {
+            const size_t entry = entry_bytes(i);
+            offset += entry;
+            since_start += entry;
+            if (since_start >= ENCODE_CHUNK_BYTES && i + 1 < end) {
+                starts.emplace_back(i + 1, offset);
+                since_start = 0;
+            }
+        }
+        RunJobs(starts.size(), policy, [&](size_t k) {
+            put_rows(base + starts[k].second, starts[k].first, k + 1 < starts.size() ? starts[k + 1].first : end);
+        });
+        out = base + offset;
     }
     if (durability != 0) {
         *out++ = 0x20;   // durabilityMode (4)
@@ -1056,8 +1145,8 @@ class XStoreClient {
   // forever. A plain member, not thread_local: this client's REQ socket is already single-threaded use only.
   int timeout_ms_ = -1;
 
-  // Threads used to parse a big reply of rows; 0 = adaptive. See SetParseThreads.
-  size_t parse_threads_ = 0;
+  // Threads of the team that parses a big reply and encodes a big request; 0 = adaptive. See SetThreads.
+  size_t threads_ = 0;
 
   // Memory a reply received as messages may hold: 0 = automatic. See SetMemoryBudget.
   size_t memory_budget_ = 0;
@@ -1125,7 +1214,7 @@ class XStoreClient {
   bool TryParseInParallel(const FragmentList &fragments, RepT &into, google::protobuf::Arena *arena) {
       if constexpr (xstore_client::IsFragmentMergeable<RepT>::value) {
           if (BytesOf(fragments) < xstore_client::MIN_PARALLEL_PARSE_BYTES) return false;
-          return xstore_client::ParseFragmentsParallel(fragments, into, xstore_client::ParsePolicy(parse_threads_),
+          return xstore_client::ParseFragmentsParallel(fragments, into, xstore_client::TeamPolicy(threads_),
                                                         xstore_client::PARSE_PIECE_BYTES, arena);
       } else {
           (void)fragments;
@@ -1139,29 +1228,27 @@ class XStoreClient {
   // has just measured them; otherwise they are measured here.
   std::string BatchInsertPart(std::string_view db_name, const std::vector<std::pair<uint64_t, XStore_Proto::RowData>> &rows, size_t begin,
                               size_t end, XStore_Proto::WalDurabilityMode durability_mode, const std::vector<uint32_t> *sizes = nullptr) {
+      const xstore_client::ParallelismPolicy policy = xstore_client::TeamPolicy(threads_);
       std::vector<uint32_t> measured;
       if (sizes == nullptr) {
-          measured.reserve(end - begin);
-          for (size_t i = begin; i < end; ++i) measured.push_back(static_cast<uint32_t>(rows[i].second.ByteSizeLong()));
+          measured = xstore_client::MeasureRowSizes(rows, begin, end, policy);
           sizes = &measured;
       }
-      return SendRecvMessage<XStore_Proto::BatchInsert_REP>(xstore_client::EncodeBatchInsert(db_name, rows, begin, end, *sizes, durability_mode, timeout_ms_))
+      return SendRecvMessage<XStore_Proto::BatchInsert_REP>(
+                 xstore_client::EncodeBatchInsert(db_name, rows, begin, end, *sizes, durability_mode, timeout_ms_, static_cast<size_t>(INT_MAX), policy))
           .insertstatus();
   }
 
-  // The next part of `rows` from `begin`: its end and the sizes of its rows, cut once the part would pass `part_bytes` (a row bigger than that
-  // still goes, alone).
-  size_t NextInsertPart(const std::vector<std::pair<uint64_t, XStore_Proto::RowData>> &rows, size_t begin, size_t part_bytes,
-                        std::vector<uint32_t> &sizes) const {
-      sizes.clear();
+  // The next part of the rows from `begin`, given the size of every row (`all_sizes`): its end, and the sizes of its rows in `sizes`. The part is
+  // cut once it would pass `part_bytes` (a row bigger than that still goes, alone).
+  static size_t NextInsertPart(const std::vector<uint32_t> &all_sizes, size_t begin, size_t part_bytes, std::vector<uint32_t> &sizes) {
       size_t end = begin, bytes = 0;
-      while (end < rows.size()) {
-          const size_t row_bytes = rows[end].second.ByteSizeLong();
-          if (end > begin && bytes + row_bytes + 16 > part_bytes) break;
-          bytes += row_bytes + 16;
-          sizes.push_back(static_cast<uint32_t>(row_bytes));
+      while (end < all_sizes.size()) {
+          if (end > begin && bytes + all_sizes[end] + 16 > part_bytes) break;
+          bytes += all_sizes[end] + 16;
           ++end;
       }
+      sizes.assign(all_sizes.begin() + static_cast<std::ptrdiff_t>(begin), all_sizes.begin() + static_cast<std::ptrdiff_t>(end));
       return end;
   }
 
@@ -1232,25 +1319,34 @@ class XStoreClient {
       throw std::runtime_error("XStore_Client: no database named '" + std::string(db_name) + "' on the server");
   }
 
-  // Reads `total_units` units (timestamps, or the entries of a list) as windows of `per_window`: fetch(client, first_unit, count) makes one
-  // streamed call, on_window gets its reply and the reply is dropped. With prefetch the next window is fetched on a second client meanwhile;
-  // the memory budget is then shared by the two. Returns the rows delivered.
-  template <typename RepT, typename Fetch>
-  uint64_t ReadInWindows(uint64_t total_units, uint64_t per_window, bool prefetch, Fetch &&fetch,
+  // Reads `total_units` units (timestamps, or the entries of a list) as windows: the first of `first_units`, each next one of
+  // next_units(rows_of_the_last_window, units_of_the_last_window, units_left) units (clamped to 1..units_left). fetch(client, first_unit, count)
+  // makes one streamed call, on_window gets its reply and the reply is dropped. With prefetch the next window is fetched on a second client
+  // meanwhile (it is chosen from the last window that has arrived); the memory budget is then shared by the two. Returns the rows delivered.
+  template <typename RepT, typename Fetch, typename Next>
+  uint64_t ReadInWindows(uint64_t total_units, uint64_t first_units, bool prefetch, Fetch &&fetch, Next &&next_units,
                          const std::function<void(const RepT &)> &on_window) {
-      const uint64_t windows = total_units / per_window + (total_units % per_window != 0 ? 1 : 0);
-      auto count_of = [&](uint64_t w) { return std::min(per_window, total_units - w * per_window); };
+      struct Window {
+          uint64_t first, count;
+      };
+      auto after = [&](const Window &w, uint64_t rows_of_w) {   // the window that follows w
+          const uint64_t first = w.first + w.count, left = total_units - first;
+          return Window{first, std::clamp<uint64_t>(next_units(rows_of_w, w.count, left), 1, left)};
+      };
       uint64_t rows = 0;
-      if (!prefetch || windows <= 1) {
-          for (uint64_t w = 0; w < windows; ++w) {
-              const xstore_client::ArenaReply<RepT> reply = fetch(*this, w * per_window, count_of(w));
-              rows += static_cast<uint64_t>(reply->queryresponse_size());
+      Window window{0, std::clamp<uint64_t>(first_units, 1, total_units)};
+      if (!prefetch || window.count >= total_units) {
+          while (true) {
+              const xstore_client::ArenaReply<RepT> reply = fetch(*this, window.first, window.count);
+              const uint64_t rows_of_window = static_cast<uint64_t>(reply->queryresponse_size());
+              rows += rows_of_window;
               on_window(*reply);
+              if (window.first + window.count >= total_units) return rows;
+              window = after(window, rows_of_window);
           }
-          return rows;
       }
       XStoreClient helper(server_addr_, server_port_, timeout_ms_, /*warmup_on_init=*/false, curve_auth_);
-      helper.parse_threads_ = parse_threads_;
+      helper.threads_ = threads_;
       const size_t saved_budget = memory_budget_;
       const std::optional<size_t> budget =
           xstore_client::MemoryBudgetBytes(memory_budget_, memory_budget_ == 0 ? xstore_client::AvailableMemoryBytes() : std::nullopt, 0.95);
@@ -1264,41 +1360,49 @@ class XStoreClient {
           ~Restore() { target = value; }
       } restore{memory_budget_, saved_budget};
       XStoreClient *clients[2] = {this, &helper};
-      auto launch = [&](uint64_t w) {
-          return std::async(std::launch::async, [&, w] { return fetch(*clients[w % 2], w * per_window, count_of(w)); });
+      auto launch = [&](const Window &w, uint64_t number) {
+          return std::async(std::launch::async, [&, w, number] { return fetch(*clients[number % 2], w.first, w.count); });
       };
-      std::future<xstore_client::ArenaReply<RepT>> next = launch(0);
-      for (uint64_t w = 0; w < windows; ++w) {
+      Window current_window = window;
+      std::future<xstore_client::ArenaReply<RepT>> next = launch(current_window, 0);
+      for (uint64_t number = 0;; ++number) {
           const xstore_client::ArenaReply<RepT> current = next.get();
-          if (w + 1 < windows) next = launch(w + 1);
-          rows += static_cast<uint64_t>(current->queryresponse_size());
+          const uint64_t rows_of_window = static_cast<uint64_t>(current->queryresponse_size());
+          const bool last = current_window.first + current_window.count >= total_units;
+          if (!last) {
+              current_window = after(current_window, rows_of_window);
+              next = launch(current_window, number + 1);
+          }
+          rows += rows_of_window;
           on_window(*current);
+          if (last) return rows;
       }
-      return rows;
   }
 
-  // A range [start_time, end_time] read as windows of timestamps; fetch(client, from, to) makes one call for [from, to].
+  // A range [start_time, end_time] read as windows of timestamps; fetch(client, from, to) makes one call for [from, to]. With `grows` (and
+  // options.adaptive) the window grows while its answers are sparse, see WindowPlan.
   template <typename RepT, typename Fetch>
   uint64_t ReadInTimeWindows(uint64_t start_time, uint64_t end_time, std::string_view db_name, const xstore_client::WindowOptions &options,
-                             Fetch &&fetch, const std::function<void(const RepT &)> &on_window) {
+                             Fetch &&fetch, const std::function<void(const RepT &)> &on_window, bool grows = false) {
       if (end_time < start_time) throw std::invalid_argument("XStore_Client: the end of the range is before its start");
       const uint64_t span = end_time - start_time;
       const uint64_t total = span == std::numeric_limits<uint64_t>::max() ? span : span + 1;
+      const xstore_client::WindowPlan plan = PlanWindows(db_name, options);
+      auto next = [&](uint64_t rows_last, uint64_t units_last, uint64_t) {
+          return grows && options.adaptive ? plan.NextUnits(rows_last, units_last) : plan.units;
+      };
       return ReadInWindows<RepT>(
-          total, WindowLength(db_name, options), options.prefetch,
-          [&](XStoreClient &c, uint64_t first, uint64_t count) { return fetch(c, start_time + first, start_time + first + count - 1); }, on_window);
+          total, plan.units, options.prefetch,
+          [&](XStoreClient &c, uint64_t first, uint64_t count) { return fetch(c, start_time + first, start_time + first + count - 1); }, next, on_window);
   }
 
-  // The window length in timestamps for these options (looks the row length up when it is not given).
-  uint64_t WindowLength(std::string_view db_name, const xstore_client::WindowOptions &options) {
+  // The window sizes for these options (looks the row length up when it is not given).
+  xstore_client::WindowPlan PlanWindows(std::string_view db_name, const xstore_client::WindowOptions &options) {
       const int32_t row_length = options.row_length > 0 ? options.row_length : RowLengthOf(db_name);
-      size_t window_bytes = options.window_bytes;
-      if (window_bytes == 0) {
-          const std::optional<size_t> budget =
-              xstore_client::MemoryBudgetBytes(memory_budget_, memory_budget_ == 0 ? xstore_client::AvailableMemoryBytes() : std::nullopt, 0.95);
-          window_bytes = xstore_client::DefaultWindowBytes(budget);
-      }
-      return xstore_client::WindowTimestamps(window_bytes, row_length);
+      const std::optional<size_t> budget =
+          xstore_client::MemoryBudgetBytes(memory_budget_, memory_budget_ == 0 ? xstore_client::AvailableMemoryBytes() : std::nullopt, 0.95);
+      const size_t window_bytes = options.window_bytes != 0 ? options.window_bytes : xstore_client::DefaultWindowBytes(budget);
+      return xstore_client::MakeWindowPlan(window_bytes, row_length, budget);
   }
 
   // rows [begin, end) of a BatchDelete's timestamps as ONE request.
@@ -1404,7 +1508,7 @@ class XStoreClient {
           options.max_block_size = size_t{8} << 20;
           auto arena = std::make_unique<google::protobuf::Arena>(options);
           RepT *from_server = google::protobuf::Arena::Create<RepT>(arena.get());
-          xstore_client::ReplyStreamParser<RepT> parser(*from_server, arena.get(), xstore_client::ParsePolicy(parse_threads_));
+          xstore_client::ReplyStreamParser<RepT> parser(*from_server, arena.get(), xstore_client::TeamPolicy(threads_));
           const std::optional<size_t> budget =
               xstore_client::MemoryBudgetBytes(memory_budget_, memory_budget_ == 0 ? xstore_client::AvailableMemoryBytes() : std::nullopt, 0.95);
           size_t fed = 0, received_bytes = 0;
@@ -1432,11 +1536,12 @@ class XStoreClient {
   }
 
  public:
-  // Threads used to parse a big reply of rows -- RangeQuery, BatchQuery, FindByValue, FindByPattern. 0 (the default) is adaptive: the
+  // Threads used to parse a big reply of rows -- RangeQuery, BatchQuery, FindByValue, FindByPattern (and, once it is built, to encode a big
+  // BatchInsert). 0 (the default) is adaptive: the
   // parse starts on the calling thread and adds helpers while the machine has idle cores, and they leave when other work needs the cores
-  // (cap: XSTORE_CLIENT_PARSE_MAX, default the machine's hardware threads). N > 0 forces N threads (XSTORE_CLIENT_PARSE_THREADS=N does the
+  // (cap: XSTORE_CLIENT_THREADS_MAX, default the machine's hardware threads). N > 0 forces N threads (XSTORE_CLIENT_THREADS=N does the
   // same for every client of a process); 1 parses on the calling thread only.
-  void SetParseThreads(size_t threads) { parse_threads_ = threads; }
+  void SetThreads(size_t threads) { threads_ = threads; }
 
   // The memory a big reply may hold (received frames + parsed objects) before the call stops with xstore_client::MemoryBudgetExceeded rather
   // than run the machine out of memory: a number of bytes, 0 (the default) for 95% of the memory available when the reply turns out to be big,
@@ -1716,8 +1821,9 @@ class XStoreClient {
       uint64_t inserted = 0;
       size_t parts = 0;
       std::vector<uint32_t> sizes;
+      const std::vector<uint32_t> all_sizes = xstore_client::MeasureRowSizes(rows, 0, rows.size(), xstore_client::TeamPolicy(threads_));
       for (size_t begin = 0; begin < rows.size();) {
-          const size_t end = NextInsertPart(rows, begin, max_request_bytes_, sizes);
+          const size_t end = NextInsertPart(all_sizes, begin, max_request_bytes_, sizes);
           const std::string status = BatchInsertPart(db_name, rows, begin, end, durability_mode, &sizes);
           const size_t at = status.find(" - Inserted ");
           if (status.compare(0, 6, "[INFO]") != 0 || at == std::string::npos) return status;   // this part failed: stop, say why
@@ -1741,12 +1847,26 @@ class XStoreClient {
       xstore_client::SplitStatusTally tally(" - Inserted ", " elements successfully");
       size_t begin = 0;
       std::vector<uint32_t> sizes;
+      const xstore_client::ParallelismPolicy policy = xstore_client::TeamPolicy(threads_);
+      // With a team, every row is measured up front (the team ramps up over the whole pass). With one thread that would put the whole
+      // pass before the first send, so the rows are measured a block at a time as the parts are cut and measuring overlaps the sends.
+      std::vector<uint32_t> all_sizes =
+          policy.fixed_threads == 1 ? std::vector<uint32_t>() : xstore_client::MeasureRowSizes(rows, 0, rows.size(), policy);
       SendPipelined<XStore_Proto::BatchInsert_REP>(
           xstore_client::PIPELINE_IN_FLIGHT,
           [&]() -> std::optional<zmq::message_t> {
               if (begin >= rows.size() || tally.failed()) return std::nullopt;
-              const size_t end = NextInsertPart(rows, begin, part_bytes, sizes);
-              zmq::message_t body = xstore_client::EncodeBatchInsert(db_name, rows, begin, end, sizes, durability_mode, timeout_ms_);
+              size_t end;
+              while (true) {
+                  end = NextInsertPart(all_sizes, begin, part_bytes, sizes);
+                  // the part is closed when a measured row did not fit (end is short of the measured rows) or no row is left to measure
+                  if (end < all_sizes.size() || all_sizes.size() >= rows.size()) break;
+                  const size_t from = all_sizes.size(), to = std::min(rows.size(), from + xstore_client::MEASURE_CHUNK_ROWS);
+                  const std::vector<uint32_t> block = xstore_client::MeasureRowSizes(rows, from, to, policy);
+                  all_sizes.insert(all_sizes.end(), block.begin(), block.end());
+              }
+              zmq::message_t body =
+                  xstore_client::EncodeBatchInsert(db_name, rows, begin, end, sizes, durability_mode, timeout_ms_, static_cast<size_t>(INT_MAX), policy);
               begin = end;
               return body;
           },
@@ -1867,7 +1987,7 @@ class XStoreClient {
                            const xstore_client::WindowOptions &options = {}) {
       return ReadInTimeWindows<XStore_Proto::FindByValue_REP>(
           start_time, end_time, db_name, options,
-          [&](XStoreClient &c, uint64_t from, uint64_t to) { return c.FindByValue(from, to, db_name, column_idx, value); }, on_window);
+          [&](XStoreClient &c, uint64_t from, uint64_t to) { return c.FindByValue(from, to, db_name, column_idx, value); }, on_window, /*grows=*/true);
   }
 
   uint64_t FindByPatternEach(uint64_t start_time, uint64_t end_time, std::string_view db_name, int32_t column_idx, std::string_view pattern,
@@ -1877,7 +1997,7 @@ class XStoreClient {
       return ReadInTimeWindows<XStore_Proto::FindByPattern_REP>(
           start_time, end_time, db_name, options,
           [&](XStoreClient &c, uint64_t from, uint64_t to) { return c.FindByPattern(from, to, db_name, column_idx, pattern, mode, case_insensitive); },
-          on_window);
+          on_window, /*grows=*/true);
   }
 
   // The windows are consecutive slices of `timestamps`; with sort_time they are sliced from the sorted list, so the order holds across windows.
@@ -1891,13 +2011,14 @@ class XStoreClient {
           std::sort(sorted.begin(), sorted.end());
       }
       const std::vector<uint64_t> &list = sort_time ? sorted : timestamps;
+      const uint64_t per_window = PlanWindows(db_name, options).units;
       return ReadInWindows<XStore_Proto::BatchQuery_REP>(
-          list.size(), WindowLength(db_name, options), options.prefetch,
+          list.size(), per_window, options.prefetch,
           [&](XStoreClient &c, uint64_t first, uint64_t count) {
               const std::vector<uint64_t> slice(list.begin() + static_cast<std::ptrdiff_t>(first), list.begin() + static_cast<std::ptrdiff_t>(first + count));
               return c.BatchQuery(db_name, slice, sort_time);
           },
-          on_window);
+          [per_window](uint64_t, uint64_t, uint64_t) { return per_window; }, on_window);
   }
 
   [[nodiscard]] std::string RangeDelete(uint64_t start_time, uint64_t end_time, std::string_view db_name) {

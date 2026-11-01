@@ -213,22 +213,22 @@ TEST(ParallelParseTest, MalformedFramingAndBadRowsFailAndLeaveTheReplyUntouched)
 
 TEST(ParallelParseTest, EnvironmentChoosesFixedOrAdaptiveAndTheCap) {
     const size_t cores = std::max<size_t>(1, std::thread::hardware_concurrency());
-    unsetenv("XSTORE_CLIENT_PARSE_THREADS");
-    unsetenv("XSTORE_CLIENT_PARSE_MAX");
-    EXPECT_EQ(xstore_client::ParsePolicy(0).fixed_threads, 0u);   // 0 = adaptive
-    EXPECT_EQ(xstore_client::ParsePolicy(0).max_threads, cores);
-    EXPECT_EQ(xstore_client::ParsePolicy(6).fixed_threads, 6u);   // the caller's choice wins
-    setenv("XSTORE_CLIENT_PARSE_THREADS", "3", 1);
-    EXPECT_EQ(xstore_client::ParsePolicy(0).fixed_threads, 3u);
-    EXPECT_EQ(xstore_client::ParsePolicy(6).fixed_threads, 6u);
-    setenv("XSTORE_CLIENT_PARSE_THREADS", "adaptive", 1);
-    EXPECT_EQ(xstore_client::ParsePolicy(0).fixed_threads, 0u);
-    setenv("XSTORE_CLIENT_PARSE_THREADS", "nonsense", 1);
-    EXPECT_EQ(xstore_client::ParsePolicy(0).fixed_threads, 0u);
-    setenv("XSTORE_CLIENT_PARSE_MAX", "5", 1);
-    EXPECT_EQ(xstore_client::ParsePolicy(0).max_threads, 5u);
-    unsetenv("XSTORE_CLIENT_PARSE_THREADS");
-    unsetenv("XSTORE_CLIENT_PARSE_MAX");
+    unsetenv("XSTORE_CLIENT_THREADS");
+    unsetenv("XSTORE_CLIENT_THREADS_MAX");
+    EXPECT_EQ(xstore_client::TeamPolicy(0).fixed_threads, 0u);   // 0 = adaptive
+    EXPECT_EQ(xstore_client::TeamPolicy(0).max_threads, cores);
+    EXPECT_EQ(xstore_client::TeamPolicy(6).fixed_threads, 6u);   // the caller's choice wins
+    setenv("XSTORE_CLIENT_THREADS", "3", 1);
+    EXPECT_EQ(xstore_client::TeamPolicy(0).fixed_threads, 3u);
+    EXPECT_EQ(xstore_client::TeamPolicy(6).fixed_threads, 6u);
+    setenv("XSTORE_CLIENT_THREADS", "adaptive", 1);
+    EXPECT_EQ(xstore_client::TeamPolicy(0).fixed_threads, 0u);
+    setenv("XSTORE_CLIENT_THREADS", "nonsense", 1);
+    EXPECT_EQ(xstore_client::TeamPolicy(0).fixed_threads, 0u);
+    setenv("XSTORE_CLIENT_THREADS_MAX", "5", 1);
+    EXPECT_EQ(xstore_client::TeamPolicy(0).max_threads, 5u);
+    unsetenv("XSTORE_CLIENT_THREADS");
+    unsetenv("XSTORE_CLIENT_THREADS_MAX");
 }
 
 TEST(ParallelParseTest, OnlyRepliesWithRowsAreMergeable) {
@@ -281,7 +281,7 @@ void ExpectEveryShapeOfReplyGivesTheSameBytesAsASerialParse() {
         for (size_t threads : {size_t{1}, size_t{8}, size_t{0}}) {   // 0 = adaptive
             OneShotServer server(shape.frames);
             XStoreClient client("127.0.0.1", server.port(), 10000, /*warmup_on_init=*/false);
-            client.SetParseThreads(threads);
+            client.SetThreads(threads);
             EXPECT_TRUE(ViaTheCall<RepT>(client) == expected.SerializeAsString()) << shape.name << " threads=" << threads;
         }
     }
@@ -304,7 +304,7 @@ TEST(ClientStreamedReplyTest, TheStatusAndTheRowCountComeThrough) {
     const std::vector<std::string> frames = MakeFrames(K_FRAMES, K_ROWS, true);
     OneShotServer server(frames);
     XStoreClient client("127.0.0.1", server.port(), 10000, /*warmup_on_init=*/false);
-    client.SetParseThreads(8);
+    client.SetThreads(8);
     const auto rep = client.RangeQuery(0, K_ROWS, "ANY");
     EXPECT_EQ(rep->queryresponse_size(), static_cast<int>(K_ROWS));
     EXPECT_EQ(rep->querystatus(), K_STATUS);
@@ -314,7 +314,7 @@ TEST(ClientStreamedReplyTest, ASingleFrameReplyIsParsedInParallelToo) {
     const std::vector<std::string> frames = MakeFrames(1, K_ROWS * 4, true);   // ~20 MB in one frame
     OneShotServer server(frames);
     XStoreClient client("127.0.0.1", server.port(), 10000, /*warmup_on_init=*/false);
-    client.SetParseThreads(4);
+    client.SetThreads(4);
     const auto rep = client.RangeQuery(0, K_ROWS * 4, "ANY");
     XStore_Proto::RangeQuery_REP expected;
     ASSERT_TRUE(expected.ParseFromString(Whole(frames)));
@@ -340,7 +340,7 @@ TEST(ArenaReplyTest, EveryRowOfEveryShapeOfReplySitsOnTheRepliesArena) {
     for (const auto &frames : shapes) {
         OneShotServer server(frames);
         XStoreClient client("127.0.0.1", server.port(), 10000, /*warmup_on_init=*/false);
-        client.SetParseThreads(4);
+        client.SetThreads(4);
         const auto rep = client.RangeQuery(0, K_ROWS, "ANY");
         ExpectOneArena(*rep);
     }

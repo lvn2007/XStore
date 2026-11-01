@@ -242,6 +242,17 @@ TEST(ScanThreadsTest, TheDefaultIsAdaptiveCappedAtHalfTheCores) {
     EXPECT_EQ(from_env.adaptive_max, half);
 }
 
+// The pieces of a row-emitting scan are 2 MiB of the file out of the box (8 MiB left windows of up to ~6k rows of 1.4 KB in one serial piece and made
+// the cost per timestamp rise with the window up to ~8k rows; see the Technical Reference, section 8.1); the environment still sets it.
+TEST(ScanThreadsTest, TheOrderedPieceIsTwoMiBAndTheEnvironmentChangesIt) {
+    unsetenv("XSTORE_SCAN_ORDERED_PIECE_MB");
+    EXPECT_EQ(xstore::scanlock::Config().ordered_piece_bytes, uint64_t{2} << 20);
+    EXPECT_EQ(xstore::scanlock::detail::FromEnv().ordered_piece_bytes, uint64_t{2} << 20);
+    setenv("XSTORE_SCAN_ORDERED_PIECE_MB", "8", 1);
+    EXPECT_EQ(xstore::scanlock::detail::FromEnv().ordered_piece_bytes, uint64_t{8} << 20);
+    unsetenv("XSTORE_SCAN_ORDERED_PIECE_MB");
+}
+
 TEST(ScanThreadsTest, TheEnvironmentForcesANumberOrTheCap) {
     setenv("XSTORE_SCAN_PARALLEL_THREADS", "3", 1);
     setenv("XSTORE_SCAN_ADAPTIVE_MAX", "5", 1);

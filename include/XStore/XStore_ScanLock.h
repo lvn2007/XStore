@@ -39,8 +39,11 @@ struct Config {
     uint32_t adaptive_headroom = 2;
     uint64_t piece_bytes = uint64_t{64} << 20;
     // Row-emitting scans (ScanRegionOrdered): the pieces are smaller, because each in-flight piece holds its output until it is
-    // sent in order (the same number of threads).
-    uint64_t ordered_piece_bytes = uint64_t{8} << 20;
+    // sent in order (the same number of threads). 2 MiB, not 8: a scan of fewer than two pieces runs sequentially, and at 8 MiB the
+    // cost per timestamp of a FindByValue window rose from 7.5 us (2.9k rows of 1.4 KB, one piece) to 8.9 us (8k rows, two unequal
+    // pieces) before falling to 1.7 us (187k); at 2 MiB it falls steadily (6.5 us at 2.9k, 3.6 at 12k, 1.0 at 187k), inserts next to
+    // scans lose less and the memory held by the in-flight pieces is a quarter (Technical Reference, section 8.1).
+    uint64_t ordered_piece_bytes = uint64_t{2} << 20;
 };
 
 namespace detail {

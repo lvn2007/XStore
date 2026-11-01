@@ -349,7 +349,7 @@ void ExpectEveryStreamedShapeGivesTheBytesOfASerialParse() {
         for (size_t threads : {size_t{1}, size_t{8}, size_t{0}}) {   // 0 = adaptive
             ScriptedServer server({shape.script});
             XStoreClient client("127.0.0.1", server.port(), 10000, /*warmup_on_init=*/false);
-            client.SetParseThreads(threads);
+            client.SetThreads(threads);
             EXPECT_TRUE(ViaTheCall<RepT>(client) == expected.SerializeAsString()) << shape.name << " threads=" << threads;
         }
     }

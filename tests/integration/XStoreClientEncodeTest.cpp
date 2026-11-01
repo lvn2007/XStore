@@ -2,6 +2,10 @@
 // must be exactly what protobuf makes of the same Request, for every shape of row.
 #include <gtest/gtest.h>
 
+#include <cstdlib>
+#include <atomic>
+#include <climits>
+#include <optional>
 #include <random>
 #include <string>
 #include <vector>
@@ -80,3 +84,73 @@ TEST(EncodeBatchInsertTest, ARequestOverTheLimitIsRefusedLikeAnySerializedReques
 }
 
 }  // namespace
+
+// ---- the team: the size pass and the encoding of a big request run on several threads, with the same result as one thread ----
+
+// Rows of very different sizes (empty, tiny, ~1.5 KB, one of 2 MiB), enough of them to pass the size from which the encoding is split up.
+Rows BigRows(std::mt19937_64 &rng, size_t count) {
+    Rows rows;
+    for (size_t i = 0; i < count; ++i) {
+        XStore_Proto::RowData row;
+        if (i % 97 == 0) {
+            // an empty row
+        } else if (i == count / 3) {
+            *row.add_fielddata() = xstore_fdata::String(std::string(2u << 20, 'x'));
+        } else if (i % 5 == 0) {
+            *row.add_fielddata() = xstore_fdata::Int64(static_cast<int64_t>(i));
+        } else {
+            *row.add_fielddata() = xstore_fdata::String(std::string(1000 + rng() % 1000, static_cast<char>('a' + i % 26)));
+        }
+        rows.emplace_back(i % 11 == 0 ? 0 : rng(), std::move(row));
+    }
+    return rows;
+}
+
+xstore_client::ParallelismPolicy Fixed(size_t threads) {
+    xstore_client::ParallelismPolicy policy;
+    policy.fixed_threads = threads;
+    return policy;
+}
+
+TEST(MeasureRowSizesTest, EverySizeIsTheRowsByteSizeWhateverTheTeamAndTheRange) {
+    std::mt19937_64 rng(11);
+    const Rows rows = BigRows(rng, 20000);
+    for (auto policy : {Fixed(1), Fixed(2), Fixed(8), xstore_client::ParallelismPolicy()}) {
+        for (auto [begin, end] : {std::pair<size_t, size_t>{0, rows.size()}, {0, 0}, {5, 6}, {1, 4099}, {4096, 12289}, {rows.size() - 3, rows.size()}}) {
+            const std::vector<uint32_t> sizes = xstore_client::MeasureRowSizes(rows, begin, end, policy);
+            ASSERT_EQ(sizes.size(), end - begin);
+            for (size_t i = begin; i < end; ++i) {
+                ASSERT_EQ(sizes[i - begin], rows[i].second.ByteSizeLong()) << "row " << i << " threads " << policy.fixed_threads;
+            }
+        }
+    }
+}
+
+TEST(EncodeBatchInsertTeamTest, ABigRequestIsTheSameBytesOnOneThreadAndOnAnyTeam) {
+    std::mt19937_64 rng(21);
+    const Rows rows = BigRows(rng, 9000);
+    for (auto [begin, end] : {std::pair<size_t, size_t>{0, rows.size()}, {17, 5001}, {4000, rows.size()}}) {
+        const std::string reference = Reference("BENCH_DB", rows, begin, end, XStore_Proto::SYNC, 1800000);
+        ASSERT_GE(reference.size(), xstore_client::MIN_PARALLEL_PARSE_BYTES) << "the request must be big enough to be split up";
+        const std::vector<uint32_t> sizes = xstore_client::MeasureRowSizes(rows, begin, end, Fixed(1));
+        for (auto policy : {Fixed(1), Fixed(2), Fixed(3), Fixed(8), xstore_client::ParallelismPolicy()}) {
+            const zmq::message_t message = xstore_client::EncodeBatchInsert("BENCH_DB", rows, begin, end, sizes, XStore_Proto::SYNC, 1800000,
+                                                                            static_cast<size_t>(INT_MAX), policy);
+            EXPECT_TRUE(std::string(static_cast<const char *>(message.data()), message.size()) == reference)
+                << "rows [" << begin << "," << end << ") threads " << policy.fixed_threads;
+        }
+    }
+}
+
+TEST(EncodeBatchInsertTeamTest, ASmallRequestIsEncodedOnTheCallingThreadAlone) {
+    std::mt19937_64 rng(5);
+    Rows rows;
+    for (size_t i = 0; i < 1000; ++i) rows.emplace_back(i + 1, RandomRow(rng));
+    const std::vector<uint32_t> sizes = xstore_client::MeasureRowSizes(rows, 0, rows.size(), Fixed(8));
+    std::atomic<int> consulted{0};
+    xstore_client::ParallelismPolicy policy;   // adaptive: it asks the machine's load once a team is started
+    policy.runnable = [&]() -> std::optional<size_t> { ++consulted; return 0; };
+    (void)xstore_client::EncodeBatchInsert("DB", rows, 0, rows.size(), sizes, XStore_Proto::ASYNC, -1, static_cast<size_t>(INT_MAX), policy);
+    (void)xstore_client::MeasureRowSizes(rows, 0, rows.size(), policy);
+    EXPECT_EQ(consulted.load(), 0) << "no team, no controller thread, for a request this small";
+}
