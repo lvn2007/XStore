@@ -227,84 +227,109 @@ constexpr size_t BATCH_LOCK_OFFSETS_KEEP = 65536;
 void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, bool sort_time, size_t chunk_size_bytes,
                                  const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk,
                                  xstore::MemoryPool::Clock::time_point deadline, bool streamed_reply) {
-    std::string db_name = proto_from_client->dbname();
+    BatchQueryJob job;
+    job.db_name = proto_from_client->dbname();
+    job.timestamps.assign(proto_from_client->timestamp().begin(), proto_from_client->timestamp().end());
+    job.sort_time = sort_time;
+    job.chunk_size_bytes = chunk_size_bytes;
+    job.deadline = deadline;
+    job.streamed_reply = streamed_reply;
+    BatchQueryRun(job, emit_chunk, [] { return false; }, 0);
+}
+
+XStore::RunState XStore::BatchQueryRun(BatchQueryJob &job, const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk,
+                                       const std::function<bool()> &should_park, uint64_t slice_lease_bytes) {
+    std::string db_name = job.db_name;
     ToUpperCase(db_name.begin(), db_name.end());
 
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
-    bool has_warning = false;
-    std::string last_warning;
     auto set_warning = [&](const char *tag, const std::string &body) {
-        has_warning = true;
-        last_warning = tag;
-        last_warning += body;
+        job.has_warning = true;
+        job.last_warning = tag;
+        job.last_warning += body;
     };
     auto finish = [&](std::string &&chunk_buf) {
-        if (has_warning) {
-            AppendQueryStatus(chunk_buf, last_warning);
+        if (job.has_warning) {
+            AppendQueryStatus(chunk_buf, job.last_warning);
         }
         emit_chunk(std::move(chunk_buf), true);
     };
 
-    XStore_Proto::ConfigStruct cfg_struct;
-    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
-        set_warning("[WARNING] ", fmt::format("[BATCH QUERY] [DB: {}] - {}.CFG does not exist", db_name, db_name));
-        finish(std::string());
-        return;
-    }
+    const bool resumed = job.started;
+    if (!resumed) {
+        job.started = true;
+        // Loaded BEFORE the cfg is read, as the deletes do: CfgEpochCurrent tells a resumed run whether the DB was removed meanwhile.
+        job.cfg_epoch = CfgEpoch();
+        if (!GetOrLoadCfg(db_name, db_base_path_str, job.cfg_struct)) {
+            set_warning("[WARNING] ", fmt::format("[BATCH QUERY] [DB: {}] - {}.CFG does not exist", db_name, db_name));
+            finish(std::string());
+            return RunState::kDone;
+        }
 
-    // 64-bit product: timestamp_size() * rowlength() as two 32-bit ints wrapped negative past 2^31 bytes (70000 rows of 32000 bytes) and the request
-    // was let through. As in RangeQuery, a streamed_reply is not limited to 2 GB (the lease below is).
-    if ((!streamed_reply && static_cast<int64_t>(proto_from_client->timestamp_size()) * cfg_struct.rowlength() > static_cast<int64_t>(xstore::ReplyLimitBytes().load())) ||
-        proto_from_client->timestamp_size() < 0) {
-        set_warning("[WARNING] ", fmt::format("[BATCH QUERY] [DB: {}] - Query results is larger than 2GB or empty", db_name));
-        finish(std::string());
-        return;
+        // 64-bit product: timestamp_size() * rowlength() as two 32-bit ints wrapped negative past 2^31 bytes (70000 rows of 32000 bytes) and the request
+        // was let through. As in RangeQuery, a streamed_reply is not limited to 2 GB (the lease below is).
+        if (!job.streamed_reply && static_cast<int64_t>(job.timestamps.size()) * job.cfg_struct.rowlength() > static_cast<int64_t>(xstore::ReplyLimitBytes().load())) {
+            set_warning("[WARNING] ", fmt::format("[BATCH QUERY] [DB: {}] - Query results is larger than 2GB or empty", db_name));
+            finish(std::string());
+            return RunState::kDone;
+        }
+    } else if (!CfgEpochCurrent(db_name, job.cfg_epoch)) {
+        // Parked, and the DB was removed (maybe re-created) since: the rest of the request is stale. The rows already read stay in the reply.
+        set_warning("[ERROR] ", fmt::format("[BATCH QUERY] [DB: {}] - The DB was removed while the request ran", db_name));
+        finish(std::move(job.chunk_buf));
+        return RunState::kDone;
     }
+    const XStore_Proto::ConfigStruct &cfg_struct = job.cfg_struct;
 
-    // The whole reply stays in memory until its last chunk is sent (a multipart reply is delivered atomically): reserve it
-    // from the process-wide pool, an upper bound (a requested row that does not exist is left out of the reply).
-    const uint64_t reply_estimate = static_cast<uint64_t>(proto_from_client->timestamp_size()) * (static_cast<uint64_t>(cfg_struct.rowlength()) + 16);
+    // The reply stays in memory until its chunks are written: reserve it from the process-wide pool, an upper bound (a requested row that does not
+    // exist is left out of the reply). A run that may park reserves only its slice: a parked reply holds no lease.
+    const uint64_t total_estimate = static_cast<uint64_t>(job.timestamps.size()) * (static_cast<uint64_t>(cfg_struct.rowlength()) + 16);
+    const uint64_t reply_estimate = slice_lease_bytes == 0 ? total_estimate : std::min(total_estimate, slice_lease_bytes);
     std::shared_ptr<xstore::MemoryLease> reply_lease;
-    if (const xstore::MemoryPool::Result leased = xstore::AcquireOperationLease(reply_estimate, deadline, reply_lease);
+    if (const xstore::MemoryPool::Result leased = xstore::AcquireOperationLease(reply_estimate, job.deadline, reply_lease);
         leased != xstore::MemoryPool::Result::kGranted) {
         set_warning("[ERROR] ", xstore::OperationLeaseRejection("BATCH QUERY", db_name, leased, reply_estimate));
-        finish(std::string());
-        return;
+        finish(std::move(job.chunk_buf));
+        return RunState::kDone;
     }
 
-    if (sort_time) {
-        SortBatch(proto_from_client->mutable_timestamp()->begin(), proto_from_client->mutable_timestamp()->end(),
-                      [](const unsigned long long int& a, const unsigned long long int& b) {
-                        return a < b;
-        });
-    }
-
-    YearBucketMap data_map;
-
-    bool have_window = false;
-    unsigned short int curr_year = 0;
-    int64_t window_last_epoch = 0;
-    for (int i = 0; i < proto_from_client->timestamp_size(); i++) {
-        unsigned long long int curr_time = proto_from_client->timestamp(i);
-        if (!sort_time || !have_window || static_cast<int64_t>(curr_time) > window_last_epoch) {
-            TimeStruct curr_ts(curr_time, cfg_struct.timeresolution());
-            curr_year = curr_ts.year;
-            window_last_epoch = curr_ts.last_epoch;
-            have_window = true;
+    if (!resumed) {
+        if (job.sort_time) {
+            SortBatch(job.timestamps.begin(), job.timestamps.end(),
+                          [](const unsigned long long int& a, const unsigned long long int& b) {
+                            return a < b;
+            });
         }
-        AppendToYearBucket(data_map, curr_year, static_cast<unsigned long long int>(i));
+
+        bool have_window = false;
+        unsigned short int curr_year = 0;
+        int64_t window_last_epoch = 0;
+        for (size_t i = 0; i < job.timestamps.size(); i++) {
+            unsigned long long int curr_time = job.timestamps[i];
+            if (!job.sort_time || !have_window || static_cast<int64_t>(curr_time) > window_last_epoch) {
+                TimeStruct curr_ts(curr_time, cfg_struct.timeresolution());
+                curr_year = curr_ts.year;
+                window_last_epoch = curr_ts.last_epoch;
+                have_window = true;
+            }
+            AppendToYearBucket(job.year_groups, curr_year, static_cast<unsigned long long int>(i));
+        }
+
+        std::sort(job.year_groups.begin(), job.year_groups.end(),
+                  [](const auto &a, const auto &b) { return a.first < b.first; });
+        job.chunk_buf.reserve(job.chunk_size_bytes + 4096);
     }
 
-    std::sort(data_map.begin(), data_map.end(),
-              [](const auto &a, const auto &b) { return a.first < b.first; });
+    std::string &chunk_buf = job.chunk_buf;
+    const size_t chunk_size_bytes = job.chunk_size_bytes;
+    bool consumed_any = false;   // parking is only asked after one wave of this run: every run makes progress
 
-    std::string chunk_buf;
-    chunk_buf.reserve(chunk_size_bytes + 4096);
-
-    for (const std::pair<unsigned short int, std::vector<unsigned long long int>> &pair : data_map) {
-        unsigned short int year_key = pair.first;
-        const std::vector<unsigned long long int> &indices = pair.second;
+    for (size_t group = job.group; group < job.year_groups.size(); ++group) {
+        const unsigned short int year_key = job.year_groups[group].first;
+        const std::vector<unsigned long long int> &indices = job.year_groups[group].second;
+        const size_t start = group == job.group ? job.position : 0;   // a parked reply resumes inside its group
+        if (start >= indices.size()) continue;
         const std::string &target_file = CachedYearFilePath(db_base_path_str, year_key);
 
         if (!IsFdCached(target_file) && std::filesystem::exists(target_file) == 0) {
@@ -312,7 +337,7 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, bool so
             continue;
         }
 
-        TimeStruct this_ts{static_cast<time_t>(proto_from_client->timestamp(indices.front())), cfg_struct.timeresolution()};
+        TimeStruct this_ts{static_cast<time_t>(job.timestamps[indices[start]]), cfg_struct.timeresolution()};
 
         std::shared_ptr<int> fd_handle = GetOrOpenFile(target_file, cfg_struct.rowlength(), this_ts.last_epoch - this_ts.first_epoch);
         if (!fd_handle) {
@@ -332,15 +357,17 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, bool so
         posix_fadvise(fd, 0, 0, POSIX_FADV_RANDOM);
 
         const size_t row_len = static_cast<size_t>(cfg_struct.rowlength());
+        const size_t remaining = indices.size() - start;
 
         // READ locks on exactly the rows read (indices are in request order: only this lock list is sorted), so a
         // writer's rows in the gaps never wait for this query nor it for them. Past the cap: the min-to-max span.
-        // thread_local scratch, reused: the guard is gone before the next year-group refills it.
+        // thread_local scratch, reused: the guard is gone before the next year-group refills it. A resumed group locks
+        // only the rows it has left.
         thread_local std::vector<unsigned long long int> lock_offsets;
         thread_local std::vector<FileRangeLock::Run> lock_runs;
-        lock_offsets.resize(indices.size());
-        for (size_t i = 0; i < indices.size(); i++) {
-            lock_offsets[i] = (proto_from_client->timestamp(indices[i]) - this_ts.first_epoch) * row_len;
+        lock_offsets.resize(remaining);
+        for (size_t i = 0; i < remaining; i++) {
+            lock_offsets[i] = (job.timestamps[indices[start + i]] - this_ts.first_epoch) * row_len;
         }
         // O(n) check first: a request sent sorted (or sorted by sort_time) skips the O(n log n) sort.
         if (!std::is_sorted(lock_offsets.begin(), lock_offsets.end())) {
@@ -357,14 +384,16 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, bool so
         // overhead could plausibly exceed the work itself. The real
         // device-concurrency tuning knob lives on XStorePreadPool itself
         // (XStoreTunables::BATCH_QUERY_PREAD_POOL_SIZE_CAP), not here -- see
-        // its comment in XStore_Tunables.h.
-        if (indices.size() < XStoreTunables::BATCH_QUERY_PARALLEL_PREAD_MIN_ROWS) {
+        // its comment in XStore_Tunables.h. Such a group is too small to be
+        // worth parking in.
+        if (remaining < XStoreTunables::BATCH_QUERY_PARALLEL_PREAD_MIN_ROWS) {
             thread_local std::vector<char> buffer_in;
             if (buffer_in.size() < row_len) {
                 buffer_in.resize(row_len);
             }
-            for (unsigned long long int idx : indices) {
-                unsigned long long int timestamp = proto_from_client->timestamp(idx);
+            for (size_t k = start; k < indices.size(); ++k) {
+                const unsigned long long int idx = indices[k];
+                unsigned long long int timestamp = job.timestamps[idx];
                 unsigned long long int offset = (timestamp - this_ts.first_epoch) * row_len;
 
                 // (void) doesn't suppress __wur under _FORTIFY_SOURCE; short read is ignored on purpose.
@@ -390,7 +419,7 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, bool so
             continue;
         }
 
-        // Wave-parallel pread: fan indices.size() preads out across
+        // Wave-parallel pread: fan the remaining indices out across
         // BATCH_QUERY_PREAD_WAVE_ROWS-sized waves. Within a wave, every
         // pread is submitted to the shared XStorePreadPool (pread takes its
         // offset as a parameter and doesn't touch shared file-position
@@ -423,12 +452,19 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, bool so
         std::vector<char> wave_buf;
         const size_t wave_rows = XStoreTunables::BATCH_QUERY_PREAD_WAVE_ROWS;
         wave_buf.resize(wave_rows * row_len);
-        for (size_t wave_start = 0; wave_start < indices.size(); wave_start += wave_rows) {
+        for (size_t wave_start = start; wave_start < indices.size(); wave_start += wave_rows) {
+            // Between two waves nothing is in flight: every row read so far is in chunk_buf or was emitted. The locks go with the guard.
+            if (consumed_any && should_park()) {
+                job.group = group;
+                job.position = wave_start;
+                return RunState::kParked;
+            }
+            consumed_any = true;
             const size_t wave_end = std::min(indices.size(), wave_start + wave_rows);
             const unsigned long long int *wave_base = indices.data() + wave_start;
 
             XStorePreadPool::ParallelFor(wave_end - wave_start, [&](size_t local_i) {
-                const unsigned long long int timestamp = proto_from_client->timestamp(wave_base[local_i]);
+                const unsigned long long int timestamp = job.timestamps[wave_base[local_i]];
                 const unsigned long long int offset = (timestamp - this_ts.first_epoch) * row_len;
                 // Same __wur note as serial path above.
                 [[maybe_unused]] ssize_t pread_ret = pread(fd, wave_buf.data() + local_i * row_len, row_len, static_cast<off_t>(offset));
@@ -442,7 +478,7 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, bool so
                     continue;
                 }
 
-                const unsigned long long int timestamp = proto_from_client->timestamp(wave_base[local_i]);
+                const unsigned long long int timestamp = job.timestamps[wave_base[local_i]];
                 EncodeQueryResponseEntry(chunk_buf, timestamp, row_ptr, row_len);
 
                 if (chunk_buf.size() >= chunk_size_bytes) {
@@ -455,6 +491,7 @@ void XStore::BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, bool so
     }
 
     finish(std::move(chunk_buf));
+    return RunState::kDone;
 }
 
 // BATCH DELETE

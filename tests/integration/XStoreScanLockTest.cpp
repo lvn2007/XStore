@@ -228,6 +228,62 @@ TEST_F(ScanLockTest, ASlowConsumerMakesTheProducersRetireAndTheScanStillFinishes
     EXPECT_GE(xstore::scanlock::ProducerRelaunchesForTests(), relaunches_before + 1) << "no producer retired and was started again";
 }
 
+// A parallel row-emitting scan that is stopped by its consumer (a reply that parks) reports how many rows of the region were consumed, so the
+// scan can be started again from there (docs/superpowers/specs/2026-11-01-park-resume-replies-design.md).
+class OrderedScanStopTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        xstore::scanlock::Config config;
+        config.chunk_bytes = kBlockBytes;
+        config.parallel_threads = 2;
+        config.ordered_piece_bytes = kBlockBytes;   // one piece per zone-map block
+        xstore::scanlock::Set(config);
+    }
+    void TearDown() override { xstore::scanlock::Set(xstore::scanlock::Config{}); }
+    std::vector<char> region = std::vector<char>(5 * 4096 * kRowLength);   // 5 blocks
+
+    xstore::scanlock::OrderedScan Run(unsigned long long first_row_in_year, int stop_after_pieces, int *consumed_pieces) {
+        return xstore::scanlock::ScanRegionOrdered(
+            "ordered-scan-stop-test", region.data(), 0, region.size(), kRowLength, first_row_in_year,
+            [](const char *, unsigned long long, unsigned long long, std::string &out) { out.assign(1, 'x'); },
+            [&](std::string &) { return ++*consumed_pieces != stop_after_pieces; });
+    }
+};
+
+TEST_F(OrderedScanStopTest, AScanThatRunsToTheEndReportsTheWholeRegionConsumed) {
+    int pieces = 0;
+    const xstore::scanlock::OrderedScan result = Run(0, -1, &pieces);
+    EXPECT_TRUE(result.ran);
+    EXPECT_EQ(pieces, 5);
+    EXPECT_EQ(result.rows_consumed, 5u * 4096u);
+}
+
+TEST_F(OrderedScanStopTest, AScanStoppedAfterTwoPiecesReportsTheirRows) {
+    int pieces = 0;
+    const xstore::scanlock::OrderedScan result = Run(0, 2, &pieces);
+    EXPECT_TRUE(result.ran);
+    EXPECT_EQ(pieces, 2) << "nothing is consumed after the stop";
+    EXPECT_EQ(result.rows_consumed, 2u * 4096u);
+}
+
+TEST_F(OrderedScanStopTest, PiecesStartAtTheBlockBoundariesOfTheYearNotOfTheRegion) {
+    int pieces = 0;
+    const xstore::scanlock::OrderedScan result = Run(1000, 2, &pieces);   // the region starts at row 1000 of the year: the first piece is 3096 rows
+    EXPECT_EQ(result.rows_consumed, 3096u + 4096u);
+}
+
+TEST_F(OrderedScanStopTest, ANotParallelScanReportsThatItDidNotRun) {
+    xstore::scanlock::Config config;
+    config.parallel_threads = 1;
+    xstore::scanlock::Set(config);
+    int pieces = 0;
+    const xstore::scanlock::OrderedScan result = Run(0, -1, &pieces);
+    EXPECT_FALSE(result.ran);
+    EXPECT_FALSE(static_cast<bool>(result));
+    EXPECT_EQ(pieces, 0);
+    EXPECT_EQ(result.rows_consumed, 0u);
+}
+
 // Out of the box a scan is adaptive (parallel_threads 0) and may use half of the machine's hardware threads at most; the environment
 // still forces a number or goes back to adaptive.
 TEST(ScanThreadsTest, TheDefaultIsAdaptiveCappedAtHalfTheCores) {

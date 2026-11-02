@@ -17,6 +17,7 @@
 #include <climits>
 #include <cmath>
 #include <cstdlib>
+#include <future>
 #include <map>
 #include <thread>
 #include <unistd.h>
@@ -24,6 +25,8 @@
 
 #include "include/Networking/ZMQ_Server.h"
 #include "include/Networking/ZMQ_StreamFlow.h"
+#include "include/XStore/XStore_MemoryPool.h"
+#include "include/XStore/XStore_ScanLock.h"
 #include "XStoreTestSupport.h"
 #include "XStoreZmqTestSupport.h"
 
@@ -1464,8 +1467,15 @@ struct SlowRead {
 
 class StreamFlowServerTest : public XStoreZmqNetworkTest {
 protected:
-    void SetUp() override { saved_ = xstore::streamflow::Get(); }
-    void TearDown() override { xstore::streamflow::Set(saved_); }
+    // These tests drive the flow control where a worker waits for its window; parking (the default) has ParkServerTest. saved_ is the configuration
+    // they start from and change: the server's own, with parking off.
+    void SetUp() override {
+        original_ = xstore::streamflow::Get();
+        saved_ = original_;
+        saved_.park_replies = false;
+        xstore::streamflow::Set(saved_);
+    }
+    void TearDown() override { xstore::streamflow::Set(original_); }
 
     // ~40 MB of rows (more than the kernel's socket buffers take on loopback, so a slow reader makes the server queue).
     static constexpr int ROWS = 28000;
@@ -1492,8 +1502,13 @@ protected:
     }
 
     // A streamed RangeQuery over the whole DB, read at one message per `delay`.
-    SlowRead ReadSlowly(const std::string &db, std::chrono::milliseconds delay) {
-        XStore_Proto::Request request = RangeRequest(db, TWO_CHUNK_T0, TWO_CHUNK_T0 + ROWS - 1);
+    SlowRead ReadSlowly(const std::string &db, std::chrono::milliseconds delay, std::chrono::milliseconds first_pause = std::chrono::milliseconds(0),
+                        const std::string &address = server_addr) {
+        return ReadRequestSlowly(RangeRequest(db, TWO_CHUNK_T0, TWO_CHUNK_T0 + ROWS - 1), delay, first_pause, address);
+    }
+    // Any streamed row call, read at one message per `delay`.
+    SlowRead ReadRequestSlowly(XStore_Proto::Request request, std::chrono::milliseconds delay, std::chrono::milliseconds first_pause = std::chrono::milliseconds(0),
+                               const std::string &address = server_addr) {
         request.set_streamok(true);
         zmq::socket_t sock(*client_ctx, zmq::socket_type::dealer);
         sock.set(zmq::sockopt::rcvtimeo, 60000);
@@ -1501,7 +1516,7 @@ protected:
         // A client's own libzmq reads the connection into its memory (up to its receive high-water mark, 1000 messages by default) whether or not the
         // application is reading, so a slow application alone backs nothing up on the server. A client that stops taking data off the connection does.
         sock.set(zmq::sockopt::rcvhwm, 2);
-        sock.connect(server_addr);
+        sock.connect(address);
         const std::string payload = request.SerializeAsString();
         SlowRead read;
         if (!sock.send(zmq::message_t(), zmq::send_flags::sndmore) || !sock.send(zmq::buffer(payload), zmq::send_flags::none)) return read;
@@ -1520,7 +1535,7 @@ protected:
                 read.complete = true;
                 return read;
             }
-            std::this_thread::sleep_for(delay);
+            std::this_thread::sleep_for(read.messages == 1 ? delay + first_pause : delay);
         }
     }
 
@@ -1534,6 +1549,7 @@ protected:
     }
 
     xstore::streamflow::Config saved_;
+    xstore::streamflow::Config original_;
 };
 
 TEST_F(StreamFlowServerTest, ASlowReaderHoldsAtMostItsWindowAndStillGetsTheSameBytes) {
@@ -1559,45 +1575,11 @@ TEST_F(StreamFlowServerTest, ASlowReaderHoldsAtMostItsWindowAndStillGetsTheSameB
     EXPECT_TRUE(QueueDrains());
 }
 
-TEST_F(StreamFlowServerTest, AReplyThatTheClientIsNotTakingIsStoppedWithAnErrorStatusAndTheServerKeepsServing) {
-    CreateBigDb("ZMQ_FLOW_STOP_DB");
-    xstore::streamflow::Config config = saved_;
-    config.window_bytes = 0;                  // no waiting: the queue limit is what applies
-    config.queue_limit_bytes = 3u << 20;
-    config.share_bytes = 1u << 20;
-    config.min_chunk_bytes = 64u << 10;
-    xstore::streamflow::Set(config);
-    ASSERT_TRUE(QueueDrains());
-
-    const SlowRead stopped = ReadSlowly("ZMQ_FLOW_STOP_DB", std::chrono::milliseconds(30));
-    ASSERT_TRUE(stopped.complete) << "a stopped reply still ends with the empty-delimiter message";
-    XStore_Proto::RangeQuery_REP reply;
-    ASSERT_TRUE(reply.ParseFromString(stopped.payload));
-    ASSERT_TRUE(reply.has_querystatus());
-    EXPECT_NE(reply.querystatus().find("[ERROR]"), std::string::npos) << reply.querystatus();
-    EXPECT_NE(reply.querystatus().find("queue is full"), std::string::npos) << reply.querystatus();
-    EXPECT_GT(reply.queryresponse_size(), 0) << "the rows before the stop were delivered";
-    EXPECT_LT(reply.queryresponse_size(), ROWS) << "and not all of them";
-    EXPECT_TRUE(QueueDrains());
-
-    // The server is unharmed: with the limit lifted the same read gets every row.
-    config.queue_limit_bytes = 1ull << 40;
-    xstore::streamflow::Set(config);
-    const SlowRead whole = ReadSlowly("ZMQ_FLOW_STOP_DB", std::chrono::milliseconds(1));
-    ASSERT_TRUE(whole.complete);
-    XStore_Proto::RangeQuery_REP all;
-    ASSERT_TRUE(all.ParseFromString(whole.payload));
-    EXPECT_EQ(all.queryresponse_size(), ROWS);
-    EXPECT_FALSE(all.has_querystatus() && all.querystatus().find("[ERROR]") != std::string::npos);
-}
-
 // Chunks below the minimum (every chunk of a small reply) skip the accounting: with a minimum above the chunk size, limits that would stop any counted
 // reply stop nothing, and nothing is ever counted.
 TEST_F(StreamFlowServerTest, ChunksBelowTheMinimumAreNeitherCountedNorLimited) {
     CreateBigDb("ZMQ_FLOW_SMALL_DB");
     xstore::streamflow::Config config = saved_;
-    config.queue_limit_bytes = 1;
-    config.share_bytes = 0;
     config.window_bytes = 1;
     config.min_chunk_bytes = 4u << 20;   // the chunks are 512 KiB
     xstore::streamflow::Set(config);
@@ -1609,4 +1591,280 @@ TEST_F(StreamFlowServerTest, ChunksBelowTheMinimumAreNeitherCountedNorLimited) {
     ASSERT_TRUE(reply.ParseFromString(read.payload));
     EXPECT_EQ(reply.queryresponse_size(), ROWS);
     EXPECT_FALSE(reply.has_querystatus() && !reply.querystatus().empty()) << reply.querystatus();
+}
+
+// ---- Park and resume (docs/superpowers/specs/2026-11-01-park-resume-replies-design.md) ----
+// The server of this suite has ONE worker: a reply that waited for its slow client in that worker would block every other request, so a request
+// answered while a slow reader is stalled shows the worker was released.
+class ParkServerTest : public StreamFlowServerTest {
+protected:
+    void SetUp() override {
+        StreamFlowServerTest::SetUp();
+        saved_scan_ = xstore::scanlock::Get();
+        xstore::scanlock::Config scan = saved_scan_;
+        scan.chunk_bytes = 2u << 20;   // one zone-map block: parking is possible every ~2 MiB of rows
+        scan.parallel_threads = 1;
+        xstore::scanlock::Set(scan);
+    }
+    void TearDown() override {
+        xstore::scanlock::Set(saved_scan_);
+        StreamFlowServerTest::TearDown();
+    }
+    static constexpr uint64_t WINDOW = 2u << 20;
+    xstore::streamflow::Config ParkConfig() const {
+        xstore::streamflow::Config config = saved_;
+        config.park_replies = true;
+        config.window_bytes = WINDOW;
+        config.min_chunk_bytes = 64u << 10;
+        return config;
+    }
+    SlowRead Baseline(const std::string &db) {
+        xstore::streamflow::Config config = saved_;
+        config.park_replies = false;
+        config.window_bytes = 0;
+        xstore::streamflow::Set(config);
+        const SlowRead read = ReadSlowly(db, std::chrono::milliseconds(0));
+        EXPECT_TRUE(read.complete);
+        EXPECT_TRUE(QueueDrains());
+        return read;
+    }
+    static bool WaitForParks(uint64_t more_than) {
+        for (int i = 0; i < 1000; ++i) {
+            if (xstore::streamflow::ParkCount() > more_than) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return false;
+    }
+    static bool WaitForResumesToCatchUp() {
+        for (int i = 0; i < 1000; ++i) {
+            if (xstore::streamflow::ResumeCount() >= xstore::streamflow::ParkCount()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return false;
+    }
+    bool PingAnswersWithin(std::chrono::milliseconds limit) {
+        XStore_Proto::Request ping_req;
+        ping_req.mutable_ping()->set_rtype(XStore_Proto::PING);
+        const auto start = std::chrono::steady_clock::now();
+        (void)SendRequest<XStore_Proto::Ping_REP>(ping_req);
+        return std::chrono::steady_clock::now() - start < limit;
+    }
+    xstore::scanlock::Config saved_scan_;
+};
+
+TEST_F(ParkServerTest, AParkedReplyFreesTheOnlyWorkerAndStillDeliversTheSameBytes) {
+    CreateBigDb("ZMQ_PARK_DB");
+    const SlowRead expected = Baseline("ZMQ_PARK_DB");
+    xstore::streamflow::Set(ParkConfig());
+    const uint64_t parks_before = xstore::streamflow::ParkCount();
+    auto reader = std::async(std::launch::async, [&] { return ReadSlowly("ZMQ_PARK_DB", std::chrono::milliseconds(15)); });
+    ASSERT_TRUE(WaitForParks(parks_before)) << "the reply never parked";
+    EXPECT_TRUE(PingAnswersWithin(std::chrono::milliseconds(1000))) << "the worker was not released while the reply waits for its slow client";
+    EXPECT_EQ(reader.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout) << "the reply was still in progress";
+    const SlowRead read = reader.get();
+    ASSERT_TRUE(read.complete);
+    EXPECT_TRUE(read.payload == expected.payload) << "the same bytes, in the same order, as without parking";
+    EXPECT_LE(read.max_queued, WINDOW + (4u << 20)) << "a window plus what one scan chunk adds";
+    EXPECT_TRUE(WaitForResumesToCatchUp());
+    EXPECT_TRUE(QueueDrains());
+}
+
+// The other three row calls park the same way: the single worker is free while the slow reader's reply waits, and the bytes are those of a read
+// without parking. Every row of the DB matches (a 1400-byte string repeated), so each reply is the whole 40 MB.
+class ParkOtherCallsTest : public ParkServerTest {
+protected:
+    XStore_Proto::Request FindByValueRequest(const std::string &db) {
+        XStore_Proto::FindByValue_REQ req;
+        req.set_rtype(XStore_Proto::FINDBYVALUE);
+        req.set_dbname(db);
+        req.set_starttime(TWO_CHUNK_T0);
+        req.set_endtime(TWO_CHUNK_T0 + ROWS - 1);
+        req.set_columnidx(0);
+        req.mutable_value()->set_stringdata(std::string(1400, 'x'));
+        return Wrap(req);
+    }
+    XStore_Proto::Request FindByPatternRequest(const std::string &db) {
+        XStore_Proto::FindByPattern_REQ req;
+        req.set_rtype(XStore_Proto::FINDBYPATTERN);
+        req.set_dbname(db);
+        req.set_starttime(TWO_CHUNK_T0);
+        req.set_endtime(TWO_CHUNK_T0 + ROWS - 1);
+        req.set_columnidx(0);
+        req.set_pattern("xxxx%");
+        req.set_mode(XStore_Proto::PATTERN_LIKE);
+        return Wrap(req);
+    }
+    XStore_Proto::Request BatchQueryRequest(const std::string &db) {
+        XStore_Proto::BatchQuery_REQ req;
+        req.set_rtype(XStore_Proto::BATCHQUERY);
+        req.set_dbname(db);
+        for (int i = 0; i < ROWS; ++i) req.add_timestamp(TWO_CHUNK_T0 + static_cast<unsigned long long>(i));
+        return Wrap(req);
+    }
+
+    void ExpectParksFreesTheWorkerAndDeliversTheSameBytes(const XStore_Proto::Request &request) {
+        xstore::streamflow::Config off = saved_;
+        off.park_replies = false;
+        off.window_bytes = 0;
+        xstore::streamflow::Set(off);
+        const SlowRead expected = ReadRequestSlowly(request, std::chrono::milliseconds(0));
+        ASSERT_TRUE(expected.complete);
+        ASSERT_TRUE(QueueDrains());
+        XStore_Proto::RangeQuery_REP all;
+        ASSERT_TRUE(all.ParseFromString(expected.payload));
+        ASSERT_EQ(all.queryresponse_size(), ROWS);
+
+        xstore::streamflow::Set(ParkConfig());
+        const uint64_t parks_before = xstore::streamflow::ParkCount();
+        auto reader = std::async(std::launch::async, [&] { return ReadRequestSlowly(request, std::chrono::milliseconds(15)); });
+        ASSERT_TRUE(WaitForParks(parks_before)) << "the reply never parked";
+        EXPECT_TRUE(PingAnswersWithin(std::chrono::milliseconds(1000))) << "the worker was not released while the reply waits for its slow client";
+        const SlowRead read = reader.get();
+        ASSERT_TRUE(read.complete);
+        EXPECT_TRUE(read.payload == expected.payload) << "the same bytes, in the same order, as without parking";
+        EXPECT_LE(read.max_queued, WINDOW + (8u << 20)) << "a window plus what one boundary adds";
+        EXPECT_TRUE(WaitForResumesToCatchUp());
+        EXPECT_TRUE(QueueDrains());
+    }
+};
+
+TEST_F(ParkOtherCallsTest, FindByValueParksAndDeliversTheSameBytes) {
+    CreateBigDb("ZMQ_PARK_FV_DB");
+    ExpectParksFreesTheWorkerAndDeliversTheSameBytes(FindByValueRequest("ZMQ_PARK_FV_DB"));
+}
+
+TEST_F(ParkOtherCallsTest, FindByPatternParksAndDeliversTheSameBytes) {
+    CreateBigDb("ZMQ_PARK_FP_DB");
+    ExpectParksFreesTheWorkerAndDeliversTheSameBytes(FindByPatternRequest("ZMQ_PARK_FP_DB"));
+}
+
+TEST_F(ParkOtherCallsTest, BatchQueryParksAndDeliversTheSameBytes) {
+    CreateBigDb("ZMQ_PARK_BQ_DB");
+    ExpectParksFreesTheWorkerAndDeliversTheSameBytes(BatchQueryRequest("ZMQ_PARK_BQ_DB"));
+}
+
+// One memory budget: a reply parks when the POOL is full, not only when its own window is. The window here is far bigger than the reply, so
+// only the pool can make it park; the queue then stays at about one scan chunk, and the reply still arrives whole.
+TEST_F(ParkServerTest, AReplyParksWhenThePoolIsFullEvenThoughItsWindowIsNot) {
+    CreateBigDb("ZMQ_PARK_POOL_DB");
+    const SlowRead expected = Baseline("ZMQ_PARK_POOL_DB");
+    xstore::streamflow::Config config = ParkConfig();
+    config.window_bytes = 512u << 20;
+    xstore::streamflow::Set(config);
+    const uint64_t parks_before = xstore::streamflow::ParkCount();
+    xstore::streamflow::SetPoolFullForTests(0);
+    const SlowRead roomy = ReadSlowly("ZMQ_PARK_POOL_DB", std::chrono::milliseconds(3));
+    ASSERT_TRUE(roomy.complete);
+    EXPECT_EQ(xstore::streamflow::ParkCount(), parks_before) << "with room in the pool and a window this big, nothing parks";
+    ASSERT_TRUE(QueueDrains());
+
+    xstore::streamflow::SetPoolFullForTests(1);
+    const SlowRead pressed = ReadSlowly("ZMQ_PARK_POOL_DB", std::chrono::milliseconds(3));
+    xstore::streamflow::SetPoolFullForTests(-1);
+    ASSERT_TRUE(pressed.complete) << "a reply makes progress whatever the pool says";
+    EXPECT_GE(xstore::streamflow::ParkCount(), parks_before + 4) << "a full pool parks the reply at (nearly) every scan chunk";
+    EXPECT_TRUE(pressed.payload == expected.payload);
+    EXPECT_LE(pressed.max_queued, 8u << 20) << "with the pool full the queue stays at about a scan chunk, not the 512 MiB window";
+    EXPECT_TRUE(WaitForResumesToCatchUp());
+    EXPECT_TRUE(QueueDrains());
+}
+
+TEST_F(ParkServerTest, TheBytesQueuedForASlowClientAreChargedToThePoolAndReturnedWhenTheyAreWritten) {
+    CreateBigDb("ZMQ_PARK_CHARGE_DB");
+    xstore::streamflow::Set(ParkConfig());
+    xstore::MemoryPool &pool = xstore::MemoryPool::Instance();
+    const uint64_t base = pool.UsedBytes();
+    const uint64_t parks_before = xstore::streamflow::ParkCount();
+    auto reader = std::async(std::launch::async, [&] { return ReadSlowly("ZMQ_PARK_CHARGE_DB", std::chrono::milliseconds(15)); });
+    ASSERT_TRUE(WaitForParks(parks_before));
+    EXPECT_GE(pool.UsedBytes(), base + (1u << 20)) << "a parked reply's queued bytes are in the pool's figure";
+    ASSERT_TRUE(reader.get().complete);
+    EXPECT_TRUE(QueueDrains());
+    EXPECT_EQ(pool.UsedBytes(), base) << "everything written is returned";
+}
+
+TEST_F(ParkServerTest, MoreSlowReadersThanWorkersAllCompleteWithTheSameBytesAndTheWorkerStaysFree) {
+    CreateBigDb("ZMQ_PARK_MANY_DB");
+    const SlowRead expected = Baseline("ZMQ_PARK_MANY_DB");
+    xstore::streamflow::Set(ParkConfig());
+    const uint64_t parks_before = xstore::streamflow::ParkCount();
+    std::vector<std::future<SlowRead>> readers;
+    for (int i = 0; i < 5; ++i) readers.push_back(std::async(std::launch::async, [&] { return ReadSlowly("ZMQ_PARK_MANY_DB", std::chrono::milliseconds(15)); }));
+    ASSERT_TRUE(WaitForParks(parks_before + 2));
+    EXPECT_TRUE(PingAnswersWithin(std::chrono::milliseconds(1000)));
+    for (auto &reader : readers) {
+        const SlowRead read = reader.get();
+        ASSERT_TRUE(read.complete);
+        EXPECT_TRUE(read.payload == expected.payload);
+        EXPECT_LE(read.max_queued, 5 * (WINDOW + (4u << 20))) << "the total queued over all replies stays bound by their windows";
+    }
+    EXPECT_TRUE(WaitForResumesToCatchUp());
+    EXPECT_TRUE(QueueDrains());
+}
+
+TEST_F(ParkServerTest, ADbRemovedWhileTheReplyIsParkedEndsItWithAnErrorStatus) {
+    CreateBigDb("ZMQ_PARK_RM_DB");
+    xstore::streamflow::Set(ParkConfig());
+    const uint64_t parks_before = xstore::streamflow::ParkCount();
+    // Takes the first message, then stalls for 2 s (its receive high-water mark of 2 backs the rest up into the server).
+    auto reader = std::async(std::launch::async, [&] { return ReadSlowly("ZMQ_PARK_RM_DB", std::chrono::milliseconds(0), std::chrono::milliseconds(2000)); });
+    ASSERT_TRUE(WaitForParks(parks_before));
+    XStore_Proto::RemoveDB_REQ remove_req;
+    remove_req.set_rtype(XStore_Proto::REMOVEDB);
+    remove_req.set_dbname("ZMQ_PARK_RM_DB");
+    (void)SendRequest<XStore_Proto::RemoveDB_REP>(Wrap(remove_req));
+    const SlowRead read = reader.get();
+    ASSERT_TRUE(read.complete) << "the reply still ends properly";
+    XStore_Proto::RangeQuery_REP reply;
+    ASSERT_TRUE(reply.ParseFromString(read.payload));
+    EXPECT_NE(reply.querystatus().find("removed while the request ran"), std::string::npos) << reply.querystatus();
+    EXPECT_LT(reply.queryresponse_size(), ROWS);
+    EXPECT_TRUE(WaitForResumesToCatchUp());
+    EXPECT_TRUE(QueueDrains());
+}
+
+TEST_F(ParkServerTest, AClientThatDisconnectsWhileItsReplyIsParkedLeavesNothingBehind) {
+    CreateBigDb("ZMQ_PARK_GONE_DB");
+    xstore::streamflow::Set(ParkConfig());
+    const uint64_t parks_before = xstore::streamflow::ParkCount();
+    {
+        XStore_Proto::Request request = RangeRequest("ZMQ_PARK_GONE_DB", TWO_CHUNK_T0, TWO_CHUNK_T0 + ROWS - 1);
+        request.set_streamok(true);
+        zmq::socket_t sock(*client_ctx, zmq::socket_type::dealer);
+        sock.set(zmq::sockopt::rcvtimeo, 10000);
+        sock.set(zmq::sockopt::linger, 0);
+        sock.set(zmq::sockopt::rcvhwm, 2);
+        sock.connect(server_addr);
+        const std::string payload = request.SerializeAsString();
+        ASSERT_TRUE(sock.send(zmq::message_t(), zmq::send_flags::sndmore).has_value());
+        ASSERT_TRUE(sock.send(zmq::buffer(payload), zmq::send_flags::none).has_value());
+        zmq::message_t first;
+        ASSERT_TRUE(sock.recv(first, zmq::recv_flags::none).has_value());
+        ASSERT_TRUE(WaitForParks(parks_before));
+    }   // the socket closes with the reply parked
+    EXPECT_TRUE(WaitForResumesToCatchUp()) << "a parked reply whose client left is resumed (and dropped), not kept for ever";
+    EXPECT_TRUE(QueueDrains());
+    EXPECT_TRUE(PingAnswersWithin(std::chrono::milliseconds(1000)));
+}
+
+TEST_F(ParkServerTest, AParkedReplyThatItsClientDoesNotTakeForTheStallTimeIsStoppedWithAnErrorStatus) {
+    CreateBigDb("ZMQ_PARK_STALL_DB");
+    xstore::streamflow::Config config = ParkConfig();
+    config.stall = std::chrono::milliseconds(1000);
+    xstore::streamflow::Set(config);
+    const int port = StartZmqServerOnFreePort(1);   // its broker reads the stall time at start; the same data directory
+    ASSERT_GE(port, 0);
+    const std::string address = "tcp://127.0.0.1:" + std::to_string(port);
+    const uint64_t parks_before = xstore::streamflow::ParkCount();
+    auto reader = std::async(std::launch::async, [&] { return ReadSlowly("ZMQ_PARK_STALL_DB", std::chrono::milliseconds(0), std::chrono::milliseconds(3500), address); });
+    ASSERT_TRUE(WaitForParks(parks_before));
+    const SlowRead read = reader.get();
+    ASSERT_TRUE(read.complete);
+    XStore_Proto::RangeQuery_REP reply;
+    ASSERT_TRUE(reply.ParseFromString(read.payload));
+    EXPECT_NE(reply.querystatus().find("[ERROR]"), std::string::npos) << reply.querystatus();
+    EXPECT_NE(reply.querystatus().find("not taking the reply"), std::string::npos) << reply.querystatus();
+    EXPECT_LT(reply.queryresponse_size(), ROWS);
+    EXPECT_TRUE(WaitForResumesToCatchUp());
+    EXPECT_TRUE(QueueDrains());
 }

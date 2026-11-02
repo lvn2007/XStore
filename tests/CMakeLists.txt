@@ -15,6 +15,9 @@ add_executable(xstore_tests
         integration/XStoreCatIdxTest.cpp
         integration/XStoreBitmapBuildLeaseTest.cpp
         integration/XStoreScanLockTest.cpp
+        integration/XStoreRangeQueryResumeTest.cpp
+        integration/XStoreFindByResumeTest.cpp
+        integration/XStoreBatchQueryResumeTest.cpp
         integration/XStoreExactAggregatesTest.cpp
         integration/XStorePatternTest.cpp
         integration/XStoreMemoryTest.cpp
@@ -56,6 +59,7 @@ add_executable(xstore_network_tests
         integration/XStoreGracefulShutdownTest.cpp
         integration/XStoreZmqBrokerTest.cpp
         integration/XStoreStreamFlowTest.cpp
+        integration/XStoreParkedRepliesTest.cpp
 )
 # xstore_network brings the core (xstore_core) and curve-key handling
 # (xstore_curve) with it.

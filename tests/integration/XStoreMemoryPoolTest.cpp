@@ -2,6 +2,7 @@
 // (first come, first served) when the pool, or the host, has no room; a reservation is returned when its last owner lets go.
 #include <gtest/gtest.h>
 #include "include/XStore/XStore_MemoryPool.h"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -286,6 +287,100 @@ TEST(MemoryPoolTest, ManyThreadsNeverExceedTheLimitAndEverythingIsReturned) {
     EXPECT_LE(pool.PeakBytes(), kLimit);
     EXPECT_EQ(pool.UsedBytes(), 0u);
     EXPECT_EQ(pool.PendingBytes(), 0u);
+    EXPECT_EQ(pool.WaitingCount(), 0u);
+}
+
+// ---- Memory that already exists and cannot wait: the bytes of a reply queued for a slow client (Charge / Uncharge) ----
+// They count against the pool's limit like a lease, so a request that would not fit next to them waits, but taking them is never refused or delayed
+// (the memory is there already); the pool is then Full() and whoever produces such memory is expected to stop producing.
+MemoryPool UnlimitedHostPool(uint64_t limit) {
+    return MemoryPool(limit, 0, [] { return MemoryPool::kUnknown; });
+}
+
+TEST(MemoryPoolChargeTest, ChargedBytesCountAsUsedAndUnchargingReturnsThem) {
+    MemoryPool pool = UnlimitedHostPool(100 * MB);
+    pool.Charge(30 * MB);
+    EXPECT_EQ(pool.UsedBytes(), 30 * MB);
+    auto lease = MustAcquire(pool, 20 * MB);
+    EXPECT_EQ(pool.UsedBytes(), 50 * MB);
+    pool.Uncharge(30 * MB);
+    EXPECT_EQ(pool.UsedBytes(), 20 * MB);
+    lease.reset();
+    EXPECT_EQ(pool.UsedBytes(), 0u);
+}
+
+TEST(MemoryPoolChargeTest, ARequestThatDoesNotFitNextToChargedBytesWaitsUntilTheyAreReturned) {
+    MemoryPool pool = UnlimitedHostPool(100 * MB);
+    pool.Charge(80 * MB);
+    auto waiting = std::async(std::launch::async, [&] {
+        std::shared_ptr<MemoryLease> lease;
+        const auto result = pool.Acquire(40 * MB, kForever, lease);
+        return result == MemoryPool::Result::kGranted;
+    });
+    ASSERT_TRUE(WaitForWaiting(pool, 1));
+    EXPECT_EQ(waiting.wait_for(100ms), std::future_status::timeout);
+    pool.Uncharge(80 * MB);
+    ASSERT_EQ(waiting.wait_for(2s), std::future_status::ready) << "returning the charged bytes did not wake the waiting request";
+    EXPECT_TRUE(waiting.get());
+}
+
+// A waiting request re-checks every 50 ms by itself; returning charged bytes must wake it at once, not on that tick.
+TEST(MemoryPoolChargeTest, UnchargeWakesAWaitingRequestAtOnceNotOnTheNextPoll) {
+    std::vector<std::chrono::microseconds> latencies;
+    for (int round = 0; round < 12; ++round) {
+        MemoryPool pool = UnlimitedHostPool(100 * MB);
+        pool.Charge(80 * MB);
+        auto waiting = std::async(std::launch::async, [&] {
+            std::shared_ptr<MemoryLease> lease;
+            return pool.Acquire(40 * MB, kForever, lease) == MemoryPool::Result::kGranted;
+        });
+        ASSERT_TRUE(WaitForWaiting(pool, 1));
+        std::this_thread::sleep_for(5ms);   // let it settle into its timed wait
+        const auto start = Clock::now();
+        pool.Uncharge(80 * MB);
+        ASSERT_EQ(waiting.wait_for(2s), std::future_status::ready);
+        latencies.push_back(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - start));
+        EXPECT_TRUE(waiting.get());
+    }
+    std::sort(latencies.begin(), latencies.end());
+    EXPECT_LT(latencies[latencies.size() / 2], 15ms) << "the median wake-up took as long as the poll tick (50 ms): Uncharge did not notify";
+}
+
+TEST(MemoryPoolChargeTest, ChargingPastTheLimitIsAllowedAndTheRequestsWaitUntilThereIsRoomAgain) {
+    MemoryPool pool = UnlimitedHostPool(100 * MB);
+    EXPECT_FALSE(pool.Full());
+    pool.Charge(150 * MB);   // never refused: the memory exists
+    EXPECT_TRUE(pool.Full());
+    std::shared_ptr<MemoryLease> lease;
+    EXPECT_EQ(pool.Acquire(1 * MB, Clock::now() + 100ms, lease), MemoryPool::Result::kTimedOut);
+    pool.Uncharge(60 * MB);   // 90 MB of 100 MB
+    EXPECT_FALSE(pool.Full());
+    EXPECT_EQ(pool.Acquire(1 * MB, Clock::now() + 1s, lease), MemoryPool::Result::kGranted);
+    pool.Uncharge(90 * MB);
+}
+
+TEST(MemoryPoolChargeTest, FullMeansTheLimitIsReachedNotMerelyApproached) {
+    MemoryPool pool = UnlimitedHostPool(100 * MB);
+    pool.Charge(99 * MB);
+    EXPECT_FALSE(pool.Full());
+    pool.Charge(1 * MB);
+    EXPECT_TRUE(pool.Full());
+    pool.Uncharge(100 * MB);
+}
+
+TEST(MemoryPoolChargeTest, ManyThreadsChargingAndUnchargingEndWithNothingCharged) {
+    MemoryPool pool = UnlimitedHostPool(1000 * MB);
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 8; ++t) {
+        threads.emplace_back([&] {
+            for (int i = 0; i < 20000; ++i) {
+                pool.Charge(512 * 1024);
+                pool.Uncharge(512 * 1024);
+            }
+        });
+    }
+    for (auto &t : threads) t.join();
+    EXPECT_EQ(pool.UsedBytes(), 0u);
     EXPECT_EQ(pool.WaitingCount(), 0u);
 }
 

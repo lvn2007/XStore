@@ -6,6 +6,7 @@
 #include <cerrno>
 #include <condition_variable>
 #include <cstdlib>
+#include <cstring>
 #include <chrono>
 #include <fstream>
 #include <functional>
@@ -130,9 +131,9 @@ class ReplyWriter {
                 return;
             }
             if (!window) window = std::make_shared<xstore::streamflow::ReplyWindow>();
-            const xstore::streamflow::Verdict verdict = window->Admit(chunk.size());
+            const xstore::streamflow::Verdict verdict = window->Admit(chunk.size(), !parkable);
             if (verdict != xstore::streamflow::Verdict::kSend) {
-                Stop(verdict == xstore::streamflow::Verdict::kStalled ? "the client was not taking the reply" : "the server's reply queue is full");
+                Stop("the client was not taking the reply");
                 return;
             }
             struct Holder {
@@ -150,6 +151,32 @@ class ReplyWriter {
             SendFrame(message, last);
         }
 
+        // Park and resume (ZMQ_ParkedReplies.h). A parkable reply never waits for its window in SendChunk: its producer asks WindowFull() between scan
+        // chunks and parks instead. Park() sends the release message [client_id][0x02 + token]: the client sees a bare delimiter, the broker frees this
+        // worker. After it Finish() does nothing: the reply goes on when a worker resumes it.
+        void MarkParkable() { parkable = true; }
+        bool WindowFull() const { return window && window->ShouldPark(xstore::streamflow::Get().window_bytes); }
+        const std::shared_ptr<xstore::streamflow::ReplyWindow> &Window() const { return window; }
+        bool Parked() const { return parked; }
+        void Park(uint64_t token) {
+            zmq::message_t id;
+            id.copy(client_id);
+            socket.send(id, zmq::send_flags::dontwait | zmq::send_flags::sndmore);
+            const std::string delimiter = xstore::parked::ReleaseDelimiter(token);
+            socket.send(zmq::buffer(delimiter), zmq::send_flags::dontwait);
+            parked = true;
+        }
+        // A writer for the next part of a parked reply (its earlier messages were sent by the writer of an earlier run).
+        void Resume(std::shared_ptr<xstore::streamflow::ReplyWindow> reply_window) {
+            streaming = true;
+            parkable = true;
+            parked = false;
+            state = State::OPEN;
+            window = std::move(reply_window);
+        }
+        // Ends the reply with a status instead of the rest of its rows (a client that does not take it).
+        void StopWith(const char *why) { Stop(why); }
+
         // A frame after the reply's last one is dropped: sent bare it would
         // reach the broker as a second reply and queue this worker twice.
         void Send(zmq::message_t &frame, bool last) { SendFrame(frame, last); }
@@ -160,7 +187,7 @@ class ReplyWriter {
         // terminator of a streamed reply cut short (same frames a REP socket
         // used to send in that case).
         void Finish() {
-            if (state == State::DONE) return;
+            if (state == State::DONE || parked) return;
             zmq::message_t empty;
             Send(empty, true);
         }
@@ -226,9 +253,55 @@ class ReplyWriter {
         State state = State::NONE;
         bool streaming = false;
         bool stopped = false;
+        bool parkable = false;
+        bool parked = false;
         std::function<std::string(const std::string &)> make_stop_frame;
         std::shared_ptr<xstore::streamflow::ReplyWindow> window;
 };
+
+// The bookmark of a parked streamed reply: what a worker needs to carry it on. `run` does one stretch of the call and returns true when the reply is
+// complete (its last chunk was sent), false when it parked again (should_park asked at a boundary). It holds the call's own bookmark (e.g. the
+// RangeQueryJob) and runs on whichever worker resumes the reply, with that worker's XStore (XStore objects hold no per-request state).
+struct ParkedReply {
+    zmq::message_t client_id;
+    std::shared_ptr<xstore::streamflow::ReplyWindow> window;
+    std::function<std::string(const std::string &)> make_stop_frame;
+    std::function<bool(XStore &, ReplyWriter &, const std::function<bool()> &)> run;
+};
+
+// One stretch of a parkable reply, on the worker that got the request or resumed the reply. If the call parks, the reply is registered BEFORE the
+// release message is sent (the broker looks the token up when it relays that message), and the drain callback is armed after: it makes the reply
+// ready once the connection has taken the queue down to half the window.
+void ServeParkable(XStore &store, ReplyWriter &writer, const std::shared_ptr<ParkedReply> &reply,
+                   const std::shared_ptr<xstore::parked::ParkedReplies> &registry) {
+    if (reply->run(store, writer, [&] { return writer.WindowFull(); })) return;
+    reply->window = writer.Window();
+    const uint64_t token = registry->Park(reply);
+    writer.Park(token);
+    xstore::streamflow::NoteParked();
+    // Resume once the connection has taken half of what is queued, at most half the window: a reply parked because the POOL is full (little queued, a window
+    // that is not) must not be resumed at once, or it would refill the queue as fast as it drains.
+    reply->window->ArmDrain(std::min(xstore::streamflow::Get().window_bytes, reply->window->QueuedBytesOfThisReply()) / 2,
+                            [registry, token] { registry->OnDrained(token); });
+}
+
+// Whether this request's reply parks instead of waiting: a streaming client (Request.streamOk) and flow control with a window, with park on.
+bool ParksReplies(const xstore::streamflow::Config &flow, const XStore_Proto::Request &request) {
+    return flow.park_replies && flow.window_bytes != 0 && request.streamok();
+}
+
+// Starts a parkable reply on this worker. `stop_frame` builds the REP of the call's type that carries a stop status; `run` is one stretch of the call
+// (see ParkedReply). Its job object lives in the `run` closure: this worker's request (and arena) is gone by the time another worker resumes it.
+void StartParkable(XStore &store, ReplyWriter &writer, zmq::message_t &client_id, std::function<std::string(const std::string &)> stop_frame,
+                   std::function<bool(XStore &, ReplyWriter &, const std::function<bool()> &)> run,
+                   const std::shared_ptr<xstore::parked::ParkedReplies> &registry) {
+    const auto reply = std::make_shared<ParkedReply>();
+    reply->client_id.copy(client_id);
+    reply->make_stop_frame = std::move(stop_frame);
+    reply->run = std::move(run);
+    writer.MarkParkable();
+    ServeParkable(store, writer, reply, registry);
+}
 
 // Shared by every case below: serialize a response proto and dispatch it to
 // the CLIENT as the reply's only frame.
@@ -364,7 +437,8 @@ void ZmqServer::Serve(const std::string &listen_addr, const std::string &listen_
     // workers after activity; a 0 tunable means it always blocks in poll.
     RunReadyBroker(client_socket, worker_socket, static_cast<size_t>(num_threads),
                    std::chrono::microseconds(XStoreTunables::ZMQ_ADAPTIVE_POLL_WINDOW_US),
-                   HeavyRequestLimit{XStoreTunables::ZMQ_HEAVY_REQUEST_BYTES, HeavyRequestCap(num_threads)});
+                   HeavyRequestLimit{XStoreTunables::ZMQ_HEAVY_REQUEST_BYTES, HeavyRequestCap(num_threads)},
+                   ParkSettings{parked_.get(), xstore::streamflow::Get().stall});
 }
 
 void ZmqServer::WorkerRoutine(std::string server_addr, int worker_index) {
@@ -462,6 +536,43 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
             zmq::message_t &dst = frame_count == 1 ? delimiter : (frame_count == 2 ? client_msg : extra_frame);
             (void) socket.recv(dst);
             more = dst.more();
+        }
+        // A resume from the broker: [token]['R'][empty body] (ZMQ_ParkedReplies.h). It ends with a message the broker takes as "worker free": the
+        // reply's last chunk, a release (parked again), a stop status, or a terminator. A token nobody holds gets a terminator to a client that is not
+        // there (the frontend drops it) so the worker is not left busy.
+        if (frame_count == 3 && client_id.size() == sizeof(uint64_t) && delimiter.size() == 1 &&
+            *delimiter.data<char>() == xstore::parked::RESUME_MARK) {
+            uint64_t token = 0;
+            std::memcpy(&token, client_id.data(), sizeof(token));
+            bool expired = false;
+            const std::shared_ptr<void> payload = parked_->Take(token, &expired);
+            if (!payload) {
+                spdlog::warn("[NETWORKING] - Resume of a reply nobody holds, ignoring");
+                ReplyWriter(socket, client_id).Finish();
+                continue;
+            }
+            const auto reply = std::static_pointer_cast<ParkedReply>(payload);
+            ReplyWriter writer(socket, reply->client_id);
+            writer.Resume(reply->window);
+            writer.SetStopFrame(reply->make_stop_frame);
+            xstore::streamflow::NoteResumed();
+            try {
+                if (expired) writer.StopWith("the client was not taking the reply");
+                else ServeParkable(my_store, writer, reply, parked_);
+            } catch (const std::exception &e) {
+                if (auto *ze = dynamic_cast<const zmq::error_t *>(&e); ze != nullptr && ze->num() == ETERM) throw;
+                spdlog::error("[NETWORKING] - Resumed reply threw ({}), ending it", e.what());
+                try { writer.Finish(); } catch (...) {}
+            } catch (...) {
+                spdlog::error("[NETWORKING] - Resumed reply threw a non-std exception, ending it");
+                try { writer.Finish(); } catch (...) {}
+            }
+            // A worker that parked a reply does not busy-poll for its next request: it blocks. The busy-poll (ZMQ_ADAPTIVE_POLL_WINDOW_US) pays off after a
+            // request that was short, but a park comes after a stretch of work and often many in a row, and 32 workers busy-polling on 32 logical cores
+            // take the cores from the ones that work. Measured on Mystic (8 nodes x 4 threads of 100k-row reads): +6.5% server CPU and no gain with the
+            // busy-poll, +2.6% CPU and +10% calls/s without it.
+            if (writer.Parked()) last_activity = std::chrono::steady_clock::time_point{};
+            continue;
         }
         ReplyWriter writer(socket, client_id);
         if (frame_count != 3 || delimiter.size() != 0) {
@@ -647,6 +758,22 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                     const uint32_t timeout_ms = client_request->timeoutms();
                     const auto deadline = timeout_ms > 0 ? pickup + std::chrono::milliseconds(timeout_ms) : xstore::MemoryPool::Clock::time_point::max();
                     writer.SetStopFrame([](const std::string &status) { XStore_Proto::BatchQuery_REP rep; rep.set_querystatus(status); return rep.SerializeAsString(); });
+                    if (const xstore::streamflow::Config flow = xstore::streamflow::Get(); ParksReplies(flow, *client_request)) {
+                        auto job = std::make_shared<XStore::BatchQueryJob>();
+                        job->db_name = req->dbname();
+                        job->timestamps.assign(req->timestamp().begin(), req->timestamp().end());   // the request's arena is reset when this worker takes the next one
+                        job->sort_time = true;
+                        job->chunk_size_bytes = chunk_bytes;
+                        job->deadline = deadline;
+                        job->streamed_reply = true;
+                        const uint64_t slice_lease_bytes = XStoreTunables::PARK_RUN_LEASE_BYTES;
+                        StartParkable(my_store, writer, client_id, [](const std::string &status) { XStore_Proto::BatchQuery_REP rep; rep.set_querystatus(status); return rep.SerializeAsString(); },
+                                      [job, slice_lease_bytes](XStore &store, ReplyWriter &w, const std::function<bool()> &should_park) {
+                                          return store.BatchQueryRun(*job, [&](std::string &&chunk, bool is_last) { w.SendChunk(std::move(chunk), is_last); },
+                                                                     should_park, slice_lease_bytes) == XStore::RunState::kDone;
+                                      }, parked_);
+                        break;
+                    }
                     my_store.BatchQuery(req, /*sort_time=*/true, chunk_bytes,
                         [&](std::string &&chunk, bool is_last) { writer.SendChunk(std::move(chunk), is_last); }, deadline, client_request->streamok());
                     break;
@@ -694,6 +821,24 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                     const uint32_t timeout_ms = client_request->timeoutms();
                     const auto deadline = timeout_ms > 0 ? pickup + std::chrono::milliseconds(timeout_ms) : xstore::MemoryPool::Clock::time_point::max();
                     writer.SetStopFrame([](const std::string &status) { XStore_Proto::RangeQuery_REP rep; rep.set_querystatus(status); return rep.SerializeAsString(); });
+                    if (const xstore::streamflow::Config flow = xstore::streamflow::Get(); ParksReplies(flow, *client_request)) {
+                        // Park instead of waiting when the client is slow: a run leases only its own working memory (the bytes it queues are charged to the pool as they
+                        // are queued), not the whole reply and not the window.
+                        auto job = std::make_shared<XStore::RangeQueryJob>();
+                        job->start_epoch = req.starttime();
+                        job->end_epoch = req.endtime();
+                        job->db_name = req.dbname();
+                        job->chunk_size_bytes = chunk_bytes;
+                        job->deadline = deadline;
+                        job->streamed_reply = true;
+                        const uint64_t slice_lease_bytes = XStoreTunables::PARK_RUN_LEASE_BYTES;
+                        StartParkable(my_store, writer, client_id, [](const std::string &status) { XStore_Proto::RangeQuery_REP rep; rep.set_querystatus(status); return rep.SerializeAsString(); },
+                                      [job, slice_lease_bytes](XStore &store, ReplyWriter &w, const std::function<bool()> &should_park) {
+                                          return store.RangeQueryRun(*job, [&](std::string &&chunk, bool is_last) { w.SendChunk(std::move(chunk), is_last); },
+                                                                     should_park, slice_lease_bytes) == XStore::RunState::kDone;
+                                      }, parked_);
+                        break;
+                    }
                     my_store.RangeQuery(req.starttime(), req.endtime(), req.dbname(),
                         chunk_bytes,
                         [&](std::string &&chunk, bool is_last) { writer.SendChunk(std::move(chunk), is_last); }, deadline, client_request->streamok());
@@ -704,6 +849,22 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                 case XStore_Proto::Request::kFindbyvalue: {
                     const auto &req = client_request->findbyvalue();
                     writer.SetStopFrame([](const std::string &status) { XStore_Proto::FindByValue_REP rep; rep.set_querystatus(status); return rep.SerializeAsString(); });
+                    if (ParksReplies(xstore::streamflow::Get(), *client_request)) {
+                        auto job = std::make_shared<XStore::FindByValueJob>();
+                        job->start_epoch = req.starttime();
+                        job->end_epoch = req.endtime();
+                        job->db_name = req.dbname();
+                        job->column_idx = req.columnidx();
+                        job->value = req.value();
+                        job->chunk_size_bytes = chunk_bytes;
+                        job->streamed_reply = true;
+                        StartParkable(my_store, writer, client_id, [](const std::string &status) { XStore_Proto::FindByValue_REP rep; rep.set_querystatus(status); return rep.SerializeAsString(); },
+                                      [job](XStore &store, ReplyWriter &w, const std::function<bool()> &should_park) {
+                                          return store.FindByValueRun(*job, [&](std::string &&chunk, bool is_last) { w.SendChunk(std::move(chunk), is_last); },
+                                                                      should_park) == XStore::RunState::kDone;
+                                      }, parked_);
+                        break;
+                    }
                     my_store.FindByValue(req.starttime(), req.endtime(), req.dbname(), req.columnidx(), req.value(),
                         chunk_bytes,
                         [&](std::string &&chunk, bool is_last) { writer.SendChunk(std::move(chunk), is_last); }, client_request->streamok());
@@ -715,6 +876,24 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                 case XStore_Proto::Request::kFindbypattern: {
                     const auto &req = client_request->findbypattern();
                     writer.SetStopFrame([](const std::string &status) { XStore_Proto::FindByPattern_REP rep; rep.set_querystatus(status); return rep.SerializeAsString(); });
+                    if (ParksReplies(xstore::streamflow::Get(), *client_request)) {
+                        auto job = std::make_shared<XStore::FindByPatternJob>();
+                        job->start_epoch = req.starttime();
+                        job->end_epoch = req.endtime();
+                        job->db_name = req.dbname();
+                        job->column_idx = req.columnidx();
+                        job->pattern = req.pattern();
+                        job->mode = req.mode();
+                        job->case_insensitive = req.caseinsensitive();
+                        job->chunk_size_bytes = chunk_bytes;
+                        job->streamed_reply = true;
+                        StartParkable(my_store, writer, client_id, [](const std::string &status) { XStore_Proto::FindByPattern_REP rep; rep.set_querystatus(status); return rep.SerializeAsString(); },
+                                      [job](XStore &store, ReplyWriter &w, const std::function<bool()> &should_park) {
+                                          return store.FindByPatternRun(*job, [&](std::string &&chunk, bool is_last) { w.SendChunk(std::move(chunk), is_last); },
+                                                                        should_park) == XStore::RunState::kDone;
+                                      }, parked_);
+                        break;
+                    }
                     my_store.FindByPattern(req.starttime(), req.endtime(), req.dbname(), req.columnidx(),
                         req.pattern(), req.mode(), req.caseinsensitive(),
                         chunk_bytes,
@@ -848,6 +1027,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
             // No-op once the handler completed its reply; otherwise the
             // request still gets its one reply.
             writer.Finish();
+            if (writer.Parked()) last_activity = std::chrono::steady_clock::time_point{};   // no busy-poll after a park, see the resume branch
         } catch (const std::exception &e) {
             // Context shut down mid-request (the reply send failed): not an
             // error, unwind to WorkerRoutine.

@@ -48,6 +48,8 @@
 namespace walring { class Ring; }
 namespace livewiden { class LiveWidenGovernor; class LiveWidenLoadSource; }
 
+class PatternMatcher;   // XStore_PatternMatch.h (held by FindByPatternJob)
+
 class XStore {
     public:
         // Convention: every directory-path member/return value in this class
@@ -550,8 +552,7 @@ class XStore {
         // BatchQuery helper in XStoreTestSupport.h, which wraps this. Same
         // query semantics/output either way -- including holes being
         // OMITTED, not included as empty entries, unlike RangeQuery. Takes
-        // proto_from_client non-const since sort_time=true sorts the
-        // request's timestamps in place.
+        // proto_from_client non-const for the callers' sake (it is not changed).
         void BatchQuery(XStore_Proto::BatchQuery_REQ *proto_from_client, bool sort_time, size_t chunk_size_bytes,
                                  const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk,
                                  xstore::MemoryPool::Clock::time_point deadline = xstore::MemoryPool::Clock::time_point::max(),
@@ -603,6 +604,36 @@ class XStore {
                                  xstore::MemoryPool::Clock::time_point deadline = xstore::MemoryPool::Clock::time_point::max(),
                                  bool streamed_reply = false);
 
+        // RANGE QUERY that can stop at a scan-chunk boundary and be continued later, on any thread (park and resume of a streamed reply:
+        // docs/superpowers/specs/2026-11-01-park-resume-replies-design.md). RangeQuery above is this with a should_park that is never true.
+        // Fill the request fields of a job, call RangeQueryRun: it returns kDone after the last chunk (is_last = true) has been emitted, or kParked
+        // when should_park() said so at a boundary (asked before every scan chunk but the first of the run, so each run makes progress): the job
+        // then holds the bookmark (next timestamp, the part of the next chunk already encoded, the status text) and holds no lock and no pool lease.
+        // Call RangeQueryRun again with the same job to continue; a DB removed meanwhile ends the reply with an error status. The memory lease of
+        // a run covers `slice_lease_bytes` (0 = the whole reply, as RangeQuery does), taken when the run starts and returned when it ends.
+        struct RangeQueryJob {
+            // The request.
+            unsigned long long start_epoch = 0;
+            unsigned long long end_epoch = 0;
+            std::string db_name;
+            size_t chunk_size_bytes = 0;
+            xstore::MemoryPool::Clock::time_point deadline = xstore::MemoryPool::Clock::time_point::max();
+            bool streamed_reply = false;
+            // The bookmark (written by RangeQueryRun).
+            bool started = false;
+            unsigned long long next_epoch = 0;
+            uint32_t cfg_epoch = 0;
+            XStore_Proto::ConfigStruct cfg_struct;
+            std::string chunk_buf;
+            bool has_warning = false;
+            std::string last_warning;
+        };
+        // The outcome of one run of a call that can park (RangeQueryRun, FindByValueRun, FindByPatternRun).
+        enum class RunState { kDone, kParked };
+        using RangeQueryState = RunState;
+        RangeQueryState RangeQueryRun(RangeQueryJob &job, const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk,
+                                      const std::function<bool()> &should_park, uint64_t slice_lease_bytes);
+
         // FIND BY VALUE (streamed, wire-format encode -- same chunking
         // contract as RangeQuery above, same RangeQuery_REP wire shape on
         // the response). Equality lookup on one column: [startEpochT,
@@ -627,6 +658,35 @@ class XStore {
                           size_t chunk_size_bytes, const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk,
                           bool streamed_reply = false);
 
+        // FindByValue that can park: same contract as RangeQueryRun (the job is the bookmark; should_park is asked before every scan chunk, or every
+        // consumed piece of a parallel scan, but the first of the run; a DB removed while parked ends the reply with an error status). FindByValue is
+        // this with a should_park that is never true.
+        struct FindByValueJob {
+            // The request.
+            unsigned long long start_epoch = 0;
+            unsigned long long end_epoch = 0;
+            std::string db_name;
+            int32_t column_idx = 0;
+            XStore_Proto::FData value;
+            size_t chunk_size_bytes = 0;
+            bool streamed_reply = false;
+            // The bookmark (written by FindByValueRun).
+            bool started = false;
+            unsigned long long next_epoch = 0;
+            uint32_t cfg_epoch = 0;
+            XStore_Proto::ConfigStruct cfg_struct;
+            std::string encoded_target;
+            uint32_t tracked_column_count = 0;
+            bool unindexed_notice_emitted = false;
+            std::string chunk_buf;
+            unsigned long long total_emitted_bytes = 0;
+            bool size_limit_exceeded = false;
+            bool has_warning = false;
+            std::string last_warning;
+        };
+        RunState FindByValueRun(FindByValueJob &job, const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk,
+                                const std::function<bool()> &should_park);
+
         // FIND BY PATTERN -- TEMPORARY IMPLEMENTATION (option A). Streams
         // every row in [startEpochT, endEpochT] whose column_idx holds a
         // stringData/bytesData value matching pattern (PATTERN_LIKE: SQL
@@ -641,6 +701,58 @@ class XStore {
                            XStore_Proto::PatternMode mode, bool case_insensitive,
                            size_t chunk_size_bytes, const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk,
                            bool streamed_reply = false);
+
+        // FindByPattern that can park (see FindByValueJob).
+        struct FindByPatternJob {
+            // The request.
+            unsigned long long start_epoch = 0;
+            unsigned long long end_epoch = 0;
+            std::string db_name;
+            int32_t column_idx = 0;
+            std::string pattern;
+            XStore_Proto::PatternMode mode = XStore_Proto::PATTERN_LIKE;
+            bool case_insensitive = false;
+            size_t chunk_size_bytes = 0;
+            bool streamed_reply = false;
+            // The bookmark (written by FindByPatternRun).
+            bool started = false;
+            unsigned long long next_epoch = 0;
+            uint32_t cfg_epoch = 0;
+            XStore_Proto::ConfigStruct cfg_struct;
+            std::shared_ptr<PatternMatcher> matcher;
+            std::string chunk_buf;
+            unsigned long long total_emitted_bytes = 0;
+            bool size_limit_exceeded = false;
+            bool has_warning = false;
+            std::string last_warning;
+        };
+        RunState FindByPatternRun(FindByPatternJob &job, const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk,
+                                  const std::function<bool()> &should_park);
+
+        // BatchQuery that can park between waves of preads (see RangeQueryRun): the job holds a copy of the requested timestamps (sorted when
+        // sort_time), their year groups and the position (group, index in the group) reached. should_park is asked before every wave of preads but the
+        // first of the run, with no lock held. BatchQuery is this with a should_park that is never true.
+        struct BatchQueryJob {
+            // The request.
+            std::string db_name;
+            std::vector<unsigned long long> timestamps;
+            bool sort_time = true;
+            size_t chunk_size_bytes = 0;
+            xstore::MemoryPool::Clock::time_point deadline = xstore::MemoryPool::Clock::time_point::max();
+            bool streamed_reply = false;
+            // The bookmark (written by BatchQueryRun).
+            bool started = false;
+            uint32_t cfg_epoch = 0;
+            XStore_Proto::ConfigStruct cfg_struct;
+            std::vector<std::pair<unsigned short int, std::vector<unsigned long long int>>> year_groups;   // per year: indices into `timestamps`, in request order
+            size_t group = 0;      // the year group being read
+            size_t position = 0;   // the next index (into the group's list) to read
+            std::string chunk_buf;
+            bool has_warning = false;
+            std::string last_warning;
+        };
+        RunState BatchQueryRun(BatchQueryJob &job, const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk,
+                               const std::function<bool()> &should_park, uint64_t slice_lease_bytes);
 
         // RANGE DELETE
         [[nodiscard]] XStore_Proto::RangeDelete_REP RangeDelete(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t, std::string_view db_name);

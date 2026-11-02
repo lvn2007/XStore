@@ -18,8 +18,6 @@ using xstore::streamflow::Verdict;
 Config TestConfig() {
     Config config;
     config.window_bytes = 100;
-    config.queue_limit_bytes = 1'000'000;   // not in the way unless a test lowers it
-    config.share_bytes = 10;
     config.min_chunk_bytes = 1;
     config.max_waiting = 4;
     config.stall = 30s;
@@ -87,6 +85,128 @@ TEST_F(StreamFlowTest, AWaitingWorkerIsWokenOnceWhenTheQueueReachesHalfAndNotByE
     window.Done(80);
 }
 
+// Park and resume (docs/superpowers/specs/2026-11-01-park-resume-replies-design.md): instead of a worker waiting, the reply arms a callback that fires
+// once when the queue is down to the level it wants.
+TEST_F(StreamFlowTest, ADrainCallbackFiresOnceWhenTheQueueReachesTheLevelAndNotBefore) {
+    ReplyWindow window;
+    for (int i = 0; i < 10; ++i) ASSERT_EQ(window.Admit(10), Verdict::kSend);
+    int fired = 0;
+    window.ArmDrain(50, [&] { ++fired; });
+    for (int i = 0; i < 4; ++i) window.Done(10);   // 60 queued
+    EXPECT_EQ(fired, 0);
+    window.Done(10);   // 50
+    EXPECT_EQ(fired, 1);
+    window.Done(10);
+    window.Done(10);
+    EXPECT_EQ(fired, 1) << "fires once per arming";
+    window.Done(10);
+    window.Done(10);
+    window.Done(10);
+}
+
+TEST_F(StreamFlowTest, ADrainCallbackArmedAfterTheQueueIsAlreadyLowFiresAtOnce) {
+    ReplyWindow window;
+    ASSERT_EQ(window.Admit(10), Verdict::kSend);
+    int fired = 0;
+    window.ArmDrain(50, [&] { ++fired; });
+    EXPECT_EQ(fired, 1);
+    window.Done(10);
+    EXPECT_EQ(fired, 1);
+}
+
+TEST_F(StreamFlowTest, ADrainCallbackFiresExactlyOnceWhenTheLastChunkIsWrittenWhileItIsBeingArmed) {
+    for (int round = 0; round < 2000; ++round) {
+        ReplyWindow window;
+        ASSERT_EQ(window.Admit(60), Verdict::kSend);
+        std::atomic<int> fired{0};
+        std::thread network([&] { window.Done(60); });   // the write completes on another thread
+        window.ArmDrain(50, [&] { fired.fetch_add(1); });
+        network.join();
+        ASSERT_EQ(fired.load(), 1) << "round " << round;
+    }
+}
+
+// Parking is the default; XSTORE_PARK_REPLIES=0 goes back to a worker waiting for its window.
+TEST(StreamFlowDefaultsTest, ParkingIsOnUnlessTheEnvironmentTurnsItOff) {
+    unsetenv("XSTORE_PARK_REPLIES");
+    EXPECT_TRUE(Config().park_replies);
+    EXPECT_TRUE(xstore::streamflow::detail::FromEnv().park_replies);
+    setenv("XSTORE_PARK_REPLIES", "0", 1);
+    EXPECT_FALSE(xstore::streamflow::detail::FromEnv().park_replies);
+    setenv("XSTORE_PARK_REPLIES", "1", 1);
+    EXPECT_TRUE(xstore::streamflow::detail::FromEnv().park_replies);
+    setenv("XSTORE_PARK_REPLIES", "true", 1);
+    EXPECT_TRUE(xstore::streamflow::detail::FromEnv().park_replies) << "only 0 turns it off";
+    unsetenv("XSTORE_PARK_REPLIES");
+}
+
+// ---- One memory budget: the bytes queued for a slow client are charged to the process-wide MemoryPool ----
+TEST_F(StreamFlowTest, AdmitChargesTheMemoryPoolAndDoneReturnsIt) {
+    xstore::MemoryPool &pool = xstore::MemoryPool::Instance();
+    const uint64_t base = pool.UsedBytes();
+    ReplyWindow window;
+    ASSERT_EQ(window.Admit(60), Verdict::kSend);
+    ASSERT_EQ(window.Admit(40), Verdict::kSend);
+    EXPECT_EQ(pool.UsedBytes(), base + 100);
+    window.Done(60);
+    EXPECT_EQ(pool.UsedBytes(), base + 40);
+    window.Done(40);
+    EXPECT_EQ(pool.UsedBytes(), base);
+}
+
+TEST_F(StreamFlowTest, AChunkIsNeverRefusedBecauseThePoolIsFull) {
+    xstore::MemoryPool &pool = xstore::MemoryPool::Instance();
+    const uint64_t base = pool.UsedBytes();
+    ReplyWindow window;
+    xstore::streamflow::SetPoolFullForTests(1);
+    EXPECT_EQ(window.Admit(10), Verdict::kSend) << "a chunk is never refused for memory: the producer parks instead";
+    window.Done(10);
+    xstore::streamflow::SetPoolFullForTests(-1);
+    EXPECT_EQ(pool.UsedBytes(), base);
+}
+
+// When a producer should stop and park: its window is full, or the pool is full while it has something queued that will drain. A reply with
+// nothing queued has nothing to wait for (it would never be woken).
+class ParkDecisionTest : public StreamFlowTest {
+protected:
+    void TearDown() override {
+        xstore::streamflow::SetPoolFullForTests(-1);
+        StreamFlowTest::TearDown();
+    }
+};
+
+TEST_F(ParkDecisionTest, ParksWhenItsWindowIsFull) {
+    ReplyWindow window;
+    ASSERT_EQ(window.Admit(100), Verdict::kSend);
+    EXPECT_TRUE(window.ShouldPark(100));
+    window.Done(100);
+}
+
+TEST_F(ParkDecisionTest, DoesNotParkBelowItsWindowWhileThePoolHasRoom) {
+    ReplyWindow window;
+    ASSERT_EQ(window.Admit(99), Verdict::kSend);
+    xstore::streamflow::SetPoolFullForTests(0);
+    EXPECT_FALSE(window.ShouldPark(100));
+    window.Done(99);
+}
+
+TEST_F(ParkDecisionTest, ParksBelowItsWindowWhenThePoolIsFullAndSomethingIsQueued) {
+    ReplyWindow window;
+    ASSERT_EQ(window.Admit(10), Verdict::kSend);
+    xstore::streamflow::SetPoolFullForTests(1);
+    EXPECT_TRUE(window.ShouldPark(100));
+    window.Done(10);
+}
+
+TEST_F(ParkDecisionTest, NeverParksWithNothingQueuedWhateverThePoolSays) {
+    ReplyWindow window;
+    xstore::streamflow::SetPoolFullForTests(1);
+    EXPECT_FALSE(window.ShouldPark(100)) << "nothing will drain, so nothing would ever wake it";
+    ASSERT_EQ(window.Admit(10), Verdict::kSend);
+    window.Done(10);
+    EXPECT_FALSE(window.ShouldPark(100));
+}
+
 TEST_F(StreamFlowTest, OnlyMaxWaitingWorkersWaitAndTheOthersQueueAtOnce) {
     Config config = TestConfig();
     config.max_waiting = 1;
@@ -115,25 +235,6 @@ TEST_F(StreamFlowTest, WithoutAWindowNothingEverWaits) {
     EXPECT_EQ(window.Admit(100000), Verdict::kSend);
     EXPECT_EQ(window.Admit(100000), Verdict::kSend);
     window.Done(200000);
-}
-
-TEST_F(StreamFlowTest, AReplyHoldingMoreThanItsShareIsRefusedWhenTheTotalPassesTheLimitAndASmallOneIsNot) {
-    Config config = TestConfig();
-    config.window_bytes = 0;
-    config.queue_limit_bytes = 1000;
-    config.share_bytes = 100;
-    xstore::streamflow::Set(config);
-    ReplyWindow stalled, healthy;
-    ASSERT_EQ(stalled.Admit(900), Verdict::kSend);   // first chunk: nothing queued yet
-    ASSERT_EQ(stalled.Admit(50), Verdict::kSend);    // 950 in all: under the limit
-    EXPECT_EQ(stalled.Admit(100), Verdict::kQueueFull) << "950 + 100 passes 1000 and this reply holds more than its share";
-    EXPECT_EQ(stalled.QueuedBytesOfThisReply(), 950u) << "a refused chunk is not counted";
-    EXPECT_EQ(xstore::streamflow::QueuedBytes(), 950u);
-    EXPECT_EQ(healthy.Admit(200), Verdict::kSend) << "a reply that holds nothing is not the one cut, whatever the total";
-    EXPECT_EQ(healthy.Admit(50), Verdict::kQueueFull) << "...but once it holds more than its share it is";
-    healthy.Done(200);
-    stalled.Done(950);
-    EXPECT_EQ(xstore::streamflow::QueuedBytes(), 0u);
 }
 
 TEST_F(StreamFlowTest, AWaitThatNothingEndsIsStoppedAfterTheStallTimeAndCountsNothing) {

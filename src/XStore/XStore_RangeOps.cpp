@@ -33,79 +33,104 @@ void XStore::RangeQuery(unsigned long long int start_epoch_t, unsigned long long
                                  std::string_view db_name_view, size_t chunk_size_bytes,
                                  const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk,
                                  xstore::MemoryPool::Clock::time_point deadline, bool streamed_reply) {
-    const std::string &db_name = UpperCaseInto(db_name_view);
+    RangeQueryJob job;
+    job.start_epoch = start_epoch_t;
+    job.end_epoch = end_epoch_t;
+    job.db_name = std::string(db_name_view);
+    job.chunk_size_bytes = chunk_size_bytes;
+    job.deadline = deadline;
+    job.streamed_reply = streamed_reply;
+    RangeQueryRun(job, emit_chunk, [] { return false; }, 0);
+}
+
+XStore::RangeQueryState XStore::RangeQueryRun(RangeQueryJob &job,
+                                              const std::function<void(std::string &&chunk, bool is_last)> &emit_chunk,
+                                              const std::function<bool()> &should_park, uint64_t slice_lease_bytes) {
+    const std::string &db_name = UpperCaseInto(job.db_name);
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
     // querystatus (RangeQuery_REP field 3) semantics match RangeQuery
     // exactly: SetTaggedStatus OVERWRITES, so if several segments in one
     // query each hit a warning, only the last one survives -- tracked here
     // the same way, applied once at the very end rather than per-occurrence.
-    bool has_warning = false;
-    std::string last_warning;
     auto set_warning = [&](const char *tag, const std::string &body) {
-        has_warning = true;
-        last_warning = tag;
-        last_warning += body;
+        job.has_warning = true;
+        job.last_warning = tag;
+        job.last_warning += body;
     };
 
     // Appends querystatus (field 3, only if set) to the last chunk and
-    // emits it. The only exit point of this function -- every return path
-    // below funnels through here so emit_chunk is always called at least
-    // once (a reply must exist even for a zero-row/error query, or the
-    // caller's REQ socket would hang forever waiting for one).
+    // emits it. The only exit point of this function that ends the reply --
+    // every return path below that does funnels through here so emit_chunk is
+    // always called at least once (a reply must exist even for a zero-row/error
+    // query, or the caller's REQ socket would hang forever waiting for one).
     auto finish = [&](std::string &&chunk_buf) {
-        if (has_warning) {
-            AppendQueryStatus(chunk_buf, last_warning);
+        if (job.has_warning) {
+            AppendQueryStatus(chunk_buf, job.last_warning);
         }
         emit_chunk(std::move(chunk_buf), true);
     };
 
-    XStore_Proto::ConfigStruct cfg_struct;
-    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
-        set_warning("[WARNING] ", fmt::format("[RANGE QUERY] [DB: {}] - {}.CFG does not exist", db_name, db_name));
-        finish(std::string());
-        return;
+    const bool resumed = job.started;
+    if (!resumed) {
+        job.started = true;
+        job.next_epoch = job.start_epoch;
+        // Loaded BEFORE the cfg is read, as the deletes do: CfgEpochCurrent tells a resumed run whether the DB was removed meanwhile.
+        job.cfg_epoch = CfgEpoch();
+        if (!GetOrLoadCfg(db_name, db_base_path_str, job.cfg_struct)) {
+            set_warning("[WARNING] ", fmt::format("[RANGE QUERY] [DB: {}] - {}.CFG does not exist", db_name, db_name));
+            finish(std::string());
+            return RangeQueryState::kDone;
+        }
+
+        if (job.start_epoch > job.end_epoch) {
+            set_warning("[WARNING] ", fmt::format("[RANGE QUERY] [DB: {}] - Target end time must be after start time", db_name));
+            finish(std::string());
+            return RangeQueryState::kDone;
+        }
+
+        // Chunking bounds THIS SERVER's peak memory (never more than ~chunk_size_bytes live at once) -- it does NOT lift protobuf's real ~2GB
+        // ceiling on a single message for a client that concatenates every chunk back into one buffer before ParseFromArray/ParseFromString
+        // (older C++ clients, the Python client): a >2GB reassembled result would corrupt on the CLIENT side even though this server never
+        // held more than one chunk at a time. So the guard stays for them, checked before any chunk is sent (an abort partway through a reply
+        // has no clean way to signal "actually, error" to a client already receiving it). A streamed_reply (Request.streamOk) goes to a client
+        // that parses chunk by chunk and never holds one serialized message, so it is not limited here; the memory lease below still is.
+        if (!job.streamed_reply && (job.end_epoch - job.start_epoch) * job.cfg_struct.rowlength() > xstore::ReplyLimitBytes().load()) {
+            set_warning("[WARNING] ", fmt::format("[RANGE QUERY] [DB: {}] - Query results is larger than 2GB", db_name));
+            finish(std::string());
+            return RangeQueryState::kDone;
+        }
+
+        if (std::filesystem::is_directory(db_base_path_str) == 0) {
+            set_warning("[WARNING] ", fmt::format("[RANGE QUERY] [DB: {}] - DB does not exist", db_name));
+            finish(std::string());
+            return RangeQueryState::kDone;
+        }
+        job.chunk_buf.reserve(job.chunk_size_bytes + 4096);
+    } else if (!CfgEpochCurrent(db_name, job.cfg_epoch)) {
+        // Parked, and the DB was removed (maybe re-created) since: the rest of the request is stale. The rows already read stay in the reply.
+        set_warning("[ERROR] ", fmt::format("[RANGE QUERY] [DB: {}] - The DB was removed while the request ran", db_name));
+        finish(std::move(job.chunk_buf));
+        return RangeQueryState::kDone;
     }
 
-    if (start_epoch_t > end_epoch_t) {
-        set_warning("[WARNING] ", fmt::format("[RANGE QUERY] [DB: {}] - Target end time must be after start time", db_name));
-        finish(std::string());
-        return;
-    }
-
-    // Chunking bounds THIS SERVER's peak memory (never more than ~chunk_size_bytes live at once) -- it does NOT lift protobuf's real ~2GB
-    // ceiling on a single message for a client that concatenates every chunk back into one buffer before ParseFromArray/ParseFromString
-    // (older C++ clients, the Python client): a >2GB reassembled result would corrupt on the CLIENT side even though this server never
-    // held more than one chunk at a time. So the guard stays for them, checked before any chunk is sent (an abort partway through a reply
-    // has no clean way to signal "actually, error" to a client already receiving it). A streamed_reply (Request.streamOk) goes to a client
-    // that parses chunk by chunk and never holds one serialized message, so it is not limited here; the memory lease below still is.
-    if (!streamed_reply && (end_epoch_t - start_epoch_t) * cfg_struct.rowlength() > xstore::ReplyLimitBytes().load()) {
-        set_warning("[WARNING] ", fmt::format("[RANGE QUERY] [DB: {}] - Query results is larger than 2GB", db_name));
-        finish(std::string());
-        return;
-    }
-
-    if (std::filesystem::is_directory(db_base_path_str) == 0) {
-        set_warning("[WARNING] ", fmt::format("[RANGE QUERY] [DB: {}] - DB does not exist", db_name));
-        finish(std::string());
-        return;
-    }
-
-    // The whole reply stays in memory until its last chunk is sent (a multipart reply is delivered atomically): reserve it
-    // from the process-wide pool, an upper bound, as the 2 GB guard above also is (a sparse range encodes smaller).
-    const uint64_t reply_estimate = (end_epoch_t - start_epoch_t + 1) * (static_cast<uint64_t>(cfg_struct.rowlength()) + 16);
+    // The reply stays in memory until its chunks are written: reserve it from the process-wide pool, an upper bound, as the 2 GB guard above also is
+    // (a sparse range encodes smaller). A run that may park reserves only its slice: a parked reply holds no lease.
+    const uint64_t remaining_estimate = (job.end_epoch - job.next_epoch + 1) * (static_cast<uint64_t>(job.cfg_struct.rowlength()) + 16);
+    const uint64_t reply_estimate = slice_lease_bytes == 0 ? remaining_estimate : std::min(remaining_estimate, slice_lease_bytes);
     std::shared_ptr<xstore::MemoryLease> reply_lease;
-    if (const xstore::MemoryPool::Result leased = xstore::AcquireOperationLease(reply_estimate, deadline, reply_lease);
+    if (const xstore::MemoryPool::Result leased = xstore::AcquireOperationLease(reply_estimate, job.deadline, reply_lease);
         leased != xstore::MemoryPool::Result::kGranted) {
         set_warning("[ERROR] ", xstore::OperationLeaseRejection("RANGE QUERY", db_name, leased, reply_estimate));
-        finish(std::string());
-        return;
+        finish(std::move(job.chunk_buf));
+        return RangeQueryState::kDone;
     }
 
-    std::string chunk_buf;
-    chunk_buf.reserve(chunk_size_bytes + 4096);
-
-    unsigned long long int iter_epoch = start_epoch_t;
+    std::string &chunk_buf = job.chunk_buf;
+    const unsigned long long int end_epoch_t = job.end_epoch;
+    const XStore_Proto::ConfigStruct &cfg_struct = job.cfg_struct;
+    bool consumed_any = false;   // parking is only asked after one scan chunk of this run: every run makes progress
+    unsigned long long int iter_epoch = job.next_epoch;
     while (iter_epoch <= end_epoch_t) {
         TimeStruct curr_ts(iter_epoch, cfg_struct.timeresolution());
         const std::string &target_file_path = CachedYearFilePath(db_base_path_str, curr_ts.year);
@@ -131,9 +156,18 @@ void XStore::RangeQuery(unsigned long long int start_epoch_t, unsigned long long
         // The rows are read under a READ lock one scan chunk at a time (xstore::scanlock), and a completed output buffer is
         // held in `ready` until that chunk's lock is released: sending to a slow client must not hold off the inserts.
         std::vector<std::string> ready;
+        bool parked = false;
+        unsigned long long int parked_epoch = 0;
         xstore::scanlock::ScanUnderReadLock(
             target_file_path, mapped_base, first_offset, region_length, cfg_struct.rowlength(), iter_epoch - curr_ts.first_epoch,
             [&](const char *rows_base, unsigned long long rows, unsigned long long row_offset) {
+                // Between two scan chunks nothing is in flight: every earlier chunk's output is in chunk_buf or was emitted by after().
+                if (consumed_any && should_park()) {
+                    parked = true;
+                    parked_epoch = iter_epoch + row_offset;
+                    return false;
+                }
+                consumed_any = true;
                 for (unsigned long long i = 0; i < rows; ++i) {
                     EncodeQueryResponseEntry(chunk_buf, iter_epoch + row_offset + i, rows_base + i * cfg_struct.rowlength(),
                                              cfg_struct.rowlength());
@@ -146,10 +180,10 @@ void XStore::RangeQuery(unsigned long long int start_epoch_t, unsigned long long
                     // buffer, one emit_chunk call at the end (see finish()) --
                     // chunking isn't a separate path, just what this becomes
                     // once a query is big enough to reach the target.
-                    if (chunk_buf.size() >= chunk_size_bytes) {
+                    if (chunk_buf.size() >= job.chunk_size_bytes) {
                         ready.push_back(std::move(chunk_buf));
                         chunk_buf.clear();
-                        chunk_buf.reserve(chunk_size_bytes + 4096);
+                        chunk_buf.reserve(job.chunk_size_bytes + 4096);
                     }
                 }
                 return true;
@@ -159,10 +193,15 @@ void XStore::RangeQuery(unsigned long long int start_epoch_t, unsigned long long
                 ready.clear();
             });
 
+        if (parked) {
+            job.next_epoch = parked_epoch;
+            return RangeQueryState::kParked;
+        }
         iter_epoch = segment_end + 1;
     }
 
     finish(std::move(chunk_buf));
+    return RangeQueryState::kDone;
 }
 
 // RANGE DELETE

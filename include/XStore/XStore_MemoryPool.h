@@ -76,6 +76,15 @@ public:
     // them already; they count against the pool limit but not against the host's available memory.
     Result Acquire(uint64_t bytes, Clock::time_point deadline, std::shared_ptr<MemoryLease> &lease, uint64_t already_resident = 0);
 
+    // Memory that exists already and cannot wait for its turn, e.g. the bytes of a reply queued for a slow client. It counts against `limit`
+    // like a lease (a request that would not fit next to it waits; UsedBytes() includes it), but taking it is never refused or delayed, so the pool
+    // can end up Full() or past its limit: whoever produces such memory is expected to stop producing while Full(). Lock-free; Uncharge wakes the
+    // requests in the line. Every Charge must be matched by an Uncharge of the same bytes.
+    void Charge(uint64_t bytes) noexcept;
+    void Uncharge(uint64_t bytes) noexcept;
+    // The leases and the charged bytes together have reached the limit.
+    bool Full() const;
+
     uint64_t Limit() const { return limit_; }
     uint64_t Reserve() const { return reserve_; }
     uint64_t UsedBytes() const;
@@ -97,6 +106,8 @@ private:
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     uint64_t used_ = 0;
+    std::atomic<uint64_t> external_{0};   // Charge / Uncharge
+    std::atomic<size_t> waiters_{0};      // requests in the line (waiting_.size(), readable without the mutex)
     uint64_t pending_ = 0;
     uint64_t peak_ = 0;
     bool host_cached_ = false;

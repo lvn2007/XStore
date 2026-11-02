@@ -23,64 +23,94 @@ void XStore::FindByPattern(unsigned long long int start_epoch_t, unsigned long l
                            std::string_view db_name_view, int32_t column_idx, std::string_view pattern,
                            XStore_Proto::PatternMode mode, bool case_insensitive,
                            size_t chunk_size_bytes, const std::function<void(std::string&&, bool)> &emit_chunk, bool streamed_reply) {
-    const std::string &db_name = UpperCaseInto(db_name_view);
+    FindByPatternJob job;
+    job.start_epoch = start_epoch_t;
+    job.end_epoch = end_epoch_t;
+    job.db_name = std::string(db_name_view);
+    job.column_idx = column_idx;
+    job.pattern = std::string(pattern);
+    job.mode = mode;
+    job.case_insensitive = case_insensitive;
+    job.chunk_size_bytes = chunk_size_bytes;
+    job.streamed_reply = streamed_reply;
+    FindByPatternRun(job, emit_chunk, [] { return false; });
+}
+
+XStore::RunState XStore::FindByPatternRun(FindByPatternJob &job, const std::function<void(std::string&&, bool)> &emit_chunk,
+                                          const std::function<bool()> &should_park) {
+    const std::string &db_name = UpperCaseInto(job.db_name);
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
-    bool has_warning = false;
-    std::string last_warning;
     auto set_warning = [&](const char *tag, const std::string &body) {
-        has_warning = true;
-        last_warning = tag;
-        last_warning += body;
+        job.has_warning = true;
+        job.last_warning = tag;
+        job.last_warning += body;
     };
     auto finish = [&](std::string &&chunk_buf) {
-        if (has_warning) {
-            XStoreWireEncode::AppendQueryStatus(chunk_buf, last_warning);
+        if (job.has_warning) {
+            XStoreWireEncode::AppendQueryStatus(chunk_buf, job.last_warning);
         }
         emit_chunk(std::move(chunk_buf), true);
     };
 
-    XStore_Proto::ConfigStruct cfg_struct;
-    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
-        set_warning("[WARNING] ", fmt::format("[FINDBYPATTERN] [DB: {}] - {}.CFG does not exist", db_name, db_name));
-        finish(std::string());
-        return;
-    }
-    if (start_epoch_t > end_epoch_t) {
-        set_warning("[WARNING] ", fmt::format("[FINDBYPATTERN] [DB: {}] - Target end time must be after start time", db_name));
-        finish(std::string());
-        return;
-    }
-    if (std::filesystem::is_directory(db_base_path_str) == 0) {
-        set_warning("[WARNING] ", fmt::format("[FINDBYPATTERN] [DB: {}] - DB does not exist", db_name));
-        finish(std::string());
-        return;
-    }
-    if (column_idx < 0 || column_idx > std::numeric_limits<unsigned short>::max()) {
-        set_warning("[WARNING] ", fmt::format("[FINDBYPATTERN] [DB: {}] - columnIdx out of range: {}", db_name, column_idx));
-        finish(std::string());
-        return;
-    }
-    std::string pattern_error;
-    std::optional<PatternMatcher> matcher = PatternMatcher::Compile(pattern, mode, case_insensitive, pattern_error);
-    if (!matcher.has_value()) {
-        set_warning("[ERROR] ", fmt::format("[FINDBYPATTERN] [DB: {}] - Invalid pattern: {}", db_name, pattern_error));
-        finish(std::string());
-        return;
+    if (!job.started) {
+        job.started = true;
+        job.next_epoch = job.start_epoch;
+        // Loaded BEFORE the cfg is read, as the deletes do: CfgEpochCurrent tells a resumed run whether the DB was removed meanwhile.
+        job.cfg_epoch = CfgEpoch();
+        if (!GetOrLoadCfg(db_name, db_base_path_str, job.cfg_struct)) {
+            set_warning("[WARNING] ", fmt::format("[FINDBYPATTERN] [DB: {}] - {}.CFG does not exist", db_name, db_name));
+            finish(std::string());
+            return RunState::kDone;
+        }
+        if (job.start_epoch > job.end_epoch) {
+            set_warning("[WARNING] ", fmt::format("[FINDBYPATTERN] [DB: {}] - Target end time must be after start time", db_name));
+            finish(std::string());
+            return RunState::kDone;
+        }
+        if (std::filesystem::is_directory(db_base_path_str) == 0) {
+            set_warning("[WARNING] ", fmt::format("[FINDBYPATTERN] [DB: {}] - DB does not exist", db_name));
+            finish(std::string());
+            return RunState::kDone;
+        }
+        if (job.column_idx < 0 || job.column_idx > std::numeric_limits<unsigned short>::max()) {
+            set_warning("[WARNING] ", fmt::format("[FINDBYPATTERN] [DB: {}] - columnIdx out of range: {}", db_name, job.column_idx));
+            finish(std::string());
+            return RunState::kDone;
+        }
+        std::string pattern_error;
+        std::optional<PatternMatcher> compiled = PatternMatcher::Compile(job.pattern, job.mode, job.case_insensitive, pattern_error);
+        if (!compiled.has_value()) {
+            set_warning("[ERROR] ", fmt::format("[FINDBYPATTERN] [DB: {}] - Invalid pattern: {}", db_name, pattern_error));
+            finish(std::string());
+            return RunState::kDone;
+        }
+        job.matcher = std::make_shared<PatternMatcher>(std::move(*compiled));
+        job.chunk_buf.reserve(job.chunk_size_bytes + 4096);
+    } else if (!CfgEpochCurrent(db_name, job.cfg_epoch)) {
+        // Parked, and the DB was removed (maybe re-created) since: the rest of the request is stale. The rows already read stay in the reply.
+        set_warning("[ERROR] ", fmt::format("[FINDBYPATTERN] [DB: {}] - The DB was removed while the request ran", db_name));
+        finish(std::move(job.chunk_buf));
+        return RunState::kDone;
     }
 
-    std::string chunk_buf;
-    chunk_buf.reserve(chunk_size_bytes + 4096);
+    const XStore_Proto::ConfigStruct &cfg_struct = job.cfg_struct;
+    const PatternMatcher *matcher = job.matcher.get();
+    std::string &chunk_buf = job.chunk_buf;
+    const size_t chunk_size_bytes = job.chunk_size_bytes;
+    const int32_t column_idx = job.column_idx;
     // Same 2GB client-reassembly guard as FindByValue (and the same exemption for a streamed_reply): match count is unknown until scanned,
     // so it's a running total checked after every match.
-    const unsigned long long reply_limit = streamed_reply ? std::numeric_limits<unsigned long long>::max() : xstore::ReplyLimitBytes().load();
-    unsigned long long int total_emitted_bytes = 0;
-    bool size_limit_exceeded = false;
+    const unsigned long long reply_limit = job.streamed_reply ? std::numeric_limits<unsigned long long>::max() : xstore::ReplyLimitBytes().load();
+    unsigned long long int &total_emitted_bytes = job.total_emitted_bytes;
+    bool &size_limit_exceeded = job.size_limit_exceeded;
     // Hoisted out of the row loop so a string column's buffer is recycled
     // across rows instead of reallocated per row.
     XStore_Proto::FData f_data;
+    bool consumed_any = false;   // parking is only asked after one scan chunk or piece of this run: every run makes progress
 
-    unsigned long long int iter_epoch = start_epoch_t;
+    unsigned long long int iter_epoch = job.next_epoch;
+    const unsigned long long int end_epoch_t = job.end_epoch;
     while (iter_epoch <= end_epoch_t && !size_limit_exceeded) {
         TimeStruct curr_ts(iter_epoch, cfg_struct.timeresolution());
         const std::string &target_file_path = CachedYearFilePath(db_base_path_str, curr_ts.year);
@@ -200,7 +230,9 @@ void XStore::FindByPattern(unsigned long long int start_epoch_t, unsigned long l
 
             // Parallel (xstore::scanlock::Config::parallel_threads > 1 and at least two pieces): the pieces are scanned in parallel
             // and their matches are appended here in order; otherwise the sequential scan.
-            if (!xstore::scanlock::ScanRegionOrdered(
+            bool parked = false;
+            unsigned long long int parked_epoch = 0;
+            const xstore::scanlock::OrderedScan ordered = xstore::scanlock::ScanRegionOrdered(
                     target_file_path, const_cast<char *>(mapped_base), first_offset, region_length, cfg_struct.rowlength(),
                     iter_epoch - curr_ts.first_epoch,
                     [&](const char *chunk_rows, unsigned long long rows, unsigned long long row_offset, std::string &out) {
@@ -223,12 +255,32 @@ void XStore::FindByPattern(unsigned long long int start_epoch_t, unsigned long l
                             size_limit_exceeded = true;
                             return false;
                         }
+                        // A whole piece is consumed: the scan can be taken up again after it.
+                        consumed_any = true;
+                        if (should_park()) {
+                            parked = true;
+                            return false;
+                        }
                         return true;
-                    })) {
+                    });
+            if (ordered.ran) {
+                if (parked) {
+                    // The last piece of the segment parked nothing worth parking for: go on to the next segment.
+                    parked_epoch = iter_epoch + ordered.rows_consumed;
+                    if (parked_epoch > segment_end) parked = false;
+                }
+            } else {
                 xstore::scanlock::ScanUnderReadLock(
                     target_file_path, const_cast<char *>(mapped_base), first_offset, region_length, cfg_struct.rowlength(),
                     iter_epoch - curr_ts.first_epoch,
                     [&](const char *chunk_rows, unsigned long long rows, unsigned long long row_offset) {
+                        // Between two scan chunks nothing is in flight: every earlier chunk's output is in chunk_buf or was emitted by after().
+                        if (consumed_any && should_park()) {
+                            parked = true;
+                            parked_epoch = iter_epoch + row_offset;
+                            return false;
+                        }
+                        consumed_any = true;
                         return scan_rows(chunk_rows, rows, iter_epoch + row_offset, f_data, emit_row) && !size_limit_exceeded;
                     },
                     [&] {
@@ -236,9 +288,14 @@ void XStore::FindByPattern(unsigned long long int start_epoch_t, unsigned long l
                         ready.clear();
                     });
             }
+            if (parked) {
+                job.next_epoch = parked_epoch;
+                return RunState::kParked;
+            }
         }
         iter_epoch = segment_end + 1;
     }
 
     finish(std::move(chunk_buf));
+    return RunState::kDone;
 }

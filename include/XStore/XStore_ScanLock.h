@@ -190,14 +190,22 @@ void ScanUnderReadLock(const std::string &file_path, void *mapped_base, unsigned
 // of ordered_piece_bytes (whole zone-map blocks), parallel_threads pieces at a time are produced on the shared XStorePreadPool, and
 // after each wave the calling thread consume()s the pieces' outputs in order, with no lock held. produce(rows_base, rows,
 // row_offset, out) runs under a READ lock on its chunk (see ScanUnderReadLock) and appends the chunk's output to out; consume(out)
-// returns false to stop. Returns false, having done nothing, when this scan should not run parallel (one thread, or fewer than two
-// pieces): the caller then runs its sequential path.
+// returns false to stop. Returns `ran` false, having done nothing, when this scan should not run parallel (one thread, or fewer than two
+// pieces): the caller then runs its sequential path. rows_consumed tells where a stopped scan ended (see OrderedScan).
+// What ScanRegionOrdered did: `ran` is false when it did nothing (the caller runs its sequential path); otherwise rows_consumed is how many rows of
+// the region, counted from its start, the consumer has taken (whole pieces): when it stopped the scan (returned false), the scan is to continue from there.
+struct OrderedScan {
+    bool ran = false;
+    unsigned long long rows_consumed = 0;
+    explicit operator bool() const { return ran; }
+};
+
 template <typename ProduceChunk, typename ConsumePiece>
-bool ScanRegionOrdered(const std::string &file_path, void *mapped_base, unsigned long long first_offset,
+OrderedScan ScanRegionOrdered(const std::string &file_path, void *mapped_base, unsigned long long first_offset,
                        unsigned long long region_length, uint16_t row_length, unsigned long long first_row_in_year,
                        ProduceChunk &&produce, ConsumePiece &&consume) {
     const Config config = Get();
-    if (config.parallel_threads == 1) return false;
+    if (config.parallel_threads == 1) return {};
     const unsigned long long rows_total = region_length / row_length;
     const unsigned long long rows_per_block = RowsPerBlock(row_length);
     unsigned long long piece_rows = std::max<unsigned long long>(1, config.ordered_piece_bytes / row_length);
@@ -209,9 +217,9 @@ bool ScanRegionOrdered(const std::string &file_path, void *mapped_base, unsigned
         pieces.push_back({row, end});
         row = end;
     }
-    if (pieces.size() < 2) return false;
+    if (pieces.size() < 2) return {};
     const size_t team = std::min<size_t>(pieces.size(), EffectiveThreads(config));
-    if (team <= 1) return false;
+    if (team <= 1) return {};
 
     // A pipeline, not waves: `team` producers pull pieces one after the other without waiting for each other (a barrier every
     // few milliseconds left the pool threads idle at the CPU's lowest frequency half the time, and was SLOWER than one thread at
@@ -274,6 +282,7 @@ bool ScanRegionOrdered(const std::string &file_path, void *mapped_base, unsigned
     };
     launch();
     bool more = true;
+    unsigned long long rows_consumed = 0;
     for (size_t i = 0; i < pieces.size() && more; ++i) {
         Slot &slot = slots[i % window];
         std::unique_lock<std::mutex> lock(mutex);
@@ -288,6 +297,7 @@ bool ScanRegionOrdered(const std::string &file_path, void *mapped_base, unsigned
         }
         lock.unlock();
         more = consume(slot.out);
+        rows_consumed = pieces[i].end;
         lock.lock();
         slot.ready = false;
         consumed = i + 1;
@@ -300,7 +310,7 @@ bool ScanRegionOrdered(const std::string &file_path, void *mapped_base, unsigned
     }
     space_cv.notify_all();
     if (helper.joinable()) helper.join();
-    return true;
+    return {true, rows_consumed};
 }
 
 }  // namespace xstore::scanlock

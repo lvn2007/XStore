@@ -648,13 +648,15 @@ inline constexpr size_t      STREAMED_REPLY_CHUNK_SIZE_BYTES = 512ull * 1024;
 //    (a reader beyond that goes on without waiting, as before). 0 turns the window off. Measured on Mystic (1M rows of 1.42 GB, 8 nodes x 4 threads
 //    next to one client): a 128 MiB window cost nothing in throughput or CPU, 40 slow readers pinned 5.6 GB instead of 15.5 GB; 32 and 8 MiB windows
 //    cost 55-65% more server CPU when the worker woke for every chunk (the half-window wake-up is the fix).
-//  * STREAM_QUEUE_LIMIT: the bytes queued for ALL clients together (0 = a quarter of the memory pool's limit). A reply that is already holding more than
-//    STREAM_SHARE_BYTES and would pass it is stopped with an explicit error status in its last frame; a reply holding less is never stopped, so a
-//    healthy client is not the one cut when stalled readers have filled the queue.
+//  * The bytes queued for slow clients are charged to the memory pool (XStore_MemoryPool.h), whose limit (host memory minus its reserve) is the only
+//    limit: there is no separate queue limit and no share. A parked reply (ZMQ_ParkedReplies.h) also parks when the pool is full.
 //  * STREAM_STALL_SECONDS: a reply whose worker has waited this long without the client taking anything is stopped the same way.
 // Chunks below STREAM_MIN_ACCOUNTED_CHUNK_BYTES (all small replies) skip all of it.
 inline constexpr size_t      STREAM_WINDOW_BYTES = 64ull * 1024 * 1024;
-inline constexpr size_t      STREAM_SHARE_BYTES = 16ull * 1024 * 1024;
+// The lease of one run of a parked RangeQuery / BatchQuery: the memory the producer holds while it runs (a scan chunk of output, the chunk buffers). What a
+// run queues for the client is charged to the pool as it is queued, so it is not part of this. At least OPERATION_LEASE_MIN_BYTES, or the pool is skipped.
+inline constexpr size_t      PARK_RUN_LEASE_BYTES = 8ull * 1024 * 1024;
+static_assert(PARK_RUN_LEASE_BYTES >= OPERATION_LEASE_MIN_BYTES, "a run lease below the threshold skips the pool");
 inline constexpr unsigned    STREAM_STALL_SECONDS = 120;
 inline constexpr unsigned    STREAM_WAITING_WORKERS_PERCENT = 75;
 inline constexpr size_t      STREAM_MIN_ACCOUNTED_CHUNK_BYTES = 64ull * 1024;

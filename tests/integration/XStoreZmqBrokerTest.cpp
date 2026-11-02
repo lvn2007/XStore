@@ -3,6 +3,7 @@
 // ETERM. Negative "nothing arrived" checks use a short receive timeout; every positive step is synchronised by a
 // message actually arriving. Every broker test runs with spin window 0 (block in poll) and 50 ms (spin first).
 #include "include/Networking/ZMQ_Broker.h"
+#include "include/Networking/ZMQ_ParkedReplies.h"
 
 #include <gtest/gtest.h>
 
@@ -54,6 +55,12 @@ struct FakeWorker {
         ReplyWithDelimiter(request, "", frames);
     }
 
+    // The release message of a parked reply: [client_id][delimiter] and no frame.
+    void ReleaseReply(const std::vector<std::string> &request, const std::string &delimiter) {
+        socket.send(zmq::buffer(request[0]), zmq::send_flags::sndmore);
+        socket.send(zmq::buffer(delimiter), zmq::send_flags::none);
+    }
+
     // One message of a reply: [client_id][delimiter][frames...]. An empty delimiter is a reply's last message, a non-empty one means more
     // messages of the same reply follow (a streamed reply).
     void ReplyWithDelimiter(const std::vector<std::string> &request, const std::string &delimiter, const std::vector<std::string> &frames) {
@@ -76,6 +83,7 @@ class XStoreZmqBrokerTest : public ::testing::TestWithParam<std::chrono::microse
     std::vector<std::unique_ptr<zmq::socket_t>> clients;
 
     virtual HeavyRequestLimit Heavy() const { return {}; }
+    virtual ParkSettings Park() { return {}; }
 
     void SetUp() override {
         frontend.set(zmq::sockopt::linger, 0);
@@ -84,7 +92,7 @@ class XStoreZmqBrokerTest : public ::testing::TestWithParam<std::chrono::microse
         backend.bind("inproc://broker-test-backend");
         broker_exit = std::async(std::launch::async, [this] {
             try {
-                RunReadyBroker(frontend, backend, 4, GetParam(), Heavy());
+                RunReadyBroker(frontend, backend, 4, GetParam(), Heavy(), Park());
             } catch (const zmq::error_t &e) {
                 return e.num();
             }
@@ -411,6 +419,209 @@ TEST_P(XStoreZmqBrokerTest, SpinEndsAfterWindowWithAnIdleWorker) {
     const double cpu_ms = 1000.0 * static_cast<double>(std::clock() - cpu_before) / CLOCKS_PER_SEC;
     EXPECT_LT(cpu_ms, 100.0) << "broker still spinning after its window";
 }
+
+// ---- Park and resume (docs/superpowers/specs/2026-11-01-park-resume-replies-design.md) ----
+// A worker that parks a reply sends [client_id][0x02 + 8-byte token] with no frame: the client gets the bare delimiter (it only tests empty / non-empty),
+// the worker is idle again, and the broker resumes the reply on an idle worker with [token]['R'][empty] once the reply is released AND drained.
+using xstore::parked::ParkedReplies;
+
+class XStoreZmqBrokerParkTest : public XStoreZmqBrokerTest {
+  protected:
+    ParkedReplies parked;
+    std::chrono::milliseconds max_age{600000};
+    ParkSettings Park() override { return {&parked, max_age}; }
+
+    static std::string TokenBytes(uint64_t token) { return std::string(reinterpret_cast<const char *>(&token), sizeof(token)); }
+    static std::string ReleaseDelimiter(uint64_t token) { return std::string(1, '\x02') + TokenBytes(token); }
+};
+
+TEST_P(XStoreZmqBrokerParkTest, AReleaseMessageReachesTheClientAsABareDelimiterAndFreesTheWorker) {
+    FakeWorker &worker = AddWorker("wA");
+    zmq::socket_t &first = AddDealerClient();
+    SendAsDealer(first, "stream");
+    const auto request = worker.Take();
+    ASSERT_EQ(request.size(), 3u);
+    const uint64_t token = parked.Park(std::make_shared<int>(1));
+
+    worker.ReleaseReply(request, ReleaseDelimiter(token));
+    EXPECT_EQ(RecvFrames(first), (std::vector<std::string>{ReleaseDelimiter(token)}));
+
+    zmq::socket_t &second = AddDealerClient();   // the worker is idle again: it gets the next request
+    SendAsDealer(second, "other");
+    const auto next = worker.Take();
+    ASSERT_EQ(next.size(), 3u);
+    EXPECT_EQ(next.back(), "other");
+}
+
+TEST_P(XStoreZmqBrokerParkTest, AParkedReplyIsResumedOnAnIdleWorkerOnlyAfterTheQueueDrained) {
+    FakeWorker &worker = AddWorker("wA");
+    zmq::socket_t &client = AddDealerClient();
+    SendAsDealer(client, "stream");
+    const auto request = worker.Take();
+    const uint64_t token = parked.Park(std::make_shared<int>(5));
+    worker.ReleaseReply(request, ReleaseDelimiter(token));
+    ASSERT_EQ(RecvFrames(client).size(), 1u);
+
+    EXPECT_TRUE(worker.Take(NEGATIVE_CHECK_MS).empty()) << "released but the queue has not drained: nothing to resume";
+    const auto drained_at = std::chrono::steady_clock::now();
+    parked.OnDrained(token);
+    const auto resume = worker.Take();
+    // Woken by the registry's fd (the broker is blocked by now), not by the sweep timeout (up to 1 s here).
+    EXPECT_LT(std::chrono::steady_clock::now() - drained_at, std::chrono::milliseconds(300));
+    ASSERT_EQ(resume.size(), 3u);
+    EXPECT_EQ(resume[0], TokenBytes(token));
+    EXPECT_EQ(resume[1], "R");
+    EXPECT_EQ(resume[2], "");   // a worker sees [token]['R'][empty body], where a request is [client_id][empty][body]
+    bool expired = true;
+    const auto bookmark = parked.Take(token, &expired);
+    ASSERT_NE(bookmark, nullptr);
+    EXPECT_EQ(*static_cast<int *>(bookmark.get()), 5);
+    EXPECT_FALSE(expired);
+}
+
+TEST_P(XStoreZmqBrokerParkTest, TheClientHasTheReleaseMessageBeforeAnyWorkerGetsTheResume) {
+    // The queue drains BEFORE the release message is relayed: the resume must still wait for the relay, or the next chunks could overtake it.
+    FakeWorker &a = AddWorker("wA");
+    FakeWorker &b = AddWorker("wB");
+    zmq::socket_t &client = AddDealerClient();
+    SendAsDealer(client, "stream");
+    std::vector<std::string> request;
+    FakeWorker *serving = TakeFromAny({&a, &b}, request) == 0 ? &a : &b;
+    FakeWorker *other = serving == &a ? &b : &a;
+    const uint64_t token = parked.Park(std::make_shared<int>(1));
+    parked.OnDrained(token);
+    serving->ReleaseReply(request, ReleaseDelimiter(token));
+    auto resume = other->Take(NEGATIVE_CHECK_MS);
+    if (resume.empty()) resume = serving->Take();
+    ASSERT_EQ(resume.size(), 3u);
+    zmq::message_t delimiter;
+    EXPECT_TRUE(client.recv(delimiter, zmq::recv_flags::dontwait).has_value()) << "the resume was dispatched before the release reached the client";
+    EXPECT_EQ(std::string(static_cast<const char *>(delimiter.data()), delimiter.size()), ReleaseDelimiter(token));
+}
+
+TEST_P(XStoreZmqBrokerParkTest, AResumeWaitsForAnIdleWorker) {
+    FakeWorker &worker = AddWorker("wA");
+    zmq::socket_t &client = AddDealerClient();
+    SendAsDealer(client, "stream");
+    const uint64_t token = parked.Park(std::make_shared<int>(1));
+    worker.ReleaseReply(worker.Take(), ReleaseDelimiter(token));
+    ASSERT_EQ(RecvFrames(client).size(), 1u);
+    zmq::socket_t &other = AddDealerClient();
+    SendAsDealer(other, "busy");   // the only worker is busy again when the reply becomes ready
+    const auto busy = worker.Take();
+    ASSERT_EQ(busy.size(), 3u);
+    parked.OnDrained(token);
+    EXPECT_TRUE(worker.Take(NEGATIVE_CHECK_MS).empty());
+    worker.Reply(busy, {"done"});
+    const auto resume = worker.Take();
+    ASSERT_EQ(resume.size(), 3u);
+    EXPECT_EQ(resume[1], "R");
+}
+
+TEST_P(XStoreZmqBrokerParkTest, ResumesAndNewRequestsAlternateWhenBothWait) {
+    FakeWorker &worker = AddWorker("wA");
+    uint64_t tokens[2];
+    for (int i = 0; i < 2; ++i) {   // two replies parked by the one worker
+        zmq::socket_t &client = AddDealerClient();
+        SendAsDealer(client, "stream-" + std::to_string(i));
+        tokens[i] = parked.Park(std::make_shared<int>(i));
+        worker.ReleaseReply(worker.Take(), ReleaseDelimiter(tokens[i]));
+        ASSERT_EQ(RecvFrames(client).size(), 1u);
+    }
+    zmq::socket_t &busy_client = AddDealerClient();
+    SendAsDealer(busy_client, "busy");
+    const auto busy = worker.Take();
+    ASSERT_EQ(busy.size(), 3u);
+    zmq::socket_t &c1 = AddDealerClient();
+    zmq::socket_t &c2 = AddDealerClient();
+    SendAsDealer(c1, "new-1");
+    SendAsDealer(c2, "new-2");
+    for (uint64_t t : tokens) parked.OnDrained(t);   // both ready, both new requests waiting, the one worker busy
+    std::this_thread::sleep_for(std::chrono::milliseconds(NEGATIVE_CHECK_MS));
+
+    std::vector<std::string> order;
+    worker.Reply(busy, {"x"});
+    for (int i = 0; i < 4; ++i) {
+        const auto next = worker.Take();
+        ASSERT_EQ(next.size(), 3u);
+        order.push_back(next[1] == "R" ? "resume" : next.back());
+        worker.Reply(next, {"x"});
+    }
+    // The router does not promise an order between two clients' requests: check the alternation and that both were served.
+    ASSERT_EQ(order.size(), 4u);
+    EXPECT_EQ(order[0], "resume");
+    EXPECT_EQ(order[2], "resume");
+    EXPECT_TRUE((order[1] == "new-1" && order[3] == "new-2") || (order[1] == "new-2" && order[3] == "new-1"));
+}
+
+TEST_P(XStoreZmqBrokerParkTest, ReadyRepliesAreAllResumedWhenNoNewRequestWaits) {
+    FakeWorker &worker = AddWorker("wA");
+    uint64_t tokens[3];
+    for (int i = 0; i < 3; ++i) {
+        zmq::socket_t &client = AddDealerClient();
+        SendAsDealer(client, "stream-" + std::to_string(i));
+        tokens[i] = parked.Park(std::make_shared<int>(i));
+        worker.ReleaseReply(worker.Take(), ReleaseDelimiter(tokens[i]));
+        ASSERT_EQ(RecvFrames(client).size(), 1u);
+    }
+    for (uint64_t t : tokens) parked.OnDrained(t);
+    for (int i = 0; i < 3; ++i) {   // alternation must not hold a resume back when there is no request to alternate with
+        const auto resume = worker.Take(2000);
+        ASSERT_EQ(resume.size(), 3u) << "resume " << i;
+        EXPECT_EQ(resume[0], TokenBytes(tokens[i]));
+        worker.Reply(resume, {"x"});
+    }
+}
+
+TEST_P(XStoreZmqBrokerParkTest, ARunningNonParkedStreamStillKeepsItsWorkerBusy) {
+    const std::string more(1, '\x01');
+    FakeWorker &worker = AddWorker("wA");
+    zmq::socket_t &first = AddDealerClient();
+    SendAsDealer(first, "stream");
+    const auto request = worker.Take();
+    worker.ReplyWithDelimiter(request, more, {"chunk-0"});
+    EXPECT_EQ(RecvFrames(first), (std::vector<std::string>{more, "chunk-0"}));
+    zmq::socket_t &second = AddDealerClient();
+    SendAsDealer(second, "other");
+    EXPECT_TRUE(worker.Take(NEGATIVE_CHECK_MS).empty());
+}
+
+TEST_P(XStoreZmqBrokerParkTest, AReleaseOfAnUnknownTokenIsRelayedAndHarmless) {
+    FakeWorker &worker = AddWorker("wA");
+    zmq::socket_t &client = AddDealerClient();
+    SendAsDealer(client, "stream");
+    const auto request = worker.Take();
+    worker.ReleaseReply(request, ReleaseDelimiter(0x1122334455667788ull));
+    EXPECT_EQ(RecvFrames(client).size(), 1u);
+    zmq::socket_t &second = AddDealerClient();
+    SendAsDealer(second, "other");
+    EXPECT_EQ(worker.Take().back(), "other");
+}
+
+class XStoreZmqBrokerParkExpiryTest : public XStoreZmqBrokerParkTest {
+  protected:
+    XStoreZmqBrokerParkExpiryTest() { max_age = std::chrono::milliseconds(300); }
+};
+
+TEST_P(XStoreZmqBrokerParkExpiryTest, AReleasedReplyThatNeverDrainsIsResumedAsExpiredAfterTheMaxAge) {
+    FakeWorker &worker = AddWorker("wA");
+    zmq::socket_t &client = AddDealerClient();
+    SendAsDealer(client, "stream");
+    const auto request = worker.Take();
+    const uint64_t token = parked.Park(std::make_shared<int>(9));
+    worker.ReleaseReply(request, ReleaseDelimiter(token));
+    ASSERT_EQ(RecvFrames(client).size(), 1u);
+    const auto resume = worker.Take(3000);   // never drained: the sweep makes it ready
+    ASSERT_EQ(resume.size(), 3u);
+    bool expired = false;
+    ASSERT_NE(parked.Take(token, &expired), nullptr);
+    EXPECT_TRUE(expired);
+}
+
+INSTANTIATE_TEST_SUITE_P(SpinWindow, XStoreZmqBrokerParkTest,
+                         ::testing::Values(std::chrono::microseconds(0), SPIN_WINDOW));
+INSTANTIATE_TEST_SUITE_P(SpinWindow, XStoreZmqBrokerParkExpiryTest,
+                         ::testing::Values(std::chrono::microseconds(0), SPIN_WINDOW));
 
 INSTANTIATE_TEST_SUITE_P(SpinWindow, XStoreZmqBrokerTest,
                          ::testing::Values(std::chrono::microseconds(0), SPIN_WINDOW),

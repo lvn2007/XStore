@@ -12,6 +12,7 @@
 #include <zmq_addon.hpp>
 #include "include/Logger/Logger.h"
 #include "include/Networking/XStore_Curve.h"
+#include "include/Networking/ZMQ_ParkedReplies.h"
 
 class ZmqServer {
     private:
@@ -20,6 +21,10 @@ class ZmqServer {
 
         int num_threads;
         std::string server_addr;
+
+        // Streamed replies parked by their worker (ZMQ_ParkedReplies.h): shared with the broker, and with the drain callbacks that run on libzmq's
+        // threads, which can outlive this object.
+        std::shared_ptr<xstore::parked::ParkedReplies> parked_ = std::make_shared<xstore::parked::ParkedReplies>();
 
         // Worker threads are detached, so shutdown waits on this counter
         // instead of joining. shared_ptr: a worker's final decrement/notify

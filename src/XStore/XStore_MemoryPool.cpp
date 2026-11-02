@@ -133,8 +133,9 @@ uint64_t MemoryPool::HostAvailableLocked() {
 }
 
 bool MemoryPool::FitsLocked(uint64_t bytes, uint64_t unseen) {
-    if (used_ + bytes > limit_) return false;
-    if (used_ == 0) return true;   // nothing running: no memory is coming back, see the header
+    const uint64_t in_use = used_ + external_.load();
+    if (in_use + bytes > limit_) return false;
+    if (in_use == 0) return true;   // nothing running: no memory is coming back, see the header
     const uint64_t host_available = HostAvailableLocked();
     if (host_available == kUnknown) return true;
     const uint64_t effective = host_available > pending_ ? host_available - pending_ : 0;
@@ -152,22 +153,25 @@ MemoryPool::Result MemoryPool::Acquire(uint64_t bytes, Clock::time_point deadlin
     if (waiting_.empty() && FitsLocked(bytes, unseen)) {
         used_ += bytes;
         pending_ += unseen;
-        peak_ = std::max(peak_, used_);
+        peak_ = std::max(peak_, used_ + external_.load());
     } else {
         const uint64_t ticket = next_ticket_++;
         waiting_.push_back(ticket);
+        waiters_.fetch_add(1);
         for (;;) {
             const bool forever = deadline == Clock::time_point::max();
             if (!forever && Clock::now() >= deadline) {
                 waiting_.remove(ticket);
+                waiters_.fetch_sub(1);
                 cv_.notify_all();
                 return Result::kTimedOut;
             }
             if (waiting_.front() == ticket && FitsLocked(bytes, unseen)) {
                 waiting_.pop_front();
+                waiters_.fetch_sub(1);
                 used_ += bytes;
                 pending_ += unseen;
-                peak_ = std::max(peak_, used_);
+                peak_ = std::max(peak_, used_ + external_.load());
                 cv_.notify_all();
                 break;
             }
@@ -184,7 +188,19 @@ MemoryPool::Result MemoryPool::Acquire(uint64_t bytes, Clock::time_point deadlin
 
 uint64_t MemoryPool::UsedBytes() const {
     std::lock_guard<std::mutex> lk(mutex_);
-    return used_;
+    return used_ + external_.load();
+}
+void MemoryPool::Charge(uint64_t bytes) noexcept { external_.fetch_add(bytes); }
+void MemoryPool::Uncharge(uint64_t bytes) noexcept {
+    external_.fetch_sub(bytes);
+    if (waiters_.load() > 0) {
+        { std::lock_guard<std::mutex> lk(mutex_); }   // a waiter between its test and its sleep has the lock: this orders us after it
+        cv_.notify_all();
+    }
+}
+bool MemoryPool::Full() const {
+    std::lock_guard<std::mutex> lk(mutex_);
+    return used_ + external_.load() >= limit_;
 }
 uint64_t MemoryPool::PendingBytes() const {
     std::lock_guard<std::mutex> lk(mutex_);

@@ -1089,62 +1089,88 @@ void XStore::TopKAggregate(unsigned long long int start_epoch_t, unsigned long l
 void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
                           std::string_view db_name_view, int32_t column_idx, const XStore_Proto::FData &value,
                           size_t chunk_size_bytes, const std::function<void(std::string&&, bool)> &emit_chunk, bool streamed_reply) {
-    const std::string &db_name = UpperCaseInto(db_name_view);
+    FindByValueJob job;
+    job.start_epoch = start_epoch_t;
+    job.end_epoch = end_epoch_t;
+    job.db_name = std::string(db_name_view);
+    job.column_idx = column_idx;
+    job.value = value;
+    job.chunk_size_bytes = chunk_size_bytes;
+    job.streamed_reply = streamed_reply;
+    FindByValueRun(job, emit_chunk, [] { return false; });
+}
+
+XStore::RunState XStore::FindByValueRun(FindByValueJob &job, const std::function<void(std::string&&, bool)> &emit_chunk,
+                                        const std::function<bool()> &should_park) {
+    const std::string &db_name = UpperCaseInto(job.db_name);
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
-    bool has_warning = false;
-    std::string last_warning;
     auto set_warning = [&](const char *tag, const std::string &body) {
         // Append rather than overwrite: a later warning (e.g. year-missing)
         // must not silently drop an earlier one (e.g. the full-scan notice).
-        if (has_warning) {
-            last_warning += " | ";
+        if (job.has_warning) {
+            job.last_warning += " | ";
         }
-        has_warning = true;
-        last_warning += tag;
-        last_warning += body;
+        job.has_warning = true;
+        job.last_warning += tag;
+        job.last_warning += body;
     };
     auto finish = [&](std::string &&chunk_buf) {
-        if (has_warning) {
-            XStoreWireEncode::AppendQueryStatus(chunk_buf, last_warning);
+        if (job.has_warning) {
+            XStoreWireEncode::AppendQueryStatus(chunk_buf, job.last_warning);
         }
         emit_chunk(std::move(chunk_buf), true);
     };
 
-    XStore_Proto::ConfigStruct cfg_struct;
-    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
-        set_warning("[WARNING] ", fmt::format("[FINDBYVALUE] [DB: {}] - {}.CFG does not exist", db_name, db_name));
-        finish(std::string());
-        return;
-    }
-    if (start_epoch_t > end_epoch_t) {
-        set_warning("[WARNING] ", fmt::format("[FINDBYVALUE] [DB: {}] - Target end time must be after start time", db_name));
-        finish(std::string());
-        return;
-    }
-    if (std::filesystem::is_directory(db_base_path_str) == 0) {
-        set_warning("[WARNING] ", fmt::format("[FINDBYVALUE] [DB: {}] - DB does not exist", db_name));
-        finish(std::string());
-        return;
+    if (!job.started) {
+        job.started = true;
+        job.next_epoch = job.start_epoch;
+        // Loaded BEFORE the cfg is read, as the deletes do: CfgEpochCurrent tells a resumed run whether the DB was removed meanwhile.
+        job.cfg_epoch = CfgEpoch();
+        if (!GetOrLoadCfg(db_name, db_base_path_str, job.cfg_struct)) {
+            set_warning("[WARNING] ", fmt::format("[FINDBYVALUE] [DB: {}] - {}.CFG does not exist", db_name, db_name));
+            finish(std::string());
+            return RunState::kDone;
+        }
+        if (job.start_epoch > job.end_epoch) {
+            set_warning("[WARNING] ", fmt::format("[FINDBYVALUE] [DB: {}] - Target end time must be after start time", db_name));
+            finish(std::string());
+            return RunState::kDone;
+        }
+        if (std::filesystem::is_directory(db_base_path_str) == 0) {
+            set_warning("[WARNING] ", fmt::format("[FINDBYVALUE] [DB: {}] - DB does not exist", db_name));
+            finish(std::string());
+            return RunState::kDone;
+        }
+
+        // A null (unset) target is refused on every path: the bloom never holds unset columns (live inserts and rebuilds
+        // both skip them), so an indexed column would answer "no rows" while the real-scan fallback would match the
+        // explicitly-unset cells. One rule instead of an answer that depends on indexing.
+        if (job.value.oneOfData_case() == XStore_Proto::FData::ONEOFDATA_NOT_SET) {
+            set_warning("[WARNING] ", fmt::format("[FINDBYVALUE] [DB: {}] - Searching for a null (unset) value is not supported", db_name));
+            finish(std::string());
+            return RunState::kDone;
+        }
+
+        job.encoded_target = EncodeFDataForCatIdx(job.value);
+        job.tracked_column_count = EffectiveTrackedColumnCount(job.cfg_struct);
+        job.chunk_buf.reserve(job.chunk_size_bytes + 4096);
+    } else if (!CfgEpochCurrent(db_name, job.cfg_epoch)) {
+        // Parked, and the DB was removed (maybe re-created) since: the rest of the request is stale. The rows already read stay in the reply.
+        set_warning("[ERROR] ", fmt::format("[FINDBYVALUE] [DB: {}] - The DB was removed while the request ran", db_name));
+        finish(std::move(job.chunk_buf));
+        return RunState::kDone;
     }
 
-    // A null (unset) target is refused on every path: the bloom never holds unset columns (live inserts and rebuilds
-    // both skip them), so an indexed column would answer "no rows" while the real-scan fallback would match the
-    // explicitly-unset cells. One rule instead of an answer that depends on indexing.
-    if (value.oneOfData_case() == XStore_Proto::FData::ONEOFDATA_NOT_SET) {
-        set_warning("[WARNING] ", fmt::format("[FINDBYVALUE] [DB: {}] - Searching for a null (unset) value is not supported", db_name));
-        finish(std::string());
-        return;
-    }
-
-    std::string encoded_target = EncodeFDataForCatIdx(value);
-    uint32_t tracked_column_count = EffectiveTrackedColumnCount(cfg_struct);
+    const XStore_Proto::ConfigStruct &cfg_struct = job.cfg_struct;
+    const int32_t column_idx = job.column_idx;
+    const size_t chunk_size_bytes = job.chunk_size_bytes;
+    const std::string &encoded_target = job.encoded_target;
+    const uint32_t tracked_column_count = job.tracked_column_count;
     // Notice-only: the scan is always correct (real-scan fallback), the caller just deserves to know it paid for
     // one. Decided below from the width of the .catidx this query actually consults, once per query.
-    bool unindexed_notice_emitted = false;
-
-    std::string chunk_buf;
-    chunk_buf.reserve(chunk_size_bytes + 4096);
+    bool &unindexed_notice_emitted = job.unindexed_notice_emitted;
+    std::string &chunk_buf = job.chunk_buf;
 
     // Unlike RangeQuery, an equality predicate's result size can't be known
     // ahead of a scan (it depends on how many rows actually match, not the
@@ -1157,11 +1183,13 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
     // unselective predicate over a wide range stops scanning instead of
     // streaming past the limit. A streamed_reply (Request.streamOk) goes to
     // a client that parses chunk by chunk, so it has no such limit.
-    const unsigned long long reply_limit = streamed_reply ? std::numeric_limits<unsigned long long>::max() : xstore::ReplyLimitBytes().load();
-    unsigned long long int total_emitted_bytes = 0;
-    bool size_limit_exceeded = false;
+    const unsigned long long reply_limit = job.streamed_reply ? std::numeric_limits<unsigned long long>::max() : xstore::ReplyLimitBytes().load();
+    unsigned long long int &total_emitted_bytes = job.total_emitted_bytes;
+    bool &size_limit_exceeded = job.size_limit_exceeded;
+    bool consumed_any = false;   // parking is only asked after one scan chunk or piece of this run: every run makes progress
 
-    unsigned long long int iter_epoch = start_epoch_t;
+    unsigned long long int iter_epoch = job.next_epoch;
+    const unsigned long long int end_epoch_t = job.end_epoch;
     while (iter_epoch <= end_epoch_t) {
         TimeStruct curr_ts(iter_epoch, cfg_struct.timeresolution());
         const std::string &target_file_path = CachedYearFilePath(db_base_path_str, curr_ts.year);
@@ -1340,7 +1368,9 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
 
             // Parallel (xstore::scanlock::Config::parallel_threads > 1 and at least two pieces): the pieces are scanned in parallel
             // and their matches are appended here in order; otherwise the sequential scan.
-            if (!xstore::scanlock::ScanRegionOrdered(
+            bool parked = false;
+            unsigned long long int parked_epoch = 0;
+            const xstore::scanlock::OrderedScan ordered = xstore::scanlock::ScanRegionOrdered(
                     target_file_path, mapped_base, first_offset, region_length, cfg_struct.rowlength(), iter_epoch - curr_ts.first_epoch,
                     [&](const char *, unsigned long long rows, unsigned long long row_offset, std::string &out) {
                         const unsigned long long int lo = iter_epoch + row_offset;
@@ -1362,11 +1392,31 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
                             size_limit_exceeded = true;
                             return false;
                         }
+                        // A whole piece is consumed: the scan can be taken up again after it.
+                        consumed_any = true;
+                        if (should_park()) {
+                            parked = true;
+                            return false;
+                        }
                         return true;
-                    })) {
+                    });
+            if (ordered.ran) {
+                if (parked) {
+                    // Parked after the last piece of the segment: nothing is left to resume here, go on to the next segment.
+                    parked_epoch = iter_epoch + ordered.rows_consumed;
+                    if (parked_epoch > segment_end) parked = false;
+                }
+            } else {
                 xstore::scanlock::ScanUnderReadLock(
                     target_file_path, mapped_base, first_offset, region_length, cfg_struct.rowlength(), iter_epoch - curr_ts.first_epoch,
                     [&](const char *, unsigned long long rows, unsigned long long row_offset) {
+                        // Between two scan chunks nothing is in flight: every earlier chunk's output is in chunk_buf or was emitted by after().
+                        if (consumed_any && should_park()) {
+                            parked = true;
+                            parked_epoch = iter_epoch + row_offset;
+                            return false;
+                        }
+                        consumed_any = true;
                         const unsigned long long int lo = iter_epoch + row_offset;
                         return scan_rows(lo, lo + rows - 1, emit_match);
                     },
@@ -1375,6 +1425,10 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
                         ready.clear();
                     });
             }
+            if (parked) {
+                job.next_epoch = parked_epoch;
+                return RunState::kParked;
+            }
         }
 
         if (size_limit_exceeded) break;
@@ -1382,4 +1436,5 @@ void XStore::FindByValue(unsigned long long int start_epoch_t, unsigned long lon
     }
 
     finish(std::move(chunk_buf));
+    return RunState::kDone;
 }
