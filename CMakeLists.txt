@@ -203,7 +203,13 @@ endif()
 # --- jemalloc (pinned to the 5.4.0 release; process allocator for the
 # server + perf tests only -- see docs/XStore_Technical_Reference.md section 4.17) ---
 option(XSTORE_USE_JEMALLOC "Link jemalloc (fetched, pinned 5.4.0) as the process allocator for the server and perf tests" ON)
-option(XSTORE_JEMALLOC_THP "jemalloc heap on transparent huge pages (thp:always): +23% BatchInsert / +45% RangeInsert, ~2x steady-state RSS" ON)
+# thp:always costs ~2x steady-state RSS; ARM boards (Raspberry Pi) have little RAM, so there it defaults to OFF. Pass -DXSTORE_JEMALLOC_THP=ON/OFF to override.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm)")
+    set(_xs_thp_default OFF)
+else()
+    set(_xs_thp_default ON)
+endif()
+option(XSTORE_JEMALLOC_THP "jemalloc heap on transparent huge pages (thp:always): +23% BatchInsert / +45% RangeInsert, ~2x steady-state RSS (default OFF on ARM)" ${_xs_thp_default})
 
 if("${CMAKE_CXX_FLAGS}" MATCHES "-fsanitize" OR "${CMAKE_EXE_LINKER_FLAGS}" MATCHES "-fsanitize")
     set(XSTORE_USE_JEMALLOC OFF)

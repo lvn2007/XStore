@@ -6,6 +6,11 @@
 #if defined(__x86_64__) || defined(__i386__)
 #include <nmmintrin.h>
 #define XSTORE_CRC32C_X86 1
+#elif defined(__aarch64__) && defined(__linux__)
+#include <arm_acle.h>
+#include <asm/hwcap.h>
+#include <sys/auxv.h>
+#define XSTORE_CRC32C_ARM 1
 #endif
 
 namespace {
@@ -72,12 +77,46 @@ bool Crc32cHardwareSupported() {
 }
 #endif
 
+#if XSTORE_CRC32C_ARM
+// Same polynomial as the x86 CRC32 instruction (CRC32C, not the IEEE CRC32 of __crc32d). "+crc" enables the ARMv8 CRC extension for this one function
+// (Raspberry Pi 4/5 have it, the baseline armv8-a build target does not); Crc32cHardwareSupported() gates the call at runtime via the kernel's hwcap.
+__attribute__((target("+crc")))
+uint32_t Crc32cHardwareUpdate(uint32_t crc, const void *data, size_t len) {
+    const auto *bytes = static_cast<const unsigned char *>(data);
+    while (len >= 8) {
+        uint64_t chunk;
+        std::memcpy(&chunk, bytes, 8);
+        crc = __crc32cd(crc, chunk);
+        bytes += 8;
+        len -= 8;
+    }
+    if (len >= 4) {
+        uint32_t chunk;
+        std::memcpy(&chunk, bytes, 4);
+        crc = __crc32cw(crc, chunk);
+        bytes += 4;
+        len -= 4;
+    }
+    while (len > 0) {
+        crc = __crc32cb(crc, *bytes);
+        ++bytes;
+        --len;
+    }
+    return crc;
+}
+
+bool Crc32cHardwareSupported() {
+    static const bool supported = (getauxval(AT_HWCAP) & HWCAP_CRC32) != 0;
+    return supported;
+}
+#endif
+
 } // namespace
 
 uint32_t Crc32cInit() { return 0xFFFFFFFFu; }
 
 uint32_t Crc32cUpdate(uint32_t crc, const void *data, size_t len) {
-#if XSTORE_CRC32C_X86
+#if XSTORE_CRC32C_X86 || XSTORE_CRC32C_ARM
     if (Crc32cHardwareSupported()) return Crc32cHardwareUpdate(crc, data, len);
 #endif
     return Crc32cSoftwareTableUpdate(crc, data, len);
