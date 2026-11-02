@@ -1,6 +1,7 @@
 #include "include/Networking/ZMQ_Server.h"
 #include "include/Networking/ZMQ_Broker.h"
 #include "include/Networking/ZMQ_StreamFlow.h"
+#include "include/XStore/XStore_ChunkPool.h"
 #include <google/protobuf/arena.h>
 #include <algorithm>
 #include <cerrno>
@@ -128,6 +129,7 @@ class ReplyWriter {
             if (stopped) return;
             if (!streaming || chunk.size() < xstore::streamflow::Get().min_chunk_bytes) {
                 Send(zmq::buffer(chunk), last);
+                xstore::ChunkPool::Instance().Put(std::move(chunk));   // copied into the message: the buffer is free again
                 return;
             }
             if (!window) window = std::make_shared<xstore::streamflow::ReplyWindow>();
@@ -146,6 +148,7 @@ class ReplyWriter {
             zmq::message_t message(holder->data.data(), holder->size, [](void *, void *hint) {
                 auto *h = static_cast<Holder *>(hint);
                 h->window->Done(h->size);
+                xstore::ChunkPool::Instance().Put(std::move(h->data));   // written to the connection: the buffer goes back to the encoders
                 delete h;
             }, holder);
             SendFrame(message, last);
@@ -567,11 +570,11 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                 spdlog::error("[NETWORKING] - Resumed reply threw a non-std exception, ending it");
                 try { writer.Finish(); } catch (...) {}
             }
-            // A worker that parked a reply does not busy-poll for its next request: it blocks. The busy-poll (ZMQ_ADAPTIVE_POLL_WINDOW_US) pays off after a
-            // request that was short, but a park comes after a stretch of work and often many in a row, and 32 workers busy-polling on 32 logical cores
-            // take the cores from the ones that work. Measured on Mystic (8 nodes x 4 threads of 100k-row reads): +6.5% server CPU and no gain with the
-            // busy-poll, +2.6% CPU and +10% calls/s without it.
-            if (writer.Parked()) last_activity = std::chrono::steady_clock::time_point{};
+            // A worker that served a stretch of a parked reply does not busy-poll for its next request: it blocks. The busy-poll
+            // (ZMQ_ADAPTIVE_POLL_WINDOW_US) pays off after a request that was short, but a resumed stretch comes after a pickup that was itself a wake-up,
+            // and 32 workers busy-polling on 32 logical cores take the cores from the ones that work. Without this the last stretch of every reply
+            // (a few ms to tens of ms after its pickup) spun for the rest of the 50 ms window.
+            last_activity = std::chrono::steady_clock::time_point{};
             continue;
         }
         ReplyWriter writer(socket, client_id);

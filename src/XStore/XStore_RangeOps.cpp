@@ -1,5 +1,6 @@
 #include "include/XStore/XStore_ReplyLimit.h"
 #include "include/XStore/XStore_Internal.h"
+#include "include/XStore/XStore_ChunkPool.h"
 #include "include/XStore/XStore_ScanLock.h"
 #include "include/XStore/XStore_WalRing.h"
 #include "include/XStore/XStore_WireEncode.h"
@@ -106,7 +107,7 @@ XStore::RangeQueryState XStore::RangeQueryRun(RangeQueryJob &job,
             finish(std::string());
             return RangeQueryState::kDone;
         }
-        job.chunk_buf.reserve(job.chunk_size_bytes + 4096);
+        job.chunk_buf = xstore::ChunkPool::Instance().Take(job.chunk_size_bytes + 4096);
     } else if (!CfgEpochCurrent(db_name, job.cfg_epoch)) {
         // Parked, and the DB was removed (maybe re-created) since: the rest of the request is stale. The rows already read stay in the reply.
         set_warning("[ERROR] ", fmt::format("[RANGE QUERY] [DB: {}] - The DB was removed while the request ran", db_name));
@@ -182,8 +183,7 @@ XStore::RangeQueryState XStore::RangeQueryRun(RangeQueryJob &job,
                     // once a query is big enough to reach the target.
                     if (chunk_buf.size() >= job.chunk_size_bytes) {
                         ready.push_back(std::move(chunk_buf));
-                        chunk_buf.clear();
-                        chunk_buf.reserve(job.chunk_size_bytes + 4096);
+                        chunk_buf = xstore::ChunkPool::Instance().Take(job.chunk_size_bytes + 4096);
                     }
                 }
                 return true;

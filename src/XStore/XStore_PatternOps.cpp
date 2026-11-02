@@ -6,6 +6,7 @@
 // literal skips decoding rows that cannot match.
 #include "include/XStore/XStore_ReplyLimit.h"
 #include "include/XStore/XStore_Internal.h"
+#include "include/XStore/XStore_ChunkPool.h"
 #include "include/XStore/XStore_PatternMatch.h"
 #include "include/XStore/XStore_WireEncode.h"
 #include "include/DataStructs/TimeStruct.h"
@@ -86,7 +87,7 @@ XStore::RunState XStore::FindByPatternRun(FindByPatternJob &job, const std::func
             return RunState::kDone;
         }
         job.matcher = std::make_shared<PatternMatcher>(std::move(*compiled));
-        job.chunk_buf.reserve(job.chunk_size_bytes + 4096);
+        job.chunk_buf = xstore::ChunkPool::Instance().Take(job.chunk_size_bytes + 4096);
     } else if (!CfgEpochCurrent(db_name, job.cfg_epoch)) {
         // Parked, and the DB was removed (maybe re-created) since: the rest of the request is stale. The rows already read stay in the reply.
         set_warning("[ERROR] ", fmt::format("[FINDBYPATTERN] [DB: {}] - The DB was removed while the request ran", db_name));
@@ -163,8 +164,7 @@ XStore::RunState XStore::FindByPatternRun(FindByPatternJob &job, const std::func
                 total_emitted_bytes += static_cast<unsigned long long int>(chunk_buf.size() - size_before);
                 if (chunk_buf.size() >= chunk_size_bytes) {
                     ready.push_back(std::move(chunk_buf));
-                    chunk_buf.clear();
-                    chunk_buf.reserve(chunk_size_bytes + 4096);
+                    chunk_buf = xstore::ChunkPool::Instance().Take(chunk_size_bytes + 4096);
                 }
                 if (total_emitted_bytes > reply_limit) {
                     set_warning("[WARNING] ", fmt::format("[FINDBYPATTERN] [DB: {}] - Query results exceeded 2GB, results truncated", db_name));
@@ -247,8 +247,7 @@ XStore::RunState XStore::FindByPatternRun(FindByPatternJob &job, const std::func
                         chunk_buf.append(piece_out);
                         if (chunk_buf.size() >= chunk_size_bytes) {
                             emit_chunk(std::move(chunk_buf), false);
-                            chunk_buf.clear();
-                            chunk_buf.reserve(chunk_size_bytes + 4096);
+                            chunk_buf = xstore::ChunkPool::Instance().Take(chunk_size_bytes + 4096);
                         }
                         if (total_emitted_bytes > reply_limit) {
                             set_warning("[WARNING] ", fmt::format("[FINDBYPATTERN] [DB: {}] - Query results exceeded 2GB, results truncated", db_name));

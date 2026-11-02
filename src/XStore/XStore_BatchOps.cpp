@@ -1,5 +1,6 @@
 #include "include/XStore/XStore_ReplyLimit.h"
 #include "include/XStore/XStore_Internal.h"
+#include "include/XStore/XStore_ChunkPool.h"
 #include "include/XStore/XStore_WalRing.h"
 #include "include/XStore/XStore_PreadPool.h"
 #include "include/XStore/XStore_WireEncode.h"
@@ -318,7 +319,7 @@ XStore::RunState XStore::BatchQueryRun(BatchQueryJob &job, const std::function<v
 
         std::sort(job.year_groups.begin(), job.year_groups.end(),
                   [](const auto &a, const auto &b) { return a.first < b.first; });
-        job.chunk_buf.reserve(job.chunk_size_bytes + 4096);
+        job.chunk_buf = xstore::ChunkPool::Instance().Take(job.chunk_size_bytes + 4096);
     }
 
     std::string &chunk_buf = job.chunk_buf;
@@ -412,8 +413,7 @@ XStore::RunState XStore::BatchQueryRun(BatchQueryJob &job, const std::function<v
 
                 if (chunk_buf.size() >= chunk_size_bytes) {
                     emit_chunk(std::move(chunk_buf), false);
-                    chunk_buf.clear();
-                    chunk_buf.reserve(chunk_size_bytes + 4096);
+                    chunk_buf = xstore::ChunkPool::Instance().Take(chunk_size_bytes + 4096);
                 }
             }
             continue;
@@ -483,8 +483,7 @@ XStore::RunState XStore::BatchQueryRun(BatchQueryJob &job, const std::function<v
 
                 if (chunk_buf.size() >= chunk_size_bytes) {
                     emit_chunk(std::move(chunk_buf), false);
-                    chunk_buf.clear();
-                    chunk_buf.reserve(chunk_size_bytes + 4096);
+                    chunk_buf = xstore::ChunkPool::Instance().Take(chunk_size_bytes + 4096);
                 }
             }
         }
