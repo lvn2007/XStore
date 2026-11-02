@@ -92,4 +92,23 @@ TEST(ChunkPoolTest, BuffersHandedOutAreNeverSharedBetweenThreads) {
     EXPECT_FALSE(clash.load());
     EXPECT_LE(pool.KeptCount(), ChunkPool::kMaxKept);
 }
+// The buffers kept for reuse are not counted in the memory pool, so on a small machine the cap follows the pool: a 256th of its limit, between 4 MiB and 64 MiB.
+TEST(ChunkPoolTest, TheCapFollowsTheMemoryPoolLimit) {
+    constexpr uint64_t GB = 1024ull * 1024 * 1024;
+    EXPECT_EQ(ChunkPool::KeptLimitFor(60 * GB), ChunkPool::kMaxKept) << "a big server keeps the 64 MiB it always did";
+    EXPECT_EQ(ChunkPool::KeptLimitFor(3 * GB + GB / 2), 28u);   // 3.5 GiB / 256 = 14 MiB = 28 buffers
+    EXPECT_EQ(ChunkPool::KeptLimitFor(GB / 2), 8u);             // floor: 4 MiB
+    EXPECT_EQ(ChunkPool::KeptLimitFor(0), 8u);
+}
+
+TEST(ChunkPoolTest, APoolBuiltWithASmallCapKeepsNoMoreThanThat) {
+    ChunkPool pool(8);
+    for (size_t i = 0; i < 30; ++i) {
+        std::string buffer;
+        buffer.reserve(kChunk);
+        pool.Put(std::move(buffer));
+    }
+    EXPECT_EQ(pool.KeptCount(), 8u);
+}
+
 }  // namespace

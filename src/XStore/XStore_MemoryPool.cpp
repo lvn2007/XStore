@@ -12,7 +12,9 @@ namespace xstore {
 namespace {
 
 constexpr uint64_t kBytesPerKB = 1024;
-constexpr uint64_t kDefaultReserveMB = 2048;
+constexpr uint64_t kDefaultReserveMB = 2048;   // the most the reserve is: what a big server leaves to the host
+constexpr uint64_t kMinReserveMB = 128;
+constexpr uint64_t kReserveShare = 8;          // otherwise an eighth of the machine's (or container's) memory, so a small device keeps a pool
 // Waiters re-check every 50 ms anyway, so a reading this old changes no decision that was not already that slow to notice.
 constexpr std::chrono::milliseconds kHostFigureCache{50};
 
@@ -95,33 +97,41 @@ void MemoryLease::MarkResident() {
     if (!resident_.exchange(true)) pool_.ResidentNow(unseen_);
 }
 
+uint64_t DefaultReserveBytes(uint64_t total_bytes) {
+    constexpr uint64_t kMax = kDefaultReserveMB * kBytesPerKB * kBytesPerKB;
+    constexpr uint64_t kMin = kMinReserveMB * kBytesPerKB * kBytesPerKB;
+    if (total_bytes == 0) return kMax;
+    return std::clamp(total_bytes / kReserveShare, kMin, kMax);
+}
+
 MemoryPool::MemoryPool(uint64_t limit, uint64_t reserve, AvailableFn available, Clock::duration host_cache)
     : limit_(limit), reserve_(reserve), host_cache_(host_cache),
       available_(available ? std::move(available) : AvailableFn(ReadHostAvailableBytes)) {}
 
+PoolSizing SizePool(uint64_t total_bytes, uint64_t reserve_override_mb, uint64_t limit_override_mb) {
+    PoolSizing sizing;
+    sizing.reserve = reserve_override_mb > 0 ? reserve_override_mb * kBytesPerKB * kBytesPerKB : DefaultReserveBytes(total_bytes);
+    if (limit_override_mb > 0) {
+        sizing.limit = limit_override_mb * kBytesPerKB * kBytesPerKB;
+    } else {
+        if (total_bytes == 0) total_bytes = sizing.reserve * 2;  // unreadable host figure: fall back to a small, safe pool
+        sizing.limit = total_bytes > sizing.reserve ? total_bytes - sizing.reserve : total_bytes;
+    }
+    return sizing;
+}
+
 MemoryPool &MemoryPool::Instance() {
     static MemoryPool *pool = [] {
-        uint64_t reserve_mb = EnvOverrideMB("XSTORE_MEMORY_RESERVE_MB");
-        if (reserve_mb == 0) reserve_mb = kDefaultReserveMB;
-        const uint64_t reserve = reserve_mb * kBytesPerKB * kBytesPerKB;
-
-        const uint64_t limit_mb = EnvOverrideMB("XSTORE_MEMORY_LIMIT_MB");
-        uint64_t limit;
-        if (limit_mb > 0) {
-            limit = limit_mb * kBytesPerKB * kBytesPerKB;
-        } else {
-            uint64_t total = ReadMemTotalBytes();
-            if (total == 0) total = reserve * 2;  // unreadable host figure: fall back to a small, safe pool
-            const uint64_t cgroup_max = ReadCgroupMemory("/sys/fs/cgroup", "/proc/self/cgroup").max;
-            if (cgroup_max > 0) total = std::min(total, cgroup_max);
-            limit = total > reserve ? total - reserve : total;
-        }
-        return new MemoryPool(limit, reserve, nullptr, kHostFigureCache);
+        uint64_t total = ReadMemTotalBytes();
+        const uint64_t cgroup_max = ReadCgroupMemory("/sys/fs/cgroup", "/proc/self/cgroup").max;
+        if (cgroup_max > 0 && (total == 0 || cgroup_max < total)) total = cgroup_max;
+        const PoolSizing sizing = SizePool(total, EnvOverrideMB("XSTORE_MEMORY_RESERVE_MB"), EnvOverrideMB("XSTORE_MEMORY_LIMIT_MB"));
+        return new MemoryPool(sizing.limit, sizing.reserve, nullptr, kHostFigureCache);
     }();
     return *pool;
 }
 
-uint64_t MemoryPool::HostAvailableLocked() {
+uint64_t MemoryPool::HostAvailableLocked() const {
     if (host_cache_ <= Clock::duration::zero()) return available_();
     const Clock::time_point now = Clock::now();
     if (!host_cached_ || now - host_cached_at_ >= host_cache_) {
@@ -200,7 +210,11 @@ void MemoryPool::Uncharge(uint64_t bytes) noexcept {
 }
 bool MemoryPool::Full() const {
     std::lock_guard<std::mutex> lk(mutex_);
-    return used_ + external_.load() >= limit_;
+    if (used_ + external_.load() >= limit_) return true;
+    const uint64_t host_available = HostAvailableLocked();
+    if (host_available == kUnknown) return false;
+    const uint64_t effective = host_available > pending_ ? host_available - pending_ : 0;   // as FitsLocked: reservations not allocated yet
+    return effective < reserve_;
 }
 uint64_t MemoryPool::PendingBytes() const {
     std::lock_guard<std::mutex> lk(mutex_);

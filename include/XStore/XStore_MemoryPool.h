@@ -9,7 +9,7 @@
 //   * the pool's own total stays within `limit` (the memory limit of the machine or container minus `reserve`), and
 //   * the OS reports at least `bytes + reserve` available, not counting reservations whose memory is not allocated yet
 //     (those have not reached the OS's figure; see MemoryLease::MarkResident).
-// so a reserve of 1-2 GB is always left for the host, and other processes using memory make inserts wait instead of fail.
+// so a reserve (an eighth of the machine's memory, 128 MiB to 2 GB) is always left for the host, and other processes using memory make inserts wait instead of fail.
 // The one exception is progress: with no other lease outstanding the front request is admitted without the second check. The
 // allocator keeps memory it has freed, so the OS's figure may never recover once the work that used it is done; waiting for it
 // then would never end. The pool limit still applies.
@@ -33,6 +33,18 @@ struct CgroupMemory {
     uint64_t headroom = UINT64_MAX;
 };
 CgroupMemory ReadCgroupMemory(const std::string &cgroup_root, const std::string &proc_cgroup_file);
+
+// The memory left to the host when the machine (or container) has `total_bytes` (0 = unknown): an eighth of it, between 128 MiB and 2 GiB, so a
+// big server keeps 2 GiB and a small device (a Raspberry Pi) keeps a pool.
+uint64_t DefaultReserveBytes(uint64_t total_bytes);
+
+// What the process-wide pool is sized to: `limit` (most the leases may add up to) and `reserve` (left to the host). `total_bytes` is the machine's or
+// container's memory (0 = unknown); the overrides are XSTORE_MEMORY_RESERVE_MB / XSTORE_MEMORY_LIMIT_MB (0 = not set).
+struct PoolSizing {
+    uint64_t limit = 0;
+    uint64_t reserve = 0;
+};
+PoolSizing SizePool(uint64_t total_bytes, uint64_t reserve_override_mb, uint64_t limit_override_mb);
 
 class MemoryPool;
 
@@ -82,7 +94,9 @@ public:
     // requests in the line. Every Charge must be matched by an Uncharge of the same bytes.
     void Charge(uint64_t bytes) noexcept;
     void Uncharge(uint64_t bytes) noexcept;
-    // The leases and the charged bytes together have reached the limit.
+    // The leases and the charged bytes together have reached the limit, or the OS has less than `reserve` available (memory the pool does not count:
+    // the allocator's retention, caches, other processes). A producer of charged bytes stops while Full(); it is asked at every chunk boundary, so the
+    // OS figure is read at most once per `host_cache`.
     bool Full() const;
 
     uint64_t Limit() const { return limit_; }
@@ -97,7 +111,7 @@ private:
     void Release(uint64_t bytes, uint64_t unseen, bool resident);
     void ResidentNow(uint64_t unseen);
     bool FitsLocked(uint64_t bytes, uint64_t unseen);
-    uint64_t HostAvailableLocked();
+    uint64_t HostAvailableLocked() const;
 
     const uint64_t limit_;
     const uint64_t reserve_;
@@ -110,9 +124,9 @@ private:
     std::atomic<size_t> waiters_{0};      // requests in the line (waiting_.size(), readable without the mutex)
     uint64_t pending_ = 0;
     uint64_t peak_ = 0;
-    bool host_cached_ = false;
-    uint64_t host_available_ = 0;
-    Clock::time_point host_cached_at_;
+    mutable bool host_cached_ = false;   // the cached OS figure; refreshed by Full() too
+    mutable uint64_t host_available_ = 0;
+    mutable Clock::time_point host_cached_at_;
     uint64_t next_ticket_ = 0;
     std::list<uint64_t> waiting_;   // tickets in arrival order; only the front may be admitted
 };

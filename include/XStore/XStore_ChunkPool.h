@@ -3,13 +3,17 @@
 // copy, and freed from the network layer's thread once it was written to the connection; allocating and freeing one per chunk means fresh pages for the
 // kernel to zero (about 6% of the server's CPU on big reads, perf). The network layer Put()s the buffer back instead of freeing it, and the encoders Take() it.
 //
-// At most kMaxKept buffers are kept (64 MiB at most, not counted in the memory pool), and only ones whose capacity is about a chunk's: a tiny buffer is
-// cheap to allocate and a huge one would pin memory for nothing.
+// At most kMaxKept buffers are kept (64 MiB at most, not counted in the memory pool; on a small machine a 256th of the pool's limit, KeptLimitFor), and
+// only ones whose capacity is about a chunk's: a tiny buffer is cheap to allocate and a huge one would pin memory for nothing.
+#include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "include/XStore/XStore_MemoryPool.h"
 
 namespace xstore {
 
@@ -19,9 +23,20 @@ public:
     static constexpr size_t kMinKeptCapacity = 64 * 1024;
     static constexpr size_t kMaxKeptCapacity = 8 * 1024 * 1024;
 
+    static constexpr size_t kBufferBytes = 512 * 1024;
+
+    explicit ChunkPool(size_t max_kept = kMaxKept) : max_kept_(max_kept) {}
+
+    // How many buffers a process whose memory pool has `pool_limit_bytes` keeps: a 256th of the limit, between 4 MiB and 64 MiB worth.
+    static constexpr size_t KeptLimitFor(uint64_t pool_limit_bytes) {
+        constexpr uint64_t kFloor = 4ull * 1024 * 1024;
+        constexpr uint64_t kCeiling = kMaxKept * kBufferBytes;
+        return static_cast<size_t>(std::clamp<uint64_t>(pool_limit_bytes / 256, kFloor, kCeiling) / kBufferBytes);
+    }
+
     // The pool the encoders and the network layer share. Never destroyed: a buffer may come back from a network thread during shutdown.
     static ChunkPool &Instance() {
-        static ChunkPool *pool = new ChunkPool();
+        static ChunkPool *pool = new ChunkPool(KeptLimitFor(MemoryPool::Instance().Limit()));
         return *pool;
     }
 
@@ -50,7 +65,7 @@ public:
         if (capacity < kMinKeptCapacity || capacity > kMaxKeptCapacity) return;
         try {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (kept_.size() < kMaxKept) kept_.push_back(std::move(buffer));
+            if (kept_.size() < max_kept_) kept_.push_back(std::move(buffer));
         } catch (...) {
         }
     }
@@ -63,6 +78,7 @@ public:
 private:
     mutable std::mutex mutex_;
     std::vector<std::string> kept_;
+    size_t max_kept_ = kMaxKept;
 };
 
 }  // namespace xstore

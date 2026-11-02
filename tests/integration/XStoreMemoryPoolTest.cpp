@@ -384,6 +384,104 @@ TEST(MemoryPoolChargeTest, ManyThreadsChargingAndUnchargingEndWithNothingCharged
     EXPECT_EQ(pool.WaitingCount(), 0u);
 }
 
+// Full() is what makes a streamed reply park: besides the pool's own limit, it is true when the OS has less than the reserve left, so that slow
+// readers' queues stop growing on real memory pressure (memory the pool does not count: the allocator's retention, caches, other processes).
+TEST(MemoryPoolFullTest, FullWhenTheHostHasLessThanTheReserveAvailableEvenWithNothingCharged) {
+    std::atomic<uint64_t> available{15 * MB};
+    MemoryPool pool(1000 * MB, 20 * MB, [&] { return available.load(); });
+    EXPECT_TRUE(pool.Full());
+    available = 500 * MB;
+    EXPECT_FALSE(pool.Full()) << "memory came back: no longer full";
+}
+
+TEST(MemoryPoolFullTest, TheReserveItselfAvailableIsNotFull) {
+    MemoryPool pool(1000 * MB, 20 * MB, [] { return 20 * MB; });
+    EXPECT_FALSE(pool.Full());
+    MemoryPool below(1000 * MB, 20 * MB, [] { return 20 * MB - 1; });
+    EXPECT_TRUE(below.Full());
+}
+
+TEST(MemoryPoolFullTest, AReservationNotYetAllocatedCountsAgainstTheHostFigureLikeInAcquire) {
+    std::atomic<uint64_t> available{100 * MB};
+    MemoryPool pool(1000 * MB, 20 * MB, [&] { return available.load(); });
+    auto first = MustAcquire(pool, 1 * MB);    // nothing running before it: admitted without the host check
+    first->MarkResident();
+    auto lease = MustAcquire(pool, 45 * MB);   // fits: 100 MB seen by the OS >= 45 + the 20 MB reserve; the memory is not allocated yet
+    EXPECT_FALSE(pool.Full());
+    available = 60 * MB;                       // another process took memory meanwhile
+    EXPECT_TRUE(pool.Full()) << "60 MB seen by the OS - 45 MB still to be allocated = 15 MB < the 20 MB reserve";
+    lease->MarkResident();
+    EXPECT_FALSE(pool.Full()) << "allocated: the OS figure reflects it, nothing is pending";
+}
+
+TEST(MemoryPoolFullTest, AnUnknownHostFigureNeverMakesItFull) {
+    MemoryPool pool(1000 * MB, 20 * MB, [] { return MemoryPool::kUnknown; });
+    EXPECT_FALSE(pool.Full());
+}
+
+TEST(MemoryPoolFullTest, ThePoolLimitStillMakesItFullWhateverTheHostHas) {
+    MemoryPool pool(100 * MB, 20 * MB, [] { return 10000 * MB; });
+    pool.Charge(100 * MB);
+    EXPECT_TRUE(pool.Full());
+    pool.Uncharge(100 * MB);
+    EXPECT_FALSE(pool.Full());
+}
+
+// Full() is asked at every scan-chunk boundary of every reply that has bytes queued: the OS figure (/proc/meminfo, cgroup files) must not be read each time.
+TEST(MemoryPoolFullTest, TheHostFigureIsReadAtMostOncePerCacheIntervalNotOncePerCall) {
+    std::atomic<int> reads{0};
+    MemoryPool pool(1000 * MB, 20 * MB, [&] { ++reads; return 500 * MB; }, std::chrono::hours(1));
+    for (int i = 0; i < 1000; ++i) EXPECT_FALSE(pool.Full());
+    EXPECT_EQ(reads.load(), 1);
+}
+
+// The reserve left to the host follows the size of the machine: an eighth of its memory, between 128 MiB and 2 GiB, so a 2 GB or 4 GB device keeps a pool.
+TEST(MemoryPoolSizingTest, TheDefaultReserveIsAnEighthOfTheMemoryBetween128MBAnd2GB) {
+    EXPECT_EQ(xstore::DefaultReserveBytes(64 * GB), 2 * GB);
+    EXPECT_EQ(xstore::DefaultReserveBytes(16 * GB), 2 * GB);
+    EXPECT_EQ(xstore::DefaultReserveBytes(8 * GB), 1 * GB);
+    EXPECT_EQ(xstore::DefaultReserveBytes(4 * GB), 512 * MB);
+    EXPECT_EQ(xstore::DefaultReserveBytes(2 * GB), 256 * MB);
+    EXPECT_EQ(xstore::DefaultReserveBytes(1 * GB), 128 * MB);
+    EXPECT_EQ(xstore::DefaultReserveBytes(256 * MB), 128 * MB);
+}
+
+TEST(MemoryPoolSizingTest, ThePoolIsTheMemoryOfTheMachineMinusTheReserve) {
+    const xstore::PoolSizing big = xstore::SizePool(64 * GB, 0, 0);
+    EXPECT_EQ(big.reserve, 2 * GB);
+    EXPECT_EQ(big.limit, 62 * GB);
+    const xstore::PoolSizing pi4 = xstore::SizePool(4 * GB, 0, 0);
+    EXPECT_EQ(pi4.reserve, 512 * MB);
+    EXPECT_EQ(pi4.limit, 4 * GB - 512 * MB);
+    const xstore::PoolSizing pi2 = xstore::SizePool(2 * GB, 0, 0);
+    EXPECT_EQ(pi2.reserve, 256 * MB) << "a 2 GB device used to get a pool of ALL its memory and a reserve it could never have";
+    EXPECT_EQ(pi2.limit, 2 * GB - 256 * MB);
+}
+
+TEST(MemoryPoolSizingTest, TheEnvironmentOverridesWinAndAreIndependent) {
+    const xstore::PoolSizing reserve_only = xstore::SizePool(4 * GB, 100, 0);
+    EXPECT_EQ(reserve_only.reserve, 100 * MB);
+    EXPECT_EQ(reserve_only.limit, 4 * GB - 100 * MB);
+    const xstore::PoolSizing limit_only = xstore::SizePool(60 * GB, 0, 8192);
+    EXPECT_EQ(limit_only.limit, 8 * GB);
+    EXPECT_EQ(limit_only.reserve, 2 * GB);
+}
+
+TEST(MemoryPoolSizingTest, AnUnreadableMachineSizeFallsBackToASmallPool) {
+    const xstore::PoolSizing unknown = xstore::SizePool(0, 0, 0);
+    EXPECT_EQ(unknown.reserve, 2 * GB);
+    EXPECT_EQ(unknown.limit, 2 * GB);
+}
+
+TEST(MemoryPoolSizingTest, AnUnknownMachineSizeGetsTheLargestReserve) {
+    EXPECT_EQ(xstore::DefaultReserveBytes(0), 2 * GB);
+}
+
+TEST(MemoryPoolSizingTest, ASmallDeviceStillHasAPoolOfItsOwn) {
+    const uint64_t total = 2 * GB;
+    EXPECT_GT(total, xstore::DefaultReserveBytes(total) * 4) << "the reserve must not eat the machine";
+}
+
 TEST(MemoryPoolTest, TheProcessWidePoolIsSizedFromTheMachineAndLeavesTheReserve) {
     MemoryPool &pool = MemoryPool::Instance();
     EXPECT_GT(pool.Limit(), 0u);
