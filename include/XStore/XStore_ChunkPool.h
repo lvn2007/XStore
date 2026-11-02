@@ -3,9 +3,10 @@
 // copy, and freed from the network layer's thread once it was written to the connection; allocating and freeing one per chunk means fresh pages for the
 // kernel to zero (about 6% of the server's CPU on big reads, perf). The network layer Put()s the buffer back instead of freeing it, and the encoders Take() it.
 //
-// At most kMaxKept buffers are kept (64 MiB at most, not counted in the memory pool; on a small machine a 256th of the pool's limit, KeptLimitFor), and
+// At most kMaxKept buffers are kept (64 MiB at most, not counted in the memory pool; fewer on a small machine or with few workers, KeptLimitFor), and
 // only ones whose capacity is about a chunk's: a tiny buffer is cheap to allocate and a huge one would pin memory for nothing.
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -27,16 +28,22 @@ public:
 
     explicit ChunkPool(size_t max_kept = kMaxKept) : max_kept_(max_kept) {}
 
-    // How many buffers a process whose memory pool has `pool_limit_bytes` keeps: a 256th of the limit, between 4 MiB and 64 MiB worth.
-    static constexpr size_t KeptLimitFor(uint64_t pool_limit_bytes) {
+    // How many buffers a process whose memory pool has `pool_limit_bytes` keeps: a 256th of the limit, between 4 MiB and 64 MiB worth. With a known worker
+    // count (> 0) also at most four per worker (but not below 8): about one buffer per worker is the plateau (measured), more only pins memory.
+    static constexpr size_t KeptLimitFor(uint64_t pool_limit_bytes, size_t workers = 0) {
         constexpr uint64_t kFloor = 4ull * 1024 * 1024;
         constexpr uint64_t kCeiling = kMaxKept * kBufferBytes;
-        return static_cast<size_t>(std::clamp<uint64_t>(pool_limit_bytes / 256, kFloor, kCeiling) / kBufferBytes);
+        const size_t by_memory = static_cast<size_t>(std::clamp<uint64_t>(pool_limit_bytes / 256, kFloor, kCeiling) / kBufferBytes);
+        if (workers == 0) return by_memory;
+        return std::min(by_memory, std::max<size_t>(4 * workers, kFloor / kBufferBytes));
     }
+
+    // The server's worker count, set once at startup before the first Instance(); ignored after it. 0 = unknown.
+    static void SetWorkerCount(size_t workers) { WorkerHint().store(workers, std::memory_order_relaxed); }
 
     // The pool the encoders and the network layer share. Never destroyed: a buffer may come back from a network thread during shutdown.
     static ChunkPool &Instance() {
-        static ChunkPool *pool = new ChunkPool(KeptLimitFor(MemoryPool::Instance().Limit()));
+        static ChunkPool *pool = new ChunkPool(KeptLimitFor(MemoryPool::Instance().Limit(), WorkerHint().load(std::memory_order_relaxed)));
         return *pool;
     }
 
@@ -76,6 +83,11 @@ public:
     }
 
 private:
+    static std::atomic<size_t> &WorkerHint() {
+        static std::atomic<size_t> hint{0};
+        return hint;
+    }
+
     mutable std::mutex mutex_;
     std::vector<std::string> kept_;
     size_t max_kept_ = kMaxKept;

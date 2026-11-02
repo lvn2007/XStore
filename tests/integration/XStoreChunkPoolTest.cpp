@@ -101,6 +101,20 @@ TEST(ChunkPoolTest, TheCapFollowsTheMemoryPoolLimit) {
     EXPECT_EQ(ChunkPool::KeptLimitFor(0), 8u);
 }
 
+// About one buffer per worker is the plateau (measured); the cap is four per worker (128 for Mystic's 32, the tested setting), at least 8, and the smaller of that and the memory cap.
+TEST(ChunkPoolTest, TheCapAlsoFollowsTheWorkerCount) {
+    constexpr uint64_t GB = 1024ull * 1024 * 1024;
+    EXPECT_EQ(ChunkPool::KeptLimitFor(60 * GB, 32), 128u);
+    EXPECT_EQ(ChunkPool::KeptLimitFor(60 * GB, 1), 8u) << "floor";
+    EXPECT_EQ(ChunkPool::KeptLimitFor(60 * GB, 2), 8u) << "floor";
+    EXPECT_EQ(ChunkPool::KeptLimitFor(60 * GB, 3), 12u);
+    EXPECT_EQ(ChunkPool::KeptLimitFor(60 * GB, 16), 64u);
+    EXPECT_EQ(ChunkPool::KeptLimitFor(60 * GB, 1000), ChunkPool::kMaxKept) << "memory cap is the ceiling";
+    EXPECT_EQ(ChunkPool::KeptLimitFor(60 * GB, 0), ChunkPool::kMaxKept) << "unknown worker count: memory only";
+    EXPECT_EQ(ChunkPool::KeptLimitFor(3 * GB + GB / 2, 32), 28u) << "memory is the smaller cap";
+    EXPECT_EQ(ChunkPool::KeptLimitFor(3 * GB + GB / 2, 5), 20u) << "workers are the smaller cap";
+}
+
 TEST(ChunkPoolTest, APoolBuiltWithASmallCapKeepsNoMoreThanThat) {
     ChunkPool pool(8);
     for (size_t i = 0; i < 30; ++i) {

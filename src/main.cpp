@@ -1,5 +1,6 @@
 #include "include/Networking/ZMQ_Server.h"
 #include "include/XStore/XStore.h"
+#include "include/XStore/XStore_ChunkPool.h"
 #include "include/XStore/XStore_DirLock.h"
 #include "include/XStore/XStore_PreadPool.h"
 #include "include/XStore/XStore_SysStats.h"
@@ -193,6 +194,7 @@ int main(int argc, char *argv[]) {
     // fixes. Charged at most the PHYSICAL core count (PreadPoolReserved): workers beyond it mostly wait in fsync, and
     // charging them left the pool at its floor of 2 (-60% BatchQuery throughput with 32 workers on 32 logical cores).
     XStorePreadPool::Init(ZmqServer::PreadPoolReserved(thread_count, ZmqServer::PhysicalCoreCount()));
+    xstore::ChunkPool::SetWorkerCount(static_cast<size_t>(thread_count));   // before the first reply is built
 
     // Constructed (not started) before the slow boot work below so that a
     // signal arriving during InitDB/WAL replay is remembered: RequestStop()
