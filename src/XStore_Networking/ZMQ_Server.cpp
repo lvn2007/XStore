@@ -118,6 +118,9 @@ class ReplyWriter {
 
         void AllowStreaming(bool allow) { streaming = allow; }
 
+        // The registry the broker cancels this reply through when its client is gone (ZMQ_GoneClients.h): the reply registers when it gets its window.
+        void SetGoneClients(xstore::streamflow::GoneClients *registry) { gone = registry; }
+
         // The final frame of a reply this writer has to stop (a client that is not reading): a serialized REP of the call's type holding only the
         // status text, which the client merges into the reply it parsed so far (queryStatus). Set by the four row calls.
         void SetStopFrame(std::function<std::string(const std::string &)> make_frame) { make_stop_frame = std::move(make_frame); }
@@ -132,7 +135,10 @@ class ReplyWriter {
                 xstore::ChunkPool::Instance().Put(std::move(chunk));   // copied into the message: the buffer is free again
                 return;
             }
-            if (!window) window = std::make_shared<xstore::streamflow::ReplyWindow>();
+            if (!window) {
+                window = std::make_shared<xstore::streamflow::ReplyWindow>();
+                if (gone != nullptr) gone->Register(std::string_view(client_id.data<char>(), client_id.size()), window);
+            }
             const xstore::streamflow::Verdict verdict = window->Admit(chunk.size(), !parkable);
             if (verdict != xstore::streamflow::Verdict::kSend) {
                 Stop("the client was not taking the reply");
@@ -158,7 +164,8 @@ class ReplyWriter {
         // chunks and parks instead. Park() sends the release message [client_id][0x02 + token]: the client sees a bare delimiter, the broker frees this
         // worker. After it Finish() does nothing: the reply goes on when a worker resumes it.
         void MarkParkable() { parkable = true; }
-        bool WindowFull() const { return window && window->ShouldPark(xstore::streamflow::Get().window_bytes); }
+        // Also true for a reply whose client is gone: the producer stops like a parking one, and the worker that resumes the reply only ends it.
+        bool WindowFull() const { return window && (window->Cancelled() || window->ShouldPark(xstore::streamflow::Get().window_bytes)); }
         const std::shared_ptr<xstore::streamflow::ReplyWindow> &Window() const { return window; }
         bool Parked() const { return parked; }
         void Park(uint64_t token) {
@@ -258,6 +265,7 @@ class ReplyWriter {
         bool stopped = false;
         bool parkable = false;
         bool parked = false;
+        xstore::streamflow::GoneClients *gone = nullptr;
         std::function<std::string(const std::string &)> make_stop_frame;
         std::shared_ptr<xstore::streamflow::ReplyWindow> window;
 };
@@ -386,6 +394,15 @@ void ZmqServer::Serve(const std::string &listen_addr, const std::string &listen_
     // pool, this queues in RAM instead of blocking/dropping at the socket.
     client_socket.set(zmq::sockopt::sndhwm, 0);
     client_socket.set(zmq::sockopt::rcvhwm, 0);
+    // A reply message for a client whose connection is closed is refused (EHOSTUNREACH) instead of dropped without a word: the broker then cancels
+    // that client's streamed replies (ZMQ_GoneClients.h). The send high-water mark is 0, so nothing else can make a send fail (EAGAIN).
+    client_socket.set(zmq::sockopt::router_mandatory, 1);
+    // A client machine that died or lost its network leaves a connection that is never closed: the kernel probes an idle connection after 60 s, every
+    // 10 s, and drops it after 6 unanswered probes, so the broker finds out about it too. The probes are answered by the client's kernel.
+    client_socket.set(zmq::sockopt::tcp_keepalive, 1);
+    client_socket.set(zmq::sockopt::tcp_keepalive_idle, 60);
+    client_socket.set(zmq::sockopt::tcp_keepalive_intvl, 10);
+    client_socket.set(zmq::sockopt::tcp_keepalive_cnt, 6);
     // Bounded linger: after RequestStop() the context destructor blocks until
     // queued outgoing messages are delivered or this expires (default: forever,
     // e.g. a client that stopped reading).
@@ -441,7 +458,7 @@ void ZmqServer::Serve(const std::string &listen_addr, const std::string &listen_
     RunReadyBroker(client_socket, worker_socket, static_cast<size_t>(num_threads),
                    std::chrono::microseconds(XStoreTunables::ZMQ_ADAPTIVE_POLL_WINDOW_US),
                    HeavyRequestLimit{XStoreTunables::ZMQ_HEAVY_REQUEST_BYTES, HeavyRequestCap(num_threads)},
-                   ParkSettings{parked_.get(), xstore::streamflow::Get().stall});
+                   ParkSettings{parked_.get(), xstore::streamflow::Get().stall}, gone_.get());
 }
 
 void ZmqServer::WorkerRoutine(std::string server_addr, int worker_index) {
@@ -561,6 +578,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
             xstore::streamflow::NoteResumed();
             try {
                 if (expired) writer.StopWith("the client was not taking the reply");
+                else if (reply->window->Cancelled()) writer.Finish();   // the client is gone: the rest of the scan is not done, the reply only ends
                 else ServeParkable(my_store, writer, reply, parked_);
             } catch (const std::exception &e) {
                 if (auto *ze = dynamic_cast<const zmq::error_t *>(&e); ze != nullptr && ze->num() == ETERM) throw;
@@ -578,6 +596,7 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
             continue;
         }
         ReplyWriter writer(socket, client_id);
+        writer.SetGoneClients(gone_.get());
         if (frame_count != 3 || delimiter.size() != 0) {
             spdlog::warn("[NETWORKING] - Malformed request envelope ({} frames), dropping", frame_count);
             writer.Finish();

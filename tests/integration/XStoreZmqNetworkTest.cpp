@@ -1669,6 +1669,63 @@ TEST_F(ParkServerTest, AParkedReplyFreesTheOnlyWorkerAndStillDeliversTheSameByte
     EXPECT_TRUE(QueueDrains());
 }
 
+// A client that disconnects in the middle of its reply (ZMQ_GoneClients.h): the broker finds out when it relays the next message (ZMQ_ROUTER_MANDATORY),
+// the reply is cancelled, and the rest of the scan is not done. Counted in the messages the broker could not relay to the gone client: a scan that went on for
+// nobody would add one per chunk (a read of the whole DB is dozens of messages), one that was cancelled adds the few before the producer noticed.
+TEST_F(ParkServerTest, AClientThatDisconnectsMidReplyEndsTheScanAndTheServerKeepsServing) {
+    CreateBigDb("ZMQ_GONE_DB");
+    xstore::streamflow::Set(ParkConfig());
+    uint64_t parks_before = xstore::streamflow::ParkCount();
+    const SlowRead whole = ReadSlowly("ZMQ_GONE_DB", std::chrono::milliseconds(5));
+    ASSERT_TRUE(whole.complete);
+    ASSERT_TRUE(WaitForResumesToCatchUp());
+    const uint64_t parks_whole = xstore::streamflow::ParkCount() - parks_before;
+    ASSERT_GE(parks_whole, 8u) << "the DB is too small for this test: a whole read must park often";
+    ASSERT_GE(whole.messages, 30u) << "the DB is too small for this test: a whole read is dozens of messages";
+    ASSERT_TRUE(QueueDrains());
+
+    parks_before = xstore::streamflow::ParkCount();
+    const uint64_t cancels_before = xstore::streamflow::CancelCount();
+    const uint64_t drops_before = xstore::streamflow::GoneDropCount();
+    {
+        XStore_Proto::Request request = RangeRequest("ZMQ_GONE_DB", TWO_CHUNK_T0, TWO_CHUNK_T0 + ROWS - 1);
+        request.set_streamok(true);
+        zmq::socket_t sock(*client_ctx, zmq::socket_type::dealer);
+        sock.set(zmq::sockopt::rcvtimeo, 60000);
+        sock.set(zmq::sockopt::linger, 0);
+        sock.set(zmq::sockopt::rcvhwm, 2);
+        sock.connect(server_addr);
+        const std::string payload = request.SerializeAsString();
+        ASSERT_TRUE(sock.send(zmq::message_t(), zmq::send_flags::sndmore).has_value());
+        ASSERT_TRUE(sock.send(zmq::buffer(payload), zmq::send_flags::none).has_value());
+        for (int i = 0; i < 2; ++i) {   // takes a little of the reply, then stops reading
+            zmq::message_t delimiter;
+            ASSERT_TRUE(sock.recv(delimiter, zmq::recv_flags::none).has_value());
+            for (bool more = delimiter.more(); more;) {
+                zmq::message_t frame;
+                ASSERT_TRUE(sock.recv(frame, zmq::recv_flags::none).has_value());
+                more = frame.more();
+            }
+        }
+        ASSERT_TRUE(WaitForParks(parks_before)) << "the reply never parked";
+    }   // the socket closes here: the client is gone
+
+    for (int i = 0; i < 1000 && xstore::streamflow::CancelCount() == cancels_before; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    EXPECT_GT(xstore::streamflow::CancelCount(), cancels_before) << "the reply was never cancelled";
+    EXPECT_TRUE(WaitForResumesToCatchUp());
+    EXPECT_TRUE(QueueDrains());
+    EXPECT_TRUE(PingAnswersWithin(std::chrono::milliseconds(1000)));
+    const uint64_t drops = xstore::streamflow::GoneDropCount() - drops_before;
+    EXPECT_GE(drops, 1u);
+    // The stretch running when the client left finishes its scan block (~4 chunks of 512 KiB) before it looks: about 10 of the ~95, not one per chunk.
+    EXPECT_LE(drops, whole.messages / 5) << "the scan went on for a client that is gone (" << drops << " messages dropped against " << whole.messages << " in a whole read)";
+
+    // The server is intact: the same read, whole, gives the same bytes as before.
+    const SlowRead again = ReadSlowly("ZMQ_GONE_DB", std::chrono::milliseconds(0));
+    ASSERT_TRUE(again.complete);
+    EXPECT_TRUE(again.payload == whole.payload);
+}
+
 // The other three row calls park the same way: the single worker is free while the slow reader's reply waits, and the bytes are those of a read
 // without parking. Every row of the DB matches (a 1400-byte string repeated), so each reply is the whole 40 MB.
 class ParkOtherCallsTest : public ParkServerTest {

@@ -5,8 +5,12 @@
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <memory>
+#include <string>
 #include <thread>
+#include <vector>
 
+#include "include/Networking/ZMQ_GoneClients.h"
 #include "include/Networking/ZMQ_StreamFlow.h"
 
 namespace {
@@ -296,5 +300,96 @@ TEST_F(StreamFlowTest, ManyThreadsQueueingAndCompletingEndWithNothingCounted) {
     EXPECT_EQ(refused.load(), 0);
     EXPECT_EQ(xstore::streamflow::QueuedBytes(), 0u);
     EXPECT_EQ(xstore::streamflow::WaitingWorkers(), 0);
+}
+}  // namespace
+
+// ---- A client that is gone (include/Networking/ZMQ_GoneClients.h) ----
+
+namespace {
+using xstore::streamflow::GoneClients;
+
+TEST(GoneClientsTest, AWindowIsNotCancelledUntilItsClientIsMarkedGone) {
+    GoneClients gone;
+    const auto window = std::make_shared<ReplyWindow>();
+    gone.Register("client-a", window);
+    EXPECT_FALSE(window->Cancelled());
+    EXPECT_EQ(gone.Mark("client-a"), 1u);
+    EXPECT_TRUE(window->Cancelled());
+}
+
+TEST(GoneClientsTest, OnlyTheRepliesOfThatClientAreCancelled) {
+    GoneClients gone;
+    const auto a1 = std::make_shared<ReplyWindow>(), a2 = std::make_shared<ReplyWindow>(), b = std::make_shared<ReplyWindow>();
+    gone.Register("client-a", a1);
+    gone.Register("client-b", b);
+    gone.Register("client-a", a2);
+    EXPECT_EQ(gone.Mark("client-a"), 2u);
+    EXPECT_TRUE(a1->Cancelled());
+    EXPECT_TRUE(a2->Cancelled());
+    EXPECT_FALSE(b->Cancelled());
+}
+
+TEST(GoneClientsTest, MarkingAnUnknownClientDoesNothing) {
+    GoneClients gone;
+    const auto window = std::make_shared<ReplyWindow>();
+    gone.Register("client-a", window);
+    EXPECT_EQ(gone.Mark("nobody"), 0u);
+    EXPECT_FALSE(window->Cancelled());
+}
+
+TEST(GoneClientsTest, RepliesThatEndedAreNotCountedAndNothingIsKeptAlive) {
+    GoneClients gone;
+    std::weak_ptr<ReplyWindow> watch;
+    {
+        const auto window = std::make_shared<ReplyWindow>();
+        watch = window;
+        gone.Register("client-a", window);
+    }
+    EXPECT_TRUE(watch.expired()) << "the registry must not keep a finished reply's window alive";
+    EXPECT_EQ(gone.Mark("client-a"), 0u);
+}
+
+TEST(GoneClientsTest, AClientMarkedGoneIsForgottenSoANewConnectionWithTheSameIdIsNotCancelled) {
+    GoneClients gone;
+    const auto old_reply = std::make_shared<ReplyWindow>();
+    gone.Register("client-a", old_reply);
+    EXPECT_EQ(gone.Mark("client-a"), 1u);
+    const auto new_reply = std::make_shared<ReplyWindow>();
+    gone.Register("client-a", new_reply);
+    EXPECT_FALSE(new_reply->Cancelled());
+    EXPECT_EQ(gone.Mark("client-a"), 1u);
+    EXPECT_TRUE(new_reply->Cancelled());
+}
+
+TEST(GoneClientsTest, ClientsThatCameAndWentDoNotAccumulate) {
+    GoneClients gone;
+    for (int i = 0; i < 5000; ++i) gone.Register("client-" + std::to_string(i), std::make_shared<ReplyWindow>());   // each window ends at once
+    EXPECT_LT(gone.EntryCountForTests(), 1000u);
+}
+
+TEST(GoneClientsTest, RegisteringAndMarkingFromManyThreadsCancelsEveryLiveReply) {
+    GoneClients gone;
+    std::vector<std::shared_ptr<ReplyWindow>> windows;
+    for (int i = 0; i < 400; ++i) windows.push_back(std::make_shared<ReplyWindow>());
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 4; ++t) {
+        threads.emplace_back([&, t] {
+            for (int i = t; i < 400; i += 4) gone.Register("client-" + std::to_string(i % 20), windows[static_cast<size_t>(i)]);
+        });
+    }
+    for (auto &t : threads) t.join();
+    size_t cancelled = 0;
+    for (int c = 0; c < 20; ++c) cancelled += gone.Mark("client-" + std::to_string(c));
+    EXPECT_EQ(cancelled, 400u);
+    for (const auto &w : windows) EXPECT_TRUE(w->Cancelled());
+}
+
+TEST(GoneClientsTest, TheCancelCountGrowsByTheRepliesCancelled) {
+    GoneClients gone;
+    const uint64_t before = xstore::streamflow::CancelCount();
+    const auto window = std::make_shared<ReplyWindow>();
+    gone.Register("client-a", window);
+    gone.Mark("client-a");
+    EXPECT_EQ(xstore::streamflow::CancelCount(), before + 1);
 }
 }  // namespace

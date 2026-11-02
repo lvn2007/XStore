@@ -1,10 +1,12 @@
 #include "include/Networking/ZMQ_Broker.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <deque>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -37,12 +39,14 @@ class HeavyInFlight {
 // REQ socket expects), and the worker stays busy until the message that has it. Parked ids are moved, not copied: a short id
 // lives inline in the zmq_msg_t, so the stack never allocates past its reserve.
 bool RelayReply(zmq::socket_t &backend, zmq::socket_t &frontend, std::vector<zmq::message_t> &idle, HeavyInFlight &heavy,
-                zmq::message_t &worker_id, zmq::message_t &frame, xstore::parked::ParkedReplies *parked, size_t &parked_count) {
+                zmq::message_t &worker_id, zmq::message_t &frame, xstore::parked::ParkedReplies *parked, size_t &parked_count,
+                xstore::streamflow::GoneClients *gone) {
     if (!backend.recv(worker_id, zmq::recv_flags::dontwait)) return false;
     // The rest of a multipart message is delivered atomically with its first frame: these recvs never block.
     bool more = worker_id.more();
     bool more_messages_follow = false;
     bool released = false;
+    bool client_gone = false;   // the client's connection is closed (ZMQ_ROUTER_MANDATORY): the rest of this message is read but not sent
     uint64_t token = 0;
     for (size_t index = 0; more; ++index) {
         (void)backend.recv(frame, zmq::recv_flags::none);
@@ -55,7 +59,16 @@ bool RelayReply(zmq::socket_t &backend, zmq::socket_t &frontend, std::vector<zmq
                 more_messages_follow = false;
             }
         }
-        frontend.send(frame, more ? zmq::send_flags::sndmore : zmq::send_flags::none);
+        if (client_gone) continue;
+        try {
+            frontend.send(frame, more ? zmq::send_flags::sndmore : zmq::send_flags::none);
+        } catch (const zmq::error_t &e) {
+            if (e.num() != EHOSTUNREACH || index != 0) throw;
+            // The first frame is the client's id; the send failed, so `frame` still holds it. Nothing of this message was sent.
+            client_gone = true;
+            xstore::streamflow::NoteGoneDrop();
+            if (gone != nullptr) gone->Mark(std::string_view(frame.data<char>(), frame.size()));
+        }
     }
     // After the relay: from here on the client's socket holds everything this worker sent, so a resume may send the next chunks.
     if (released && parked->OnReleased(token)) ++parked_count;
@@ -97,7 +110,8 @@ void Dispatch(zmq::socket_t &backend, std::vector<zmq::message_t> &idle, Frames 
 }  // namespace
 
 void RunReadyBroker(zmq::socket_t &frontend, zmq::socket_t &backend, size_t max_workers,
-                    std::chrono::microseconds spin_window, HeavyRequestLimit heavy_limit, ParkSettings park) {
+                    std::chrono::microseconds spin_window, HeavyRequestLimit heavy_limit, ParkSettings park,
+                    xstore::streamflow::GoneClients *gone) {
     // LIFO: the most recently freed worker is the one still spinning in its adaptive-poll window, with a warm cache.
     std::vector<zmq::message_t> idle;
     idle.reserve(max_workers);
@@ -151,7 +165,7 @@ void RunReadyBroker(zmq::socket_t &frontend, zmq::socket_t &backend, size_t max_
             }
         }
         for (int round = 0; round < MAX_DRAIN_ROUNDS; ++round) {
-            const bool replied = RelayReply(backend, frontend, idle, heavy, worker_id, frame, parked, parked_count);
+            const bool replied = RelayReply(backend, frontend, idle, heavy, worker_id, frame, parked, parked_count, gone);
             bool requested = false;
             if (prefer_resume && try_resume()) {
                 requested = true;

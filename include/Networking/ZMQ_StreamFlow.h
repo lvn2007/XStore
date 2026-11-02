@@ -72,6 +72,8 @@ inline std::atomic<int> &Waiting() { static std::atomic<int> w{0}; return w; }
 inline std::atomic<uint64_t> &Wakeups() { static std::atomic<uint64_t> w{0}; return w; }
 inline std::atomic<uint64_t> &Parks() { static std::atomic<uint64_t> p{0}; return p; }
 inline std::atomic<uint64_t> &Resumes() { static std::atomic<uint64_t> r{0}; return r; }
+inline std::atomic<uint64_t> &Cancels() { static std::atomic<uint64_t> c{0}; return c; }
+inline std::atomic<uint64_t> &GoneDrops() { static std::atomic<uint64_t> d{0}; return d; }
 }  // namespace detail
 
 // The configuration in force: the environment (read once) unless Set() was called. Copied under a mutex (a few ns per chunk of 512 KiB).
@@ -102,6 +104,12 @@ inline void NoteParked() { detail::Parks().fetch_add(1); }
 inline void NoteResumed() { detail::Resumes().fetch_add(1); }
 inline uint64_t ParkCount() { return detail::Parks().load(); }
 inline uint64_t ResumeCount() { return detail::Resumes().load(); }
+// Replies cancelled since the start because their client was gone (ReplyWindow::Cancel).
+inline uint64_t CancelCount() { return detail::Cancels().load(); }
+// Reply messages the broker could not relay because their client was gone (counted only when that happens): after a cancel the producer stops, so a
+// reply that ends this way adds a few, a scan that goes on for nobody adds one per chunk.
+inline void NoteGoneDrop() { detail::GoneDrops().fetch_add(1, std::memory_order_relaxed); }
+inline uint64_t GoneDropCount() { return detail::GoneDrops().load(); }
 
 // The pool is full (leases plus charged reply bytes have reached its limit). Tests can force the answer: 1 = full, 0 = not, -1 = ask the pool.
 namespace detail {
@@ -166,6 +174,13 @@ public:
 
     uint64_t QueuedBytesOfThisReply() const { return queued_.load(); }
 
+    // The reply's client is gone (GoneClients::Mark): nobody reads what is produced from now on. The producer checks Cancelled() where it asks
+    // whether to park; a cancelled reply is only ended (relaxed: the producer sees it at its next boundary, no ordering with other data is needed).
+    void Cancel() noexcept {
+        if (!cancelled_.exchange(true, std::memory_order_relaxed)) detail::Cancels().fetch_add(1, std::memory_order_relaxed);
+    }
+    bool Cancelled() const noexcept { return cancelled_.load(std::memory_order_relaxed); }
+
     // Whether the producer should stop and park: its window is full, or the pool is full and this reply has bytes queued whose draining will wake it.
     // With nothing queued it never parks (nothing would ever wake it): the run goes on for at least one more boundary.
     bool ShouldPark(uint64_t window_bytes) const {
@@ -197,6 +212,7 @@ private:
     }
 
     std::atomic<uint64_t> queued_{0};
+    std::atomic<bool> cancelled_{false};
     std::atomic<bool> drain_armed_{false};
     std::atomic<uint64_t> drain_below_{0};
     std::mutex drain_mutex_;

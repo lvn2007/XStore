@@ -3,7 +3,9 @@
 // ETERM. Negative "nothing arrived" checks use a short receive timeout; every positive step is synchronised by a
 // message actually arriving. Every broker test runs with spin window 0 (block in poll) and 50 ms (spin first).
 #include "include/Networking/ZMQ_Broker.h"
+#include "include/Networking/ZMQ_GoneClients.h"
 #include "include/Networking/ZMQ_ParkedReplies.h"
+#include "include/Networking/ZMQ_StreamFlow.h"
 
 #include <gtest/gtest.h>
 
@@ -84,15 +86,17 @@ class XStoreZmqBrokerTest : public ::testing::TestWithParam<std::chrono::microse
 
     virtual HeavyRequestLimit Heavy() const { return {}; }
     virtual ParkSettings Park() { return {}; }
+    virtual xstore::streamflow::GoneClients *Gone() { return nullptr; }
 
     void SetUp() override {
         frontend.set(zmq::sockopt::linger, 0);
+        frontend.set(zmq::sockopt::router_mandatory, 1);   // as the server sets it: a send to a client that is gone fails (EHOSTUNREACH)
         backend.set(zmq::sockopt::linger, 0);
         frontend.bind("inproc://broker-test-frontend");
         backend.bind("inproc://broker-test-backend");
         broker_exit = std::async(std::launch::async, [this] {
             try {
-                RunReadyBroker(frontend, backend, 4, GetParam(), Heavy(), Park());
+                RunReadyBroker(frontend, backend, 4, GetParam(), Heavy(), Park(), Gone());
             } catch (const zmq::error_t &e) {
                 return e.num();
             }
@@ -598,6 +602,105 @@ TEST_P(XStoreZmqBrokerParkTest, AReleaseOfAnUnknownTokenIsRelayedAndHarmless) {
     EXPECT_EQ(worker.Take().back(), "other");
 }
 
+// A client that is gone (ZMQ_GoneClients.h): the server sets ZMQ_ROUTER_MANDATORY on the client socket, so the relay of a reply message to a client whose
+// connection is closed fails with EHOSTUNREACH, and the broker cancels that client's registered replies.
+class XStoreZmqBrokerGoneTest : public XStoreZmqBrokerParkTest {
+  protected:
+    xstore::streamflow::GoneClients gone;
+    xstore::streamflow::GoneClients *Gone() override { return &gone; }
+
+    // Closes the client and waits until the broker's socket has dropped its connection: a reply message that comes back is dropped (a cancel).
+    // `send_one` sends one message of the reply to the client; returns when `window` was cancelled by it.
+    template <typename Send>
+    static bool CancelledBySending(const std::shared_ptr<xstore::streamflow::ReplyWindow> &window, Send send_one) {
+        for (int i = 0; i < 500 && !window->Cancelled(); ++i) {
+            send_one();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return window->Cancelled();
+    }
+};
+
+TEST_P(XStoreZmqBrokerGoneTest, AReplyMessageToAClientThatIsGoneCancelsItsRegisteredReply) {
+    FakeWorker &worker = AddWorker("wA");
+    zmq::socket_t &client = AddDealerClient();
+    SendAsDealer(client, "stream");
+    const auto request = worker.Take();
+    const auto window = std::make_shared<xstore::streamflow::ReplyWindow>();
+    gone.Register(request[0], window);
+    worker.ReplyWithDelimiter(request, "\x01", {"chunk"});
+    ASSERT_EQ(RecvFrames(client).size(), 2u) << "a live client gets its chunk and the reply is not cancelled";
+    EXPECT_FALSE(window->Cancelled());
+
+    clients.clear();   // the client closes its connection
+    EXPECT_TRUE(CancelledBySending(window, [&] { worker.ReplyWithDelimiter(request, "\x01", {"chunk"}); }));
+}
+
+TEST_P(XStoreZmqBrokerGoneTest, OnlyTheRepliesOfTheClientThatLeftAreCancelled) {
+    FakeWorker &worker = AddWorker("wA");
+    FakeWorker &worker_b = AddWorker("wB");
+    zmq::socket_t &leaving = AddDealerClient();
+    SendAsDealer(leaving, "stream");
+    std::vector<std::string> request_a;
+    FakeWorker *first = TakeFromAny({&worker, &worker_b}, request_a) == 0 ? &worker : &worker_b;
+    FakeWorker *second = first == &worker ? &worker_b : &worker;
+    zmq::socket_t &staying = AddDealerClient();
+    SendAsDealer(staying, "stream");
+    const auto request_b = second->Take();
+    ASSERT_NE(request_a[0], request_b[0]);
+    const auto window_a = std::make_shared<xstore::streamflow::ReplyWindow>();
+    const auto window_b = std::make_shared<xstore::streamflow::ReplyWindow>();
+    gone.Register(request_a[0], window_a);
+    gone.Register(request_b[0], window_b);
+
+    clients.erase(clients.begin());   // `leaving` is the first client
+    ASSERT_TRUE(CancelledBySending(window_a, [&] { first->ReplyWithDelimiter(request_a, "\x01", {"chunk"}); }));
+    second->ReplyWithDelimiter(request_b, "\x01", {"chunk"});
+    EXPECT_EQ(RecvFrames(*clients.front()).size(), 2u);
+    EXPECT_FALSE(window_b->Cancelled());
+}
+
+TEST_P(XStoreZmqBrokerGoneTest, AReplyToAClientThatIsGoneStillFreesItsWorkerAndLeaksNoFramesToOthers) {
+    FakeWorker &worker = AddWorker("wA");
+    zmq::socket_t &leaving = AddDealerClient();
+    SendAsDealer(leaving, "stream");
+    const auto request = worker.Take();
+    const auto window = std::make_shared<xstore::streamflow::ReplyWindow>();
+    gone.Register(request[0], window);
+    clients.clear();
+    // Several frames to the gone client: the frames after the first must be skipped, not sent as the start of another message.
+    ASSERT_TRUE(CancelledBySending(window, [&] { worker.ReplyWithDelimiter(request, "\x01", {"a", "b", "c"}); }));
+    worker.Reply(request, {"last", "frames", "here"});   // the reply's last message: the worker is idle again
+
+    zmq::socket_t &next = AddDealerClient();
+    SendAsDealer(next, "second request");
+    const auto second = worker.Take();
+    ASSERT_EQ(second.size(), 3u) << "the worker is idle again";
+    EXPECT_EQ(second.back(), "second request");
+    worker.Reply(second, {"for the new client"});
+    const auto got = RecvFrames(next);
+    ASSERT_EQ(got.size(), 2u);
+    EXPECT_EQ(got.back(), "for the new client") << "nothing of the gone client's frames reached another client";
+}
+
+TEST_P(XStoreZmqBrokerGoneTest, TheRelayOfAReleaseToAGoneClientStillMakesTheReplyReadyForAResume) {
+    FakeWorker &worker = AddWorker("wA");
+    zmq::socket_t &leaving = AddDealerClient();
+    SendAsDealer(leaving, "stream");
+    const auto request = worker.Take();
+    const auto window = std::make_shared<xstore::streamflow::ReplyWindow>();
+    gone.Register(request[0], window);
+    clients.clear();
+    // Wait until the broker's socket has dropped the client (a chunk to it cancels the reply), then park: the chunk's worker stays busy meanwhile.
+    ASSERT_TRUE(CancelledBySending(window, [&] { worker.ReplyWithDelimiter(request, "\x01", {"chunk"}); }));
+    const uint64_t token = parked.Park(std::make_shared<int>(3));
+    parked.OnDrained(token);
+    worker.ReleaseReply(request, ReleaseDelimiter(token));
+    const auto resume = worker.Take();
+    ASSERT_EQ(resume.size(), 3u) << "the release was parsed even though its relay failed: the reply became ready";
+    EXPECT_EQ(resume[0], TokenBytes(token));
+}
+
 class XStoreZmqBrokerParkExpiryTest : public XStoreZmqBrokerParkTest {
   protected:
     XStoreZmqBrokerParkExpiryTest() { max_age = std::chrono::milliseconds(300); }
@@ -621,6 +724,8 @@ TEST_P(XStoreZmqBrokerParkExpiryTest, AReleasedReplyThatNeverDrainsIsResumedAsEx
 INSTANTIATE_TEST_SUITE_P(SpinWindow, XStoreZmqBrokerParkTest,
                          ::testing::Values(std::chrono::microseconds(0), SPIN_WINDOW));
 INSTANTIATE_TEST_SUITE_P(SpinWindow, XStoreZmqBrokerParkExpiryTest,
+                         ::testing::Values(std::chrono::microseconds(0), SPIN_WINDOW));
+INSTANTIATE_TEST_SUITE_P(SpinWindow, XStoreZmqBrokerGoneTest,
                          ::testing::Values(std::chrono::microseconds(0), SPIN_WINDOW));
 
 INSTANTIATE_TEST_SUITE_P(SpinWindow, XStoreZmqBrokerTest,

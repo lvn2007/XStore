@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <zmq.hpp>
 
+#include "include/Networking/ZMQ_GoneClients.h"
 #include "include/Networking/ZMQ_ParkedReplies.h"
 
 // Ready-based request dispatch between a client-facing ROUTER (`frontend`) and a worker-facing ROUTER (`backend`).
@@ -32,7 +33,12 @@ struct ParkSettings {
     xstore::parked::ParkedReplies *registry = nullptr;
     std::chrono::milliseconds max_age{120000};
 };
+// A client that is gone (ZMQ_GoneClients.h): with ZMQ_ROUTER_MANDATORY set on `frontend`, relaying a reply message to a client whose connection is closed
+// fails with EHOSTUNREACH. The broker then skips the rest of that message (its frames are consumed, never sent: they would start a new message), still
+// does everything else it does for the message (a release is told to the registry, a last message frees the worker), and with `gone` cancels the replies
+// registered under that client id. Without ZMQ_ROUTER_MANDATORY the router drops such messages silently, as before.
 [[noreturn]] void RunReadyBroker(zmq::socket_t &frontend, zmq::socket_t &backend, size_t max_workers,
-                                 std::chrono::microseconds spin_window, HeavyRequestLimit heavy = {}, ParkSettings park = {});
+                                 std::chrono::microseconds spin_window, HeavyRequestLimit heavy = {}, ParkSettings park = {},
+                                 xstore::streamflow::GoneClients *gone = nullptr);
 
 #endif  // XSTORE_ZMQ_BROKER_H
