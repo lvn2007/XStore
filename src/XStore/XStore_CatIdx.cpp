@@ -705,6 +705,28 @@ void XStore::ClearCatIdxRegistryForTests() {
     catidx_registry_retired_.clear();
 }
 
+namespace {
+std::atomic<uint64_t> &bitmap_year_scans_started() {
+    static std::atomic<uint64_t> n{0};
+    return n;
+}
+}  // namespace
+
+uint64_t XStore::BitmapYearScansStarted() { return bitmap_year_scans_started().load(std::memory_order_relaxed); }
+
+const XStore::BitmapDeferral *XStore::BitmapDeferralFor(const std::string &db_base_path, unsigned short year) const {
+    const auto it = bitmap_deferrals_.find(fmt::format("{}/{}", db_base_path, year));
+    return it == bitmap_deferrals_.end() ? nullptr : &it->second;
+}
+
+std::chrono::steady_clock::time_point XStore::EarliestBitmapRetry() const {
+    auto earliest = std::chrono::steady_clock::time_point::max();
+    for (const auto &[key, deferral] : bitmap_deferrals_) {
+        if (!deferral.permanent) earliest = std::min(earliest, deferral.retry_at);
+    }
+    return earliest;
+}
+
 bool XStore::BuildOneYearBitmapSection(const std::string &db_base_path, unsigned short year, uint16_t row_length,
                                    uint32_t tracked_column_count) {
     std::string data_path = fmt::format("{}/{}.XSTORE", db_base_path, year);
@@ -724,6 +746,7 @@ bool XStore::BuildOneYearBitmapSection(const std::string &db_base_path, unsigned
     if (fd < 0) return true;
     fstat(fd, &st);
     uint64_t total_rows = row_length > 0 ? static_cast<uint64_t>(st.st_size) / row_length : 0;
+    bitmap_year_scans_started().fetch_add(1, std::memory_order_relaxed);
 
     // {column_idx: {encoded_value: [row_index...]}} -- abandoned (erased)
     // for a column the moment its distinct-value count crosses the cap, so
@@ -790,8 +813,8 @@ bool XStore::BuildOneYearBitmapSection(const std::string &db_base_path, unsigned
             std::string enc = EncodeFDataForCatIdx(f_data);
             if (!reserve_row(c)) {
                 close(fd);
-                spdlog::info("[CATIDX] - Bitmap build of {}/{} deferred: the memory pool has no room for its accumulators; "
-                             "retried in {} s", db_base_path, year, XStoreTunables::LIVE_WIDEN_BITMAP_BUILD_RESUME_DELAY_SEC);
+                // The step the pool refused: what the accumulators would hold with it. The pass logs and schedules the retry.
+                last_bitmap_need_bytes_ = (leases.size() + 1) * XStoreTunables::CATIDX_BITMAP_BUILD_LEASE_STEP_BYTES;
                 return false;
             }
             auto &bucket = accumulators[c][enc];
@@ -835,7 +858,9 @@ void XStore::RebuildOneYearCatIdxBloom(const std::string &db_base_path, unsigned
     RebuildYearIndexes(db_base_path, year, row_length, tracked_column_count, /*need_zmap=*/false, /*need_catidx=*/true);
 }
 
-bool XStore::BuildColdBitmapSectionsForAllDbs(const std::string &data_store_dir) {
+bool XStore::BuildColdBitmapSectionsForAllDbs(const std::string &data_store_dir,
+                                              const std::function<std::chrono::steady_clock::time_point()> &now_fn) {
+    const auto now = [&] { return now_fn ? now_fn() : std::chrono::steady_clock::now(); };
     unsigned short current_year = TimeStruct(static_cast<std::time_t>(std::time(nullptr)), XStore_Proto::SECOND).year;
     if (!std::filesystem::exists(data_store_dir)) return true;
     bool complete = true;
@@ -888,9 +913,40 @@ bool XStore::BuildColdBitmapSectionsForAllDbs(const std::string &data_store_dir)
                 complete = false;
                 break;
             }
-            if (!BuildOneYearBitmapSection(db_base_path, year, static_cast<uint16_t>(cfg_struct.rowlength()),
-                                       EffectiveTrackedColumnCount(cfg_struct))) {
-                complete = false; // no room in the MemoryPool: this year runs again soon, the others go on
+            const std::string year_key = fmt::format("{}/{}", db_base_path, year);
+            if (const auto deferred = bitmap_deferrals_.find(year_key);
+                deferred != bitmap_deferrals_.end() && (deferred->second.permanent || now() < deferred->second.retry_at)) {
+                continue;   // deferred for lack of pool room: not before its backoff ends (never, if it cannot fit the pool at all)
+            }
+            if (BuildOneYearBitmapSection(db_base_path, year, static_cast<uint16_t>(cfg_struct.rowlength()),
+                                          EffectiveTrackedColumnCount(cfg_struct))) {
+                bitmap_deferrals_.erase(year_key);
+            } else {
+                // No room in the MemoryPool for the accumulators (nothing was appended). The other years go on.
+                BitmapDeferral &deferral = bitmap_deferrals_[year_key];
+                const bool first = deferral.attempts == 0;
+                ++deferral.attempts;
+                deferral.need_bytes = last_bitmap_need_bytes_;
+                const uint64_t pool_limit = bitmap_pool_limit_for_tests_.value_or(0) != 0 ? *bitmap_pool_limit_for_tests_
+                                                                                          : xstore::MemoryPool::Instance().Limit();
+                if (deferral.need_bytes > pool_limit) {
+                    deferral.permanent = true;
+                    spdlog::warn("[CATIDX] - Bitmap build of {} skipped until the server restarts: its accumulators need at least {} MiB and the "
+                                 "memory pool's limit is {} MiB (XSTORE_MEMORY_LIMIT_MB); FindByValue uses the bloom filter alone for this year",
+                                 year_key, deferral.need_bytes >> 20, pool_limit >> 20);
+                } else {
+                    const uint64_t delay_sec = std::min<uint64_t>(XStoreTunables::LIVE_WIDEN_BITMAP_BUILD_RESUME_DELAY_SEC
+                                                                      << std::min<uint32_t>(deferral.attempts - 1, 20),
+                                                                  XStoreTunables::CATIDX_BITMAP_BUILD_POLL_INTERVAL_SEC);
+                    deferral.retry_at = now() + std::chrono::seconds(delay_sec);
+                    if (first) {
+                        spdlog::warn("[CATIDX] - Bitmap build of {} deferred: the memory pool has no room for its accumulators (at least {} MiB); "
+                                     "retried in {} s, with a longer wait after each failure. FindByValue uses the bloom filter alone until then",
+                                     year_key, deferral.need_bytes >> 20, delay_sec);
+                    } else {
+                        spdlog::info("[CATIDX] - Bitmap build of {} deferred again (attempt {}); retried in {} s", year_key, deferral.attempts, delay_sec);
+                    }
+                }
             }
             // A cancel abandoned that year (its removal, or shutdown): the run is cut here, as the next Enter would.
             if (bg_cancel_.load(std::memory_order_relaxed)) return false;
@@ -962,7 +1018,7 @@ void XStore::BackgroundIndexTick(const std::string &data_store_dir, BackgroundIn
     if (now() < schedule.next_bitmap_build) return;
     bool complete = true;
     try {
-        complete = BuildColdBitmapSectionsForAllDbs(data_store_dir);
+        complete = BuildColdBitmapSectionsForAllDbs(data_store_dir, now);
     } catch (const std::exception &e) {
         spdlog::error("[CATIDX] - Bitmap build pass failed: {}", e.what());
     }
@@ -975,7 +1031,9 @@ void XStore::BackgroundIndexTick(const std::string &data_store_dir, BackgroundIn
         // interval later.
         schedule.next_bitmap_build = now() + std::chrono::seconds(XStoreTunables::LIVE_WIDEN_BITMAP_BUILD_RESUME_DELAY_SEC);
     } else {
-        schedule.next_bitmap_build = now() + std::chrono::seconds(XStoreTunables::CATIDX_BITMAP_BUILD_POLL_INTERVAL_SEC);
+        // A year deferred for lack of pool room is retried when its backoff ends, which is sooner than the poll interval.
+        schedule.next_bitmap_build = std::min(now() + std::chrono::seconds(XStoreTunables::CATIDX_BITMAP_BUILD_POLL_INTERVAL_SEC),
+                                              EarliestBitmapRetry());
     }
 }
 

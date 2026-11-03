@@ -4,6 +4,7 @@
 // CATIDX_BITMAP_BUILD_LEASE_STEP_BYTES steps. Bitmap build is background work, so it never waits in the pool's line: when a
 // step cannot be had at once the year is abandoned for this pass (nothing appended) and the function reports it.
 #include <gtest/gtest.h>
+#include <functional>
 #include "XStore/XStore.h"
 #include "XStore/XStore_CatIdx.h"
 #include "XStore/XStore_MemoryPool.h"
@@ -113,6 +114,114 @@ TEST_F(BitmapBuildLeaseTest, ASmallYearNeverTouchesThePool) {
     FillYear(kSmallRows);
     HogAllBut(0);
     EXPECT_TRUE(Build());
+    EXPECT_TRUE(HasBitmaps());
+}
+
+
+// ---- A year that does not fit is not rescanned every 30 s (TODO: bitmap build retries from scratch) ----
+// The per-year function still reports a deferral at once (the tests above); the pass over all years remembers it: a backoff that doubles from
+// LIVE_WIDEN_BITMAP_BUILD_RESUME_DELAY_SEC up to the poll interval, and for a year that needs more than the pool's whole limit, no retry until restart.
+class BitmapBuildBackoffTest : public BitmapBuildLeaseTest {
+protected:
+    using Clock = std::chrono::steady_clock;
+    Clock::time_point fake_now = Clock::time_point{} + std::chrono::hours(1);
+    std::function<Clock::time_point()> Now() { return [this] { return fake_now; }; }
+    std::string DataStoreDir() const { return (scratch->test_root / "DataStore").string(); }
+    bool Pass() { return store->BuildColdBitmapSectionsForAllDbs(DataStoreDir(), Now()); }
+    const XStore::BitmapDeferral *Deferral() const { return store->BitmapDeferralFor(DbPath(), year); }
+    static std::chrono::seconds Delay(uint32_t attempt) {
+        return std::chrono::seconds(std::min<uint64_t>(XStoreTunables::LIVE_WIDEN_BITMAP_BUILD_RESUME_DELAY_SEC << (attempt - 1),
+                                                       XStoreTunables::CATIDX_BITMAP_BUILD_POLL_INTERVAL_SEC));
+    }
+};
+
+TEST_F(BitmapBuildBackoffTest, ADeferredYearIsNotScannedAgainBeforeItsBackoffEnds) {
+    FillYear(kOneStepRows);
+    HogAllBut(0);
+    const uint64_t scans = XStore::BitmapYearScansStarted();
+    EXPECT_TRUE(Pass());   // a deferred year is tracked, not reported as an interrupted run
+    EXPECT_EQ(XStore::BitmapYearScansStarted(), scans + 1);
+    ASSERT_NE(Deferral(), nullptr);
+    EXPECT_EQ(Deferral()->attempts, 1u);
+    EXPECT_FALSE(Deferral()->permanent);
+    EXPECT_EQ(Deferral()->retry_at, fake_now + Delay(1));
+
+    fake_now += std::chrono::seconds(XStoreTunables::LIVE_WIDEN_BITMAP_BUILD_RESUME_DELAY_SEC - 1);
+    EXPECT_TRUE(Pass());
+    EXPECT_EQ(XStore::BitmapYearScansStarted(), scans + 1) << "scanned again inside the backoff";
+
+    fake_now += std::chrono::seconds(2);
+    EXPECT_TRUE(Pass());
+    EXPECT_EQ(XStore::BitmapYearScansStarted(), scans + 2) << "not retried once the backoff ended";
+    EXPECT_EQ(Deferral()->attempts, 2u);
+}
+
+TEST_F(BitmapBuildBackoffTest, TheBackoffDoublesAndStopsAtThePollInterval) {
+    FillYear(kOneStepRows);
+    HogAllBut(0);
+    for (uint32_t attempt = 1; attempt <= 12; ++attempt) {
+        EXPECT_TRUE(Pass());
+        ASSERT_NE(Deferral(), nullptr);
+        EXPECT_EQ(Deferral()->attempts, attempt);
+        EXPECT_EQ(Deferral()->retry_at, fake_now + Delay(attempt)) << "attempt " << attempt;
+        fake_now = Deferral()->retry_at;
+    }
+    EXPECT_EQ(Deferral()->retry_at - fake_now, std::chrono::seconds(0));
+    EXPECT_EQ(Delay(12), std::chrono::seconds(XStoreTunables::CATIDX_BITMAP_BUILD_POLL_INTERVAL_SEC));
+}
+
+TEST_F(BitmapBuildBackoffTest, AYearThatNeverFitsThePoolIsNotRetriedUntilRestart) {
+    FillYear(kOneStepRows);
+    HogAllBut(0);
+    store->SetBitmapPoolLimitForTests(XStoreTunables::CATIDX_BITMAP_BUILD_LEASE_STEP_BYTES / 2);   // the first step alone is over the limit
+    const uint64_t scans = XStore::BitmapYearScansStarted();
+    EXPECT_TRUE(Pass());
+    ASSERT_NE(Deferral(), nullptr);
+    EXPECT_TRUE(Deferral()->permanent);
+    EXPECT_GT(Deferral()->need_bytes, XStoreTunables::CATIDX_BITMAP_BUILD_LEASE_STEP_BYTES / 2);
+
+    hog.reset();   // even with the pool free, and a day later: the limit did not change, nothing is scanned
+    fake_now += std::chrono::hours(24);
+    EXPECT_TRUE(Pass());
+    EXPECT_EQ(XStore::BitmapYearScansStarted(), scans + 1);
+    EXPECT_FALSE(HasBitmaps());
+}
+
+TEST_F(BitmapBuildBackoffTest, ASuccessfulRetryBuildsTheSectionAndForgetsTheDeferral) {
+    FillYear(kOneStepRows);
+    HogAllBut(0);
+    EXPECT_TRUE(Pass());
+    ASSERT_NE(Deferral(), nullptr);
+    hog.reset();
+    fake_now = Deferral()->retry_at;
+    EXPECT_TRUE(Pass());
+    EXPECT_EQ(Deferral(), nullptr);
+    EXPECT_TRUE(HasBitmaps());
+}
+
+TEST_F(BitmapBuildBackoffTest, TheBackgroundTickWakesAtTheRetryNotAtThePollInterval) {
+    FillYear(kOneStepRows);
+    HogAllBut(0);
+    XStore::BackgroundIndexSchedule schedule;   // the first tick builds
+    store->BackgroundIndexTick(DataStoreDir(), schedule, Now());
+    ASSERT_NE(Deferral(), nullptr);
+    EXPECT_EQ(schedule.next_bitmap_build, fake_now + Delay(1)) << "the tick would sleep the whole poll interval";
+    fake_now = schedule.next_bitmap_build;
+    store->BackgroundIndexTick(DataStoreDir(), schedule, Now());
+    EXPECT_EQ(schedule.next_bitmap_build, fake_now + Delay(2));
+
+    hog.reset();
+    fake_now = schedule.next_bitmap_build;
+    store->BackgroundIndexTick(DataStoreDir(), schedule, Now());
+    EXPECT_TRUE(HasBitmaps());
+    EXPECT_EQ(schedule.next_bitmap_build, fake_now + std::chrono::seconds(XStoreTunables::CATIDX_BITMAP_BUILD_POLL_INTERVAL_SEC));
+}
+
+TEST_F(BitmapBuildBackoffTest, ASmallYearIsBuiltByThePassAndLeavesNoDeferral) {
+    FillYear(kSmallRows);
+    HogAllBut(0);
+    EXPECT_TRUE(Pass());
+    EXPECT_EQ(Deferral(), nullptr);
     EXPECT_TRUE(HasBitmaps());
 }
 

@@ -1254,7 +1254,25 @@ class XStore {
         // (it takes part in the RemoveDB handshake, see bg_mutex_).
         // Returns false when the run stopped early (a cancel, shutdown, a pending widen, or a DB whose cfg changed
         // during the run), true when it went through.
-        bool BuildColdBitmapSectionsForAllDbs(const std::string &data_store_dir);
+        // A year whose build was deferred (the MemoryPool had no room for its accumulators) is remembered by the pass, not retried at once:
+        // the retry waits LIVE_WIDEN_BITMAP_BUILD_RESUME_DELAY_SEC, then twice that, and so on up to the poll interval; a year that needs more
+        // than the pool's whole limit is not retried until restart (the limit does not change). The year's scan stops at the first step the
+        // pool refuses, so a retry that hits the wall again is cheap, but a rescan every 30 s of a year that can never finish was not.
+        // `now` is the clock (the real one by default); a deferred year is not "an interrupted run": the pass still returns true for it.
+        struct BitmapDeferral {
+            uint32_t attempts = 0;
+            std::chrono::steady_clock::time_point retry_at{};
+            bool permanent = false;
+            uint64_t need_bytes = 0;   // the accumulators' reservation at the step the pool refused
+        };
+        bool BuildColdBitmapSectionsForAllDbs(const std::string &data_store_dir,
+                                              const std::function<std::chrono::steady_clock::time_point()> &now = {});
+        // The deferral of one year (nullptr: none), the earliest retry among the years that are not permanently skipped (time_point::max():
+        // none), and, for tests, how many year scans were started in this process and a pool limit to judge "never fits" against.
+        [[nodiscard]] const BitmapDeferral *BitmapDeferralFor(const std::string &db_base_path, unsigned short year) const;
+        [[nodiscard]] std::chrono::steady_clock::time_point EarliestBitmapRetry() const;
+        static uint64_t BitmapYearScansStarted();
+        void SetBitmapPoolLimitForTests(uint64_t limit) { bitmap_pool_limit_for_tests_ = limit; }
 
         // One tick of the background index thread (StartBitmapBuildThread runs it every LIVE_WIDEN_TICK_SEC with
         // the real clock; tests with a fake one). Due live widening first (RunLiveWidenPass). Bitmap build yields to
@@ -1268,6 +1286,10 @@ class XStore {
         };
         void BackgroundIndexTick(const std::string &data_store_dir, BackgroundIndexSchedule &schedule,
                                  const std::function<std::chrono::steady_clock::time_point()> &now);
+        // Used by the background thread's pass (and tests) only, never by two threads at once.
+        std::unordered_map<std::string, BitmapDeferral> bitmap_deferrals_;
+        uint64_t last_bitmap_need_bytes_ = 0;   // set by BuildOneYearBitmapSection when it returns false
+        std::optional<uint64_t> bitmap_pool_limit_for_tests_;
 
         // Rebuilds this year's .catidx bloom from the year file (Task 11): a thin wrapper over RebuildYearIndexes with
         // only the catidx selected, so it takes the same path InitDB does (the .zmap is not touched). A correctness
