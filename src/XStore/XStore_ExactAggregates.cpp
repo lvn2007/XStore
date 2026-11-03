@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <cstring>
 
 namespace xstore {
@@ -76,15 +77,22 @@ bool Better(const std::pair<double, uint64_t> &a, const std::pair<double, uint64
 
 }  // namespace
 
-double ExactPercentile(std::vector<double> &values, double percentile) {
-    const double rank = percentile * static_cast<double>(values.size() - 1);
+double ExactPercentile(std::vector<double> &values, double percentile, uint64_t *nan_skipped) {
+    // A NaN is not less than, greater than or equal to anything: nth_element over data that holds one is not a sort of anything, and the
+    // result depended on where the NaNs sat. They are left out (the percentile of the numbers), and counted.
+    const auto end = PartitionOutNaN(values);
+    const size_t count = static_cast<size_t>(end - values.begin());
+    if (nan_skipped != nullptr) *nan_skipped = values.size() - count;
+    if (count == 0) return std::numeric_limits<double>::quiet_NaN();
+    const double rank = percentile * static_cast<double>(count - 1);
     const size_t lower = static_cast<size_t>(std::floor(rank));
     const size_t upper = static_cast<size_t>(std::ceil(rank));
     const double fraction = rank - static_cast<double>(lower);
-    std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(lower), values.end());
+    std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(lower), end);
     const double low = values[lower];
     // Everything after `lower` is now >= it, so the next rank is the minimum of that part.
-    const double high = upper == lower ? low : *std::min_element(values.begin() + static_cast<std::ptrdiff_t>(lower) + 1, values.end());
+    const double high = upper == lower ? low : *std::min_element(values.begin() + static_cast<std::ptrdiff_t>(lower) + 1, end);
+    if (high == low) return low;   // also two equal infinities: inf - inf would be NaN
     return low + fraction * (high - low);
 }
 

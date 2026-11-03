@@ -961,7 +961,18 @@ void XStore::PercentileAggregate(unsigned long long int start_epoch_t, unsigned 
 
     // Exact, PERCENTILE_CONT (linear-interpolation) semantics -- same
     // interpolation numpy.percentile/most SQL engines default to.
-    const double value = xstore::ExactPercentile(all_values, percentile);
+    // NaNs are left out of the ranking (ExactPercentile); the status stays exactly "SUCCESS" (callers compare it), so the count goes to the log.
+    uint64_t nan_skipped = 0;
+    const double value = xstore::ExactPercentile(all_values, percentile, &nan_skipped);
+    if (nan_skipped == all_values.size()) {
+        return_data->set_opstatus("ERROR: No valid data found");
+        spdlog::warn("[PERCENTILE AGGREGATE] [DB: {}] - Every value of column {} over [{}, {}] is NaN", db_name, column_idx, start_epoch_t, end_epoch_t);
+        return;
+    }
+    if (nan_skipped > 0) {
+        spdlog::warn("[PERCENTILE AGGREGATE] [DB: {}] - {} NaN value(s) of column {} over [{}, {}] left out of the percentile", db_name, nan_skipped,
+                     column_idx, start_epoch_t, end_epoch_t);
+    }
 
     return_data->set_opstatus("SUCCESS");
     return_data->set_value(value);

@@ -6,7 +6,7 @@
 //     there are few), then sort + unique in place (no extra memory when nearly every value is distinct).
 //   * ExactTopK: sort, then count runs and keep the k best in a heap: no hash map, no list of every (value, count) pair.
 // Results equal the straightforward hash-set / hash-map / full-sort versions. A NaN is never equal to anything, so each NaN is
-// one distinct value and one entry of count 1, as it was with std::unordered_set / std::unordered_map.
+// one distinct value and one entry of count 1, as it was with std::unordered_set / std::unordered_map. Percentile skips NaNs.
 #include "include/XStore/XStore_Tunables.h"
 #include <cstddef>
 #include <cstdint>
@@ -15,8 +15,9 @@
 
 namespace xstore {
 
-// `values` is not empty, `percentile` in [0, 1]. PERCENTILE_CONT: linear interpolation between the two nearest ranks.
-[[nodiscard]] double ExactPercentile(std::vector<double> &values, double percentile);
+// `values` is not empty, `percentile` in [0, 1]. PERCENTILE_CONT: linear interpolation between the two nearest ranks. NaNs are skipped (the
+// percentile of the numbers, as pandas does); *nan_skipped, when given, is how many. NaN when every value is NaN.
+[[nodiscard]] double ExactPercentile(std::vector<double> &values, double percentile, uint64_t *nan_skipped = nullptr);
 
 [[nodiscard]] uint64_t ExactDistinctCount(std::vector<double> &values,
                                           size_t max_table_distinct = XStoreTunables::EXACT_DISTINCT_TABLE_MAX_DISTINCT);

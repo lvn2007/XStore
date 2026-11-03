@@ -2,10 +2,13 @@
 // std::unordered_set, std::unordered_map + ranked vector), on every data shape: few and many distinct values, around the point
 // where DistinctCount leaves its flat table for sort + unique, duplicates, signed zeros, NaN.
 #include <gtest/gtest.h>
+#include "XStoreTestSupport.h"
+#include "include/XStore/XStore.h"
 #include "include/XStore/XStore_ExactAggregates.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <memory>
 #include <random>
 #include <unordered_map>
 #include <unordered_set>
@@ -60,6 +63,90 @@ TEST(ExactPercentileTest, MatchesAFullSortOnEveryShape) {
             }
         }
     }
+}
+
+// A NaN is not less than, greater than or equal to anything, so nth_element over data that holds one is not a sort of anything (the result depended on
+// where the NaNs sat). Percentile skips them, as pandas does, and says how many it skipped.
+TEST(ExactPercentileTest, NaNsAreSkippedWhereverTheySit) {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    std::mt19937_64 gen(11);
+    for (size_t n : {1u, 2u, 3u, 10u, 11u, 1000u}) {
+        for (size_t nans : {1u, 2u, 5u, 40u}) {
+            for (double p : {0.0, 0.1, 0.25, 0.5, 0.75, 0.99, 1.0}) {
+                const std::vector<double> numbers = Values(n, 50, static_cast<uint32_t>(n * 17 + nans));
+                std::vector<double> data = numbers;
+                for (size_t j = 0; j < nans; ++j) data.insert(data.begin() + static_cast<std::ptrdiff_t>(gen() % (data.size() + 1)), nan);
+                uint64_t skipped = 0;
+                EXPECT_EQ(xstore::ExactPercentile(data, p, &skipped), ReferencePercentile(numbers, p)) << "n=" << n << " nans=" << nans << " p=" << p;
+                EXPECT_EQ(skipped, nans);
+            }
+        }
+    }
+}
+
+TEST(ExactPercentileTest, ValuesOfOnlyNaNGiveNaNAndAreAllCounted) {
+    std::vector<double> data(7, std::numeric_limits<double>::quiet_NaN());
+    uint64_t skipped = 0;
+    EXPECT_TRUE(std::isnan(xstore::ExactPercentile(data, 0.5, &skipped)));
+    EXPECT_EQ(skipped, 7u);
+}
+
+// Interpolating between two equal infinities is inf - inf = NaN; two equal values interpolate to themselves.
+TEST(ExactPercentileTest, EqualInfinitiesInterpolateToThemselves) {
+    const double inf = std::numeric_limits<double>::infinity();
+    std::vector<double> up = {inf, inf, 1.0, inf};
+    EXPECT_EQ(xstore::ExactPercentile(up, 0.9), inf);   // ranks 2 and 3 of {1, inf, inf, inf}, fraction .7
+    std::vector<double> down = {-inf, -inf, 1.0};
+    EXPECT_EQ(xstore::ExactPercentile(down, 0.25), -inf);
+}
+
+TEST(ExactPercentileTest, WithoutNaNNothingIsSkipped) {
+    std::vector<double> data = Values(100, 100, 5);
+    uint64_t skipped = 99;
+    (void)xstore::ExactPercentile(data, 0.5, &skipped);
+    EXPECT_EQ(skipped, 0u);
+}
+
+// Through the aggregate: NaN doubles stored in the column.
+class PercentileNaNTest : public ::testing::Test {
+protected:
+    static constexpr uint64_t kBase = 1704067200;   // 2024-01-01T00:00:00Z
+    std::unique_ptr<xstore_test::ScratchDir> scratch;
+    std::unique_ptr<XStore> store;
+    void SetUp() override {
+        scratch = std::make_unique<xstore_test::ScratchDir>("xstore_percentile_nan_test");
+        store = std::make_unique<XStore>();
+        xstore_test::CreateTestDb(*store, "PNAN", XStore_Proto::SECOND, 100);
+    }
+    void TearDown() override {
+        store.reset();
+        scratch.reset();
+    }
+    void Put(const std::vector<double> &values) {
+        for (size_t i = 0; i < values.size(); ++i) {
+            XStore_Proto::UnaryInsert_REP rep;
+            store->UnaryInsert(kBase + i, xstore_test::MakeRow({xstore_test::FDouble(values[i])}), "PNAN", &rep);
+        }
+    }
+    XStore_Proto::Percentile_REP Median(size_t rows) {
+        XStore_Proto::Percentile_REP rep;
+        store->PercentileAggregate(kBase, kBase + rows - 1, "PNAN", 0, 0.5, &rep);
+        return rep;
+    }
+};
+
+TEST_F(PercentileNaNTest, StoredNaNsAreLeftOutOfThePercentile) {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    Put({1, 2, nan, 4, 5, nan, 7, 8, 9, 10});   // the numbers: 1 2 4 5 7 8 9 10, median (5 + 7) / 2
+    const XStore_Proto::Percentile_REP rep = Median(10);
+    EXPECT_EQ(rep.opstatus(), "SUCCESS");
+    EXPECT_EQ(rep.value(), 6.0);
+}
+
+TEST_F(PercentileNaNTest, AColumnOfOnlyNaNHasNoValidData) {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    Put({nan, nan, nan});
+    EXPECT_EQ(Median(3).opstatus(), "ERROR: No valid data found");
 }
 
 TEST(ExactDistinctCountTest, MatchesAHashSetBelowAndAboveTheTableLimit) {
