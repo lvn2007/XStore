@@ -48,6 +48,12 @@ public:
         std::ofstream((root_ / cgroup.substr(1) / "memory.max").string()) << max << "\n";
         std::ofstream((root_ / cgroup.substr(1) / "memory.current").string()) << current << "\n";
     }
+    // memory.stat of a cgroup: the page cache the kernel can drop (inactive_file), minus what is dirty or being written back.
+    void SetStat(const std::string &cgroup, uint64_t inactive_file, uint64_t file_dirty, uint64_t file_writeback) {
+        std::ofstream((root_ / cgroup.substr(1) / "memory.stat").string())
+            << "anon 123\nfile 456\ninactive_file " << inactive_file << "\nactive_file 789\nfile_dirty " << file_dirty
+            << "\nfile_writeback " << file_writeback << "\n";
+    }
     std::string ProcFile(const std::string &cgroup) {
         const std::string path = (root_ / "proc_self_cgroup").string();
         std::ofstream(path) << "0::" << cgroup << "\n";
@@ -88,6 +94,68 @@ TEST(MemoryPoolTest, NoLimitAnywhereMeansUnlimited) {
     const xstore::CgroupMemory missing = xstore::ReadCgroupMemory(cg.Root(), cg.Root() + "/no_such_file");
     EXPECT_EQ(missing.max, 0u);
     EXPECT_EQ(missing.headroom, MemoryPool::kUnknown);
+}
+
+// A write-heavy process fills its cgroup with page cache; memory.current counts it, but the kernel drops clean cache before it kills anything, so the
+// pool must not treat it as used (an insert would wait for memory that is only cache).
+TEST(MemoryPoolTest, CleanInactivePageCacheCountsAsHeadroom) {
+    FakeCgroups cg;
+    cg.Set("/system.slice/run-1.scope", std::to_string(8 * GB), 8 * GB - 100 * MB);
+    cg.SetStat("/system.slice/run-1.scope", 5 * GB, 0, 0);
+    const xstore::CgroupMemory m = xstore::ReadCgroupMemory(cg.Root(), cg.ProcFile("/system.slice/run-1.scope"));
+    EXPECT_EQ(m.max, 8 * GB);
+    EXPECT_EQ(m.headroom, 100 * MB + 5 * GB);
+}
+
+TEST(MemoryPoolTest, DirtyAndWritebackPagesAreNotCountedAsHeadroom) {
+    FakeCgroups cg;
+    cg.Set("/system.slice/run-1.scope", std::to_string(8 * GB), 8 * GB - 100 * MB);
+    cg.SetStat("/system.slice/run-1.scope", 5 * GB, 1 * GB, 512 * MB);   // only 3.5 GiB of the 5 GiB can be dropped without writing it first
+    const xstore::CgroupMemory m = xstore::ReadCgroupMemory(cg.Root(), cg.ProcFile("/system.slice/run-1.scope"));
+    EXPECT_EQ(m.headroom, 100 * MB + 5 * GB - 1 * GB - 512 * MB);
+}
+
+TEST(MemoryPoolTest, MoreDirtyPagesThanInactiveCacheAddsNothing) {
+    FakeCgroups cg;
+    cg.Set("/system.slice/run-1.scope", std::to_string(8 * GB), 7 * GB);
+    cg.SetStat("/system.slice/run-1.scope", 1 * GB, 3 * GB, 2 * GB);   // dirty pages can sit on the active list too
+    const xstore::CgroupMemory m = xstore::ReadCgroupMemory(cg.Root(), cg.ProcFile("/system.slice/run-1.scope"));
+    EXPECT_EQ(m.headroom, 1 * GB);
+}
+
+TEST(MemoryPoolTest, HeadroomNeverExceedsTheLimitWhateverMemoryStatSays) {
+    FakeCgroups cg;
+    cg.Set("/system.slice/run-1.scope", std::to_string(1 * GB), 400 * MB);
+    cg.SetStat("/system.slice/run-1.scope", 900 * MB, 0, 0);   // more cache than the cgroup holds: a stale or odd file
+    const xstore::CgroupMemory m = xstore::ReadCgroupMemory(cg.Root(), cg.ProcFile("/system.slice/run-1.scope"));
+    EXPECT_EQ(m.headroom, 1 * GB);
+}
+
+TEST(MemoryPoolTest, WithoutMemoryStatTheHeadroomIsTheOldOne) {
+    FakeCgroups cg;
+    cg.Set("/system.slice/run-1.scope", std::to_string(8 * GB), 3 * GB);
+    const xstore::CgroupMemory m = xstore::ReadCgroupMemory(cg.Root(), cg.ProcFile("/system.slice/run-1.scope"));
+    EXPECT_EQ(m.headroom, 5 * GB);
+}
+
+TEST(MemoryPoolTest, EachLimitedLevelUsesItsOwnPageCache) {
+    FakeCgroups cg;
+    cg.Set("/system.slice/run-1.scope", std::to_string(8 * GB), 1 * GB);
+    cg.Set("/system.slice", std::to_string(4 * GB), 4 * GB - 512 * MB);
+    cg.SetStat("/system.slice/run-1.scope", 900 * MB, 0, 0);   // the inner cache does not make room in the outer level
+    cg.SetStat("/system.slice", 2 * GB, 0, 0);
+    const xstore::CgroupMemory m = xstore::ReadCgroupMemory(cg.Root(), cg.ProcFile("/system.slice/run-1.scope"));
+    EXPECT_EQ(m.max, 4 * GB);
+    EXPECT_EQ(m.headroom, 512 * MB + 2 * GB);
+}
+
+TEST(MemoryPoolTest, AnUnlimitedLevelIgnoresItsMemoryStat) {
+    FakeCgroups cg;
+    cg.Set("/system.slice/run-1.scope", "max", 3 * GB);
+    cg.SetStat("/system.slice/run-1.scope", 2 * GB, 0, 0);
+    const xstore::CgroupMemory m = xstore::ReadCgroupMemory(cg.Root(), cg.ProcFile("/system.slice/run-1.scope"));
+    EXPECT_EQ(m.max, 0u);
+    EXPECT_EQ(m.headroom, MemoryPool::kUnknown);
 }
 
 TEST(MemoryPoolTest, GrantsWithinTheLimitAndGivesBackWhenTheLastOwnerLetsGo) {

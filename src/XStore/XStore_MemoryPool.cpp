@@ -64,6 +64,20 @@ bool ReadCgroupNumber(const std::string &path, uint64_t &out) {
     return end && *end == '\0';
 }
 
+// The page cache of a cgroup that the kernel drops without writing anything: memory.stat's inactive_file less what is dirty or under writeback.
+// memory.current counts it, but a write-heavy process fills its cgroup with it, and the kernel reclaims it before it kills anything.
+uint64_t ReadCgroupDroppableCache(const std::string &stat_path) {
+    std::ifstream f(stat_path);
+    std::string key;
+    uint64_t value = 0, inactive = 0, dirty = 0, writeback = 0;
+    while (f >> key >> value) {
+        if (key == "inactive_file") inactive = value;
+        else if (key == "file_dirty") dirty = value;
+        else if (key == "file_writeback") writeback = value;
+    }
+    return inactive > dirty + writeback ? inactive - dirty - writeback : 0;
+}
+
 // /proc/meminfo MemAvailable, capped by the headroom of the process's own cgroup (and its ancestors) when a limit is set.
 uint64_t ReadHostAvailableBytes() {
     const uint64_t available = ReadMemAvailableBytes();
@@ -81,8 +95,10 @@ CgroupMemory ReadCgroupMemory(const std::string &cgroup_root, const std::string 
         uint64_t max = 0, current = 0;
         if (ReadCgroupNumber(dir + "/memory.max", max)) {
             ReadCgroupNumber(dir + "/memory.current", current);
+            const uint64_t cache = std::min(current, ReadCgroupDroppableCache(dir + "/memory.stat"));   // read only for a limited level
+            const uint64_t used = current - cache;
             result.max = result.max == 0 ? max : std::min(result.max, max);
-            result.headroom = std::min(result.headroom, max > current ? max - current : 0);
+            result.headroom = std::min(result.headroom, max > used ? max - used : 0);
         }
         const size_t slash = path.rfind('/');
         if (path.empty() || slash == std::string::npos) break;

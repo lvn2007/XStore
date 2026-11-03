@@ -27,7 +27,9 @@ namespace xstore {
 
 // The memory limit and headroom of the cgroup (v2) the process runs in: `proc_cgroup_file` (/proc/self/cgroup) names it, and every
 // ancestor up to `cgroup_root` (/sys/fs/cgroup) is considered too. `max` is the tightest memory.max (0: no limit anywhere),
-// `headroom` the smallest memory.max - memory.current over the limited levels (UINT64_MAX: no limit anywhere).
+// `headroom` the smallest memory.max - (memory.current - the clean page cache the kernel can drop: memory.stat inactive_file less file_dirty and
+// file_writeback) over the limited levels (UINT64_MAX: no limit anywhere). The cache counts as free because a process that writes a lot fills its cgroup
+// with it, and the kernel reclaims it before it kills anything.
 struct CgroupMemory {
     uint64_t max = 0;
     uint64_t headroom = UINT64_MAX;
