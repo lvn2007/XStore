@@ -183,24 +183,24 @@ Performance evaluated across latency, throughput, aggregate/analytical queries, 
 
 <details open><summary>Latency</summary>
 
-![XStore Latency](benchmark_artifact/XStore_latencyNumerical.svg)
+![XStore Latency](benchmark_artifact_91e167d0/XStore_latencyNumerical.svg)
 
 </details>
 
 <details open><summary>Throughput</summary>
 
-![XStore Throughput](benchmark_artifact/XStore_throughputNumerical.svg)
+![XStore Throughput](benchmark_artifact_91e167d0/XStore_throughputNumerical.svg)
 
 </details>
 
 <details open><summary>Aggregates / Analytical Queries</summary>
 
-![XStore Aggregates](benchmark_artifact/XStore_analyticalQueries.svg)
+![XStore Aggregates](benchmark_artifact_91e167d0/XStore_analyticalQueries.svg)
 
 </details>
 
 <details open><summary>Backtesting</summary>
 
-![XStore Backtesting](benchmark_artifact/XStore_Backtester.svg)
+![XStore Backtesting](benchmark_artifact_91e167d0/XStore_Backtester.svg)
 
 </details>

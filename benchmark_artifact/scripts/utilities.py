@@ -25,8 +25,8 @@ marker = itertools.cycle((">", "o", "s", "^", "v", "p", "P", "d", "*"))
 DEFAULT_KEEPALIVE_SEC = 30
 DEFAULT_RESTORE_TIMEOUT_SEC = 3600
 
-# server_ips/client_ips (64.131.114.*) all route through a single ProxyJump
-# gateway (see ~/.ssh/config: "Host 64.131.114.* / ProxyJump mysticLogin").
+# server_ips/client_ips (172.16.5.*) all route through a single ProxyJump
+# gateway (see ~/.ssh/config: "Host 172.16.5.* / ProxyJump mysticLogin").
 # Every new SSH handshake -- explicit makeConnection() or Fabric's lazy
 # reopen after a .close() -- is therefore a fresh unauthenticated session on
 # that ONE gateway's sshd, which defaults to MaxStartups 10:30:100: at 10

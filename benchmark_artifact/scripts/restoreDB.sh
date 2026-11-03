@@ -10,7 +10,7 @@ if [ ${DATASET} == "BACKTESTER" ]; then
 fi
 
 urlTACC="https://chi.tacc.chameleoncloud.org:7480/swift/v1/AUTH_07e3c8c4081143c189d399c676ad139f/${DATA_DIR}/${DB_NAME}_${DATASET}.tar.zst"
-urlMystic="http://172.16.6.231:8000/${DATA_DIR}/${DB_NAME}_${DATASET}.tar.zst"
+urlMystic="http://172.16.6.15:8000/${DATA_DIR}/${DB_NAME}_${DATASET}.tar.zst"
 
 # Default download URL to TACC site
 defaultURL=${urlTACC}
