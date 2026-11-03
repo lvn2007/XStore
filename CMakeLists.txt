@@ -464,6 +464,7 @@ add_library(xstore_core STATIC
         src/XStore/XStore_Aggregates.cpp
         src/XStore/XStore_ExactAggregates.cpp
         include/XStore/XStore_ExactAggregates.h
+        include/XStore/XStore_RowDecode.h
         src/XStore/XStore_PatternOps.cpp
         include/XStore/XStore.h
         include/DataStructs/ValueStruct.h

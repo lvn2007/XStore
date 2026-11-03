@@ -1,4 +1,5 @@
 #include "include/XStore/XStore.h"
+#include "include/XStore/XStore_RowDecode.h"
 #include <algorithm>
 #include <fcntl.h>
 #include <unistd.h>
@@ -534,6 +535,15 @@ void XStore::ProcessFileRangeCollectValues(const char* rows_base, unsigned long 
         const char* row_ptr = rows_base + (i * row_len);
 
         if (row_ptr[0] == 0) continue;
+
+        // Plain-pointer decode first (XStore_RowDecode.h); the protobuf path below only for a row it declines to decide.
+        double decoded;
+        const xstore::RowDecode decode = xstore::DecodeColumnAsDouble(row_ptr, row_len, column_idx, &decoded);
+        if (decode == xstore::RowDecode::kValue) {
+            values_out.push_back(decoded);
+            continue;
+        }
+        if (decode == xstore::RowDecode::kSkip) continue;
 
         curr_data.Clear();
         if (!ExtractColumnByIndexSkipParse(row_ptr, row_len, column_idx, curr_data)) continue;

@@ -784,10 +784,18 @@ class XStore {
         // each thread's partial result into the running total sequentially
         // after all threads join -- cheap, O(#threads) not O(#rows).
         // Returns the fully-merged state.
-        template <typename PartialState, typename SegmentKernel, typename MergeFn>
+        // reserve_fn(PartialState&, rows), when given, runs once for each piece's state before its first chunk with the most rows the
+        // piece can hold, so a state that grows (a vector of values) is sized once instead of regrown at every 4 MiB chunk the scan lock
+        // hands the kernel (the sequential path calls it once for the whole span).
+        struct NoSegmentReserve {
+            template <typename PartialState>
+            void operator()(PartialState &, unsigned long long) const {}
+        };
+        template <typename PartialState, typename SegmentKernel, typename MergeFn, typename ReserveFn = NoSegmentReserve>
         PartialState WalkYearSpanParallel(const std::string &db_base_path, const XStore_Proto::ConfigStruct &cfg_struct,
                                             unsigned long long start_epoch_t, unsigned long long end_epoch_t,
-                                            PartialState initial_state, SegmentKernel &&segment_kernel, MergeFn &&merge_fn);
+                                            PartialState initial_state, SegmentKernel &&segment_kernel, MergeFn &&merge_fn,
+                                            ReserveFn &&reserve_fn = ReserveFn{});
 
         // Shared mmap-backed scan kernels used by Min/Max/Sum/AvgAggregate ----------
         // rowsBase points directly into GetOrMapFile's cached, already-resident

@@ -76,10 +76,11 @@ void XStore::WalkYearSpan(const std::string &db_base_path, const XStore_Proto::C
 // number was chosen) take the parallel path.
 constexpr size_t K_MIN_SEGMENTS_FOR_PARALLEL_WALK = 4;
 
-template <typename PartialState, typename SegmentKernel, typename MergeFn>
+template <typename PartialState, typename SegmentKernel, typename MergeFn, typename ReserveFn>
 PartialState XStore::WalkYearSpanParallel(const std::string &db_base_path, const XStore_Proto::ConfigStruct &cfg_struct,
                                             unsigned long long start_epoch_t, unsigned long long end_epoch_t,
-                                            PartialState initial_state, SegmentKernel &&segment_kernel, MergeFn &&merge_fn) {
+                                            PartialState initial_state, SegmentKernel &&segment_kernel, MergeFn &&merge_fn,
+                                            ReserveFn &&reserve_fn) {
     // Enumerate segments first -- O(#years), not O(#rows), so this is cheap
     // even for a wide span -- to know upfront whether parallel dispatch is
     // worth it before committing to any thread spawning.
@@ -114,6 +115,7 @@ PartialState XStore::WalkYearSpanParallel(const std::string &db_base_path, const
         // no threads, no merge step, byte-for-byte the same code path this
         // function used before parallelism existed.
         PartialState result = initial_state;
+        reserve_fn(result, end_epoch_t - start_epoch_t + 1);
         WalkYearSpan(db_base_path, cfg_struct, start_epoch_t, end_epoch_t,
             [&](const char *rows_base, unsigned long long rows_to_process, unsigned short year, unsigned long long first_row_index) {
                 segment_kernel(result, rows_base, rows_to_process, year, first_row_index);
@@ -142,6 +144,7 @@ PartialState XStore::WalkYearSpanParallel(const std::string &db_base_path, const
     XStorePreadPool::ParallelFor(wave, [&](size_t in_wave) {
         const size_t s = wave_start + in_wave;
         const Segment &seg = segments[s];
+        reserve_fn(partial_results[s], seg.end - seg.start + 1);
         // Each Segment already falls entirely within one year (built that
         // way above), so this WalkYearSpan call's internal loop runs
         // exactly once -- reuses the exact same GetOrMapFile/lock/madvise/
@@ -215,8 +218,17 @@ struct VariancePartial {
 // concatenation (order doesn't matter -- see ProcessFileRangeCollectValues's
 // comment); each of the three ops then reduces the fully-merged vector
 // differently (sort+interpolate / hash-set size / frequency-map top-k).
-struct CollectPartial {
+// One cache line each: the pieces' partial states sit side by side in one vector and every push_back writes its vector's end pointer, so
+// states sharing a line made all the threads fight over it (a piece took ~150 ms for 1M rows, ten times a single thread's rate).
+struct alignas(64) CollectPartial {
     std::vector<double> values;
+};
+static_assert(alignof(CollectPartial) == 64, "neighbouring pieces' states must not share a cache line");
+
+// A piece's values vector is sized once for the most values the piece can hold (untouched pages of it are not resident), not regrown
+// chunk by chunk as the scan lock hands the kernel 4 MiB at a time: that regrowth copied the vector at every chunk, ~90 % of a 12M-row call.
+struct ReserveCollected {
+    void operator()(CollectPartial &partial, unsigned long long rows) const { partial.values.reserve(rows); }
 };
 
 // Takes the first non-empty partial over as it is and frees each partial once it is appended, so the segments' vectors and
@@ -950,7 +962,7 @@ void XStore::PercentileAggregate(unsigned long long int start_epoch_t, unsigned 
             unsigned short /*year*/, unsigned long long /*first_row_index*/) {
             ProcessFileRangeCollectValues(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.values);
         },
-        MergeCollected);
+        MergeCollected, ReserveCollected{});
     std::vector<double> all_values = std::move(final_state.values);
 
     if (all_values.empty()) {
@@ -1016,7 +1028,7 @@ void XStore::DistinctCountAggregate(unsigned long long int start_epoch_t, unsign
             unsigned short /*year*/, unsigned long long /*first_row_index*/) {
             ProcessFileRangeCollectValues(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.values);
         },
-        MergeCollected);
+        MergeCollected, ReserveCollected{});
     std::vector<double> all_values = std::move(final_state.values);
 
     // An empty range is a legitimate count of zero, not an error -- same
@@ -1065,7 +1077,7 @@ void XStore::TopKAggregate(unsigned long long int start_epoch_t, unsigned long l
             unsigned short /*year*/, unsigned long long /*first_row_index*/) {
             ProcessFileRangeCollectValues(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.values);
         },
-        MergeCollected);
+        MergeCollected, ReserveCollected{});
     std::vector<double> all_values = std::move(final_state.values);
 
     // Fewer than k distinct values in range returns however many exist --

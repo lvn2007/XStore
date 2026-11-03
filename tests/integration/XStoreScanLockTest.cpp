@@ -18,6 +18,25 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <atomic>
+#include <cstdlib>
+#include <new>
+
+// Counts the allocations of 24 KiB or more (a value vector of the test rows is 32 KiB per zone-map block) while armed. Replaces the global
+// operator new of this test binary only to count.
+namespace {
+std::atomic<bool> g_count_big_allocs{false};
+std::atomic<uint64_t> g_big_allocs{0};
+}  // namespace
+void *operator new(std::size_t size) {
+    if (g_count_big_allocs.load(std::memory_order_relaxed) && size >= 24576) {
+        g_big_allocs.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (void *p = std::malloc(size == 0 ? 1 : size)) return p;
+    throw std::bad_alloc();
+}
+void operator delete(void *p) noexcept { std::free(p); }
+void operator delete(void *p, std::size_t) noexcept { std::free(p); }
 
 namespace {
 
@@ -120,6 +139,59 @@ TEST_F(ScanLockTest, EveryScanOpGivesTheSameAnswerWholeAndChunked) {
         xstore::scanlock::Set(Sequential(chunk_bytes));
         for (const Op &op : Ops()) {
             EXPECT_EQ(op.run(*store, db, base), op.expected) << op.name << " with chunks of " << chunk_bytes << " bytes";
+        }
+    }
+}
+
+// An exact aggregate collects its values in one vector per piece, and the scan lock hands the kernel one chunk at a time: the vector must
+// be sized once for the piece, not regrown (reallocated and copied) at every chunk, which made a 12M-row call spend ~90 % of its time in
+// memmove (Mystic, 2026-11-03).
+TEST_F(ScanLockTest, TheExactAggregatesAllocateEachValueVectorOnce) {
+    const auto call = [&](int op) {
+        if (op == 0) {
+            XStore_Proto::Percentile_REP rep;
+            store->PercentileAggregate(base, base + kRows - 1, db, 0, 0.5, &rep);
+            EXPECT_NEAR(rep.value(), (kRows - 1) / 2.0, 1.0);
+        } else if (op == 1) {
+            XStore_Proto::DistinctCount_REP rep;
+            store->DistinctCountAggregate(base, base + kRows - 1, db, 0, &rep);
+            EXPECT_EQ(rep.count(), kRows);
+        } else {
+            XStore_Proto::TopK_REP rep;
+            store->TopKAggregate(base, base + kRows - 1, db, 0, 3, &rep);
+            EXPECT_EQ(rep.entries_size(), 3);
+        }
+    };
+    const auto big_allocations = [&](const xstore::scanlock::Config &config, int op) {
+        xstore::scanlock::Set(config);
+        uint64_t fewest = UINT64_MAX;
+        for (int run = 0; run < 3; ++run) {   // the least of three: another thread's allocation of that size cannot make it fail
+            g_big_allocs = 0;
+            g_count_big_allocs = true;
+            call(op);
+            g_count_big_allocs = false;
+            fewest = std::min<uint64_t>(fewest, g_big_allocs.load());
+        }
+        return fewest;
+    };
+    // Each op's own other allocations (DistinctCount's table, the merge) are the same whether the scan lock hands the kernel one chunk or
+    // many, so the count with the whole range under one lock (nothing to regrow) is the baseline the chunked count must not exceed.
+    // Sequential: one piece of five chunks. Pieces: 3 blocks each (12,288 and 7,712 rows), three and two chunks, two threads.
+    xstore::scanlock::Config pieces;
+    pieces.parallel_threads = 2;
+    pieces.piece_bytes = 3 * kBlockBytes;
+    for (int op = 0; op < 3; ++op) {
+        pieces.chunk_bytes = 0;
+        const uint64_t pieces_baseline = big_allocations(pieces, op);
+        pieces.chunk_bytes = kBlockBytes;
+        EXPECT_LE(big_allocations(pieces, op), pieces_baseline) << "op " << op << ": a piece's value vector grew chunk by chunk";
+        if (op == 0) {   // Percentile allocates nothing else of that size: one vector per piece (98,304 and 61,696 bytes) and the merge's
+            EXPECT_LE(big_allocations(pieces, op), 3u) << "a piece's vector was sized too small and regrown";
+        }
+        const uint64_t sequential_baseline = big_allocations(Sequential(0), op);
+        EXPECT_LE(big_allocations(Sequential(kBlockBytes), op), sequential_baseline) << "op " << op << ": the value vector grew chunk by chunk";
+        if (op == 0) {
+            EXPECT_LE(big_allocations(Sequential(kBlockBytes), op), 1u) << "the value vector was sized too small and regrown";
         }
     }
 }
