@@ -288,9 +288,18 @@ public:
     // state (bytes, age). Does NOT touch the per-file ring-LSN bookkeeping:
     // RingClear still needs it until the ring is checkpointed past it.
     Snapshot Take();
-    // Same view as Take() but resets nothing (the paced flush reads ranges it
-    // does not own; the cycle's Take is what consumes them).
+    // Same view as Take() but resets nothing (tests and diagnostics; the cycle's Take is what consumes the ranges).
+    // Copies every range under the lock: never call it from a loop the writers share a lock with.
     Snapshot PeekRanges() const;
+
+    // Paced-flush queue: the dirty bytes no paced flush has taken yet. It is built from the ranges by the first
+    // PopFlushChunk after a Take (one copy), then kept current by Note, which queues only bytes no earlier Note
+    // covered: bytes a flush took stay flushed when written again (the cycle's fdatasync is the arbiter for them).
+    // Below the soft fill mark nothing calls this, so Note pays one bool check and no queue exists.
+    // Takes the first chunk of at most max_bytes of the first file with queued bytes. O(log n) under the lock.
+    bool PopFlushChunk(uint64_t max_bytes, std::string &path, DirtyRange &chunk);
+    // The file could not be opened: drops its queued bytes and queues no more of its writes until the next Take.
+    void SkipFlushOf(const std::string &path);
 
     // True iff no un-checkpointed ring record touched `data_path`: for every
     // ring that recorded a write to it and is still alive,
@@ -305,6 +314,7 @@ public:
     uint64_t OldestUnsyncedAgeMs() const;   // age of the oldest range noted since the last Take; 0 if none
     uint64_t UnflushedBytes() const;        // bytes currently held in ranges
     void ClearForTests();                   // drops ranges AND ring bookkeeping
+    size_t QueuedFlushRunsForTests() const; // runs in the paced-flush queues of all files
 
 private:
     struct RingMark {
@@ -313,13 +323,17 @@ private:
         uint64_t last_lsn;
     };
     struct FileState {
-        std::map<uint64_t, uint64_t> ranges;   // begin -> end, disjoint and non-adjacent
-        std::vector<RingMark> marks;           // one per distinct ring that wrote here
+        std::map<uint64_t, uint64_t> ranges;      // begin -> end, disjoint and non-adjacent
+        std::map<uint64_t, uint64_t> unflushed;   // the part of `ranges` no paced flush took; only maintained while flush_armed_
+        bool flush_skip = false;                  // SkipFlushOf: queue nothing for this file until the next Take
+        std::vector<RingMark> marks;              // one per distinct ring that wrote here
     };
     static void AddMark(FileState &file, const std::shared_ptr<Ring> &ring, uint64_t ring_lsn_end);
+    static void QueueNewBytes(FileState &file, std::map<uint64_t, uint64_t>::const_iterator next, uint64_t begin, uint64_t end);
     mutable std::mutex mu_;
     std::unordered_map<std::string, FileState> files_;
     uint64_t bytes_ = 0;
+    bool flush_armed_ = false;   // `unflushed` of every file is current (set by PopFlushChunk, cleared by Take)
     bool have_oldest_ = false;
     std::chrono::steady_clock::time_point oldest_{};
 };

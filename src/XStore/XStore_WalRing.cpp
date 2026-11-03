@@ -543,6 +543,47 @@ void DirtyTracker::AddMark(FileState &file, const std::shared_ptr<Ring> &ring, u
     if (!found) file.marks.push_back(RingMark{ring.get(), ring, ring_lsn_end});
 }
 
+namespace {
+
+// Inserts [begin, end) into a map of disjoint runs, merging with every run it overlaps or touches.
+void AddRun(std::map<uint64_t, uint64_t> &m, uint64_t begin, uint64_t end) {
+    auto it = m.lower_bound(begin);
+    if (it != m.begin()) {
+        const auto prev = std::prev(it);
+        if (prev->second >= begin) {
+            begin = prev->first;
+            end = std::max(end, prev->second);
+            it = m.erase(prev);
+        }
+    }
+    while (it != m.end() && it->first <= end) {
+        end = std::max(end, it->second);
+        it = m.erase(it);
+    }
+    m.emplace_hint(it, begin, end);
+}
+
+}  // namespace
+
+// Queues the parts of [begin, end) that no range of the file covers yet. Called before Note merges the range in;
+// `next` is ranges.upper_bound(begin), which Note has already looked up.
+void DirtyTracker::QueueNewBytes(FileState &file, std::map<uint64_t, uint64_t>::const_iterator next, uint64_t begin, uint64_t end) {
+    const auto &ranges = file.ranges;
+    uint64_t pos = begin;
+    if (next != ranges.begin()) {
+        const auto prev = std::prev(next);
+        if (prev->second > pos) pos = prev->second;
+    }
+    for (; pos < end; ++next) {
+        if (next == ranges.end() || next->first >= end) {
+            AddRun(file.unflushed, pos, end);
+            return;
+        }
+        if (next->first > pos) AddRun(file.unflushed, pos, next->first);
+        pos = std::max(pos, next->second);
+    }
+}
+
 void DirtyTracker::NoteRingMarkOnly(const std::shared_ptr<Ring> &ring, const std::string &data_path, uint64_t ring_lsn_end) {
     if (!ring || ring_lsn_end == 0) return;
     std::lock_guard<std::mutex> lock(mu_);
@@ -564,6 +605,7 @@ void DirtyTracker::Note(const std::shared_ptr<Ring> &ring, const std::string &da
     // (extend the previous range / fall inside it) edit a node in place.
     auto &ranges = file.ranges;
     auto next = ranges.upper_bound(begin);
+    if (flush_armed_ && !file.flush_skip) QueueNewBytes(file, next, begin, end);
     std::map<uint64_t, uint64_t>::iterator target;
     if (next != ranges.begin() && std::prev(next)->second >= begin) {
         target = std::prev(next);
@@ -598,9 +640,12 @@ DirtyTracker::Snapshot DirtyTracker::Take() {
             snap.ranges.emplace(it->first, std::move(out));
             file.ranges.clear();
         }
+        file.unflushed.clear();
+        file.flush_skip = false;
         it = file.marks.empty() ? files_.erase(it) : std::next(it);
     }
     bytes_ = 0;
+    flush_armed_ = false;
     have_oldest_ = false;
     return snap;
 }
@@ -616,6 +661,42 @@ DirtyTracker::Snapshot DirtyTracker::PeekRanges() const {
         snap.ranges.emplace(entry.first, std::move(out));
     }
     return snap;
+}
+
+bool DirtyTracker::PopFlushChunk(uint64_t max_bytes, std::string &path, DirtyRange &chunk) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!flush_armed_) {
+        for (auto &entry : files_) {
+            if (!entry.second.flush_skip) entry.second.unflushed = entry.second.ranges;
+        }
+        flush_armed_ = true;
+    }
+    if (max_bytes == 0) max_bytes = 1;
+    for (auto &entry : files_) {
+        auto &queue = entry.second.unflushed;
+        if (queue.empty()) continue;
+        const auto first = queue.begin();
+        const uint64_t begin = first->first, end = first->second;
+        chunk = DirtyRange{begin, end - begin > max_bytes ? begin + max_bytes : end};
+        if (chunk.end == end) {
+            queue.erase(first);
+        } else {
+            auto node = queue.extract(first);   // the rest stays the first run: re-key it without an allocation
+            node.key() = chunk.end;
+            queue.insert(queue.begin(), std::move(node));
+        }
+        path = entry.first;
+        return true;
+    }
+    return false;
+}
+
+void DirtyTracker::SkipFlushOf(const std::string &path) {
+    std::lock_guard<std::mutex> lock(mu_);
+    const auto it = files_.find(path);
+    if (it == files_.end()) return;
+    it->second.unflushed.clear();
+    it->second.flush_skip = true;
 }
 
 bool DirtyTracker::RingClear(const std::string &data_path) const {
@@ -653,10 +734,18 @@ uint64_t DirtyTracker::UnflushedBytes() const {
     return bytes_;
 }
 
+size_t DirtyTracker::QueuedFlushRunsForTests() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    size_t runs = 0;
+    for (const auto &entry : files_) runs += entry.second.unflushed.size();
+    return runs;
+}
+
 void DirtyTracker::ClearForTests() {
     std::lock_guard<std::mutex> lock(mu_);
     files_.clear();
     bytes_ = 0;
+    flush_armed_ = false;
     have_oldest_ = false;
 }
 

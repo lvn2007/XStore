@@ -220,7 +220,6 @@ private:
     std::mutex dirent_mutex_;
     std::unordered_map<std::string, FileId> dirent_durable_;   // path -> the file whose directory entry is durable (dirent_mutex_)
     std::unordered_set<std::string> carried_;     // unsynced data files (guarded by cycle_mutex_)
-    std::unordered_map<std::string, std::map<uint64_t, uint64_t>> flushed_;   // paced-flushed ranges (guarded by cycle_mutex_)
     mutable std::mutex synced_mutex_;
     std::unordered_set<std::string> last_synced_;
     std::unordered_set<std::string> last_synced_dirs_;

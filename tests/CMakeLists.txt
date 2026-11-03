@@ -123,6 +123,7 @@ gtest_discover_tests(xstore_keys_cli_tests)
 # perf work.
 add_executable(xstore_perf_tests
         perf/XStorePerfTest.cpp
+        perf/XStoreDirtyTrackerPerfTest.cpp
 )
 target_link_libraries(xstore_perf_tests PRIVATE GTest::gtest_main xstore_core)
 if(XSTORE_USE_JEMALLOC)

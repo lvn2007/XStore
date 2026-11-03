@@ -529,11 +529,13 @@ The insert deficit shrinks as the run lengthens (−7.9 % at ~0.15 s runs → �
   | Condition | Action |
   |---|---|
   | fill < 25 % (`WAL_CKPT_SOFT_FILL`) | no paced flushing |
-  | fill ≥ 25 % | one paced step per tick: `sync_file_range(WAIT_BEFORE\|WRITE\|WAIT_AFTER)` over the first not-yet-flushed gap of the dirty ranges, ≤ `WAL_FLUSH_CHUNK_BYTES` (4 MiB) |
+  | fill ≥ 25 % | one paced step per tick: `sync_file_range(WAIT_BEFORE\|WRITE\|WAIT_AFTER)` over the first chunk of the paced-flush queue (the dirty bytes no paced flush has taken), ≤ `WAL_FLUSH_CHUNK_BYTES` (4 MiB) |
   | oldest unsynced dirty range ≥ `WAL_CKPT_MAX_AGE_MS` (5 s), at any fill | full cycle |
   | dirty or un-checkpointed data and no writer batch for ≥ `WAL_CKPT_IDLE_MS` (50 ms) | full cycle |
   | fill ≥ 50 % (`WAL_CKPT_CYCLE_FILL`) | back-to-back cycles while they make progress; warning at most once per 60 s |
   | previous cycle failed (not poisoned) | retry after a 50 ms back-off |
+
+  **Paced-flush queue (2026-11-03).** `DirtyTracker` keeps, per file, `unflushed`: the part of the dirty ranges no paced flush has taken. The first `PopFlushChunk` after a `Take` copies the ranges into it (once); from then on `Note` queues only the bytes no earlier `Note` covered, so overwriting a row that was already flushed does not flush it again (the cycle's `fdatasync` is the arbiter for it, as before); `Take` empties the queues and disarms them, so below the soft mark `Note` pays one bool check and no queue exists. A step pops the first chunk in O(log n) under the tracker mutex and does the `sync_file_range` outside it. An unopenable file is dropped with `SkipFlushOf` until the next `Take`. Before this, every step copied all ranges under the mutex and scanned them for the first gap (about 15 + 28 ns per range, 1000 times a second): with 20,000 scattered ranges and 8 writers at 1 M `Note`/s the writers fell to 0.13 M/s with p99 2.3 ms; now 0.92-0.95 M/s and 40 us, against 0.97-1.01 M/s with no step (`tests/perf/XStoreDirtyTrackerPerfTest.cpp`, opt-in). End-to-end insert effect not measured. After a failed cycle the flushed bytes are forgotten at `Take`, so a later write to them is paced-flushed once more.
   | fill ≥ 90 % (`WAL_STALL_FILL`) | writers stall in `Reserve`, then fail as "overloaded" after 5 s |
 
   The idle trigger keys off the start of the writer's last gathered batch (one relaxed store per batch). Operators can change the two time triggers with `XSTORE_CKPT_IDLE_MS` and `XSTORE_CKPT_MAX_AGE_MS` (`src/main.cpp`): digits only, unsigned, `0` or unset = the tunable default; an invalid value is logged as a warning and ignored; the effective value is logged at startup as `[CONFIG]`. A graceful stop runs its final cycle regardless.
@@ -1061,7 +1063,7 @@ UNARY_INSERT_RAND   UNARY_INSERT_SEQ   UNARY_QUERY_RAND   UNARY_QUERY_SEQ
 
 Naming convention observed in the artifacts (e.g. `BASIC-INSERT-BATCH-SEQ_Client-26_10-1000_900000-910000.parquet`): `<WORKLOAD-TAG>_Client-<clientID>_<param>-<param>_<rangeStart>-<rangeEnd>.parquet` — each file is one client's timed results for one contiguous timestamp sub-range of the 10-year (2000–2009), 128-column synthetic dataset described in §10.3, stored in **Parquet** for downstream analysis. This corpus is the empirical basis for whatever throughput/latency figures the associated paper reports at scale (as opposed to the single-machine, single-process numbers the in-repo `tests/perf` suite produces) — it exercises **SEQ vs. RAND** access patterns and **UNARY vs. BATCH** call granularity orthogonally across all four CRUD-adjacent operation families plus all four aggregate types, driven by XBench across a distributed multi-node client fleet against one XStore server.
 
-`benchmark_artifact/` exists in the XStore repo but is currently empty (a designated output location, not yet populated in this checkout).
+`benchmark_artifact_91e167d0/` holds the results of the benchmark runs made around commit 91e167d0 (per-workload CSVs and logs for XStore, MongoDB, InfluxDB, Graphite and the backtester, the notebooks with their outputs, and the result SVGs the README shows); it is frozen and not modified. `benchmark_artifact/` is the results-free working copy for new runs: the scripts, `XStore/prep_clients.py` and every notebook with its outputs cleared, the XStore notebook set up for the current Mystic hosts (since 2f55784d).
 
 ---
 

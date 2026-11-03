@@ -709,6 +709,158 @@ TEST_F(WalRingWriterTest, PeekRangesDoesNotReset) {
     EXPECT_TRUE(t.PeekRanges().ranges.empty());
 }
 
+namespace {
+
+// Pops chunks until the queue is empty; "begin-end" strings in pop order.
+std::vector<std::string> PopAll(walring::DirtyTracker &t, uint64_t max_bytes, std::string *path_out = nullptr) {
+    std::vector<std::string> out;
+    std::string path;
+    walring::DirtyRange chunk;
+    while (t.PopFlushChunk(max_bytes, path, chunk)) {
+        out.push_back(std::to_string(chunk.begin) + "-" + std::to_string(chunk.end));
+        if (path_out) *path_out = path;
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST_F(WalRingWriterTest, PopFlushChunkWalksTheRangesInOrderAndCapsEachChunk) {
+    walring::DirtyTracker t;
+    t.Note(nullptr, "/a", 100, 300, 0);
+    t.Note(nullptr, "/a", 0, 10, 0);
+    t.Note(nullptr, "/a", 20, 30, 0);
+    EXPECT_EQ(PopAll(t, 64), (std::vector<std::string>{"0-10", "20-30", "100-164", "164-228", "228-292", "292-300"}));
+    EXPECT_EQ(t.UnflushedBytes(), 220u) << "popping a chunk must not touch the dirty ranges the cycle takes";
+    EXPECT_EQ(t.Take().ranges.at("/a").size(), 3u);
+}
+
+TEST_F(WalRingWriterTest, PopFlushChunkDoesNotQueueBytesAFlushAlreadyTook) {
+    walring::DirtyTracker t;
+    t.Note(nullptr, "/a", 0, 100, 0);
+    std::string path;
+    walring::DirtyRange chunk;
+    ASSERT_TRUE(t.PopFlushChunk(40, path, chunk));
+    EXPECT_EQ(chunk.begin, 0u);
+    EXPECT_EQ(chunk.end, 40u);
+    t.Note(nullptr, "/a", 10, 20, 0);    // inside the flushed part: nothing new
+    t.Note(nullptr, "/a", 30, 120, 0);   // [30,40) flushed, [40,100) already queued, [100,120) new
+    EXPECT_EQ(PopAll(t, 1000), (std::vector<std::string>{"40-120"}));
+    t.Note(nullptr, "/a", 0, 120, 0);    // everything was taken: still nothing to flush until the next Take
+    EXPECT_TRUE(PopAll(t, 1000).empty());
+}
+
+TEST_F(WalRingWriterTest, PopFlushChunkQueuesOnlyTheGapsOfAWriteThatBridgesRanges) {
+    walring::DirtyTracker t;
+    t.Note(nullptr, "/a", 0, 10, 0);
+    t.Note(nullptr, "/a", 20, 30, 0);
+    t.Note(nullptr, "/a", 50, 60, 0);
+    std::string path;
+    walring::DirtyRange chunk;
+    ASSERT_TRUE(t.PopFlushChunk(1000, path, chunk));   // [0,10)
+    ASSERT_TRUE(t.PopFlushChunk(1000, path, chunk));   // [20,30)
+    EXPECT_EQ(chunk.begin, 20u);
+    t.Note(nullptr, "/a", 5, 55, 0);   // new: [10,20) and [30,50); [50,55) is queued already, [5,10) and [20,30) flushed
+    EXPECT_EQ(PopAll(t, 1000), (std::vector<std::string>{"10-20", "30-60"}));
+}
+
+TEST_F(WalRingWriterTest, PopFlushChunkStartsOverAfterATake) {
+    walring::DirtyTracker t;
+    t.Note(nullptr, "/a", 0, 10, 0);
+    EXPECT_EQ(PopAll(t, 100), (std::vector<std::string>{"0-10"}));
+    EXPECT_TRUE(t.Take().ranges.count("/a") == 1);
+    EXPECT_TRUE(PopAll(t, 100).empty());
+    t.Note(nullptr, "/a", 0, 10, 0);   // the cycle synced it: a new write to the same bytes is flushed again
+    EXPECT_EQ(PopAll(t, 100), (std::vector<std::string>{"0-10"}));
+}
+
+TEST_F(WalRingWriterTest, SkipFlushOfDropsOneFileUntilTheNextTake) {
+    walring::DirtyTracker t;
+    t.Note(nullptr, "/a", 0, 10, 0);
+    t.Note(nullptr, "/b", 0, 10, 0);
+    std::string path;
+    walring::DirtyRange chunk;
+    ASSERT_TRUE(t.PopFlushChunk(100, path, chunk));
+    t.SkipFlushOf(path == "/a" ? "/b" : "/a");   // the file that was not popped first
+    const std::string kept = path;
+    EXPECT_TRUE(PopAll(t, 100, &path).empty()) << "the skipped file has nothing queued";
+    t.Note(nullptr, "/a", 50, 60, 0);
+    t.Note(nullptr, "/b", 50, 60, 0);
+    std::string only;
+    const auto got = PopAll(t, 100, &only);
+    ASSERT_EQ(got.size(), 1u);
+    EXPECT_EQ(only, kept) << "writes to the skipped file are not queued";
+    EXPECT_EQ(got[0], "50-60");
+    (void)t.Take();
+    t.Note(nullptr, "/a", 0, 10, 0);
+    t.Note(nullptr, "/b", 0, 10, 0);
+    EXPECT_EQ(PopAll(t, 100).size(), 2u) << "Take lifts the skip";
+}
+
+// A file kept alive by an un-checkpointed ring mark survives Take: its flush queue and skip flag must not.
+TEST_F(WalRingWriterTest, TakeEmptiesTheFlushQueueOfAFileKeptByARingMarkAndDisarmsTheQueue) {
+    auto ring = walring::GetOrOpenRing((scratch->test_root / "flush_mark_ring.WAL").string(), 2);
+    ASSERT_NE(ring, nullptr);
+    ring->CommitAppended(1000);
+    walring::DirtyTracker t;
+    t.Note(ring, "/a", 0, 10, 500);
+    t.Note(ring, "/b", 0, 10, 500);
+    std::string path;
+    walring::DirtyRange chunk;
+    ASSERT_TRUE(t.PopFlushChunk(100, path, chunk));   // arms the queue: one run left
+    EXPECT_EQ(t.QueuedFlushRunsForTests(), 1u);
+    t.Note(ring, "/a", 20, 30, 600);                  // armed: queued
+    t.Note(ring, "/b", 20, 30, 600);
+    EXPECT_EQ(t.QueuedFlushRunsForTests(), 3u);
+    (void)t.Take();                                   // both files stay (ring marks), their ranges go
+    EXPECT_EQ(t.QueuedFlushRunsForTests(), 0u) << "Take must free the queues";
+    t.Note(ring, "/a", 0, 10, 700);
+    EXPECT_EQ(t.QueuedFlushRunsForTests(), 0u) << "after Take nothing is queued until a flush step asks again";
+    EXPECT_EQ(PopAll(t, 100), (std::vector<std::string>{"0-10"})) << "and then the pending write is found";
+
+    t.SkipFlushOf("/a");
+    (void)t.Take();
+    t.Note(ring, "/a", 0, 10, 800);
+    EXPECT_EQ(PopAll(t, 100), (std::vector<std::string>{"0-10"})) << "Take lifts the skip of a file that survived it";
+}
+
+// Byte-level model: dirty = every byte noted since the last Take, taken = bytes a pop returned. A pop returns the first
+// run of dirty-and-not-taken bytes, cut at max_bytes. Pops are interleaved with writes and takes at random.
+TEST_F(WalRingWriterTest, PopFlushChunkMatchesAByteModelUnderRandomWritesPopsAndTakes) {
+    constexpr uint64_t DOMAIN = 400;
+    for (uint32_t seed = 1; seed <= 300; ++seed) {
+        std::mt19937 rng(seed);
+        walring::DirtyTracker t;
+        std::vector<bool> dirty(DOMAIN, false), taken(DOMAIN, false);
+        for (int step = 0; step < 150; ++step) {
+            const uint32_t op = rng() % 10;
+            if (op < 5) {
+                const uint64_t b = rng() % DOMAIN, e = std::min<uint64_t>(DOMAIN, b + 1 + rng() % 40);
+                t.Note(nullptr, "/a", b, e, 0);
+                for (uint64_t i = b; i < e; ++i) dirty[i] = true;
+            } else if (op < 9) {
+                const uint64_t max_bytes = 1 + rng() % 30;
+                std::string path;
+                walring::DirtyRange chunk;
+                const bool got = t.PopFlushChunk(max_bytes, path, chunk);
+                uint64_t first = 0;
+                while (first < DOMAIN && !(dirty[first] && !taken[first])) ++first;
+                ASSERT_EQ(got, first < DOMAIN) << "seed " << seed << " step " << step;
+                if (!got) continue;
+                uint64_t last = first;
+                while (last < DOMAIN && dirty[last] && !taken[last] && last - first < max_bytes) ++last;
+                ASSERT_EQ(chunk.begin, first) << "seed " << seed << " step " << step;
+                ASSERT_EQ(chunk.end, last) << "seed " << seed << " step " << step;
+                for (uint64_t i = first; i < last; ++i) taken[i] = true;
+            } else {
+                (void)t.Take();
+                std::fill(dirty.begin(), dirty.end(), false);
+                std::fill(taken.begin(), taken.end(), false);
+            }
+        }
+    }
+}
+
 // M6: a hole-punch is a metadata change nothing else marks dirty; without a Note a clean stop would never
 // fdatasync it (the final cycle only syncs noted files).
 TEST_F(WalRingWriterTest, EveryDeleteMarksItsFileDirty) {

@@ -36,38 +36,6 @@ bool ParseMsKnob(const char *text, unsigned &out) {
 
 namespace {
 
-// First sub-range of [begin, end) not covered by the disjoint map `m`; false if fully covered.
-bool FirstGap(const std::map<uint64_t, uint64_t> &m, uint64_t begin, uint64_t end, uint64_t &gap_begin, uint64_t &gap_end) {
-    uint64_t pos = begin;
-    auto it = m.upper_bound(pos);
-    if (it != m.begin()) {
-        const auto p = std::prev(it);
-        if (p->second > pos) pos = p->second;
-    }
-    while (pos < end) {
-        it = m.lower_bound(pos);
-        if (it != m.end() && it->first == pos) { pos = it->second; continue; }
-        gap_begin = pos;
-        gap_end = it == m.end() ? end : std::min(end, it->first);
-        return true;
-    }
-    return false;
-}
-
-// Inserts [begin, end) (known to be a gap), merging with touching neighbours.
-void AddRange(std::map<uint64_t, uint64_t> &m, uint64_t begin, uint64_t end) {
-    auto it = m.lower_bound(begin);
-    if (it != m.end() && it->first == end) {
-        end = it->second;
-        it = m.erase(it);
-    }
-    if (it != m.begin()) {
-        const auto p = std::prev(it);
-        if (p->second == begin) { p->second = end; return; }
-    }
-    m.emplace_hint(it, begin, end);
-}
-
 // Rate limiter for log lines emitted from the loop.
 bool Due(std::chrono::steady_clock::time_point &last, std::chrono::seconds every) {
     const auto now = std::chrono::steady_clock::now();
@@ -317,7 +285,7 @@ bool Checkpointer::SyncPathsForReplay(const std::set<std::string> &paths) {
         std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
         replay_window_cycles_.store(cycles_.load(std::memory_order_relaxed) - before, std::memory_order_relaxed);
     }
-    // No cycle_mutex_: that lock guards the cycle's own state (carried_, flushed_, the checkpoint advance), which
+    // No cycle_mutex_: that lock guards the cycle's own state (carried_, the checkpoint advance), which
     // this function never touches, and holding it here made every shard's direct-write sync queue behind one
     // process-wide lock. What must stay exclusive is the sync of ONE path against any other sync of that path
     // (cycle, paced flush, replay): SyncDataFile / SyncDirectory take that per-path lock themselves.
@@ -351,7 +319,6 @@ void Checkpointer::StopWithoutFinalCycleForTests() {
     }
     std::lock_guard<std::mutex> cycle(cycle_mutex_);
     carried_.clear();
-    flushed_.clear();
 }
 
 bool Checkpointer::RunCycle() {
@@ -418,7 +385,6 @@ bool Checkpointer::RunCycleLocked() {
 
     // (5) Everything below the snapshot is now durable in the data files.
     carried_.clear();
-    flushed_.clear();
     {
         std::lock_guard<std::mutex> lock(synced_mutex_);
         last_synced_ = std::move(synced);
@@ -448,51 +414,43 @@ bool Checkpointer::RunCycleLocked() {
 bool Checkpointer::PacedFlushStep() {
     std::lock_guard<std::mutex> cycle(cycle_mutex_);
     if (paused_.load(std::memory_order_acquire) || poisoned_.load(std::memory_order_acquire)) return false;
-    const DirtyTracker::Snapshot dirty = Dirty().PeekRanges();
-    for (const auto &[path, ranges] : dirty.ranges) {
-        std::map<uint64_t, uint64_t> &done = flushed_[path];
-        for (const DirtyRange &r : ranges) {
-            uint64_t begin = 0, end = 0;
-            if (!FirstGap(done, r.begin, r.end, begin, end)) continue;
-            end = std::min<uint64_t>(end, begin + XStoreTunables::WAL_FLUSH_CHUNK_BYTES);
-            // sync_file_range consumes the file's writeback error like an fdatasync does: same per-path rule.
-            std::lock_guard<std::mutex> path_lock(PathSyncMutex(path));
-            const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
-            if (fd < 0) {
-                // Missing/unopenable file (deleted DB; the cycle skips ENOENT too): mark the whole
-                // file as flushed until the next cycle so it is not re-opened every tick, and
-                // move on to the other files. Not work done.
-                done.clear();
-                done.emplace(0, UINT64_MAX);
-                break;
-            }
-            int rc = 0, err = 0;
-            for (int attempt = 0; attempt < 3; ++attempt) {
-                if (const int simulated = sim_sfr_errno_.load(std::memory_order_relaxed); simulated != 0) {
-                    rc = -1; err = simulated;
-                } else {
-                    rc = sync_file_range(fd, static_cast<off64_t>(begin), static_cast<off64_t>(end - begin),
-                                         SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER);
-                    err = rc == 0 ? 0 : errno;
-                }
-                if (rc == 0 || (err != EINTR && err != EAGAIN)) break;
-            }
-            close(fd);
-            // sync_file_range(WAIT_AFTER) consumes ANY writeback error of the file, so a later fdatasync could
-            // report success for dropped pages: every errno poisons (see the header) except EINTR/EAGAIN
-            // (retried above; a persistent one is a plain skip) and the "unsupported here" usage errors
-            // EINVAL/ESPIPE/ENOSYS/EBADF, which never touch writeback state. The cycle's fdatasync is the arbiter
-            // for everything skipped.
-            const bool benign = err == 0 || err == EINTR || err == EAGAIN || err == EINVAL || err == ESPIPE ||
-                                err == ENOSYS || err == EBADF;
-            if (!benign) {
-                Poison("sync_file_range", path, err);
-                return false;
-            }
-            AddRange(done, begin, end);
-            paced_bytes_.fetch_add(end - begin, std::memory_order_relaxed);
-            return true;
+    std::string path;
+    DirtyRange chunk;
+    while (Dirty().PopFlushChunk(XStoreTunables::WAL_FLUSH_CHUNK_BYTES, path, chunk)) {
+        // sync_file_range consumes the file's writeback error like an fdatasync does: same per-path rule.
+        std::lock_guard<std::mutex> path_lock(PathSyncMutex(path));
+        const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+            // Missing/unopenable file (deleted DB; the cycle skips ENOENT too): queue no more of its bytes until
+            // the next cycle so it is not re-opened every tick, and move on to the other files. Not work done.
+            Dirty().SkipFlushOf(path);
+            continue;
         }
+        int rc = 0, err = 0;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            if (const int simulated = sim_sfr_errno_.load(std::memory_order_relaxed); simulated != 0) {
+                rc = -1; err = simulated;
+            } else {
+                rc = sync_file_range(fd, static_cast<off64_t>(chunk.begin), static_cast<off64_t>(chunk.end - chunk.begin),
+                                     SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER);
+                err = rc == 0 ? 0 : errno;
+            }
+            if (rc == 0 || (err != EINTR && err != EAGAIN)) break;
+        }
+        close(fd);
+        // sync_file_range(WAIT_AFTER) consumes ANY writeback error of the file, so a later fdatasync could
+        // report success for dropped pages: every errno poisons (see the header) except EINTR/EAGAIN
+        // (retried above; a persistent one is a plain skip) and the "unsupported here" usage errors
+        // EINVAL/ESPIPE/ENOSYS/EBADF, which never touch writeback state. The cycle's fdatasync is the arbiter
+        // for everything skipped.
+        const bool benign = err == 0 || err == EINTR || err == EAGAIN || err == EINVAL || err == ESPIPE ||
+                            err == ENOSYS || err == EBADF;
+        if (!benign) {
+            Poison("sync_file_range", path, err);
+            return false;
+        }
+        paced_bytes_.fetch_add(chunk.end - chunk.begin, std::memory_order_relaxed);
+        return true;
     }
     return false;
 }
