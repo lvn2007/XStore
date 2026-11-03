@@ -12,6 +12,7 @@
 #include <spdlog/fmt/fmt.h>
 #include "include/Logger/Logger.h"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <filesystem>
 #include <functional>
@@ -171,13 +172,13 @@ namespace {
 // accumulate into (never a value shared across threads: protobuf/
 // ValueStruct objects aren't safe for concurrent mutation from multiple
 // threads even on logically-disjoint fields).
-struct MinMaxPartial {
+struct alignas(64) MinMaxPartial {
     ValueStruct value;
     XStore_Proto::FData data;
 };
 
 // Per-thread partial state for Sum/Avg's parallel merge.
-struct SumPartial {
+struct alignas(64) SumPartial {
     double sum = 0.0;
     unsigned long long count = 0;
 };
@@ -187,7 +188,7 @@ struct SumPartial {
 // in a std::vector<PartialState>, and std::vector<bool> is the infamous
 // bitset specialization whose operator[] returns a proxy reference, not a
 // real bool&, which the segment_kernel's bool& parameter can't bind to.
-struct ExistsPartial {
+struct alignas(64) ExistsPartial {
     bool found = false;
 };
 
@@ -199,7 +200,7 @@ struct ExistsPartial {
 // per-block merge needs to distinguish "haven't seen a block yet" from
 // "seen one, running min/max are meaningful" independent of open (open, once
 // set, never changes within a segment, while high/low keep updating).
-struct OhlcPartial {
+struct alignas(64) OhlcPartial {
     double open = 0.0, high = 0.0, low = 0.0, close = 0.0;
     bool open_set = false, high_low_set = false, close_set = false;
 };
@@ -207,23 +208,26 @@ struct OhlcPartial {
 // Per-thread partial state for Variance/Stddev's parallel merge -- a
 // sibling of SumPartial rather than widening it, since Sum/Avg never need
 // sum_sq and a shared struct would carry dead weight into their hot path.
-struct VariancePartial {
+struct alignas(64) VariancePartial {
     double sum = 0.0;
     double sum_sq = 0.0;
     unsigned long long count = 0;
 };
 
-// Shared per-segment partial for Percentile/DistinctCount/TopKAggregate --
-// one vector of every real value this segment saw. Merge is a plain
-// concatenation (order doesn't matter -- see ProcessFileRangeCollectValues's
-// comment); each of the three ops then reduces the fully-merged vector
-// differently (sort+interpolate / hash-set size / frequency-map top-k).
+// Per-piece partial state for Percentile/DistinctCount/TopK: every real value of the piece, in one vector (order is not load-bearing --
+// see ProcessFileRangeCollectValues's comment). The merge keeps the pieces' vectors as they are (nothing is concatenated or copied) and
+// each of the three ops reduces them where they lie (XStore_ExactAggregates.h).
 // One cache line each: the pieces' partial states sit side by side in one vector and every push_back writes its vector's end pointer, so
 // states sharing a line made all the threads fight over it (a piece took ~150 ms for 1M rows, ten times a single thread's rate).
 struct alignas(64) CollectPartial {
-    std::vector<double> values;
+    std::vector<double> values;                    // this piece (or, on the sequential path, the whole span)
+    std::vector<std::vector<double>> pieces;       // after the merge: the pieces' vectors
 };
 static_assert(alignof(CollectPartial) == 64, "neighbouring pieces' states must not share a cache line");
+// The other partial states above are one cache line each for the same reason (their kernels write them through references per row; they only
+// scan where the zone map does not cover, so the gain is not measured).
+static_assert(alignof(MinMaxPartial) == 64 && alignof(SumPartial) == 64 && alignof(ExistsPartial) == 64 && alignof(OhlcPartial) == 64 &&
+              alignof(VariancePartial) == 64, "neighbouring pieces' states must not share a cache line");
 
 // A piece's values vector is sized once for the most values the piece can hold (untouched pages of it are not resident), not regrown
 // chunk by chunk as the scan lock hands the kernel 4 MiB at a time: that regrowth copied the vector at every chunk, ~90 % of a 12M-row call.
@@ -231,24 +235,49 @@ struct ReserveCollected {
     void operator()(CollectPartial &partial, unsigned long long rows) const { partial.values.reserve(rows); }
 };
 
-// Takes the first non-empty partial over as it is and frees each partial once it is appended, so the segments' vectors and
-// the merged one are not all alive together.
+// Hands the piece's vector over to the merged state: no copy, and no second copy of the values alive at any moment.
 void MergeCollected(CollectPartial &acc, CollectPartial &partial) {
-    if (acc.values.empty()) {
-        acc.values = std::move(partial.values);
-    } else {
-        acc.values.insert(acc.values.end(), partial.values.begin(), partial.values.end());
-    }
+    if (!partial.values.empty()) acc.pieces.push_back(std::move(partial.values));
     std::vector<double>().swap(partial.values);
 }
 
+// The merged state's vectors as spans for the reductions.
+std::vector<xstore::ValueSpan> CollectedSpans(CollectPartial &state) {
+    std::vector<xstore::ValueSpan> spans;
+    if (!state.values.empty()) spans.push_back({state.values.data(), state.values.size()});
+    for (std::vector<double> &piece : state.pieces) spans.push_back({piece.data(), piece.size()});
+    return spans;
+}
+
+size_t CountValues(const std::vector<xstore::ValueSpan> &spans) {
+    size_t total = 0;
+    for (const xstore::ValueSpan &span : spans) total += span.size;
+    return total;
+}
+
+// Runs the reductions' tasks on the shared scan pool: as many workers as the scan's adaptive team size (idle cores less headroom, the
+// same figure the collect waves use, re-read for every call), each pulling the next task from one counter, so no worker waits for a
+// slow task of a "wave" and a busy machine gets one worker, i.e. the plain sequential run.
+void RunOnScanTeam(size_t tasks, const std::function<void(size_t)> &body) {
+    const size_t team = std::min<size_t>(tasks, xstore::scanlock::EffectiveThreads(xstore::scanlock::Get()));
+    if (team <= 1) {
+        xstore::RunInline(tasks, body);
+        return;
+    }
+    std::atomic<size_t> next{0};
+    XStorePreadPool::ParallelFor(team, [&](size_t) {
+        for (size_t task; (task = next.fetch_add(1, std::memory_order_relaxed)) < tasks;) body(task);
+    });
+}
+
 // Bytes held per value of the range by an exact aggregate (the range length is the upper-bound count of values; see
-// XStore_ExactAggregates.h for the reductions). Measured on Mystic over 12M unique values, beyond the mapped file pages: a
-// call holds 8 bytes per value in its one vector (Percentile 8.0, TopK 8.0, DistinctCount 14.3 with its flat table, which is
-// at most about 28 MB, hence 24 for the sizes just above the threshold). 16 covers a range over 4 or more years, whose
-// per-year vectors are merged (appending can briefly hold the merged vector twice). TopK adds 16 bytes per entry kept.
+// XStore_ExactAggregates.h for the reductions). Measured on Mystic over 12M values (unique, 7 distinct, sorted, random order), growth of
+// the process's anonymous memory during one call: 11-13 bytes per value for all three (8 for the values, the rest allocator slack and
+// the reductions' histograms and heaps), 100 before the vectors were sized once per piece and the pieces' copy was dropped.
+// 16 covers it; the reductions work in place on the pieces' vectors, so DistinctCount needs no more than the others. TopK adds 16 bytes
+// per entry kept.
 constexpr uint64_t PERCENTILE_BYTES_PER_VALUE = 16;
-constexpr uint64_t DISTINCTCOUNT_BYTES_PER_VALUE = 24;
+constexpr uint64_t DISTINCTCOUNT_BYTES_PER_VALUE = 16;
 constexpr uint64_t TOPK_BYTES_PER_VALUE = 16;
 constexpr uint64_t TOPK_BYTES_PER_ENTRY = 16;
 
@@ -963,9 +992,10 @@ void XStore::PercentileAggregate(unsigned long long int start_epoch_t, unsigned 
             ProcessFileRangeCollectValues(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.values);
         },
         MergeCollected, ReserveCollected{});
-    std::vector<double> all_values = std::move(final_state.values);
+    const std::vector<xstore::ValueSpan> spans = CollectedSpans(final_state);
+    const size_t value_count = CountValues(spans);
 
-    if (all_values.empty()) {
+    if (value_count == 0) {
         return_data->set_opstatus("ERROR: No valid data found");
         spdlog::warn("[PERCENTILE AGGREGATE] [DB: {}] - No valid data for column {} over [{}, {}]", db_name, column_idx, start_epoch_t, end_epoch_t);
         return;
@@ -975,8 +1005,8 @@ void XStore::PercentileAggregate(unsigned long long int start_epoch_t, unsigned 
     // interpolation numpy.percentile/most SQL engines default to.
     // NaNs are left out of the ranking (ExactPercentile); the status stays exactly "SUCCESS" (callers compare it), so the count goes to the log.
     uint64_t nan_skipped = 0;
-    const double value = xstore::ExactPercentile(all_values, percentile, &nan_skipped);
-    if (nan_skipped == all_values.size()) {
+    const double value = xstore::ExactPercentile(spans, percentile, RunOnScanTeam, &nan_skipped);
+    if (nan_skipped == value_count) {
         return_data->set_opstatus("ERROR: No valid data found");
         spdlog::warn("[PERCENTILE AGGREGATE] [DB: {}] - Every value of column {} over [{}, {}] is NaN", db_name, column_idx, start_epoch_t, end_epoch_t);
         return;
@@ -1029,12 +1059,12 @@ void XStore::DistinctCountAggregate(unsigned long long int start_epoch_t, unsign
             ProcessFileRangeCollectValues(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.values);
         },
         MergeCollected, ReserveCollected{});
-    std::vector<double> all_values = std::move(final_state.values);
+    const std::vector<xstore::ValueSpan> spans = CollectedSpans(final_state);
 
     // An empty range is a legitimate count of zero, not an error -- same
     // "absence is a real answer" precedent ExistsAggregate uses for false.
     return_data->set_opstatus("SUCCESS");
-    return_data->set_count(xstore::ExactDistinctCount(all_values));
+    return_data->set_count(xstore::ExactDistinctCount(spans, RunOnScanTeam));
 }
 
 void XStore::TopKAggregate(unsigned long long int start_epoch_t, unsigned long long int end_epoch_t,
@@ -1078,13 +1108,13 @@ void XStore::TopKAggregate(unsigned long long int start_epoch_t, unsigned long l
             ProcessFileRangeCollectValues(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.values);
         },
         MergeCollected, ReserveCollected{});
-    std::vector<double> all_values = std::move(final_state.values);
+    const std::vector<xstore::ValueSpan> spans = CollectedSpans(final_state);
 
     // Fewer than k distinct values in range returns however many exist --
     // same as SQL's GROUP BY ... ORDER BY COUNT(*) DESC LIMIT k. An empty
     // range is SUCCESS with zero entries, same precedent as DistinctCount.
     // Most frequent first, ties by ascending value, for determinism.
-    const std::vector<std::pair<double, uint64_t>> ranked = xstore::ExactTopK(all_values, k);
+    const std::vector<std::pair<double, uint64_t>> ranked = xstore::ExactTopK(spans, k, RunOnScanTeam);
     return_data->set_opstatus("SUCCESS");
     for (const auto &[value, count] : ranked) {
         XStore_Proto::TopKEntry *entry = return_data->add_entries();

@@ -141,8 +141,8 @@ TEST_F(QueryLeaseTest, TheLeaseIsHeldWhileChunksStreamAndFullyReturnedAfterwards
     EXPECT_EQ(pool.PendingBytes(), 0u);
 }
 
-// ---- exact aggregates: 16 / 24 / 16 bytes per value of the range (Percentile / DistinctCount / TopK, plus 16 per TopK entry) ----
-constexpr uint64_t kAggRows = 1'000'000;   // over the threshold for all three (16 MB / 24 MB / 16 MB)
+// ---- exact aggregates: 16 bytes per value of the range (plus 16 per TopK entry kept) ----
+constexpr uint64_t kAggRows = 1'000'000;   // over the threshold for all three (16 MB each)
 
 TEST_F(QueryLeaseTest, ASmallAggregateNeverWaitsForThePool) {
     HogThePool();
@@ -188,17 +188,31 @@ TEST_F(QueryLeaseTest, ABigAggregateWaitsForMemoryAndRunsOnceItIsReturned) {
 TEST_F(QueryLeaseTest, AnAggregateReservesPerValueBytesAndReturnsThemWhenDone) {
     MemoryPool &pool = MemoryPool::Instance();
     const uint64_t used_before = pool.UsedBytes();
-    // A lease for exactly (pool limit - used - 20 MB) leaves room for Percentile's and TopK's 16 MB estimates but not for
-    // DistinctCount's 24 MB, nor for a TopK that keeps up to a million entries (16 MB + 16 MB): the first are admitted at
-    // once, the others have to wait (and are rejected at their short deadline).
-    MemoryPool::Instance().Acquire(pool.Limit() - used_before - 20'000'000, MemoryPool::Clock::now() + 5s, hog);
+    const auto fits = [&](const std::function<std::string(MemoryPool::Clock::time_point)> &run) {
+        return run(MemoryPool::Clock::now() + 300ms).find("rejected") == std::string::npos;
+    };
+    const std::function<std::string(MemoryPool::Clock::time_point)> percentile = [&](auto d) { return PercentileStatus(kAggRows, d); };
+    const std::function<std::string(MemoryPool::Clock::time_point)> distinct = [&](auto d) { return DistinctStatus(kAggRows, d); };
+    const std::function<std::string(MemoryPool::Clock::time_point)> topk = [&](auto d) { return TopKStatus(kAggRows, d); };
+    const std::function<std::string(MemoryPool::Clock::time_point)> topk_many = [&](auto d) { return TopKStatus(kAggRows, d, 1'000'000'000); };
+
+    // 12 MB of room: none of the three 16 MB estimates fits, so each has to wait and is rejected at its short deadline.
+    pool.Acquire(pool.Limit() - used_before - 12'000'000, MemoryPool::Clock::now() + 5s, hog);
     ASSERT_NE(hog, nullptr);
     hog->MarkResident();   // otherwise the host check subtracts it as memory not allocated yet and nothing fits
-    EXPECT_EQ(PercentileStatus(kAggRows, MemoryPool::Clock::now() + 300ms).find("rejected"), std::string::npos) << "16 MB should fit";
-    EXPECT_EQ(TopKStatus(kAggRows, MemoryPool::Clock::now() + 300ms).find("rejected"), std::string::npos) << "16 MB should fit";
-    EXPECT_NE(DistinctStatus(kAggRows, MemoryPool::Clock::now() + 300ms).find("rejected"), std::string::npos) << "24 MB should not fit";
-    EXPECT_NE(TopKStatus(kAggRows, MemoryPool::Clock::now() + 300ms, 1'000'000'000).find("rejected"), std::string::npos)
-        << "a TopK that may keep a million entries should not fit";
+    EXPECT_FALSE(fits(percentile)) << "16 MB should not fit in 12 MB";
+    EXPECT_FALSE(fits(distinct)) << "16 MB should not fit in 12 MB";
+    EXPECT_FALSE(fits(topk)) << "16 MB should not fit in 12 MB";
+    hog.reset();
+
+    // 20 MB of room: all three are admitted at once, but not a TopK that may keep a million entries (16 MB + 16 MB).
+    pool.Acquire(pool.Limit() - used_before - 20'000'000, MemoryPool::Clock::now() + 5s, hog);
+    ASSERT_NE(hog, nullptr);
+    hog->MarkResident();
+    EXPECT_TRUE(fits(percentile)) << "16 MB should fit in 20 MB";
+    EXPECT_TRUE(fits(distinct)) << "16 MB should fit in 20 MB";
+    EXPECT_TRUE(fits(topk)) << "16 MB should fit in 20 MB";
+    EXPECT_FALSE(fits(topk_many)) << "a TopK that may keep a million entries should not fit";
     hog.reset();
     EXPECT_EQ(pool.UsedBytes(), used_before);
     EXPECT_EQ(pool.PendingBytes(), 0u);

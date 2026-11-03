@@ -178,6 +178,19 @@ inline constexpr uint64_t SCAN_READ_LOCK_CHUNK_BYTES = uint64_t{4} << 20;
 // then sorts in place instead: the table stays under about 20 MB, and a column of mostly unique values pays no hash memory.
 inline constexpr size_t      EXACT_DISTINCT_TABLE_MAX_DISTINCT = 1u << 20;
 
+// The exact aggregates reduce the collected values where they lie, as slices of at most this many values (2 MiB) that are sorted or
+// counted one task each; smaller slices sort faster (cache) but make the merge of the sorted slices wider and Percentile build more
+// histograms. Mystic, 12M values, time by slice size (random-order unique column, DistinctCount ms / Percentile ms): 64K 252 / 82,
+// 128K 221 / 53, 256K 211 / 44, 1M 234 / 48, 4M 232 / 48; on 10k and 7 distinct values 256K is 20-30 % faster than 1M.
+inline constexpr size_t      EXACT_SLICE_VALUES = size_t{1} << 18;
+// DistinctCount and TopK cut the value range into at most this many ranges (by sampled splitters) and merge each on its own task.
+inline constexpr size_t      EXACT_MAX_RANGES = 64;
+// Values sampled from every sorted slice to choose the range splitters.
+inline constexpr size_t      EXACT_RANGE_SAMPLES_PER_SLICE = 32;
+// Percentile narrows the rank by 16 bits of the value per pass and copies the values still in the bucket only when at most this many
+// are left (8 MiB), then finishes with nth_element.
+inline constexpr size_t      EXACT_SELECT_GATHER_MAX = size_t{1} << 20;
+
 // Graceful shutdown (ZmqServer::StartServer): after the ZMQ context is shut
 // down, how long to wait for the worker threads to finish their in-flight
 // request and exit before giving up. On timeout the process must NOT run

@@ -10,6 +10,7 @@
 #include "include/XStore/XStore_Tunables.h"
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <utility>
 #include <vector>
 
@@ -24,5 +25,35 @@ namespace xstore {
 
 // The k most frequent values, by count descending, ties by value ascending; fewer when there are fewer distinct values.
 [[nodiscard]] std::vector<std::pair<double, uint64_t>> ExactTopK(std::vector<double> &values, size_t k);
+
+// ---- the same reductions over the values where they lie ----------------------------------------------------------------------
+// The collected values are never concatenated: they are spans over the pieces' vectors, and the work is cut into tasks that a
+// TaskRunner runs (the server's on the shared scan pool at the adaptive thread count; RunInline for none). Extra memory is a few
+// MB: a histogram per running task for Percentile, a small heap per range for DistinctCount/TopK. Results equal the single-vector
+// versions above; a NaN is counted as there (DistinctCount: one each; TopK: one entry of count 1 each, ranked after every number).
+struct ValueSpan {
+    double *data;
+    size_t size;
+};
+
+// Runs body(0) .. body(tasks - 1), in any order and on any threads, and returns when all have finished.
+using TaskRunner = std::function<void(size_t tasks, const std::function<void(size_t)> &body)>;
+inline void RunInline(size_t tasks, const std::function<void(size_t)> &body) {
+    for (size_t i = 0; i < tasks; ++i) body(i);
+}
+
+struct ReduceTuning {
+    size_t slice_values = XStoreTunables::EXACT_SLICE_VALUES;
+    size_t max_ranges = XStoreTunables::EXACT_MAX_RANGES;
+    size_t samples_per_slice = XStoreTunables::EXACT_RANGE_SAMPLES_PER_SLICE;
+    size_t gather_max = XStoreTunables::EXACT_SELECT_GATHER_MAX;
+};
+
+// Percentile does not modify the values; DistinctCount and TopK sort every slice in place (NaNs moved behind the numbers).
+[[nodiscard]] double ExactPercentile(const std::vector<ValueSpan> &spans, double percentile, const TaskRunner &run,
+                                     uint64_t *nan_skipped = nullptr, const ReduceTuning &tuning = {});
+[[nodiscard]] uint64_t ExactDistinctCount(const std::vector<ValueSpan> &spans, const TaskRunner &run, const ReduceTuning &tuning = {});
+[[nodiscard]] std::vector<std::pair<double, uint64_t>> ExactTopK(const std::vector<ValueSpan> &spans, size_t k, const TaskRunner &run,
+                                                                 const ReduceTuning &tuning = {});
 
 }  // namespace xstore

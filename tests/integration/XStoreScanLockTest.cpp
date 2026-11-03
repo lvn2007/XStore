@@ -22,14 +22,14 @@
 #include <cstdlib>
 #include <new>
 
-// Counts the allocations of 24 KiB or more (a value vector of the test rows is 32 KiB per zone-map block) while armed. Replaces the global
-// operator new of this test binary only to count.
+// Counts the allocations of 24 KiB up to 256 KiB (a value vector of the test rows is 32 KiB per zone-map block; Percentile's histograms are
+// 256 KiB and 512 KiB) while armed. Replaces the global operator new of this test binary only to count.
 namespace {
 std::atomic<bool> g_count_big_allocs{false};
 std::atomic<uint64_t> g_big_allocs{0};
 }  // namespace
 void *operator new(std::size_t size) {
-    if (g_count_big_allocs.load(std::memory_order_relaxed) && size >= 24576) {
+    if (g_count_big_allocs.load(std::memory_order_relaxed) && size >= 24576 && size < 262144) {
         g_big_allocs.fetch_add(1, std::memory_order_relaxed);
     }
     if (void *p = std::malloc(size == 0 ? 1 : size)) return p;
@@ -185,8 +185,8 @@ TEST_F(ScanLockTest, TheExactAggregatesAllocateEachValueVectorOnce) {
         const uint64_t pieces_baseline = big_allocations(pieces, op);
         pieces.chunk_bytes = kBlockBytes;
         EXPECT_LE(big_allocations(pieces, op), pieces_baseline) << "op " << op << ": a piece's value vector grew chunk by chunk";
-        if (op == 0) {   // Percentile allocates nothing else of that size: one vector per piece (98,304 and 61,696 bytes) and the merge's
-            EXPECT_LE(big_allocations(pieces, op), 3u) << "a piece's vector was sized too small and regrown";
+        if (op == 0) {   // Percentile allocates nothing else of that size: one vector per piece (98,304 and 61,696 bytes), no merged copy
+            EXPECT_LE(big_allocations(pieces, op), 2u) << "a piece's vector was sized too small and regrown";
         }
         const uint64_t sequential_baseline = big_allocations(Sequential(0), op);
         EXPECT_LE(big_allocations(Sequential(kBlockBytes), op), sequential_baseline) << "op " << op << ": the value vector grew chunk by chunk";
