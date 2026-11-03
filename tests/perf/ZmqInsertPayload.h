@@ -46,4 +46,29 @@ inline std::string BuildPayload(const std::string &db, XStore_Proto::WalDurabili
     return request.SerializeAsString();
 }
 
+// Like BuildPayload, but `rows` distinct timestamps drawn at random from the thread's whole range: the rows of a call
+// (and of successive calls) land far apart in the year file, so the dirty bytes stay thousands of separate ranges.
+inline std::string BuildScatterPayload(const std::string &db, XStore_Proto::WalDurabilityMode mode, unsigned long long range_start,
+                                       std::mt19937_64 &rng, size_t rows) {
+    std::vector<unsigned long long> stamps;
+    stamps.reserve(rows);
+    while (stamps.size() < rows) {
+        stamps.push_back(range_start + rng() % kThreadStride);
+        if (stamps.size() == rows) {
+            std::sort(stamps.begin(), stamps.end());
+            stamps.erase(std::unique(stamps.begin(), stamps.end()), stamps.end());
+        }
+    }
+    XStore_Proto::Request request;
+    XStore_Proto::BatchInsert_REQ *batch = request.mutable_batchinsert();
+    batch->set_dbname(db);
+    batch->set_durabilitymode(mode);
+    for (const unsigned long long ts : stamps) {
+        XStore_Proto::BatchInsert_DATA *entry = batch->add_batchinsert_data();
+        entry->set_timestamp(ts);
+        *entry->mutable_data() = WideRow(ts);
+    }
+    return request.SerializeAsString();
+}
+
 }  // namespace zmq_insert_payload

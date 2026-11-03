@@ -3,7 +3,9 @@
 // (ZmqInsertPayload.h); requests are serialized before the start time, so only the server's work is timed.
 //
 //   xstore_zmq_insert_client create <host:port> <db>
-//   xstore_zmq_insert_client run <host:port> <db> <seq|rand> <async|sync> <first_thread> <threads> <calls> <start_epoch_s>
+//   xstore_zmq_insert_client run <host:port> <db> <seq|rand|scatter> <async|sync> <first_thread> <threads> <calls> <start_epoch_s>
+//   seq: consecutive rows per call; rand: the same rows shuffled inside the call; scatter: XSTORE_SCATTER_ROWS (default 40)
+//   random timestamps from the thread's whole range per call, so the dirty bytes stay many separate ranges.
 //
 // `run` drives threads first_thread .. first_thread+threads-1 (each on its own disjoint timestamp range, its own REQ
 // socket), waits for the wall-clock start epoch (NTP-synced nodes share one, so several machines start together),
@@ -77,8 +79,8 @@ bool RowPresent(zmq::context_t &ctx, const std::string &addr, const std::string 
     return !reply.empty() && rep.ParseFromString(reply) && rep.data().fielddata_size() > 0;
 }
 
-int Run(const std::string &addr, const std::string &db, bool shuffle, XStore_Proto::WalDurabilityMode mode,
-        unsigned long long first_thread, int threads, int calls, double start_epoch_s) {
+int Run(const std::string &addr, const std::string &db, bool shuffle, bool scatter, size_t scatter_rows,
+        XStore_Proto::WalDurabilityMode mode, unsigned long long first_thread, int threads, int calls, double start_epoch_s) {
     zmq::context_t ctx(2);
     std::vector<std::vector<std::string>> payloads(static_cast<size_t>(threads));
     {
@@ -89,7 +91,8 @@ int Run(const std::string &addr, const std::string &db, bool shuffle, XStore_Pro
                 std::mt19937_64 rng(1000 + id);
                 for (int c = 0; c < calls; ++c) {
                     payloads[static_cast<size_t>(t)].push_back(
-                        BuildPayload(db, mode, FirstTs(id, static_cast<unsigned long long>(c)), shuffle, rng));
+                        scatter ? BuildScatterPayload(db, mode, FirstTs(id, 0), rng, scatter_rows)
+                                : BuildPayload(db, mode, FirstTs(id, static_cast<unsigned long long>(c)), shuffle, rng));
                 }
             });
         }
@@ -126,7 +129,7 @@ int Run(const std::string &addr, const std::string &db, bool shuffle, XStore_Pro
             const long long reply_ns = EpochNs(WallClock::now());
             const unsigned long long id = first_thread + static_cast<unsigned long long>(t);
             const unsigned long long last_ts = FirstTs(id, static_cast<unsigned long long>(calls - 1)) + kRowsPerCall - 1;
-            bool landed = false;
+            bool landed = scatter;   // scattered calls have no single "last row" to poll for: the reply time is the result
             for (int i = 0; i < 24000 && !landed; ++i) {   // up to ~2 min
                 landed = RowPresent(ctx, addr, db, last_ts);
                 if (!landed) std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -144,7 +147,7 @@ int Run(const std::string &addr, const std::string &db, bool shuffle, XStore_Pro
     start_ns = EpochNs(WallClock::now());
     go.store(true, std::memory_order_release);
     for (std::thread &c : clients) c.join();
-    const unsigned long long rows = static_cast<unsigned long long>(threads) * static_cast<unsigned long long>(calls) * kRowsPerCall;
+    const unsigned long long rows = static_cast<unsigned long long>(threads) * static_cast<unsigned long long>(calls) * (scatter ? scatter_rows : kRowsPerCall);
     std::printf("RESULT first_thread=%llu threads=%d rows=%llu failed=%llu not_landed=%llu start_ns=%lld reply_ns=%lld landed_ns=%lld lateness_us=%lld\n",
                 first_thread, threads, rows, failed.load(), not_landed, start_ns, last_reply_ns, landed_ns,
                 (start_ns - target_ns) / 1000);
@@ -158,14 +161,17 @@ int main(int argc, char **argv) {
     if (argc == 4 && std::string(argv[1]) == "create") return Create(argv[2], argv[3]);
     if (argc == 10 && std::string(argv[1]) == "run") {
         const std::string pattern = argv[4], mode = argv[5];
-        if ((pattern != "seq" && pattern != "rand") || (mode != "async" && mode != "sync")) {
-            std::cerr << "pattern is seq|rand, mode is async|sync\n";
+        if ((pattern != "seq" && pattern != "rand" && pattern != "scatter") || (mode != "async" && mode != "sync")) {
+            std::cerr << "pattern is seq|rand|scatter, mode is async|sync\n";
             return 2;
         }
-        return Run(argv[2], argv[3], pattern == "rand", mode == "sync" ? XStore_Proto::SYNC : XStore_Proto::ASYNC,
+        const char *scatter_rows_env = std::getenv("XSTORE_SCATTER_ROWS");   // rows per call for `scatter` (default 40: ~56 KiB, always a ring record)
+        const size_t scatter_rows = scatter_rows_env ? std::strtoull(scatter_rows_env, nullptr, 10) : 40;
+        return Run(argv[2], argv[3], pattern == "rand", pattern == "scatter", scatter_rows,
+                   mode == "sync" ? XStore_Proto::SYNC : XStore_Proto::ASYNC,
                    std::strtoull(argv[6], nullptr, 10), std::atoi(argv[7]), std::atoi(argv[8]), std::atof(argv[9]));
     }
-    std::cerr << "usage: " << argv[0] << " create <host:port> <db> | run <host:port> <db> <seq|rand> <async|sync> "
+    std::cerr << "usage: " << argv[0] << " create <host:port> <db> | run <host:port> <db> <seq|rand|scatter> <async|sync> "
               << "<first_thread> <threads> <calls> <start_epoch_s>\n";
     return 2;
 }
