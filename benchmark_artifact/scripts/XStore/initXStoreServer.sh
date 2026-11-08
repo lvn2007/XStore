@@ -9,6 +9,13 @@ WORKING_DIR="$1"
 # ccache is an optional compile cache CMake auto-detects (content-addressed,
 # so cached builds always reflect the latest code); installing it here keeps
 # the compile step below fast.
+# Curtin leaves an apt proxy from imaging time (90curtin-aptproxy) pointing at a
+# dead provisioning cache after the lease starts; apt then hangs on every fetch.
+# Remove it and stop the periodic-apt jobs from racing the benchmark's own apt.
+sudo rm -f /etc/apt/apt.conf.d/90curtin-aptproxy
+sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null
+sudo systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null
+
 sudo apt install build-essential cmake g++ git pkg-config sysstat ccache -y
 
 # Go to proper working dir
