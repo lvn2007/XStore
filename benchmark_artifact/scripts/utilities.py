@@ -1,4 +1,4 @@
-import time, os, itertools, math, threading, logging
+import time, os, itertools, math, threading, logging, re
 from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 import matplotlib as mpl
@@ -53,8 +53,21 @@ _openSemaphore = threading.Semaphore(MAX_CONCURRENT_SSH_OPENS)
 # only in fetchResults covers every call site uniformly (dispatch, fetch,
 # pollTmuxUntilDone's waitConns, waitForSSH) since they all funnel through
 # this one open().
-MAX_OPEN_RETRIES = 5
-OPEN_RETRY_DELAY_SEC = 2
+# Backoff doubles per attempt: a shared login node under load doesn't clear a
+# throttling window on a fixed 2s cadence, and a tight retry cadence lets this
+# module's own retry storm keep tripping MaxStartups. MAX_CONCURRENT_SSH_OPENS
+# bounds how many retries can be in flight at once.
+MAX_OPEN_RETRIES = 6
+OPEN_RETRY_BASE_SEC = 3
+
+# Synchronized-start safety: every client dispatch must finish at least this
+# many seconds before the scheduled epoch so all XBench invocations actually
+# wait for and share the same invoke_at. A tier whose dispatch landed inside
+# this margin (or past the epoch: negative Delta) would have clients starting
+# unsynchronized -- the tier 8 TOPK run on 2026-11-09 did exactly that -- so
+# the tier is re-dispatched instead of recording contaminated numbers.
+MIN_DISPATCH_DELTA_SEC = 10
+MAX_DISPATCH_ATTEMPTS = 3
 
 
 class _KeepAliveConnection(Connection):
@@ -83,12 +96,47 @@ class _KeepAliveConnection(Connection):
             except (SSHException, EOFError, ConnectionResetError) as e:
                 lastErr = e
                 if attempt < MAX_OPEN_RETRIES:
-                    time.sleep(OPEN_RETRY_DELAY_SEC)
+                    time.sleep(OPEN_RETRY_BASE_SEC * (2 ** (attempt - 1)))
         raise lastErr
 
 
+# Fabric's built-in ProxyJump support (get_gateway()) builds a FRESH gateway
+# Connection per client Connection -- every dispatch/poll/fetch open is thus a
+# full KEX+auth on login1's sshd, drawing from the same shared MaxStartups
+# budget other campus users draw from (that's what killed the 2026-11-08/09
+# TOPK runs: "Error reading SSH protocol banner", EOFError at auth, and
+# SSHException("No existing session") mid-KEX, plus 10+ minute dispatch
+# Deltas). Share one long-lived authenticated gateway transport instead:
+# Fabric then only opens direct-tcpip CHANNELS on it per client, and
+# MaxStartups counts only in-flight handshakes, never channels. The gateway
+# authenticates once per kernel session and is rebuilt on demand if its
+# transport ever dies. Passing an explicit gateway= Connection suppresses
+# Fabric's per-Connection ProxyJump resolution entirely.
+_GATEWAYED_HOST_RE = re.compile(r"^(172\.16\.5\.\d+|64\.131\.114\.\d+)$")
+_gatewayLock = threading.Lock()
+_gatewayConn = None
+
+
+def getGatewayConnection(keepalive=DEFAULT_KEEPALIVE_SEC):
+    global _gatewayConn
+    with _gatewayLock:
+        if _gatewayConn is None or not _gatewayConn.is_connected:
+            stale = _gatewayConn
+            _gatewayConn = None
+            if stale is not None:
+                try:
+                    stale.close()
+                except Exception:
+                    pass
+            gw = _KeepAliveConnection("mysticLogin", user=None, connect_timeout=30, keepalive=keepalive)
+            gw.open()
+            _gatewayConn = gw
+        return _gatewayConn
+
+
 def makeConnection(host, user="cc", keepalive=DEFAULT_KEEPALIVE_SEC, connect_timeout=30):
-    conn = _KeepAliveConnection(host, user=user, connect_timeout=connect_timeout, keepalive=keepalive)
+    gateway = getGatewayConnection(keepalive=keepalive) if _GATEWAYED_HOST_RE.match(host) else None
+    conn = _KeepAliveConnection(host, user=user, connect_timeout=connect_timeout, keepalive=keepalive, gateway=gateway)
     conn.open()
     return conn
 
@@ -303,8 +351,10 @@ def _dispatchWorkloadToClient(idx, ip, user, keepalive, WORKLOAD_TYPE, EXPERIMEN
         elif WORKLOAD_TYPE == "BACKTEST":
             conn.put(f"../scripts/backtestBench.sh")
             conn.run(f"bash backtestBench.sh {threadsPerMachine} {serverNode} {serverPort} {chunkSize} {skipSize} {dataFile} {dbName.upper()} {epochTime}")
+    delta = epochTime - int(time.time())
     with printLock:
-        print(f"[Benchmark: {totalClients}] [Client: {ip}] - Time now: {int(time.time())} | Delta: {epochTime - int(time.time())}")
+        print(f"[Benchmark: {totalClients}] [Client: {ip}] - Time now: {int(time.time())} | Delta: {delta}")
+    return delta
 
 
 def runWorkload(EXPERIMENT_TYPE, targetClients, serverNode, serverPort, dbName, clientNodes, nIter, batchIter,
@@ -353,31 +403,44 @@ def runWorkload(EXPERIMENT_TYPE, targetClients, serverNode, serverPort, dbName, 
             serverGroup.put(f"../scripts/sysMonitor.sh")
             serverGroup.run(f"bash sysMonitor.sh 20 {dbName}", hide=True)
 
-        # Schedule workload dispatch. Single-machine and multi-machine tiers share
-        # the same lead time so every reading starts from the same reference point
-        # -- this only works because dispatch is concurrent (see ThreadPoolExecutor
-        # below): total dispatch time is max(per-client time) regardless of how many
-        # clients are involved, not sum(per-client time), so multi-machine doesn't
-        # need extra lead just for having more machines to reach.
-        epochTime = int(time.time()) + leadSec
-        print(f"[Benchmark: {totalClients}] - Schedule workload on {epochTime}")
-
         # Dispatch to all clients concurrently instead of one at a time -- with N
         # machines dispatched sequentially, total dispatch time is sum(per-client
         # time); concurrent, it's max(per-client time), which is what the lead time
-        # above actually needs to cover.
+        # actually needs to cover. Single-machine and multi-machine tiers share the
+        # same lead time so every reading starts from the same reference point. The
+        # Delta guard below re-dispatches the whole tier if any client's connection
+        # landed too close to (or past) the scheduled epoch: a late-dispatched
+        # client would find invoke_at already in the past, start immediately, and
+        # desynchronize the tier. Re-dispatch is safe because every bench script
+        # starts with killTmuxIfRunning + a result file wipe, which cleanly cancels
+        # the previous attempt's job.
         dispatchPrintLock = threading.Lock()  # serializes only the print() calls, not the dispatches
-        with ThreadPoolExecutor(max_workers=len(selectedClients)) as executor:
-            futures = [
-                executor.submit(_dispatchWorkloadToClient, idx, ip, user, keepalive, WORKLOAD_TYPE, EXPERIMENT_TYPE,
-                                 serverNode, serverPort, dbName, threadsPerMachine, nIter, batchIter, epochTime,
-                                 chunkSize, skipSize, dataFile, totalClients, dispatchPrintLock)
-                for idx, ip in enumerate(selectedClients)
-            ]
-            for f in futures:
-                f.result()
-        # Each dispatch above prints its own "Delta: ..." -- a negative value there
-        # already signals insufficient lead time, no separate check needed.
+        for attempt in range(1, MAX_DISPATCH_ATTEMPTS + 1):
+            epochTime = int(time.time()) + leadSec
+            attemptTag = f" (attempt {attempt}/{MAX_DISPATCH_ATTEMPTS})" if attempt > 1 else ""
+            print(f"[Benchmark: {totalClients}] - Schedule workload on {epochTime}{attemptTag}")
+            deltas = []
+            with ThreadPoolExecutor(max_workers=len(selectedClients)) as executor:
+                futures = [
+                    executor.submit(_dispatchWorkloadToClient, idx, ip, user, keepalive, WORKLOAD_TYPE, EXPERIMENT_TYPE,
+                                     serverNode, serverPort, dbName, threadsPerMachine, nIter, batchIter, epochTime,
+                                     chunkSize, skipSize, dataFile, totalClients, dispatchPrintLock)
+                    for idx, ip in enumerate(selectedClients)
+                ]
+                for f in futures:
+                    deltas.append(f.result())
+            minDelta = min(deltas)
+            if minDelta >= MIN_DISPATCH_DELTA_SEC:
+                break
+            if attempt == MAX_DISPATCH_ATTEMPTS:
+                raise RuntimeError(
+                    f"[Benchmark: {totalClients}] dispatch could not finish at least "
+                    f"{MIN_DISPATCH_DELTA_SEC}s before the scheduled start after "
+                    f"{MAX_DISPATCH_ATTEMPTS} attempts (last min Delta: {minDelta}s). "
+                    f"Refusing to run a tier whose clients would not start synchronized "
+                    f"-- check jumphost congestion before rerunning."
+                )
+            print(f"[Benchmark: {totalClients}] min dispatch Delta: {minDelta}s < {MIN_DISPATCH_DELTA_SEC}s -- rescheduling tier (re-dispatch kills any already-scheduled tmux job)")
 
         # Poll until and add 1 min delay buffer for workload to finish
         poller(epochTime)
