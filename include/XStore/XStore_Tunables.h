@@ -853,6 +853,10 @@ static_assert(INDEXER_THREADS_DIVISOR >= 1, "divisor must be positive");
 // 128 +16.6 %, 256 +18.5 %, 1000 +45.2 % (CPU/row lower from 64 up). Break-even T=64; the default is 2x T.
 inline constexpr uint32_t INDEXER_MIN_RUN_ROWS_DEFAULT = 128;
 static_assert(INDEXER_MIN_RUN_ROWS_DEFAULT >= 1, "a run holds at least one row");
+// Pool workers at SCHED_IDLE (env XSTORE_INDEXER_IDLE=1; anything else keeps this default): they only get CPU nobody
+// else wants. Mystic, dense ASYNC 12.8 M rows, pool on, backlog 16384, 2 pairs: rows/s 955K/981K on vs 884K/880K
+// off (+8.9 %, CPU/row -3.8 %), but RSS 1.6-2.0 GB vs 1.2 GB (the backlog fills further). Off: memory over throughput.
+inline constexpr bool INDEXER_IDLE_PRIORITY_DEFAULT = false;
 // How long Shutdown waits for the indexer to fold what is queued; the years still pending afterwards stay dirty (rebuilt
 // at the next start). A live widen waits as long for its year's pending rows before it scans.
 inline constexpr int64_t INDEXER_DRAIN_BOUND_MS = 30000;

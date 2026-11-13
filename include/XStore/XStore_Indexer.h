@@ -26,9 +26,11 @@ struct IndexerConfig {
     // TESTS ONLY (no env variable): SYNC/BYPASS records are handed off too. Most indexer tests insert SYNC (the apply has
     // finished when the call returns) and still need the hand-off path under test.
     bool hand_off_sync = false;
+    // Workers run at SCHED_IDLE (env XSTORE_INDEXER_IDLE=1). Last, so the positional test configs above stay as they are.
+    bool idle_priority = XStoreTunables::INDEXER_IDLE_PRIORITY_DEFAULT;
 };
 
-// Reads XSTORE_INDEXER_THREADS / XSTORE_INDEXER_BACKLOG_MB / XSTORE_INDEXER_MIN_RUN_ROWS once; defaults from XStoreTunables.
+// Reads XSTORE_INDEXER_THREADS / XSTORE_INDEXER_BACKLOG_MB / XSTORE_INDEXER_MIN_RUN_ROWS / XSTORE_INDEXER_IDLE once; defaults from XStoreTunables.
 IndexerConfig IndexerConfigFromEnv();
 
 // One hint: "this block of this year file may have pending rows". The bits are the authority.
@@ -89,7 +91,7 @@ private:
     static constexpr size_t PASS_STRIPES = 64;
 
     Indexer() = default;
-    void WorkerLoop();
+    void WorkerLoop(bool idle_priority);
     void StopLocked(std::chrono::milliseconds bound);
     void RunPass(const IndexHint &hint);
     [[nodiscard]] PassEnd PassBody(const IndexHint &hint, const std::string &key);

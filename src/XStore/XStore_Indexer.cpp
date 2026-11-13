@@ -9,6 +9,7 @@
 #include <cctype>
 #include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <sched.h>
 
@@ -56,6 +57,8 @@ IndexerConfig IndexerConfigFromEnv() {
         const unsigned long v = std::strtoul(env, &end, 10);
         if (*end == '\0' && v != 0) c.min_run_rows = static_cast<uint32_t>(std::min<unsigned long>(v, 1ul << 20));
     }
+    // Exactly "1" turns it on; unset, "0" or anything else keeps the default.
+    if (const char *env = std::getenv("XSTORE_INDEXER_IDLE")) c.idle_priority = std::strcmp(env, "1") == 0;
     return c;
 }
 
@@ -78,7 +81,7 @@ void Indexer::Start(const IndexerConfig &config) {
     stopping_.store(false, std::memory_order_relaxed);
     const uint32_t threads = std::max<uint32_t>(1, config.threads);
     workers_.reserve(threads);
-    for (uint32_t i = 0; i < threads; ++i) workers_.emplace_back([this] { WorkerLoop(); });
+    for (uint32_t i = 0; i < threads; ++i) workers_.emplace_back([this, idle = config.idle_priority] { WorkerLoop(idle); });
     PendingMaps::SetNoticesEnabled(true);   // before the first hand-off can leave a row pending (ruling 4)
     active_.store(true, std::memory_order_release);
 }
@@ -193,10 +196,9 @@ void Indexer::DropHints(const std::function<bool(const std::string &year_key)> &
     for (IndexHint &k : keep) queue_.enqueue(std::move(k));
 }
 
-void Indexer::WorkerLoop() {
-    // EXPERIMENT (burst test, 2026-11-10): XSTORE_INDEXER_IDLE=1 runs the indexer threads at SCHED_IDLE, so they only get CPU
-    // nobody else wants. Throwaway; remove or promote to a Tunable depending on the burst-test verdict.
-    if (const char *idle_env = std::getenv("XSTORE_INDEXER_IDLE"); idle_env != nullptr && idle_env[0] == '1') {
+void Indexer::WorkerLoop(bool idle_priority) {
+    // IndexerConfig::idle_priority (XStoreTunables::INDEXER_IDLE_PRIORITY_DEFAULT): only CPU nobody else wants.
+    if (idle_priority) {
         const sched_param param{};
         if (sched_setscheduler(0, SCHED_IDLE, &param) != 0) spdlog::warn("[INDEXER] - SCHED_IDLE refused (errno {})", errno);
     }

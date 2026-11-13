@@ -781,6 +781,43 @@ TEST_F(IndexerWriteTest, HandedOffRowsStayPendingUntilTheIndexerFoldsThem) {
     EXPECT_TRUE(got.second == ref.second) << ".catidx differs from the synchronous build";
 }
 
+// A startup-style rebuild (InitDB -> RebuildStaleIndexesForDb -> BeginYearRebuild) with the pool on and a pass in flight:
+// BeginYearRebuild drops the year's registry entries, which ignores pins, so it must first wait for the pass that holds
+// them (else the pass folds into a freed ZoneMapFile / CatIdxFile: ASan heap-use-after-free). Test-only: production
+// runs InitDB before the pool starts.
+TEST_F(IndexerWriteTest, AStartupRebuildWaitsForAPassInFlight) {
+    const std::string db = "IDXWRRB", ref_db = "IDXWRRBREF";
+    XStore store;
+    const Rows rows = Dense(0, 3000, 40);
+    const auto ref = ReferenceBytes(store, ref_db, rows);
+    xstore::Indexer::SetConfigForTests({1, kPoolBacklog, /*min_run_rows=*/1, /*hand_off_sync=*/true});
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    // Shared, not a stack local: an ASSERT below returns with the hook still installed (TearDown releases it, then nulls it).
+    const auto entered = std::make_shared<std::atomic<bool>>(false);
+    released_.store(false);
+    xstore::Indexer::SetPassDelayForTests([this, entered] {
+        entered->store(true);
+        while (!released_.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    });
+    Insert(store, db, rows);
+    ASSERT_TRUE(WaitFor([entered] { return entered->load(); })) << "no pass started";
+    const uint32_t width = Width(db);
+    // No ASSERT between its start and its join; it captures only the fixture.
+    std::thread releaser([this] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        ReleasePasses();
+    });
+    const std::vector<std::exception_ptr> failures = store.RebuildYearsIndexes(DbPath(db), {{kYear, true, true}}, kRowLength, width, 1);
+    const bool waited = released_.load();
+    releaser.join();
+    EXPECT_TRUE(waited) << "the rebuild dropped the registry entries under a pass's pins";
+    ASSERT_FALSE(failures.front());
+    ASSERT_TRUE(Quiesce());
+    const auto got = CleanBytes(db, width);
+    EXPECT_TRUE(got.first == ref.first) << ".zmap differs from the synchronous build";
+    EXPECT_TRUE(got.second == ref.second) << ".catidx differs from the synchronous build";
+}
+
 // Clean sidecars stay trusted after a restart, so a handed-off run (folded only after the ack) must mark both dirty on
 // disk before the ack, as the inline fold does: a kill before the indexer's pass then leaves them dirty (rebuilt).
 TEST_F(IndexerWriteTest, AHandOffMarksCleanSidecarsDirtyOnDiskBeforeTheAck) {
@@ -1162,6 +1199,20 @@ TEST(IndexerConfigTest, MinRunRowsFromEnvAndClamped) {
              {"-5", kDefault}, {"12abc", kDefault}}) {
         ScopedEnv m("XSTORE_INDEXER_MIN_RUN_ROWS", v);
         EXPECT_EQ(xstore::IndexerConfigFromEnv().min_run_rows, want) << '"' << v << '"';
+    }
+}
+
+TEST(IndexerConfigTest, IdlePriorityOnlyForExactlyOne) {
+    EXPECT_FALSE(XStoreTunables::INDEXER_IDLE_PRIORITY_DEFAULT);
+    EXPECT_FALSE(xstore::IndexerConfig{}.idle_priority);
+    {
+        ScopedEnv i("XSTORE_INDEXER_IDLE", nullptr);
+        EXPECT_FALSE(xstore::IndexerConfigFromEnv().idle_priority);
+    }
+    for (const auto &[v, want] : std::vector<std::pair<const char *, bool>>{
+             {"1", true}, {"0", false}, {"", false}, {"abc", false}, {"10", false}, {"1 ", false}, {"yes", false}}) {
+        ScopedEnv i("XSTORE_INDEXER_IDLE", v);
+        EXPECT_EQ(xstore::IndexerConfigFromEnv().idle_priority, want) << '"' << v << '"';
     }
 }
 

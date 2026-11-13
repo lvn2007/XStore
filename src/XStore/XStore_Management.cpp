@@ -1739,6 +1739,11 @@ void XStore::BeginYearRebuild(const std::string &db_base_path, uint16_t row_leng
     // A live widen left stopped or failed in this process ends here: this rebuild replaces its state.
     ForgetRebuildStatusMatching([&](const LiveRebuildStatus &n) { return n.year == year && n.db_base_path == db_base_path; });
 
+    // A pool pass holds pins the registry erase below ignores: wait (bounded) for the pool to go idle. A no-op when the
+    // pool is not active, i.e. always in production (InitDB runs before Indexer::Start); tests re-run InitDB with it on.
+    // No caller holds a lock a pass needs (registry, year key, range, fd or pass mutexes).
+    xstore::Indexer::Instance().WaitIdleForTests(std::chrono::seconds(30));
+
     // Startup only. A registry instance may already exist for this year (WAL replay opened it, possibly at another
     // width; a test may have deleted its file under it): drop it, so the pin below opens the file that is on disk and
     // the rebuilt index lands there. Ignores pins: never run while a builder or another pin holder is alive.
