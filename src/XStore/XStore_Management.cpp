@@ -1,4 +1,6 @@
 #include "include/XStore/XStore_Internal.h"
+#include "include/XStore/XStore_PendingMap.h"
+#include "include/XStore/XStore_Indexer.h"
 #include "include/XStore/XStore_DirLock.h"
 #include "include/DataStructs/FileRangeLock.h"
 #include "include/DataStructs/TimeStruct.h"
@@ -12,6 +14,7 @@
 #include <spdlog/fmt/fmt.h>
 #include "include/Logger/Logger.h"
 #include <algorithm>
+#include <cassert>
 #include <limits>
 #include <optional>
 #include <cerrno>
@@ -177,6 +180,11 @@ XStore::XStore() {
     if (new_dir) {
         initialized_dirs.insert(data_store_dir);
         InitDB();
+        // After InitDB: its WAL replay and index rebuilds apply synchronously, with no pool (spec section 6). A pool
+        // already running (tests) is left as it is; with no backlog configured nothing starts.
+        const xstore::IndexerConfig indexer_config = xstore::IndexerConfigFromEnv();
+        xstore::Indexer &indexer = xstore::Indexer::Instance();
+        if (indexer_config.backlog_bytes != 0 && !indexer.Active()) indexer.Start(indexer_config);
     }
 }
 
@@ -215,7 +223,7 @@ bool XStore::GetOrLoadCfg(const std::string &db_name, const std::string &db_base
     std::fclose(c_file);
 
     // Sanitize BEFORE this value is cached or handed back -- everything
-    // downstream (EffectiveTrackedColumnCount, WalRecord::AppendRow,
+    // downstream (EffectiveTrackedColumnCount, WalRecord::AppendRowWithObs,
     // every GetOrOpenZoneMap call site) treats a cached cfg as already
     // trustworthy. See ClampPersistedColumnCount's comment in XStore.h.
     ClampPersistedColumnCount(db_name, cfg_out);
@@ -412,6 +420,9 @@ ZoneMapFile& XStore::GetOrOpenZoneMapLocked(std::string_view db_base_path, unsig
         throw std::runtime_error(fmt::format("ZoneMapFile::Open failed for {}", path));
     }
     ZoneMapFile &ref = *zmap;
+    // Before the object is shared (AttachPending is a plain write): the year's one map. The registry keeps it across a
+    // file eviction only while it has pending marks (PendingMaps::For sweeps unheld, empty maps).
+    ref.AttachPending(xstore::PendingMaps::For(key, ref.RowsPerBlockValue()));
     zone_map_registry_.emplace(key, std::move(zmap));
     zone_map_registry_lru_.push_back(key);
     return ref;
@@ -484,15 +495,25 @@ XStore::YearIndexWidths XStore::PeekYearIndexWidths(const std::string &db_base_p
 // Ignores pins, like the explicit erase in RebuildYearIndexes: neither may run while a builder or another pin
 // holder is alive (today they run only in InitDB and in tests).
 void XStore::ClearZoneMapRegistryForTests() {
+    xstore::Indexer::Instance().WaitIdleForTests(std::chrono::seconds(30));   // a pool pass holds pins
     std::lock_guard<std::mutex> lock(zone_map_registry_mutex_);
     zone_map_registry_.clear();
     zone_map_registry_lru_.clear();
     zone_map_registry_retired_.clear();
+    xstore::PendingMaps::ClearForTests();
     ForgetRebuildStatusMatching([](const LiveRebuildStatus &) { return true; });
 }
 
 template <typename Match>
-void XStore::RetireIndexesMatching(const Match &match) {
+void XStore::ForgetPendingMatching(const Match &match) {
+    // The queued hints go first, while their maps are still the registered ones: each gives its reservation back now
+    // instead of whenever a worker reaches it (a no-op when nothing is queued: no pool, or nothing handed off).
+    xstore::Indexer::Instance().DropHints(match);
+    xstore::PendingMaps::ForgetMatching(match); // a file still pinned keeps its (now unregistered) map until it is released
+}
+
+template <typename Match>
+void XStore::RetireIndexesMatching(const Match &match, bool forget_pending) {
     {
         std::lock_guard<std::mutex> lock(zone_map_registry_mutex_);
         RetireMatching(zone_map_registry_, zone_map_registry_lru_, zone_map_registry_retired_, match);
@@ -501,6 +522,7 @@ void XStore::RetireIndexesMatching(const Match &match) {
         std::lock_guard<std::mutex> lock(catidx_registry_mutex_);
         RetireMatching(catidx_registry_, catidx_registry_lru_, catidx_registry_retired_, match);
     }
+    if (forget_pending) ForgetPendingMatching(match);
     ForgetRebuildStatusMatching([&match](const LiveRebuildStatus &n) {
         return match(fmt::format("{}/{}", n.db_base_path, n.year)); // the registry key format
     });
@@ -509,12 +531,17 @@ void XStore::RetireIndexesMatching(const Match &match) {
 void XStore::RetireIndexesUnderPrefix(const std::string &db_dir_prefix) {
     RetireIndexesMatching([&db_dir_prefix](const std::string &key) {
         return key.compare(0, db_dir_prefix.size(), db_dir_prefix) == 0;
-    });
+    }, /*forget_pending=*/true);
 }
 
-void XStore::RetireYearIndexes(std::string_view db_base_path, unsigned short year) {
+void XStore::RetireYearIndexes(std::string_view db_base_path, unsigned short year, bool forget_pending) {
     const std::string year_key = fmt::format("{}/{}", db_base_path, year); // same format as GetOrOpen*Locked
-    RetireIndexesMatching([&year_key](const std::string &key) { return key == year_key; });
+    RetireIndexesMatching([&year_key](const std::string &key) { return key == year_key; }, forget_pending);
+}
+
+void XStore::ForgetYearPending(std::string_view db_base_path, unsigned short year) {
+    const std::string year_key = fmt::format("{}/{}", db_base_path, year);
+    ForgetPendingMatching([&year_key](const std::string &key) { return key == year_key; });
 }
 
 size_t XStore::RetiredIndexCountForTests() {
@@ -696,6 +723,8 @@ std::condition_variable XStore::bg_cv_;
 std::string XStore::bg_active_key_;
 std::multiset<std::string> XStore::bg_removing_scopes_;
 bool XStore::bg_cancel_clear_on_leave_ = false;
+std::multiset<std::string> XStore::indexer_active_keys_;
+std::atomic<uint32_t> XStore::bg_removing_count_{0};
 
 void XStore::RecordLiveWidenRequest(const std::string &db_name, const std::string &db_base_path) {
     std::lock_guard<std::mutex> lock(live_widen_mutex_);
@@ -755,6 +784,25 @@ XStore::BgEnter XStore::EnterBackgroundYear(const std::string &year_key) {
     }
     bg_active_key_ = year_key;
     return BgEnter::kGo;
+}
+
+bool XStore::EnterIndexerYear(const std::string &year_key) {
+    std::lock_guard<std::mutex> lock(bg_mutex_);
+    for (const std::string &scope : bg_removing_scopes_) {
+        if (ScopeCovers(scope, year_key)) return false;
+    }
+    indexer_active_keys_.insert(year_key);
+    return true;
+}
+
+void XStore::LeaveIndexerYear(const std::string &year_key) {
+    {
+        std::lock_guard<std::mutex> lock(bg_mutex_);
+        const auto it = indexer_active_keys_.find(year_key);
+        assert(it != indexer_active_keys_.end() && "LeaveIndexerYear without EnterIndexerYear");
+        if (it != indexer_active_keys_.end()) indexer_active_keys_.erase(it);
+    }
+    bg_cv_.notify_all();
 }
 
 bool XStore::RemovalCovers(const std::string &year_key) {
@@ -848,16 +896,26 @@ void XStore::LeaveBackgroundYear() {
 bool XStore::StopBackgroundWork(const std::string &scope) {
     std::unique_lock<std::mutex> lock(bg_mutex_);
     bg_removing_scopes_.insert(scope);
+    bg_removing_count_.fetch_add(1, std::memory_order_relaxed);   // under bg_mutex_: Enqueue's slow path sees the scope
     bool cancelled = false;
     try {
         if (!bg_active_key_.empty() && ScopeCovers(scope, bg_active_key_)) {
             bg_cancel_.store(true, std::memory_order_relaxed);
             cancelled = true;
         }
-        const auto released = [&] { return bg_active_key_.empty() || !ScopeCovers(scope, bg_active_key_); };
+        const auto released = [&] {
+            for (const std::string &key : indexer_active_keys_) {
+                if (ScopeCovers(scope, key)) return false;
+            }
+            return bg_active_key_.empty() || !ScopeCovers(scope, bg_active_key_);
+        };
         if (!bg_cv_.wait_for(lock, std::chrono::milliseconds(XStoreTunables::BACKGROUND_REMOVE_WAIT_MS), released)) {
-            spdlog::error("[REMOVE] [{}] - The background index thread did not let go of {} within {} ms; removing anyway",
-                          scope, bg_active_key_, XStoreTunables::BACKGROUND_REMOVE_WAIT_MS);
+            std::string held = bg_active_key_;
+            for (const std::string &key : indexer_active_keys_) {
+                if (ScopeCovers(scope, key)) { held = key; break; }
+            }
+            spdlog::error("[REMOVE] [{}] - The background index thread or an indexer pass did not let go of {} within {} "
+                          "ms; removing anyway", scope, held, XStoreTunables::BACKGROUND_REMOVE_WAIT_MS);
         }
     } catch (...) {
         // The caller's guard is built from the return value, so nothing else would take the scope (and the cancel)
@@ -872,7 +930,10 @@ bool XStore::StopBackgroundWork(const std::string &scope) {
 void XStore::ResumeBackgroundWork(const std::string &scope, bool cancelled) {
     std::lock_guard<std::mutex> lock(bg_mutex_);
     auto it = bg_removing_scopes_.find(scope);
-    if (it != bg_removing_scopes_.end()) bg_removing_scopes_.erase(it);
+    if (it != bg_removing_scopes_.end()) {
+        bg_removing_scopes_.erase(it);
+        bg_removing_count_.fetch_sub(1, std::memory_order_relaxed);
+    }
     if (!cancelled) return;
     // The thread is still on a year that this scope (its wait timed out: a chunk that runs long) or another removal's
     // (which cancelled it and still waits) covers: it must keep seeing the cancel until it lets go of that year, else it
@@ -1260,12 +1321,17 @@ XStore_Proto::RemoveDBFiles_REP XStore::RemoveDBFiles(XStore_Proto::RemoveDBFile
         // half-built index. That case keeps the old gap (an insert creating the file anew between the unlink and the
         // retire can still hit the old entry) for a year whose widen was just cancelled.
         const bool retire_late = RemovalScopeHasRebuildingIndex(bg_scope);
-        if (!retire_late) RetireYearIndexes(db_loc, *year);
+        // The year's pending map (and its queued hints) is forgotten only once the data file is gone: if the unlink
+        // fails the rows stay queryable, and a later cold open must share the old map, whose marked rows are still
+        // unindexed (a fresh, empty map would make it trust blocks that miss them). The scope blocks cold opens until
+        // Resume, so forgetting after the unlink is still before any reopen.
+        if (!retire_late) RetireYearIndexes(db_loc, *year, /*forget_pending=*/false);
         // The data file still exists when its removal failed: then its index files stay as they are (a fresh, empty
         // index next to rows that are still there would answer "no rows here" wrongly); after the wait nothing holds
         // the retired objects, so the next cold open is the only object on those files.
         const bool data_removed = remove_one(file_name, /*report_missing=*/true, /*empty_if_stuck=*/false);
-        if (retire_late && data_removed) RetireYearIndexes(db_loc, *year);
+        if (retire_late && data_removed) RetireYearIndexes(db_loc, *year, /*forget_pending=*/true);
+        if (!retire_late && data_removed) ForgetYearPending(db_loc, *year);
         // Also before the sidecars go: a retired object still pinned would write into an index file this empties.
         WaitForRemovedFilesReleased(bg_scope, old_fds);
         if (data_removed) {
@@ -1457,7 +1523,31 @@ std::string XStore::RebuildingColumnNoticeText(std::string_view op, const std::s
                        "or failed finishes at the next start)", op, db_name, column_idx, year, state);
 }
 
+std::string XStore::PendingIndexNoticeText(std::string_view op, const std::string &db_name, unsigned short year) {
+    return fmt::format("[WARNING] [{}] [DB: {}] - part of {} is not indexed yet (the indexer is catching up); the part not "
+                       "yet indexed is answered by scan, results are correct", op, db_name, year);
+}
+
 namespace {
+// One notice per year whose part of [start_epoch, end_epoch] contains a block with an outstanding index update.
+std::string PendingIndexNotices(std::string_view op, const std::string &db_name, const std::string &db_base_path,
+                                const XStore_Proto::ConfigStruct &cfg, unsigned long long start_epoch,
+                                unsigned long long end_epoch) {
+    std::string out;
+    unsigned long long iter_epoch = start_epoch;
+    while (iter_epoch <= end_epoch) {
+        TimeStruct curr_ts(static_cast<std::time_t>(iter_epoch), cfg.timeresolution());
+        const unsigned long long end_of_year = std::min(end_epoch, static_cast<unsigned long long>(curr_ts.last_epoch));
+        if (const auto pending = xstore::PendingMaps::Find(fmt::format("{}/{}", db_base_path, curr_ts.year));
+            pending && pending->AnyPendingInRows(iter_epoch - curr_ts.first_epoch, end_of_year - curr_ts.first_epoch)) {
+            if (!out.empty()) out += " | ";
+            out += XStore::PendingIndexNoticeText(op, db_name, curr_ts.year);
+        }
+        iter_epoch = end_of_year + 1;
+    }
+    return out;
+}
+
 // The rebuild notices of the years in [start_epoch, end_epoch] with a live widen of their .zmap: one per year whose
 // part of the range reaches a row at or past the zone map's contiguous watermark (a column >= the always-indexed width
 // counts in any part of the year). Exact for block usability: TryGetBlockStats serves only blocks that end at or below
@@ -1489,6 +1579,21 @@ std::string LiveRebuildNotices(std::string_view op, const std::string &db_name, 
 std::string XStore::UnindexedColumnNotice(std::string_view op, const std::string &db_name, const std::string &db_base_path,
                                            const XStore_Proto::ConfigStruct &cfg, unsigned long long start_epoch,
                                            unsigned long long end_epoch, int32_t column_idx) {
+    // One acquire load while nothing is pending; on only while the indexer pool runs (PendingMaps::NoticesEnabled). The
+    // pending notices come first and join the column notice, if any, with " | ".
+    std::string pending_notices;
+    if (__builtin_expect(xstore::PendingMaps::AnyPending(), 0) && xstore::PendingMaps::NoticesEnabled()) {
+        pending_notices = PendingIndexNotices(op, db_name, db_base_path, cfg, start_epoch, end_epoch);
+    }
+    std::string column_notice = ColumnIndexNotice(op, db_name, db_base_path, cfg, start_epoch, end_epoch, column_idx);
+    if (pending_notices.empty()) return column_notice;
+    if (!column_notice.empty()) pending_notices += " | " + column_notice;
+    return pending_notices;
+}
+
+std::string XStore::ColumnIndexNotice(std::string_view op, const std::string &db_name, const std::string &db_base_path,
+                                      const XStore_Proto::ConfigStruct &cfg, unsigned long long start_epoch,
+                                      unsigned long long end_epoch, int32_t column_idx) {
     if (column_idx < 0 || static_cast<uint32_t>(column_idx) >= EffectiveTrackedColumnCount(cfg)) return "";
 
     // While no year of any DB is live-widened (the common case) this load and its branch are all this adds.
@@ -1576,7 +1681,10 @@ void EmptyUnusableZoneMap(const std::string &zmap_path, uint16_t row_length) {
         const bool unusable = !readable || header.magic != ZoneMapFileHeader{}.magic ||
                               (header.version == ZONE_MAP_VERSION && header.rows_per_block != RowsPerBlock(row_length));
         if (unusable && ftruncate(fd, 0) != 0) {
-            spdlog::error("[ZONE MAP REBUILD] [{}] - Cannot empty an unusable zone map", zmap_path);
+            // Fatal for the start (InitDB rethrows it): the rebuild would otherwise keep the header's block size.
+            const int err = errno;
+            close(fd);
+            throw std::runtime_error(fmt::format("cannot empty the unusable zone map {}: {}", zmap_path, strerror(err)));
         }
     }
     close(fd);
@@ -1637,14 +1745,25 @@ void XStore::BeginYearRebuild(const std::string &db_base_path, uint16_t row_leng
     // The pins are held from before BeginRebuild until after MarkClean. If BeginRebuild fails, the file (the registry
     // entry just opened) is put in the untrusted rebuild state instead and its pin dropped: it stays in the registry
     // (a rebuilding entry is never evicted) and is scanned, never trusted, until the next start rebuilds it.
+    // Both files and the year's pending map go, whichever file is rebuilt: the rebuild re-derives every row from the
+    // data file, so a map left registered (an in-process restart, or one PendingMaps::For kept for another block size)
+    // holds nothing the rebuilt index needs, and a file of the year that kept it would read its stale marks against its
+    // own blocks. The pins below share a fresh map.
+    {
+        std::lock_guard<std::mutex> registry_lock(zone_map_registry_mutex_);
+        zone_map_registry_.erase(registry_key);
+        zone_map_registry_lru_.erase(
+            std::remove(zone_map_registry_lru_.begin(), zone_map_registry_lru_.end(), registry_key),
+            zone_map_registry_lru_.end());
+    }
+    {
+        std::lock_guard<std::mutex> registry_lock(catidx_registry_mutex_);
+        catidx_registry_.erase(registry_key);
+        catidx_registry_lru_.erase(std::remove(catidx_registry_lru_.begin(), catidx_registry_lru_.end(), registry_key),
+                                   catidx_registry_lru_.end());
+    }
+    xstore::PendingMaps::ForgetMatching([&registry_key](const std::string &key) { return key == registry_key; });
     if (y.need_zmap) {
-        {
-            std::lock_guard<std::mutex> registry_lock(zone_map_registry_mutex_);
-            zone_map_registry_.erase(registry_key);
-            zone_map_registry_lru_.erase(
-                std::remove(zone_map_registry_lru_.begin(), zone_map_registry_lru_.end(), registry_key),
-                zone_map_registry_lru_.end());
-        }
         EmptyUnusableZoneMap(fmt::format("{}/{}.zmap", db_base_path, year), row_length);
         y.zmap = PinZoneMap(db_base_path, year, row_length, tracked_column_count);
         // BeginRebuild empties the file whatever its width: an old file WIDER than tracked_column_count (a first
@@ -1658,13 +1777,6 @@ void XStore::BeginYearRebuild(const std::string &db_base_path, uint16_t row_leng
         }
     }
     if (y.need_catidx) {
-        {
-            std::lock_guard<std::mutex> registry_lock(catidx_registry_mutex_);
-            catidx_registry_.erase(registry_key);
-            catidx_registry_lru_.erase(
-                std::remove(catidx_registry_lru_.begin(), catidx_registry_lru_.end(), registry_key),
-                catidx_registry_lru_.end());
-        }
         y.catidx = PinCatIdx(db_base_path, year, row_length, tracked_column_count);
         if (!y.catidx->BeginRebuild(tracked_column_count)) { // also drops the bitmap section; bitmap build rebuilds it
             spdlog::error("[CATIDX REBUILD] [{}/{}.catidx] - Cannot start the rebuild; the index is not trusted until "
@@ -2028,6 +2140,25 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
     BeginRebuildFiles(rebuild_status, zmap.get() != nullptr, catidx.get() != nullptr, governor != nullptr,
                       zmap.get() != nullptr ? zmap->OldWidth() : 0, catidx.get() != nullptr ? catidx->OldWidth() : 0);
 
+    // Rows handed to the indexer and not folded yet would be folded twice: by the scan below (it reads every row) and
+    // by their pass (UpdateRows keeps rows below F). Writers no longer hand off while a file is rebuilt (ApplyWalRecord
+    // checks Rebuilding() after marking its rows, so every earlier hand-off is visible here), so wait for the ones
+    // already handed off: their passes fold into the old index only (F is 0, nothing is folded yet) and clear them.
+    const std::shared_ptr<xstore::PendingMap> pending = zmap.get() != nullptr ? zmap->Pending() : catidx->Pending();
+    const auto drain_deadline = Clock::now() + std::chrono::milliseconds(XStoreTunables::INDEXER_DRAIN_BOUND_MS);
+    while (pending && pending->PendingBlockCount() != 0) {
+        const bool stop_now = stopped();
+        if (stop_now || Clock::now() >= drain_deadline) {
+            if (zmap.get() != nullptr) rebuild_status.zmap_governed.store(false, std::memory_order_relaxed);
+            if (catidx.get() != nullptr) rebuild_status.catidx_governed.store(false, std::memory_order_relaxed);
+            if (stop_now) return LiveWidenResult::kStopped;
+            spdlog::error("[LIVE WIDEN] [{}] - Rows of the year are still waiting for the indexer after {} ms; the index "
+                          "stays in rebuild until the next start", data_path, XStoreTunables::INDEXER_DRAIN_BOUND_MS);
+            return LiveWidenResult::kFailed;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
     // From here every early return leaves the files that began in rebuild at the frontier they reached: dirty on
     // disk, blocks past F scanned (never trusted from the new file; with keep_old they are answered from the old index,
     // which stays until the next start), MarkClean refusing, unevictable; the next start rebuilds them.
@@ -2377,14 +2508,31 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
     if ((zmap_finished || catidx_finished) && !data_synced) {
         spdlog::error("[LIVE WIDEN] [{}] - fdatasync of the data file failed; leaving the rebuilt index dirty", data_path);
     }
-    if (zmap_finished && data_synced && !zmap->MarkClean()) {
+    // Rebuilding() ended with FinishRebuild, so writers hand rows off again: the files are cleaned only while none of
+    // the year's rows is pending, checked under a READ lock of the whole file. A record holds the WRITE locks of all its
+    // runs until it is applied, so none is half way (marked, but its sidecars not marked dirty yet: the dirty mark is
+    // once per record). Pending rows leave the files dirty (the next start rebuilds them). With no pool no row is
+    // handed off: nothing to check.
+    std::optional<TimedFileRangeLockGuard> clean_lock;
+    bool may_clean = true;
+    if (xstore::Indexer::Instance().Active() && (zmap_finished || catidx_finished) && data_synced) {
+        clean_lock.emplace(data_path, 0, 0, FileRangeLock::LockType::READ,
+                           std::chrono::milliseconds(XStoreTunables::LIVE_WIDEN_LOCK_WAIT_MS));
+        may_clean = clean_lock->owns_lock() && !(pending && pending->PendingBlockCount() != 0);
+        if (!may_clean) {
+            spdlog::info("[LIVE WIDEN] [{}] - Rows of the year are waiting for the indexer; the widened index stays dirty "
+                         "until the next start", data_path);
+        }
+    }
+    if (zmap_finished && data_synced && may_clean && !zmap->MarkClean()) {
         spdlog::error("[LIVE WIDEN] [{}/{}.zmap] - MarkClean failed; leaving it dirty", db_base_path, year);
         all_ok = false;
     }
-    if (catidx_finished && data_synced && !catidx->MarkClean()) {
+    if (catidx_finished && data_synced && may_clean && !catidx->MarkClean()) {
         spdlog::error("[LIVE WIDEN] [{}/{}.catidx] - MarkClean failed; leaving it dirty", db_base_path, year);
         all_ok = false;
     }
+    clean_lock.reset();
     spdlog::info("[LIVE WIDEN] [{}] - Rebuilt at {} columns (zone map: {}, catidx: {}): {} rows in {} chunks, {} lock "
                  "timeouts, max lock hold {} us, {} ms, {} writer yields ({} ms)", data_path, tracked_column_count,
                  zmap_finished, catidx_finished, st.rows_folded, st.chunks, st.lock_timeouts, st.max_lock_hold_us,
@@ -2772,18 +2920,57 @@ void XStore::AppendRebuildObservations(uint64_t row_index, const char *row, uint
     google::protobuf::io::CodedInputStream in(reinterpret_cast<const uint8_t *>(row), row_length);
     bool one_pass = true;
     uint32_t column = 0;
+    // Wire bytes of the two column shapes that need no protobuf parse: an unset column is `0A 00`; a double column is
+    // `0A 09 09 <8 bytes>` (FData field 1 = doubleData, wire type 1 = fixed64, so its tag byte is 0x09).
+    constexpr uint8_t DOUBLE_FIELD_TAG = (XStore_Proto::FData::kDoubleDataFieldNumber << 3) | WireFormatLite::WIRETYPE_FIXED64;
+    constexpr char DOUBLE_CASE_BYTE = static_cast<char>(XStore_Proto::FData::kDoubleData);   // AppendFDataForCatIdx writes the case id first
+    static_assert(DOUBLE_FIELD_TAG == 0x09 && DOUBLE_CASE_BYTE == 1, "the lean double path assumes proto/XStore.proto field 1 = doubleData");
     for (uint32_t tag = in.ReadTag(); tag != 0; tag = in.ReadTag(), ++column) {
         int length = 0;
         if (tag != kColumnTag || !in.ReadVarintSizeAsInt(&length) ||
-            length > static_cast<int>(row_length) - in.CurrentPosition() ||
-            !scratch.column.ParseFromArray(row + in.CurrentPosition(), length)) {
+            length > static_cast<int>(row_length) - in.CurrentPosition()) {
             one_pass = false;
             break;
         }
-        if (column < tracked_column_count) {
-            if (zmap != nullptr) zmap->observations.push_back(ZoneMapObservationOf(*this, scratch.column, column));
-            if (catidx != nullptr && scratch.column.oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
-                catidx->Add(column, EncodeFDataForCatIdx(scratch.column));
+        const char *column_bytes = row + in.CurrentPosition();
+        // A NaN double keeps the parse path: the old path (and the live insert) carry the value through a long double,
+        // which quiets a signaling NaN, and ZoneMapFile does not skip NaN, so a raw copy would change the .zmap bytes.
+        // Tested on the integer bits so no floating-point conversion can fold the test away.
+        bool lean_double = false;
+        if (length == 9 && static_cast<uint8_t>(column_bytes[0]) == DOUBLE_FIELD_TAG) {
+            uint64_t bits;
+            std::memcpy(&bits, column_bytes + 1, sizeof(bits));
+            lean_double = !((bits & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL && (bits & 0x000FFFFFFFFFFFFFULL) != 0);
+        }
+        if (length == 0) {
+            // Unset column: ParseFromArray of nothing succeeds and leaves the oneof unset, so the zone map sees a
+            // null ({column, 0, not numeric}) and the catidx skips it.
+            if (column < tracked_column_count && zmap != nullptr) zmap->observations.push_back({column, 0.0, false});
+        } else if (lean_double) {
+            // Double column, not a NaN: nine bytes can only be the tag plus the 8-byte value, which always parses.
+            if (column < tracked_column_count) {
+                if (zmap != nullptr) {
+                    double value;
+                    std::memcpy(&value, column_bytes + 1, sizeof(value));
+                    zmap->observations.push_back({column, value, true});
+                }
+                if (catidx != nullptr) {
+                    char encoded[9];
+                    encoded[0] = DOUBLE_CASE_BYTE;
+                    std::memcpy(encoded + 1, column_bytes + 1, 8);
+                    catidx->Add(column, encoded, sizeof(encoded));
+                }
+            }
+        } else {
+            if (!scratch.column.ParseFromArray(column_bytes, length)) {
+                one_pass = false;
+                break;
+            }
+            if (column < tracked_column_count) {
+                if (zmap != nullptr) zmap->observations.push_back(ZoneMapObservationOf(scratch.column, column));
+                if (catidx != nullptr && scratch.column.oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
+                    catidx->Add(column, EncodeFDataForCatIdx(scratch.column));
+                }
             }
         }
         static_cast<void>(in.Skip(length)); // cannot fail: length was checked against the slot
@@ -2798,7 +2985,7 @@ void XStore::AppendRebuildObservations(uint64_t row_index, const char *row, uint
             if (real_len > 0) static_cast<void>(scratch.row.ParseFromArray(row, static_cast<int>(real_len)));
             const int tracked = std::min(static_cast<int>(tracked_column_count), scratch.row.fielddata_size());
             for (int c = 0; c < tracked; ++c) {
-                zmap->observations.push_back(ZoneMapObservationOf(*this, scratch.row.fielddata(c), static_cast<uint32_t>(c)));
+                zmap->observations.push_back(ZoneMapObservationOf(scratch.row.fielddata(c), static_cast<uint32_t>(c)));
             }
         }
         if (catidx != nullptr) {

@@ -319,7 +319,10 @@ TEST_F(XStoreZoneMapTest, UnaryInsertTreatsHoleAsNullNotZero) {
     CreateTestDb(store, "ZMAPHOLE", XStore_Proto::SECOND, 64);
 
     unsigned long long timestamp = 1700600000ULL;
-    XStore_Proto::RowData row; // fielddata left empty -- a hole at column 0
+    // One unset column -- a hole at column 0. (A RowData with no column at all is all-zero bytes, a hole ROW that no
+    // fold counts, as every scan and the rebuild read it.)
+    XStore_Proto::RowData row;
+    row.add_fielddata();
     XStore_Proto::UnaryInsert_REP rep;
     store.UnaryInsert(timestamp, row, "ZMAPHOLE", &rep, XStore_Proto::SYNC);
 

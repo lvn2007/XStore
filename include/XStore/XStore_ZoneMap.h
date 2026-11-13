@@ -5,6 +5,10 @@
 #include <type_traits>
 #include "include/XStore/XStore_Tunables.h"
 
+namespace xstore {
+class PendingMap;
+}  // namespace xstore
+
 // Zone-map secondary index: per-block min/max/sum/count summary statistics
 // for numeric columns, used to prune blocks a range/aggregate query cannot
 // possibly need. See docs/XStore_Technical_Reference.md section 4.14 for the
@@ -368,17 +372,25 @@ public:
     // Test-visible: block pwrites made by MarkInexact/DeleteRows, plus one per successful DeleteRows reset punch.
     [[nodiscard]] uint64_t MarkWritesForTests() const;
 
-    // Test-visible: whether block_index carries the inexact bit.
+    // Test-visible: whether block_index carries the inexact bit, or is pending (its entries miss rows not folded yet).
     [[nodiscard]] bool BlockInexact(uint64_t block_index);
 
     // Always returns real, safe stats for block_index -- a never-touched
     // block simply has valid_count==0 everywhere, which is the true and
     // correct answer for "no rows landed here yet," not a placeholder for
-    // "unknown." nullopt means an I/O failure on the read, or a block a
-    // running rebuild has not finished yet (callers scan it).
+    // "unknown." nullopt means an I/O failure on the read, a block a
+    // running rebuild has not finished yet, or a pending block (its index
+    // update is outstanding, see PendingMap); callers scan it.
     std::optional<std::vector<ZoneMapEntry>> TryGetBlockStats(uint64_t block_index);
 
     ~ZoneMapFile();
+
+    // The rows of this year file whose index update is outstanding (nullptr = none are ever pending, e.g. a file
+    // opened outside the registry). Set once, before the file is shared.
+    void AttachPending(std::shared_ptr<xstore::PendingMap> pending) { pending_ = std::move(pending); }
+    [[nodiscard]] const std::shared_ptr<xstore::PendingMap> &Pending() const { return pending_; }
+    // Keep-old rebuild: the kept old index never has a map of its own (the outer object's is the year's).
+    [[nodiscard]] bool OldHasPendingForTests() const { return old_ != nullptr && old_->pending_ != nullptr; }
 
     uint64_t RowsPerBlockValue() const { return header_.rows_per_block; }
 
@@ -404,6 +416,7 @@ public:
     [[nodiscard]] uint64_t DirtyMarkWritesForTests() const;
 
 private:
+    std::shared_ptr<xstore::PendingMap> pending_;   // see AttachPending; read lock-free on the query path
     struct CachedBlock {
         std::vector<ZoneMapEntry> entries;
         // One past the highest row folded into this block; valid only when fold_end_known. Known for a block

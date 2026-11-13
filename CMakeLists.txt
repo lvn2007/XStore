@@ -430,6 +430,12 @@ include_directories(src)
 add_library(xstore_core STATIC
         include/XStore/XStore_Internal.h src/XStore/XStore_Internal.cpp
         src/XStore/XStore_Management.cpp
+        src/XStore/XStore_DeferredFold.cpp
+        include/XStore/XStore_IndexRun.h
+        src/XStore/XStore_PendingMap.cpp
+        include/XStore/XStore_PendingMap.h
+        src/XStore/XStore_Indexer.cpp
+        include/XStore/XStore_Indexer.h
         src/XStore/XStore_RebuildProgress.cpp
         src/XStore/XStore_LiveWidenGovernor.cpp
         include/XStore/XStore_LiveWidenGovernor.h

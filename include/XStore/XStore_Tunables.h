@@ -339,7 +339,7 @@ inline constexpr uint32_t ZONE_MAP_MAX_TRACKED_COLUMNS = 64;
 // client may pass to CreateDB and the high-water mark MaybeGrowColumnCount
 // will grow to from observed rows. columnCount directly sizes
 // std::vector<ZoneMapEntry> allocations (ZoneMapFile::EnsureBlockLoaded /
-// TryGetBlockStats) and WalRecord::ReserveRows' reserve(), and it is
+// TryGetBlockStats) and WalRecord::ReserveRowsWithObs' reserve(), and it is
 // persisted to .CFG, so an unvalidated value straight off the wire is a
 // durable remote denial of service: CreateDB(columnCount=0xFFFFFFFF) makes
 // every later insert on that DB throw std::length_error out of a ZMQ worker
@@ -841,5 +841,20 @@ inline constexpr uint64_t BATCH_DELETE_MAX_RUN_LOCKS = 1;
 static_assert(BATCH_DELETE_MAX_RUN_LOCKS >= 1, "a year-group needs at least one lock");
 inline constexpr uint64_t BATCH_QUERY_MAX_RUN_LOCKS = 512;
 static_assert(BATCH_QUERY_MAX_RUN_LOCKS >= 1, "a year-group needs at least one lock");
+
+// Async indexer (spec 2026-11-04-async-indexer-design.md section 7). Backlog is pending ROW bytes; 0 = synchronous (no pool).
+// 0 until the stage 4 gates pass and the default is flipped.
+inline constexpr uint64_t INDEXER_BACKLOG_MB_DEV_DEFAULT = 0;
+inline constexpr unsigned INDEXER_THREADS_DIVISOR = 4;  // threads = max(1, cores / divisor)
+static_assert(INDEXER_THREADS_DIVISOR >= 1, "divisor must be positive");
+// A record goes to the pool only when it is ASYNC and its average contiguous run (adjacent timestamps) is at least this
+// many rows; otherwise the request thread builds its observations (env XSTORE_INDEXER_MIN_RUN_ROWS). Task 1b sweep
+// (2026-11-12, Mystic, saturating ASYNC, rows/s pool on vs base by run length L): L=16 -2.7 %, 32 -2.9 %, 64 +10.8 %,
+// 128 +16.6 %, 256 +18.5 %, 1000 +45.2 % (CPU/row lower from 64 up). Break-even T=64; the default is 2x T.
+inline constexpr uint32_t INDEXER_MIN_RUN_ROWS_DEFAULT = 128;
+static_assert(INDEXER_MIN_RUN_ROWS_DEFAULT >= 1, "a run holds at least one row");
+// How long Shutdown waits for the indexer to fold what is queued; the years still pending afterwards stay dirty (rebuilt
+// at the next start). A live widen waits as long for its year's pending rows before it scans.
+inline constexpr int64_t INDEXER_DRAIN_BOUND_MS = 30000;
 
 } // namespace XStoreTunables

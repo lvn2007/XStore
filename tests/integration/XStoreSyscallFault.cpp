@@ -38,7 +38,7 @@ struct FdSlot {
     int skip = 0, fail = 0, err = 0, calls = 0, failures = 0;
 };
 
-constexpr size_t kFdOpCount = 3;
+constexpr size_t kFdOpCount = 4;
 size_t Index(FdOp op) { return static_cast<size_t>(op); }
 
 // Heap-allocated and leaked: interposed calls can run from threads still alive during static
@@ -376,6 +376,19 @@ int rename(const char *from, const char *to) noexcept {
     return real(from, to);
 }
 
+#define XSTORE_FAULT_REMOVE(NAME)                                                                  \
+    int NAME(const char *path) noexcept {                                                          \
+        using Fn = int (*)(const char *);                                                          \
+        static const Fn real = RealSymbol<Fn>(#NAME);                                              \
+        if (const int err = PathFaultErrno(path, g_open_hits, xstore_fault::kRemove); err != 0) {  \
+            errno = err;                                                                           \
+            return -1;                                                                             \
+        }                                                                                          \
+        return real(path);                                                                         \
+    }
+XSTORE_FAULT_REMOVE(remove)
+XSTORE_FAULT_REMOVE(unlink)
+
 #define XSTORE_FAULT_SYNC(NAME)                                                                    \
     int NAME(int fd) {                                                                             \
         using Fn = int (*)(int);                                                                   \
@@ -415,6 +428,19 @@ XSTORE_FAULT_PWRITE(pwrite64, off64_t)
     }
 XSTORE_FAULT_PREAD(pread, off_t)
 XSTORE_FAULT_PREAD(pread64, off64_t)
+
+#define XSTORE_FAULT_FTRUNCATE(NAME, OFF_T)                                                        \
+    int NAME(int fd, OFF_T length) noexcept {                                                      \
+        using Fn = int (*)(int, OFF_T);                                                            \
+        static const Fn real = RealSymbol<Fn>(#NAME);                                              \
+        if (const int err = FdFaultErrno(FdOp::kFtruncate, fd); err != 0) {                        \
+            errno = err;                                                                           \
+            return -1;                                                                             \
+        }                                                                                          \
+        return real(fd, length);                                                                   \
+    }
+XSTORE_FAULT_FTRUNCATE(ftruncate, off_t)
+XSTORE_FAULT_FTRUNCATE(ftruncate64, off64_t)
 
 #define XSTORE_FAULT_LSEEK(NAME, OFF_T)                                                            \
     OFF_T NAME(int fd, OFF_T offset, int whence) noexcept {                                        \

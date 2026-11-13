@@ -7,7 +7,8 @@
 #include "XStore.pb.h"
 
 // Canonical byte encoding for an FData value, used identically at insert
-// time (WalRecord::AppendRow) and query time (FindByValue) so a bloom
+// time (WalRecord::AppendRowWithObs for a record the request thread indexes,
+// FoldStoredRows for a rows-only one) and query time (FindByValue) so a bloom
 // bit set for a value at insert is found by the same value's lookup at
 // query time. Distinguishes oneof case explicitly (int64Data=5 and
 // doubleData=5.0 encode differently) -- this is exact-type equality, not
@@ -130,8 +131,8 @@ inline void AppendFDataForCatIdx(Out &out, const XStore_Proto::FData &f_data) {
             out.append(f_data.bytesdata());
             break;
         default:
-            // ONEOFDATA_NOT_SET -- a hole. Caller (WalRecord::AppendRow)
-            // is responsible for not emitting an observation for holes at
+            // ONEOFDATA_NOT_SET -- a hole. Callers (WalRecord::AppendRowWithObs,
+            // FoldStoredRows) are responsible for not emitting an observation for holes at
             // all; this function is never called on an unset FData in
             // practice, but appends the tag-only bytes rather than
             // asserting, matching the codebase's existing "hole is not an
@@ -213,7 +214,7 @@ inline CatIdxBloomValue BloomValueOf(uint32_t column_idx, uint64_t h1, uint64_t 
 
 // One value ready to fold: its column and its k bit positions inside the column's entry. The positions are in range
 // (< kCatIdxBloomBits) by construction: BloomValueOf is the only writer, and a default value is column 0 with every
-// position 0. So the fold and ObservationsWellFormed need no per-value check; the fold sets entry[bit >> 3] |=
+// position 0. So the fold needs no per-value check; the fold sets entry[bit >> 3] |=
 // 1 << (bit & 7) and nothing else.
 class CatIdxBloomValue {
 public:
@@ -422,10 +423,18 @@ public:
     // nullopt covers BOTH "no directory for this column" (over cardinality
     // cap, or year not bitmapped yet) and "directory exists but value
     // absent" -- both mean the same thing to the caller: fall back to
-    // bloom+real-scan.
+    // bloom+real-scan. Also nullopt while any row of the year is pending
+    // (written, not folded yet): the directory does not hold it.
     std::optional<std::vector<uint64_t>> LookupExact(uint32_t column_idx, const std::string &encoded_value);
 
     ~CatIdxFile();
+
+    // The rows of this year file whose index update is outstanding (nullptr = none are ever pending, e.g. a file
+    // opened outside the registry). Set once, before the file is shared.
+    void AttachPending(std::shared_ptr<xstore::PendingMap> pending) { pending_ = std::move(pending); }
+    [[nodiscard]] const std::shared_ptr<xstore::PendingMap> &Pending() const { return pending_; }
+    // Keep-old rebuild: the kept old index never has a map of its own (the outer object's is the year's).
+    [[nodiscard]] bool OldHasPendingForTests() const { return old_ != nullptr && old_->pending_ != nullptr; }
 
     uint64_t RowsPerBlockValue() const { return rows_per_block_; }
 
@@ -448,6 +457,7 @@ public:
     [[nodiscard]] uint64_t DirtyMarkWritesForTests() const;
 
 private:
+    std::shared_ptr<xstore::PendingMap> pending_;   // see AttachPending; read lock-free on the query path
     // Every method that writes index content calls this first (mutex_ held):
     // one predictable branch once the flag is on disk.
     void EnsureDirtyOnDisk() { if (!dirty_on_disk_) MarkDirtyOnDisk(); }

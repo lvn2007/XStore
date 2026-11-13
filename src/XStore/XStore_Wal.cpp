@@ -2,6 +2,8 @@
 #include "include/XStore/XStore.h"
 #include "include/XStore/XStore_Crc32c.h"
 #include "include/XStore/XStore_WalRing.h"
+#include "include/XStore/XStore_PendingMap.h"
+#include "include/XStore/XStore_Indexer.h"
 #include "include/XStore/XStore_WalCheckpoint.h"
 #include "include/DataStructs/FileRangeLock.h"
 #include "include/DataStructs/TimeStruct.h"
@@ -66,6 +68,8 @@ void LogFencedWalOncePerMinute(const std::string &wal_path) {
 // EINTR/EAGAIN) and therefore poisons the checkpointer.
 constexpr bool IsRealWalIoError(int err) { return err != 0 && err != EINTR && err != EAGAIN; }
 
+std::atomic<uint64_t> g_inline_reread_folds{0};
+
 } // namespace
 
 // Wire format (native-endian -- WAL files aren't portable across
@@ -125,10 +129,11 @@ bool XStore::ParseWalRecord(const char *data, size_t len, size_t &consumed, XSto
 
     out_record.row_length = row_length;
     out_record.time_resolution = static_cast<XStore_Proto::TimeUnit>(time_res);
-    // The rows section is already WalRecord::wire's layout: one copy, no per-row allocation. No observations.
+    // The rows section is already WalRecord::wire's layout: one copy, no per-row allocation.
     out_record.wire.assign(payload + off, expected_rows_bytes);
     out_record.row_count = row_count;
-    out_record.ClearObservations();
+    out_record.replayed = true;
+    out_record.has_obs = false;   // the record is reused across the replay loop: a replayed record carries no observations
 
     consumed = 4 + record_len;
     return true;
@@ -183,7 +188,8 @@ XStore::RingParse XStore::ParseWalRecordV2(const char *data, size_t len, uint64_
     // Same single copy of the rows section as ParseWalRecord.
     out_record.wire.assign(payload + off, expected_rows_bytes);
     out_record.row_count = row_count;
-    out_record.ClearObservations();
+    out_record.replayed = true;
+    out_record.has_obs = false;   // as ParseWalRecord
     consumed = 4 + static_cast<size_t>(record_len);
     damaged = false;
     return RingParse::kOk;
@@ -256,6 +262,35 @@ bool ObservationsWellFormed(const XStore::WalRecord &record) {
     return zmap_prev == record.zmap_values.size() && catidx_prev == record.catidx_vals.size();
 }
 
+// Clears a run's pending mark when the run's loop iteration ends, whichever way: after the inline fold, after a failed
+// write (not folded, as before) or on an exception, so no block is left pending forever. Dismiss() keeps the marks: the
+// run was handed to the indexer, which clears them after its fold.
+struct PendingRunClear {
+    xstore::PendingMap *map;
+    uint64_t first_row;
+    uint64_t row_count;
+    PendingRunClear(xstore::PendingMap *m, uint64_t first, uint64_t count) : map(m), first_row(first), row_count(count) {}
+    PendingRunClear(const PendingRunClear &) = delete;
+    PendingRunClear &operator=(const PendingRunClear &) = delete;
+    ~PendingRunClear() { if (map) map->ClearRows(first_row, row_count); }
+    void Dismiss() { map = nullptr; }
+};
+
+// A backlog reservation not yet handed to the indexer: whatever no hint took is released at scope exit (an exception
+// between TryReserve and the last Enqueue).
+class ReservationHold {
+public:
+    ReservationHold(xstore::Indexer &indexer, uint64_t bytes) : indexer_(indexer), bytes_(bytes) {}
+    ReservationHold(const ReservationHold &) = delete;
+    ReservationHold &operator=(const ReservationHold &) = delete;
+    ~ReservationHold() { if (bytes_ != 0) indexer_.Release(bytes_); }
+    [[nodiscard]] uint64_t Take(uint64_t bytes) { bytes_ -= bytes; return bytes; }
+
+private:
+    xstore::Indexer &indexer_;
+    uint64_t bytes_;
+};
+
 } // namespace
 
 bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_ptr<walring::Ring> &ring, uint64_t ring_lsn_end) {
@@ -268,10 +303,12 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
     // enforcement, same style as the rest of this precondition).
     const size_t row_count = record_to_apply.row_count;
     if (row_count == 0) return true;
-    // Every accessor below reads wire and the observation arrays by row index and offset: a record whose containers
-    // disagree with row_count is a producer bug, refused before anything is read or written. (A ring record never
-    // gets here with a mismatched wire: framing checks its size against the planned ring size first.)
-    if (record_to_apply.wire.size() != row_count * record_to_apply.RowStride() || !ObservationsWellFormed(record_to_apply)) {
+    // Every accessor below reads wire (and, for a has_obs record, the observation arrays) by row index and offset: a
+    // record whose containers disagree with row_count is a producer bug, refused before anything is read or written.
+    // (A ring record never gets here with a mismatched wire: framing checks its size against the planned ring size
+    // first.) A has_obs record has exactly one observation end per row (the fold below indexes obs_end by row).
+    if (record_to_apply.wire.size() != row_count * record_to_apply.RowStride() ||
+        (record_to_apply.has_obs && (record_to_apply.obs_end.size() != row_count || !ObservationsWellFormed(record_to_apply)))) {
         spdlog::error("[WAL APPLY] [DB: {}] - malformed record ({} rows, {} wire bytes, {} observation ends, {} zone-map "
                       "observations, {} catidx values): not applied",
                       record_to_apply.db_name, row_count, record_to_apply.wire.size(), record_to_apply.obs_end.size(),
@@ -334,10 +371,10 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
     // instead of eliminated.
     //
     // tracked_column_count comes off the RECORD, not the global default:
-    // it is the exact width this record's zmap_values were built
-    // at (captured alongside them at enqueue time, before the .CFG's
-    // columnCount could move underneath), so the file this creates can
-    // never claim to track more columns than were actually folded into it.
+    // it is the exact width this record's rows are folded at (captured at
+    // enqueue time, before the .CFG's columnCount could move underneath), so
+    // the file this creates can never claim to track more columns than were
+    // actually folded into it.
     //
     // Both files are pinned until this record is applied: the registry may not evict (destroy) a file this apply
     // still writes. The pin is one atomic increment inside the registry lookup and one decrement at return.
@@ -361,6 +398,9 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
     }
     ZoneMapFile &zmap = *zmap_pin;
     CatIdxFile &catidx = *catidx_pin;
+    // The year's one map, shared by both files; null only for a file opened outside the registry. Owned by the pinned
+    // zmap for this whole call (attached before it was shared, never replaced), so no reference count is taken.
+    xstore::PendingMap *const pending = zmap.Pending().get();
 
     std::vector<unsigned long long> offsets(row_count);
     for (size_t i = 0; i < row_count; ++i) {
@@ -398,10 +438,11 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
     // Thread-local scratch buffer, grown to fit the largest run applied so
     // far and reused across calls -- avoids a heap allocation per run.
     thread_local std::vector<char> run_buf;
-    // One batch per run for each index, folded under one mutex hold per file. Both folds read the record's own
-    // observations and values in place through views; only the run's rows and its run-relative ends are built, in
-    // these reused vectors (no allocation once grown). The record is const for the whole call and outlives both
-    // UpdateRows calls, and the vectors are not touched between building a run's views and those calls.
+    thread_local std::vector<xstore::IndexRun> fold_runs;   // the one run FoldStoredRows folds inline (no allocation once grown)
+    // has_obs records only: one batch per run for each index, folded under one mutex hold per file. Both folds read the
+    // record's own observations and values in place through views; only the run's rows and its run-relative ends are
+    // built, in these reused vectors (no allocation once grown). The record is const for the whole call and outlives
+    // both UpdateRows calls, and the vectors are not touched between building a run's views and those calls.
     thread_local std::vector<uint64_t> run_row_index;      // shared by both views
     thread_local std::vector<size_t> zmap_obs_end;
     thread_local std::vector<size_t> catidx_value_end;
@@ -409,11 +450,10 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
     // lock: a widen begun after this read only widens the file and starts it at F = 0, and the builder cannot fold
     // these rows (it needs a READ lock on them) before this record is applied, so no folded row needs a dropped value.
     const uint32_t catidx_width = catidx.TrackedColumnCount();
-    // A replayed record has no observations: every row still goes through UpdateRows, as empty observations with
-    // pad_to 0, which folds nothing (the calls and their side effects, such as the dirty mark, are kept as they were).
-    const bool has_obs = !record_to_apply.obs_end.empty();
-    const std::vector<WalRecord::ObsEnd> &obs_end = record_to_apply.obs_end;
+    const std::vector<WalRecord::ObsEnd> &obs_end = record_to_apply.obs_end;   // row_count entries when has_obs (checked above)
     bool all_rows_ok = true;
+    xstore::Indexer &indexer = xstore::Indexer::Instance();   // once per record (a function-static's guard load)
+    bool sidecars_marked_dirty = false;                        // by this record's first hand-off
 
     for (size_t run_start = 0; run_start < offsets.size(); ) {
         size_t run_end = run_start + 1;
@@ -435,8 +475,7 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
         // block must mark that block inexact (aggregates then scan it) BEFORE the new bytes land. The range lock
         // above keeps every other writer off these rows. A sorted append into fresh blocks never reads; otherwise
         // read the old bytes (a never-written or deleted row has first byte 0, the same hole test the scans use).
-        // An empty RowData also serializes to a zero first byte, so replacing one is not detected; it only leaves
-        // that row's null_count counted twice (no aggregate reads null_count).
+        // An empty RowData also serializes to a zero first byte: it is a hole to every fold, so it was never folded.
         const uint64_t run_first_row = record_to_apply.EpochAt(run_start) - first_ts.first_epoch;
         if (zmap.NeedsOverwriteCheck(run_first_row, run_rows)) {
             thread_local std::vector<char> old_buf;
@@ -452,48 +491,115 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
             if (lo <= hi) zmap.MarkInexact(run_first_row + lo, run_first_row + hi);
         }
 
+        // Outstanding until this iteration ends (I1: set before the bytes are readable). The clearer is declared first
+        // so a MarkRows that throws part way is undone too.
+        PendingRunClear pending_run(pending, run_first_row, run_rows);
+        if (pending) pending->MarkRows(run_first_row, run_rows);
         ssize_t written = pwrite(fd, run_buf.data(), run_bytes, static_cast<off_t>(offsets[run_start]));
-        if (written != static_cast<ssize_t>(run_bytes)) {
+        const bool written_ok = written == static_cast<ssize_t>(run_bytes);
+        if (!written_ok) {
             spdlog::error("[WAL APPLY] [DB: {}] - Short/failed write to {}.XSTORE", record_to_apply.db_name, first_ts.year);
             all_rows_ok = false;
         } else {
             // The data file now holds bytes the checkpointer must fdatasync
             // before it may pass this record's ring LSN (spec §3.2).
             walring::Dirty().Note(ring, target_file, offsets[run_start], offsets[run_start] + run_bytes, ring_lsn_end);
-            // Only reached when this run's rows are confirmed durably
-            // written above -- never update the zone map for a row whose
-            // real write just failed.
-            // The run's rows go to each index as one batch (UpdateRows: one mutex hold, one block write per block
-            // touched), still before the next run's overwrite check reads the blocks.
+        }
+        // With the pool off the hand-off costs the one Active() load. A full backlog (TryReserve fails) folds inline.
+        // Not while a sidecar of the year is rebuilt (a live widen): its scan would fold the pending rows and the pass
+        // again. Checked after MarkRows: a widen that begins later sees these marks and waits for them (LiveWidenOneYear).
+        // A has_obs record (indexed by the request thread: pool off, SYNC/BYPASS, sparse or unary; see HandOffToPool) is
+        // never handed off, even if the pool is on: its observations are folded below.
+        if (written_ok && !record_to_apply.has_obs && pending && indexer.Active() && !zmap.Rebuilding() && !catidx.Rebuilding() &&
+            indexer.TryReserve(run_bytes)) {
+            // Handed to the indexer: the marks stay until its fold. One hint per block the run touches, each holding
+            // the bytes of its own rows, so the hints' reservations add up to run_bytes exactly.
+            ReservationHold hold(indexer, run_bytes);
+            // The inline path marks both sidecars dirty on disk inside UpdateRows; a handed-off run is folded after the
+            // ack, so mark them here, under the WRITE lock and before the ack: an unclean stop must find them dirty
+            // (spec section 6). Same call and durability as the inline path (header pwrite + fdatasync, once per file
+            // until MarkClean; afterwards a mutex and a flag test).
+            if (!sidecars_marked_dirty) {
+                zmap.MarkDirty();
+                catidx.MarkDirty();
+                sidecars_marked_dirty = true;
+            }
+            pending_run.Dismiss();
+            const uint64_t rpb = pending->RowsPerBlock();   // the grouping PendingRunsOfBlock reads the hint's block in
+            const uint64_t run_end_row = run_first_row + run_rows;
+            for (uint64_t block = run_first_row / rpb; block * rpb < run_end_row; ++block) {
+                const uint64_t rows = std::min(run_end_row, (block + 1) * rpb) - std::max(run_first_row, block * rpb);
+                xstore::IndexHint hint;
+                hint.map = zmap.Pending();
+                hint.db_base_path = record_to_apply.db_base_path;
+                hint.db_name = record_to_apply.db_name;
+                hint.year = first_ts.year;
+                hint.row_length = record_to_apply.row_length;
+                hint.tracked_column_count = record_to_apply.tracked_column_count;
+                hint.block = block;
+                hint.reserved_bytes = hold.Take(rows * row_length);
+                indexer.Enqueue(std::move(hint));
+            }
+        } else if (written_ok && record_to_apply.replayed) {
+            // Replay folds nothing (see WalRecord::replayed); the sidecars are marked dirty, as the replayed rows are
+            // not in them until InitDB's rebuild of the year.
+            if (!sidecars_marked_dirty) {
+                zmap.MarkDirty();
+                catidx.MarkDirty();
+                sidecars_marked_dirty = true;
+            }
+        } else if (written_ok && record_to_apply.has_obs) {
+            // The request thread built the observations (pool off, SYNC/BYPASS, sparse or unary): fold them, as the base
+            // build does. Same code as the
+            // Task 7 tree; the run's rows go to each index as one batch (UpdateRows: one mutex hold, one block write per
+            // block touched), still under the WRITE lock and before the next run's overwrite check reads the blocks.
+            // Never for a row whose write failed.
             run_row_index.clear();
             zmap_obs_end.clear();
             catidx_value_end.clear();
             // The run's observations and values are contiguous in the record: each view starts at the run's first one
-            // and each row's end is rebased to it. Indexes were checked by ObservationsWellFormed. A replayed record
-            // has none: every row's end is 0 and neither array is read.
-            const size_t zmap_begin = has_obs && run_start != 0 ? obs_end[run_start - 1].zmap_end : 0;
-            const size_t catidx_begin = has_obs && run_start != 0 ? obs_end[run_start - 1].catidx_end : 0;
-            if (has_obs) {
-                for (size_t i = run_start; i < run_end; ++i) {
-                    run_row_index.push_back(record_to_apply.EpochAt(i) - first_ts.first_epoch);
-                    zmap_obs_end.push_back(obs_end[i].zmap_end - zmap_begin);
-                    catidx_value_end.push_back(obs_end[i].catidx_end - catidx_begin);
-                }
-            } else {
-                for (size_t i = run_start; i < run_end; ++i) {
-                    run_row_index.push_back(record_to_apply.EpochAt(i) - first_ts.first_epoch);
-                    zmap_obs_end.push_back(0);
-                    catidx_value_end.push_back(0);
-                }
+            // and each row's end is rebased to it. Indexes were checked by ObservationsWellFormed.
+            const size_t zmap_begin = run_start != 0 ? obs_end[run_start - 1].zmap_end : 0;
+            const size_t catidx_begin = run_start != 0 ? obs_end[run_start - 1].catidx_end : 0;
+            for (size_t i = run_start; i < run_end; ++i) {
+                // An empty RowData (zero first byte, no observations) is a hole, as FoldStoredRows and the rebuild see
+                // it: not folded, so pad_to bumps no nulls for it and the bytes equal the rows-only fold's. (Not in the
+                // Task 7 tree, which counted its nulls.)
+                if (record_to_apply.RowAt(i)[0] == 0) continue;
+                run_row_index.push_back(record_to_apply.EpochAt(i) - first_ts.first_epoch);
+                zmap_obs_end.push_back(obs_end[i].zmap_end - zmap_begin);
+                catidx_value_end.push_back(obs_end[i].catidx_end - catidx_begin);
             }
-            ZoneMapFoldView zmap_view{run_row_index.data(), zmap_obs_end.data(), run_rows, nullptr,
-                                      has_obs ? record_to_apply.zone_map_pad_to : 0};   // one pad_to per record
-            zmap_view.values = record_to_apply.zmap_values.data() + zmap_begin;
-            zmap_view.numeric = &record_to_apply.zmap_numeric;
-            zmap_view.numeric_base = zmap_begin;
-            zmap.UpdateRows(zmap_view);
-            catidx.UpdateRows(CatIdxFoldView{run_row_index.data(), catidx_value_end.data(), run_rows,
-                                             record_to_apply.catidx_vals.data() + catidx_begin, catidx_width});
+            const size_t fold_rows = run_row_index.size();
+            if (fold_rows != 0) {   // a run of only holes takes no mutex, as FoldStoredRows
+                ZoneMapFoldView zmap_view{run_row_index.data(), zmap_obs_end.data(), fold_rows, nullptr,
+                                          record_to_apply.zone_map_pad_to};   // one pad_to per record
+                zmap_view.values = record_to_apply.zmap_values.data() + zmap_begin;
+                zmap_view.numeric = &record_to_apply.zmap_numeric;
+                zmap_view.numeric_base = zmap_begin;
+                zmap.UpdateRows(zmap_view);
+                catidx.UpdateRows(CatIdxFoldView{run_row_index.data(), catidx_value_end.data(), fold_rows,
+                                                 record_to_apply.catidx_vals.data() + catidx_begin, catidx_width});
+            }
+        } else if (written_ok) {
+            // Backlog 0, a full backlog or a year being rebuilt (ruling 2): the run's own rows, read back from the page
+            // cache the pwrite above just filled, folded under the WRITE lock this thread holds by the indexer's fold
+            // function (one fold function, no second code path), at the record's width; values in columns at or past
+            // the catidx width read above are not folded. Never for a row whose write failed.
+            g_inline_reread_folds.fetch_add(1, std::memory_order_relaxed);
+            fold_runs.assign(1, {run_first_row, run_rows});
+            if (!FoldStoredRows(fd, record_to_apply.row_length, record_to_apply.tracked_column_count, catidx_width, fold_runs,
+                                zmap, catidx)) {
+                // The read-back failed: the run is written but not (or only partly) folded. Its marks stay, so no query
+                // trusts its blocks (min/max/sum and the bloom are scanned), it is inexact, and the dirty sidecars are
+                // rebuilt at the next start (a clean shutdown keeps a year with pending rows dirty).
+                pending_run.Dismiss();
+                zmap.MarkInexact(run_first_row, run_first_row + run_rows - 1);
+                zmap.MarkDirty();
+                catidx.MarkDirty();
+                spdlog::error("[WAL APPLY] [DB: {}] - Cannot read back {} row(s) of {}.XSTORE to index them; its indexes are "
+                              "marked dirty and rebuilt at the next start", record_to_apply.db_name, run_rows, first_ts.year);
+            }
         }
         run_start = run_end;
     }
@@ -645,6 +751,16 @@ void XStore::StartWalWriters(const std::string &data_store_dir) {
 
 std::atomic<bool> XStore::shutdown_flag_{false};
 
+namespace {
+std::atomic<int64_t> g_indexer_drain_bound_ms{XStoreTunables::INDEXER_DRAIN_BOUND_MS};
+}  // namespace
+
+void XStore::SetIndexerDrainBoundForTests(std::chrono::milliseconds bound) {
+    g_indexer_drain_bound_ms.store(bound.count(), std::memory_order_relaxed);
+}
+
+uint64_t XStore::InlineRereadFoldsForTests() { return g_inline_reread_folds.load(std::memory_order_relaxed); }
+
 void XStore::StopWalWriters(bool final_checkpoint_cycle) {
     for (size_t i = 0; i < XStoreTunables::WAL_SHARD_COUNT; ++i) {
         wal_shards[i].stop_flag.store(true, std::memory_order_relaxed);
@@ -679,6 +795,10 @@ void XStore::Shutdown() {
     // dirtied since the previous cycle (by path, throwaway fd) and advances each ring's
     // checkpoint to its head.
     StopWalWriters();
+    // The writers are joined, so no hint arrives any more: let the indexer fold what is queued (bounded). A pool that
+    // never started returns at once.
+    const std::chrono::milliseconds drain_bound(g_indexer_drain_bound_ms.load(std::memory_order_relaxed));
+    xstore::Indexer::Instance().StopAndDrain(drain_bound);
 
     // An index may only be marked clean once every data file it describes is durable.
     // Earlier cycles synced the files that were clean by the final one, so the gate is
@@ -697,7 +817,13 @@ void XStore::Shutdown() {
     // LRU eviction. Order is registry mutex -> file mutex; no file method takes a
     // registry mutex, so no inversion. A write racing in after MarkClean simply
     // re-marks the file dirty.
-    auto mark_registry_clean = [](std::mutex &registry_mutex, auto &registry, const char *what) {
+    // Rows the indexer did not fold (the drain ran out, a pass failed, a hint was dropped) keep their year's sidecars
+    // dirty. Per map, not BacklogBytes(): a failed pass or a dropped hint leaves pending rows with nothing reserved.
+    const bool any_pending = xstore::PendingMaps::AnyPending();
+    if (any_pending) {
+        spdlog::warn("[SHUTDOWN] - rows not indexed yet: their years' indexes stay dirty and are rebuilt at the next start");
+    }
+    auto mark_registry_clean = [any_pending](std::mutex &registry_mutex, auto &registry, const char *what) {
         std::lock_guard<std::mutex> lock(registry_mutex);
         for (const auto &entry : registry) {
             if (entry.second->Rebuilding()) { // MarkClean refuses it by design: not an error
@@ -705,6 +831,8 @@ void XStore::Shutdown() {
                              what, entry.first);
                 continue;
             }
+            // The file's own map: the one its writers marked through.
+            if (any_pending && entry.second->Pending() && entry.second->Pending()->PendingBlockCount() != 0) continue;
             if (!entry.second->MarkClean()) {
                 spdlog::error("[SHUTDOWN] - MarkClean failed for {} {}; leaving it dirty", what, entry.first);
             }

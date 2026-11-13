@@ -70,18 +70,27 @@ void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::R
     // fix's multi-row form).
     const int widest = data.fielddata_size();
     MaybeGrowColumnCount(db_name, db_base_path_str, widest);
-    // One width for both the observations and the zone map ApplyWalRecord
-    // will open/create for them -- see WalRecord::tracked_column_count.
+    // The width ApplyWalRecord opens/creates the zone map at and folds this
+    // row at -- see WalRecord::tracked_column_count.
     // Folded in with the pre-grown `widest` so a brand-new index file is
     // created at this row's true width on this very first write, not just
     // EffectiveTrackedColumnCount's pre-growth floor.
     record.tracked_column_count = std::max(EffectiveTrackedColumnCount(cfg_struct),
                                             std::min<uint32_t>(static_cast<uint32_t>(widest), XStoreTunables::MAX_TRACKED_COLUMN_COUNT));
-    record.zone_map_pad_to = record.tracked_column_count;
     // Serialized straight into the record's zero-filled slot, reusing the sizes ByteSizeLong() cached above: no
     // scratch buffer, no copy.
-    record.ReserveRows(1, static_cast<size_t>(widest));
-    record.AppendRow(*this, unix_time, data);
+    // One row = a run of 1: below any threshold >= 2, so the request thread indexes, as the base build does; with threshold
+    // 1 (tests) the pool is wanted. Production: !Active() || mode != ASYNC || MinRunRows() > 1 (HandOffToPool states it).
+    const xstore::Indexer &indexer = xstore::Indexer::Instance();
+    record.has_obs = !indexer.Active() || !HandOffToPool(1, 1, indexer.MinRunRows(), durability_mode, indexer.HandOffSync());
+    if (record.has_obs) {
+        record.zone_map_pad_to = record.tracked_column_count;
+        record.ReserveRowsWithObs(1, static_cast<size_t>(widest));
+        record.AppendRowWithObs(unix_time, data);
+    } else {
+        record.ReserveRows(1);
+        record.AppendRow(unix_time, data);
+    }
 
     if (durability_mode == XStore_Proto::BYPASS) {
         // Skip WAL entirely -- no queue, no CRC32, no second write. Applies

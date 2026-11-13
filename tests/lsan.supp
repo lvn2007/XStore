@@ -1,0 +1,4 @@
+# LeakSanitizer suppressions for xstore_tests. Use: ASAN_OPTIONS=... LSAN_OPTIONS="suppressions=tests/lsan.supp" ./tests/xstore_tests
+# WalCompletion objects are checked out of XStore::completion_pool and returned to it, never freed (one allocation per
+# concurrent SYNC writer for the life of the process, see EnqueueWalRecord); the pool is not drained at exit.
+leak:XStore::EnqueueWalRecord

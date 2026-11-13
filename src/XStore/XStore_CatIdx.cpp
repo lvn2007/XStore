@@ -1,6 +1,8 @@
 #include "XStore/XStore_CatIdx.h"
 #include "include/XStore/XStore.h"
+#include "include/XStore/XStore_Indexer.h"
 #include "include/XStore/XStore_RowScan.h"
+#include "include/XStore/XStore_PendingMap.h"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -281,6 +283,7 @@ bool CatIdxFile::FoldBatchLocked(const CatIdxFoldView &view, Keep keep) {
 }
 
 bool CatIdxFile::MightContain(uint64_t block_index, uint32_t column_idx, const std::string &encoded_value) {
+    if (pending_ && pending_->IsPending(block_index)) return true;   // outstanding index update: the caller scans
     std::lock_guard<std::mutex> lock(mutex_);
     if (column_idx >= header_.tracked_column_count) return true; // no bloom for this column -- caller must real-scan
     if ((block_index + 1) * rows_per_block_ > frontier_) { // not rebuilt yet: the old bloom, or real-scan
@@ -403,6 +406,9 @@ bool CatIdxFile::AppendBitmapSection(const std::unordered_map<uint32_t, std::map
 }
 
 std::optional<std::vector<uint64_t>> CatIdxFile::LookupExact(uint32_t column_idx, const std::string &encoded_value) {
+    // A pending row is in the data but not in the directory (only its fold, through FlushBlock, invalidates the section):
+    // no directory answer while any row of the year is pending. The process-wide load first; the map's mutex only then.
+    if (pending_ && xstore::PendingMaps::AnyPending() && pending_->PendingBlockCount() != 0) return std::nullopt;
     std::lock_guard<std::mutex> lock(mutex_);
     if (frontier_ != kNoRebuild) { // see HasBitmapSection
         return old_ != nullptr ? old_->LookupExact(column_idx, encoded_value) : std::nullopt;
@@ -691,6 +697,8 @@ CatIdxFile& XStore::GetOrOpenCatIdxLocked(std::string_view db_base_path, unsigne
         throw std::runtime_error(fmt::format("CatIdxFile::Open failed for {}", path));
     }
     CatIdxFile &ref = *catidx;
+    // Before the object is shared (AttachPending is a plain write): the year's one map, shared with the zone map.
+    ref.AttachPending(xstore::PendingMaps::For(key, ref.RowsPerBlockValue()));
     catidx_registry_.emplace(key, std::move(catidx));
     catidx_registry_lru_.push_back(key);
     return ref;
@@ -699,10 +707,12 @@ CatIdxFile& XStore::GetOrOpenCatIdxLocked(std::string_view db_base_path, unsigne
 // Ignores pins, like the explicit erase in RebuildYearIndexes: neither may run while a builder or another pin holder is
 // alive (today they run only in InitDB and in tests).
 void XStore::ClearCatIdxRegistryForTests() {
+    xstore::Indexer::Instance().WaitIdleForTests(std::chrono::seconds(30));   // a pool pass holds pins
     std::lock_guard<std::mutex> lock(catidx_registry_mutex_);
     catidx_registry_.clear();
     catidx_registry_lru_.clear();
     catidx_registry_retired_.clear();
+    xstore::PendingMaps::ClearForTests();
 }
 
 namespace {

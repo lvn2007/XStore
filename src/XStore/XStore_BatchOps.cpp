@@ -164,13 +164,14 @@ public:
         std::stable_sort(refs_.begin(), refs_.end(), [](const WireRef &a, const WireRef &b) { return a.timestamp < b.timestamp; });
     }
     template <typename Record>
-    bool AppendTo(XStore &store, Record &record, int i) {
+    bool AppendTo(Record &record, int i) {
         const WireRef &ref = refs_[static_cast<size_t>(i)];
         if (!scratch_.ParseFromArray(base_ + ref.offset, static_cast<int>(ref.length)) ||
             scratch_.fielddata_size() != static_cast<int>(ref.fields) || scratch_.ByteSizeLong() != ref.length) {   // ByteSizeLong also caches the sizes AppendRow serializes with
             return false;
         }
-        record.AppendRow(store, ref.timestamp, scratch_);
+        if (record.has_obs) record.AppendRowWithObs(ref.timestamp, scratch_);
+        else record.AppendRow(ref.timestamp, scratch_);
         return true;
     }
 

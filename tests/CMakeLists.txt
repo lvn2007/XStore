@@ -31,6 +31,9 @@ add_executable(xstore_tests
         integration/XStoreRowScanTest.cpp
         integration/XStoreDeleteFaultTest.cpp
         integration/XStoreRebuildTest.cpp
+        integration/XStoreDeferredFoldTest.cpp
+        integration/XStorePendingMapTest.cpp
+        integration/XStoreIndexerTest.cpp
         integration/XStoreParallelRebuildTest.cpp
         integration/XStoreRebuildProgressTest.cpp
         integration/XStoreLiveWidenTest.cpp
@@ -124,6 +127,7 @@ gtest_discover_tests(xstore_keys_cli_tests)
 add_executable(xstore_perf_tests
         perf/XStorePerfTest.cpp
         perf/XStoreDirtyTrackerPerfTest.cpp
+        perf/XStoreDeferredFoldPerfTest.cpp
 )
 target_link_libraries(xstore_perf_tests PRIVATE GTest::gtest_main xstore_core)
 if(XSTORE_USE_JEMALLOC)

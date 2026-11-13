@@ -13,7 +13,7 @@
 #include "XStoreTestSupport.h"
 #include "XStoreRebuildTestSupport.h"
 #include "XStoreSyscallFault.h"
-#include "include/XStore/XStore_Internal.h" // WalRecord::AppendRow / ReserveRows
+#include "include/XStore/XStore_Internal.h"
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
@@ -313,13 +313,12 @@ TEST_F(XStoreRebuildTest, OnlyTheStaleIndexIsRebuilt) {
     EXPECT_FALSE(XStore::GetOrOpenCatIdx(DbPath(db), year, kRowLength, width).HasBitmapSection());
 }
 
-// ---- Insert path (WalRecord::AppendRow + ApplyWalRecord) against the reference ---------------------------------------
+// ---- Insert path (WalRecord::AppendRowWithObs + ApplyWalRecord) against the reference ---------------------------------------
 
-// The flat observations AppendRow builds, entry by entry, against the per-row reference: the zone map's present
+// The flat observations AppendRowWithObs builds, entry by entry, against the per-row reference: the zone map's present
 // columns with the independent numeric coercion, and for each set column the old bloom bit positions of its
 // EncodeFDataForCatIdx bytes (RefBloomPositions; unset columns skipped). At width 64, and at 3, which clamps the wider rows. Also the row slot itself.
-TEST_F(XStoreRebuildTest, AppendRowObservationsMatchThePerRowReference) {
-    XStore store;
+TEST_F(XStoreRebuildTest, AppendRowWithObsObservationsMatchThePerRowReference) {
     std::vector<XStore_Proto::RowData> rows;
     rows.push_back(MakeRow({FDouble(-2.5), FFloat(0.75f), FInt32(-123456), FInt64(int64_t{1} << 40), FUInt32(4000000000u),
                             FUInt64(0xFFFFFFFFFFFF0001ULL), FSInt32(-77), FSInt64(-(int64_t{1} << 50)), FFixed32(12345u),
@@ -334,10 +333,10 @@ TEST_F(XStoreRebuildTest, AppendRowObservationsMatchThePerRowReference) {
         XStore::WalRecord record;
         record.row_length = kRowLength;
         record.tracked_column_count = width;
-        record.ReserveRows(rows.size(), 20);
+        record.ReserveRowsWithObs(rows.size(), 20);
         for (size_t i = 0; i < rows.size(); ++i) {
-            ASSERT_LE(rows[i].ByteSizeLong(), kRowLength);   // also caches the sizes AppendRow serializes with
-            record.AppendRow(store, 5000 + i, rows[i]);
+            ASSERT_LE(rows[i].ByteSizeLong(), kRowLength);   // also caches the sizes AppendRowWithObs serializes with
+            record.AppendRowWithObs(5000 + i, rows[i]);
         }
         ASSERT_EQ(record.row_count, rows.size());
         ASSERT_EQ(record.obs_end.size(), rows.size());
@@ -409,16 +408,15 @@ TEST_F(XStoreRebuildTest, CatIdxEncodeBufferBytesEqualTheStringEncodingForEveryK
 // The zone-map observations of a record cost 8 B + 1 flag byte per column (they were 24 B): this is what an ASYNC backlog
 // is charged for them, so it is pinned. ReserveRows must reserve exactly that, not an upper bound of the old size.
 TEST_F(XStoreRebuildTest, ZoneMapObservationsOfARecordTakeNineBytesPerColumnAtMost) {
-    XStore store;
     constexpr size_t kRows = 50, kColumns = 16;
     XStore::WalRecord record;
     record.row_length = kRowLength;
     record.tracked_column_count = kColumns;
-    record.ReserveRows(kRows, kColumns);
+    record.ReserveRowsWithObs(kRows, kColumns);
     for (size_t i = 0; i < kRows; ++i) {
         XStore_Proto::RowData row = MixedRow(i, kColumns);
         ASSERT_LE(row.ByteSizeLong(), kRowLength);
-        record.AppendRow(store, 7000 + i, row);
+        record.AppendRowWithObs(7000 + i, row);
     }
     ASSERT_EQ(record.zmap_values.size(), kRows * kColumns);
     const size_t bytes = record.zmap_values.capacity() * sizeof(double) + record.zmap_numeric.capacity();

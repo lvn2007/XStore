@@ -4,7 +4,7 @@
 //
 //   xstore_zmq_insert_client create <host:port> <db>
 //   xstore_zmq_insert_client run <host:port> <db> <seq|rand|scatter> <async|sync> <first_thread> <threads> <calls> <start_epoch_s>
-//   seq: consecutive rows per call; rand: the same rows shuffled inside the call; scatter: XSTORE_SCATTER_ROWS (default 40)
+//   seq: consecutive rows per call (XSTORE_SEQ_ROWS, default 1000); rand: the same rows shuffled inside the call; scatter: XSTORE_SCATTER_ROWS (default 40)
 //   random timestamps from the thread's whole range per call, so the dirty bytes stay many separate ranges.
 //
 // `run` drives threads first_thread .. first_thread+threads-1 (each on its own disjoint timestamp range, its own REQ
@@ -31,6 +31,8 @@
 using namespace zmq_insert_payload;
 
 namespace {
+
+size_t g_seq_rows = kRowsPerCall;   // rows per call for seq/rand (XSTORE_SEQ_ROWS; below ~700 the record takes the WAL ring)
 
 using WallClock = std::chrono::system_clock;
 
@@ -92,7 +94,7 @@ int Run(const std::string &addr, const std::string &db, bool shuffle, bool scatt
                 for (int c = 0; c < calls; ++c) {
                     payloads[static_cast<size_t>(t)].push_back(
                         scatter ? BuildScatterPayload(db, mode, FirstTs(id, 0), rng, scatter_rows)
-                                : BuildPayload(db, mode, FirstTs(id, static_cast<unsigned long long>(c)), shuffle, rng));
+                                : BuildPayload(db, mode, FirstTs(id, 0) + static_cast<unsigned long long>(c) * g_seq_rows, shuffle, rng, g_seq_rows));
                 }
             });
         }
@@ -128,7 +130,7 @@ int Run(const std::string &addr, const std::string &db, bool shuffle, bool scatt
             }
             const long long reply_ns = EpochNs(WallClock::now());
             const unsigned long long id = first_thread + static_cast<unsigned long long>(t);
-            const unsigned long long last_ts = FirstTs(id, static_cast<unsigned long long>(calls - 1)) + kRowsPerCall - 1;
+            const unsigned long long last_ts = FirstTs(id, 0) + static_cast<unsigned long long>(calls) * g_seq_rows - 1;
             bool landed = scatter;   // scattered calls have no single "last row" to poll for: the reply time is the result
             for (int i = 0; i < 24000 && !landed; ++i) {   // up to ~2 min
                 landed = RowPresent(ctx, addr, db, last_ts);
@@ -147,7 +149,7 @@ int Run(const std::string &addr, const std::string &db, bool shuffle, bool scatt
     start_ns = EpochNs(WallClock::now());
     go.store(true, std::memory_order_release);
     for (std::thread &c : clients) c.join();
-    const unsigned long long rows = static_cast<unsigned long long>(threads) * static_cast<unsigned long long>(calls) * (scatter ? scatter_rows : kRowsPerCall);
+    const unsigned long long rows = static_cast<unsigned long long>(threads) * static_cast<unsigned long long>(calls) * (scatter ? scatter_rows : g_seq_rows);
     std::printf("RESULT first_thread=%llu threads=%d rows=%llu failed=%llu not_landed=%llu start_ns=%lld reply_ns=%lld landed_ns=%lld lateness_us=%lld\n",
                 first_thread, threads, rows, failed.load(), not_landed, start_ns, last_reply_ns, landed_ns,
                 (start_ns - target_ns) / 1000);
@@ -166,6 +168,7 @@ int main(int argc, char **argv) {
             return 2;
         }
         const char *scatter_rows_env = std::getenv("XSTORE_SCATTER_ROWS");   // rows per call for `scatter` (default 40: ~56 KiB, always a ring record)
+        if (const char *seq_rows_env = std::getenv("XSTORE_SEQ_ROWS")) g_seq_rows = std::strtoull(seq_rows_env, nullptr, 10);
         const size_t scatter_rows = scatter_rows_env ? std::strtoull(scatter_rows_env, nullptr, 10) : 40;
         return Run(argv[2], argv[3], pattern == "rand", pattern == "scatter", scatter_rows,
                    mode == "sync" ? XStore_Proto::SYNC : XStore_Proto::ASYNC,

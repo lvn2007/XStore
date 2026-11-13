@@ -2,6 +2,7 @@
 #define XSTORE_XSTORE_INTERNAL_H
 
 #include "include/XStore/XStore.h"
+#include "include/XStore/XStore_Indexer.h"
 #include "include/DataStructs/TimeStruct.h"
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
@@ -88,6 +89,33 @@ inline void AppendToYearBucket(YearBucketMap &buckets, unsigned short int year, 
     buckets.emplace_back(year, std::vector<unsigned long long int>{idx});
 }
 
+// Contiguous runs (adjacent timestamps = adjacent rows) among the ascending rows `indices` of one year group. An equal
+// timestamp (a duplicate) starts a new run: conservative (more runs = a shorter average, less likely handed off). Rows
+// later rejected as oversize are still counted: harmless (they only shift the estimate; either record kind applies correctly).
+template <typename Rows>
+inline size_t CountContiguousRuns(const Rows &rows, const std::vector<unsigned long long int> &indices) {
+    size_t runs = 0;
+    unsigned long long int prev = 0;
+    for (size_t k = 0; k < indices.size(); ++k) {
+        const unsigned long long int ts = rows.Timestamp(static_cast<int>(indices[k]));
+        if (k == 0 || ts != prev + 1) ++runs;
+        prev = ts;
+    }
+    return runs;
+}
+// Pool hand-off pays only for long runs: one hint is one pass (pin, lock, fold, write-through) however short its run.
+// Only ASYNC records are deferred: a SYNC/BYPASS client waits for the apply, so the pass cannot shorten its ack and only adds
+// lock and mutex contention (measured: SYNC capacity -21..-28 % even for dense sequential runs).
+// `hand_off_sync` is a test-only switch: nearly every existing indexer test inserts SYNC (so the apply has finished when the call
+// returns) and still needs the hand-off path under test.
+// Limit: the test is an AVERAGE over one year-group record, so a dense run plus a tail of isolated rows (e.g. 100000 contiguous
+// + 700 scattered, average ~143) is handed off whole and the apply path queues one hint per run; correct, perf on that mix unmeasured.
+inline bool HandOffToPool(size_t rows, size_t runs, uint32_t min_run_rows, XStore_Proto::WalDurabilityMode mode, bool hand_off_sync) {
+    // rows / runs >= min_run_rows is exactly rows >= runs * min_run_rows (integer floor), without the product's wrap on a
+    // 32-bit size_t.
+    return (mode == XStore_Proto::ASYNC || hand_off_sync) && rows != 0 && runs != 0 && rows / runs >= min_run_rows;
+}
+
 // std::execution::par_unseq dispatches work across a thread pool -- worth it
 // once a batch is big enough that sorting it in parallel outweighs that
 // dispatch/join overhead, but for a small batch (the common case for most
@@ -112,16 +140,31 @@ void SortBatch(Iterator begin, Iterator end, Compare comp) {
 // ProcessFileRangeAccumulate's own oneOfData_case() guard (XStore_IO.cpp) --
 // same "1..12 is numeric" rule the aggregate kernels already use, so a
 // bool/string/bytes column is a hole here too, not a crash or a silently-wrong 0.
-inline ZoneMapObservation XStore::ZoneMapObservationOf(XStore &store, const XStore_Proto::FData &f_data, uint32_t column_idx) {
+inline ZoneMapObservation XStore::ZoneMapObservationOf(const XStore_Proto::FData &f_data, uint32_t column_idx) {
     bool is_numeric = f_data.oneOfData_case() > 0 && f_data.oneOfData_case() <= 12;
     ValueStruct vs{};
     if (is_numeric) {
-        store.GetFDataValue(&f_data, &vs);
+        GetFDataValue(&f_data, &vs);
     }
     return {column_idx, static_cast<double>(vs.value), is_numeric};
 }
 
-inline void XStore::WalRecord::ReserveRows(size_t rows, size_t widest_fields) {
+inline void XStore::WalRecord::ReserveRows(size_t rows) { wire.reserve(rows * RowStride()); }
+
+// Definition of XStore::WalRecord::AppendRow (declared in XStore.h). Rows only:
+// the zone map and catidx are folded later from the stored bytes
+// (ApplyWalRecord's inline fold or an indexer pass, both FoldStoredRows).
+inline void XStore::WalRecord::AppendRow(uint64_t epoch, const XStore_Proto::RowData &data) {
+    const size_t at = wire.size();
+    wire.resize(at + RowStride());   // the zero fill pads the tail past the serialized size
+    std::memcpy(&wire[at], &epoch, sizeof(epoch));
+    // Reuses the sizes the caller's ByteSizeLong() cached (SerializeToArray would recompute them), as SendProto in
+    // ZMQ_Server.cpp.
+    (void)data.SerializeWithCachedSizesToArray(reinterpret_cast<uint8_t *>(&wire[at + sizeof(uint64_t)]));
+    ++row_count;
+}
+
+inline void XStore::WalRecord::ReserveRowsWithObs(size_t rows, size_t widest_fields) {
     const size_t columns = std::min<size_t>(tracked_column_count, widest_fields);
     wire.reserve(rows * RowStride());
     zmap_values.reserve(rows * columns);
@@ -130,7 +173,7 @@ inline void XStore::WalRecord::ReserveRows(size_t rows, size_t widest_fields) {
     obs_end.reserve(rows);
 }
 
-// Definition of XStore::WalRecord::AppendRow (declared in XStore.h). The
+// Definition of XStore::WalRecord::AppendRowWithObs (declared in XStore.h). The
 // observations are built once at WAL enqueue time (the row's wire bytes --
 // already serialized -- are all ApplyWalRecord has later, not the original
 // RowData, so this can't be deferred to apply time). Both indexes see only
@@ -149,7 +192,7 @@ inline void XStore::WalRecord::ReserveRows(size_t rows, size_t widest_fields) {
 //   into its bloom bit positions (BloomValueOfEncoded), off the writer thread.
 // tracked_column_count is max(EffectiveTrackedColumnCount(cfg_struct), the
 // request's widest accepted row) at every call site.
-inline void XStore::WalRecord::AppendRow(XStore &store, uint64_t epoch, const XStore_Proto::RowData &data) {
+inline void XStore::WalRecord::AppendRowWithObs(uint64_t epoch, const XStore_Proto::RowData &data) {
     const size_t at = wire.size();
     wire.resize(at + RowStride());   // the zero fill pads the tail past the serialized size
     std::memcpy(&wire[at], &epoch, sizeof(epoch));
@@ -161,7 +204,7 @@ inline void XStore::WalRecord::AppendRow(XStore &store, uint64_t epoch, const XS
     CatIdxEncodeBuffer encoded;   // inline storage: no allocation, no out-of-line append per value
     for (int col = 0; col < tracked; ++col) {
         const XStore_Proto::FData &f_data = data.fielddata(col);
-        const ZoneMapObservation obs = ZoneMapObservationOf(store, f_data, static_cast<uint32_t>(col));
+        const ZoneMapObservation obs = ZoneMapObservationOf(f_data, static_cast<uint32_t>(col));
         AddZoneMapObs(obs.value, obs.is_numeric);
         if (f_data.oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
             encoded.clear();
@@ -192,9 +235,10 @@ public:
         std::stable_sort(rows_.pointer_begin(), rows_.pointer_end(), [](const Data *a, const Data *b) { return a->timestamp() < b->timestamp(); });
     }
     template <typename Record>
-    bool AppendTo(XStore &store, Record &record, int i) {
+    bool AppendTo(Record &record, int i) {
         const Data &entry = rows_.Get(i);
-        record.AppendRow(store, entry.timestamp(), entry.data());
+        if (record.has_obs) record.AppendRowWithObs(entry.timestamp(), entry.data());
+        else record.AppendRow(entry.timestamp(), entry.data());
         return true;
     }
 
@@ -349,6 +393,13 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
     // Build the record of every year group first (no side effect yet), then grow the width and enqueue them.
     std::vector<WalRecord> records;
     records.reserve(data_map.size());
+    // Decided per record (one per year group; see WalRecord::has_obs and HandOffToPool): a request spanning years may
+    // produce records of both kinds. One config snapshot per request; the run count only when a hand-off is possible
+    // (pool on and ASYNC, or the tests' hand_off_sync), so the base path pays nothing for it.
+    const bool pool_active = xstore::Indexer::Instance().Active();
+    const uint32_t min_run_rows = pool_active ? xstore::Indexer::Instance().MinRunRows() : 0;
+    const bool hand_off_sync = pool_active && xstore::Indexer::Instance().HandOffSync();
+    const bool may_hand_off = pool_active && (durability_mode == XStore_Proto::ASYNC || hand_off_sync);
     for (const std::pair<unsigned short int, std::vector<unsigned long long int>> &pair : data_map) {
         unsigned short int year_key = pair.first;
         const std::vector<unsigned long long int> &indices = pair.second;
@@ -364,8 +415,8 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
         record.cfg_epoch = cfg_epoch;
         record.year = year_key;  // routes the record to its (db, year) shard
         record.durability_mode = durability_mode;
-        // One width for both the observations below and the zone map
-        // ApplyWalRecord will open/create for them -- see
+        // The width ApplyWalRecord opens/creates the zone map at and folds
+        // these rows at -- see
         // WalRecord::tracked_column_count. cfg_struct is this call's own
         // local snapshot, so this stays constant across the whole loop even
         // as MaybeGrowColumnCount moves the persisted value underneath.
@@ -374,9 +425,16 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
         // not just EffectiveTrackedColumnCount's pre-growth floor.
         record.tracked_column_count = std::max(EffectiveTrackedColumnCount(cfg_struct),
                                                 std::min<uint32_t>(static_cast<uint32_t>(widest), XStoreTunables::MAX_TRACKED_COLUMN_COUNT));
-        record.zone_map_pad_to = record.tracked_column_count;
-        // widest is the widest ACCEPTED row, so a true bound on every appended row's columns.
-        record.ReserveRows(indices.size(), static_cast<size_t>(widest));
+        // has_obs: the request thread indexes, as the base build does (pool off, SYNC/BYPASS, or short runs).
+        record.has_obs = !may_hand_off ||
+                         !HandOffToPool(indices.size(), CountContiguousRuns(rows, indices), min_run_rows, durability_mode, hand_off_sync);
+        if (record.has_obs) {
+            record.zone_map_pad_to = record.tracked_column_count;
+            // widest is the widest ACCEPTED row, so a true bound on every appended row's columns.
+            record.ReserveRowsWithObs(indices.size(), static_cast<size_t>(widest));
+        } else {
+            record.ReserveRows(indices.size());
+        }
 
         for (unsigned long long int idx : indices) {
             size_t serialized_size = rows.RowBytes(static_cast<int>(idx));
@@ -387,7 +445,7 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
             if (serialized_size > static_cast<size_t>(cfg_struct.rowlength())) {
                 continue;
             }
-            if (!rows.AppendTo(*this, record, static_cast<int>(idx))) return false;   // WireRows only: nothing enqueued or grown yet
+            if (!rows.AppendTo(record, static_cast<int>(idx))) return false;   // WireRows only: nothing enqueued or grown yet
         }
 
         if (record.row_count == 0) {
@@ -398,7 +456,7 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
         records.push_back(std::move(record));
     }
 
-    // Every record's bytes (rows, zone-map/catidx observations) are now actually allocated, so the OS's own memory
+    // Every record's bytes (its rows, and its observations when has_obs) are now actually allocated, so the OS's own memory
     // figure already reflects them -- the lease stops being counted as "pending" (still charged against the
     // pool's own total, released in full when this function returns).
     memory_lease->MarkResident();

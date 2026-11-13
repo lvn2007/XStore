@@ -9,6 +9,7 @@
 #include "include/XStore/XStore_PreadPool.h"
 #include "include/XStore/XStore_ScanLock.h"
 #include "include/XStore/XStore_ZoneMap.h"
+#include "include/XStore/XStore_PendingMap.h"
 #include <spdlog/fmt/fmt.h>
 #include "include/Logger/Logger.h"
 #include <algorithm>
@@ -310,6 +311,8 @@ void XStore::ScanSegmentWithZoneMapPruning(const std::string &db_base_path, unsi
         uint64_t block_row_count = block_last_row - block_first_row + 1;
         const char *block_rows_base = rows_base + (block_first_row - first_row) * row_length;
 
+        // Under the scan chunk's READ lock (callers run only inside WalkYearSpan's ScanUnderReadLock callback), so a writer
+        // of these rows has marked them pending first; tested by IndexerQueryTest.QueriesDuringInsertsMatchAScanOracle.
         auto stats = zmap.TryGetBlockStats(block);
         if (stats.has_value() && column_idx < stats->size()) {
             const ZoneMapEntry &e = (*stats)[column_idx];
@@ -351,6 +354,8 @@ void XStore::AccumulateSegmentWithZoneMapPushdown(const std::string &db_base_pat
         bool block_fully_in_range = (block_own_first_row >= first_row && block_own_last_row <= last_row);
 
         // An inexact block (a folded row was overwritten or deleted) still counts the old row: scan it.
+        // Under the scan chunk's READ lock (callers run only inside WalkYearSpan's ScanUnderReadLock callback), so a writer
+        // of these rows has marked them pending first; tested by IndexerQueryTest.QueriesDuringInsertsMatchAScanOracle.
         auto stats = zmap.TryGetBlockStats(block);
         if (block_fully_in_range && stats.has_value() && column_idx < stats->size() && !ZoneMapEntryInexact((*stats)[column_idx])) {
             const ZoneMapEntry &e = (*stats)[column_idx];
@@ -391,6 +396,8 @@ void XStore::ScanSegmentForExistence(const std::string &db_base_path, unsigned s
         uint64_t block_row_count = block_last_row - block_first_row + 1;
         const char *block_rows_base = rows_base + (block_first_row - first_row) * row_length;
 
+        // Under the scan chunk's READ lock (callers run only inside WalkYearSpan's ScanUnderReadLock callback), so a writer
+        // of these rows has marked them pending first; tested by IndexerQueryTest.QueriesDuringInsertsMatchAScanOracle.
         auto stats = zmap.TryGetBlockStats(block);
         if (stats.has_value() && column_idx < stats->size()) {
             const ZoneMapEntry &e = (*stats)[column_idx];
@@ -462,6 +469,8 @@ void XStore::ScanSegmentForOhlc(const std::string &db_base_path, unsigned short 
         bool block_fully_in_range = (block_own_first_row >= first_row && block_own_last_row <= last_row);
 
         // An inexact block's first/last/min/max may describe overwritten or deleted rows: scan it.
+        // Under the scan chunk's READ lock (callers run only inside WalkYearSpan's ScanUnderReadLock callback), so a writer
+        // of these rows has marked them pending first; tested by IndexerQueryTest.QueriesDuringInsertsMatchAScanOracle.
         auto stats = zmap.TryGetBlockStats(block);
         if (block_fully_in_range && stats.has_value() && column_idx < stats->size() && !ZoneMapEntryInexact((*stats)[column_idx])) {
             const ZoneMapEntry &e = (*stats)[column_idx];
@@ -1302,6 +1311,15 @@ XStore::RunState XStore::FindByValueRun(FindByValueJob &job, const std::function
                 set_warning("", UnindexedColumnNoticeText("FINDBYVALUE", db_name, column_idx, curr_ts.year,
                                                           catidx.TrackedColumnCount()));
                 unindexed_notice_emitted = true;
+            }
+            // Pending blocks are scanned (MightContain says maybe); the reply says so once per call.
+            if (__builtin_expect(xstore::PendingMaps::AnyPending(), 0) && xstore::PendingMaps::NoticesEnabled() &&
+                !job.pending_notice_emitted) {
+                const auto pending = xstore::PendingMaps::Find(fmt::format("{}/{}", db_base_path_str, curr_ts.year));
+                if (pending && pending->AnyPendingInRows(iter_epoch - curr_ts.first_epoch, segment_end - curr_ts.first_epoch)) {
+                    set_warning("", XStore::PendingIndexNoticeText("FINDBYVALUE", db_name, curr_ts.year));
+                    job.pending_notice_emitted = true;
+                }
             }
             block_might_contain.assign(static_cast<size_t>(last_block - first_block + 1), 0);
             for (uint64_t b = first_block; b <= last_block; ++b) {

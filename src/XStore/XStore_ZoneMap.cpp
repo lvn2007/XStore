@@ -1,4 +1,5 @@
 #include "include/XStore/XStore_ZoneMap.h"
+#include "include/XStore/XStore_PendingMap.h"
 #include "include/Logger/Logger.h"
 #include <algorithm>
 #include <cstring>
@@ -47,7 +48,10 @@ bool ZoneMapFile::Open(const std::string &path, uint16_t row_length, uint32_t tr
             return false; // corrupt/foreign file -- caller falls back to no acceleration
         }
         dirty_on_disk_ = header_.dirty != 0;
-        if (header_.version != ZONE_MAP_VERSION || tracked_column_count > header_.tracked_column_count) {
+        // A block size this row length does not give (a stale header the startup check did not see: no .XSTORE, or
+        // corrupt) is as unusable as an old version: its blocks would be read and folded at the wrong rows.
+        if (header_.version != ZONE_MAP_VERSION || tracked_column_count > header_.tracked_column_count ||
+            header_.rows_per_block != RowsPerBlock(row_length)) {
             // A zone map is always a derived, rebuildable index, never a
             // source of truth (TryGetBlockStats already treats "no
             // coverage" as a valid answer, not an error) -- discarding
@@ -454,11 +458,13 @@ uint64_t ZoneMapFile::MarkWritesForTests() const {
 }
 
 bool ZoneMapFile::BlockInexact(uint64_t block_index) {
+    if (pending_ && pending_->IsPending(block_index)) return true;   // its entries miss the rows not folded yet
     auto stats = TryGetBlockStats(block_index);
     return stats.has_value() && !stats->empty() && ZoneMapEntryInexact((*stats)[0]);
 }
 
 std::optional<std::vector<ZoneMapEntry>> ZoneMapFile::TryGetBlockStats(uint64_t block_index) {
+    if (pending_ && pending_->IsPending(block_index)) return std::nullopt;   // outstanding index update: scan
     std::lock_guard<std::mutex> lock(mutex_);
     if ((block_index + 1) * header_.rows_per_block > frontier_) { // not rebuilt yet
         if (old_ == nullptr) return std::nullopt;

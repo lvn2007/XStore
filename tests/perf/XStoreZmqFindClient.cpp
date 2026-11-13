@@ -12,7 +12,12 @@
 //   xstore_zmq_find_client uq     <host:port> <db> <year_start_epoch> <year_seconds> <threads> <seconds>
 //   xstore_zmq_find_client scan   <host:port> <db> <start_epoch> <end_epoch> <column> <seconds>
 // `bload` runs <threads> threads of BatchInserts of <rows> rows (128 doubles each) at random seconds of the year for
-// <seconds>, and prints one line per wall second: second, acks, worst latency in ms. `scan` repeats a MAX over the range
+// <seconds>, and prints one line per wall second: second, acks, worst latency in ms. Optional env for `bload`:
+// XSTORE_BLOAD_RATE=<calls per second per thread> paces the threads open-loop (latency is measured from each call's SCHEDULED send
+// time, so a slow server is charged its queueing delay), 0/unset = closed loop; XSTORE_BLOAD_DUMP=1 also prints every call's latency as
+// `lat_ms <ms> <second>`. XSTORE_BLOAD_CHUNK=<L> makes a call's rows runs of L consecutive seconds
+// at random starts (default 1 = scattered). XSTORE_BLOAD_SEQ=1: each thread appends sequentially through its own slice
+// of the range instead (consecutive seconds, call after call: the shape of the insert client's `seq` pattern). `scan` repeats a MAX over the range
 // (a column above the index width is read from the data) back to back for <seconds> and prints each call's milliseconds.
 // `range` and `pattern` time a RangeQuery / FindByPattern (LIKE) over the range: wall milliseconds until the last frame is in,
 // reply bytes (rows are not counted: parsing a GB reply would be timed too). `uq` runs <threads> threads of UnaryQuerys of
@@ -142,6 +147,12 @@ int Bload(const std::string &addr, const std::string &db, unsigned long long yea
             sock.set(zmq::sockopt::sndtimeo, 600000);
             sock.connect("tcp://" + addr);
             std::mt19937_64 rng(1234567ULL + static_cast<unsigned long long>(t));
+            const bool seq = std::getenv("XSTORE_BLOAD_SEQ") != nullptr && std::getenv("XSTORE_BLOAD_SEQ")[0] == '1';   // sequential append
+            unsigned long long seq_pos = 0;
+            const char *rate_env = std::getenv("XSTORE_BLOAD_RATE");
+            const double rate = rate_env != nullptr ? std::atof(rate_env) : 0.0;   // calls per second per thread; 0 = closed loop
+            const auto interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(rate > 0.0 ? 1.0 / rate : 0.0));
+            auto scheduled = t0 + interval * t / std::max(1, threads);   // threads start at evenly spread phases
             while (std::chrono::steady_clock::now() < deadline) {
                 XStore_Proto::Request request;
                 XStore_Proto::BatchInsert_REQ *batch = request.mutable_batchinsert();
@@ -149,14 +160,29 @@ int Bload(const std::string &addr, const std::string &db, unsigned long long yea
                 batch->set_dbname(db);
                 batch->set_durabilitymode(sync ? XStore_Proto::SYNC : XStore_Proto::ASYNC);
                 std::unordered_set<unsigned long long> used;
-                while (static_cast<int>(used.size()) < rows) used.insert(year_start + rng() % year_seconds);
+                // XSTORE_BLOAD_CHUNK=<L>: the call's rows are runs of L consecutive seconds at random starts (L=1: scattered rows).
+                const char *chunk_env = std::getenv("XSTORE_BLOAD_CHUNK");
+                const unsigned long long chunk = chunk_env != nullptr ? std::max<unsigned long long>(1, std::strtoull(chunk_env, nullptr, 10)) : 1;
+                while (seq && static_cast<int>(used.size()) < rows) {   // sequential append: each thread walks forward through its own slice
+                    const unsigned long long slice = year_seconds / static_cast<unsigned long long>(std::max(1, threads));
+                    used.insert(year_start + static_cast<unsigned long long>(t) * slice + (seq_pos++ % slice));
+                }
+                while (static_cast<int>(used.size()) < rows) {
+                    const unsigned long long start_ts = year_start + rng() % (year_seconds > chunk ? year_seconds - chunk : 1);
+                    for (unsigned long long k = 0; k < chunk && static_cast<int>(used.size()) < rows; ++k) used.insert(start_ts + k);
+                }
                 for (unsigned long long ts : used) {
                     XStore_Proto::BatchInsert_DATA *entry = batch->add_batchinsert_data();
                     entry->set_timestamp(ts);
                     for (int c = 0; c < 128; ++c) entry->mutable_data()->add_fielddata()->set_doubledata(static_cast<double>(ts % 1000 + c));
                 }
                 const std::string payload = request.SerializeAsString();
-                const auto start = std::chrono::steady_clock::now();
+                if (rate > 0.0) {
+                    if (scheduled >= deadline) break;
+                    std::this_thread::sleep_until(scheduled);   // the payload is already built: generation is not charged to the server
+                }
+                const auto start = rate > 0.0 ? scheduled : std::chrono::steady_clock::now();   // open loop: from the scheduled send time
+                if (rate > 0.0) scheduled += interval;
                 zmq::message_t reply;
                 if (!sock.send(zmq::buffer(payload), zmq::send_flags::none) || !sock.recv(reply, zmq::recv_flags::none)) { ++failures; return; }
                 const auto end = std::chrono::steady_clock::now();
@@ -178,6 +204,9 @@ int Bload(const std::string &addr, const std::string &db, unsigned long long yea
         }
     }
     for (size_t i = 0; i < acks.size(); ++i) std::cout << "sec " << i << " acks=" << acks[i] << " worst_ms=" << worst[i] << "\n";
+    if (const char *dump = std::getenv("XSTORE_BLOAD_DUMP"); dump != nullptr && dump[0] == '1') {
+        for (const auto &per_thread : samples) for (const Sample &sample : per_thread) std::cout << "lat_ms " << sample.ms << " " << sample.second << "\n";
+    }
     std::cout << "TOTAL acks=" << total << " rows=" << total * static_cast<unsigned long long>(rows) << " failures=" << failures.load() << std::endl;
     return failures.load() == 0 ? 0 : 1;
 }
