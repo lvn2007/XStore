@@ -290,21 +290,46 @@ int PointReads(const std::string &addr, const std::string &db, unsigned long lon
 }
 
 int ScanLoop(const std::string &addr, const std::string &db, unsigned long long start, unsigned long long end, int column, int seconds) {
+    // XSTORE_SCAN_OP=min repeats a MIN instead of a MAX: on ascending data MIN is answered from block stats (every block after the first is
+    // pruned), so a block the indexer has not folded yet (untrusted, scanned) shows up as extra latency. Each line ends with the first
+    // 80 characters of the reply's opStatus, which carries the "not indexed yet" notice while rows are pending.
+    const char *op_env = std::getenv("XSTORE_SCAN_OP");
+    const bool use_min = op_env != nullptr && std::string(op_env) == "min";
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
     int calls = 0;
     do {
         XStore_Proto::Request request;
-        XStore_Proto::Max_REQ *max = request.mutable_max();
-        max->set_rtype(XStore_Proto::MAX);
-        max->set_starttime(start);
-        max->set_endtime(end);
-        max->set_dbname(db);
-        max->set_columnidx(column);
+        if (use_min) {
+            XStore_Proto::Min_REQ *min = request.mutable_min();
+            min->set_rtype(XStore_Proto::MIN);
+            min->set_starttime(start);
+            min->set_endtime(end);
+            min->set_dbname(db);
+            min->set_columnidx(column);
+        } else {
+            XStore_Proto::Max_REQ *max = request.mutable_max();
+            max->set_rtype(XStore_Proto::MAX);
+            max->set_starttime(start);
+            max->set_endtime(end);
+            max->set_dbname(db);
+            max->set_columnidx(column);
+        }
         std::string reply;
         const auto t0 = std::chrono::steady_clock::now();
         const bool ok = Exchange(addr, request, reply, 1800000);
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-        std::cout << "scan " << calls++ << ": " << ms << " ms " << (ok ? "ok" : "FAILED") << std::endl;
+        std::string status;
+        if (ok) {
+            if (use_min) {
+                XStore_Proto::Min_REP rep;
+                if (rep.ParseFromString(reply)) status = rep.opstatus();
+            } else {
+                XStore_Proto::Max_REP rep;
+                if (rep.ParseFromString(reply)) status = rep.opstatus();
+            }
+        }
+        if (status.size() > 80) status.resize(80);
+        std::cout << "scan " << calls++ << ": " << ms << " ms " << (ok ? "ok" : "FAILED") << " status=[" << status << "]" << std::endl;
         if (!ok) return 1;
     } while (std::chrono::steady_clock::now() < deadline);
     return 0;
