@@ -845,8 +845,12 @@ static_assert(BATCH_QUERY_MAX_RUN_LOCKS >= 1, "a year-group needs at least one l
 // Async indexer (spec 2026-11-04-async-indexer-design.md section 7). Backlog is pending ROW bytes; 0 = synchronous (no pool).
 // 0 until the stage 4 gates pass and the default is flipped.
 inline constexpr uint64_t INDEXER_BACKLOG_MB_DEV_DEFAULT = 0;
-inline constexpr unsigned INDEXER_THREADS_DIVISOR = 4;  // threads = max(1, cores / divisor)
-static_assert(INDEXER_THREADS_DIVISOR >= 1, "divisor must be positive");
+// Pool size (env XSTORE_INDEXER_THREADS). Mystic 2026-11-14, 8 client nodes: more threads contend on the one year file's
+// mutex. SYNC closed-loop calls/s with SYNC hand-off by threads 1:232 2:278 3:220 4:191 6:141 8:134 (base 199.5); dense
+// ASYNC 12.8 M burst rows/s +49.6/+46.3/+42.2/+35 % for 1/2/4/8; sustained 51.2 M ingest +7/+12/+10 % for 2/4/8 (noise
+// ~15 %). Lag after a burst grows as threads drop (76/56/29/34 s for 1/2/4/8). 2 is the best all-round point.
+inline constexpr unsigned INDEXER_THREADS_DEFAULT = 2;
+static_assert(INDEXER_THREADS_DEFAULT >= 1, "the pool needs a worker");
 // A record goes to the pool only when it is ASYNC and its average contiguous run (adjacent timestamps) is at least this
 // many rows; otherwise the request thread builds its observations (env XSTORE_INDEXER_MIN_RUN_ROWS). Task 1b sweep
 // (2026-11-12, Mystic, saturating ASYNC, rows/s pool on vs base by run length L): L=16 -2.7 %, 32 -2.9 %, 64 +10.8 %,

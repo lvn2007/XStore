@@ -57,8 +57,7 @@ TEST(IndexerConfigTest, DefaultsWithoutEnv) {
     ScopedEnv t("XSTORE_INDEXER_THREADS", nullptr);
     ScopedEnv b("XSTORE_INDEXER_BACKLOG_MB", nullptr);
     const xstore::IndexerConfig c = xstore::IndexerConfigFromEnv();
-    const uint32_t hw = std::thread::hardware_concurrency();
-    EXPECT_EQ(c.threads, std::max<uint32_t>(1, hw / 4));
+    EXPECT_EQ(c.threads, XStoreTunables::INDEXER_THREADS_DEFAULT);
     EXPECT_EQ(c.backlog_bytes, XStoreTunables::INDEXER_BACKLOG_MB_DEV_DEFAULT << 20);
 }
 

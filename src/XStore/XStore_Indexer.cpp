@@ -42,7 +42,7 @@ void PassOpenDelay() { RunHook(g_has_open_delay, g_open_delay); }
 
 IndexerConfig IndexerConfigFromEnv() {
     IndexerConfig c;
-    c.threads = std::max<uint32_t>(1, std::thread::hardware_concurrency() / XStoreTunables::INDEXER_THREADS_DIVISOR);
+    c.threads = XStoreTunables::INDEXER_THREADS_DEFAULT;
     c.backlog_bytes = XStoreTunables::INDEXER_BACKLOG_MB_DEV_DEFAULT << 20;
     if (const char *env = std::getenv("XSTORE_INDEXER_THREADS")) {
         c.threads = static_cast<uint32_t>(std::clamp<unsigned long>(std::strtoul(env, nullptr, 10), 1, MAX_THREADS));
