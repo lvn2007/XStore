@@ -154,12 +154,13 @@ void Indexer::SetPassOpenDelayForTests(std::function<void()> cb) {
     g_open_delay = std::move(cb);
 }
 
-void Indexer::WaitIdleForTests(std::chrono::milliseconds bound) {
+void Indexer::WaitIdle(std::chrono::milliseconds bound) {
     if (!Active()) return;
     const auto deadline = std::chrono::steady_clock::now() + bound;
     while (outstanding_.load(std::memory_order_acquire) != 0) {
         if (std::chrono::steady_clock::now() >= deadline) {
-            spdlog::warn("[INDEXER] - still busy after {} ms; the test registries are cleared under its passes", bound.count());
+            spdlog::warn("[INDEXER] - still busy after {} ms; registry entries are about to be dropped under its passes",
+                         bound.count());
             return;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));

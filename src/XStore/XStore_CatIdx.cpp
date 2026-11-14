@@ -707,7 +707,7 @@ CatIdxFile& XStore::GetOrOpenCatIdxLocked(std::string_view db_base_path, unsigne
 // Ignores pins, like the explicit erase in RebuildYearIndexes: neither may run while a builder or another pin holder is
 // alive (today they run only in InitDB and in tests).
 void XStore::ClearCatIdxRegistryForTests() {
-    xstore::Indexer::Instance().WaitIdleForTests(std::chrono::seconds(30));   // a pool pass holds pins
+    xstore::Indexer::Instance().WaitIdle(std::chrono::seconds(30));   // a pool pass holds pins
     std::lock_guard<std::mutex> lock(catidx_registry_mutex_);
     catidx_registry_.clear();
     catidx_registry_lru_.clear();

@@ -83,8 +83,9 @@ public:
     // Called once per pass after it took its year key and found the year still registered, before it opens anything.
     static void SetPassOpenDelayForTests(std::function<void()> cb);
     // Returns once no hint is queued or in a pool pass (at once with no pool), or after `bound` (logs a warning). Not
-    // counted: RunPassForTests passes. For the test-only registry clears, which ignore pins.
-    void WaitIdleForTests(std::chrono::milliseconds bound);
+    // counted: RunPassForTests passes. For callers about to drop registry entries (a drop ignores pins): the
+    // Clear*RegistryForTests hooks and BeginYearRebuild (a no-op in production, where InitDB runs before Start).
+    void WaitIdle(std::chrono::milliseconds bound);
 
 private:
     enum class PassEnd { kDone, kRequeue };
