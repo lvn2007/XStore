@@ -7,6 +7,7 @@
 #include "include/XStore/XStore.h"
 #include "include/XStore/XStore_Crc32c.h"
 #include "include/XStore/XStore_WalRing.h"
+#include "include/XStore/XStore_Indexer.h"
 #include "include/XStore/XStore_WalCheckpoint.h"
 #include "include/DataStructs/TimeStruct.h"
 #include <spdlog/fmt/fmt.h>
@@ -2808,6 +2809,27 @@ TEST(WalRingFormatTest, LegacyRecordParsesAsReplayedWithoutObservations) {
     ASSERT_FALSE(out.has_obs);
 }
 
+namespace {
+// InitDB replays the WAL before the indexer pool starts for the first XStore of a process (XStore::XStore starts the pool
+// after InitDB only if it is not already active), so a production replay never reaches the pool;
+// ApplyWalRecord called directly with the pool running would hand the replayed rows off and fold them. Stops the pool
+// for the scope and restarts it from the environment after, so later tests keep running with the pool they were given.
+class ScopedPoolOff {
+public:
+    ScopedPoolOff() : was_active_(xstore::Indexer::Instance().Active()) {
+        if (was_active_) xstore::Indexer::SetConfigForTests({1, 0});
+    }
+    ~ScopedPoolOff() {
+        if (was_active_) xstore::Indexer::Instance().Start(xstore::IndexerConfigFromEnv());
+    }
+    ScopedPoolOff(const ScopedPoolOff &) = delete;
+    ScopedPoolOff &operator=(const ScopedPoolOff &) = delete;
+
+private:
+    const bool was_active_;
+};
+}  // namespace
+
 // A replayed row is marked replayed (ParseWalRecordV2 sets WalRecord::replayed), so applying it must change neither the zone-map block stats nor the catidx bloom: InitDB rebuilds replayed years
 // from the raw rows, and a replay that also folded them would double-count whenever that rebuild is skipped.
 TEST_F(WalReplayTest, ReplayedRowLeavesZoneMapAndCatIdxUntouched) {
@@ -2840,6 +2862,7 @@ TEST_F(WalReplayTest, ReplayedRowLeavesZoneMapAndCatIdxUntouched) {
     size_t used = 0;
     ASSERT_EQ(XStore::ParseWalRecordV2(bytes.data(), bytes.size(), 0, used, record), XStore::RingParse::kOk);
     record.db_base_path = db_base;
+    const ScopedPoolOff replay_without_pool;   // replay runs before the pool starts: a pool would fold this row
     ASSERT_TRUE(ApplyWalRecordPtr()(record, nullptr, 0));
 
     EXPECT_TRUE(RowPresent(1)) << "the row itself must reach the data file";
@@ -2899,6 +2922,7 @@ TEST_F(WalReplayTest, AMalformedWireFailsTheRecordBeforeAnyWrite) {
     EXPECT_FALSE(catidx.MightContain(block, 0, key));
 
     ASSERT_TRUE(ApplyWalRecordPtr()(good, nullptr, 0));
+    xstore::Indexer::Instance().WaitIdle(std::chrono::seconds(30));   // pool on: the live rows are folded after the apply returns
     EXPECT_TRUE(RowPresent(1));
     EXPECT_TRUE(RowPresent(2));
     EXPECT_TRUE(catidx.MightContain(block, 0, key));

@@ -29,6 +29,7 @@
 #include "include/DataStructs/TimeStruct.h"
 #include "include/DataStructs/FileRangeLock.h"
 #include "include/XStore/XStore_PreadPool.h"
+#include "include/XStore/XStore_Indexer.h"
 #include <spdlog/fmt/fmt.h>
 #include "XStoreTestSupport.h"
 
@@ -3386,8 +3387,26 @@ TEST_F(XStoreTest, ConcurrentVarianceAggregateDuringConcurrentInsertsDoesNotCras
             // all it must have parsed as a real numeric variance, never
             // garbage (a torn sum_sq_value read could otherwise produce a
             // negative variance or NaN without crashing).
-            EXPECT_TRUE(rep.opstatus() == "SUCCESS" || rep.opstatus() == "ERROR: No valid data found");
-            if (rep.opstatus() == "SUCCESS") {
+            // Pool on: a query in a block's pending window legitimately appends " | " + the one-year pending notice
+            // (XStore::PendingIndexNoticeText: fixed parts matched, the year is any digits); only that exact suffix
+            // after "SUCCESS" / "ERROR: No valid data found" is dropped, the value checks below are unchanged.
+            std::string status = rep.opstatus();
+            if (xstore::Indexer::Instance().Active()) {
+                const std::string notice_head = " | [WARNING] [VARIANCE AGGREGATE] [DB: TESTDB] - part of ";
+                const std::string notice_tail = " is not indexed yet (the indexer is catching up); the part not yet indexed is "
+                                                "answered by scan, results are correct";
+                for (const std::string base : {"SUCCESS", "ERROR: No valid data found"}) {
+                    const std::string head = base + notice_head;
+                    if (status.size() > head.size() + notice_tail.size() && status.compare(0, head.size(), head) == 0 &&
+                        status.compare(status.size() - notice_tail.size(), notice_tail.size(), notice_tail) == 0) {
+                        const std::string year = status.substr(head.size(), status.size() - head.size() - notice_tail.size());
+                        if (year.find_first_not_of("0123456789") == std::string::npos) status = base;
+                        break;
+                    }
+                }
+            }
+            EXPECT_TRUE(status == "SUCCESS" || status == "ERROR: No valid data found") << rep.opstatus();
+            if (status == "SUCCESS") {
                 EXPECT_GE(rep.opresult(), 0.0) << "variance must never be negative -- sign of a torn sum_sq_value";
                 EXPECT_FALSE(std::isnan(rep.opresult()));
             }

@@ -8,13 +8,16 @@
 #include "XStore/XStore_WireEncode.h"
 #include "XStore/XStore_WalRing.h"
 #include "XStore/XStore_PendingMap.h"
+#include "XStore/XStore_Indexer.h"
 #include "XStoreSyscallFault.h"
 #include "XStoreTestSupport.h"
 #include "XStoreRebuildTestSupport.h"
 #include <algorithm>
+#include <chrono>
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 #include <fcntl.h>
@@ -728,20 +731,28 @@ TEST_F(XStoreDeferredFoldTest, TheNoticeIsOffByDefaultInStage2) {
     ASSERT_NE(pending, nullptr);
     const unsigned long long lo = Jan1(kYear), hi = lo + 99;
     const std::string kNotice = "not indexed yet";
-    ASSERT_FALSE(xstore::PendingMaps::NoticesEnabled()) << "the stage 2 default";
+    // Indexer::Start turns the notice on by design, so the default is on exactly while the pool runs.
+    const bool pool_on = xstore::Indexer::Instance().Active();
+    ASSERT_EQ(xstore::PendingMaps::NoticesEnabled(), pool_on) << "the stage 2 default";
+    // A hint still queued for block 0 from the insert could clear the synthetic mark and make the "on" check flaky.
+    xstore::Indexer::Instance().WaitIdle(std::chrono::seconds(30));
     pending->MarkRows(0, 1);
 
-    XStore_Proto::Max_REP off;
-    store.MaxAggregate(lo, hi, db, 0, &off);
-    EXPECT_EQ(off.opstatus().find(kNotice), std::string::npos) << off.opstatus();
-    EXPECT_EQ(Occurrences(FindStatus(store, db, lo, hi, 0), kNotice), 0u);
     {
-        const ScopedNotices notices(true);
-        XStore_Proto::Max_REP on;
-        store.MaxAggregate(lo, hi, db, 0, &on);
-        EXPECT_NE(on.opstatus().find(kNotice), std::string::npos) << on.opstatus();
-        EXPECT_EQ(Occurrences(FindStatus(store, db, lo, hi, 0), kNotice), 1u);
+        std::optional<ScopedNotices> switched_off;   // pool on: the default is on, so switch it off to test the off state
+        if (pool_on) switched_off.emplace(false);
+        XStore_Proto::Max_REP off;
+        store.MaxAggregate(lo, hi, db, 0, &off);
+        EXPECT_EQ(off.opstatus().find(kNotice), std::string::npos) << off.opstatus();
+        EXPECT_EQ(Occurrences(FindStatus(store, db, lo, hi, 0), kNotice), 0u);
+        {
+            const ScopedNotices notices(true);
+            XStore_Proto::Max_REP on;
+            store.MaxAggregate(lo, hi, db, 0, &on);
+            EXPECT_NE(on.opstatus().find(kNotice), std::string::npos) << on.opstatus();
+            EXPECT_EQ(Occurrences(FindStatus(store, db, lo, hi, 0), kNotice), 1u);
+        }
     }
-    EXPECT_FALSE(xstore::PendingMaps::NoticesEnabled()) << "restored";
+    EXPECT_EQ(xstore::PendingMaps::NoticesEnabled(), pool_on) << "restored";
     pending->ClearRows(0, 1);
 }
