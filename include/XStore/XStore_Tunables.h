@@ -535,8 +535,8 @@ inline constexpr uint64_t LIVE_WIDEN_GROUP_BYTES = 8 * LIVE_WIDEN_MAX_CHUNK_BYTE
 // GovernorParams. LIVE_WIDEN_GOVERNOR true: RunLiveWidenPass gives every DB's years one governor (cores - headroom
 // workers, parked between groups while the governor denies them) instead of the fixed LIVE_WIDEN_WORKERS.
 // On by default since 2026-10-27 (owner decision; Tech Reference 4.18 "Governor Mystic study": it ramped to all 8 workers in
-// seconds and equalled fixed 8 workers, 4.5x faster than the fixed 1 worker; it never braked there, so the reduction under
-// heavy foreground load is covered by unit tests and a local calibration only). false: the fixed LIVE_WIDEN_WORKERS.
+// seconds and equalled fixed 8 workers, 4.5x faster than the fixed 1 worker; it never braked there; the brake was validated 2026-11-15 with 6 client
+// nodes of writers: 41-44 brakes, writer p99 0.9 s vs 10 s for fixed 8 workers, widen +21..42 % longer). false: the fixed LIVE_WIDEN_WORKERS.
 inline constexpr bool LIVE_WIDEN_GOVERNOR = true;
 inline constexpr unsigned LIVE_WIDEN_FLOOR_WORKERS = 1;              // workers always allowed (0: the starvation guard)
 inline constexpr unsigned LIVE_WIDEN_HEADROOM_CORES = 2;             // logical CPUs kept free for foreground work
@@ -547,7 +547,7 @@ inline constexpr uint64_t LIVE_WIDEN_GOVERNOR_BRAKE_HOLD_SEC = 10;   // no raise
 // per-second samples): the 1-worker floor alone reaches p95 103-116k, p99 116-120k, max 120k (up to ~130k while
 // governed), so the earlier 100000 braked the floor itself and kept the governor at 1 worker; 4 workers p50
 // 107-145k, p95 166-175k. 150000 is above every 1-worker second seen and below the 4-worker p95; verified in a
-// governed run (floor never braked, ramps to 3-8 then brakes). Recheck on Mystic.
+// governed run (floor never braked, ramps to 3-8 then brakes). Mystic 2026-11-15, 48 writer threads: brakes 41-44 times per widen, kept as is.
 inline constexpr uint64_t LIVE_WIDEN_WRITER_WAIT_BRAKE_US = 150000;
 // Long waits (>= LIVE_WIDEN_WRITER_LONG_WAIT_US) since the last evaluation that brake (a plain count, not a rate: one
 // long wait is a long wait; the count is per evaluation interval). 0 = this brake is off (the wait-RATE brake still
