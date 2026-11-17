@@ -1188,7 +1188,7 @@ TEST(IndexerConfigTest, MinRunRowsFromEnvAndClamped) {
         ScopedEnv m("XSTORE_INDEXER_MIN_RUN_ROWS", nullptr);
         const xstore::IndexerConfig c = xstore::IndexerConfigFromEnv();
         EXPECT_EQ(c.min_run_rows, XStoreTunables::INDEXER_MIN_RUN_ROWS_DEFAULT);
-        EXPECT_FALSE(c.hand_off_sync) << "the test-only switch has no env variable";
+        EXPECT_FALSE(c.hand_off_sync) << "SYNC hand-off is off unless XSTORE_INDEXER_HAND_OFF_SYNC=1";
     }
     // 0, a negative or an unparsable value keeps the default: clamping it to 1 would hand off every record (the measured
     // sparse collapse).
@@ -1212,6 +1212,20 @@ TEST(IndexerConfigTest, IdlePriorityOnlyForExactlyOne) {
              {"1", true}, {"0", false}, {"", false}, {"abc", false}, {"10", false}, {"1 ", false}, {"yes", false}}) {
         ScopedEnv i("XSTORE_INDEXER_IDLE", v);
         EXPECT_EQ(xstore::IndexerConfigFromEnv().idle_priority, want) << '"' << v << '"';
+    }
+}
+
+TEST(IndexerConfigTest, HandOffSyncOnlyForExactlyOne) {
+    EXPECT_FALSE(XStoreTunables::INDEXER_HAND_OFF_SYNC_DEFAULT);
+    EXPECT_FALSE(xstore::IndexerConfig{}.hand_off_sync);
+    {
+        ScopedEnv h("XSTORE_INDEXER_HAND_OFF_SYNC", nullptr);
+        EXPECT_FALSE(xstore::IndexerConfigFromEnv().hand_off_sync);
+    }
+    for (const auto &[v, want] : std::vector<std::pair<const char *, bool>>{
+             {"1", true}, {"0", false}, {"", false}, {"abc", false}, {"10", false}, {"1 ", false}, {"yes", false}}) {
+        ScopedEnv h("XSTORE_INDEXER_HAND_OFF_SYNC", v);
+        EXPECT_EQ(xstore::IndexerConfigFromEnv().hand_off_sync, want) << '"' << v << '"';
     }
 }
 

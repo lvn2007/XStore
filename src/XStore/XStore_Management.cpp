@@ -184,7 +184,14 @@ XStore::XStore() {
         // already running (tests) is left as it is; with no backlog configured nothing starts.
         const xstore::IndexerConfig indexer_config = xstore::IndexerConfigFromEnv();
         xstore::Indexer &indexer = xstore::Indexer::Instance();
-        if (indexer_config.backlog_bytes != 0 && !indexer.Active()) indexer.Start(indexer_config);
+        if (indexer_config.backlog_bytes != 0 && !indexer.Active()) {
+            if (indexer_config.hand_off_sync && indexer_config.threads > XStoreTunables::INDEXER_HAND_OFF_SYNC_MAX_GOOD_THREADS) {
+                spdlog::warn("[INDEXER] - SYNC hand-off with {} pool threads: measured slower than no hand-off from 4 threads up "
+                             "(year-file mutex contention); use XSTORE_INDEXER_THREADS <= {}",
+                             indexer_config.threads, XStoreTunables::INDEXER_HAND_OFF_SYNC_MAX_GOOD_THREADS);
+            }
+            indexer.Start(indexer_config);
+        }
     }
 }
 

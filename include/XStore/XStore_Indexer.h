@@ -23,14 +23,14 @@ struct IndexerConfig {
     uint64_t backlog_bytes = 0;      // pending ROW bytes; 0 = synchronous (no pool)
     // A record is handed off only when ASYNC and its average contiguous run is >= this (HandOffToPool); >= 1.
     uint32_t min_run_rows = XStoreTunables::INDEXER_MIN_RUN_ROWS_DEFAULT;
-    // TESTS ONLY (no env variable): SYNC/BYPASS records are handed off too. Most indexer tests insert SYNC (the apply has
-    // finished when the call returns) and still need the hand-off path under test.
-    bool hand_off_sync = false;
+    // SYNC/BYPASS records are handed off too (env XSTORE_INDEXER_HAND_OFF_SYNC=1). The client still waits for the apply;
+    // only the index entries lag. Most indexer tests insert SYNC and set this to exercise the hand-off path.
+    bool hand_off_sync = XStoreTunables::INDEXER_HAND_OFF_SYNC_DEFAULT;
     // Workers run at SCHED_IDLE (env XSTORE_INDEXER_IDLE=1). Last, so the positional test configs above stay as they are.
     bool idle_priority = XStoreTunables::INDEXER_IDLE_PRIORITY_DEFAULT;
 };
 
-// Reads XSTORE_INDEXER_THREADS / XSTORE_INDEXER_BACKLOG_MB / XSTORE_INDEXER_MIN_RUN_ROWS / XSTORE_INDEXER_IDLE once; defaults from XStoreTunables.
+// Reads XSTORE_INDEXER_THREADS / XSTORE_INDEXER_BACKLOG_MB / XSTORE_INDEXER_MIN_RUN_ROWS / XSTORE_INDEXER_IDLE / XSTORE_INDEXER_HAND_OFF_SYNC once; defaults from XStoreTunables.
 IndexerConfig IndexerConfigFromEnv();
 
 // One hint: "this block of this year file may have pending rows". The bits are the authority.

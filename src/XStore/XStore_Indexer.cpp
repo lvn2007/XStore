@@ -59,6 +59,7 @@ IndexerConfig IndexerConfigFromEnv() {
     }
     // Exactly "1" turns it on; unset, "0" or anything else keeps the default.
     if (const char *env = std::getenv("XSTORE_INDEXER_IDLE")) c.idle_priority = std::strcmp(env, "1") == 0;
+    if (const char *env = std::getenv("XSTORE_INDEXER_HAND_OFF_SYNC")) c.hand_off_sync = std::strcmp(env, "1") == 0;
     return c;
 }
 
