@@ -23,8 +23,8 @@ struct IndexerConfig {
     uint64_t backlog_bytes = 0;      // pending ROW bytes; 0 = synchronous (no pool)
     // A record is handed off only when ASYNC and its average contiguous run is >= this (HandOffToPool); >= 1.
     uint32_t min_run_rows = XStoreTunables::INDEXER_MIN_RUN_ROWS_DEFAULT;
-    // SYNC/BYPASS records are handed off too (env XSTORE_INDEXER_HAND_OFF_SYNC=1). The client still waits for the apply;
-    // only the index entries lag. Most indexer tests insert SYNC and set this to exercise the hand-off path.
+    // SYNC/BYPASS records are handed off too (on by default; env XSTORE_INDEXER_HAND_OFF_SYNC=0 or any value but 1 turns it
+    // off). The client still waits for the apply; only the index entries lag. Most indexer tests insert SYNC and set this.
     bool hand_off_sync = XStoreTunables::INDEXER_HAND_OFF_SYNC_DEFAULT;
     // Workers run at SCHED_IDLE (env XSTORE_INDEXER_IDLE=1). Last, so the positional test configs above stay as they are.
     bool idle_priority = XStoreTunables::INDEXER_IDLE_PRIORITY_DEFAULT;
@@ -63,6 +63,7 @@ public:
     // The config of the last Start (meaningful while Active(): stored before active_ is released).
     [[nodiscard]] uint32_t MinRunRows() const { return min_run_rows_.load(std::memory_order_relaxed); }
     [[nodiscard]] bool HandOffSync() const { return hand_off_sync_.load(std::memory_order_relaxed); }
+    static void SetHandOffSyncForTests(bool on) { Instance().hand_off_sync_.store(on, std::memory_order_relaxed); }   // tests only; the next Start resets it
     // Backlog accounting in ROW BYTES. TryReserve succeeds iff Active() and used + bytes <= backlog_bytes.
     [[nodiscard]] bool TryReserve(uint64_t bytes);
     void Release(uint64_t bytes);

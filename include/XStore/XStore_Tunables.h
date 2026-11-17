@@ -861,15 +861,16 @@ static_assert(INDEXER_MIN_RUN_ROWS_DEFAULT >= 1, "a run holds at least one row")
 // else wants. Mystic, dense ASYNC 12.8 M rows, pool on, backlog 16384, 2 pairs: rows/s 955K/981K on vs 884K/880K
 // off (+8.9 %, CPU/row -3.8 %), but RSS 1.6-2.0 GB vs 1.2 GB (the backlog fills further). Off: memory over throughput.
 inline constexpr bool INDEXER_IDLE_PRIORITY_DEFAULT = false;
-// SYNC/BYPASS records go to the pool too (env XSTORE_INDEXER_HAND_OFF_SYNC=1; anything else keeps this default), still
-// only for average runs >= INDEXER_MIN_RUN_ROWS. Durability is unchanged; the index entries lag like ASYNC's. Mystic
-// 2026-11-14, dense 1000-row SYNC, 64 threads: closed-loop calls/s by pool threads 1:232 2:278 3:220 4:191 6:141 8:134
-// vs 199.5 without, so it wins up to 3 threads and loses from 4 (year-file mutex contention); Management warns then.
-// Rerun at the 2-thread default (2026-11-17, 4 reps saturated, 3 reps otherwise): saturated 258-285 vs 194-197 calls/s,
-// p50 182-202 vs 283-295 ms; light load 64 calls/s p50 69-77 vs 98-117 ms, 128 calls/s p50 47-48 vs 60 ms; sparse
-// 40-row SYNC unchanged (below the run threshold). Off by default: after an 11.2 M-row SYNC burst, queries over the fresh rows
-// carry the not-indexed-yet notice and run 3-4x slower for 26-41 s, which a SYNC client does not expect.
-inline constexpr bool INDEXER_HAND_OFF_SYNC_DEFAULT = false;
+// SYNC/BYPASS records go to the pool too, while the pool is on (env XSTORE_INDEXER_HAND_OFF_SYNC: unset keeps this default,
+// exactly "1" is on, any other value is off), still only for average runs >= INDEXER_MIN_RUN_ROWS. Durability is
+// unchanged; the index entries lag like ASYNC's. Mystic 2026-11-14, dense 1000-row SYNC, 64 threads: closed-loop calls/s
+// by pool threads 1:232 2:278 3:220 4:191 6:141 8:134 vs 199.5 without, so it wins up to 3 threads and loses from 4
+// (year-file mutex contention); Management warns then. Rerun at the 2-thread default (2026-11-17, 4 reps saturated, 3
+// reps otherwise): saturated 258-285 vs 194-197 calls/s, p50 182-202 vs 283-295 ms; light load 64 calls/s p50 69-77 vs
+// 98-117 ms, 128 calls/s p50 47-48 vs 60 ms; sparse 40-row SYNC unchanged (below the run threshold). Cost: after an
+// 11.2 M-row SYNC burst, queries over the fresh rows carry the not-indexed-yet notice and run 3-4x slower for 26-41 s.
+// On by default (owner's decision 2026-11-17); the pool itself is still opt-in.
+inline constexpr bool INDEXER_HAND_OFF_SYNC_DEFAULT = true;
 inline constexpr unsigned INDEXER_HAND_OFF_SYNC_MAX_GOOD_THREADS = 3;
 // How long Shutdown waits for the indexer to fold what is queued; the years still pending afterwards stay dirty (rebuilt
 // at the next start). A live widen waits as long for its year's pending rows before it scans.

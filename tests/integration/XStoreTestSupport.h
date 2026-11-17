@@ -23,6 +23,7 @@
 #include <spdlog/spdlog.h>
 
 #include "include/XStore/XStore.h"
+#include "include/XStore/XStore_Indexer.h"
 #include "include/XStore/XStore_WalRing.h"
 #include "include/XStore/XStore_WalCheckpoint.h"
 
@@ -261,6 +262,20 @@ inline int FreePort() {
     close(fd);
     return port;
 }
+
+// Tests that assert the request-thread (inline) SYNC path: with the pool on (env) and SYNC hand-off on by default a dense SYNC
+// record is handed off, so they opt out for their duration. Construct it after the test's XStore (its first
+// construction may start the pool, which resets the setting from the environment).
+class ScopedHandOffSyncOff {
+public:
+    ScopedHandOffSyncOff() : was_on_(xstore::Indexer::Instance().HandOffSync()) { xstore::Indexer::SetHandOffSyncForTests(false); }
+    ~ScopedHandOffSyncOff() { xstore::Indexer::SetHandOffSyncForTests(was_on_); }
+    ScopedHandOffSyncOff(const ScopedHandOffSyncOff &) = delete;
+    ScopedHandOffSyncOff &operator=(const ScopedHandOffSyncOff &) = delete;
+
+private:
+    bool was_on_;
+};
 
 }  // namespace xstore_test
 

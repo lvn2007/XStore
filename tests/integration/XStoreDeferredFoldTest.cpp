@@ -571,6 +571,7 @@ TEST_F(XStoreDeferredFoldTest, SignalingNaNDoublesMatchTheLiveInsertPath) {
 TEST_F(XStoreDeferredFoldTest, InlineIndexingMarksEveryRowAndLeavesNothingPending) {
     const std::string db = "PENDINGMARK";
     XStore store;
+    const xstore_test::ScopedHandOffSyncOff sync_inline;   // this test checks the request-thread (inline) SYNC path
     CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
     const unsigned short kYear = 1971;
     std::vector<std::pair<unsigned long long, XStore_Proto::RowData>> rows;
@@ -653,6 +654,7 @@ TEST_F(XStoreDeferredFoldTest, APendingBlockGetsTheNoticeAndTheSameAnswer) {
     const ScopedNotices notices(true);
     const std::string db = "PENDINGNOTICE";
     XStore store;
+    const xstore_test::ScopedHandOffSyncOff sync_inline;   // this test checks the request-thread (inline) SYNC path
     CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
     const unsigned short kYear = 1971;
     std::vector<std::pair<unsigned long long, XStore_Proto::RowData>> rows;

@@ -1166,8 +1166,8 @@ TEST_F(IndexerWriteTest, ConcurrentScatteredWritersEqualTheSynchronousBuild) {
 // ---------------------------------------------------------------------------------------------------------------------
 // Adaptive hand-off (plan 2026-11-12): a record goes to the pool only when it is ASYNC and its average contiguous run is
 // at least min_run_rows; every other record is has_obs (the request thread builds its observations). The tests below use
-// the production semantics (hand_off_sync false), so they insert ASYNC where the pool may take the record and wait for the
-// writer's apply (AppliedMap / WaitFor).
+// ASYNC inserts (hand_off_sync is on by default, but these tests pick ASYNC where the pool may take the record and wait
+// for the writer's apply: AppliedMap / WaitFor).
 
 // Pure function: a request goes to the pool only when its average contiguous run is long enough.
 TEST(IndexerPredicateTest, HandOffNeedsAnAverageRunOfMinRunRows) {
@@ -1188,7 +1188,7 @@ TEST(IndexerConfigTest, MinRunRowsFromEnvAndClamped) {
         ScopedEnv m("XSTORE_INDEXER_MIN_RUN_ROWS", nullptr);
         const xstore::IndexerConfig c = xstore::IndexerConfigFromEnv();
         EXPECT_EQ(c.min_run_rows, XStoreTunables::INDEXER_MIN_RUN_ROWS_DEFAULT);
-        EXPECT_FALSE(c.hand_off_sync) << "SYNC hand-off is off unless XSTORE_INDEXER_HAND_OFF_SYNC=1";
+        EXPECT_TRUE(c.hand_off_sync) << "SYNC hand-off is on unless XSTORE_INDEXER_HAND_OFF_SYNC is set to something but 1";
     }
     // 0, a negative or an unparsable value keeps the default: clamping it to 1 would hand off every record (the measured
     // sparse collapse).
@@ -1215,12 +1215,12 @@ TEST(IndexerConfigTest, IdlePriorityOnlyForExactlyOne) {
     }
 }
 
-TEST(IndexerConfigTest, HandOffSyncOnlyForExactlyOne) {
-    EXPECT_FALSE(XStoreTunables::INDEXER_HAND_OFF_SYNC_DEFAULT);
-    EXPECT_FALSE(xstore::IndexerConfig{}.hand_off_sync);
+TEST(IndexerConfigTest, HandOffSyncOnByDefaultAndOnlyExactlyOneKeepsItOn) {
+    EXPECT_TRUE(XStoreTunables::INDEXER_HAND_OFF_SYNC_DEFAULT);
+    EXPECT_TRUE(xstore::IndexerConfig{}.hand_off_sync);
     {
         ScopedEnv h("XSTORE_INDEXER_HAND_OFF_SYNC", nullptr);
-        EXPECT_FALSE(xstore::IndexerConfigFromEnv().hand_off_sync);
+        EXPECT_TRUE(xstore::IndexerConfigFromEnv().hand_off_sync);
     }
     for (const auto &[v, want] : std::vector<std::pair<const char *, bool>>{
              {"1", true}, {"0", false}, {"", false}, {"abc", false}, {"10", false}, {"1 ", false}, {"yes", false}}) {
@@ -1329,14 +1329,39 @@ TEST_F(IndexerWriteTest, ARequestWithASparseAndADenseYearMakesOneRecordOfEachKin
     EXPECT_TRUE(got2.second == ref2.second) << kYear2 << ".catidx differs from the rows-only build";
 }
 
-// The production config (default min_run_rows, no hand_off_sync): a dense SYNC record is indexed by the request thread
+// The default config: a dense SYNC record (>= the default min run) is handed to the pool like an ASYNC one, and the
+// indexes end up equal to the rows-only build.
+TEST_F(IndexerWriteTest, ADenseSyncRecordIsHandedOffByDefault) {
+    const std::string db = "IDXADAPTSD", ref_db = "IDXADAPTSDREF";
+    XStore store;
+    const Rows rows = Dense(0, 3000, 40);
+    const auto ref = RowsOnlyReferenceBytes(store, ref_db, rows);
+    xstore::Indexer::SetConfigForTests({2, kPoolBacklog});
+    ASSERT_EQ(xstore::Indexer::Instance().MinRunRows(), XStoreTunables::INDEXER_MIN_RUN_ROWS_DEFAULT);
+    ASSERT_TRUE(xstore::Indexer::Instance().HandOffSync());
+    CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+    HoldPasses();
+    Insert(store, db, rows);   // SYNC
+    const auto map = Map(db);
+    ASSERT_NE(map, nullptr);
+    EXPECT_TRUE(HandedOff(rows.size())) << "a dense SYNC record was not handed to the pool";
+    EXPECT_GT(map->PendingBlockCount(), 0u) << "a dense SYNC record was not handed to the pool";
+    ReleasePasses();
+    ASSERT_TRUE(Quiesce());
+    EXPECT_EQ(map->PendingBlockCount(), 0u);
+    const auto got = CleanBytes(db, Width(db));
+    EXPECT_TRUE(got.first == ref.first) << ".zmap differs from the rows-only build";
+    EXPECT_TRUE(got.second == ref.second) << ".catidx differs from the rows-only build";
+}
+
+// SYNC hand-off opted out (XSTORE_INDEXER_HAND_OFF_SYNC=0): a dense SYNC record is indexed by the request thread
 // (nothing pending, nothing re-read), while the same rows ASYNC are handed off. Both end in the reference's bytes.
 TEST_F(IndexerWriteTest, ADenseSyncRecordTakesTheRequestThreadPathAndTheSameRowsAsyncAreHandedOff) {
     const std::string db = "IDXADAPTS", async_db = "IDXADAPTA", ref_db = "IDXADAPTSREF";
     XStore store;
     const Rows rows = Dense(0, 3000, 40);
     const auto ref = RowsOnlyReferenceBytes(store, ref_db, rows);
-    xstore::Indexer::SetConfigForTests({2, kPoolBacklog});
+    xstore::Indexer::SetConfigForTests({2, kPoolBacklog, XStoreTunables::INDEXER_MIN_RUN_ROWS_DEFAULT, /*hand_off_sync=*/false});
     ASSERT_EQ(xstore::Indexer::Instance().MinRunRows(), XStoreTunables::INDEXER_MIN_RUN_ROWS_DEFAULT);
     ASSERT_FALSE(xstore::Indexer::Instance().HandOffSync());
     CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
@@ -1818,7 +1843,7 @@ TEST_F(IndexerQueryTest, HasObsRecordsOnABlockWithPendingHandedOffRowsEqualTheRo
 
     // A plug with the production predicate (PlugThePool's config hands SYNC records off): one worker, held in the
     // plug's pass, so the hints below wait in the queue.
-    xstore::Indexer::SetConfigForTests({1, kPoolBacklog, /*min_run_rows=*/16});
+    xstore::Indexer::SetConfigForTests({1, kPoolBacklog, /*min_run_rows=*/16, /*hand_off_sync=*/false});
     released_.store(false);
     xstore::Indexer::SetPassDelayForTests([this] {
         ++held_;
@@ -3888,6 +3913,7 @@ TEST_F(RowsOnlyRecordTest, TheWritersInlineFoldEqualsFoldStoredRowsOverTheSameRo
     xstore::Indexer::SetConfigForTests({1, 0});
     const std::string db = "ROWSONLY";
     XStore store;
+    const xstore_test::ScopedHandOffSyncOff sync_inline;   // this test checks the request-thread (inline) SYNC path
     CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
     Rows rows = Dense(0, 1000, 40);
     rows[7].second = XStore_Proto::RowData();   // all-zero bytes on disk: a hole to every fold

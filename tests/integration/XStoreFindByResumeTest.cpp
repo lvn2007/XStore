@@ -30,11 +30,13 @@ class FindByResumeTest : public ::testing::Test {
 protected:
     std::unique_ptr<ScratchDir> scratch;
     std::unique_ptr<XStore> store;
+    std::unique_ptr<xstore_test::ScopedHandOffSyncOff> sync_inline;   // the SetUp inserts and the checks use the request-thread (inline) SYNC path
     unsigned long long first = 0, begin = 0, last = 0;   // the rows start at first; the query range starts three years earlier (years that have no file: three notices)
 
     void SetUp() override {
         scratch = std::make_unique<ScratchDir>("xstore_findby_resume_test");
         store = std::make_unique<XStore>();
+        sync_inline = std::make_unique<xstore_test::ScopedHandOffSyncOff>();
         CreateTestDb(*store, kDb, XStore_Proto::SECOND, kRowLength);
         first = TimeStruct(static_cast<std::time_t>(1672531200ULL), XStore_Proto::SECOND).first_epoch;   // 2023-01-01
         begin = first - 3 * 366 * 86400ULL;
@@ -58,6 +60,7 @@ protected:
     }
     void TearDown() override {
         xstore::scanlock::Set(xstore::scanlock::Config{});
+        sync_inline.reset();
         store.reset();
         scratch.reset();
     }

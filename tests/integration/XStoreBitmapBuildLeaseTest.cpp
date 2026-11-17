@@ -111,6 +111,7 @@ TEST_F(BitmapBuildLeaseTest, ASecondStepIsReservedWhenTheAccumulatorsGrowPastThe
 }
 
 TEST_F(BitmapBuildLeaseTest, ASmallYearNeverTouchesThePool) {
+    const xstore_test::ScopedHandOffSyncOff sync_inline;   // this test checks the request-thread (inline) SYNC path
     FillYear(kSmallRows);
     HogAllBut(0);
     EXPECT_TRUE(Build());
@@ -218,6 +219,7 @@ TEST_F(BitmapBuildBackoffTest, TheBackgroundTickWakesAtTheRetryNotAtThePollInter
 }
 
 TEST_F(BitmapBuildBackoffTest, ASmallYearIsBuiltByThePassAndLeavesNoDeferral) {
+    const xstore_test::ScopedHandOffSyncOff sync_inline;   // this test checks the request-thread (inline) SYNC path
     FillYear(kSmallRows);
     HogAllBut(0);
     EXPECT_TRUE(Pass());

@@ -3264,6 +3264,7 @@ TEST_F(XStoreTest, AggregateOnSpecificColumnAmongMixedTypeColumnsIgnoresOtherCol
 // whether the row has numeric data somewhere.
 TEST_F(XStoreTest, AggregateTargetingNonNumericColumnAmongMixedTypeRowReturnsNoValidData) {
     XStore store;
+    const xstore_test::ScopedHandOffSyncOff sync_inline;   // this test checks the request-thread (inline) SYNC path
     CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 1024);
 
     XStore_Proto::RangeInsert_REQ insert_req;
