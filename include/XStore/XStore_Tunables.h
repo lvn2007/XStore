@@ -849,15 +849,16 @@ static_assert(BATCH_QUERY_MAX_RUN_LOCKS >= 1, "a year-group needs at least one l
 
 // Async indexer (spec 2026-11-04-async-indexer-design.md section 7). Backlog is pending ROW bytes; 0 = synchronous (no pool).
 // On by default (owner's decision 2026-11-18: rows need not be indexed right after the insert, the lag is 40-60 s after a
-// big burst): the backlog is a quarter of the host's memory (cgroup aware) between FLOOR and CAP MB; CAP is the size every
-// gain here was measured at (burst +46 %, SYNC +40 %, RSS about half, CPU/row -12..15 %), an unknown host gets UNKNOWN_HOST.
-// A smaller backlog fills sooner and the writers then index inline, so the gain fades. Mystic 2026-11-18, 64 GB host, dense
-// ASYNC, 3 reps: 12.8 M rows (18 GB) +37 % with 8192 MB (an eighth) vs +47 % with 16384 MB, peak RSS 6.9 vs 1.2 GB; 25.6 M
-// rows (36 GB) +6 % vs +32 %. Env XSTORE_INDEXER_BACKLOG_MB=0 turns the pool off.
-inline constexpr uint64_t INDEXER_BACKLOG_MB_CAP = 16384;
+// big burst): the backlog is half of the host's memory (cgroup aware) between FLOOR and CAP MB, an unknown host gets
+// UNKNOWN_HOST. A smaller backlog fills sooner and the writers then index inline, so the gain fades. Mystic 2026-11-18, 64 GB
+// host, dense ASYNC, 3 reps, rows/s vs no pool: 12.8 M rows (18 GB) +37 % with 8192 MB vs +47 % with 16384 MB (peak RSS 6.9 vs
+// 1.2 GB); 25.6 M rows (36 GB) +6 % (8192), +33 % (16384), +43 % (24576), +48 % (32768 and 49152; peak RSS 12.1 -> 4.8 GB), so
+// CAP is 32768: the gain stops where the backlog holds the burst. The not-indexed-yet lag after the 36 GB burst: last notice
+// 55-63 s after the last ack with 16384 MB, 14-87 s with 32768 MB. Env XSTORE_INDEXER_BACKLOG_MB=0 turns the pool off.
+inline constexpr uint64_t INDEXER_BACKLOG_MB_CAP = 32768;
 inline constexpr uint64_t INDEXER_BACKLOG_MB_FLOOR = 16;
 inline constexpr uint64_t INDEXER_BACKLOG_MB_UNKNOWN_HOST = 256;
-inline constexpr uint64_t INDEXER_BACKLOG_RAM_DIVISOR = 4;
+inline constexpr uint64_t INDEXER_BACKLOG_RAM_DIVISOR = 2;
 static_assert(INDEXER_BACKLOG_MB_FLOOR >= 1 && INDEXER_BACKLOG_MB_FLOOR <= INDEXER_BACKLOG_MB_CAP, "an on pool needs a backlog");
 static_assert(INDEXER_BACKLOG_MB_UNKNOWN_HOST >= INDEXER_BACKLOG_MB_FLOOR && INDEXER_BACKLOG_MB_UNKNOWN_HOST <= INDEXER_BACKLOG_MB_CAP, "fallback in range");
 static_assert(INDEXER_BACKLOG_RAM_DIVISOR >= 1, "a share of the host's memory");

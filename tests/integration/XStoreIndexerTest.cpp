@@ -62,13 +62,13 @@ TEST(IndexerConfigTest, DefaultsWithoutEnv) {
     EXPECT_GT(c.backlog_bytes, 0u) << "the pool is on by default";
 }
 
-// A quarter of the host's memory, between the floor and the cap (the size the gains were measured at); unknown host: the fallback.
+// Half of the host's memory, between the floor and the cap (the size the gains were measured at); unknown host: the fallback.
 TEST(IndexerConfigTest, DefaultBacklogScalesWithHostMemoryUpToTheCap) {
     constexpr uint64_t kMiB = uint64_t{1} << 20, kGiB = uint64_t{1} << 30;
     EXPECT_EQ(xstore::DefaultBacklogBytes(128 * kGiB), XStoreTunables::INDEXER_BACKLOG_MB_CAP * kMiB);
     EXPECT_EQ(xstore::DefaultBacklogBytes(64 * kGiB), XStoreTunables::INDEXER_BACKLOG_MB_CAP * kMiB);   // Mystic
-    EXPECT_EQ(xstore::DefaultBacklogBytes(32 * kGiB), uint64_t{8192} * kMiB);
-    EXPECT_EQ(xstore::DefaultBacklogBytes(1 * kGiB), uint64_t{256} * kMiB);   // a Raspberry Pi 3B
+    EXPECT_EQ(xstore::DefaultBacklogBytes(32 * kGiB), uint64_t{16384} * kMiB);
+    EXPECT_EQ(xstore::DefaultBacklogBytes(1 * kGiB), uint64_t{512} * kMiB);   // a Raspberry Pi 3B
     EXPECT_EQ(xstore::DefaultBacklogBytes(16 * kMiB), XStoreTunables::INDEXER_BACKLOG_MB_FLOOR * kMiB);
     EXPECT_EQ(xstore::DefaultBacklogBytes(0), XStoreTunables::INDEXER_BACKLOG_MB_UNKNOWN_HOST * kMiB);
 }
