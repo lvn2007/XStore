@@ -58,7 +58,18 @@ TEST(IndexerConfigTest, DefaultsWithoutEnv) {
     ScopedEnv b("XSTORE_INDEXER_BACKLOG_MB", nullptr);
     const xstore::IndexerConfig c = xstore::IndexerConfigFromEnv();
     EXPECT_EQ(c.threads, XStoreTunables::INDEXER_THREADS_DEFAULT);
-    EXPECT_EQ(c.backlog_bytes, XStoreTunables::INDEXER_BACKLOG_MB_DEV_DEFAULT << 20);
+    EXPECT_EQ(c.backlog_bytes, xstore::DefaultBacklogBytes(xstore::HostMemoryTotalBytes()));
+    EXPECT_GT(c.backlog_bytes, 0u) << "the pool is on by default";
+}
+
+// An eighth of the host's memory, between the floor and the cap (the size the gains were measured at); unknown host: the fallback.
+TEST(IndexerConfigTest, DefaultBacklogScalesWithHostMemoryUpToTheCap) {
+    constexpr uint64_t kMiB = uint64_t{1} << 20, kGiB = uint64_t{1} << 30;
+    EXPECT_EQ(xstore::DefaultBacklogBytes(128 * kGiB), XStoreTunables::INDEXER_BACKLOG_MB_CAP * kMiB);
+    EXPECT_EQ(xstore::DefaultBacklogBytes(64 * kGiB), uint64_t{8192} * kMiB);
+    EXPECT_EQ(xstore::DefaultBacklogBytes(1 * kGiB), uint64_t{128} * kMiB);   // a Raspberry Pi 3B
+    EXPECT_EQ(xstore::DefaultBacklogBytes(16 * kMiB), XStoreTunables::INDEXER_BACKLOG_MB_FLOOR * kMiB);
+    EXPECT_EQ(xstore::DefaultBacklogBytes(0), XStoreTunables::INDEXER_BACKLOG_MB_UNKNOWN_HOST * kMiB);
 }
 
 TEST(IndexerConfigTest, EnvOverrides) {

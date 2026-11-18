@@ -2,6 +2,7 @@
 
 #include "include/DataStructs/FileRangeLock.h"
 #include "include/XStore/XStore.h"
+#include "include/XStore/XStore_MemoryPool.h"
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -40,10 +41,17 @@ void PassOpenDelay() { RunHook(g_has_open_delay, g_open_delay); }
 
 }  // namespace
 
+uint64_t DefaultBacklogBytes(uint64_t host_total_bytes) {
+    constexpr uint64_t kMiB = uint64_t{1} << 20;
+    if (host_total_bytes == 0) return XStoreTunables::INDEXER_BACKLOG_MB_UNKNOWN_HOST * kMiB;
+    const uint64_t share = host_total_bytes / XStoreTunables::INDEXER_BACKLOG_RAM_DIVISOR;
+    return std::clamp<uint64_t>(share, XStoreTunables::INDEXER_BACKLOG_MB_FLOOR * kMiB, XStoreTunables::INDEXER_BACKLOG_MB_CAP * kMiB);
+}
+
 IndexerConfig IndexerConfigFromEnv() {
     IndexerConfig c;
     c.threads = XStoreTunables::INDEXER_THREADS_DEFAULT;
-    c.backlog_bytes = XStoreTunables::INDEXER_BACKLOG_MB_DEV_DEFAULT << 20;
+    c.backlog_bytes = DefaultBacklogBytes(HostMemoryTotalBytes());
     if (const char *env = std::getenv("XSTORE_INDEXER_THREADS")) {
         c.threads = static_cast<uint32_t>(std::clamp<unsigned long>(std::strtoul(env, nullptr, 10), 1, MAX_THREADS));
     }

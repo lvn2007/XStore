@@ -48,6 +48,9 @@ struct PoolSizing {
 };
 PoolSizing SizePool(uint64_t total_bytes, uint64_t reserve_override_mb, uint64_t limit_override_mb);
 
+// The machine's memory, or its cgroup's memory.max when lower; 0 = unknown. What the process-wide pool is sized from.
+uint64_t HostMemoryTotalBytes();
+
 class MemoryPool;
 
 class MemoryLease {

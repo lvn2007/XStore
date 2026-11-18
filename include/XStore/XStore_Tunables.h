@@ -843,8 +843,18 @@ inline constexpr uint64_t BATCH_QUERY_MAX_RUN_LOCKS = 512;
 static_assert(BATCH_QUERY_MAX_RUN_LOCKS >= 1, "a year-group needs at least one lock");
 
 // Async indexer (spec 2026-11-04-async-indexer-design.md section 7). Backlog is pending ROW bytes; 0 = synchronous (no pool).
-// 0 until the stage 4 gates pass and the default is flipped.
-inline constexpr uint64_t INDEXER_BACKLOG_MB_DEV_DEFAULT = 0;
+// On by default (owner's decision 2026-11-18: rows need not be indexed right after the insert, the lag is 40-60 s after a
+// big burst): the backlog is an eighth of the host's memory (cgroup aware) between FLOOR and CAP MB; CAP is the size every
+// gain here was measured at (burst +46 %, SYNC +40 %, RSS about half, CPU/row -12..15 %), an unknown host gets UNKNOWN_HOST.
+// A smaller backlog fills sooner and the writers then index inline (the gain fades). Env XSTORE_INDEXER_BACKLOG_MB=0 turns
+// the pool off.
+inline constexpr uint64_t INDEXER_BACKLOG_MB_CAP = 16384;
+inline constexpr uint64_t INDEXER_BACKLOG_MB_FLOOR = 16;
+inline constexpr uint64_t INDEXER_BACKLOG_MB_UNKNOWN_HOST = 256;
+inline constexpr uint64_t INDEXER_BACKLOG_RAM_DIVISOR = 8;
+static_assert(INDEXER_BACKLOG_MB_FLOOR >= 1 && INDEXER_BACKLOG_MB_FLOOR <= INDEXER_BACKLOG_MB_CAP, "an on pool needs a backlog");
+static_assert(INDEXER_BACKLOG_MB_UNKNOWN_HOST >= INDEXER_BACKLOG_MB_FLOOR && INDEXER_BACKLOG_MB_UNKNOWN_HOST <= INDEXER_BACKLOG_MB_CAP, "fallback in range");
+static_assert(INDEXER_BACKLOG_RAM_DIVISOR >= 1, "a share of the host's memory");
 // Pool size (env XSTORE_INDEXER_THREADS). Mystic 2026-11-14, 8 client nodes: more threads contend on the one year file's
 // mutex. SYNC closed-loop calls/s with SYNC hand-off by threads 1:232 2:278 3:220 4:191 6:141 8:134 (base 199.5); dense
 // ASYNC 12.8 M burst rows/s +49.6/+46.3/+42.2/+35 % for 1/2/4/8; sustained 51.2 M ingest +7/+12/+10 % for 2/4/8 (noise

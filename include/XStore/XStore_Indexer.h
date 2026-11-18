@@ -33,6 +33,10 @@ struct IndexerConfig {
 // Reads XSTORE_INDEXER_THREADS / XSTORE_INDEXER_BACKLOG_MB / XSTORE_INDEXER_MIN_RUN_ROWS / XSTORE_INDEXER_IDLE / XSTORE_INDEXER_HAND_OFF_SYNC once; defaults from XStoreTunables.
 IndexerConfig IndexerConfigFromEnv();
 
+// The default backlog for a host with `host_total_bytes` of memory (0 = unknown): an eighth of it, between
+// INDEXER_BACKLOG_MB_FLOOR and INDEXER_BACKLOG_MB_CAP MB.
+uint64_t DefaultBacklogBytes(uint64_t host_total_bytes);
+
 // One hint: "this block of this year file may have pending rows". The bits are the authority.
 struct IndexHint {
     std::shared_ptr<PendingMap> map;     // the map the writer marked through (never look it up again by key); empty = stop sentinel

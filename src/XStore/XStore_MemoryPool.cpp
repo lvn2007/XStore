@@ -136,11 +136,16 @@ PoolSizing SizePool(uint64_t total_bytes, uint64_t reserve_override_mb, uint64_t
     return sizing;
 }
 
+uint64_t HostMemoryTotalBytes() {
+    uint64_t total = ReadMemTotalBytes();
+    const uint64_t cgroup_max = ReadCgroupMemory("/sys/fs/cgroup", "/proc/self/cgroup").max;
+    if (cgroup_max > 0 && (total == 0 || cgroup_max < total)) total = cgroup_max;
+    return total;
+}
+
 MemoryPool &MemoryPool::Instance() {
     static MemoryPool *pool = [] {
-        uint64_t total = ReadMemTotalBytes();
-        const uint64_t cgroup_max = ReadCgroupMemory("/sys/fs/cgroup", "/proc/self/cgroup").max;
-        if (cgroup_max > 0 && (total == 0 || cgroup_max < total)) total = cgroup_max;
+        const uint64_t total = HostMemoryTotalBytes();
         const PoolSizing sizing = SizePool(total, EnvOverrideMB("XSTORE_MEMORY_RESERVE_MB"), EnvOverrideMB("XSTORE_MEMORY_LIMIT_MB"));
         return new MemoryPool(sizing.limit, sizing.reserve, nullptr, kHostFigureCache);
     }();
