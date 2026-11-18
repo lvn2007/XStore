@@ -33,7 +33,7 @@ struct IndexerConfig {
 // Reads XSTORE_INDEXER_THREADS / XSTORE_INDEXER_BACKLOG_MB / XSTORE_INDEXER_MIN_RUN_ROWS / XSTORE_INDEXER_IDLE / XSTORE_INDEXER_HAND_OFF_SYNC once; defaults from XStoreTunables.
 IndexerConfig IndexerConfigFromEnv();
 
-// The default backlog for a host with `host_total_bytes` of memory (0 = unknown): an eighth of it, between
+// The default backlog for a host with `host_total_bytes` of memory (0 = unknown): a quarter of it, between
 // INDEXER_BACKLOG_MB_FLOOR and INDEXER_BACKLOG_MB_CAP MB.
 uint64_t DefaultBacklogBytes(uint64_t host_total_bytes);
 
