@@ -3333,6 +3333,26 @@ std::string WholeFile(const std::string &path) {
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
+// WholeFile of a .zmap with every NaN in an entry's double fields replaced by one canonical NaN. Which NaN a fold writes
+// depends on operand order (+inf + -inf is the x86 default NaN, sign set; NaN + quiet_NaN keeps the first operand), and
+// two instantiations of the fold may order them differently under another compiler or flags, so compare values, not NaN bits.
+std::string ZoneMapBytesNanCanonical(const std::string &path) {
+    std::string bytes = WholeFile(path);
+    constexpr size_t kDoubleFields = offsetof(ZoneMapEntry, valid_count) / sizeof(double);
+    for (size_t at = sizeof(ZoneMapFileHeader); at + sizeof(ZoneMapEntry) <= bytes.size(); at += sizeof(ZoneMapEntry)) {
+        for (size_t f = 0; f < kDoubleFields; ++f) {
+            char *field = &bytes[at + f * sizeof(double)];
+            double v;
+            std::memcpy(&v, field, sizeof v);
+            if (std::isnan(v)) {
+                v = std::numeric_limits<double>::quiet_NaN();
+                std::memcpy(field, &v, sizeof v);
+            }
+        }
+    }
+    return bytes;
+}
+
 // Two pairs of index files driven by one script: pair A gets every writer row through UpdateRow, pair B the same rows
 // through UpdateRows; every other call (builder folds, deletes, inexact marks, bitmap sections, rebuild begin and end)
 // is made on both. Before the keep-old begin each file is hard-linked to "<name>.keep", which then still names the old
@@ -3577,10 +3597,10 @@ protected:
         SCOPED_TRACE(step);
         for (const char *ext : {".zmap", ".zmap.keep"}) {
             if (!fs::exists(Path(std::string("a") + ext))) continue; // no keep-old rebuild yet
-            const std::string want = WholeFile(Path(std::string("a") + ext));
+            const std::string want = ZoneMapBytesNanCanonical(Path(std::string("a") + ext));
             EXPECT_GT(want.size(), sizeof(ZoneMapFileHeader) + kWidth * sizeof(ZoneMapEntry)) << ext;
-            EXPECT_TRUE(WholeFile(Path(std::string("b") + ext)) == want) << ext << ": batch differs from UpdateRow";
-            EXPECT_TRUE(WholeFile(Path(std::string("c") + ext)) == want) << ext << ": view differs from UpdateRow";
+            EXPECT_TRUE(ZoneMapBytesNanCanonical(Path(std::string("b") + ext)) == want) << ext << ": batch differs from UpdateRow";
+            EXPECT_TRUE(ZoneMapBytesNanCanonical(Path(std::string("c") + ext)) == want) << ext << ": view differs from UpdateRow";
         }
     }
 };
@@ -3616,7 +3636,7 @@ TEST_F(ZoneMapFoldViewTest, CompactViewWritesIdenticalBytesToTheDenseView) {
         compact.numeric_base = begin;
         batched.UpdateRows(ZoneMapFoldView{row_index.data(), obs_end.data(), row_index.size(), dense.data(), pad_to});
         viewed.UpdateRows(compact);
-        EXPECT_TRUE(WholeFile(Path("b.zmap")) == WholeFile(Path("c.zmap"))) << "compact view differs from the dense view";
+        EXPECT_TRUE(ZoneMapBytesNanCanonical(Path("b.zmap")) == ZoneMapBytesNanCanonical(Path("c.zmap"))) << "compact view differs from the dense view";
         EXPECT_GT(WholeFile(Path("b.zmap")).size(), sizeof(ZoneMapFileHeader) + kWidth * sizeof(ZoneMapEntry));
     }
 }
