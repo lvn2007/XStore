@@ -538,7 +538,12 @@ inline constexpr uint64_t LIVE_WIDEN_GROUP_BYTES = 8 * LIVE_WIDEN_MAX_CHUNK_BYTE
 // seconds and equalled fixed 8 workers, 4.5x faster than the fixed 1 worker; it never braked there; the brake was validated 2026-11-15 with 6 client
 // nodes of writers: 41-44 brakes, writer p99 0.9 s vs 10 s for fixed 8 workers, widen +21..42 % longer). false: the fixed LIVE_WIDEN_WORKERS.
 inline constexpr bool LIVE_WIDEN_GOVERNOR = true;
-inline constexpr unsigned LIVE_WIDEN_FLOOR_WORKERS = 1;              // workers always allowed (0: the starvation guard)
+// Workers always allowed (0: the starvation guard). 2 since 2026-11-18 (Mystic, widen of 2009, 2 rounds each, pool off):
+// with CPU-saturating queries plus writers the CPU rule held the governor at 1 worker and the widen did not finish in 4500 s
+// (floor 2: 2930 / 2993 s, fixed 8: 1855 / 1937 s; writer p99 8.6-8.7 s vs 7.4-7.6 s at floor 1, 13.5-13.9 s at fixed 8);
+// with heavy writers only floor 2 widened in 1996 / 1974 s (floor 1: 2037 / ~2375 s) at writer p99 0.95-1.0 s (floor 1:
+// 0.90-0.95 s, fixed 8: ~10 s); queries unaffected, a quiet machine ramps past the floor anyway. Tech Reference 4.18.
+inline constexpr unsigned LIVE_WIDEN_FLOOR_WORKERS = 2;
 inline constexpr unsigned LIVE_WIDEN_HEADROOM_CORES = 2;             // logical CPUs kept free for foreground work
 inline constexpr unsigned LIVE_WIDEN_CPUS_PER_WORKER = 4;              // max workers = min(cores - headroom, max(1, cores / this)); Mystic (32 vCPU), quiet, one year: 8 workers 121 s, 16 workers 363 s; one machine's data, revisit
 inline constexpr uint64_t LIVE_WIDEN_GOVERNOR_BRAKE_HOLD_SEC = 10;   // no raise for this long after a writer brake

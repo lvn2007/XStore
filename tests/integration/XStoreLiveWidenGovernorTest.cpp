@@ -66,6 +66,12 @@ GovernorParams Params(unsigned cores, unsigned floor_workers = 1) {
     return p;
 }
 
+// The shipped floor: a second worker lets a widen finish under CPU-saturating load (Mystic 2026-11-18, Tech Reference 4.18).
+TEST(LiveWidenGovernorDefaultsTest, TheDefaultFloorIsTwoWorkers) {
+    EXPECT_EQ(XStoreTunables::LIVE_WIDEN_FLOOR_WORKERS, 2u);
+    EXPECT_EQ(GovernorParams{}.floor_workers, XStoreTunables::LIVE_WIDEN_FLOOR_WORKERS);
+}
+
 struct Rig {
     FakeEnv env;
     LiveWidenGovernor gov;
