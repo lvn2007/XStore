@@ -1589,7 +1589,7 @@ std::string XStore::UnindexedColumnNotice(std::string_view op, const std::string
     // One acquire load while nothing is pending; on only while the indexer pool runs (PendingMaps::NoticesEnabled). The
     // pending notices come first and join the column notice, if any, with " | ".
     std::string pending_notices;
-    if (__builtin_expect(xstore::PendingMaps::AnyPending(), 0) && xstore::PendingMaps::NoticesEnabled()) {
+    if (xstore::PendingMaps::AnyPending() && xstore::PendingMaps::NoticesEnabled()) [[unlikely]] {
         pending_notices = PendingIndexNotices(op, db_name, db_base_path, cfg, start_epoch, end_epoch);
     }
     std::string column_notice = ColumnIndexNotice(op, db_name, db_base_path, cfg, start_epoch, end_epoch, column_idx);
@@ -1604,7 +1604,7 @@ std::string XStore::ColumnIndexNotice(std::string_view op, const std::string &db
     if (column_idx < 0 || static_cast<uint32_t>(column_idx) >= EffectiveTrackedColumnCount(cfg)) return "";
 
     // While no year of any DB is live-widened (the common case) this load and its branch are all this adds.
-    if (__builtin_expect(g_years_rebuilding.load(std::memory_order_relaxed) != 0, 0)) {
+    if (g_years_rebuilding.load(std::memory_order_relaxed) != 0) [[unlikely]] {
         std::string notices = LiveRebuildNotices(op, db_name, db_base_path, cfg, start_epoch, end_epoch, column_idx);
         if (!notices.empty()) return notices;
     }

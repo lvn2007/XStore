@@ -1,5 +1,6 @@
 #include "include/XStore/XStore_PendingMap.h"
 
+#include <bit>
 #include <algorithm>
 #include <cassert>
 #include <unordered_set>
@@ -61,7 +62,7 @@ void PendingMap::MarkRows(uint64_t first_row, uint64_t row_count) {
             for (size_t w = first_word; w <= last_word; ++w) {
                 const uint64_t mask = WordMask(w, lo, hi);
                 uint64_t &word = bits.words[w];
-                bits.set_bits += static_cast<uint64_t>(__builtin_popcountll(mask & ~word));
+                bits.set_bits += static_cast<uint64_t>(std::popcount(mask & ~word));
                 word |= mask;
             }
             continue;
@@ -72,7 +73,7 @@ void PendingMap::MarkRows(uint64_t first_row, uint64_t row_count) {
         for (size_t w = first_word; w <= last_word; ++w) {
             const uint64_t mask = WordMask(w, lo, hi);
             fresh.words[w] = mask;
-            fresh.set_bits += static_cast<uint64_t>(__builtin_popcountll(mask));
+            fresh.set_bits += static_cast<uint64_t>(std::popcount(mask));
         }
         blocks_.emplace(block, std::move(fresh));
         summary_[SlotOf(block)].fetch_add(1, std::memory_order_release);
@@ -105,7 +106,7 @@ void PendingMap::ClearRowsLocked(uint64_t first_row, uint64_t row_count) {
         for (size_t w = static_cast<size_t>(lo >> 6); w <= last_word; ++w) {
             const uint64_t mask = WordMask(w, lo, hi);
             uint64_t &word = bits.words[w];
-            bits.set_bits -= static_cast<uint64_t>(__builtin_popcountll(mask & word));
+            bits.set_bits -= static_cast<uint64_t>(std::popcount(mask & word));
             word &= ~mask;
         }
         if (bits.set_bits == 0) {
@@ -143,9 +144,9 @@ std::vector<IndexRun> PendingMap::RunsOfBits(uint64_t base_row, const std::vecto
     for (size_t w = 0; w < words.size(); ++w) {
         uint64_t bits = words[w];
         while (bits != 0) {
-            const uint64_t start = static_cast<uint64_t>(__builtin_ctzll(bits));
+            const uint64_t start = static_cast<uint64_t>(std::countr_zero(bits));
             const uint64_t shifted = bits >> start;
-            const uint64_t ones = shifted == ~uint64_t{0} ? 64 : static_cast<uint64_t>(__builtin_ctzll(~shifted));
+            const uint64_t ones = shifted == ~uint64_t{0} ? 64 : static_cast<uint64_t>(std::countr_zero(~shifted));
             const uint64_t first = base_row + (static_cast<uint64_t>(w) << 6) + start;
             if (!runs.empty() && runs.back().first_row + runs.back().row_count == first) {
                 runs.back().row_count += ones;   // a run continuing across a word boundary

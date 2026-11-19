@@ -1313,8 +1313,8 @@ XStore::RunState XStore::FindByValueRun(FindByValueJob &job, const std::function
                 unindexed_notice_emitted = true;
             }
             // Pending blocks are scanned (MightContain says maybe); the reply says so once per call.
-            if (__builtin_expect(xstore::PendingMaps::AnyPending(), 0) && xstore::PendingMaps::NoticesEnabled() &&
-                !job.pending_notice_emitted) {
+            if (xstore::PendingMaps::AnyPending() && xstore::PendingMaps::NoticesEnabled() &&
+                !job.pending_notice_emitted) [[unlikely]] {
                 const auto pending = xstore::PendingMaps::Find(fmt::format("{}/{}", db_base_path_str, curr_ts.year));
                 if (pending && pending->AnyPendingInRows(iter_epoch - curr_ts.first_epoch, segment_end - curr_ts.first_epoch)) {
                     set_warning("", XStore::PendingIndexNoticeText("FINDBYVALUE", db_name, curr_ts.year));

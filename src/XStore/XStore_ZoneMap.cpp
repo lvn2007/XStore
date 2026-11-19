@@ -165,7 +165,7 @@ void ZoneMapFile::UpdateRow(uint64_t row_index, const std::vector<ZoneMapObserva
     std::lock_guard<std::mutex> lock(mutex_);
     // Not rebuilding: this one compare. A keep-old rebuild updates the old index first (it gets every writer call). A
     // running rebuild folds this row later, from the data file, unless a parallel group already folded it.
-    if (__builtin_expect(frontier_ != kNoRebuild, 0)) {
+    if (frontier_ != kNoRebuild) [[unlikely]] {
         if (old_ != nullptr) old_->UpdateRow(row_index, observations, pad_to);
         if (row_index >= frontier_ && fold_.FoldedEnd(row_index) <= row_index) return;
     }
@@ -194,7 +194,7 @@ void ZoneMapFile::UpdateRowLocked(uint64_t row_index, const std::vector<ZoneMapO
 
 void ZoneMapFile::UpdateRows(const ZoneMapFoldView &view) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (__builtin_expect(frontier_ != kNoRebuild, 0)) { // same rules as UpdateRow, row by row
+    if (frontier_ != kNoRebuild) [[unlikely]] { // same rules as UpdateRow, row by row
         if (old_ != nullptr) old_->UpdateRows(view);
         static_cast<void>(FoldBatchLocked(view, [this](uint64_t row) { return row < frontier_ || fold_.FoldedEnd(row) > row; }));
         return;
@@ -312,7 +312,7 @@ bool ZoneMapFile::WriteBlock(uint64_t block_index, const CachedBlock &block) {
 bool ZoneMapFile::NeedsOverwriteCheck(uint64_t first_row, uint64_t row_count) {
     if (row_count == 0) return false;
     std::lock_guard<std::mutex> lock(mutex_);
-    if (__builtin_expect(frontier_ != kNoRebuild, 0)) return NeedsOverwriteCheckRebuildingLocked(first_row, row_count);
+    if (frontier_ != kNoRebuild) [[unlikely]] return NeedsOverwriteCheckRebuildingLocked(first_row, row_count);
     if (header_.tracked_column_count == 0) return false; // nothing is ever folded
     return BlocksNeedOverwriteCheck(first_row, first_row + row_count - 1);
 }
