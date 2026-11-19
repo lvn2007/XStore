@@ -12,14 +12,14 @@ Consolidated pending work for XStore. Items verified against actual code as of 2
 |---|---|---|
 | Pending: Small (up to about half a day each) | 0 | |
 | Pending: Medium (one to three days each) | 0 | |
-| Pending: Large (about a week or more) | 6 | L x4, XL x2 |
+| Pending: Large (about a week or more) | 4 | L x2, XL x2 |
 | Pending: Needs the owner, hardware or external access | 2 | L x1, M x1 |
-| Pending: Parked (decided not to do now) | 3 | L x2, M x1 |
+| Pending: Parked (decided not to do now) | 5 | L x4, M x1 |
 | Pending: Ideas (not scheduled) | 2 | L x1, M x1 |
 | Done | 50 | |
 | Won't do / intentional | 7 | |
 
-Biggest open items by value: **owner/hardware** (finish the `BENCH_DB`/`BACKTESTER` check, real power-fail run), then the L items (C++23, TSBS load-only, WAL segmentation). Parked on purpose: Stage G, incremental index recovery, bitmap space cost. The two XL entries (compression, distributed XStore) are long-term. Counts above are open items only; closed entries stay in place, marked `[x]`.
+Biggest open items by value: **owner/hardware** (finish the `BENCH_DB`/`BACKTESTER` check, real power-fail run), then the L items (C++23, TSBS load-only). Parked on purpose: Stage G, incremental index recovery, bitmap space cost, WAL segmentation, the rest of LSN tracking. The two XL entries (compression, distributed XStore) are long-term. Counts above are open items only; closed entries stay in place, marked `[x]`.
 
 ## 1. Pending
 
@@ -64,7 +64,7 @@ Biggest open items by value: **owner/hardware** (finish the `BENCH_DB`/`BACKTEST
 
 - [ ] `[L]` **TSBS (Time Series Benchmark Suite) integration — load-only, design done, not started.** Full feasibility/plan in `docs/TSBS_Integration.md` (2026-09-07). Why: TSBS is the most widely-cited third-party TSDB benchmark (InfluxDB/TimescaleDB/ClickHouse/QuestDB/etc. all publish numbers there) — a credible XStore result there carries more external weight than XBench alone. Key finding: XStore's RPC surface (fixed-width positional-column rows, `MIN/MAX/SUM/AVG` over one column/one DB/one time range, no GROUP BY, no tags, no filter/ORDER BY/LIMIT) cannot honestly express TSBS's devops-use-case query set (single-groupby, cpu-max-all-N, double-groupby, groupby-orderby-limit, high-cpu, threads, etc. all need multi-host GROUP BY / tag filtering XStore doesn't have server-side). Recommended scope: **load-only**, same precedent as upstream TSBS's `akumuli`/`siridb` targets (ship `tsbs_load_xstore`, no `tsbs_run_queries_xstore`) — this is exactly where XStore's real strength (raw insert throughput/latency) is a fully legitimate, zero-compromise TSBS metric. Query support restricted to `lastpoint` + single-host/single-field range-aggregate only (maps directly to `UnaryQuery`/`MIN`/`MAX`/`SUM`/`AVG`), as a stretch goal — everything else stays explicitly unimplemented rather than faked via client-side fan-out. Work involves: Go protobuf codegen from `proto/XStore.proto`, a Go ZMQ REQ client (CGO+libzmq, new dependency) mirroring `XStoreClient::SendRecv`, and a `pkg/targets/xstore/` package (serializer/creator/batch/process) modeled on TSBS's `akumuli` target — one XStore DB per TSBS series (measurement+tag-set), columns = that measurement's numeric fields, `BatchInsert_REQ` as the write path. Multi-week effort (new Go module + CGO dependency + schema-mapping design), not a quick patch.
 
-- [ ] `[L]` **WAL segmentation/rotation** *(migrated from `TStor_WAL_Design.md` §6, confirmed still open)*. **Partly superseded 2026-10:** each shard is now an append-only fixed-size ring (64 MiB, LSN-addressed, checkpointed; Tech Reference §4.19) — no longer overwritten at offset 0 — but there is still no rotation or multi-generation segment history, which replication catch-up would need. Original design:
+- [ ] `[L]` **PARKED 2026-11-19 (owner agreed): its only consumer is replication catch-up (the distributed XL item, not started), so do it as Phase 0 of that project, not before.** **WAL segmentation/rotation** *(migrated from `TStor_WAL_Design.md` §6, confirmed still open)*. **Partly superseded 2026-10:** each shard is now an append-only fixed-size ring (64 MiB, LSN-addressed, checkpointed; Tech Reference §4.19) — no longer overwritten at offset 0 — but there is still no rotation or multi-generation segment history, which replication catch-up would need. Original design:
   ```text
   wal/0000000000000001.wal, 0000000000000002.wal, ...
   Segment size: 64–256MB (128MB reasonable start)
@@ -72,7 +72,7 @@ Biggest open items by value: **owner/hardware** (finish the `BENCH_DB`/`BACKTEST
   Old segments recycled after checkpointing.
   ```
 
-- [~] `[L]` **LSN tracking + checkpoint-based recovery** *(migrated from `TStor_WAL_Design.md` §5, §11-12, §22, **done 2026-10 for the single node** — per-ring byte-position LSNs in the CRC-covered record, `checkpoint_lsn` in a two-slot header, replay from the checkpoint, checkpointer that syncs data files before advancing; see the (C) item above and Tech Reference §4.19. Not done: LSNs stamped into the data/index files (phase 2 follow-up above) and a per-slot/global replication LSN. Original design:*. Original design:
+- [~] `[L]` **PARKED 2026-11-19 (owner agreed) for the remaining part (per-slot/global replication LSN, LSNs in data/index files): same reason as WAL segmentation, do it with replication.** **LSN tracking + checkpoint-based recovery** *(migrated from `TStor_WAL_Design.md` §5, §11-12, §22, **done 2026-10 for the single node** — per-ring byte-position LSNs in the CRC-covered record, `checkpoint_lsn` in a two-slot header, replay from the checkpoint, checkpointer that syncs data files before advancing; see the (C) item above and Tech Reference §4.19. Not done: LSNs stamped into the data/index files (phase 2 follow-up above) and a per-slot/global replication LSN. Original design:*. Original design:
   ```cpp
   struct DataRecord { uint64_t lsn; uint64_t timestamp; /* payload */ };
   // WAL record and materialized data record share the same LSN.
