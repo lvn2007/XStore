@@ -8,7 +8,10 @@ if(NOT CMAKE_PROJECT_NAME)
     project(XStoreClient CXX)
 endif()
 
-set(CMAKE_CXX_STANDARD 17)
+# C++23 when built on its own; inherits the parent's standard when built inside the server tree.
+if(NOT DEFINED CMAKE_CXX_STANDARD)
+    set(CMAKE_CXX_STANDARD 23)
+endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(NOT TARGET protobuf::libprotobuf)

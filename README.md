@@ -27,7 +27,7 @@ IEEE/ACM Supercomputing/SC 2023
 
 # System Requirements
 * Operating systems: Linux Ubuntu 24.04 LTS
-* Build tools: build-essential, cmake, g++ 11.4.0 (C++ 17 standard), git, pkg-config, ccache (optional, auto-detected by CMake)
+* Build tools: build-essential, cmake, g++ >= 13 (C++23 standard; 13.3.0 is what the dev and benchmark machines have), git, pkg-config, ccache (optional, auto-detected by CMake)
 * Google Protocol Buffer — built from source, pinned to [commit `35cd01f`](https://github.com/protocolbuffers/protobuf/commit/35cd01f9fe9afbeea38cc7b979a3b6bfcde82c03) (v35.1)
 * ZeroMQ — built from source (libzmq 4.3.5, pinned, with libsodium 1.0.18 for CURVE support) plus bundled cppzmq header ([client_src/Cpp/zmq.hpp](client_src/Cpp/zmq.hpp)); `libzmq3-dev` only needed when building with `-DXSTORE_FETCH_ZMQ=OFF`
 * sysstat, tmux — used by the server deployment scripts (see below)
