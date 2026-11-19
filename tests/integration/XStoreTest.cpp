@@ -3343,7 +3343,7 @@ TEST_F(XStoreTest, ConcurrentSumAggregateDuringConcurrentInsertsDoesNotCrashOrTe
             store.SumAggregate(TS_2024_MID, TS_2024_MID + k_width - 1, "TESTDB", 0, &rep);
             // No crash/hang is the primary assertion; if data is present at
             // all it must have parsed as a real numeric sum, never garbage.
-            EXPECT_TRUE(rep.opstatus() == "SUCCESS" || rep.opstatus() == "ERROR: No valid data found");
+            EXPECT_TRUE(rep.opstatus().rfind("SUCCESS", 0) == 0 || rep.opstatus() == "ERROR: No valid data found");
         }
     };
 
@@ -3449,7 +3449,7 @@ TEST_F(XStoreTest, ConcurrentMinAggregateDuringConcurrentInsertsDoesNotCrashOrTe
             store.MinAggregate(TS_2024_MID, TS_2024_MID + k_width - 1, "TESTDB", 0, &rep);
             // No crash/hang is the primary assertion; if data is present at
             // all it must have parsed as a real numeric value, never garbage.
-            EXPECT_TRUE(rep.opstatus() == "SUCCESS" || rep.opstatus() == "ERROR: No valid data found");
+            EXPECT_TRUE(rep.opstatus().rfind("SUCCESS", 0) == 0 || rep.opstatus() == "ERROR: No valid data found");
         }
     };
 
@@ -3649,7 +3649,7 @@ TEST_F(XStoreTest, ConcurrentOhlcAggregateDuringConcurrentInsertsDoesNotCrashOrT
         for (int i = 0; i < k_iterations; i++) {
             XStore_Proto::Ohlc_REP rep;
             store.OhlcAggregate(TS_2024_MID, TS_2024_MID + k_width - 1, "TESTDB", 0, &rep);
-            EXPECT_TRUE(rep.opstatus() == "SUCCESS" || rep.opstatus() == "ERROR: No valid data found");
+            EXPECT_TRUE(rep.opstatus().rfind("SUCCESS", 0) == 0 || rep.opstatus() == "ERROR: No valid data found");
             if (rep.opstatus() == "SUCCESS") {
                 EXPECT_FALSE(std::isnan(rep.open()));
                 EXPECT_FALSE(std::isnan(rep.close()));
@@ -4100,7 +4100,7 @@ TEST(XStorePreadPoolDeathTest, ProcessExitAfterParallelForNeverCrashesDetachedWo
                 std::atomic<size_t> sum{0};
                 XStorePreadPool::ParallelFor(64, [&](size_t k) {
                     sum.fetch_add(k, std::memory_order_relaxed);
-                    for (volatile int j = 0; j < 2000; ++j) {}
+                    for (volatile int j = 0; j < 2000; j = j + 1) {}   // not ++j: volatile ++ is deprecated since C++20
                 });
                 std::exit(0);
             },

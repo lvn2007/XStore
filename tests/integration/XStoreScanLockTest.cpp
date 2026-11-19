@@ -4,6 +4,7 @@
 // to the client with no lock held.
 #include <gtest/gtest.h>
 #include "XStore/XStore.h"
+#include "XStore/XStore_Indexer.h"
 #include "XStore/XStore_ScanLock.h"
 #include "DataStructs/FileRangeLock.h"
 #include "include/DataStructs/TimeStruct.h"
@@ -96,7 +97,10 @@ protected:
             XStore_Proto::BatchInsert_REP rep;
             store->BatchInsert(&req, &rep);
         }
-        year_path = (scratch->test_root / "DataStore" / db / (std::to_string(TimeStruct(base, XStore_Proto::SECOND).year) + ".XSTORE")).string();
+        // Pool on (the default): the seeded rows are indexed in the background, and a reply made while that is still running
+        // differs from one made after it. The tests below compare replies, so let the pool finish first.
+        xstore::Indexer::Instance().WaitIdle(std::chrono::seconds(30));
+        year_path =(scratch->test_root / "DataStore" / db / (std::to_string(TimeStruct(base, XStore_Proto::SECOND).year) + ".XSTORE")).string();
     }
     void TearDown() override {
         xstore::scanlock::Set(xstore::scanlock::Config{});

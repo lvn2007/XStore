@@ -14,6 +14,7 @@
 // XSTORE_PERF_N environment variable for quicker local iteration or a
 // heavier run.
 #include <gtest/gtest.h>
+#include "XStore/XStore_Indexer.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -941,6 +942,8 @@ TEST_F(XStorePerfTest, MinAggregateThroughput) {
     XStore_Proto::BatchInsert_REP insert_rep;
     store.BatchInsert(&insert_req, &insert_rep);
 
+    // Pool on (the default): wait for the index to catch up, so the timed call answers a plain "SUCCESS" (not the catch-up notice).
+    xstore::Indexer::Instance().WaitIdle(std::chrono::seconds(30));
     XStore_Proto::Min_REP min_rep;
     auto start = std::chrono::steady_clock::now();
     store.MinAggregate(BASE_TS, BASE_TS + n - 1, "PERFDB", 0, &min_rep);
@@ -967,6 +970,8 @@ TEST_F(XStorePerfTest, MaxAggregateThroughput) {
     XStore_Proto::BatchInsert_REP insert_rep;
     store.BatchInsert(&insert_req, &insert_rep);
 
+    // Pool on (the default): wait for the index to catch up, so the timed call answers a plain "SUCCESS" (not the catch-up notice).
+    xstore::Indexer::Instance().WaitIdle(std::chrono::seconds(30));
     XStore_Proto::Max_REP max_rep;
     auto start = std::chrono::steady_clock::now();
     store.MaxAggregate(BASE_TS, BASE_TS + n - 1, "PERFDB", 0, &max_rep);
@@ -993,6 +998,8 @@ TEST_F(XStorePerfTest, SumAggregateThroughput) {
     XStore_Proto::BatchInsert_REP insert_rep;
     store.BatchInsert(&insert_req, &insert_rep);
 
+    // Pool on (the default): wait for the index to catch up, so the timed call answers a plain "SUCCESS" (not the catch-up notice).
+    xstore::Indexer::Instance().WaitIdle(std::chrono::seconds(30));
     XStore_Proto::Sum_REP sum_rep;
     auto start = std::chrono::steady_clock::now();
     store.SumAggregate(BASE_TS, BASE_TS + n - 1, "PERFDB", 0, &sum_rep);
@@ -1018,6 +1025,8 @@ TEST_F(XStorePerfTest, AvgAggregateThroughput) {
     XStore_Proto::BatchInsert_REP insert_rep;
     store.BatchInsert(&insert_req, &insert_rep);
 
+    // Pool on (the default): wait for the index to catch up, so the timed call answers a plain "SUCCESS" (not the catch-up notice).
+    xstore::Indexer::Instance().WaitIdle(std::chrono::seconds(30));
     XStore_Proto::Avg_REP avg_rep;
     auto start = std::chrono::steady_clock::now();
     store.AvgAggregate(BASE_TS, BASE_TS + n - 1, "PERFDB", 0, &avg_rep);

@@ -9,6 +9,7 @@
 // as the positive "this server is up" signal). They are started once in SetUpTestSuite() and deliberately never torn
 // down (their workers keep an XStore rooted in the scratch dir) -- the OS reclaims the socket/threads on process
 // exit. Only the on-disk scratch directory is cleaned up in TearDownTestSuite().
+#include "include/XStore/XStore_Indexer.h"
 #include "include/XStore/XStore_ReplyLimit.h"
 #include <gtest/gtest.h>
 #include <google/protobuf/io/coded_stream.h>
@@ -1499,6 +1500,9 @@ protected:
             }
             EXPECT_NE(SendRequest<XStore_Proto::BatchInsert_REP>(Wrap(insert_req)).insertstatus().find("Inserted"), std::string::npos);
         }
+        // Pool on (the default): the rows are indexed in the background, and a reply made meanwhile differs from one made after
+        // it. These tests compare replies, so let the pool finish first.
+        xstore::Indexer::Instance().WaitIdle(std::chrono::seconds(30));
     }
 
     // A streamed RangeQuery over the whole DB, read at one message per `delay`.
