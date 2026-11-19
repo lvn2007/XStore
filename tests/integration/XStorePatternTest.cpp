@@ -4,6 +4,7 @@
 #include "XStore/XStore.h"
 #include "XStoreTestSupport.h"
 #include "XStore.pb.h"
+#include <atomic>
 #include <chrono>
 #include <map>
 #include <memory>
@@ -11,6 +12,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -21,6 +23,29 @@ bool Like(std::string_view pattern, std::string_view text, bool case_insensitive
     return matcher.has_value() && matcher->Matches(text);
 }
 } // namespace
+
+// The parallel ordered scan calls Matches() on ONE matcher from several threads at once, so a case-insensitive match must not use
+// a buffer shared between calls (it did: a mutable member, a data race that corrupted the string and crashed in release builds).
+// Texts of many lengths, so a shared buffer would be reallocated while another thread reads it.
+TEST(PatternMatcherTest, ConcurrentCaseInsensitiveMatchesOnOneMatcherAreCorrect) {
+    std::string error;
+    auto matcher = PatternMatcher::Compile("%order-1%", XStore_Proto::PATTERN_LIKE, true, error);
+    ASSERT_TRUE(matcher.has_value()) << error;
+    std::atomic<int> wrong{0};
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 8; ++t) {
+        threads.emplace_back([&matcher, &wrong, t] {
+            for (int i = 0; i < 200000; ++i) {
+                const bool hit = (i + t) % 2 == 0;
+                const std::string text = std::string(static_cast<size_t>((i * 7 + t) % 90), 'x') + (hit ? "ORDER-1" : "ORDER-2") +
+                                         std::string(static_cast<size_t>((i + t) % 40), 'y');
+                if (matcher->Matches(text) != hit) wrong.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+    for (std::thread &thread : threads) thread.join();
+    EXPECT_EQ(wrong.load(), 0);
+}
 
 TEST(PatternMatcherTest, NoWildcardsMeansWholeValueEquality) {
     EXPECT_TRUE(Like("AAPL", "AAPL"));

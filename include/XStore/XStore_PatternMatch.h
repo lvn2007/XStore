@@ -154,7 +154,6 @@ private:
     bool case_insensitive_ = false;
     std::string prefilter_literal_;
     bool prefilter_case_insensitive_ = false;
-    mutable std::string fold_buf_;
 #ifdef XSTORE_HAVE_RE2
     std::unique_ptr<re2::RE2> regex_;  // non-null iff compiled in PATTERN_REGEX mode
 #endif

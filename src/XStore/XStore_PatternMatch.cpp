@@ -191,9 +191,12 @@ bool PatternMatcher::Matches(std::string_view text) const {
     }
 #endif
     if (case_insensitive_) {
-        fold_buf_.assign(text.data(), text.size());
-        for (char &c : fold_buf_) c = AsciiLower(c);
-        text = fold_buf_;
+        // One scratch buffer per THREAD, recycled across rows (no allocation per row once warm). It must not be a member: the
+        // pieces of a parallel scan call Matches() on this one matcher at the same time.
+        thread_local std::string fold_buf;
+        fold_buf.assign(text.data(), text.size());
+        for (char &c : fold_buf) c = AsciiLower(c);
+        text = fold_buf;
     }
     return MatchesLike(text);
 }
