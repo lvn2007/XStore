@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 #include "XStoreTestSupport.h"
 #include "include/XStore/XStore.h"
+#include "include/XStore/XStore_Indexer.h"
 #include "include/XStore/XStore_MemoryPool.h"
 #include "include/XStore/XStore_WalRing.h"
 #include <spdlog/fmt/fmt.h>
@@ -204,6 +205,8 @@ protected:
 
     // Every file of the two DB directories is byte-identical (the .CFG compared with its dbName cleared).
     static void ExpectSameDirectories(XStore &store) {
+        // Pool on (the default): the index files are written in the background, so let the pool finish before comparing them.
+        xstore::Indexer::Instance().WaitIdle(std::chrono::seconds(30));
         const std::string dir_batch = store.data_store_dir + "/" + kBatchDb;
         const std::string dir_range = store.data_store_dir + "/" + kRangeDb;
         std::set<std::string> names_batch = FileNames(dir_batch), names_range = FileNames(dir_range);
