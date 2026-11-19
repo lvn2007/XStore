@@ -286,7 +286,9 @@ TEST_F(XStoreMemoryTest, OversizedRowDoesNotWidenIndex) {
 
     XStore_Proto::BatchInsert_REP rep;
     store.BatchInsert(&req, &rep);
-    ASSERT_NE(rep.insertstatus().find("successfully"), std::string::npos) << rep.insertstatus();
+    // The accepted row went in; the rejected one is reported, not counted as inserted.
+    ASSERT_NE(rep.insertstatus().find("[ERROR]"), std::string::npos) << rep.insertstatus();
+    ASSERT_NE(rep.insertstatus().find("Inserted 1 of 2 elements; 1 row(s) rejected"), std::string::npos) << rep.insertstatus();
 
     const auto path = (scratch->test_root / "DataStore" / "MEMOVER").string();
     const unsigned short year = TimeStruct(9000, XStore_Proto::SECOND).year;

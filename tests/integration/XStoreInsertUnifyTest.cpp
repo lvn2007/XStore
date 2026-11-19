@@ -187,7 +187,14 @@ protected:
         xstore_test::CreateTestDb(store, kRangeDb, unit, row_length);
         const std::string batch_status = Batch(store, kBatchDb, rows, mode);
         const std::string range_status = Range(store, kRangeDb, rows, mode);
-        EXPECT_EQ(batch_status, fmt::format("[INFO] [BATCH INSERT] [DB: {}] - Inserted {} elements successfully", kBatchDb, rows.size()));
+        size_t oversized = 0;
+        for (const Row &row : rows) oversized += row.data.ByteSizeLong() > static_cast<size_t>(row_length) ? 1 : 0;
+        if (oversized == 0) {
+            EXPECT_EQ(batch_status, fmt::format("[INFO] [BATCH INSERT] [DB: {}] - Inserted {} elements successfully", kBatchDb, rows.size()));
+        } else {   // dropped rows are reported, not counted as inserted
+            EXPECT_EQ(batch_status.rfind(fmt::format("[ERROR] [BATCH INSERT] [DB: {}] - Inserted {} of {} elements; {} row(s) rejected", kBatchDb,
+                                                     rows.size() - oversized, rows.size(), oversized), 0), 0u) << batch_status;
+        }
         EXPECT_EQ(Replace(Replace(batch_status, "[BATCH INSERT]", "[RANGE INSERT]"), "[DB: " + kBatchDb + "]", "[DB: " + kRangeDb + "]"),
                   range_status);
 
@@ -414,6 +421,18 @@ TEST_F(InsertUnifyTest, OversizedRowInTheMiddleIsDroppedIdentically) {
     ExpectLastOccurrenceWins(store, rows, {rows[50].ts});
 }
 
+// Every row oversized: nothing is written, and the reply says so and names the first offender (it used to say "Inserted N elements successfully").
+TEST_F(InsertUnifyTest, AllRowsOversizedIsReportedAsRejected) {
+    XStore store;
+    xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
+    std::vector<Row> rows = RowsFor({kBoundarySeconds + 10, kBoundarySeconds + 11});
+    for (Row &row : rows) row.data = MakeRow({FDouble(1.0), FString(std::string(200, 'x'))});
+    const size_t row_bytes = rows[0].data.ByteSizeLong();
+    ASSERT_GT(row_bytes, static_cast<size_t>(kRowLength));
+    EXPECT_EQ(Batch(store, kBatchDb, rows, XStore_Proto::SYNC),
+              fmt::format("[ERROR] [BATCH INSERT] [DB: {}] - Inserted 0 of 2 elements; 2 row(s) rejected: serialized row larger than the DB's row length {} "
+                          "(first: timestamp {}, {} bytes)", kBatchDb, kRowLength, rows[0].ts, row_bytes));
+}
 TEST_F(InsertUnifyTest, EmptyRequestIsIdentical) {
     XStore store;
     const std::string status = RunEquivalence(store, XStore_Proto::SECOND, {});

@@ -383,6 +383,10 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
     // on BatchInsert_REQ / RangeInsert_REQ in XStore.proto.
     bool any_sync_failed = false;
     bool any_overloaded = false;   // a SYNC group failed because the WAL ring was full
+    // Rows dropped because they do not fit the DB's row length: counted so the reply can say so (it used to report them as inserted).
+    size_t rejected_oversized = 0;
+    unsigned long long int first_rejected_ts = 0;
+    size_t first_rejected_size = 0;
 
     // `widest` (the widest ACCEPTED row of the whole request) was already found above, together with
     // `total_fields` for the memory estimate -- not recomputed here. The index width is grown to it
@@ -443,6 +447,10 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
             // corrupting whatever follows it. Before AppendRow: a row once
             // appended cannot be taken back.
             if (serialized_size > static_cast<size_t>(cfg_struct.rowlength())) {
+                if (rejected_oversized++ == 0) {
+                    first_rejected_ts = rows.Timestamp(static_cast<int>(idx));
+                    first_rejected_size = serialized_size;
+                }
                 continue;
             }
             if (!rows.AppendTo(record, static_cast<int>(idx))) return false;   // WireRows only: nothing enqueued or grown yet
@@ -488,12 +496,25 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
     // (queue-full/backpressure timeout, allocation failure, etc.), which is
     // just as real a failure as the other modes' and must not be masked by
     // the unconditional success message below -- no mode condition here.
+    // The accepted rows were written; a rejected row is reported, not hidden, so the reply is an [ERROR] (SplitStatusTally and the
+    // XBench loaders already treat any non-[INFO] reply as a failure) that still says how many rows went in.
+    const size_t accepted_rows = static_cast<size_t>(row_count) - rejected_oversized;
+    const std::string rejected_note = rejected_oversized == 0 ? std::string()
+        : fmt::format("{} row(s) rejected: serialized row larger than the DB's row length {} (first: timestamp {}, {} bytes)",
+                      rejected_oversized, cfg_struct.rowlength(), first_rejected_ts, first_rejected_size);
     if (any_sync_failed) {
         std::string err_msg = fmt::format("[{}] [DB: {}] - Inserted {} elements, but the write failed for at least one group",
-                                           op, db_name, row_count);
+                                           op, db_name, accepted_rows);
         if (any_overloaded) err_msg += std::string("; ") + kWalOverloadedText;
+        if (rejected_oversized != 0) err_msg += "; " + rejected_note;
         SetTaggedStatus(return_data->mutable_insertstatus(), "[ERROR] ", err_msg);
         spdlog::error(err_msg);
+        return true;
+    }
+    if (rejected_oversized != 0) {
+        std::string err_msg = fmt::format("[{}] [DB: {}] - Inserted {} of {} elements; {}", op, db_name, accepted_rows, row_count, rejected_note);
+        SetTaggedStatus(return_data->mutable_insertstatus(), "[ERROR] ", err_msg);
+        spdlog::warn(err_msg);
         return true;
     }
     std::string success_msg = fmt::format("[{}] [DB: {}] - Inserted {} elements successfully", op, db_name, row_count);

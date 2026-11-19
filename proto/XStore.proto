@@ -228,8 +228,8 @@ message BatchDelete_REQ {
 // --- RANGE INSERT (DATA)
 // LEGACY ALIAS of BatchInsert, kept on the wire only for old clients: the server runs both RPCs through the same
 // code (XStore::MultiRowInsert) with identical semantics, and the client libraries in client_src no longer expose
-// it -- new code sends BatchInsert_REQ. Still sent by: the XBench `ingest` command (external repo, older client
-// copy). See docs/XStore_Technical_Reference.md, "RangeInsert compatibility".
+// it -- new code sends BatchInsert_REQ. Still sent by: old client builds only (XBench moved to BatchInsert on
+// 2026-10-20). See docs/XStore_Technical_Reference.md, "RangeInsert compatibility".
 message RangeInsert_DATA {
   uint64 timestamp = 1;
   RowData data = 2;
