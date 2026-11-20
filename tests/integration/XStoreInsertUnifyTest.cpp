@@ -6,6 +6,7 @@
 #include "XStoreTestSupport.h"
 #include "include/XStore/XStore.h"
 #include "include/XStore/XStore_Indexer.h"
+#include "include/XStore/XStore_Config.h"
 #include "include/XStore/XStore_MemoryPool.h"
 #include "include/XStore/XStore_WalRing.h"
 #include <spdlog/fmt/fmt.h>
@@ -33,6 +34,13 @@ using xstore_test::FString;
 using xstore_test::MakeRow;
 
 constexpr short kRowLength = 48;
+
+// The server's rejection rule: a row is rejected iff it cannot be packed into a slot of the DB's row length (3 header bytes,
+// 9 per dynamic cell, plus the bytes of its strings), not by its protobuf size.
+bool DoesNotFit(const XStore_Proto::RowData &row, size_t row_length) {
+    std::string slot(row_length, '\0');
+    return !xstore_test::DynamicLayout(row_length)->PackFromRowData(row, slot.data()).Ok();
+}
 constexpr uint64_t kBoundarySeconds = 1704067200;   // 2024-01-01T00:00:00Z
 constexpr uint64_t kSecondsPerYear = 31'536'000;    // spacing for the multi-year case (365 days)
 const std::string kBatchDb = "EQBATCH";
@@ -122,9 +130,8 @@ std::set<std::string> FileNames(const std::string &dir) {
 }
 
 XStore_Proto::ConfigStruct ReadCfgWithoutName(const std::string &path) {
-    std::ifstream in(path, std::ios::binary);
     XStore_Proto::ConfigStruct cfg;
-    EXPECT_TRUE(cfg.ParseFromIstream(&in)) << path;
+    EXPECT_EQ(xstore::config::Load(path, &cfg), xstore::config::LoadStatus::kOk) << path;
     cfg.clear_dbname();
     return cfg;
 }
@@ -189,7 +196,7 @@ protected:
         const std::string batch_status = Batch(store, kBatchDb, rows, mode);
         const std::string range_status = Range(store, kRangeDb, rows, mode);
         size_t oversized = 0;
-        for (const Row &row : rows) oversized += row.data.ByteSizeLong() > static_cast<size_t>(row_length) ? 1 : 0;
+        for (const Row &row : rows) oversized += DoesNotFit(row.data, static_cast<size_t>(row_length)) ? 1 : 0;
         if (oversized == 0) {
             EXPECT_EQ(batch_status, fmt::format("[INFO] [BATCH INSERT] [DB: {}] - Inserted {} elements successfully", kBatchDb, rows.size()));
         } else {   // dropped rows are reported, not counted as inserted
@@ -419,7 +426,7 @@ TEST_F(InsertUnifyTest, OversizedRowInTheMiddleIsDroppedIdentically) {
     for (uint64_t i = 0; i < 100; ++i) ts.push_back(kBoundarySeconds + 5000 - i);
     std::vector<Row> rows = RowsFor(ts);
     rows[50].data = MakeRow({FDouble(50.0), FString(std::string(200, 'x'))});
-    ASSERT_GT(rows[50].data.ByteSizeLong(), static_cast<size_t>(kRowLength));
+    ASSERT_TRUE(DoesNotFit(rows[50].data, static_cast<size_t>(kRowLength)));
     RunEquivalence(store, XStore_Proto::SECOND, rows);
     ExpectLastOccurrenceWins(store, rows, {rows[50].ts});
 }
@@ -430,11 +437,10 @@ TEST_F(InsertUnifyTest, AllRowsOversizedIsReportedAsRejected) {
     xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
     std::vector<Row> rows = RowsFor({kBoundarySeconds + 10, kBoundarySeconds + 11});
     for (Row &row : rows) row.data = MakeRow({FDouble(1.0), FString(std::string(200, 'x'))});
-    const size_t row_bytes = rows[0].data.ByteSizeLong();
-    ASSERT_GT(row_bytes, static_cast<size_t>(kRowLength));
+    ASSERT_TRUE(DoesNotFit(rows[0].data, static_cast<size_t>(kRowLength)));
     EXPECT_EQ(Batch(store, kBatchDb, rows, XStore_Proto::SYNC),
-              fmt::format("[ERROR] [BATCH INSERT] [DB: {}] - Inserted 0 of 2 elements; 2 row(s) rejected: serialized row larger than the DB's row length {} "
-                          "(first: timestamp {}, {} bytes)", kBatchDb, kRowLength, rows[0].ts, row_bytes));
+              fmt::format("[ERROR] [BATCH INSERT] [DB: {}] - Inserted 0 of 2 elements; 2 row(s) rejected: the row does not fit the DB's row length "
+                          "(first: timestamp {}; DB row length {})", kBatchDb, rows[0].ts, kRowLength));
 }
 TEST_F(InsertUnifyTest, EmptyRequestIsIdentical) {
     XStore store;
@@ -667,14 +673,22 @@ TEST_F(InsertUnifyTest, WireDeclinesARowWithAnUnknownField) {
     ExpectDeclinedAndUntouched(store, kBatchDb, RawBatchRequest(body));
 }
 
-TEST_F(InsertUnifyTest, WireDeclinesARowInNonCanonicalEncoding) {
+// The wire path packs cells now (it no longer keeps the received bytes), so a non-minimal varint is accepted and the row
+// is stored normalized: it reads back as the canonical encoding of the same value (spec section 3).
+TEST_F(InsertUnifyTest, WireAcceptsARowInNonCanonicalEncodingAndStoresItNormalized) {
     XStore store;
     xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
-    // The FData length written with a redundant second byte (0x89 0x00 = 9): protobuf accepts it, but re-serializing would give 1 byte
-    // less than the slice, so the stored bytes would not be the received ones.
+    // The FData length written with a redundant second byte (0x89 0x00 = 9): protobuf accepts it.
     const std::string non_canonical = std::string("\x0A\x89\x00\x09", 4) + std::string(8, '\x11');
     const std::string body = LenField(2, kBatchDb) + RawData(kBoundarySeconds + 1, non_canonical) + VarintField(4, XStore_Proto::SYNC);
-    ExpectDeclinedAndUntouched(store, kBatchDb, RawBatchRequest(body));
+    const std::string bytes = RawBatchRequest(body);
+    XStore_Proto::BatchInsert_REP rep;
+    ASSERT_TRUE(store.BatchInsertFromWire(bytes.data(), bytes.size(), &rep));
+    EXPECT_NE(rep.insertstatus().find("Inserted 1 elements successfully"), std::string::npos) << rep.insertstatus();
+    XStore_Proto::UnaryQuery_REP query;
+    store.UnaryQuery(kBoundarySeconds + 1, kBatchDb, &query);
+    ASSERT_TRUE(query.has_data());
+    EXPECT_EQ(query.data().SerializeAsString(), std::string("\x0A\x09\x09", 3) + std::string(8, '\x11'));
 }
 
 // --- the Request envelope's timeoutMs field (50): a trailing field after the one insert submessage is otherwise
@@ -732,6 +746,76 @@ TEST_F(InsertUnifyTest, WireAbandonsARequestWhoseDeadlineHasAlreadyPassed) {
     for (const std::string &name : FileNames(store.data_store_dir + "/" + kBatchDb)) {
         EXPECT_TRUE(name.size() < 7 || name.compare(name.size() - 7, 7, ".XSTORE") != 0) << "an abandoned request created " << name;
     }
+}
+
+// A protobuf field the server does not know (a newer client's field) is never stored with the field silently dropped: the row is
+// rejected with a status the client can read (spec section 3). Covered on the unary path (always parsed), the parsed batch and
+// range paths, and the wire path, which declines such a row and leaves it to the parsed path.
+namespace {
+XStore_Proto::RowData RowWithUnknownRowField() {
+    XStore_Proto::RowData row = MakeRow({FDouble(1.0), FDouble(2.0)});
+    row.GetReflection()->MutableUnknownFields(&row)->AddVarint(99, 7);
+    return row;
+}
+XStore_Proto::RowData RowWithUnknownCellField() {
+    XStore_Proto::RowData row = MakeRow({FDouble(1.0), FDouble(2.0)});
+    XStore_Proto::FData *cell = row.mutable_fielddata(1);
+    cell->GetReflection()->MutableUnknownFields(cell)->AddVarint(16, 7);   // a kind this server does not have
+    return row;
+}
+}  // namespace
+
+TEST_F(InsertUnifyTest, UnaryInsertRejectsARowOrACellWithAnUnknownField) {
+    XStore store;
+    xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
+    uint64_t ts = kBoundarySeconds + 1;
+    for (const XStore_Proto::RowData &row : {RowWithUnknownRowField(), RowWithUnknownCellField()}) {
+        XStore_Proto::UnaryInsert_REP rep;
+        store.UnaryInsert(ts, row, kBatchDb, &rep, XStore_Proto::SYNC);
+        EXPECT_NE(rep.insertstatus().find("Row rejected: "), std::string::npos) << rep.insertstatus();
+        EXPECT_NE(rep.insertstatus().find("unknown protobuf field"), std::string::npos) << rep.insertstatus();
+        XStore_Proto::UnaryQuery_REP query;
+        store.UnaryQuery(ts, kBatchDb, &query);
+        EXPECT_EQ(query.data().fielddata_size(), 0) << "a rejected row must not be stored";
+        ++ts;
+    }
+}
+
+TEST_F(InsertUnifyTest, BatchAndRangeInsertRejectRowsWithUnknownFieldsPerRow) {
+    XStore store;
+    xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
+    xstore_test::CreateTestDb(store, kRangeDb, XStore_Proto::SECOND, kRowLength);
+    std::vector<Row> rows = RowsFor({kBoundarySeconds + 10, kBoundarySeconds + 11, kBoundarySeconds + 12});
+    rows[1].data = RowWithUnknownCellField();
+    for (const std::string &status : {Batch(store, kBatchDb, rows, XStore_Proto::SYNC), Range(store, kRangeDb, rows, XStore_Proto::SYNC)}) {
+        EXPECT_NE(status.find("Inserted 2 of 3 elements; 1 row(s) rejected: column 1 carries an unknown protobuf field"), std::string::npos) << status;
+    }
+    rows[1].data = RowWithUnknownRowField();
+    EXPECT_NE(Batch(store, kBatchDb, rows, XStore_Proto::SYNC).find("1 row(s) rejected: the row carries an unknown protobuf field"), std::string::npos);
+    for (const std::string &db : {kBatchDb, kRangeDb}) {   // the neighbours of the rejected row are intact, the rejected row is absent
+        for (size_t i = 0; i < rows.size(); ++i) {
+            XStore_Proto::UnaryQuery_REP query;
+            store.UnaryQuery(rows[i].ts, db, &query);
+            EXPECT_EQ(query.data().fielddata_size(), i == 1 ? 0 : 2) << db << " row " << i;
+        }
+    }
+}
+
+TEST_F(InsertUnifyTest, WireDeclinesARowWithAnUnknownCellFieldAndTheParsedPathRejectsIt) {
+    XStore store;
+    xstore_test::CreateTestDb(store, kBatchDb, XStore_Proto::SECOND, kRowLength);
+    std::vector<Row> rows = RowsFor({kBoundarySeconds + 10});
+    rows[0].data = RowWithUnknownCellField();
+    std::string status;
+    EXPECT_FALSE(BatchViaWire(store, kBatchDb, rows, XStore_Proto::SYNC, status));   // declined: the caller re-parses
+    XStore_Proto::BatchInsert_REQ req = BatchReq(kBatchDb, rows, XStore_Proto::SYNC);
+    const std::string bytes = req.SerializeAsString();
+    XStore_Proto::BatchInsert_REQ reparsed;   // what the worker does after the decline: a plain parse keeps the unknown field
+    ASSERT_TRUE(reparsed.ParseFromString(bytes));
+    XStore_Proto::BatchInsert_REP rep;
+    store.BatchInsert(&reparsed, &rep);
+    EXPECT_NE(rep.insertstatus().find("Inserted 0 of 1 elements; 1 row(s) rejected: column 1 carries an unknown protobuf field"), std::string::npos)
+        << rep.insertstatus();
 }
 
 // The handler-scope memory lease is released (SYNC completes synchronously, so this covers MarkResident too) by the

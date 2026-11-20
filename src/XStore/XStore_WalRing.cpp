@@ -475,7 +475,7 @@ std::shared_ptr<Ring> GetOrOpenRing(const std::string &wal_path, uint32_t shard_
         struct stat st{};
         if (fstat(fd, &st) != 0) { close(fd); return nullptr; }
         if (st.st_size != 0) {
-            // Legacy WAL (possibly still awaiting replay): never initialize it behind ReplayWal's back.
+            // Not a version-2 ring (possibly still awaiting ReplayWal, which moves it aside): never initialize it behind its back.
             if (!reinit_legacy || ftruncate(fd, 0) != 0) { close(fd); return nullptr; }
         }
         ring_bytes = DefaultRingBytes();

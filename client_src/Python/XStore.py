@@ -21,6 +21,7 @@ class DBInfo:
     files: List[FileInfo]
     rowLength: int          # configured per-row slot size (bytes); every row is zero-padded to this
     columnNames: List[str]  # optional per-index column names set at createDB time; [] if none were given
+    schema: List[tuple]     # (kind, storage, capacity) per declared column; [] if none
 
 
 @dataclasses.dataclass
@@ -109,13 +110,14 @@ class XStoreClient:
         # Extract & Append each DB Info into list
         for i in recvObj.dbInfo:
             files = [FileInfo(f.fileName, f.actualSizeBytes, f.apparentSizeBytes) for f in i.files]
-            currDB = DBInfo(i.dbName, i.dbResolution, i.totalSizeInByte, files, i.rowLength, list(i.columnNames))
+            currDB = DBInfo(i.dbName, i.dbResolution, i.totalSizeInByte, files, i.rowLength, list(i.columnNames),
+                          [(s.kind, s.storage, s.capacity) for s in i.schema])
             dbInfo.append(currDB)
 
         # SysInfo as returning object
         return SysInfo(recvObj.serverAddr, recvObj.threadCount, dbInfo)
 
-    def createDB(self, dbName, timeResolution, rowLength, columnNames=None):
+    def createDB(self, dbName, timeResolution, rowLength, columnNames=None, schema=None):
         """
         :param dbName:
         :param timeResolution:
@@ -124,6 +126,11 @@ class XStoreClient:
             an API-boundary convenience -- persisted server-side and never
             touching wire encoding/storage/zone-map internals. Resolve a
             name back to an index with resolveColumnIndex().
+        :param schema: optional list of (kind, storage, capacity) tuples, one per
+            declared (typed) column; kind = the FData field number (1 double ...
+            15 bytes), storage = 0 default / 1 INT8 / 2 INT16 / 3 UINT8 /
+            4 UINT16 / 5 INLINE_STRING, capacity only for INLINE_STRING. Columns
+            past the schema are stored dynamically.
         :return:
         """
         envelope = XStore_Proto.Request()
@@ -134,6 +141,11 @@ class XStoreClient:
         payload.rowLength = rowLength
         if columnNames:
             payload.columnNames.extend(columnNames)
+        for kind, storage, capacity in (schema or []):
+            spec = payload.schema.add()
+            spec.kind = kind
+            spec.storage = storage
+            spec.capacity = capacity
 
         recvObj = self._sendRecv(envelope, XStore_Proto.CreateDB_REP)
         return recvObj.createDBStatus
@@ -154,39 +166,51 @@ class XStoreClient:
                               f"(DB has {len(columnNames)} named column(s))")
 
     @staticmethod
-    def suggestRowLength(sampleRow, alignment: int = 8) -> int:
+    def _typedCellBytes(kind: int, storage: int, capacity: int) -> int:
+        """Width of one typed schema cell in the server's row layout: the declared storage wins, else the kind's
+        natural width; string/bytes are an 8-byte reference into the slot's tail."""
+        if storage in (1, 3):
+            return 1
+        if storage in (2, 4):
+            return 2
+        if storage == 5:
+            return capacity + 1
+        if kind in (2, 3, 5, 7, 9, 11):
+            return 4
+        if kind == 13:
+            return 1
+        return 8
+
+    @staticmethod
+    def suggestRowLength(sampleRow, alignment: int = 8, schema=None) -> int:
         """
         Suggests a CreateDB rowLength/slot size from one sample RowData, so
         callers don't have to hand-guess a value. Mirrors XStore_Client.h's
-        SuggestRowLength (C++) field-for-field.
-
-        PROTOBUF_FIELD_OVERHEAD=3 is exact for every fixed-width/varint oneof
-        case (double/int32/int64/etc.): 1B outer repeated-field tag
-        (RowData.fieldData=1) + 1B outer length-varint (assumes the encoded
-        FData stays under 128B, true for any scalar or short string) + 1B
-        inner oneof tag. It undercounts stringData/bytesData by 1B: those are
-        themselves length-delimited, so they need a second inner
-        length-varint the fixed/varint cases don't -- same known gap as the
-        C++ helper, flagged there and here, not silently fixed.
+        SuggestRowLength (C++) field-for-field: 3 header bytes, the null
+        bitmap and typed cells of the optional schema ((kind, storage,
+        capacity) tuples, as createDB takes), 9 bytes per remaining
+        (dynamic) cell, plus the bytes of every string/bytes value that lives
+        in the slot's tail, rounded up to alignment.
         """
         if alignment <= 0 or (alignment & (alignment - 1)) != 0:
             raise ValueError("alignment must be a power of 2")
-        PROTOBUF_FIELD_OVERHEAD = 3
+        schema = list(schema or [])
+        typed = len(schema)
+        columns = len(sampleRow.fieldData)
 
-        rowSize = 0
-        for field in sampleRow.fieldData:
+        rowSize = 3 + (typed + 7) // 8
+        for kind, storage, capacity in schema:
+            rowSize += XStoreClient._typedCellBytes(kind, storage, capacity)
+        if columns > typed:
+            rowSize += 9 * (columns - typed)
+        for i, field in enumerate(sampleRow.fieldData):
+            if i < typed and schema[i][1] == 5:
+                continue  # inline string: its bytes are inside the typed cell
             case = field.WhichOneof("oneOfData")
             if case == "stringData":
-                rowSize += len(field.stringData.encode("utf-8")) + PROTOBUF_FIELD_OVERHEAD
+                rowSize += len(field.stringData.encode("utf-8"))
             elif case == "bytesData":
-                rowSize += len(field.bytesData) + PROTOBUF_FIELD_OVERHEAD
-            elif case in ("doubleData", "int64Data", "uint64Data", "sint64Data", "fixed64Data", "sfixed64Data"):
-                rowSize += 8 + PROTOBUF_FIELD_OVERHEAD
-            elif case in ("floatData", "int32Data", "uint32Data", "sint32Data", "fixed32Data", "sfixed32Data"):
-                rowSize += 4 + PROTOBUF_FIELD_OVERHEAD
-            elif case == "boolData":
-                rowSize += 1 + PROTOBUF_FIELD_OVERHEAD
-            # case is None -> oneof unset, contributes 0 bytes
+                rowSize += len(field.bytesData)
 
         return (rowSize + alignment - 1) & ~(alignment - 1)
 

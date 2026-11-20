@@ -289,12 +289,13 @@ uint64_t AggregateWorkingSetEstimate(unsigned long long start_epoch_t, unsigned 
 }  // namespace
 
 template <typename Cmp, typename PruneCheck>
-void XStore::ScanSegmentWithZoneMapPruning(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+void XStore::ScanSegmentWithZoneMapPruning(const std::string &db_base_path, unsigned short year, const xstore::layout::RowLayout &layout,
                                             uint32_t tracked_column_count,
                                             const char *rows_base, unsigned long long rows_to_process,
                                             unsigned long long first_row_index, unsigned short column_idx,
                                             ValueStruct &best_value, XStore_Proto::FData &best_data,
                                             PruneCheck &&should_skip_block) {
+    const uint16_t row_length = static_cast<uint16_t>(layout.RowLength());
     if (rows_to_process == 0) return;
 
     const ZoneMapFile::Pin zmap_pin = PinZoneMap(db_base_path, year, row_length, tracked_column_count);
@@ -322,16 +323,17 @@ void XStore::ScanSegmentWithZoneMapPruning(const std::string &db_base_path, unsi
         // Not prunable (no zone-map coverage yet, column past the tracked
         // cap, or the zone map says this block could improve the answer)
         // -- scan it for real.
-        ProcessFileRangeSelect<Cmp>(block_rows_base, block_row_count, row_length, column_idx, best_value, best_data);
+        ProcessFileRangeSelect<Cmp>(block_rows_base, block_row_count, layout, column_idx, best_value, best_data);
     }
 }
 
-void XStore::AccumulateSegmentWithZoneMapPushdown(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+void XStore::AccumulateSegmentWithZoneMapPushdown(const std::string &db_base_path, unsigned short year, const xstore::layout::RowLayout &layout,
                                                    uint32_t tracked_column_count,
                                                    const char *rows_base, unsigned long long rows_to_process,
                                                    unsigned long long first_row_index, unsigned short column_idx,
                                                    double &sum_out, unsigned long long &valid_count_out,
                                                    double *sum_sq_out) {
+    const uint16_t row_length = static_cast<uint16_t>(layout.RowLength());
     if (rows_to_process == 0) return;
 
     const ZoneMapFile::Pin zmap_pin = PinZoneMap(db_base_path, year, row_length, tracked_column_count);
@@ -369,15 +371,16 @@ void XStore::AccumulateSegmentWithZoneMapPushdown(const std::string &db_base_pat
         uint64_t block_last_row = std::min(last_row, block_own_last_row);
         uint64_t block_row_count = block_last_row - block_first_row + 1;
         const char *block_rows_base = rows_base + (block_first_row - first_row) * row_length;
-        ProcessFileRangeAccumulate(block_rows_base, block_row_count, row_length, column_idx, sum_out, valid_count_out, sum_sq_out);
+        ProcessFileRangeAccumulate(block_rows_base, block_row_count, layout, column_idx, sum_out, valid_count_out, sum_sq_out);
     }
 }
 
-void XStore::ScanSegmentForExistence(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+void XStore::ScanSegmentForExistence(const std::string &db_base_path, unsigned short year, const xstore::layout::RowLayout &layout,
                                       uint32_t tracked_column_count,
                                       const char *rows_base, unsigned long long rows_to_process,
                                       unsigned long long first_row_index, unsigned short column_idx,
                                       bool &found_out) {
+    const uint16_t row_length = static_cast<uint16_t>(layout.RowLength());
     if (rows_to_process == 0 || found_out) return;
 
     const ZoneMapFile::Pin zmap_pin = PinZoneMap(db_base_path, year, row_length, tracked_column_count);
@@ -432,7 +435,7 @@ void XStore::ScanSegmentForExistence(const std::string &db_base_path, unsigned s
         // here: only whether a valid value was found at all matters.
         ValueStruct best_value;
         XStore_Proto::FData best_data;
-        ProcessFileRangeSelect<std::less<long double>>(block_rows_base, block_row_count, row_length, column_idx, best_value, best_data);
+        ProcessFileRangeSelect<std::less<long double>>(block_rows_base, block_row_count, layout, column_idx, best_value, best_data);
         if (best_value.is_initialized) {
             found_out = true;
             return;
@@ -440,13 +443,14 @@ void XStore::ScanSegmentForExistence(const std::string &db_base_path, unsigned s
     }
 }
 
-void XStore::ScanSegmentForOhlc(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+void XStore::ScanSegmentForOhlc(const std::string &db_base_path, unsigned short year, const xstore::layout::RowLayout &layout,
                                  uint32_t tracked_column_count,
                                  const char *rows_base, unsigned long long rows_to_process,
                                  unsigned long long first_row_index, unsigned short column_idx,
                                  double &open_out, bool &open_set_out,
                                  double &high_out, double &low_out, bool &high_low_set_out,
                                  double &close_out, bool &close_set_out) {
+    const uint16_t row_length = static_cast<uint16_t>(layout.RowLength());
     if (rows_to_process == 0) return;
 
     const ZoneMapFile::Pin zmap_pin = PinZoneMap(db_base_path, year, row_length, tracked_column_count);
@@ -495,7 +499,7 @@ void XStore::ScanSegmentForOhlc(const std::string &db_base_path, unsigned short 
 
         double local_open = 0.0, local_high = 0.0, local_low = 0.0, local_close = 0.0;
         bool local_open_set = false, local_high_low_set = false, local_close_set = false;
-        ProcessFileRangeOhlc(block_rows_base, block_row_count, row_length, column_idx,
+        ProcessFileRangeOhlc(block_rows_base, block_row_count, layout, column_idx,
                               local_open, local_open_set, local_high, local_low, local_high_low_set,
                               local_close, local_close_set);
         if (!local_close_set) continue; // nothing valid in this sub-range
@@ -519,7 +523,8 @@ void XStore::MinAggregate(unsigned long long int start_epoch_t, unsigned long lo
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
     XStore_Proto::ConfigStruct cfg_struct;
-    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+    std::shared_ptr<const xstore::layout::RowLayout> layout;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct, &layout)) {
         std::string err_msg = fmt::format("[MIN AGGREGATE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
         SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
         spdlog::warn(err_msg);
@@ -549,7 +554,7 @@ void XStore::MinAggregate(unsigned long long int start_epoch_t, unsigned long lo
     MinMaxPartial final = WalkYearSpanParallel<MinMaxPartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
         MinMaxPartial{},
         [&](MinMaxPartial &partial, const char *rows_base, unsigned long long rows_to_process, unsigned short year, unsigned long long first_row_index) {
-            ScanSegmentWithZoneMapPruning<std::less<long double>>(db_base_path_str, year, cfg_struct.rowlength(), EffectiveTrackedColumnCount(cfg_struct),
+            ScanSegmentWithZoneMapPruning<std::less<long double>>(db_base_path_str, year, *layout, EffectiveTrackedColumnCount(cfg_struct),
                 rows_base, rows_to_process, first_row_index, column_idx, partial.value, partial.data,
                 [&](const ZoneMapEntry &e) {
                     // MIN: a block whose smallest value is already >= our
@@ -583,7 +588,8 @@ void XStore::MaxAggregate(unsigned long long int start_epoch_t, unsigned long lo
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
     XStore_Proto::ConfigStruct cfg_struct;
-    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+    std::shared_ptr<const xstore::layout::RowLayout> layout;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct, &layout)) {
         std::string err_msg = fmt::format("[MAX AGGREGATE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
         SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
         spdlog::warn(err_msg);
@@ -602,7 +608,7 @@ void XStore::MaxAggregate(unsigned long long int start_epoch_t, unsigned long lo
     MinMaxPartial final = WalkYearSpanParallel<MinMaxPartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
         MinMaxPartial{},
         [&](MinMaxPartial &partial, const char *rows_base, unsigned long long rows_to_process, unsigned short year, unsigned long long first_row_index) {
-            ScanSegmentWithZoneMapPruning<std::greater<long double>>(db_base_path_str, year, cfg_struct.rowlength(), EffectiveTrackedColumnCount(cfg_struct),
+            ScanSegmentWithZoneMapPruning<std::greater<long double>>(db_base_path_str, year, *layout, EffectiveTrackedColumnCount(cfg_struct),
                 rows_base, rows_to_process, first_row_index, column_idx, partial.value, partial.data,
                 [&](const ZoneMapEntry &e) {
                     // MAX: a block whose largest value is already <= our
@@ -636,7 +642,8 @@ void XStore::SumAggregate(unsigned long long int start_epoch_t, unsigned long lo
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
     XStore_Proto::ConfigStruct cfg_struct;
-    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+    std::shared_ptr<const xstore::layout::RowLayout> layout;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct, &layout)) {
         std::string err_msg = fmt::format("[SUM AGGREGATE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
         SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
         spdlog::warn(err_msg);
@@ -667,7 +674,7 @@ void XStore::SumAggregate(unsigned long long int start_epoch_t, unsigned long lo
         SumPartial{},
         [&](SumPartial &partial, const char *rows_base, unsigned long long rows_to_process,
             unsigned short year, unsigned long long first_row_index) {
-            AccumulateSegmentWithZoneMapPushdown(db_base_path_str, year, cfg_struct.rowlength(), EffectiveTrackedColumnCount(cfg_struct),
+            AccumulateSegmentWithZoneMapPushdown(db_base_path_str, year, *layout, EffectiveTrackedColumnCount(cfg_struct),
                 rows_base, rows_to_process, first_row_index, column_idx, partial.sum, partial.count);
         },
         [](SumPartial &final_state, SumPartial &partial) {
@@ -694,7 +701,8 @@ void XStore::AvgAggregate(unsigned long long int start_epoch_t, unsigned long lo
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
     XStore_Proto::ConfigStruct cfg_struct;
-    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+    std::shared_ptr<const xstore::layout::RowLayout> layout;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct, &layout)) {
         std::string err_msg = fmt::format("[AVG AGGREGATE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
         SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
         spdlog::warn(err_msg);
@@ -717,7 +725,7 @@ void XStore::AvgAggregate(unsigned long long int start_epoch_t, unsigned long lo
         SumPartial{},
         [&](SumPartial &partial, const char *rows_base, unsigned long long rows_to_process,
             unsigned short year, unsigned long long first_row_index) {
-            AccumulateSegmentWithZoneMapPushdown(db_base_path_str, year, cfg_struct.rowlength(), EffectiveTrackedColumnCount(cfg_struct),
+            AccumulateSegmentWithZoneMapPushdown(db_base_path_str, year, *layout, EffectiveTrackedColumnCount(cfg_struct),
                 rows_base, rows_to_process, first_row_index, column_idx, partial.sum, partial.count);
         },
         [](SumPartial &final_state, SumPartial &partial) {
@@ -746,7 +754,8 @@ void XStore::VarianceAggregate(unsigned long long int start_epoch_t, unsigned lo
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
     XStore_Proto::ConfigStruct cfg_struct;
-    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+    std::shared_ptr<const xstore::layout::RowLayout> layout;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct, &layout)) {
         std::string err_msg = fmt::format("[VARIANCE AGGREGATE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
         SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
         spdlog::warn(err_msg);
@@ -769,7 +778,7 @@ void XStore::VarianceAggregate(unsigned long long int start_epoch_t, unsigned lo
         VariancePartial{},
         [&](VariancePartial &partial, const char *rows_base, unsigned long long rows_to_process,
             unsigned short year, unsigned long long first_row_index) {
-            AccumulateSegmentWithZoneMapPushdown(db_base_path_str, year, cfg_struct.rowlength(), EffectiveTrackedColumnCount(cfg_struct),
+            AccumulateSegmentWithZoneMapPushdown(db_base_path_str, year, *layout, EffectiveTrackedColumnCount(cfg_struct),
                 rows_base, rows_to_process, first_row_index, column_idx, partial.sum, partial.count, &partial.sum_sq);
         },
         [](VariancePartial &final_state, VariancePartial &partial) {
@@ -800,7 +809,8 @@ void XStore::StddevAggregate(unsigned long long int start_epoch_t, unsigned long
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
     XStore_Proto::ConfigStruct cfg_struct;
-    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+    std::shared_ptr<const xstore::layout::RowLayout> layout;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct, &layout)) {
         std::string err_msg = fmt::format("[STDDEV AGGREGATE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
         SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
         spdlog::warn(err_msg);
@@ -822,7 +832,7 @@ void XStore::StddevAggregate(unsigned long long int start_epoch_t, unsigned long
         VariancePartial{},
         [&](VariancePartial &partial, const char *rows_base, unsigned long long rows_to_process,
             unsigned short year, unsigned long long first_row_index) {
-            AccumulateSegmentWithZoneMapPushdown(db_base_path_str, year, cfg_struct.rowlength(), EffectiveTrackedColumnCount(cfg_struct),
+            AccumulateSegmentWithZoneMapPushdown(db_base_path_str, year, *layout, EffectiveTrackedColumnCount(cfg_struct),
                 rows_base, rows_to_process, first_row_index, column_idx, partial.sum, partial.count, &partial.sum_sq);
         },
         [](VariancePartial &final_state, VariancePartial &partial) {
@@ -853,7 +863,8 @@ void XStore::ExistsAggregate(unsigned long long int start_epoch_t, unsigned long
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
     XStore_Proto::ConfigStruct cfg_struct;
-    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+    std::shared_ptr<const xstore::layout::RowLayout> layout;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct, &layout)) {
         std::string err_msg = fmt::format("[EXISTS AGGREGATE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
         SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
         spdlog::warn(err_msg);
@@ -875,7 +886,7 @@ void XStore::ExistsAggregate(unsigned long long int start_epoch_t, unsigned long
     ExistsPartial final = WalkYearSpanParallel<ExistsPartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
         ExistsPartial{},
         [&](ExistsPartial &partial, const char *rows_base, unsigned long long rows_to_process, unsigned short year, unsigned long long first_row_index) {
-            ScanSegmentForExistence(db_base_path_str, year, cfg_struct.rowlength(), EffectiveTrackedColumnCount(cfg_struct),
+            ScanSegmentForExistence(db_base_path_str, year, *layout, EffectiveTrackedColumnCount(cfg_struct),
                 rows_base, rows_to_process, first_row_index, column_idx, partial.found);
         },
         [](ExistsPartial &final_state, ExistsPartial &partial) {
@@ -896,7 +907,8 @@ void XStore::OhlcAggregate(unsigned long long int start_epoch_t, unsigned long l
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
     XStore_Proto::ConfigStruct cfg_struct;
-    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+    std::shared_ptr<const xstore::layout::RowLayout> layout;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct, &layout)) {
         std::string err_msg = fmt::format("[OHLC AGGREGATE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
         SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
         spdlog::warn(err_msg);
@@ -922,7 +934,7 @@ void XStore::OhlcAggregate(unsigned long long int start_epoch_t, unsigned long l
     OhlcPartial final = WalkYearSpanParallel<OhlcPartial>(db_base_path_str, cfg_struct, start_epoch_t, end_epoch_t,
         OhlcPartial{},
         [&](OhlcPartial &partial, const char *rows_base, unsigned long long rows_to_process, unsigned short year, unsigned long long first_row_index) {
-            ScanSegmentForOhlc(db_base_path_str, year, cfg_struct.rowlength(), EffectiveTrackedColumnCount(cfg_struct),
+            ScanSegmentForOhlc(db_base_path_str, year, *layout, EffectiveTrackedColumnCount(cfg_struct),
                 rows_base, rows_to_process, first_row_index, column_idx,
                 partial.open, partial.open_set, partial.high, partial.low, partial.high_low_set,
                 partial.close, partial.close_set);
@@ -963,7 +975,8 @@ void XStore::PercentileAggregate(unsigned long long int start_epoch_t, unsigned 
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
     XStore_Proto::ConfigStruct cfg_struct;
-    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+    std::shared_ptr<const xstore::layout::RowLayout> layout;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct, &layout)) {
         std::string err_msg = fmt::format("[PERCENTILE AGGREGATE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
         SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
         spdlog::warn(err_msg);
@@ -998,7 +1011,7 @@ void XStore::PercentileAggregate(unsigned long long int start_epoch_t, unsigned 
         CollectPartial{},
         [&](CollectPartial &partial, const char *rows_base, unsigned long long rows_to_process,
             unsigned short /*year*/, unsigned long long /*first_row_index*/) {
-            ProcessFileRangeCollectValues(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.values);
+            ProcessFileRangeCollectValues(rows_base, rows_to_process, *layout, column_idx, partial.values);
         },
         MergeCollected, ReserveCollected{});
     const std::vector<xstore::ValueSpan> spans = CollectedSpans(final_state);
@@ -1037,7 +1050,8 @@ void XStore::DistinctCountAggregate(unsigned long long int start_epoch_t, unsign
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
     XStore_Proto::ConfigStruct cfg_struct;
-    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+    std::shared_ptr<const xstore::layout::RowLayout> layout;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct, &layout)) {
         std::string err_msg = fmt::format("[DISTINCTCOUNT AGGREGATE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
         SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
         spdlog::warn(err_msg);
@@ -1065,7 +1079,7 @@ void XStore::DistinctCountAggregate(unsigned long long int start_epoch_t, unsign
         CollectPartial{},
         [&](CollectPartial &partial, const char *rows_base, unsigned long long rows_to_process,
             unsigned short /*year*/, unsigned long long /*first_row_index*/) {
-            ProcessFileRangeCollectValues(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.values);
+            ProcessFileRangeCollectValues(rows_base, rows_to_process, *layout, column_idx, partial.values);
         },
         MergeCollected, ReserveCollected{});
     const std::vector<xstore::ValueSpan> spans = CollectedSpans(final_state);
@@ -1084,7 +1098,8 @@ void XStore::TopKAggregate(unsigned long long int start_epoch_t, unsigned long l
     const std::string &db_base_path_str = CachedDbBasePath(db_name);
 
     XStore_Proto::ConfigStruct cfg_struct;
-    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+    std::shared_ptr<const xstore::layout::RowLayout> layout;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct, &layout)) {
         std::string err_msg = fmt::format("[TOPK AGGREGATE] [DB: {}] - {}.CFG does not exist", db_name, db_name);
         SetTaggedStatus(return_data->mutable_opstatus(), "[WARNING] ", err_msg);
         spdlog::warn(err_msg);
@@ -1114,7 +1129,7 @@ void XStore::TopKAggregate(unsigned long long int start_epoch_t, unsigned long l
         CollectPartial{},
         [&](CollectPartial &partial, const char *rows_base, unsigned long long rows_to_process,
             unsigned short /*year*/, unsigned long long /*first_row_index*/) {
-            ProcessFileRangeCollectValues(rows_base, rows_to_process, cfg_struct.rowlength(), column_idx, partial.values);
+            ProcessFileRangeCollectValues(rows_base, rows_to_process, *layout, column_idx, partial.values);
         },
         MergeCollected, ReserveCollected{});
     const std::vector<xstore::ValueSpan> spans = CollectedSpans(final_state);
@@ -1190,7 +1205,7 @@ XStore::RunState XStore::FindByValueRun(FindByValueJob &job, const std::function
         job.next_epoch = job.start_epoch;
         // Loaded BEFORE the cfg is read, as the deletes do: CfgEpochCurrent tells a resumed run whether the DB was removed meanwhile.
         job.cfg_epoch = CfgEpoch();
-        if (!GetOrLoadCfg(db_name, db_base_path_str, job.cfg_struct)) {
+        if (!GetOrLoadCfg(db_name, db_base_path_str, job.cfg_struct, &job.layout)) {
             set_warning("[WARNING] ", fmt::format("[FINDBYVALUE] [DB: {}] - {}.CFG does not exist", db_name, db_name));
             finish(std::string());
             return RunState::kDone;
@@ -1226,6 +1241,7 @@ XStore::RunState XStore::FindByValueRun(FindByValueJob &job, const std::function
     }
 
     const XStore_Proto::ConfigStruct &cfg_struct = job.cfg_struct;
+    const xstore::layout::RowLayout &layout = *job.layout;
     const int32_t column_idx = job.column_idx;
     const size_t chunk_size_bytes = job.chunk_size_bytes;
     const std::string &encoded_target = job.encoded_target;
@@ -1351,7 +1367,7 @@ XStore::RunState XStore::FindByValueRun(FindByValueJob &job, const std::function
             // false once the 2GB streaming guard trips.
             auto emit_match = [&](unsigned long long int e, const char *row_ptr) {
                 size_t size_before = chunk_buf.size();
-                XStoreWireEncode::EncodeQueryResponseEntry(chunk_buf, e, row_ptr, cfg_struct.rowlength());
+                XStoreWireEncode::EncodeQueryResponseEntry(chunk_buf, e, row_ptr, layout);
                 total_emitted_bytes += static_cast<unsigned long long int>(chunk_buf.size() - size_before);
                 if (chunk_buf.size() >= chunk_size_bytes) {
                     ready.push_back(std::move(chunk_buf));
@@ -1367,11 +1383,14 @@ XStore::RunState XStore::FindByValueRun(FindByValueJob &job, const std::function
             // Confirms a row really still holds the target value right now, by
             // decoding it from the mapped file -- identical to what the
             // real-scan path does per row.
+            // The cell's catalog-index key is built in place (AppendCatIdxKey equals EncodeFDataForCatIdx of the same value):
+            // no FData, no allocation per row.
             auto row_still_matches = [&](const char *row_ptr) {
-                XStore_Proto::FData f_data;
-                return ExtractColumnByIndexSkipParse(row_ptr, cfg_struct.rowlength(),
-                                                     static_cast<unsigned short>(column_idx), f_data)
-                       && EncodeFDataForCatIdx(f_data) == encoded_target;
+                xstore::layout::Cell cell;
+                if (!layout.Load(row_ptr, static_cast<uint32_t>(column_idx), &cell)) return false;
+                CatIdxEncodeBuffer key;
+                xstore::layout::RowLayout::AppendCatIdxKey(key, cell);
+                return std::string_view(key.data(), key.size()) == encoded_target;
             };
 
             // The block loop over the rows [chunk_lo, chunk_hi] (whole zone-map blocks, except at the ends of the queried range);
@@ -1446,7 +1465,7 @@ XStore::RunState XStore::FindByValueRun(FindByValueJob &job, const std::function
                     [&](const char *, unsigned long long rows, unsigned long long row_offset, std::string &out) {
                         const unsigned long long int lo = iter_epoch + row_offset;
                         scan_rows(lo, lo + rows - 1, [&](unsigned long long int e, const char *row_ptr) {
-                            XStoreWireEncode::EncodeQueryResponseEntry(out, e, row_ptr, cfg_struct.rowlength());
+                            XStoreWireEncode::EncodeQueryResponseEntry(out, e, row_ptr, layout);
                             return true;
                         });
                     },

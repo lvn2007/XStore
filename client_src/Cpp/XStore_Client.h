@@ -1095,6 +1095,9 @@ struct DbInfo {
   // names set at CreateDB time (see ResolveColumnIndex). Empty if the DB
   // was created without names.
   std::vector<std::string> column_names;
+  // Matches XStore_Proto::DbStats.schema -- the declared typed columns (kind, storage, capacity). Empty if the DB was
+  // created without a schema (every column is then stored dynamically).
+  std::vector<XStore_Proto::ColumnSpec> schema;
 };
 
 struct SysInfo {
@@ -1641,6 +1644,7 @@ class XStoreClient {
           for (int j = 0; j < from_server.dbinfo(i).columnnames_size(); j++) {
               curr_db.column_names.push_back(from_server.dbinfo(i).columnnames(j));
           }
+          for (int j = 0; j < from_server.dbinfo(i).schema_size(); j++) curr_db.schema.push_back(from_server.dbinfo(i).schema(j));
 
           for (int j = 0; j < from_server.dbinfo(i).files_size(); j++) {
               const XStore_Proto::FileStats &f = from_server.dbinfo(i).files(j);
@@ -1654,7 +1658,8 @@ class XStoreClient {
 
   // ==== DB management ====
   [[nodiscard]] std::string CreateDB(std::string_view db_name, XStore_Proto::TimeUnit time_resolution, short int row_length,
-                                      const std::vector<std::string> &column_names = {}) {
+                                      const std::vector<std::string> &column_names = {},
+                                      const std::vector<XStore_Proto::ColumnSpec> &schema = {}) {
       XStore_Proto::Request to_server;
       auto *payload = to_server.mutable_createdb();
       payload->set_rtype(XStore_Proto::CREATEDB);
@@ -1664,6 +1669,7 @@ class XStoreClient {
       for (const std::string &name : column_names) {
           payload->add_columnnames(name);
       }
+      for (const XStore_Proto::ColumnSpec &spec : schema) *payload->add_schema() = spec;
       return SendRecv<XStore_Proto::CreateDB_REP>(to_server).createdbstatus();
   }
 
@@ -1702,66 +1708,40 @@ class XStoreClient {
   }
 
   // ==== Row sizing ====
-  // Suggests a CreateDB rowLength/slot size from one sample RowData, so
-  // callers don't have to hand-guess a value (and over/under-provision --
-  // see DbInfo::row_length above). Mirrors XBench's
-  // XStore_Adapter::ComputeRowLength, ported here so client_src callers get
-  // it natively instead of reimplementing it.
-  //
-  // PROTOBUF_FIELD_OVERHEAD=3 is exact for every fixed-width/varint oneof
-  // case (double/int32/int64/etc.): 1B outer repeated-field tag (RowData's
-  // fieldData=1) + 1B outer length-varint (assumes the encoded FData stays
-  // under 128B, true for any scalar or short string) + 1B inner oneof tag.
-  // It undercounts stringData/bytesData by 1B: those are themselves
-  // length-delimited, so they need a second inner length-varint the
-  // fixed/varint cases don't. That 1B/string-field gap already existed in
-  // the XBench original this mirrors -- flagged here, not silently fixed,
-  // since this helper is meant to match, not diverge from, the logic it's
-  // porting.
-  template <uint32_t Alignment = 8>
-  [[nodiscard]] static uint32_t SuggestRowLength(const XStore_Proto::RowData &sample_row) {
-      static_assert((Alignment & (Alignment - 1)) == 0, "Alignment must be power of 2");
-      constexpr uint32_t PROTOBUF_FIELD_OVERHEAD = 3;
-
-      uint32_t row_size = 0;
-      for (int i = 0; i < sample_row.fielddata_size(); i++) {
-          const XStore_Proto::FData &field = sample_row.fielddata(i);
-          switch (field.oneOfData_case()) {
-              case XStore_Proto::FData::kStringData:
-                  row_size += static_cast<uint32_t>(field.stringdata().size()) + PROTOBUF_FIELD_OVERHEAD;
-                  break;
-              case XStore_Proto::FData::kBytesData:
-                  row_size += static_cast<uint32_t>(field.bytesdata().size()) + PROTOBUF_FIELD_OVERHEAD;
-                  break;
-              case XStore_Proto::FData::kDoubleData:
-                  row_size += sizeof(double) + PROTOBUF_FIELD_OVERHEAD;
-                  break;
-              case XStore_Proto::FData::kFloatData:
-                  row_size += sizeof(float) + PROTOBUF_FIELD_OVERHEAD;
-                  break;
-              case XStore_Proto::FData::kBoolData:
-                  row_size += sizeof(bool) + PROTOBUF_FIELD_OVERHEAD;
-                  break;
-              case XStore_Proto::FData::kInt32Data:
-              case XStore_Proto::FData::kUint32Data:
-              case XStore_Proto::FData::kSint32Data:
-              case XStore_Proto::FData::kFixed32Data:
-              case XStore_Proto::FData::kSfixed32Data:
-                  row_size += sizeof(int32_t) + PROTOBUF_FIELD_OVERHEAD;
-                  break;
-              case XStore_Proto::FData::kInt64Data:
-              case XStore_Proto::FData::kUint64Data:
-              case XStore_Proto::FData::kSint64Data:
-              case XStore_Proto::FData::kFixed64Data:
-              case XStore_Proto::FData::kSfixed64Data:
-                  row_size += sizeof(int64_t) + PROTOBUF_FIELD_OVERHEAD;
-                  break;
-              case XStore_Proto::FData::ONEOFDATA_NOT_SET:
-                  break;
-          }
+  // Width of one typed schema cell in the server's row layout (see XStore_RowLayout.h): the declared storage wins, else the
+  // kind's natural width; string/bytes are an 8-byte reference into the slot's tail.
+  [[nodiscard]] static uint32_t TypedCellBytes(const XStore_Proto::ColumnSpec &spec) {
+      switch (spec.storage()) {
+          case 1: case 3: return 1;                        // INT8, UINT8
+          case 2: case 4: return 2;                        // INT16, UINT16
+          case 5: return spec.capacity() + 1;              // INLINE_STRING: length byte + capacity
+          default: break;
       }
+      switch (spec.kind()) {
+          case 2: case 3: case 5: case 7: case 9: case 11: return 4;   // float, int32, uint32, sint32, fixed32, sfixed32
+          case 13: return 1;                                          // bool
+          default: return 8;                                          // double, 64-bit kinds, string/bytes reference
+      }
+  }
 
-      return (row_size + Alignment - 1) & ~(Alignment - 1);
+  // The slot size a sample row needs, rounded up to Alignment: 3 header bytes, the null bitmap and typed cells of the optional
+  // schema, 9 bytes per remaining (dynamic) cell, plus the bytes of every string/bytes value that lives in the tail.
+  template <uint32_t Alignment = 8>
+  [[nodiscard]] static uint32_t SuggestRowLength(const XStore_Proto::RowData &sample_row,
+                                                 const std::vector<XStore_Proto::ColumnSpec> &schema = {}) {
+      static_assert((Alignment & (Alignment - 1)) == 0, "Alignment must be power of 2");
+      const size_t typed = schema.size();
+      size_t row_size = 3 + (typed + 7) / 8;
+      for (const XStore_Proto::ColumnSpec &spec : schema) row_size += TypedCellBytes(spec);
+      const size_t columns = static_cast<size_t>(sample_row.fielddata_size());
+      if (columns > typed) row_size += 9 * (columns - typed);
+      for (size_t i = 0; i < columns; i++) {
+          if (i < typed && schema[i].storage() == 5) continue;   // inline string: its bytes are inside the typed cell
+          const XStore_Proto::FData &field = sample_row.fielddata(static_cast<int>(i));
+          if (field.oneOfData_case() == XStore_Proto::FData::kStringData) row_size += field.stringdata().size();
+          else if (field.oneOfData_case() == XStore_Proto::FData::kBytesData) row_size += field.bytesdata().size();
+      }
+      return static_cast<uint32_t>((row_size + Alignment - 1) & ~static_cast<size_t>(Alignment - 1));
   }
 
   // ==== Unary ====

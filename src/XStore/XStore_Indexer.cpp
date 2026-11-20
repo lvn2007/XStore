@@ -326,7 +326,8 @@ Indexer::PassEnd Indexer::PassBody(const IndexHint &hint, const std::string &key
             }
             if (!chunk_runs.empty()) {
                 PassDelay();
-                if (!XStore::FoldStoredRows(*fd, hint.row_length, zmap.TrackedColumnCount(), catidx.TrackedColumnCount(),
+                if (hint.layout == nullptr ||
+                    !XStore::FoldStoredRows(*fd, *hint.layout, zmap.TrackedColumnCount(), catidx.TrackedColumnCount(),
                                             chunk_runs, zmap, catidx)) {
                     // The bits stay set (the block stays untrusted); the next start rebuilds the dirty sidecars.
                     // Runs before the failed read are already folded and the retry folds them again: count and sum

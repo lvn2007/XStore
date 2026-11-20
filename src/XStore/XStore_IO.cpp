@@ -1,5 +1,4 @@
 #include "include/XStore/XStore.h"
-#include "include/XStore/XStore_RowDecode.h"
 #include <algorithm>
 #include <fcntl.h>
 #include <unistd.h>
@@ -382,60 +381,36 @@ void XStore::EraseMappedFilesUnderPrefix(const std::string &db_dir_prefix) {
 // mapping -- no per-call mmap()/madvise()/munmap() here anymore (see the
 // header comment on the declarations for why).
 //
-// Each row is extracted via ExtractColumnByIndexSkipParse (below) rather than
-// a full RowData::MergePartialFromCodedStream: these kernels only ever want
-// ONE column (columnIdx), so full-parsing every column in the row -- and
-// allocating an FData for each -- was pure waste for every column that
-// wasn't the target. Skip-parse walks the row's wire tags, skips
-// (cursor-advances past, no allocation) every column except columnIdx, and
-// returns as soon as the target is read -- benchmarked ~40-54% faster than
-// the old full-parse kernel across N=100/1k/10k
-// (tests/perf/XStorePerfTest.cpp's *SkipParseVsFullParse tests were the A/B
-// harness that proved this before promotion; removed now that there's only
-// one kernel to measure).
+// Each row's cell sits at a fixed offset of the slot (XStore_RowLayout.h): the bound ColumnReader resolves the column's
+// offset and class once per call, so the per-row work is a marker check, a column-count check and one load. Min/Max compare
+// in long double (ReadNumericExact: every int64/uint64 exact), the others narrow to double as they always did.
 
 // Tried a two-phase version here: Phase 1 extracts each valid row's value
-// into a flat, reused double buffer (narrowed from long double, since the
-// column's byte offset varies row-to-row under protobuf's variable-length
-// encoding, so extraction itself can't be vectorized -- only a reduction
-// over an already-flat buffer could be), Phase 2 scans that buffer for
+// into a flat, reused double buffer, Phase 2 scans that buffer for
 // min/max. Benchmarked SLOWER (~15-20% on MinAggregate, a wash on Max):
 // materializing the whole array costs real write bandwidth in Phase 1 and
-// read bandwidth in Phase 2 -- for a 1M-row scan that's ~8MB of double[]
-// traffic that doesn't fit L2/L3, round-tripping to DRAM. The original
-// single-pass design never pays that: it keeps one scalar "current best" in
-// a register while streaming through rows once. Since the reduction step
-// was never the bottleneck (extraction/parse dominates per-row cost), there
-// was nothing worth vectorizing there to begin with -- reverted after
-// measuring.
+// read bandwidth in Phase 2. The single-pass design keeps one scalar
+// "current best" in a register while streaming through rows once.
 template <typename Cmp>
 void XStore::ProcessFileRangeSelect(const char* rows_base, unsigned long long total_rows,
-                                     size_t row_len, unsigned short column_idx,
+                                     const xstore::layout::RowLayout &layout, unsigned short column_idx,
                                      ValueStruct& best_value, XStore_Proto::FData& best_data) {
 
     if (total_rows == 0) return;
 
-    XStore_Proto::FData curr_data;
-    ValueStruct temp_value;
+    const size_t row_len = layout.RowLength();
     const Cmp better{}; // stateless functor, no per-call construction cost
 
     for (unsigned long long i = 0; i < total_rows; ++i) {
-        const char* row_ptr = rows_base + (i * row_len);
-
-        // Instant skip for empty slots
-        if (row_ptr[0] == 0) continue;
-
-        curr_data.Clear();
-        if (!ExtractColumnByIndexSkipParse(row_ptr, row_len, column_idx, curr_data)) continue;
-
-        if (curr_data.oneOfData_case() > 0 && curr_data.oneOfData_case() <= 12) {
-            XStore::GetFDataValue(&curr_data, &temp_value);
-
-            if (!best_value.is_initialized || better(temp_value.value, best_value.value)) {
-                best_value.value = temp_value.value;
-                best_value.is_initialized = true;
-                best_data = curr_data;
-            }
+        const char *row_ptr = rows_base + (i * row_len);
+        if (row_ptr[0] == 0) continue;   // instant skip for empty slots
+        long double value;
+        if (!layout.ReadNumericExact(row_ptr, column_idx, &value)) continue;
+        if (!best_value.is_initialized || better(value, best_value.value)) {
+            best_value.value = value;
+            best_value.is_initialized = true;
+            const bool present = layout.ReadFData(row_ptr, column_idx, &best_data);
+            static_cast<void>(present);   // ReadNumericExact just succeeded, so the cell is present
         }
     }
 }
@@ -443,35 +418,28 @@ void XStore::ProcessFileRangeSelect(const char* rows_base, unsigned long long to
 // Explicit instantiation: these are the only two comparators ever used, so the compiler
 // generates two fully-inlined, branch-free (on Cmp) versions -- no vtable/std::function overhead.
 template void XStore::ProcessFileRangeSelect<std::less<long double>>(
-    const char*, unsigned long long, size_t, unsigned short, ValueStruct&, XStore_Proto::FData&);
+    const char*, unsigned long long, const xstore::layout::RowLayout&, unsigned short, ValueStruct&, XStore_Proto::FData&);
 template void XStore::ProcessFileRangeSelect<std::greater<long double>>(
-    const char*, unsigned long long, size_t, unsigned short, ValueStruct&, XStore_Proto::FData&);
+    const char*, unsigned long long, const xstore::layout::RowLayout&, unsigned short, ValueStruct&, XStore_Proto::FData&);
 
 void XStore::ProcessFileRangeAccumulate(const char* rows_base, unsigned long long total_rows,
-                                         size_t row_len, unsigned short column_idx,
+                                         const xstore::layout::RowLayout &layout, unsigned short column_idx,
                                          double& sum_out, unsigned long long& valid_count_out,
                                          double *sum_sq_out) {
 
     if (total_rows == 0) return;
 
-    XStore_Proto::FData curr_data;
-    ValueStruct temp_value;
+    const size_t row_len = layout.RowLength();
+    const xstore::layout::ColumnReader reader(layout, column_idx);
 
     for (unsigned long long i = 0; i < total_rows; ++i) {
         const char* row_ptr = rows_base + (i * row_len);
-
         if (row_ptr[0] == 0) continue;
-
-        curr_data.Clear();
-        if (!ExtractColumnByIndexSkipParse(row_ptr, row_len, column_idx, curr_data)) continue;
-
-        if (curr_data.oneOfData_case() > 0 && curr_data.oneOfData_case() <= 12) {
-            XStore::GetFDataValue(&curr_data, &temp_value);
-            double v = (double)temp_value.value;
-            sum_out += v;
-            valid_count_out++;
-            if (sum_sq_out) *sum_sq_out += v * v;
-        }
+        double v;
+        if (!reader.ReadNumeric(row_ptr, &v)) continue;
+        sum_out += v;
+        valid_count_out++;
+        if (sum_sq_out) *sum_sq_out += v * v;
     }
 }
 
@@ -480,38 +448,31 @@ void XStore::ProcessFileRangeAccumulate(const char* rows_base, unsigned long lon
 // three/four separate scans, since they're all derived from the same
 // per-row extracted value.
 void XStore::ProcessFileRangeOhlc(const char* rows_base, unsigned long long total_rows,
-                                   size_t row_len, unsigned short column_idx,
+                                   const xstore::layout::RowLayout &layout, unsigned short column_idx,
                                    double &open_out, bool &open_set_out,
                                    double &high_out, double &low_out, bool &high_low_set_out,
                                    double &close_out, bool &close_set_out) {
 
     if (total_rows == 0) return;
 
-    XStore_Proto::FData curr_data;
-    ValueStruct temp_value;
+    const size_t row_len = layout.RowLength();
+    const xstore::layout::ColumnReader reader(layout, column_idx);
 
     for (unsigned long long i = 0; i < total_rows; ++i) {
         const char* row_ptr = rows_base + (i * row_len);
-
         if (row_ptr[0] == 0) continue;
+        double v;
+        if (!reader.ReadNumeric(row_ptr, &v)) continue;
 
-        curr_data.Clear();
-        if (!ExtractColumnByIndexSkipParse(row_ptr, row_len, column_idx, curr_data)) continue;
-
-        if (curr_data.oneOfData_case() > 0 && curr_data.oneOfData_case() <= 12) {
-            XStore::GetFDataValue(&curr_data, &temp_value);
-            double v = (double)temp_value.value;
-
-            if (!open_set_out) {
-                open_out = v;
-                open_set_out = true;
-            }
-            high_out = high_low_set_out ? std::max(high_out, v) : v;
-            low_out = high_low_set_out ? std::min(low_out, v) : v;
-            high_low_set_out = true;
-            close_out = v; // ascending i -- always overwrite, last hit wins
-            close_set_out = true;
+        if (!open_set_out) {
+            open_out = v;
+            open_set_out = true;
         }
+        high_out = high_low_set_out ? std::max(high_out, v) : v;
+        low_out = high_low_set_out ? std::min(low_out, v) : v;
+        high_low_set_out = true;
+        close_out = v; // ascending i -- always overwrite, last hit wins
+        close_set_out = true;
     }
 }
 
@@ -519,7 +480,7 @@ void XStore::ProcessFileRangeOhlc(const char* rows_base, unsigned long long tota
 // declaration's comment in XStore.h for why this is one kernel, not three,
 // and why there's no zone-map pushdown for any of them.
 void XStore::ProcessFileRangeCollectValues(const char* rows_base, unsigned long long total_rows,
-                                            size_t row_len, unsigned short column_idx,
+                                            const xstore::layout::RowLayout &layout, unsigned short column_idx,
                                             std::vector<double> &values_out) {
 
     if (total_rows == 0) return;
@@ -528,80 +489,16 @@ void XStore::ProcessFileRangeCollectValues(const char* rows_base, unsigned long 
     // holds the old and the new copy). Pages not written to are not resident, so a mostly empty year costs address space only.
     values_out.reserve(values_out.size() + total_rows);
 
-    XStore_Proto::FData curr_data;
-    ValueStruct temp_value;
+    const size_t row_len = layout.RowLength();
+    const xstore::layout::ColumnReader reader(layout, column_idx);
 
     for (unsigned long long i = 0; i < total_rows; ++i) {
         const char* row_ptr = rows_base + (i * row_len);
-
         if (row_ptr[0] == 0) continue;
-
-        // Plain-pointer decode first (XStore_RowDecode.h); the protobuf path below only for a row it declines to decide.
-        double decoded;
-        const xstore::RowDecode decode = xstore::DecodeColumnAsDouble(row_ptr, row_len, column_idx, &decoded);
-        if (decode == xstore::RowDecode::kValue) {
-            values_out.push_back(decoded);
-            continue;
-        }
-        if (decode == xstore::RowDecode::kSkip) continue;
-
-        curr_data.Clear();
-        if (!ExtractColumnByIndexSkipParse(row_ptr, row_len, column_idx, curr_data)) continue;
-
-        if (curr_data.oneOfData_case() > 0 && curr_data.oneOfData_case() <= 12) {
-            XStore::GetFDataValue(&curr_data, &temp_value);
-            values_out.push_back(static_cast<double>(temp_value.value));
-        }
+        double v;
+        if (!reader.ReadNumeric(row_ptr, &v)) continue;
+        values_out.push_back(v);
     }
-}
-
-// Extracts just columnIdx's FData from a row's wire bytes instead of parsing
-// the whole RowData -- ProcessFileRangeSelect/Accumulate above only ever
-// want ONE column, so full-parsing every column (and allocating an FData for
-// each) was pure waste for every column that wasn't the target. RowData
-// wire-encodes as repeated (tag=field1/LEN, length, bytes) triplets, one per
-// column, in column order -- Occurrence below counts those triplets to find
-// the columnIdx-th one. Non-target columns are skipped by cursor advance
-// only (WireFormatLite::SkipField), no FData object built for them.
-//
-// Edge cases match what the old full-parse kernel did: a hole/short row
-// (fewer columns than columnIdx) is caught by the tag==0 end-of-row check
-// below, same as the old fielddata_size() bound check; a present-but-wrong-
-// type column (string/bytes/unset) still gets fully decoded here so the
-// caller's oneOfData_case() filter downstream sees it unchanged. One
-// deliberate difference: because this returns as soon as the target column
-// is read, corruption in a LATER column no longer fails the read of an
-// earlier, valid target column the way a full-row parse would.
-bool XStore::ExtractColumnByIndexSkipParse(const char* row_ptr, size_t row_len,
-                                            unsigned short column_idx,
-                                            XStore_Proto::FData& out_data) {
-    using google::protobuf::internal::WireFormatLite;
-
-    google::protobuf::io::ArrayInputStream array_in(row_ptr, (int)row_len);
-    google::protobuf::io::CodedInputStream coded_in(&array_in);
-
-    unsigned int occurrence = 0;
-    uint32_t tag;
-    // ReadTag() returns 0 once it hits the fixed-width slot's zero padding
-    // (no valid message ever encodes field number 0) -- same end-of-row
-    // signal the old full-parse path relied on.
-    while ((tag = coded_in.ReadTag()) != 0) {
-        if (WireFormatLite::GetTagFieldNumber(tag) != XStore_Proto::RowData::kFieldDataFieldNumber) {
-            // RowData only ever encodes field 1 -- skip rather than assume
-            // this can't happen.
-            if (!WireFormatLite::SkipField(&coded_in, tag)) return false;
-            continue;
-        }
-
-        if (occurrence == column_idx) {
-            return WireFormatLite::ReadMessage(&coded_in, &out_data);
-        }
-
-        if (!WireFormatLite::SkipField(&coded_in, tag)) return false;
-        ++occurrence;
-    }
-
-    return false;  // ran out of columns before reaching columnIdx
 }
 
 void XStore::GetFDataValue(const XStore_Proto::FData *f_data_input, unsigned int column_idx, ValueStruct *return_data) {

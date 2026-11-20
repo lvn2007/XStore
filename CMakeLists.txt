@@ -429,6 +429,8 @@ include_directories(src)
 # consumers need these at final link too.)
 add_library(xstore_core STATIC
         include/XStore/XStore_Internal.h src/XStore/XStore_Internal.cpp
+        include/XStore/XStore_RowLayout.h src/XStore/XStore_RowLayout.cpp
+        include/XStore/XStore_Config.h src/XStore/XStore_Config.cpp
         src/XStore/XStore_Management.cpp
         src/XStore/XStore_DeferredFold.cpp
         include/XStore/XStore_IndexRun.h
@@ -470,7 +472,6 @@ add_library(xstore_core STATIC
         src/XStore/XStore_Aggregates.cpp
         src/XStore/XStore_ExactAggregates.cpp
         include/XStore/XStore_ExactAggregates.h
-        include/XStore/XStore_RowDecode.h
         src/XStore/XStore_PatternOps.cpp
         include/XStore/XStore.h
         include/DataStructs/ValueStruct.h

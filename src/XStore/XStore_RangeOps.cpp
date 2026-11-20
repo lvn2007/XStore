@@ -78,7 +78,7 @@ XStore::RangeQueryState XStore::RangeQueryRun(RangeQueryJob &job,
         job.next_epoch = job.start_epoch;
         // Loaded BEFORE the cfg is read, as the deletes do: CfgEpochCurrent tells a resumed run whether the DB was removed meanwhile.
         job.cfg_epoch = CfgEpoch();
-        if (!GetOrLoadCfg(db_name, db_base_path_str, job.cfg_struct)) {
+        if (!GetOrLoadCfg(db_name, db_base_path_str, job.cfg_struct, &job.layout)) {
             set_warning("[WARNING] ", fmt::format("[RANGE QUERY] [DB: {}] - {}.CFG does not exist", db_name, db_name));
             finish(std::string());
             return RangeQueryState::kDone;
@@ -96,7 +96,7 @@ XStore::RangeQueryState XStore::RangeQueryRun(RangeQueryJob &job,
         // held more than one chunk at a time. So the guard stays for them, checked before any chunk is sent (an abort partway through a reply
         // has no clean way to signal "actually, error" to a client already receiving it). A streamed_reply (Request.streamOk) goes to a client
         // that parses chunk by chunk and never holds one serialized message, so it is not limited here; the memory lease below still is.
-        if (!job.streamed_reply && (job.end_epoch - job.start_epoch) * job.cfg_struct.rowlength() > xstore::ReplyLimitBytes().load()) {
+        if (!job.streamed_reply && (job.end_epoch - job.start_epoch) * job.layout->MaxEncodedRowBytes() > xstore::ReplyLimitBytes().load()) {
             set_warning("[WARNING] ", fmt::format("[RANGE QUERY] [DB: {}] - Query results is larger than 2GB", db_name));
             finish(std::string());
             return RangeQueryState::kDone;
@@ -117,7 +117,7 @@ XStore::RangeQueryState XStore::RangeQueryRun(RangeQueryJob &job,
 
     // The reply stays in memory until its chunks are written: reserve it from the process-wide pool, an upper bound, as the 2 GB guard above also is
     // (a sparse range encodes smaller). A run that may park reserves only its slice: a parked reply holds no lease.
-    const uint64_t remaining_estimate = (job.end_epoch - job.next_epoch + 1) * (static_cast<uint64_t>(job.cfg_struct.rowlength()) + 16);
+    const uint64_t remaining_estimate = (job.end_epoch - job.next_epoch + 1) * (static_cast<uint64_t>(job.layout->MaxEncodedRowBytes()) + 16);
     const uint64_t reply_estimate = slice_lease_bytes == 0 ? remaining_estimate : std::min(remaining_estimate, slice_lease_bytes);
     std::shared_ptr<xstore::MemoryLease> reply_lease;
     if (const xstore::MemoryPool::Result leased = xstore::AcquireOperationLease(reply_estimate, job.deadline, reply_lease);
@@ -171,7 +171,7 @@ XStore::RangeQueryState XStore::RangeQueryRun(RangeQueryJob &job,
                 consumed_any = true;
                 for (unsigned long long i = 0; i < rows; ++i) {
                     EncodeQueryResponseEntry(chunk_buf, iter_epoch + row_offset + i, rows_base + i * cfg_struct.rowlength(),
-                                             cfg_struct.rowlength());
+                                             *job.layout);
 
                     // Flush whenever a completed row has pushed the buffer to
                     // (or past) the target -- never mid-row, so every emitted

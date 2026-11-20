@@ -272,8 +272,8 @@ inline constexpr unsigned    WAL_GATHER_POLL_US          = 50;
 // 8-byte first epoch, so the reserve equals the built header size exactly.
 inline constexpr size_t WAL_RECORD_HEADER_BYTES = 20; // recordLen(4)+crc32c(4)+dbNameLen(2)+rowLength(2)+timeResolution(4)+rowCount(4)
 
-// Sanity ceiling for the legacy-format ReplayWal streaming read
-// (XStore_Management.cpp), applied PER RECORD. Legacy shard files are read in
+// Sanity ceiling for the ReplayWal ring read (XStore_Management.cpp's
+// ReplayRingShard), applied PER RECORD. Shard files are read in
 // bounded WAL_REPLAY_READ_CHUNK_BYTES-sized chunks, growing the buffer only as
 // far as one record's own declared length needs, checked against this bound
 // *before* trying to satisfy it -- so a corrupt record_len can never force an

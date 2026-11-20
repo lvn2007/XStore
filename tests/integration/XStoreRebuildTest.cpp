@@ -1,7 +1,7 @@
 // Startup index rebuild (Tech Reference 4.14 / 4.19, M4 stage 2a): one scan per year, batch folds, years in parallel.
 // The oracle is the OLD algorithm kept here in test code: a freshly opened file per index, every row folded through
-// the write-through UpdateRow (zone map: RowData parse of the row's real bytes + an independent reimplementation of the
-// numeric coercion; catidx: ExtractColumnByIndexSkipParse + EncodeFDataForCatIdx for every tracked column). It targets
+// the write-through UpdateRow (zone map: the slot decoded to a RowData + an independent reimplementation of the
+// numeric coercion; catidx: the decoded RowData's columns + EncodeFDataForCatIdx for every tracked column). It targets
 // the decoder, the batch folds and the chunking: the fold arithmetic itself (FoldRowIntoBlock, the bloom bits) is shared
 // with production, so it is checked by the zone-map/catidx unit and aggregate tests, not here.
 #include <gtest/gtest.h>
@@ -15,6 +15,7 @@
 #include "XStoreSyscallFault.h"
 #include "include/XStore/XStore_Internal.h"
 #include <algorithm>
+#include <bit>
 #include <cerrno>
 #include <cstring>
 #include <fstream>
@@ -218,22 +219,23 @@ TEST_F(XStoreRebuildTest, StartupRebuildMatchesThePerRowReferenceOnEveryDataShap
         ASSERT_NE(store.RangeDelete(Jan1(kDelete) + 4096, Jan1(kDelete) + 6143, db).deletestatus().find("[INFO]"), std::string::npos); // a whole block
         ASSERT_NE(store.RangeDelete(Jan1(kDelete) + 7000, Jan1(kDelete) + 7100, db).deletestatus().find("[INFO]"), std::string::npos);
     }
-    {   // Damaged / unusual rows written straight into the year file: the one-pass decoder must decline them and the
-        // fallback must still give exactly the reference's answer.
+    {   // Damaged / unusual slots written straight into the year file: the fold must read each damaged cell as unset (a
+        // non-live marker as no row) and still give exactly the reference's answer.
         Insert(store, db, {{Jan1(kDamaged), MixedRow(1, 10)}});
     }
     CleanRestartState();
     {
         const std::string path = YearPath(db, kDamaged, ".XSTORE");
-        PwriteRow(path, 10, kRowLength, DoubleColumn(1.5) + std::string("\x12\x01\x41", 3) + std::string("\x0a\x02\x20\x07", 4)); // unknown field
-        PwriteRow(path, 11, kRowLength, std::string("\x08\x05", 2) + DoubleColumn(2.5));                                           // column with a varint wire type
-        PwriteRow(path, 12, kRowLength, DoubleColumn(3.5) + std::string("\x0a\xff\x0f", 3));                                       // column longer than the slot
-        PwriteRow(path, 13, kRowLength, DoubleColumn(4.5) + std::string("\x0a\x05\x72\x03\xff\xfe\xfd", 7) + std::string("\x0a\x02\x20\x09", 4)); // bad UTF-8 string
-        PwriteRow(path, 14, kRowLength, std::string("\x0a\x03\x09\x01\x02", 5) + std::string("\x0a\x02\x20\x05", 4));            // undecodable column
-        PwriteRow(path, 15, kRowLength, DoubleColumn(6.5) + std::string("\xff\x01", 2));                                           // garbage tag after a column
-        PwriteRow(path, 16, kRowLength, std::string("\x0a\x00\x0a\x00", 4) + DoubleColumn(7.5));                                   // empty columns (valid)
-        PwriteRow(path, 4095, kRowLength, DoubleColumn(8.5));                                                                      // last row of chunk 1
-        PwriteRow(path, 4096, kRowLength, DoubleColumn(9.5));                                                                      // first row of chunk 2
+        const auto bits = [](double v) { return std::bit_cast<uint64_t>(v); };
+        PwriteRow(path, 10, kRowLength, DamagedSlot(SlotDamage::kUnknownCellType, kRowLength, 1.5));
+        PwriteRow(path, 11, kRowLength, DamagedSlot(SlotDamage::kBadMarker, kRowLength, 2.5));
+        PwriteRow(path, 12, kRowLength, DamagedSlot(SlotDamage::kStringOutsideSlot, kRowLength, 3.5));
+        PwriteRow(path, 13, kRowLength, DamagedSlot(SlotDamage::kBadUtf8String, kRowLength, 4.5));
+        PwriteRow(path, 14, kRowLength, DamagedSlot(SlotDamage::kColumnCountPastSlot, kRowLength, 5.5));
+        PwriteRow(path, 15, kRowLength, DamagedSlot(SlotDamage::kGarbageInPadding, kRowLength, 6.5));
+        PwriteRow(path, 16, kRowLength, PackDynamicSlot(DoubleBitsRow({std::nullopt, std::nullopt, bits(7.5)}), kRowLength));   // empty columns (valid)
+        PwriteRow(path, 4095, kRowLength, PackDynamicSlot(DoubleBitsRow({bits(8.5)}), kRowLength));   // last row of chunk 1
+        PwriteRow(path, 4096, kRowLength, PackDynamicSlot(DoubleBitsRow({bits(9.5)}), kRowLength));   // first row of chunk 2
         // An empty year: a year file with no row at all.
         const int fd = open(YearPath(db, kEmpty, ".XSTORE").c_str(), O_WRONLY | O_CREAT, 0644);
         ASSERT_GE(fd, 0);
@@ -268,6 +270,120 @@ TEST_F(XStoreRebuildTest, StartupRebuildMatchesThePerRowReferenceOnEveryDataShap
     }
     EXPECT_EQ(ReadFileBytes(YearPath(db, kEmpty, ".zmap")).size(), sizeof(ZoneMapFileHeader));
     EXPECT_GT(ReadHeader<CatIdxFileHeader>(YearPath(db, kDense, ".catidx")).block_count, 2u);
+}
+
+// A typed-schema DB (narrow int, bool, inline string, a null typed cell, a dynamic column past the schema): the startup
+// rebuild of its sidecars, which reads the typed cells through the layout, equals the indexes its live inserts built.
+// The live side is the pack-time producer path (SYNC hand-off off: WalRecord::ObserveLastRow, not FoldStoredRows, which is
+// the rebuild's own decoder), and the rebuilt files are also checked against a reference computed from the original
+// FData values of the inserted rows, so a typed-cell decode bug shared by both paths cannot pass.
+TEST_F(XStoreRebuildTest, ATypedSchemaDbStartupRebuildEqualsItsLiveBuiltIndexes) {
+    using xstore::layout::ColumnSpec;
+    using xstore::layout::Kind;
+    using xstore::layout::Storage;
+    constexpr uint16_t kTypedRowLength = 160;
+    const std::string db = "REBUILDTYPED";
+    const unsigned short year = 1991;
+    const std::vector<ColumnSpec> schema = {{Kind::kDouble, Storage::kDefault, 0},
+                                            {Kind::kInt32, Storage::kInt16, 0},
+                                            {Kind::kBool, Storage::kDefault, 0},
+                                            {Kind::kString, Storage::kInlineString, 12},
+                                            {Kind::kInt64, Storage::kDefault, 0}};
+    XStore store;
+    // After the XStore constructor, which applies the indexer's configuration (hand-off on by default).
+    const xstore_test::ScopedHandOffSyncOff sync_inline;   // SYNC inserts index on the request thread from the packed slot
+    ASSERT_FALSE(xstore::Indexer::Instance().HandOffSync());
+    ASSERT_EQ(store.CreateDB(db, XStore_Proto::SECOND, kTypedRowLength, 0, {}, schema).createdbstatus(),
+              "[INFO] [CREATE DB] [DB: REBUILDTYPED] - Created DB");
+    const uint64_t rows_count = 2 * RowsPerBlock(kTypedRowLength) + 100;   // three blocks, the last one partial
+    std::vector<std::pair<unsigned long long, XStore_Proto::RowData>> rows;
+    for (uint64_t i = 0; i < rows_count; ++i) {
+        std::vector<XStore_Proto::FData> f = {FDouble(static_cast<double>(i) * 1.5), FInt32(-static_cast<int32_t>(i % 1000)),
+                                              FBool(i % 2 == 0), FString("tick" + std::to_string(i % 7)),
+                                              FInt64((1LL << 40) + static_cast<int64_t>(i))};
+        if (i % 5 == 0) f.push_back(FString("extra-" + std::to_string(i % 13)));   // a dynamic column past the schema
+        if (i % 11 == 0) f[1] = XStore_Proto::FData();                             // a null typed cell
+        rows.emplace_back(Jan1(year) + i, MakeRow(f));
+    }
+    for (size_t at = 0; at < rows.size(); at += 5000) {
+        Insert(store, db, std::vector<std::pair<unsigned long long, XStore_Proto::RowData>>(
+                              rows.begin() + static_cast<std::ptrdiff_t>(at),
+                              rows.begin() + static_cast<std::ptrdiff_t>(std::min(rows.size(), at + 5000))));
+    }
+    CleanRestartState();
+    const std::string live_zmap = ReadFileBytes(YearPath(db, year, ".zmap"));
+    const std::string live_catidx = ReadFileBytes(YearPath(db, year, ".catidx"));
+    ASSERT_GT(live_zmap.size(), sizeof(ZoneMapFileHeader));
+    ASSERT_GT(live_catidx.size(), sizeof(CatIdxFileHeader));
+    ASSERT_NE(live_zmap.find_first_not_of('\0', sizeof(ZoneMapFileHeader)), std::string::npos) << "an empty zone map proves nothing";
+    ASSERT_EQ(ReadHeader<ZoneMapFileHeader>(YearPath(db, year, ".zmap")).dirty, 0u);
+    ASSERT_EQ(ReadHeader<CatIdxFileHeader>(YearPath(db, year, ".catidx")).dirty, 0u);
+    ASSERT_TRUE(std::filesystem::remove(YearPath(db, year, ".zmap")));
+    ASSERT_TRUE(std::filesystem::remove(YearPath(db, year, ".catidx")));
+
+    store.InitDB();
+
+    XStore::ClearZoneMapRegistryForTests();   // the rebuilt files are complete on disk
+    XStore::ClearCatIdxRegistryForTests();
+    const std::string rebuilt_zmap = ReadFileBytes(YearPath(db, year, ".zmap"));
+    const std::string rebuilt_catidx = ReadFileBytes(YearPath(db, year, ".catidx"));
+    EXPECT_EQ(rebuilt_zmap.size(), live_zmap.size());
+    EXPECT_TRUE(rebuilt_zmap == live_zmap) << ".zmap rebuilt from the typed slots differs from the live-built one";
+    EXPECT_EQ(rebuilt_catidx.size(), live_catidx.size());
+    EXPECT_TRUE(rebuilt_catidx == live_catidx) << ".catidx rebuilt from the typed slots differs from the live-built one";
+    EXPECT_NE(rebuilt_catidx.find_first_not_of('\0', sizeof(CatIdxFileHeader)), std::string::npos) << "an empty catidx proves nothing";
+
+    // The reference from the known rows: no decoder, only the FData values that were inserted.
+    const auto numeric = [](const XStore_Proto::FData &f, double *out) {
+        switch (f.oneOfData_case()) {
+            case XStore_Proto::FData::kDoubleData: *out = f.doubledata(); return true;
+            case XStore_Proto::FData::kInt32Data: *out = f.int32data(); return true;
+            case XStore_Proto::FData::kInt64Data: *out = static_cast<double>(f.int64data()); return true;
+            default: return false;
+        }
+    };
+    const uint64_t rpb = RowsPerBlock(kTypedRowLength);
+    ZoneMapFile &zmap = XStore::GetOrOpenZoneMap(DbPath(db), year, kTypedRowLength);
+    CatIdxFile &catidx = XStore::GetOrOpenCatIdx(DbPath(db), year, kTypedRowLength);
+    for (uint64_t block = 0; block * rpb < rows_count; ++block) {
+        SCOPED_TRACE("block " + std::to_string(block));
+        const uint64_t first = block * rpb, last = std::min(rows_count, first + rpb);
+        const auto stats = zmap.TryGetBlockStats(block);
+        ASSERT_TRUE(stats.has_value());
+        ASSERT_GE(stats->size(), 5u);
+        for (int column : {0, 1, 4}) {   // double, the INT16 column with the null typed cells, int64
+            SCOPED_TRACE("column " + std::to_string(column));
+            uint64_t valid = 0;
+            double lo = 0, hi = 0, sum = 0;
+            for (uint64_t i = first; i < last; ++i) {
+                double v;
+                if (!numeric(rows[i].second.fielddata(column), &v)) continue;
+                if (valid++ == 0) lo = hi = v;
+                lo = std::min(lo, v);
+                hi = std::max(hi, v);
+                sum += v;
+            }
+            const ZoneMapEntry &e = (*stats)[static_cast<size_t>(column)];
+            EXPECT_EQ(e.valid_count, valid);
+            EXPECT_EQ(ZoneMapNullCount(e), (last - first) - valid) << "the null typed cells are null, not zero";
+            EXPECT_EQ(e.min_value, lo);
+            EXPECT_EQ(e.max_value, hi);
+            if (column != 4) EXPECT_EQ(e.sum_value, sum);   // int64 + 2^40 sums past 2^53: not exact in a double
+        }
+        EXPECT_GT(ZoneMapNullCount((*stats)[1]), 0u) << "the block has null typed cells (every 11th row)";
+        uint64_t missing = 0, checked = 0;
+        for (uint64_t i = first; i < last; ++i) {
+            for (int column : {1, 3, 4, 5}) {   // INT16, inline string, int64, the dynamic column
+                if (column >= rows[i].second.fielddata_size()) continue;
+                const XStore_Proto::FData &f = rows[i].second.fielddata(column);
+                if (f.oneOfData_case() == XStore_Proto::FData::ONEOFDATA_NOT_SET) continue;
+                ++checked;
+                if (!catidx.MightContain(block, static_cast<uint32_t>(column), EncodeFDataForCatIdx(f))) ++missing;
+            }
+        }
+        EXPECT_GT(checked, 0u);
+        EXPECT_EQ(missing, 0u) << "values that were inserted must be in the bloom";
+    }
 }
 
 // Only the stale index is rebuilt: a healthy, bitmapped catidx (bitmap section) survives a zone-map-only rebuild
@@ -333,10 +449,10 @@ TEST_F(XStoreRebuildTest, AppendRowWithObsObservationsMatchThePerRowReference) {
         XStore::WalRecord record;
         record.row_length = kRowLength;
         record.tracked_column_count = width;
+        record.layout = xstore_test::DynamicLayout(kRowLength);
         record.ReserveRowsWithObs(rows.size(), 20);
         for (size_t i = 0; i < rows.size(); ++i) {
-            ASSERT_LE(rows[i].ByteSizeLong(), kRowLength);   // also caches the sizes AppendRowWithObs serializes with
-            record.AppendRowWithObs(5000 + i, rows[i]);
+            ASSERT_TRUE(record.AppendRowWithObs(5000 + i, rows[i]).Ok()) << "row " << i;
         }
         ASSERT_EQ(record.row_count, rows.size());
         ASSERT_EQ(record.obs_end.size(), rows.size());
@@ -346,8 +462,8 @@ TEST_F(XStoreRebuildTest, AppendRowWithObsObservationsMatchThePerRowReference) {
         for (size_t i = 0; i < rows.size(); ++i) {
             SCOPED_TRACE("row " + std::to_string(i));
             EXPECT_EQ(record.EpochAt(i), 5000 + i);
-            std::string slot = rows[i].SerializeAsString();
-            slot.resize(kRowLength, '\0');
+            std::string slot(kRowLength, '\0');   // the packed row in a zeroed slot
+            ASSERT_TRUE(record.layout->PackFromRowData(rows[i], slot.data()).Ok());
             EXPECT_TRUE(std::string(record.RowAt(i), kRowLength) == slot);
 
             const std::vector<ZoneMapObservation> want_zmap = RefZoneMapObservations(rows[i], width);
@@ -412,11 +528,11 @@ TEST_F(XStoreRebuildTest, ZoneMapObservationsOfARecordTakeNineBytesPerColumnAtMo
     XStore::WalRecord record;
     record.row_length = kRowLength;
     record.tracked_column_count = kColumns;
+    record.layout = xstore_test::DynamicLayout(kRowLength);
     record.ReserveRowsWithObs(kRows, kColumns);
     for (size_t i = 0; i < kRows; ++i) {
         XStore_Proto::RowData row = MixedRow(i, kColumns);
-        ASSERT_LE(row.ByteSizeLong(), kRowLength);
-        record.AppendRowWithObs(7000 + i, row);
+        ASSERT_TRUE(record.AppendRowWithObs(7000 + i, row).Ok()) << "row " << i;
     }
     ASSERT_EQ(record.zmap_values.size(), kRows * kColumns);
     const size_t bytes = record.zmap_values.capacity() * sizeof(double) + record.zmap_numeric.capacity();
@@ -767,7 +883,7 @@ TEST_F(XStoreRebuildTest, AnUntrustedCatIdxDoesNotServeAStaleBitmapSection) {
     store.BuildOneYearBitmapSection(DbPath(db), year, kRowLength, width);
     ASSERT_TRUE(XStore::GetOrOpenCatIdx(DbPath(db), year, kRowLength, width).HasBitmapSection());
     CleanRestartState();
-    for (uint64_t i = 3000; i < 3010; ++i) PwriteRow(YearPath(db, year, ".XSTORE"), i, kRowLength, MixedRow(i, 16).SerializeAsString());
+    for (uint64_t i = 3000; i < 3010; ++i) PwriteRow(YearPath(db, year, ".XSTORE"), i, kRowLength, PackDynamicSlot(MixedRow(i, 16), kRowLength));
     {
         XStore_Proto::RowData wide;
         for (int c = 0; c < 70; ++c) wide.add_fielddata()->set_doubledata(c);

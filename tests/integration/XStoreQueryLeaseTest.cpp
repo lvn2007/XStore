@@ -24,9 +24,10 @@ using namespace std::chrono_literals;
 
 constexpr short kRowLength = 100;
 constexpr uint64_t kBoundarySeconds = 1704067200;   // 2024-01-01T00:00:00Z
-constexpr uint64_t kBytesPerRow = kRowLength + 16;   // the estimate's per-row figure
+// The estimate's per-row figure: the largest reply entry a slot of this DB can encode to (a dense row can encode larger than its slot) plus 16.
+const uint64_t kBytesPerRow = xstore_test::DynamicLayout(kRowLength)->MaxEncodedRowBytes() + 16;
 const std::string kDb = "QLEASE";
-// 8 MB / 116 B = 72,315 rows; this many is comfortably over the threshold, and a tiny range comfortably under it.
+// 8 MB / 153 B is about 55,000 rows; this many is comfortably over the threshold, and a tiny range comfortably under it.
 constexpr uint64_t kBigRows = 100'000;
 constexpr uint64_t kSmallRows = 100;
 

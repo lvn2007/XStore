@@ -1,15 +1,21 @@
 #pragma once
 // Startup-rebuild test helpers shared by XStoreRebuildTest.cpp and XStoreParallelRebuildTest.cpp: the per-row
 // reference rebuild (the oracle), the mixed-type row generator and raw year-file writers.
+// The oracle decodes slots with the production RowLayout::DecodeToRowData (what it checks is the fold, not the slot format: the
+// format itself is covered byte for byte by XStoreRowLayoutTest), so a decode defect would show in both arms alike.
 #include <gtest/gtest.h>
 #include "XStore/XStore.h"
 #include "XStore/XStore_ZoneMap.h"
 #include "XStore/XStore_CatIdx.h"
 #include "XStore/XStore_RowScan.h"
 #include "XStore/XStore_WireEncode.h"
+#include "XStore/XStore_RowLayout.h"
+#include "XStoreTestSupport.h"
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 #include <fcntl.h>
@@ -81,11 +87,17 @@ inline std::vector<uint16_t> RefBloomPositions(const std::string &encoded, size_
 
 inline std::vector<uint16_t> Positions(const CatIdxBloomValue &v) { return {std::begin(v.Bits()), std::end(v.Bits())}; }
 
-// The pre-stage-2a rebuild of one year, written to the given paths.
+// The pre-stage-2a rebuild of one year, written to the given paths: each slot decoded to a RowData through a no-schema layout
+// (the DBs of these tests have none), then the protobuf-side observations (RefZoneMapObservations, EncodeFDataForCatIdx) -- a
+// path independent of the RowLayout cell readers the rebuild itself uses.
 inline void BuildReferenceIndexes(XStore &store, const std::string &data_path, const std::string &zmap_path,
                            const std::string &catidx_path, uint16_t row_length, uint32_t width) {
+    static_cast<void>(store);
     std::filesystem::remove(zmap_path);
     std::filesystem::remove(catidx_path);
+    std::string layout_error;
+    const std::optional<xstore::layout::RowLayout> layout = xstore::layout::RowLayout::Make({}, row_length, &layout_error);
+    ASSERT_TRUE(layout.has_value()) << layout_error;
     ZoneMapFile zmap;
     ASSERT_TRUE(zmap.Open(zmap_path, row_length, width));
     CatIdxFile catidx;
@@ -95,17 +107,15 @@ inline void BuildReferenceIndexes(XStore &store, const std::string &data_path, c
     const uint64_t total_rows = static_cast<uint64_t>(lseek(fd, 0, SEEK_END)) / row_length;
     const bool complete = ForEachDataRow(fd, total_rows, row_length, [&](uint64_t r, const char *buf) {
         if (buf[0] == 0) return;
-        const size_t real_len = XStoreWireEncode::RealRowDataLength(buf, row_length);
         XStore_Proto::RowData row;
-        if (real_len > 0) static_cast<void>(row.ParseFromArray(buf, static_cast<int>(real_len)));
+        layout->DecodeToRowData(buf, &row);
         zmap.UpdateRow(r, RefZoneMapObservations(row, width), width);
         std::vector<CatIdxObservation> observations;
         for (uint32_t c = 0; c < width; ++c) {
-            XStore_Proto::FData f;
             // An unset (null) column is skipped, like WalRecord::AppendRow (live inserts).
-            if (store.ExtractColumnByIndexSkipParse(buf, row_length, static_cast<unsigned short>(c), f) &&
-                f.oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
-                observations.push_back({c, EncodeFDataForCatIdx(f), true});
+            if (c < static_cast<uint32_t>(row.fielddata_size()) &&
+                row.fielddata(static_cast<int>(c)).oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
+                observations.push_back({c, EncodeFDataForCatIdx(row.fielddata(static_cast<int>(c))), true});
             } else {
                 observations.push_back({c, std::string(), false});
             }
@@ -163,10 +173,47 @@ inline void PwriteRow(const std::string &data_path, uint64_t row, uint16_t row_l
     close(fd);
 }
 
-inline std::string DoubleColumn(double v) {
-    std::string out = "\x0a\x09\x09";
-    out.append(reinterpret_cast<const char *>(&v), sizeof(v));
-    return out;
+// Slots a healthy server never writes, in the fixed layout of a no-schema DB (header: marker, u16 n; then 9-byte dynamic
+// cells): what a damaged year file can hold. A scan must read a damaged cell as an unset column and a non-live marker
+// as no row, exactly as the per-row reference does.
+enum class SlotDamage {
+    kUnknownCellType,      // column 1 has a type byte outside 1..15
+    kBadMarker,            // the marker byte is neither 0 nor 1
+    kStringOutsideSlot,    // column 1 is a string whose (offset, length) leaves the slot
+    kBadUtf8String,        // column 1 is a string cell holding invalid UTF-8 (the layout does not validate on read)
+    kColumnCountPastSlot,  // n claims 200 columns, far more than the slot holds
+    kGarbageInPadding,     // the last byte of the slot, past every cell, is not zero
+};
+
+// Column 0 holds `value`, so the rest of the row is what the damage is about.
+inline std::string DamagedSlot(SlotDamage damage, uint16_t row_length, double value) {
+    XStore_Proto::RowData row;
+    row.add_fielddata()->set_doubledata(value);
+    switch (damage) {
+        case SlotDamage::kUnknownCellType: row.add_fielddata()->set_doubledata(0.5); break;
+        case SlotDamage::kStringOutsideSlot: row.add_fielddata()->set_stringdata("abc"); break;
+        case SlotDamage::kBadUtf8String: row.add_fielddata()->set_bytesdata(std::string("r\x03\xff\xfe\xfd", 5)); break;
+        default: break;
+    }
+    std::string slot = xstore_test::PackDynamicSlot(row, row_length);
+    constexpr size_t kCell1 = 3 + 9;   // header, then column 0's cell
+    switch (damage) {
+        case SlotDamage::kUnknownCellType: slot[kCell1] = '\x7F'; break;
+        case SlotDamage::kBadMarker: slot[0] = '\x02'; break;
+        case SlotDamage::kStringOutsideSlot: {
+            const uint32_t offset = row_length - 1;   // + length 3 ends past the slot
+            std::memcpy(&slot[kCell1 + 1], &offset, sizeof(offset));
+            break;
+        }
+        case SlotDamage::kBadUtf8String: slot[kCell1] = static_cast<char>(XStore_Proto::FData::kStringDataFieldNumber); break;
+        case SlotDamage::kColumnCountPastSlot: {
+            const uint16_t columns = 200;
+            std::memcpy(&slot[1], &columns, sizeof(columns));
+            break;
+        }
+        case SlotDamage::kGarbageInPadding: slot[row_length - 1] = '\xFF'; break;
+    }
+    return slot;
 }
 
 // Progress options for a test: log lines (never a bar, whatever the terminal) every `interval_ms`, captured instead of

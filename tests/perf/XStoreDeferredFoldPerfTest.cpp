@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 #include <fcntl.h>
@@ -45,12 +46,14 @@ void RunShape(const std::filesystem::path &dir, int columns, uint64_t rows, cons
     constexpr uint16_t ROW_LENGTH = 1408;
     const uint32_t width = static_cast<uint32_t>(std::max(columns, 64));
 
-    // The rows as stored bytes in a year file (setup, not timed), then FoldStoredRows.
+    std::string layout_error;
+    const std::optional<xstore::layout::RowLayout> layout = xstore::layout::RowLayout::Make({}, ROW_LENGTH, &layout_error);
+    ASSERT_TRUE(layout.has_value()) << layout_error;
+
+    // The rows as stored bytes in a year file (setup, not timed), packed the way the server stores them, then FoldStoredRows.
     std::string bytes(rows * ROW_LENGTH, '\0');
     for (uint64_t i = 0; i < rows; ++i) {
-        const XStore_Proto::RowData row = DoubleRow(i, columns);
-        ASSERT_LE(row.ByteSizeLong(), ROW_LENGTH);
-        ASSERT_TRUE(row.SerializeToArray(&bytes[i * ROW_LENGTH], ROW_LENGTH));
+        ASSERT_TRUE(layout->PackFromRowData(DoubleRow(i, columns), &bytes[i * ROW_LENGTH]).Ok());
     }
     const std::string data_path = (dir / "year.XSTORE").string();
     const int fd = open(data_path.c_str(), O_CREAT | O_RDWR | O_TRUNC, 0644);
@@ -61,7 +64,7 @@ void RunShape(const std::filesystem::path &dir, int columns, uint64_t rows, cons
     ASSERT_TRUE(zmap.Open((dir / "deferred.zmap").string(), ROW_LENGTH, width));
     ASSERT_TRUE(catidx.Open((dir / "deferred.catidx").string(), ROW_LENGTH, width));
     const auto start = Clock::now();
-    ASSERT_TRUE(XStore::FoldStoredRows(fd, ROW_LENGTH, width, catidx.TrackedColumnCount(), {{0, rows}}, zmap, catidx));
+    ASSERT_TRUE(XStore::FoldStoredRows(fd, *layout, width, catidx.TrackedColumnCount(), {{0, rows}}, zmap, catidx));
     const double ns = NsPerRow(start, rows);
     close(fd);
     std::cout << "[fold] " << label << " columns=" << columns << " rows=" << rows << " deferred_ns/row=" << ns << "\n";

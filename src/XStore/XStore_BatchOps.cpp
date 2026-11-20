@@ -147,38 +147,30 @@ bool ScanInsertRequest(const char *request, size_t size, uint8_t envelope_tag, s
     return true;
 }
 
-// The rows of a scanned request. A row is parsed only when its record is built, into one RowData that ParseFromArray clears and refills
-// for the next row (the clear keeps the FData objects, so nothing is allocated per row once it has grown to the widest row). The row must
-// parse, hold exactly the counted number of fields and re-serialize to exactly its slice: only then are the bytes the record stores
-// (the re-serialization, as ever) the received bytes, and the size checks made on the slice length (oversized row, widest row) the
-// ones the parsed path makes on ByteSizeLong().
+// The rows of a scanned request, read straight from the received bytes. A row is validated and packed in one pass when its record is
+// built (RowLayout::PackFromWire): no RowData is parsed. A row the wire reader cannot take (not well-formed protobuf RowData, or a field
+// this server does not know) comes back kMalformed, and the caller then takes the parsed path: that fails a request that is not
+// protobuf, and rejects, row by row, one that is protobuf but carries unknown fields (PackStatus::kUnknownField).
 class WireRows {
 public:
     WireRows(const char *base, std::vector<WireRef> refs) : base_(base), refs_(std::move(refs)) {}
     int Size() const { return static_cast<int>(refs_.size()); }
     uint64_t Timestamp(int i) const { return refs_[static_cast<size_t>(i)].timestamp; }
     int FieldCount(int i) const { return static_cast<int>(refs_[static_cast<size_t>(i)].fields); }
-    size_t RowBytes(int i) const { return refs_[static_cast<size_t>(i)].length; }
     // Stable, like the parsed path: the last occurrence of a duplicate timestamp wins.
     void SortByTimestamp() {
         std::stable_sort(refs_.begin(), refs_.end(), [](const WireRef &a, const WireRef &b) { return a.timestamp < b.timestamp; });
     }
     template <typename Record>
-    bool AppendTo(Record &record, int i) {
+    xstore::layout::PackResult AppendTo(Record &record, int i) {
         const WireRef &ref = refs_[static_cast<size_t>(i)];
-        if (!scratch_.ParseFromArray(base_ + ref.offset, static_cast<int>(ref.length)) ||
-            scratch_.fielddata_size() != static_cast<int>(ref.fields) || scratch_.ByteSizeLong() != ref.length) {   // ByteSizeLong also caches the sizes AppendRow serializes with
-            return false;
-        }
-        if (record.has_obs) record.AppendRowWithObs(ref.timestamp, scratch_);
-        else record.AppendRow(ref.timestamp, scratch_);
-        return true;
+        return record.has_obs ? record.AppendWireRowWithObs(ref.timestamp, base_ + ref.offset, ref.length)
+                              : record.AppendWireRow(ref.timestamp, base_ + ref.offset, ref.length);
     }
 
 private:
     const char *base_;
     std::vector<WireRef> refs_;
-    XStore_Proto::RowData scratch_;
 };
 
 }  // namespace
@@ -263,7 +255,7 @@ XStore::RunState XStore::BatchQueryRun(BatchQueryJob &job, const std::function<v
         job.started = true;
         // Loaded BEFORE the cfg is read, as the deletes do: CfgEpochCurrent tells a resumed run whether the DB was removed meanwhile.
         job.cfg_epoch = CfgEpoch();
-        if (!GetOrLoadCfg(db_name, db_base_path_str, job.cfg_struct)) {
+        if (!GetOrLoadCfg(db_name, db_base_path_str, job.cfg_struct, &job.layout)) {
             set_warning("[WARNING] ", fmt::format("[BATCH QUERY] [DB: {}] - {}.CFG does not exist", db_name, db_name));
             finish(std::string());
             return RunState::kDone;
@@ -271,7 +263,7 @@ XStore::RunState XStore::BatchQueryRun(BatchQueryJob &job, const std::function<v
 
         // 64-bit product: timestamp_size() * rowlength() as two 32-bit ints wrapped negative past 2^31 bytes (70000 rows of 32000 bytes) and the request
         // was let through. As in RangeQuery, a streamed_reply is not limited to 2 GB (the lease below is).
-        if (!job.streamed_reply && static_cast<int64_t>(job.timestamps.size()) * job.cfg_struct.rowlength() > static_cast<int64_t>(xstore::ReplyLimitBytes().load())) {
+        if (!job.streamed_reply && static_cast<int64_t>(job.timestamps.size()) * static_cast<int64_t>(job.layout->MaxEncodedRowBytes()) > static_cast<int64_t>(xstore::ReplyLimitBytes().load())) {
             set_warning("[WARNING] ", fmt::format("[BATCH QUERY] [DB: {}] - Query results is larger than 2GB or empty", db_name));
             finish(std::string());
             return RunState::kDone;
@@ -286,7 +278,7 @@ XStore::RunState XStore::BatchQueryRun(BatchQueryJob &job, const std::function<v
 
     // The reply stays in memory until its chunks are written: reserve it from the process-wide pool, an upper bound (a requested row that does not
     // exist is left out of the reply). A run that may park reserves only its slice: a parked reply holds no lease.
-    const uint64_t total_estimate = static_cast<uint64_t>(job.timestamps.size()) * (static_cast<uint64_t>(cfg_struct.rowlength()) + 16);
+    const uint64_t total_estimate = static_cast<uint64_t>(job.timestamps.size()) * (static_cast<uint64_t>(job.layout->MaxEncodedRowBytes()) + 16);
     const uint64_t reply_estimate = slice_lease_bytes == 0 ? total_estimate : std::min(total_estimate, slice_lease_bytes);
     std::shared_ptr<xstore::MemoryLease> reply_lease;
     if (const xstore::MemoryPool::Result leased = xstore::AcquireOperationLease(reply_estimate, job.deadline, reply_lease);
@@ -398,19 +390,20 @@ XStore::RunState XStore::BatchQueryRun(BatchQueryJob &job, const std::function<v
                 unsigned long long int timestamp = job.timestamps[idx];
                 unsigned long long int offset = (timestamp - this_ts.first_epoch) * row_len;
 
-                // (void) doesn't suppress __wur under _FORTIFY_SOURCE; short read is ignored on purpose.
-                [[maybe_unused]] ssize_t pread_ret = pread(fd, buffer_in.data(), row_len, static_cast<off_t>(offset));
+                // A short read (or an error) must not leave the previous row, possibly another DB's, in the buffer: the unread bytes
+                // are zero, i.e. a hole.
+                const ssize_t pread_ret = pread(fd, buffer_in.data(), row_len, static_cast<off_t>(offset));
+                const size_t got = pread_ret > 0 ? static_cast<size_t>(pread_ret) : 0;
+                if (got < row_len) std::memset(buffer_in.data() + got, 0, row_len - got);
 
-                // A hole is always fully zeroed, so checking the first byte
-                // is enough (buffer_in is a fixed-width binary buffer, not a
-                // C string, so strlen() would over-read). Unlike RangeQuery,
-                // a hole is OMITTED here, not encoded as an empty entry --
-                // matches BatchQuery's existing semantics exactly.
-                if (buffer_in[0] == 0) {
+                // A hole is OMITTED here, not encoded as an empty entry (unlike RangeQuery). So is a slot damaged on disk (a marker
+                // other than 0 or 1, or an impossible column count: LiveAndSane logs it, rate-limited): spec section 4, reads never
+                // trust the disk. buffer_in is a fixed-width binary buffer, not a C string.
+                if (!job.layout->LiveAndSane(buffer_in.data())) {
                     continue;
                 }
 
-                EncodeQueryResponseEntry(chunk_buf, timestamp, buffer_in.data(), row_len);
+                EncodeQueryResponseEntry(chunk_buf, timestamp, buffer_in.data(), *job.layout);
 
                 if (chunk_buf.size() >= chunk_size_bytes) {
                     emit_chunk(std::move(chunk_buf), false);
@@ -467,20 +460,23 @@ XStore::RunState XStore::BatchQueryRun(BatchQueryJob &job, const std::function<v
             XStorePreadPool::ParallelFor(wave_end - wave_start, [&](size_t local_i) {
                 const unsigned long long int timestamp = job.timestamps[wave_base[local_i]];
                 const unsigned long long int offset = (timestamp - this_ts.first_epoch) * row_len;
-                // Same __wur note as serial path above.
-                [[maybe_unused]] ssize_t pread_ret = pread(fd, wave_buf.data() + local_i * row_len, row_len, static_cast<off_t>(offset));
+                // Same short-read rule as the serial path above.
+                char *slot = wave_buf.data() + local_i * row_len;
+                const ssize_t pread_ret = pread(fd, slot, row_len, static_cast<off_t>(offset));
+                const size_t got = pread_ret > 0 ? static_cast<size_t>(pread_ret) : 0;
+                if (got < row_len) std::memset(slot + got, 0, row_len - got);
             });
 
             for (size_t local_i = 0; local_i < wave_end - wave_start; local_i++) {
                 const char *row_ptr = wave_buf.data() + local_i * row_len;
 
-                // Same hole check as the serial path above.
-                if (row_ptr[0] == 0) {
+                // Same hole and damaged-slot check as the serial path above.
+                if (!job.layout->LiveAndSane(row_ptr)) {
                     continue;
                 }
 
                 const unsigned long long int timestamp = job.timestamps[wave_base[local_i]];
-                EncodeQueryResponseEntry(chunk_buf, timestamp, row_ptr, row_len);
+                EncodeQueryResponseEntry(chunk_buf, timestamp, row_ptr, *job.layout);
 
                 if (chunk_buf.size() >= chunk_size_bytes) {
                     emit_chunk(std::move(chunk_buf), false);

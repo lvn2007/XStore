@@ -1072,8 +1072,7 @@ std::vector<std::pair<uint64_t, XStore_Proto::RowData>> ReadRows(int fd, uint64_
     const bool complete = ForEachDataRow(fd, hi + 1, row_length, [&](uint64_t r, const char *buf) {
         if (buf[0] == 0) return;
         XStore_Proto::RowData row;
-        const size_t real_len = XStoreWireEncode::RealRowDataLength(buf, row_length);
-        if (real_len > 0) static_cast<void>(row.ParseFromArray(buf, static_cast<int>(real_len)));
+        xstore_test::DecodeDynamicSlot(buf, row_length, &row);
         rows.emplace_back(r, std::move(row));
     }, lo);
     EXPECT_TRUE(complete);

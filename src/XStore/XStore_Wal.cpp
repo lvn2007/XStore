@@ -72,72 +72,11 @@ std::atomic<uint64_t> g_inline_reread_folds{0};
 
 } // namespace
 
-// Wire format (native-endian -- WAL files aren't portable across
-// architectures, same assumption XStore's .XSTORE data files already
-// make). One record = one write REQUEST, carrying 1..N rows (1 for
-// UnaryInsert; BatchInsert/RangeInsert reuse this same framing with N rows
-// per year-bucket group instead of a separate format):
-//   [u32 recordLen][u32 crc32c][u16 dbNameLen][u16 rowLength]
-//   [i32 timeResolution][u32 rowCount][dbName bytes]
-//   repeated rowCount times: [u64 epochTime][row bytes]
-// recordLen counts every byte AFTER itself. crc32c covers every byte after
-// itself (dbNameLen through the last row's bytes) so ReplayWal can
-// validate a record before trusting it. Written by WalWriterLoop's
-// pwritev path below directly (no dedicated SerializeWalRecord function --
-// removed: building one contiguous buffer per record was itself the copy
-// this format switch to vectored I/O exists to avoid). Parsed by
-// ParseWalRecord, an XStore:: member (not file-local) so ReplayWal's
-// crash-recovery path (a different translation unit) uses this exact
-// implementation instead of an independently-maintained copy -- that
-// duplication is what let a since-fixed bounds-check bug survive uncaught
-// in the duplicate.
-
-// Parses one record starting at data[0]. Returns false (consumed left
-// unset) if fewer than one full, CRC-valid record is available -- ReplayWal
-// treats that as "stop here" (a torn tail record from a crash mid-write),
-// not a hard error. XStore:: member for the same sharing reason as
-// SerializeWalRecord above.
-bool XStore::ParseWalRecord(const char *data, size_t len, size_t &consumed, XStore::WalRecord &out_record) {
-    if (len < 8) return false;
-    uint32_t record_len;
-    std::memcpy(&record_len, data, 4);
-    // record_len is widened to size_t before the addition -- adding as
-    // 4u + record_len (both 32-bit) can wrap around for a corrupt/torn
-    // record_len near UINT32_MAX, defeating this bounds check and letting
-    // a huge out-of-bounds Crc32 read through below.
-    if (len < static_cast<size_t>(record_len) + 4 || record_len < 4u + 2 + 2 + 4 + 4) return false;
-
-    uint32_t stored_crc;
-    std::memcpy(&stored_crc, data + 4, 4);
-
-    const char *payload = data + 8;
-    size_t payload_len = record_len - 4;
-    if (Crc32c(payload, payload_len) != stored_crc) return false;
-
-    size_t off = 0;
-    uint16_t db_name_len; std::memcpy(&db_name_len, payload + off, 2); off += 2;
-    uint16_t row_length;  std::memcpy(&row_length, payload + off, 2); off += 2;
-    int32_t time_res;     std::memcpy(&time_res, payload + off, 4); off += 4;
-    uint32_t row_count;   std::memcpy(&row_count, payload + off, 4); off += 4;
-
-    if (off + db_name_len > payload_len) return false;
-    out_record.db_name.assign(payload + off, db_name_len);
-    off += db_name_len;
-
-    size_t expected_rows_bytes = static_cast<size_t>(row_count) * (8u + row_length);
-    if (off + expected_rows_bytes != payload_len) return false;
-
-    out_record.row_length = row_length;
-    out_record.time_resolution = static_cast<XStore_Proto::TimeUnit>(time_res);
-    // The rows section is already WalRecord::wire's layout: one copy, no per-row allocation.
-    out_record.wire.assign(payload + off, expected_rows_bytes);
-    out_record.row_count = row_count;
-    out_record.replayed = true;
-    out_record.has_obs = false;   // the record is reused across the replay loop: a replayed record carries no observations
-
-    consumed = 4 + record_len;
-    return true;
-}
+// Wire format (native-endian -- WAL files aren't portable across architectures, same assumption XStore's .XSTORE data files
+// already make). One record = one write REQUEST, carrying 1..N rows (1 for UnaryInsert; BatchInsert/RangeInsert reuse this
+// same framing with N rows per year-bucket group). Written by WalWriterLoop's pwritev path below directly (no contiguous
+// per-record buffer), parsed by ParseWalRecordV2, an XStore:: member so ReplayWal's crash-recovery path (a different
+// translation unit) uses this exact implementation. Rows are each [u64 epochTime][row_length bytes of a packed slot].
 
 // Record v2 (ring format): [u32 recordLen][u32 crc32c][u64 lsn][u16 dbNameLen]
 // [u16 rowLength][i32 timeRes][u32 rowCount][dbName][rows as in v1].
@@ -153,7 +92,7 @@ XStore::RingParse XStore::ParseWalRecordV2(const char *data, size_t len, uint64_
     if (len < walring::RECORD_FIXED_BYTES) return RingParse::kEnd;
     uint32_t record_len;
     std::memcpy(&record_len, data, 4);
-    // Widened before the addition, same wraparound reasoning as ParseWalRecord.
+    // Widened before the addition: 4u + record_len in 32 bits could wrap for a corrupt record_len near UINT32_MAX.
     if (record_len < walring::RECORD_FIXED_BYTES - 4 || len < static_cast<size_t>(record_len) + 4) return RingParse::kEnd;
 
     uint32_t stored_crc;
@@ -185,11 +124,11 @@ XStore::RingParse XStore::ParseWalRecordV2(const char *data, size_t len, uint64_
     off += db_name_len;
     out_record.row_length = row_length;
     out_record.time_resolution = static_cast<XStore_Proto::TimeUnit>(time_res);
-    // Same single copy of the rows section as ParseWalRecord.
+    // The rows section is already WalRecord::wire's layout: one copy, no per-row allocation.
     out_record.wire.assign(payload + off, expected_rows_bytes);
     out_record.row_count = row_count;
     out_record.replayed = true;
-    out_record.has_obs = false;   // as ParseWalRecord
+    out_record.has_obs = false;   // the record is reused across the replay loop: a replayed record carries no observations
     consumed = 4 + static_cast<size_t>(record_len);
     damaged = false;
     return RingParse::kOk;
@@ -510,8 +449,9 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
         // again. Checked after MarkRows: a widen that begins later sees these marks and waits for them (LiveWidenOneYear).
         // A has_obs record (indexed by the request thread: pool off, SYNC/BYPASS, sparse or unary; see HandOffToPool) is
         // never handed off, even if the pool is on: its observations are folded below.
-        if (written_ok && !record_to_apply.has_obs && pending && indexer.Active() && !zmap.Rebuilding() && !catidx.Rebuilding() &&
-            indexer.TryReserve(run_bytes)) {
+        // Never a replayed record (no layout to fold its rows with): it takes the replay branch below.
+        if (written_ok && !record_to_apply.has_obs && !record_to_apply.replayed && record_to_apply.layout != nullptr && pending &&
+            indexer.Active() && !zmap.Rebuilding() && !catidx.Rebuilding() && indexer.TryReserve(run_bytes)) {
             // Handed to the indexer: the marks stay until its fold. One hint per block the run touches, each holding
             // the bytes of its own rows, so the hints' reservations add up to run_bytes exactly.
             ReservationHold hold(indexer, run_bytes);
@@ -535,6 +475,7 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
                 hint.db_name = record_to_apply.db_name;
                 hint.year = first_ts.year;
                 hint.row_length = record_to_apply.row_length;
+                hint.layout = record_to_apply.layout;
                 hint.tracked_column_count = record_to_apply.tracked_column_count;
                 hint.block = block;
                 hint.reserved_bytes = hold.Take(rows * row_length);
@@ -588,7 +529,10 @@ bool XStore::ApplyWalRecord(const WalRecord &record_to_apply, const std::shared_
             // the catidx width read above are not folded. Never for a row whose write failed.
             g_inline_reread_folds.fetch_add(1, std::memory_order_relaxed);
             fold_runs.assign(1, {run_first_row, run_rows});
-            if (!FoldStoredRows(fd, record_to_apply.row_length, record_to_apply.tracked_column_count, catidx_width, fold_runs,
+            // A record without a layout cannot be read back: handled as a failed read-back (never the case: every
+            // non-replayed record has one, and a replayed one took the branch above).
+            if (record_to_apply.layout == nullptr ||
+                !FoldStoredRows(fd, *record_to_apply.layout, record_to_apply.tracked_column_count, catidx_width, fold_runs,
                                 zmap, catidx)) {
                 // The read-back failed: the run is written but not (or only partly) folded. Its marks stay, so no query
                 // trusts its blocks (min/max/sum and the bloom are scanned), it is inexact, and the dirty sidecars are
@@ -723,8 +667,8 @@ void XStore::StartWalWriters(const std::string &data_store_dir) {
         // shard's ring here, not lazily on first write -- production has
         // exactly one data_store_dir, known now, so there's no reason to pay
         // the first commit's latency for it. A non-empty file WITHOUT a valid
-        // ring header is a legacy WAL that ReplayWal (called later, from
-        // InitDB) still has to read: GetOrOpenRing returns nullptr for it
+        // version-2 ring header is left for ReplayWal (called later, from
+        // InitDB), which moves it aside: GetOrOpenRing returns nullptr for it
         // rather than wiping it, and the writer opens it lazily on its first
         // append instead.
         std::string wal_path = WalFilePathForDataStoreDir(data_store_dir, i);
@@ -1270,14 +1214,13 @@ void XStore::WalWriterLoop(size_t shard_idx, std::shared_ptr<walring::Ring> preo
                     if (ring_it == rings.end()) {
                         std::shared_ptr<walring::Ring> ring = walring::GetOrOpenRing(record_wal_path[i], static_cast<uint32_t>(shard_idx));
                         if (!ring && walring::IsFenced(record_wal_path[i])) {
-                            // Failed replay: the fence, not a legacy WAL, is why there is no ring. Never re-init it.
+                            // Failed replay: the fence, not an old-format file, is why there is no ring. Never re-init it.
                             LogFencedWalOncePerMinute(record_wal_path[i]);
                         } else if (!ring) {
-                            // Non-empty without a valid ring header: a legacy WAL.
-                            // If InitDB's ReplayWal had run it would be a ring (or
-                            // empty) by now; reaching the first append means no
-                            // replay is coming for this file.
-                            spdlog::warn("[WAL] - {} has no ring header (legacy WAL never replayed?); initializing it as a ring",
+                            // Non-empty without a valid version-2 ring header. If InitDB's
+                            // ReplayWal had run it would have been moved aside by now;
+                            // reaching the first append means no replay is coming for this file.
+                            spdlog::warn("[WAL] - {} has no version-2 ring header (never replayed?); initializing it as a ring",
                                          record_wal_path[i]);
                             ring = walring::GetOrOpenRing(record_wal_path[i], static_cast<uint32_t>(shard_idx), /*reinit_legacy=*/true);
                         }

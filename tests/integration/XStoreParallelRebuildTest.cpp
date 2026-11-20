@@ -85,7 +85,7 @@ protected:
         std::vector<std::string> out;
         out.reserve(count);
         for (uint64_t i = first; i < first + count; ++i) {
-            out.push_back(MixedRow(i, columns > 0 ? columns : (i % 50 == 0 ? 80 : 40 + static_cast<int>(i % 9))).SerializeAsString());
+            out.push_back(PackDynamicSlot(MixedRow(i, columns > 0 ? columns : (i % 50 == 0 ? 80 : 40 + static_cast<int>(i % 9))), kRowLength));
         }
         return out;
     }
@@ -148,12 +148,12 @@ TEST_F(XStoreParallelRebuildTest, EveryThreadCountGivesTheReferenceBytesOnEveryD
     const std::string db = "PARREBUILD";
     XStore store;
     CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
-    // Dense: 30000 rows (4 groups, the last one partial), widths 40..48 with every 50th row 80 wide, and damaged rows
-    // (the one-pass decoder declines them) inside the first group and on a group edge.
+    // Dense: 30000 rows (4 groups, the last one partial), widths 40..48 with every 50th row 80 wide, and damaged slots
+    // (cells read as unset, a non-live marker as no row) inside the first group and on a group edge.
     WriteRows(YearPath(db, kDense, ".XSTORE"), 0, Mixed(0, 30000, 0));
-    PwriteRow(YearPath(db, kDense, ".XSTORE"), 10, kRowLength, DoubleColumn(1.5) + std::string("\x12\x01\x41", 3));
-    PwriteRow(YearPath(db, kDense, ".XSTORE"), 8191, kRowLength, DoubleColumn(3.5) + std::string("\x0a\xff\x0f", 3));
-    PwriteRow(YearPath(db, kDense, ".XSTORE"), 8192, kRowLength, std::string("\x08\x05", 2) + DoubleColumn(2.5));
+    PwriteRow(YearPath(db, kDense, ".XSTORE"), 10, kRowLength, DamagedSlot(SlotDamage::kUnknownCellType, kRowLength, 1.5));
+    PwriteRow(YearPath(db, kDense, ".XSTORE"), 8191, kRowLength, DamagedSlot(SlotDamage::kStringOutsideSlot, kRowLength, 3.5));
+    PwriteRow(YearPath(db, kDense, ".XSTORE"), 8192, kRowLength, DamagedSlot(SlotDamage::kBadMarker, kRowLength, 2.5));
     // Sparse: rows on block, chunk and group edges and far apart, over the whole 31.5M-row year (about 3850 groups).
     for (uint64_t r : {0ULL, 1ULL, 2047ULL, 2048ULL, 4095ULL, 4096ULL, 8191ULL, 8192ULL, 100000ULL, 100001ULL, 3000000ULL, 31535999ULL}) {
         WriteRows(YearPath(db, kSparse, ".XSTORE"), r, Mixed(r, 1, 1 + static_cast<int>(r % 7)));

@@ -19,7 +19,7 @@
 namespace walring {
 
 inline constexpr uint32_t RING_MAGIC = 0x474E5258;      // "XRNG" little-endian
-inline constexpr uint32_t RING_VERSION = 1;
+inline constexpr uint32_t RING_VERSION = 2;
 inline constexpr size_t HEADER_REGION_BYTES = 4096;
 inline constexpr size_t HEADER_SLOT_BYTES = 512;
 inline constexpr size_t RECORD_FIXED_BYTES = 28;        // recordLen4 crc4 lsn8 dbNameLen2 rowLength2 timeRes4 rowCount4
@@ -108,8 +108,7 @@ public:
     // wake stalled Reserve()s. No-op if lsn <= current; refused (logged) if lsn > head;
     // unchanged if the header write fails (details in *status when given).
     void AdvanceCheckpoint(uint64_t lsn, HeaderWriteStatus *status = nullptr);
-    // head = applied = checkpoint = lsn and clears the unattributed mark, in memory only. Only caller:
-    // the legacy-WAL conversion (XStore_Management.cpp), which restarts a registered ring at LSN 0.
+    // head = applied = checkpoint = lsn and clears the unattributed mark, in memory only. Tests only.
     void ResetTo(uint64_t lsn);
     // Replay finished at `end_lsn` with every touched data file synced: persist
     // checkpoint_lsn = end_lsn in the alternate header slot (slot_seq re-read from
@@ -219,9 +218,9 @@ bool ConsumeInjectedDirectSyncFailure();
 // Static, mutex-guarded registry keyed by WAL file path.
 //  * valid ring header      -> ring, start_lsn = checkpoint_lsn (ring size from the header)
 //  * empty / new file       -> InitRingFile
-//  * non-empty, no header   -> a legacy WAL awaiting replay: nullptr (never wiped here),
-//                              unless reinit_legacy: truncate + InitRingFile (the writer's
-//                              last resort when no replay ever converted the file)
+//  * non-empty, no header   -> not a version-2 ring (ReplayWal moves it aside): nullptr
+//                              (never wiped here), unless reinit_legacy: truncate +
+//                              InitRingFile (the writer's last resort when no replay ran)
 //  * open/init failure      -> nullptr
 std::shared_ptr<Ring> GetOrOpenRing(const std::string &wal_path, uint32_t shard_id, bool reinit_legacy = false);
 std::vector<std::shared_ptr<Ring>> AllRings();

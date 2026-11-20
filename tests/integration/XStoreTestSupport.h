@@ -3,11 +3,14 @@
 
 #include <arpa/inet.h>
 #include <atomic>
+#include <bit>
 #include <cstdlib>
 #include <chrono>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -131,6 +134,48 @@ inline XStore_Proto::RowData MakeRow(const std::vector<XStore_Proto::FData> &fie
     XStore_Proto::RowData row;
     for (const auto &f : fields) {
         *row.add_fielddata() = f;
+    }
+    return row;
+}
+
+// The layout of a no-schema DB of `row_length` (every column dynamic), for tests that build WalRecords by hand.
+inline std::shared_ptr<const xstore::layout::RowLayout> DynamicLayout(size_t row_length) {
+    std::string error;
+    std::optional<xstore::layout::RowLayout> layout = xstore::layout::RowLayout::Make({}, row_length, &error);
+    EXPECT_TRUE(layout.has_value()) << error;
+    return layout ? std::make_shared<const xstore::layout::RowLayout>(std::move(*layout)) : nullptr;
+}
+
+// A slot of a no-schema DB decoded to its RowData (a hole decodes to an empty row). The layout is cached per row length.
+inline void DecodeDynamicSlot(const char *slot, size_t row_length, XStore_Proto::RowData *row) {
+    thread_local std::map<size_t, std::shared_ptr<const xstore::layout::RowLayout>> layouts;
+    std::shared_ptr<const xstore::layout::RowLayout> &layout = layouts[row_length];
+    if (layout == nullptr) layout = DynamicLayout(row_length);
+    if (layout != nullptr) {
+        layout->DecodeToRowData(slot, row);
+    } else {
+        row->Clear();
+    }
+}
+
+// `row` packed into a zeroed slot of `row_length` bytes of a no-schema DB: exactly the bytes the server stores for it.
+// Fails the calling test (and returns the zeroed hole) if the row does not fit.
+inline std::string PackDynamicSlot(const XStore_Proto::RowData &row, size_t row_length) {
+    std::string slot(row_length, '\0');
+    const xstore::layout::PackResult packed = DynamicLayout(row_length)->PackFromRowData(row, slot.data());
+    if (!packed.Ok()) {
+        ADD_FAILURE() << "row does not fit a " << row_length << "-byte slot: " << xstore::layout::DescribePackResult(packed);
+        slot.assign(row_length, '\0');
+    }
+    return slot;
+}
+
+// A row of doubles given by raw bit pattern (so NaN payloads and signaling NaNs survive); nullopt is an unset (null) column.
+inline XStore_Proto::RowData DoubleBitsRow(const std::vector<std::optional<uint64_t>> &cells) {
+    XStore_Proto::RowData row;
+    for (const std::optional<uint64_t> &bits : cells) {
+        XStore_Proto::FData *f = row.add_fielddata();
+        if (bits.has_value()) f->set_doubledata(std::bit_cast<double>(*bits));
     }
     return row;
 }

@@ -59,7 +59,7 @@ XStore::RunState XStore::FindByPatternRun(FindByPatternJob &job, const std::func
         job.next_epoch = job.start_epoch;
         // Loaded BEFORE the cfg is read, as the deletes do: CfgEpochCurrent tells a resumed run whether the DB was removed meanwhile.
         job.cfg_epoch = CfgEpoch();
-        if (!GetOrLoadCfg(db_name, db_base_path_str, job.cfg_struct)) {
+        if (!GetOrLoadCfg(db_name, db_base_path_str, job.cfg_struct, &job.layout)) {
             set_warning("[WARNING] ", fmt::format("[FINDBYPATTERN] [DB: {}] - {}.CFG does not exist", db_name, db_name));
             finish(std::string());
             return RunState::kDone;
@@ -96,6 +96,7 @@ XStore::RunState XStore::FindByPatternRun(FindByPatternJob &job, const std::func
     }
 
     const XStore_Proto::ConfigStruct &cfg_struct = job.cfg_struct;
+    const xstore::layout::RowLayout &layout = *job.layout;
     const PatternMatcher *matcher = job.matcher.get();
     std::string &chunk_buf = job.chunk_buf;
     const size_t chunk_size_bytes = job.chunk_size_bytes;
@@ -105,9 +106,6 @@ XStore::RunState XStore::FindByPatternRun(FindByPatternJob &job, const std::func
     const unsigned long long reply_limit = job.streamed_reply ? std::numeric_limits<unsigned long long>::max() : xstore::ReplyLimitBytes().load();
     unsigned long long int &total_emitted_bytes = job.total_emitted_bytes;
     bool &size_limit_exceeded = job.size_limit_exceeded;
-    // Hoisted out of the row loop so a string column's buffer is recycled
-    // across rows instead of reallocated per row.
-    XStore_Proto::FData f_data;
     bool consumed_any = false;   // parking is only asked after one scan chunk or piece of this run: every run makes progress
 
     unsigned long long int iter_epoch = job.next_epoch;
@@ -137,30 +135,18 @@ XStore::RunState XStore::FindByPatternRun(FindByPatternJob &job, const std::func
             // in `ready` until that chunk's lock is released, so sending to a slow client never holds off the inserts.
             std::vector<std::string> ready;
 
-            // Whether the row's column holds a string/bytes value matching the pattern. fd is the caller's decode buffer
-            // (ExtractColumnByIndexSkipParse merges into it, ReadMessage semantics, so it is cleared first or an unset column
-            // would inherit the previous row's value).
-            auto row_matches = [&](const char *row_ptr, XStore_Proto::FData &fd) -> bool {
-                fd.Clear();
-                if (!ExtractColumnByIndexSkipParse(row_ptr, cfg_struct.rowlength(),
-                                                   static_cast<unsigned short>(column_idx), fd)) {
-                    return false;
-                }
-                std::string_view text;
-                if (fd.oneOfData_case() == XStore_Proto::FData::kStringData) {
-                    text = fd.stringdata();
-                } else if (fd.oneOfData_case() == XStore_Proto::FData::kBytesData) {
-                    text = fd.bytesdata();
-                } else {
-                    return false;
-                }
-                return matcher->Matches(text);
+            // Whether the row's column holds a string/bytes value matching the pattern. Reads the text in place (no FData copy).
+            auto row_matches = [&](const char *row_ptr) -> bool {
+                xstore::layout::Cell cell;
+                if (!layout.Load(row_ptr, static_cast<uint32_t>(column_idx), &cell)) return false;
+                if (cell.kind != xstore::layout::Kind::kString && cell.kind != xstore::layout::Kind::kBytes) return false;
+                return matcher->Matches(cell.text);
             };
             // The sequential emitter: appends the matching row to chunk_buf, holds a full buffer in `ready`. Returns false once
             // the 2GB guard trips.
             auto emit_row = [&](unsigned long long int e, const char *row_ptr) -> bool {
                 size_t size_before = chunk_buf.size();
-                XStoreWireEncode::EncodeQueryResponseEntry(chunk_buf, e, row_ptr, cfg_struct.rowlength());
+                XStoreWireEncode::EncodeQueryResponseEntry(chunk_buf, e, row_ptr, layout);
                 total_emitted_bytes += static_cast<unsigned long long int>(chunk_buf.size() - size_before);
                 if (chunk_buf.size() >= chunk_size_bytes) {
                     ready.push_back(std::move(chunk_buf));
@@ -178,12 +164,12 @@ XStore::RunState XStore::FindByPatternRun(FindByPatternJob &job, const std::func
             // One scan chunk: rows [chunk_lo, chunk_lo + rows) at chunk_rows; the prefilter below starts afresh on each chunk.
             // emit(e, row_ptr) returns false to stop. Only reads shared state, so pieces may run it in parallel.
             auto scan_rows = [&](const char *chunk_rows, unsigned long long rows, unsigned long long int chunk_lo,
-                                 XStore_Proto::FData &fd, auto &&emit) -> bool {
+                                 auto &&emit) -> bool {
             const unsigned long long int chunk_end = chunk_lo + rows - 1;
             const size_t row_len = cfg_struct.rowlength();
             auto test_row = [&](unsigned long long int e) -> bool {
                 const char *row_ptr = chunk_rows + (e - chunk_lo) * row_len;
-                return !row_matches(row_ptr, fd) || emit(e, row_ptr);
+                return !row_matches(row_ptr) || emit(e, row_ptr);
             };
             if (literal.empty()) {
                 for (unsigned long long int e = chunk_lo; e <= chunk_end; ++e) {
@@ -191,7 +177,7 @@ XStore::RunState XStore::FindByPatternRun(FindByPatternJob &job, const std::func
                 }
             } else {
                 // A+ raw-bytes prefilter: string/bytes values sit verbatim in the
-                // serialized row, so every matching row contains `literal`. One
+                // slot (inline or in its tail), so every matching row contains `literal`. One
                 // memmem over the contiguous span skips decoding rows without it;
                 // hits in another column, across a row boundary, or in a hole's
                 // zero bytes are rejected by test_row's full check. ILIKE (and only
@@ -236,9 +222,8 @@ XStore::RunState XStore::FindByPatternRun(FindByPatternJob &job, const std::func
                     target_file_path, const_cast<char *>(mapped_base), first_offset, region_length, cfg_struct.rowlength(),
                     iter_epoch - curr_ts.first_epoch,
                     [&](const char *chunk_rows, unsigned long long rows, unsigned long long row_offset, std::string &out) {
-                        XStore_Proto::FData piece_fd;
-                        scan_rows(chunk_rows, rows, iter_epoch + row_offset, piece_fd, [&](unsigned long long int e, const char *row_ptr) {
-                            XStoreWireEncode::EncodeQueryResponseEntry(out, e, row_ptr, cfg_struct.rowlength());
+                        scan_rows(chunk_rows, rows, iter_epoch + row_offset, [&](unsigned long long int e, const char *row_ptr) {
+                            XStoreWireEncode::EncodeQueryResponseEntry(out, e, row_ptr, layout);
                             return true;
                         });
                     },
@@ -280,7 +265,7 @@ XStore::RunState XStore::FindByPatternRun(FindByPatternJob &job, const std::func
                             return false;
                         }
                         consumed_any = true;
-                        return scan_rows(chunk_rows, rows, iter_epoch + row_offset, f_data, emit_row) && !size_limit_exceeded;
+                        return scan_rows(chunk_rows, rows, iter_epoch + row_offset, emit_row) && !size_limit_exceeded;
                     },
                     [&] {
                         for (std::string &full : ready) emit_chunk(std::move(full), false);

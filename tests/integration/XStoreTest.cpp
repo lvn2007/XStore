@@ -19,8 +19,10 @@
 #include <map>
 #include <random>
 #include <set>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #include <google/protobuf/io/coded_stream.h>
@@ -30,6 +32,7 @@
 #include "include/DataStructs/FileRangeLock.h"
 #include "include/XStore/XStore_PreadPool.h"
 #include "include/XStore/XStore_Indexer.h"
+#include "include/XStore/XStore_Config.h"
 #include <spdlog/fmt/fmt.h>
 #include "XStoreTestSupport.h"
 
@@ -111,9 +114,7 @@ XStore_Proto::RowData ReadRowDirectlyFromDisk(const fs::path &data_file, unsigne
     in.read(buf.data(), row_length);
 
     XStore_Proto::RowData row;
-    google::protobuf::io::ArrayInputStream array_in(buf.data(), row_length);
-    google::protobuf::io::CodedInputStream coded_in(&array_in);
-    row.MergePartialFromCodedStream(&coded_in);
+    DecodeDynamicSlot(buf.data(), static_cast<size_t>(row_length), &row);
     return row;
 }
 
@@ -390,8 +391,8 @@ TEST_F(XStoreTest, PersistedColumnCountAboveBoundIsClampedOnLoadInsteadOfCrashin
         poisoned.set_timeresolution(XStore_Proto::SECOND);
         poisoned.set_rowlength(kRowLength);
         poisoned.set_columncount(0xFFFFFFFFu);
-        std::ofstream cfg_out(db_dir / (db_name + ".CFG"), std::ios::binary | std::ios::trunc);
-        ASSERT_TRUE(poisoned.SerializeToOstream(&cfg_out));
+        std::string cfg_error;
+        ASSERT_TRUE(xstore::config::Save((db_dir / (db_name + ".CFG")).string(), poisoned, &cfg_error)) << cfg_error;
     }
 
     // One real (non-hole) row in a year file, so the startup rebuild below
@@ -400,8 +401,7 @@ TEST_F(XStoreTest, PersistedColumnCountAboveBoundIsClampedOnLoadInsteadOfCrashin
     {
         XStore_Proto::RowData row;
         row.add_fielddata()->set_doubledata(7.0);
-        std::vector<char> row_buf(kRowLength, 0);
-        ASSERT_TRUE(row.SerializeToArray(row_buf.data(), kRowLength));
+        const std::string row_buf = xstore_test::PackDynamicSlot(row, kRowLength);
         std::ofstream data_out(db_dir / "2023.XSTORE", std::ios::binary | std::ios::trunc);
         data_out.write(row_buf.data(), kRowLength);
         ASSERT_TRUE(data_out.good());
@@ -795,13 +795,14 @@ TEST_F(XStoreTest, UnaryInsertAdjacentTimestampsDoNotOverlap) {
 }
 
 TEST_F(XStoreTest, UnaryInsertAdjacentTimestampsDoNotOverlapWithTightRowLength) {
-    // rowLength set to the actual serialized size of one row (not a generous
+    // rowLength set to the actual slot size of one row (not a generous
     // round number) so adjacent slots sit back-to-back with zero slack --
     // any off-by-one in the offset math would spill into a neighbor.
-    constexpr int k_rows = 20;  // all values < 128 -> single-byte varint, so every row serializes to the same size
-    XStore_Proto::RowData sample = MakeRow({FInt64(0)});
+    constexpr int k_rows = 20;
+    // One dynamic column: 3 header bytes + a 9-byte cell, no tail.
+    constexpr short k_tight_row_length = 3 + 9;
     XStore store;
-    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, (short)sample.ByteSizeLong());
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, k_tight_row_length);
 
     XStore_Proto::UnaryInsert_REP insert_rep;
     for (int i = 0; i < k_rows; i++) {
@@ -819,19 +820,19 @@ TEST_F(XStoreTest, UnaryInsertAdjacentTimestampsDoNotOverlapWithTightRowLength) 
 
 TEST_F(XStoreTest, UnaryInsertRowLargerThanRowLengthIsRejectedAndDoesNotCorruptNeighbor) {
     XStore store;
-    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 8);  // just enough for a short row, not more
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 12);  // just enough for a one-cell row (3 + 9), not more
 
     XStore_Proto::UnaryInsert_REP neighbor_rep;
     store.UnaryInsert(TS_2009_MID, MakeRow({FInt32(1)}), "TESTDB", &neighbor_rep);
     ASSERT_NE(neighbor_rep.insertstatus().find("[INFO]"), std::string::npos);
 
-    // This row's serialized size exceeds the configured 8-byte rowLength.
-    // Before the fix, XStore::UnaryInsert never checked SerializeToArray's
-    // return value, so this silently truncated instead of erroring.
+    // This row's slot size exceeds the configured 12-byte rowLength.
+    // Before the fix, XStore::UnaryInsert never checked the serialization's
+    // result, so this silently truncated instead of erroring.
     XStore_Proto::UnaryInsert_REP oversized_rep;
     store.UnaryInsert(TS_2009_MID + 1, MakeRow({FString("this string is far too long for an 8 byte row")}), "TESTDB", &oversized_rep);
     EXPECT_NE(oversized_rep.insertstatus().find("[WARNING]"), std::string::npos) << oversized_rep.insertstatus();
-    EXPECT_NE(oversized_rep.insertstatus().find("exceeds"), std::string::npos) << oversized_rep.insertstatus();
+    EXPECT_NE(oversized_rep.insertstatus().find("does not fit the DB's row length"), std::string::npos) << oversized_rep.insertstatus();
 
     // The oversized attempt must not have written anything, and the
     // preceding row's data must be untouched.
@@ -1433,14 +1434,16 @@ TEST_F(XStoreTest, BatchInsertWithWidelySeparatedTimestampsLocksFullSpanAgainstC
         << "finalValue=" << final_value;
 }
 
-TEST_F(XStoreTest, BatchQueryRowFillingEntireBufferWithNoZeroByteIsNotTreatedAsHole) {
-    // Craft a row whose serialized bytes fill the whole rowLength slot with
-    // no zero byte anywhere in it -- regression test for BatchQuery's old
-    // strlen(BufferIn)==0 hole-check, which could read past a
-    // non-null-terminated buffer in exactly this situation.
+TEST_F(XStoreTest, BatchQueryRowFillingTheSlotToItsLastByteRoundTrips) {
+    // Craft a row that fills the whole rowLength slot to its last byte (3 header
+    // bytes + one 9-byte cell + 20 tail bytes of 0xFF, zero slack) -- regression
+    // test for BatchQuery's old strlen(BufferIn)==0 hole-check, which could read
+    // past a non-null-terminated buffer in exactly this situation. (A live slot
+    // always has a zero byte now, the high byte of its column count; the hole
+    // check is the marker byte, and the last byte of the slot must still be read.)
     XStore_Proto::RowData sample = MakeRow({FBytes(std::string(20, '\xFF'))});
     XStore store;
-    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, (short)sample.ByteSizeLong());
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 3 + 9 + 20);
 
     XStore_Proto::BatchInsert_REQ insert_req;
     insert_req.set_dbname("TESTDB");
@@ -1460,6 +1463,56 @@ TEST_F(XStoreTest, BatchQueryRowFillingEntireBufferWithNoZeroByteIsNotTreatedAsH
     ASSERT_EQ(query_rep.queryresponse_size(), 1);
     ASSERT_EQ(query_rep.queryresponse(0).data().fielddata_size(), 1);
     EXPECT_EQ(query_rep.queryresponse(0).data().fielddata(0).bytesdata(), std::string(20, '\xFF'));
+}
+
+// Reads never trust the disk (spec section 4): a slot whose marker is neither 0 nor 1, or whose column count the slot cannot
+// hold, is skipped by BatchQuery like a hole (and logged, once a minute at most) instead of being sent as an empty or inflated entry.
+TEST_F(XStoreTest, BatchQuerySkipsSlotsWithACorruptMarkerOrColumnCount) {
+    XStore store;
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 32);
+    XStore_Proto::BatchInsert_REQ insert_req;
+    insert_req.set_dbname("TESTDB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
+    for (unsigned long long i = 0; i < 4; ++i) {
+        XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
+        entry->set_timestamp(TS_2016_MID + i);
+        *entry->mutable_data() = MakeRow({FDouble(static_cast<double>(i)), FDouble(1.5)});
+    }
+    XStore_Proto::BatchInsert_REP insert_rep;
+    store.BatchInsert(&insert_req, &insert_rep);
+    ASSERT_NE(insert_rep.insertstatus().find("Inserted 4 elements"), std::string::npos) << insert_rep.insertstatus();
+
+    const unsigned long long first_epoch = TimeStruct(static_cast<std::time_t>(TS_2016_MID), XStore_Proto::SECOND).first_epoch;
+    const int fd = open((scratch->test_root / "DataStore" / "TESTDB" / "2016.XSTORE").c_str(), O_RDWR);
+    ASSERT_GE(fd, 0);
+    auto poke = [&](unsigned long long ts, off_t within_slot, const std::string &bytes) {
+        ASSERT_EQ(pwrite(fd, bytes.data(), bytes.size(), static_cast<off_t>((ts - first_epoch) * 32) + within_slot), static_cast<ssize_t>(bytes.size()));
+    };
+    poke(TS_2016_MID + 1, 0, std::string(1, '\x07'));        // marker neither 0 nor 1
+    poke(TS_2016_MID + 2, 1, std::string("\xFF\xFF", 2));    // 65535 columns in a 32-byte slot
+    ASSERT_EQ(close(fd), 0);
+
+    kLogCapture->Clear();
+    xstore::layout::ResetCorruptRowLogForTests();   // the warning is rate-limited process-wide: forget any earlier test's
+    XStore_Proto::BatchQuery_REQ query_req;
+    query_req.set_dbname("TESTDB");
+    for (unsigned long long i = 0; i < 4; ++i) query_req.add_timestamp(TS_2016_MID + i);
+    const XStore_Proto::BatchQuery_REP query_rep = BatchQuery(store, &query_req);
+    ASSERT_EQ(query_rep.queryresponse_size(), 2);
+    EXPECT_EQ(query_rep.queryresponse(0).timestamp(), TS_2016_MID);
+    EXPECT_EQ(query_rep.queryresponse(1).timestamp(), TS_2016_MID + 3);
+    for (int i = 0; i < 2; ++i) EXPECT_EQ(query_rep.queryresponse(i).data().fielddata_size(), 2);
+    EXPECT_EQ(kLogCapture->Count("corrupt row skipped"), 1u) << "a damaged slot is reported, once, not once per slot";
+
+    // The same rows past BATCH_QUERY_PARALLEL_PREAD_MIN_ROWS take the wave-parallel pread path (holes are omitted, so the answer is the same).
+    XStore_Proto::BatchQuery_REQ wide_req;
+    wide_req.set_dbname("TESTDB");
+    for (unsigned long long i = 0; i < XStoreTunables::BATCH_QUERY_PARALLEL_PREAD_MIN_ROWS + 50; ++i) wide_req.add_timestamp(TS_2016_MID + i);
+    const XStore_Proto::BatchQuery_REP wide_rep = BatchQuery(store, &wide_req);
+    ASSERT_EQ(wide_rep.queryresponse_size(), 2);
+    EXPECT_EQ(wide_rep.queryresponse(0).timestamp(), TS_2016_MID);
+    EXPECT_EQ(wide_rep.queryresponse(1).timestamp(), TS_2016_MID + 3);
+    for (int i = 0; i < 2; ++i) EXPECT_EQ(wide_rep.queryresponse(i).data().fielddata_size(), 2);
 }
 
 TEST_F(XStoreTest, BatchQueryEmptyTimestampListSucceedsWithNoResults) {
@@ -2656,7 +2709,7 @@ TEST_F(XStoreTest, UnaryBatchAndRangeInsertQueryShareSameCachedMappingWithinAYea
 
 TEST_F(XStoreTest, GetOrMapFileEvictsBeyondCapAndEvictedFilesStillReadCorrectly) {
     XStore store;
-    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 8);
+    CreateTestDb(store, "TESTDB", XStore_Proto::SECOND, 12);   // one dynamic cell: 3 + 9
 
     constexpr int k_year_count = 300;  // > MmapCacheCap (256) -- forces eviction
     std::vector<unsigned long long> timestamps;
@@ -3897,9 +3950,8 @@ TEST_F(XStoreTest, CfgCachedByOneXStoreInstanceIsVisibleToAnotherInstance) {
     divergent.set_timeresolution(XStore_Proto::SECOND);
     divergent.set_rowlength(4);
     fs::path cfg_path = scratch->test_root / "DataStore" / "TESTDB" / "TESTDB.CFG";
-    FILE *c_file = std::fopen(cfg_path.string().c_str(), "wb+");
-    divergent.SerializeToFileDescriptor(fileno(c_file));
-    std::fclose(c_file);
+    std::string cfg_error;
+    ASSERT_TRUE(xstore::config::Save(cfg_path.string(), divergent, &cfg_error)) << cfg_error;
 
     XStore_Proto::UnaryInsert_REP insert_rep;
     reader.UnaryInsert(TS_2016_MID, MakeRow({FDouble(3.14)}), "TESTDB", &insert_rep);

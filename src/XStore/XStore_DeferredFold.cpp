@@ -27,9 +27,11 @@ bool PreadOrZero(int fd, char *buf, size_t len, off_t offset) {
 
 }  // namespace
 
-bool XStore::FoldStoredRows(int data_fd, uint16_t row_length, uint32_t tracked_column_count, uint32_t catidx_column_limit,
+bool XStore::FoldStoredRows(int data_fd, const xstore::layout::RowLayout &layout, uint32_t tracked_column_count, uint32_t catidx_column_limit,
                             const std::vector<xstore::IndexRun> &runs, ZoneMapFile &zmap, CatIdxFile &catidx) {
     thread_local RebuildScratch scratch;
+    scratch.layout = &layout;
+    const size_t row_length = layout.RowLength();
     const uint64_t slice_rows = std::max<uint64_t>(1, FOLD_SLICE_BYTES / row_length);
     for (const xstore::IndexRun &run : runs) {
         for (uint64_t done = 0; done < run.row_count; done += slice_rows) {
@@ -44,8 +46,7 @@ bool XStore::FoldStoredRows(int data_fd, uint16_t row_length, uint32_t tracked_c
             for (uint64_t r = 0; r < rows; ++r) {
                 const char *row = scratch.scan_buffer.data() + r * row_length;
                 if (row[0] == 0) continue;
-                AppendRebuildObservations(first_row + r, row, row_length, tracked_column_count, &scratch.zmap, &scratch.catidx,
-                                          scratch);
+                AppendRebuildObservations(first_row + r, row, tracked_column_count, &scratch.zmap, &scratch.catidx, scratch);
             }
             if (scratch.zmap.row_index.empty()) continue;   // the whole slice was holes
             zmap.UpdateRows(scratch.zmap);

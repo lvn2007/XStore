@@ -699,7 +699,8 @@ void ZmqServer::WorkerLoop(const std::string &server_addr, int worker_index) {
                 case XStore_Proto::Request::kCreatedb: {
                     const auto &req = client_request->createdb();
                     const std::vector<std::string> column_names(req.columnnames().begin(), req.columnnames().end());
-                    XStore_Proto::CreateDB_REP rep = my_store.CreateDB(req.dbname(), req.timeresolution(), req.rowlength(), req.columncount(), column_names);
+                    XStore_Proto::CreateDB_REP rep = my_store.CreateDB(req.dbname(), req.timeresolution(), req.rowlength(), req.columncount(), column_names,
+                                                                       xstore::layout::RowLayout::SchemaFromProto(req.schema()));
                     SendProto(writer, rep);
                     break;
                 }

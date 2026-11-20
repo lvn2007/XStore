@@ -12,6 +12,10 @@ add_executable(xstore_tests
         integration/XStoreWalTest.cpp
         integration/XStoreZoneMapTest.cpp
         integration/XStoreCrc32cTest.cpp
+        integration/XStoreRowLayoutTest.cpp
+        integration/XStoreConfigTest.cpp
+        integration/XStoreSchemaCfgTest.cpp
+        integration/XStoreTypedSchemaTest.cpp
         integration/XStoreCatIdxTest.cpp
         integration/XStoreBitmapBuildLeaseTest.cpp
         integration/XStoreScanLockTest.cpp
@@ -128,6 +132,7 @@ add_executable(xstore_perf_tests
         perf/XStorePerfTest.cpp
         perf/XStoreDirtyTrackerPerfTest.cpp
         perf/XStoreDeferredFoldPerfTest.cpp
+        perf/XStoreRowLayoutPerfTest.cpp
 )
 target_link_libraries(xstore_perf_tests PRIVATE GTest::gtest_main xstore_core)
 if(XSTORE_USE_JEMALLOC)

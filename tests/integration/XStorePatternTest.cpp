@@ -762,12 +762,13 @@ TEST_F(XStorePatternTestFixture, IlikePrefilterIgnoresCaseButNotBytes) {
 }
 
 TEST_F(XStorePatternTestFixture, IlikePrefilterLiteralStraddlingRowsIsNotAMatch) {
-    // Row 9100's 60-byte string serializes to exactly 64 bytes, so "AB" is the
-    // last row byte; row 9101 holds "CD". Neither row contains "abcd" and the
-    // prefilter's span search must not invent it across the boundary (row 9101's
-    // own header bytes sit between them in the mapped span).
+    // Row 9100's 60-byte string takes exactly 72 bytes of slot (3 header + a 9-byte
+    // cell + the 60-byte tail), so "AB" is the last row byte; row 9101 holds "CD".
+    // Neither row contains "abcd" and the prefilter's span search must not invent
+    // it across the boundary (row 9101's own header bytes sit between them in the
+    // mapped span).
     XStore store;
-    CreateTestDb(store, "PATTERNIL3", XStore_Proto::SECOND, 64);
+    CreateTestDb(store, "PATTERNIL3", XStore_Proto::SECOND, 3 + 9 + 60);
     XStore_Proto::UnaryInsert_REP rep;
     store.UnaryInsert(9100, MakeRow({FString(std::string(58, 'x') + "AB")}), "PATTERNIL3", &rep, XStore_Proto::SYNC);
     store.UnaryInsert(9101, MakeRow({FString("CDyy")}), "PATTERNIL3", &rep, XStore_Proto::SYNC);

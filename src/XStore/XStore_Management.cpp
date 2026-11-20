@@ -11,6 +11,8 @@
 #include "include/XStore/XStore_LiveWidenGovernor.h"
 #include "include/XStore/XStore_LiveWidenChunk.h"
 #include "include/XStore/XStore_LiveWidenLoadSource.h"
+#include "include/XStore/XStore_Config.h"
+#include "include/XStore/XStore_RowLayout.h"
 #include <spdlog/fmt/fmt.h>
 #include "include/Logger/Logger.h"
 #include <algorithm>
@@ -21,6 +23,7 @@
 #include <chrono>
 #include <ctime>
 #include <exception>
+#include <stdexcept>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -28,7 +31,6 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <set>
-#include <stdexcept>
 #include <system_error>
 #include <thread>
 #include <type_traits>
@@ -195,47 +197,63 @@ XStore::XStore() {
     }
 }
 
-bool XStore::GetOrLoadCfg(const std::string &db_name, const std::string &db_base_path, XStore_Proto::ConfigStruct &cfg_out) {
+bool XStore::GetOrLoadCfg(const std::string &db_name, const std::string &db_base_path, XStore_Proto::ConfigStruct &cfg_out,
+                          std::shared_ptr<const xstore::layout::RowLayout> *layout_out) {
     CfgShard &shard = cfg_shards[std::hash<std::string>{}(db_name) % CFG_SHARD_COUNT];
 
-    // Fast path: another thread may have already cached this config
+    // Hit: the cfg and its layout were cached together under the shard lock.
     {
         std::shared_lock read_lock(shard.mutex);
         auto it = shard.map.find(db_name);
         if (it != shard.map.end()) {
+            if (layout_out != nullptr) {
+                const auto layout_it = shard.layouts.find(db_name);
+                if (layout_it == shard.layouts.end()) return false;   // defensive: a cached cfg always has a layout
+                *layout_out = layout_it->second;
+            }
             cfg_out = it->second;
             return true;
         }
     }
 
-    // Cache miss -> take exclusive lock & re-check (another thread may have
-    // loaded it while we were waiting for the lock)
+    // Miss: exclusive lock and re-check (another thread may have loaded it while we waited).
     std::unique_lock write_lock(shard.mutex);
     auto it = shard.map.find(db_name);
     if (it != shard.map.end()) {
+        if (layout_out != nullptr) {
+            const auto layout_it = shard.layouts.find(db_name);
+            if (layout_it == shard.layouts.end()) return false;   // defensive: a cached cfg always has a layout
+            *layout_out = layout_it->second;
+        }
         cfg_out = it->second;
         return true;
     }
 
-    std::string cfg_path = JoinPath(db_base_path, db_name + ".CFG");
-    if (!std::filesystem::exists(cfg_path)) {
-        return false;
+    const std::string cfg_path = JoinPath(db_base_path, db_name + ".CFG");
+    if (!std::filesystem::exists(cfg_path)) return false;
+    const xstore::config::LoadStatus status = xstore::config::Load(cfg_path, &cfg_out);
+    if (status != xstore::config::LoadStatus::kOk) {
+        spdlog::error("[CONFIG LOAD] [DB: {}] - {}: {}", db_name, cfg_path, xstore::config::StatusMessage(status));
+        return false;   // refused: the caller reports "DB does not exist"
     }
-
-    FILE *c_file = std::fopen(cfg_path.c_str(), "rb");
-    if (c_file == nullptr) {
-        return false;
-    }
-    cfg_out.ParseFromFileDescriptor(fileno(c_file));
-    std::fclose(c_file);
 
     // Sanitize BEFORE this value is cached or handed back -- everything
     // downstream (EffectiveTrackedColumnCount, WalRecord::AppendRowWithObs,
     // every GetOrOpenZoneMap call site) treats a cached cfg as already
     // trustworthy. See ClampPersistedColumnCount's comment in XStore.h.
     ClampPersistedColumnCount(db_name, cfg_out);
-
+    std::string layout_error;
+    std::optional<xstore::layout::RowLayout> layout = xstore::layout::RowLayout::Make(
+        xstore::layout::RowLayout::SchemaFromProto(cfg_out.schema()), static_cast<size_t>(cfg_out.rowlength()), &layout_error);
+    if (!layout) {
+        spdlog::error("[CONFIG LOAD] [DB: {}] - {}: the schema and row length do not form a valid layout ({}); the DB is not opened",
+                      db_name, cfg_path, layout_error);
+        return false;
+    }
+    auto shared_layout = std::make_shared<const xstore::layout::RowLayout>(std::move(*layout));
     shard.map[db_name] = cfg_out;
+    shard.layouts[db_name] = shared_layout;
+    if (layout_out != nullptr) *layout_out = std::move(shared_layout);
     return true;
 }
 
@@ -254,19 +272,49 @@ void XStore::ClampPersistedColumnCount(const std::string &db_name, XStore_Proto:
     cfg.set_columncount(XStoreTunables::MAX_TRACKED_COLUMN_COUNT);
 }
 
-void XStore::PutCfg(const std::string &db_name, const XStore_Proto::ConfigStruct &cfg) {
+bool XStore::PutCfg(const std::string &db_name, const XStore_Proto::ConfigStruct &cfg) {
     XStore_Proto::ConfigStruct sanitized = cfg;
     ClampPersistedColumnCount(db_name, sanitized);
+    std::string layout_error;
+    std::optional<xstore::layout::RowLayout> layout = xstore::layout::RowLayout::Make(
+        xstore::layout::RowLayout::SchemaFromProto(sanitized.schema()), static_cast<size_t>(sanitized.rowlength()), &layout_error);
 
     CfgShard &shard = cfg_shards[std::hash<std::string>{}(db_name) % CFG_SHARD_COUNT];
     std::unique_lock write_lock(shard.mutex);
+    if (!layout) {
+        spdlog::error("[CONFIG] [DB: {}] - the schema and row length do not form a valid layout ({}); the DB is not opened",
+                      db_name, layout_error);
+        shard.map.erase(db_name);
+        shard.layouts.erase(db_name);
+        return false;
+    }
     shard.map[db_name] = std::move(sanitized);
+    shard.layouts[db_name] = std::make_shared<const xstore::layout::RowLayout>(std::move(*layout));
+    return true;
 }
 
-void XStore::EraseCfg(const std::string &db_name) {
+std::shared_ptr<const xstore::layout::RowLayout> XStore::GetLayout(const std::string &db_name) {
+    CfgShard &shard = cfg_shards[std::hash<std::string>{}(db_name) % CFG_SHARD_COUNT];
+    std::shared_lock read_lock(shard.mutex);
+    const auto it = shard.layouts.find(db_name);
+    return it == shard.layouts.end() ? nullptr : it->second;
+}
+
+std::shared_ptr<const xstore::layout::RowLayout> XStore::LayoutOfDbDir(const std::string &db_base_path) {
+    const std::string db_name = std::filesystem::path(db_base_path).filename().string();
+    XStore_Proto::ConfigStruct cfg;
+    std::shared_ptr<const xstore::layout::RowLayout> layout;
+    return GetOrLoadCfg(db_name, db_base_path, cfg, &layout) ? layout : nullptr;
+}
+
+void XStore::EraseCfg(const std::string &db_name, const std::string &cfg_path) {
     CfgShard &shard = cfg_shards[std::hash<std::string>{}(db_name) % CFG_SHARD_COUNT];
     std::unique_lock write_lock(shard.mutex);
+    std::error_code remove_ec;
+    std::filesystem::remove(cfg_path, remove_ec);
+    if (remove_ec) spdlog::warn("[REMOVE DB] [DB: {}] - could not delete {}: {}", db_name, cfg_path, remove_ec.message());
     shard.map.erase(db_name);
+    shard.layouts.erase(db_name);
     // After the erase, under the lock. A request that read the erased entry loaded its epoch before that read, so
     // below this value: it is dropped. One that loaded its epoch after this bump reads the state after the erase (no
     // entry, or a re-created DB's): it is kept. Removals of other names never touch this name's entry.
@@ -598,6 +646,7 @@ XStore_Proto::SysInfo_REP XStore::InfoQuery(std::string_view server_addr, int th
             // Set DB Resolution
             curr_db->set_dbresolution(cfg_struct.timeresolution());
             curr_db->set_rowlength(cfg_struct.rowlength());
+            curr_db->mutable_schema()->CopyFrom(cfg_struct.schema());
             for (const std::string &name : cfg_struct.columnnames()) {
                 curr_db->add_columnnames(name);
             }
@@ -698,17 +747,11 @@ void XStore::MaybeGrowColumnCount(const std::string &db_name, const std::string 
     const uint32_t new_effective_tracked = EffectiveTrackedColumnCount(cfg_copy);
     if (new_effective_tracked > old_effective_tracked) RecordLiveWidenRequest(db_name, db_base_path);
 
-    std::string cfg_path = JoinPath(db_base_path, db_name + ".CFG");
-    FILE *b_file = std::fopen(cfg_path.c_str(), "wb+");
-    if (b_file == nullptr) {
-        spdlog::error("[COLUMN COUNT GROWTH] [DB: {}] - Unable to open {} for rewrite", db_name, cfg_path);
+    std::string cfg_error;
+    if (!xstore::config::Save(JoinPath(db_base_path, db_name + ".CFG"), cfg_copy, &cfg_error)) {
+        spdlog::error("[COLUMN COUNT GROWTH] [DB: {}] - Unable to rewrite the .CFG: {}", db_name, cfg_error);
         return;
     }
-    {
-        FileRangeLockGuard guard(cfg_path, 0, cfg_copy.ByteSizeLong(), FileRangeLock::LockType::WRITE);
-        cfg_copy.SerializeToFileDescriptor(fileno(b_file));
-    }
-    std::fclose(b_file);
 
     spdlog::info("[COLUMN COUNT GROWTH] [DB: {}] - columnCount grew to {}", db_name, observed_column_count);
 
@@ -973,7 +1016,8 @@ bool XStore::StopBackgroundWorkForTests(const std::string &scope) { return StopB
 void XStore::ResumeBackgroundWorkForTests(const std::string &scope, bool cancelled) { ResumeBackgroundWork(scope, cancelled); }
 
 XStore_Proto::CreateDB_REP XStore::CreateDB(std::string_view db_name_view, XStore_Proto::TimeUnit time_resolution, short int row_length, uint32_t column_count_seed,
-                                             const std::vector<std::string> &column_names) {
+                                             const std::vector<std::string> &column_names,
+                                             const std::vector<xstore::layout::ColumnSpec> &schema) {
     // Protobuf obj to be returned
     XStore_Proto::CreateDB_REP to_return;
     std::string create_db_status;
@@ -1003,6 +1047,14 @@ XStore_Proto::CreateDB_REP XStore::CreateDB(std::string_view db_name_view, XStor
     // for -- same posture as the row_length guard directly above.
     if (column_count_seed > XStoreTunables::MAX_TRACKED_COLUMN_COUNT) {
         create_db_status = fmt::format("[CREATE DB] [DB: {}] - Column count must be <= {}", db_name, XStoreTunables::MAX_TRACKED_COLUMN_COUNT);
+        SetTaggedStatus(to_return.mutable_createdbstatus(), "[WARNING] ", create_db_status);
+        spdlog::warn(create_db_status);
+        return to_return;
+    }
+
+    std::string layout_error;
+    if (!xstore::layout::RowLayout::Make(schema, static_cast<size_t>(row_length), &layout_error)) {
+        create_db_status = fmt::format("[CREATE DB] [DB: {}] - Invalid schema: {}", db_name, layout_error);
         SetTaggedStatus(to_return.mutable_createdbstatus(), "[WARNING] ", create_db_status);
         spdlog::warn(create_db_status);
         return to_return;
@@ -1064,23 +1116,22 @@ XStore_Proto::CreateDB_REP XStore::CreateDB(std::string_view db_name_view, XStor
                 cfg_struct.add_columnnames(name);
             }
 
-            // Writing cfgStruct to file
-            FILE *b_file;
-            std::string cfg_path  = JoinPath(target_path, db_name + ".CFG");
-            b_file = std::fopen(cfg_path.c_str(), "wb+");
-
-            {
-                // Lock prior to writing
-                FileRangeLockGuard guard(cfg_path, 0, cfg_struct.ByteSizeLong(), FileRangeLock::LockType::WRITE);
-
-                // Writing actual data to disk
-                cfg_struct.SerializeToFileDescriptor(fileno(b_file));
+            xstore::layout::RowLayout::SchemaToProto(schema, cfg_struct.mutable_schema());
+            std::string cfg_error;
+            if (!xstore::config::Save(JoinPath(target_path, db_name + ".CFG"), cfg_struct, &cfg_error)) {
+                std::string err_msg = fmt::format("[CREATE DB] [DB: {}] - Unable to write the config: {}", db_name, cfg_error);
+                SetTaggedStatus(to_return.mutable_createdbstatus(), "[ERROR] ", err_msg);
+                spdlog::error(err_msg);
+                // This call created the directory (create_directory said so) and nothing else knows the DB yet: remove it, so a retry
+                // creates the DB instead of answering "Already existed" for a directory no request can use.
+                std::error_code remove_ec;
+                std::filesystem::remove_all(target_path, remove_ec);
+                return to_return;
             }
-            //  Close file after write
-            std::fclose(b_file);
 
             //  Add this cfgStruct to cfgMap
-            PutCfg(db_name, cfg_struct);
+            // Cannot fail: the same schema and row length passed RowLayout::Make above, before the directory was created.
+            static_cast<void>(PutCfg(db_name, cfg_struct));
 
             spdlog::info(success_msg);
             return to_return;
@@ -1152,11 +1203,10 @@ XStore_Proto::RemoveDB_REP XStore::RemoveDB(std::string_view db_name_view) {
     const bool retire_late = RemovalScopeHasRebuildingIndex(bg_scope);
     if (!retire_late) RetireIndexesUnderPrefix(bg_scope);
 
-    // New requests stop at the door ("DB does not exist"): the .CFG goes first, then its cached copy, so a cache miss
-    // cannot load it back.
+    // New requests stop at the door ("DB does not exist"): the .CFG and its cached copy go together under the cfg lock,
+    // so neither a cache miss nor a column-count grower can bring it back.
     std::error_code remove_ec;
-    std::filesystem::remove(JoinPath(db_loc, db_name + ".CFG"), remove_ec);
-    EraseCfg(db_name);
+    EraseCfg(db_name, JoinPath(db_loc, db_name + ".CFG"));
 
     // A data file is no longer created while the scope is registered (OpenDataFile), but an index cold open that passed
     // its RemovalCovers check just before the scope was registered can still create its file while remove_all walks
@@ -1400,13 +1450,12 @@ void XStore::InitDB() {
         std::string cfg_file_path = JoinPath(p.path().string(), curr_db_name + ".CFG");
 
         XStore_Proto::ConfigStruct cfg_struct;
-        FILE *c_file = std::fopen(cfg_file_path.c_str(), "rb");
-        if (c_file == nullptr) {
-            spdlog::error("[INIT DB] [DB: {}] - Unable to open {}", curr_db_name, cfg_file_path);
+        const xstore::config::LoadStatus cfg_status = xstore::config::Load(cfg_file_path, &cfg_struct);
+        if (cfg_status != xstore::config::LoadStatus::kOk) {
+            spdlog::error("[INIT DB] [DB: {}] - {}: {}; this DB is NOT opened", curr_db_name, cfg_file_path,
+                          xstore::config::StatusMessage(cfg_status));
             continue;
         }
-        cfg_struct.ParseFromFileDescriptor(fileno(c_file));
-        std::fclose(c_file);
 
         // Clamp on THIS local too, not just inside PutCfg's own copy: the
         // local is what flows into RebuildStaleZoneMapsForDb ->
@@ -1416,7 +1465,7 @@ void XStore::InitDB() {
         // the allocations an out-of-bound on-disk value actually throws on.
         // See ClampPersistedColumnCount in XStore.h.
         ClampPersistedColumnCount(curr_db_name, cfg_struct);
-        PutCfg(curr_db_name, cfg_struct);
+        if (!PutCfg(curr_db_name, cfg_struct)) continue;   // no layout: PutCfg logged the reason; the DB is not opened
 
         // Task 5 / Task 11: rebuild every stale/missing zone map and catidx of
         // this DB before InitDB() returns -- i.e. before any worker thread
@@ -1945,6 +1994,15 @@ std::vector<std::exception_ptr> XStore::RebuildYearsIndexes(const std::string &d
                                                             uint16_t row_length, uint32_t tracked_column_count,
                                                             unsigned thread_count, uint64_t group_bytes,
                                                             const rebuildprogress::Options &progress) {
+    // Every fold reads the rows through the DB's layout. Without one (no readable .CFG, or a row length that is not the
+    // DB's) nothing is begun: each year fails, as a rebuild that could not read its rows does.
+    const std::shared_ptr<const xstore::layout::RowLayout> layout = LayoutOfDbDir(db_base_path);
+    if (layout == nullptr || layout->RowLength() != row_length) {
+        const std::string why = fmt::format("[INDEX REBUILD] [{}] - No layout of row length {} for the DB; nothing rebuilt",
+                                            db_base_path, row_length);
+        spdlog::error(why);
+        return std::vector<std::exception_ptr>(tasks.size(), std::make_exception_ptr(std::runtime_error(why)));
+    }
     std::vector<YearRebuild> years(tasks.size());
     struct GroupRef {
         size_t year;
@@ -1984,6 +2042,7 @@ std::vector<std::exception_ptr> XStore::RebuildYearsIndexes(const std::string &d
     std::atomic<size_t> next{0};
     const auto work = [&] {
         RebuildScratch scratch;
+        scratch.layout = layout.get();
         for (size_t t = next.fetch_add(1, std::memory_order_relaxed); t < groups.size();
              t = next.fetch_add(1, std::memory_order_relaxed)) {
             YearRebuild &y = years[groups[t].year];
@@ -2059,7 +2118,7 @@ XStore::FoldResult XStore::FoldChunk(int data_fd, uint64_t chunk_begin, uint64_t
     CatIdxFoldBatch *catidx_batch = catidx != nullptr ? &scratch.catidx : nullptr;
     result.scan_complete = ForEachDataRow(data_fd, chunk_end, row_length, [&](uint64_t row_index, const char *row) {
         if (row[0] == 0) return; // never-written sparse hole -- same fast skip ProcessFileRangeAccumulate uses
-        AppendRebuildObservations(row_index, row, row_length, tracked_column_count, zmap_batch, catidx_batch, scratch);
+        AppendRebuildObservations(row_index, row, tracked_column_count, zmap_batch, catidx_batch, scratch);
     }, chunk_begin, &scratch.scan_buffer);
     if (!result.scan_complete) return result;
     if (zmap != nullptr) result.zmap_written = zmap->RebuildFoldRows(scratch.zmap);
@@ -2084,6 +2143,12 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
     std::error_code exists_ec;
     if ((!widen_zmap && !widen_catidx) || row_length == 0 || !std::filesystem::exists(data_path, exists_ec)) {
         return LiveWidenResult::kNothingToDo;
+    }
+    // Every fold reads the rows through the DB's layout; without one nothing is begun (no file touched).
+    const std::shared_ptr<const xstore::layout::RowLayout> layout = LayoutOfDbDir(db_base_path);
+    if (layout == nullptr || layout->RowLength() != row_length) {
+        spdlog::error("[LIVE WIDEN] [{}] - No layout of row length {} for the DB; not widened", data_path, row_length);
+        return LiveWidenResult::kFailed;
     }
 
     // Pins before BeginRebuild, held until after MarkClean (they live in this frame): the registry never evicts these
@@ -2256,6 +2321,7 @@ XStore::LiveWidenResult XStore::LiveWidenOneYear(const std::string &db_base_path
             uint64_t consecutive_timeouts = 0;
             bool timeout_warned = false;
             RebuildScratch scratch; // per worker, never shared
+            scratch.layout = layout.get();
             const auto halt = [&] {
                 if (failed.load(std::memory_order_relaxed) || was_stopped.load(std::memory_order_relaxed)) return true;
                 if (!stopped()) return false;
@@ -2914,101 +2980,28 @@ XStore::LiveWidenDbOutcome XStore::LiveWidenDb(const std::string &db_base_path, 
     return LiveWidenDbOutcome::kRetry;
 }
 
-void XStore::AppendRebuildObservations(uint64_t row_index, const char *row, uint16_t row_length,
-                                       uint32_t tracked_column_count, ZoneMapFoldBatch *zmap, CatIdxFoldBatch *catidx,
-                                       RebuildScratch &scratch) {
-    using google::protobuf::internal::WireFormatLite;
-    static const uint32_t kColumnTag =
-        WireFormatLite::MakeTag(XStore_Proto::RowData::kFieldDataFieldNumber, WireFormatLite::WIRETYPE_LENGTH_DELIMITED);
-    const size_t zmap_mark = zmap != nullptr ? zmap->observations.size() : 0;
-    const size_t catidx_mark = catidx != nullptr ? catidx->values.size() : 0;
-
-    // One pass: walk the tags as RealRowDataLength / ExtractColumnByIndexSkipParse do (ReadTag() == 0 ends the row) and
-    // decode each column once. Accepted only if every tag is a well-formed column (field 1, length-delimited, inside
-    // the slot) and every column decodes. Then the per-row rebuild got exactly these columns: RowData parse of
-    // [0, real_len) sees the same n columns in the same order (no unknown or mis-typed field to skip or keep), and
-    // ExtractColumnByIndexSkipParse(c) skips the same c columns and decodes column c from the same bytes (an
-    // empty, unset column included: the zone map sees it as null; the catidx skips it, like WalRecord::AppendRow).
-    google::protobuf::io::CodedInputStream in(reinterpret_cast<const uint8_t *>(row), row_length);
-    bool one_pass = true;
-    uint32_t column = 0;
-    // Wire bytes of the two column shapes that need no protobuf parse: an unset column is `0A 00`; a double column is
-    // `0A 09 09 <8 bytes>` (FData field 1 = doubleData, wire type 1 = fixed64, so its tag byte is 0x09).
-    constexpr uint8_t DOUBLE_FIELD_TAG = (XStore_Proto::FData::kDoubleDataFieldNumber << 3) | WireFormatLite::WIRETYPE_FIXED64;
-    constexpr char DOUBLE_CASE_BYTE = static_cast<char>(XStore_Proto::FData::kDoubleData);   // AppendFDataForCatIdx writes the case id first
-    static_assert(DOUBLE_FIELD_TAG == 0x09 && DOUBLE_CASE_BYTE == 1, "the lean double path assumes proto/XStore.proto field 1 = doubleData");
-    for (uint32_t tag = in.ReadTag(); tag != 0; tag = in.ReadTag(), ++column) {
-        int length = 0;
-        if (tag != kColumnTag || !in.ReadVarintSizeAsInt(&length) ||
-            length > static_cast<int>(row_length) - in.CurrentPosition()) {
-            one_pass = false;
-            break;
+// The same RowLayout calls as the insert path (WalRecord::ObserveLastRow), so a rebuilt index equals the live one byte for
+// byte. An unset column is a null to the zone map and is skipped by the catalog index; a NaN is quieted by ObservationOf.
+void XStore::AppendRebuildObservations(uint64_t row_index, const char *row, uint32_t tracked_column_count,
+                                       ZoneMapFoldBatch *zmap, CatIdxFoldBatch *catidx, RebuildScratch &scratch) {
+    const xstore::layout::RowLayout &layout = *scratch.layout;
+    const uint32_t columns = layout.LiveAndSane(row) ? xstore::layout::RowLayout::ColumnCount(row) : 0;   // a damaged slot adds nothing
+    const uint32_t tracked = std::min(tracked_column_count, columns);
+    CatIdxEncodeBuffer encoded;
+    for (uint32_t column = 0; column < tracked; ++column) {
+        xstore::layout::Cell cell;
+        if (!layout.Load(row, column, &cell)) {
+            if (zmap != nullptr) zmap->observations.push_back({column, 0.0, false});
+            continue;
         }
-        const char *column_bytes = row + in.CurrentPosition();
-        // A NaN double keeps the parse path: the old path (and the live insert) carry the value through a long double,
-        // which quiets a signaling NaN, and ZoneMapFile does not skip NaN, so a raw copy would change the .zmap bytes.
-        // Tested on the integer bits so no floating-point conversion can fold the test away.
-        bool lean_double = false;
-        if (length == 9 && static_cast<uint8_t>(column_bytes[0]) == DOUBLE_FIELD_TAG) {
-            uint64_t bits;
-            std::memcpy(&bits, column_bytes + 1, sizeof(bits));
-            lean_double = !((bits & 0x7FF0000000000000ULL) == 0x7FF0000000000000ULL && (bits & 0x000FFFFFFFFFFFFFULL) != 0);
-        }
-        if (length == 0) {
-            // Unset column: ParseFromArray of nothing succeeds and leaves the oneof unset, so the zone map sees a
-            // null ({column, 0, not numeric}) and the catidx skips it.
-            if (column < tracked_column_count && zmap != nullptr) zmap->observations.push_back({column, 0.0, false});
-        } else if (lean_double) {
-            // Double column, not a NaN: nine bytes can only be the tag plus the 8-byte value, which always parses.
-            if (column < tracked_column_count) {
-                if (zmap != nullptr) {
-                    double value;
-                    std::memcpy(&value, column_bytes + 1, sizeof(value));
-                    zmap->observations.push_back({column, value, true});
-                }
-                if (catidx != nullptr) {
-                    char encoded[9];
-                    encoded[0] = DOUBLE_CASE_BYTE;
-                    std::memcpy(encoded + 1, column_bytes + 1, 8);
-                    catidx->Add(column, encoded, sizeof(encoded));
-                }
-            }
-        } else {
-            if (!scratch.column.ParseFromArray(column_bytes, length)) {
-                one_pass = false;
-                break;
-            }
-            if (column < tracked_column_count) {
-                if (zmap != nullptr) zmap->observations.push_back(ZoneMapObservationOf(scratch.column, column));
-                if (catidx != nullptr && scratch.column.oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
-                    catidx->Add(column, EncodeFDataForCatIdx(scratch.column));
-                }
-            }
-        }
-        static_cast<void>(in.Skip(length)); // cannot fail: length was checked against the slot
-    }
-
-    if (!one_pass) {
-        // A damaged or unusual row: the per-row rebuild's own calls, so it gets exactly what that rebuild got.
         if (zmap != nullptr) {
-            zmap->observations.resize(zmap_mark);
-            const size_t real_len = XStoreWireEncode::RealRowDataLength(row, row_length);
-            scratch.row.Clear();
-            if (real_len > 0) static_cast<void>(scratch.row.ParseFromArray(row, static_cast<int>(real_len)));
-            const int tracked = std::min(static_cast<int>(tracked_column_count), scratch.row.fielddata_size());
-            for (int c = 0; c < tracked; ++c) {
-                zmap->observations.push_back(ZoneMapObservationOf(scratch.row.fielddata(c), static_cast<uint32_t>(c)));
-            }
+            const xstore::layout::Observation obs = xstore::layout::RowLayout::ObservationOf(cell);
+            zmap->observations.push_back({column, obs.value, obs.is_numeric});
         }
         if (catidx != nullptr) {
-            catidx->values.resize(catidx_mark);
-            for (uint32_t c = 0; c < tracked_column_count; ++c) {
-                scratch.column.Clear();
-                if (ExtractColumnByIndexSkipParse(row, row_length, static_cast<unsigned short>(c), scratch.column) &&
-                    scratch.column.oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
-                    catidx->Add(c, EncodeFDataForCatIdx(scratch.column));
-                }
-            }
+            encoded.clear();
+            xstore::layout::RowLayout::AppendCatIdxKey(encoded, cell);
+            catidx->Add(column, encoded.data(), encoded.size());
         }
     }
     if (zmap != nullptr) zmap->EndRow(row_index);
@@ -3131,7 +3124,7 @@ XStore::ReplayedYearMap XStore::ReplayWal() {
             walring::FenceWalFile(wal_path.string());
             continue;
         }
-        // An empty file is neither a ring nor a legacy WAL: GetOrOpenRing initializes it.
+        // An empty file is neither a ring nor an old-format WAL: GetOrOpenRing initializes it.
         if (on_disk_bytes == 0) continue;
 
         const int fd = open(wal_path.c_str(), O_RDONLY | O_CLOEXEC);
@@ -3146,9 +3139,53 @@ XStore::ReplayedYearMap XStore::ReplayWal() {
             // The HEADER's ring size, never the process default: the file may
             // have been created under a different setting.
             ReplayRingShard(wal_path.string(), shard_idx, fd, header.ring_bytes, header.checkpoint_lsn, replayed_years);
+            close(fd);
+            continue;
         }
+        // No valid version-2 header slot. Only a version-1 ring or a pre-ring file (no slot carries the ring magic) is old-format;
+        // a slot carrying the magic with version 2 (or any version this binary does not know) means a version-2 ring whose header
+        // is damaged: its records may be acknowledged and unapplied, so it is fenced in place for the operator, never moved or wiped.
+        char head[walring::HEADER_REGION_BYTES] = {};
+        ssize_t got;
+        do {
+            got = pread(fd, head, sizeof head, 0);
+        } while (got < 0 && errno == EINTR);
         close(fd);
-        if (!is_ring) ReplayLegacyShard(wal_path.string(), shard_idx, replayed_years);
+        bool old_format = got >= 0;
+        for (size_t slot = 0; slot < 2 && old_format; ++slot) {
+            uint32_t magic = 0, version = 0;
+            std::memcpy(&magic, head + slot * walring::HEADER_SLOT_BYTES, sizeof magic);
+            std::memcpy(&version, head + slot * walring::HEADER_SLOT_BYTES + sizeof magic, sizeof version);
+            if (magic == walring::RING_MAGIC && version != 1) old_format = false;
+        }
+        if (!old_format) {
+            spdlog::error("[WAL REPLAY] - {} has no valid ring header but is a version-2 ring (or its header could not be read): both "
+                          "header slots are damaged. NOT replayed, NOT moved, NOT wiped; inserts to this shard fail (fenced) until "
+                          "restart. Repair the header (its records then replay on the next start), or remove the file if its records "
+                          "are not needed.", wal_path.string());
+            walring::FenceWalFile(wal_path.string());
+            continue;
+        }
+        // A version-1 ring or a pre-ring file, whose rows are protobuf. The DBs they belong to are old-format and are not opened by
+        // this server, so these records can never be replayed. The file is moved aside, not deleted, so a rollback to the older
+        // binary can put it back; a fresh ring is created for the shard on first use. Never over an earlier moved-aside file
+        // (upgrade, roll back, upgrade again): the first free of .old-format, .old-format.1, ...
+        // ponytail: exists-then-rename is not atomic; fine because ReplayWal runs single-threaded per data_store_dir at startup.
+        std::string aside = wal_path.string() + ".old-format";
+        std::error_code exists_ec;
+        for (unsigned n = 1; std::filesystem::exists(std::filesystem::symlink_status(aside, exists_ec)); ++n) {
+            aside = wal_path.string() + ".old-format." + std::to_string(n);
+        }
+        std::error_code rename_ec;
+        std::filesystem::rename(wal_path, aside, rename_ec);
+        if (rename_ec) {
+            spdlog::error("[WAL REPLAY] - {} is an old-format WAL and could not be moved aside ({}); the shard is fenced until restart",
+                          wal_path.string(), rename_ec.message());
+            walring::FenceWalFile(wal_path.string());
+        } else {
+            spdlog::warn("[WAL REPLAY] - {} is an old-format WAL (version-1 ring or pre-ring); moved to {}. Its DBs must be recreated.",
+                         wal_path.string(), aside);
+        }
     }
 
     return replayed_years;
@@ -3246,15 +3283,15 @@ void XStore::ReplayRingShard(const std::string &wal_path, size_t shard_idx, int 
         // applying when the removal's checkpoint ran, then dropped at apply) and a DB re-created under the name
         // since: its geometry must not be replayed into that DB. A record of another row length or time resolution
         // than the current .CFG cannot be this DB's, so it is skipped like a record of a DB that is gone. (One of the
-        // same geometry cannot be told apart and is replayed.)
+        // same geometry cannot be told apart and is replayed: with a typed schema its bytes are then read under the new
+        // schema, so a schema hash in the ring record is what a full fix needs; RemoveDB's checkpoint makes this rare.)
         // Read from the .CFG on disk once per DB (not the cfg cache, which a caller may not have cleared).
         auto geometry = cfg_geometry.find(record.db_base_path);
         if (geometry == cfg_geometry.end()) {
             std::optional<std::pair<int32_t, int>> on_disk;
-            if (FILE *cfg_file = std::fopen(JoinPath(record.db_base_path, record.db_name + ".CFG").c_str(), "rb")) {
-                XStore_Proto::ConfigStruct cfg;
-                if (cfg.ParseFromFileDescriptor(fileno(cfg_file))) on_disk.emplace(cfg.rowlength(), static_cast<int>(cfg.timeresolution()));
-                std::fclose(cfg_file);
+            XStore_Proto::ConfigStruct cfg;
+            if (xstore::config::Load(JoinPath(record.db_base_path, record.db_name + ".CFG"), &cfg) == xstore::config::LoadStatus::kOk) {
+                on_disk.emplace(cfg.rowlength(), static_cast<int>(cfg.timeresolution()));
             }
             geometry = cfg_geometry.emplace(record.db_base_path, on_disk).first;
         }
@@ -3396,172 +3433,6 @@ void XStore::ReplayRingShard(const std::string &wal_path, size_t shard_idx, int 
         // retry reports success): also poison, so no later cycle advances a ring over this device.
         if (header_status.real) walring::Checkpointer::Instance().ReportRealError("ring header write (replay)", wal_path, header_status.err);
     }
-}
-
-void XStore::ReplayLegacyShard(const std::string &wal_path, size_t shard_idx, ReplayedYearMap &replayed_years) {
-    // Pre-ring format (no ring header): the original streaming parse, unchanged,
-    // then a one-time upgrade to the ring layout.
-    walring::UnfenceWalFile(wal_path);   // a previous failed attempt in this process is retried from scratch
-    std::ifstream in(wal_path, std::ios::binary);
-    if (!in) {
-        spdlog::error("[WAL REPLAY] - Unable to open {}; the shard is fenced until restart", wal_path);
-        walring::FenceWalFile(wal_path);
-        return;
-    }
-
-    // Streams this file's records in bounded WAL_REPLAY_READ_CHUNK_BYTES
-    // chunks rather than loading the whole file into one std::string --
-    // a shard file's on-disk size is no longer a trustworthy bound for a
-    // single allocation (see WAL_REPLAY_MAX_RECORD_BYTES's comment in
-    // XStore_Tunables.h for why). buffer only ever holds "a chunk or two
-    // plus one in-flight record's worth of bytes", grown on demand and
-    // shrunk (erase) as each record is consumed.
-    std::string buffer;
-    // A short read that only hit EOF sets eofbit|failbit; a real I/O error sets badbit (or is injected by
-    // tests). The latter is NOT the end of the log: the records behind it are unread.
-    bool read_error = false;
-    auto ensure_available = [&](size_t needed) -> bool {
-        while (buffer.size() < needed) {
-            size_t old_size = buffer.size();
-            buffer.resize(old_size + XStoreTunables::WAL_REPLAY_READ_CHUNK_BYTES);
-            in.read(buffer.data() + old_size, static_cast<std::streamsize>(XStoreTunables::WAL_REPLAY_READ_CHUNK_BYTES));
-            std::streamsize got = in.gcount();
-            buffer.resize(old_size + static_cast<size_t>(got));
-            if (in.bad() || walring::ConsumeInjectedReplayReadFailure()) { read_error = true; return false; }
-            if (got <= 0) return false; // true EOF -- can't satisfy `needed`
-        }
-        return true;
-    };
-
-    std::set<std::string> touched_paths;
-    unsigned replayed_count = 0;
-    unsigned parsed_records = 0;
-    bool apply_failed = false;
-    while (true) {
-        if (!ensure_available(8)) {
-            // Fewer than 8 bytes left anywhere in the file -- clean end or torn tail.
-            break;
-        }
-        uint32_t declared_record_len;
-        std::memcpy(&declared_record_len, buffer.data(), 4);
-        if (declared_record_len > XStoreTunables::WAL_REPLAY_MAX_RECORD_BYTES) {
-            // Checked BEFORE trying to satisfy it -- a corrupt/bogus record_len can't force
-            // ensure_available to keep growing the buffer chasing it.
-            spdlog::error("[WAL REPLAY] - {} has a record declaring {} bytes, exceeding the "
-                          "{}-byte single-record replay sanity ceiling -- stopping replay of "
-                          "this shard here; check for corruption.",
-                          wal_path, declared_record_len,
-                          XStoreTunables::WAL_REPLAY_MAX_RECORD_BYTES);
-            break;
-        }
-        if (!ensure_available(4 + static_cast<size_t>(declared_record_len))) {
-            // Torn tail: file ends before this record's declared length is satisfied.
-            break;
-        }
-
-        XStore::WalRecord record;
-        size_t consumed = 0;
-        if (!ParseWalRecord(buffer.data(), buffer.size(), consumed, record)) {
-            // CRC/structure failure -- genuine corruption/torn record; every record before
-            // this point already passed its own CRC check, and already-applied.
-            break;
-        }
-        ++parsed_records;
-        record.db_base_path = DbBasePath(record.db_name);
-        if (!ApplyWalRecord(record)) {
-            if (DbStillExists(record.db_base_path, record.db_name)) {
-                spdlog::error("[WAL REPLAY] [DB: {}] - Legacy record ({} rows) failed to apply although the DB is not gone (reason: see the "
-                              "preceding [WAL APPLY] line); the file is NOT converted and the shard is fenced until restart",
-                              record.db_name, record.row_count);
-                apply_failed = true;
-            } else {
-                spdlog::error("[WAL REPLAY] [DB: {}] - One or more rows failed to apply (DB no longer exists; skipped)", record.db_name);
-            }
-        }
-
-        // Recorded whether or not the apply above fully succeeded: a partial apply still put
-        // SOME rows into the data file with no matching zone-map fold, which is the same gap.
-        // Year is derived the exact same way ApplyWalRecord derives it. Keyed by db_name rather
-        // than record.db_base_path so InitDB's lookup can't be defeated by a second spelling of
-        // the same directory.
-        if (record.row_count != 0) {
-            TimeStruct replayed_ts(static_cast<std::time_t>(record.EpochAt(0)), record.time_resolution);
-            replayed_years[record.db_name].insert(replayed_ts.year);
-            touched_paths.insert(CachedYearFilePath(record.db_base_path, replayed_ts.year));
-        }
-
-        replayed_count += static_cast<unsigned>(record.row_count);
-        buffer.erase(0, consumed);
-    }
-    in.close();
-
-    if (replayed_count > 0) {
-        spdlog::info("[WAL REPLAY] - Replayed {} record(s) from {}", replayed_count, wal_path);
-    }
-    if (read_error) {
-        // Records behind the failed read are unread: converting would wipe them. The file stays legacy.
-        spdlog::error("[WAL REPLAY] - Read error in legacy {}; NOT converting it; inserts to this shard fail (fenced) until the next start retries",
-                      wal_path);
-        walring::FenceWalFile(wal_path);
-        return;
-    }
-
-    // Upgrade: the legacy file becomes a ring ONLY once what it held is durable in the data
-    // files. A record for a DB that no longer exists does not block this (it would recur
-    // identically on every restart); a failed apply for an existing DB or a failed SYNC does, and
-    // the file is left as is, fenced so the writer cannot wipe it meanwhile.
-    if (apply_failed) {
-        walring::FenceWalFile(wal_path);
-        return;
-    }
-    // Nothing parsed, yet the first 4 KiB is not all zero and the first u32 is not the zeroed
-    // record_len of an invalidated legacy file (and no slot carries the ring magic): this may be a RING file whose two header slots are
-    // both damaged (or a torn first legacy record). Never wipe it automatically.
-    if (parsed_records == 0) {
-        char head[walring::HEADER_REGION_BYTES] = {};
-        const int hfd = open(wal_path.c_str(), O_RDONLY | O_CLOEXEC);
-        ssize_t got = hfd >= 0 ? pread(hfd, head, sizeof head, 0) : -1;
-        if (hfd >= 0) close(hfd);
-        uint32_t first_u32 = 0, slot_magic[2] = {0, 0};
-        std::memcpy(&first_u32, head, sizeof first_u32);
-        // A fresh ring only ever wrote one slot (slot_seq 1 -> slot 1), so look at both.
-        std::memcpy(&slot_magic[0], head, sizeof slot_magic[0]);
-        std::memcpy(&slot_magic[1], head + walring::HEADER_SLOT_BYTES, sizeof slot_magic[1]);
-        const bool ring_magic = slot_magic[0] == walring::RING_MAGIC || slot_magic[1] == walring::RING_MAGIC;
-        const bool all_zero = got >= 0 && std::all_of(head, head + (got > 0 ? got : 0), [](char c) { return c == 0; });
-        if (got < 0 || (!all_zero && (first_u32 != 0 || ring_magic))) {
-            spdlog::error("[WAL REPLAY] - {} has no valid ring header and no parseable legacy record, but is not blank: "
-                          "either a ring file with BOTH header slots damaged, or a legacy WAL whose first record was torn. "
-                          "NOT converting/wiping it; inserts to this shard fail (fenced) until the next start. Inspect the file "
-                          "and, if its records are not needed, remove it (a new ring is created on the next start).",
-                          wal_path);
-            walring::FenceWalFile(wal_path);
-            return;
-        }
-    }
-    if (!walring::Checkpointer::Instance().SyncPathsForReplay(touched_paths)) {
-        spdlog::error("[WAL REPLAY] - Could not sync the data files replayed from legacy {}; leaving it for the next start", wal_path);
-        walring::FenceWalFile(wal_path);   // the writer must not wipe it meanwhile
-        return;
-    }
-    const int fd = open(wal_path.c_str(), O_RDWR | O_CLOEXEC);
-    bool converted = false;
-    if (fd >= 0) {
-        // ftruncate(0) then InitRingFile: a crash in between leaves an empty or zero-headed file,
-        // which replays as "nothing" (the data is already synced) and is re-initialized.
-        // InitRingFile fsyncs the zero-filled ring before writing a header that describes it.
-        converted = ftruncate(fd, 0) == 0 && walring::InitRingFile(fd, static_cast<uint32_t>(shard_idx), walring::DefaultRingBytes());
-        close(fd);
-    }
-    if (!converted) {
-        spdlog::error("[WAL REPLAY] - Unable to convert legacy {} to a ring; the writer will retry", wal_path);
-        return;
-    }
-    // A Ring the registry already holds over this file (opened before the upgrade) restarts at LSN 0.
-    if (const std::shared_ptr<walring::Ring> ring = walring::GetOrOpenRing(wal_path, static_cast<uint32_t>(shard_idx))) {
-        ring->ResetTo(0);
-    }
-    spdlog::info("[WAL REPLAY] - Converted legacy WAL {} to a ring", wal_path);
 }
 
 std::string XStore::GetBaseDir() {

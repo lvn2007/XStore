@@ -344,6 +344,7 @@ protected:
         h.db_name = db;
         h.year = kYear;
         h.row_length = kRowLength;
+        h.layout = DynamicLayout(kRowLength);
         h.tracked_column_count = width;
         h.block = block;
         h.reserved_bytes = bytes;
@@ -3136,6 +3137,7 @@ protected:
     using Ops = std::function<void(const std::string &db, bool pooled)>;
     std::atomic<uint64_t> passes_{0};
     std::atomic<bool> gate_open_{true};
+    uint16_t row_length_ = kRowLength;   // the row length of the DBs RunStrict builds (WIDE needs a wider slot)
     std::mutex delay_mutex_;
     std::mt19937_64 delay_rng_;
 
@@ -3180,7 +3182,7 @@ protected:
                 continue;
             }
             if (x % 11 == 0) continue;   // null
-            if (columns > 100) {   // 130 small ints fit a 1 KiB row
+            if (columns > 100) {   // 130 small ints: 3 + 130 * 9 = 1173 bytes, WIDE runs in 2 KiB rows
                 f->set_int32data(static_cast<int32_t>(x % 100));
                 continue;
             }
@@ -3219,8 +3221,8 @@ protected:
     std::pair<std::string, std::string> YearBytes(const std::string &db, unsigned short year) const {
         const uint32_t width = WidthOf(db, year);
         {
-            ZoneMapFile::Pin z = XStore::PinZoneMap(DbPath(db), year, kRowLength, width);
-            CatIdxFile::Pin c = XStore::PinCatIdx(DbPath(db), year, kRowLength, width);
+            ZoneMapFile::Pin z = XStore::PinZoneMap(DbPath(db), year, row_length_, width);
+            CatIdxFile::Pin c = XStore::PinCatIdx(DbPath(db), year, row_length_, width);
             EXPECT_TRUE(z->MarkClean());
             EXPECT_TRUE(c->MarkClean());
         }
@@ -3244,13 +3246,13 @@ protected:
     // `ops` builds `ref` with the pool off, then `db` with it on (seeded pass delays); waits for the indexer.
     void BuildBoth(XStore &store, const std::string &db, const std::string &ref, const Ops &ops, uint64_t seed) {
         xstore::Indexer::SetConfigForTests({2, 0});
-        CreateTestDb(store, ref, XStore_Proto::SECOND, kRowLength);
+        CreateTestDb(store, ref, XStore_Proto::SECOND, row_length_);
         ops(ref, false);
         ASSERT_FALSE(HasFatalFailure());
         xstore::Indexer::SetConfigForTests({2, kPoolBacklog, /*min_run_rows=*/1, /*hand_off_sync=*/true});
         passes_ = 0;
         SeededPassDelays(seed, 1000);
-        CreateTestDb(store, db, XStore_Proto::SECOND, kRowLength);
+        CreateTestDb(store, db, XStore_Proto::SECOND, row_length_);
         ops(db, true);
         ASSERT_FALSE(HasFatalFailure());
         ASSERT_TRUE(Quiesce());
@@ -3265,7 +3267,8 @@ protected:
     // block arrive while an earlier pass of it waits (0-1 ms delays): observed passes are 1-5x the calls on Mystic, and
     // a quarter is a floor that only a mostly-inline (not handed off) build misses.
     void RunStrict(XStore &store, const char *name, const std::vector<unsigned short> &years, uint64_t extent, const Ops &ops,
-                   uint64_t seed, uint64_t min_passes) {
+                   uint64_t seed, uint64_t min_passes, uint16_t row_length = kRowLength) {
+        row_length_ = row_length;
         SCOPED_TRACE(std::string("load ") + name + ", seed " + std::to_string(seed));
         const auto t0 = std::chrono::steady_clock::now();
         const std::string db = std::string("IDXOR") + name, ref = db + "REF";
@@ -3523,8 +3526,7 @@ protected:
             const char *p = buf.data() + r * kRowLength;
             if (p[0] == 0) continue;
             XStore_Proto::RowData row;
-            const size_t len = XStoreWireEncode::RealRowDataLength(p, kRowLength);
-            if (len > 0) static_cast<void>(row.ParseFromArray(p, static_cast<int>(len)));
+            DecodeDynamicSlot(p, kRowLength, &row);
             out[r].present = true;
             for (size_t k = 0; k < 3; ++k) {
                 if (kScanColumns[k] < row.fielddata_size() &&
@@ -3653,7 +3655,7 @@ TEST_F(IndexerOracleTest, ByteIdenticalAfterQuiesce) {
     RunStrict(store, "WIDE", {kYear}, 4096, [&](const std::string &db, bool) {
         InsertShuffled(store, db, RowsOf(kYear, 0, 4096, 130), 256, 16);
         EXPECT_EQ(WidthOf(db, kYear), 130u);
-    }, seed, 16 / 4);
+    }, seed, 16 / 4, 2048);
     RunStrict(store, "EMPTY", {kYear}, 6000, empty, seed, 60 / 4);
     RunStrict(store, "TWOYEARS", {kYear, kOther}, 3000, two_years, seed, 40 / 4);
     RunStrict(store, "DELETE", {kYear}, 10000, [&](const std::string &db, bool pooled) { DeleteOps(store, db, pooled); }, seed, 1);
@@ -3871,7 +3873,7 @@ TEST_F(IndexerOracleTest, BacklogFullFallsBackInline) {
 #if defined(__GLIBCXX__) && defined(__x86_64__) && (!defined(_GLIBCXX_USE_CXX11_ABI) || _GLIBCXX_USE_CXX11_ABI)
 // The four observation arrays (4 x 24 B) and zone_map_pad_to are back for has_obs records (pool off); a rows-only
 // record leaves them empty. `replayed` still does the pad_to's job on replay.
-static_assert(sizeof(XStore::WalRecord) == 248, "WalRecord layout changed: update this check deliberately");
+static_assert(sizeof(XStore::WalRecord) == 264, "WalRecord layout changed: update this check deliberately");
 #endif
 
 using RowsOnlyRecordTest = IndexerPassTest;
@@ -3879,19 +3881,19 @@ using RowsOnlyRecordTest = IndexerPassTest;
 TEST_F(RowsOnlyRecordTest, AppendRowAddsOneRowSlotAndNothingElse) {
     XStore::WalRecord record;
     record.row_length = kRowLength;
+    record.layout = DynamicLayout(kRowLength);
     const std::vector<XStore_Proto::RowData> rows = {MixedRow(1, 40), XStore_Proto::RowData(), MixedRow(2, 3)};
     record.ReserveRows(rows.size());
     EXPECT_GE(record.wire.capacity(), rows.size() * record.RowStride());
     for (size_t i = 0; i < rows.size(); ++i) {
-        ASSERT_LE(rows[i].ByteSizeLong(), kRowLength);   // also caches the sizes AppendRow serializes with
-        record.AppendRow(100 + i, rows[i]);
+        ASSERT_TRUE(record.AppendRow(100 + i, rows[i]).Ok()) << "row " << i;
         EXPECT_EQ(record.wire.size(), (i + 1) * record.RowStride()) << "row " << i;
     }
     ASSERT_EQ(record.row_count, rows.size());
     for (size_t i = 0; i < rows.size(); ++i) {
         EXPECT_EQ(record.EpochAt(i), 100 + i);
-        std::string slot = rows[i].SerializeAsString();
-        slot.resize(kRowLength, '\0');
+        std::string slot(kRowLength, '\0');   // the packed row in a zeroed slot
+        ASSERT_TRUE(record.layout->PackFromRowData(rows[i], slot.data()).Ok());
         EXPECT_TRUE(std::string(record.RowAt(i), kRowLength) == slot) << "row " << i;
     }
     EXPECT_FALSE(record.replayed);
@@ -3905,10 +3907,10 @@ TEST_F(RowsOnlyRecordTest, ClearObservationsClearsHasObs) {
     record.tracked_column_count = 40;
     record.has_obs = true;
     record.zone_map_pad_to = 40;
+    record.layout = DynamicLayout(kRowLength);
     const XStore_Proto::RowData row = MixedRow(1, 40);
-    ASSERT_LE(row.ByteSizeLong(), kRowLength);   // also caches the sizes AppendRowWithObs serializes with
     record.ReserveRowsWithObs(1, 40);
-    record.AppendRowWithObs(100, row);
+    ASSERT_TRUE(record.AppendRowWithObs(100, row).Ok());
     ASSERT_EQ(record.obs_end.size(), 1u);
     record.ClearObservations();
     EXPECT_FALSE(record.has_obs);
@@ -3949,7 +3951,7 @@ TEST_F(RowsOnlyRecordTest, TheWritersInlineFoldEqualsFoldStoredRowsOverTheSameRo
         ASSERT_GE(fd, 0);
         ZoneMapFile::Pin z = XStore::PinZoneMap(DbPath(db), kYear, kRowLength, width);
         CatIdxFile::Pin c = XStore::PinCatIdx(DbPath(db), kYear, kRowLength, width);
-        const bool folded = XStore::FoldStoredRows(fd, kRowLength, width, c->TrackedColumnCount(), {{0, 1001}, {2050, 1}}, *z, *c);
+        const bool folded = XStore::FoldStoredRows(fd, *DynamicLayout(kRowLength), width, c->TrackedColumnCount(), {{0, 1001}, {2050, 1}}, *z, *c);
         close(fd);
         ASSERT_TRUE(folded);
     }

@@ -555,6 +555,38 @@ TEST_F(XStoreZmqNetworkTest, BatchInsertWithAnUnknownFieldIsDeclinedByTheWirePat
     EXPECT_EQ(query_rep.data().fielddata(0).int32data(), 77);
 }
 
+// A row whose cell carries a field this server does not know: the wire path declines the request, the parsed path rejects that row,
+// and the client gets a reply with a non-empty status that names the reason (it is not stored, and is not acknowledged as inserted).
+TEST_F(XStoreZmqNetworkTest, BatchInsertOfARowWithAnUnknownCellFieldIsRejectedWithAStatus) {
+    XStore_Proto::CreateDB_REQ create_req;
+    create_req.set_rtype(XStore_Proto::CREATEDB);
+    create_req.set_dbname("ZMQ_BATCH_UNKNOWN_CELL_DB");
+    create_req.set_timeresolution(XStore_Proto::SECOND);
+    create_req.set_rowlength(128);
+    SendRequest<XStore_Proto::CreateDB_REP>(Wrap(create_req));
+
+    XStore_Proto::BatchInsert_REQ insert_req;
+    insert_req.set_rtype(XStore_Proto::BATCHINSERT);
+    insert_req.set_dbname("ZMQ_BATCH_UNKNOWN_CELL_DB");
+    insert_req.set_durabilitymode(XStore_Proto::SYNC);
+    XStore_Proto::BatchInsert_DATA *entry = insert_req.add_batchinsert_data();
+    entry->set_timestamp(TS_2012_MID);
+    *entry->mutable_data() = MakeRow({FInt32(77)});
+    XStore_Proto::FData *cell = entry->mutable_data()->mutable_fielddata(0);
+    cell->GetReflection()->MutableUnknownFields(cell)->AddVarint(16, 7);
+
+    auto insert_rep = SendRequest<XStore_Proto::BatchInsert_REP>(Wrap(insert_req));
+    EXPECT_NE(insert_rep.insertstatus().find("Inserted 0 of 1 elements; 1 row(s) rejected: column 0 carries an unknown protobuf field"), std::string::npos)
+        << insert_rep.insertstatus();
+
+    XStore_Proto::UnaryQuery_REQ query_req;
+    query_req.set_rtype(XStore_Proto::UNARYQUERY);
+    query_req.set_dbname("ZMQ_BATCH_UNKNOWN_CELL_DB");
+    query_req.set_timestamp(TS_2012_MID);
+    auto query_rep = SendRequest<XStore_Proto::UnaryQuery_REP>(Wrap(query_req));
+    EXPECT_EQ(query_rep.data().fielddata_size(), 0);
+}
+
 // A request that starts like a BatchInsert but is cut short: the wire path declines it, the parse fails, the reply is empty and the
 // worker keeps serving (the same outcome as any other unparseable bytes).
 TEST_F(XStoreZmqNetworkTest, TruncatedBatchInsertGetsAnEmptyReplyAndServerKeepsServing) {

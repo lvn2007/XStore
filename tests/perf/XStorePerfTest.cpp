@@ -515,7 +515,9 @@ TEST_F(XStorePerfTest, BatchInsertWideThroughput) {
         entry->set_timestamp(BASE_TS + i);
         *entry->mutable_data() = WideRow(i);
     }
-    ASSERT_LE(req.batchinsert_data(0).data().ByteSizeLong(), static_cast<size_t>(kWideRowLength));
+    {   // every row must pack into the slot (3 + 9 per dynamic cell: 1155 B for 128 columns); PackDynamicSlot fails the test otherwise
+        static_cast<void>(PackDynamicSlot(req.batchinsert_data(0).data(), static_cast<size_t>(kWideRowLength)));
+    }
 
     XStore_Proto::BatchInsert_REP rep;
     auto start = std::chrono::steady_clock::now();
@@ -528,10 +530,11 @@ TEST_F(XStorePerfTest, BatchInsertWideThroughput) {
 }
 
 namespace {
-// 16 columns, the even ones strings of 24-64 B (unique per row), the odd ones doubles. A string column of L <= 125 B
-// serializes to L + 4 B, a double to 11 B: at most 8 * 68 + 8 * 11 = 632 B.
+// 16 columns, the even ones strings of 24-64 B (unique per row), the odd ones doubles. A slot needs 3 header bytes,
+// 9 per dynamic cell and the string bytes: at most 3 + 16 * 9 + 8 * 64 = 659 B (the protobuf size was 632 B, which is why
+// the old row length of 640 no longer fits every row).
 constexpr int kStringHeavyColumns = 16;
-constexpr short kStringHeavyRowLength = 640;
+constexpr short kStringHeavyRowLength = 704;
 
 XStore_Proto::RowData StringHeavyRow(unsigned long long i) {
     XStore_Proto::RowData row;
@@ -565,7 +568,9 @@ TEST_F(XStorePerfTest, BatchInsertStringHeavyThroughput) {
         entry->set_timestamp(BASE_TS + i);
         *entry->mutable_data() = StringHeavyRow(i);
     }
-    ASSERT_LE(req.batchinsert_data(0).data().ByteSizeLong(), static_cast<size_t>(kStringHeavyRowLength));
+    for (unsigned long long i = 0; i < std::min<unsigned long long>(n, 64); i++) {   // string lengths cycle with period 41: every shape packs
+        static_cast<void>(PackDynamicSlot(req.batchinsert_data(static_cast<int>(i)).data(), static_cast<size_t>(kStringHeavyRowLength)));
+    }
 
     XStore_Proto::BatchInsert_REP rep;
     auto start = std::chrono::steady_clock::now();

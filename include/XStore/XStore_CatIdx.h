@@ -136,7 +136,7 @@ inline void AppendFDataForCatIdx(Out &out, const XStore_Proto::FData &f_data) {
             // all; this function is never called on an unset FData in
             // practice, but appends the tag-only bytes rather than
             // asserting, matching the codebase's existing "hole is not an
-            // error" precedent (see ZoneMapObservationOf).
+            // error" precedent.
             break;
     }
 }

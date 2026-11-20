@@ -38,33 +38,32 @@ TEST(XStoreClientWarmupTest, WarmupDefaultsToOnMatchingPreviousBehavior) {
 }
 
 // SuggestRowLength is a pure static function (no socket needed) -- mirrors
-// XBench's XStore_Adapter::ComputeRowLength. Default Alignment=8,
-// PROTOBUF_FIELD_OVERHEAD=3 per field (see XStore_Client.h for why).
-TEST(XStoreClientSuggestRowLengthTest, ExactFitNeedsNoPadding) {
-    // 2 bool fields: (sizeof(bool)=1 + 3) * 2 = 8 -- already 8-aligned.
+// the fixed-layout slot: 3 header bytes + 9 bytes per dynamic column (+ string bytes), rounded up to Alignment (default 8).
+TEST(XStoreClientSuggestRowLengthTest, TwoDynamicColumnsRoundUp) {
+    // 2 bool fields: 3 + 9 * 2 = 21 -- rounds up to 24.
     XStore_Proto::RowData row;
     *row.add_fielddata() = xstore_fdata::Bool(true);
     *row.add_fielddata() = xstore_fdata::Bool(false);
-    EXPECT_EQ(XStoreClient::SuggestRowLength(row), 8u);
+    EXPECT_EQ(XStoreClient::SuggestRowLength(row), 24u);
 }
 
 TEST(XStoreClientSuggestRowLengthTest, PartialPaddingRoundsUpToAlignment) {
-    // 1 bool field: sizeof(bool)=1 + 3 = 4 -- rounds up to 8.
+    // 1 bool field: 3 + 9 = 12 -- rounds up to 16.
     XStore_Proto::RowData row;
     *row.add_fielddata() = xstore_fdata::Bool(true);
-    EXPECT_EQ(XStoreClient::SuggestRowLength(row), 8u);
+    EXPECT_EQ(XStoreClient::SuggestRowLength(row), 16u);
 }
 
-TEST(XStoreClientSuggestRowLengthTest, EmptyRowSuggestsZeroLength) {
-    XStore_Proto::RowData row;
-    EXPECT_EQ(XStoreClient::SuggestRowLength(row), 0u);
+TEST(XStoreClientSuggestRowLengthTest, EmptyRowSuggestsTheHeaderRoundedUp) {
+    XStore_Proto::RowData row;   // 3 header bytes, aligned
+    EXPECT_EQ(XStoreClient::SuggestRowLength(row), 8u);
 }
 
 TEST(XStoreClientSuggestRowLengthTest, SingleFieldRowAlignsUp) {
-    // 1 int32 field: sizeof(int32_t)=4 + 3 = 7 -- rounds up to 8.
+    // 1 int32 field: 3 + 9 = 12 -- rounds up to 16.
     XStore_Proto::RowData row;
     *row.add_fielddata() = xstore_fdata::Int32(42);
-    EXPECT_EQ(XStoreClient::SuggestRowLength(row), 8u);
+    EXPECT_EQ(XStoreClient::SuggestRowLength(row), 16u);
 }
 
 // ResolveColumnIndex: pure name->index lookup, no server/socket needed --
@@ -87,10 +86,32 @@ TEST(XStoreClientResolveColumnIndexTest, ThrowsOnEmptyColumnNamesList) {
 }
 
 TEST(XStoreClientSuggestRowLengthTest, CustomAlignmentIsRespected) {
-    // 3 int32 fields: (4 + 3) * 3 = 21 -- rounds up to 32 under Alignment=16.
+    // 3 int32 fields: 3 + 9 * 3 = 30 -- rounds up to 32 under Alignment=16.
     XStore_Proto::RowData row;
     *row.add_fielddata() = xstore_fdata::Int32(1);
     *row.add_fielddata() = xstore_fdata::Int32(2);
     *row.add_fielddata() = xstore_fdata::Int32(3);
     EXPECT_EQ((XStoreClient::SuggestRowLength<16>(row)), 32u);
+}
+
+TEST(XStoreClientSuggestRowLengthTest, FiveDynamicDoublesAndATypedSchema) {
+    XStore_Proto::RowData row;
+    for (int i = 0; i < 5; ++i) *row.add_fielddata() = xstore_fdata::Double(1.0);
+    EXPECT_EQ(XStoreClient::SuggestRowLength(row), 48u);   // 3 + 9 * 5
+
+    // double, int32 stored as INT16, string stored INLINE (capacity 8) + a dynamic string of 20 bytes:
+    // 3 + 1 (bitmap) + 8 + 2 + 9 = 23 typed, + 9 dynamic cell + 20 tail bytes = 52 -- rounds up to 56.
+    XStore_Proto::RowData typed_row;
+    *typed_row.add_fielddata() = xstore_fdata::Double(1.0);
+    *typed_row.add_fielddata() = xstore_fdata::Int32(2);
+    *typed_row.add_fielddata() = xstore_fdata::String("abc");
+    *typed_row.add_fielddata() = xstore_fdata::String(std::string(20, 'x'));
+    std::vector<XStore_Proto::ColumnSpec> schema(3);
+    schema[0].set_kind(1);
+    schema[1].set_kind(3);
+    schema[1].set_storage(2);
+    schema[2].set_kind(14);
+    schema[2].set_storage(5);
+    schema[2].set_capacity(8);
+    EXPECT_EQ(XStoreClient::SuggestRowLength(typed_row, schema), 56u);
 }

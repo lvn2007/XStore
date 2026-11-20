@@ -135,34 +135,7 @@ void SortBatch(Iterator begin, Iterator end, Compare comp) {
     }
 }
 
-// Definition of XStore::ZoneMapObservationOf (declared in XStore.h,
-// private static). Numeric-case check mirrors ProcessFileRangeSelect/
-// ProcessFileRangeAccumulate's own oneOfData_case() guard (XStore_IO.cpp) --
-// same "1..12 is numeric" rule the aggregate kernels already use, so a
-// bool/string/bytes column is a hole here too, not a crash or a silently-wrong 0.
-inline ZoneMapObservation XStore::ZoneMapObservationOf(const XStore_Proto::FData &f_data, uint32_t column_idx) {
-    bool is_numeric = f_data.oneOfData_case() > 0 && f_data.oneOfData_case() <= 12;
-    ValueStruct vs{};
-    if (is_numeric) {
-        GetFDataValue(&f_data, &vs);
-    }
-    return {column_idx, static_cast<double>(vs.value), is_numeric};
-}
-
 inline void XStore::WalRecord::ReserveRows(size_t rows) { wire.reserve(rows * RowStride()); }
-
-// Definition of XStore::WalRecord::AppendRow (declared in XStore.h). Rows only:
-// the zone map and catidx are folded later from the stored bytes
-// (ApplyWalRecord's inline fold or an indexer pass, both FoldStoredRows).
-inline void XStore::WalRecord::AppendRow(uint64_t epoch, const XStore_Proto::RowData &data) {
-    const size_t at = wire.size();
-    wire.resize(at + RowStride());   // the zero fill pads the tail past the serialized size
-    std::memcpy(&wire[at], &epoch, sizeof(epoch));
-    // Reuses the sizes the caller's ByteSizeLong() cached (SerializeToArray would recompute them), as SendProto in
-    // ZMQ_Server.cpp.
-    (void)data.SerializeWithCachedSizesToArray(reinterpret_cast<uint8_t *>(&wire[at + sizeof(uint64_t)]));
-    ++row_count;
-}
 
 inline void XStore::WalRecord::ReserveRowsWithObs(size_t rows, size_t widest_fields) {
     const size_t columns = std::min<size_t>(tracked_column_count, widest_fields);
@@ -173,52 +146,73 @@ inline void XStore::WalRecord::ReserveRowsWithObs(size_t rows, size_t widest_fie
     obs_end.reserve(rows);
 }
 
-// Definition of XStore::WalRecord::AppendRowWithObs (declared in XStore.h). The
-// observations are built once at WAL enqueue time (the row's wire bytes --
-// already serialized -- are all ApplyWalRecord has later, not the original
-// RowData, so this can't be deferred to apply time). Both indexes see only
-// columns actually present in the row (col < row.fielddata_size()), clamped
-// to tracked_column_count:
-// - zone map: one observation per present column. Columns past that, up to
-//   tracked_column_count, are exactly as much a hole as an explicitly unset
-//   field at a present index (XStoreZoneMapTest.UnaryInsertTreatsHoleAsNullNotZero
-//   -- an entirely empty row still records a hole at column 0), but
-//   zone_map_pad_to bumps null_count for those instead of this building an
-//   explicit is_numeric=false entry per hole -- same total effect.
-// - catidx: ALL FData oneof cases (no numeric gate: the bloom works on
-//   AppendFDataForCatIdx's bytes regardless of type), but only columns that
-//   are also SET -- CatIdxFile always skipped unset ones, so omitting them is
-//   the same effect as passing them as not present. Each value is hashed here
-//   into its bloom bit positions (BloomValueOfEncoded), off the writer thread.
-// tracked_column_count is max(EffectiveTrackedColumnCount(cfg_struct), the
-// request's widest accepted row) at every call site.
-inline void XStore::WalRecord::AppendRowWithObs(uint64_t epoch, const XStore_Proto::RowData &data) {
+// Definitions of XStore::WalRecord::AppendRow/AppendWireRow and their *WithObs variants (declared in XStore.h). Rows only for
+// the plain variants: the zone map and catidx are folded later from the stored bytes (ApplyWalRecord's inline fold or an
+// indexer pass, both FoldStoredRows). The *WithObs variants build the observations once at WAL enqueue time (ObserveLastRow).
+// tracked_column_count is max(EffectiveTrackedColumnCount(cfg_struct), the request's widest row that can fit the slot, see CanFit) at every call site.
+inline xstore::layout::PackResult XStore::WalRecord::AppendRow(uint64_t epoch, const XStore_Proto::RowData &data) {
     const size_t at = wire.size();
-    wire.resize(at + RowStride());   // the zero fill pads the tail past the serialized size
+    wire.resize(at + RowStride());   // the zero fill is the slot's padding: every byte of a slot is defined
     std::memcpy(&wire[at], &epoch, sizeof(epoch));
-    // Reuses the sizes the caller's ByteSizeLong() cached (SerializeToArray would recompute them), as SendProto in
-    // ZMQ_Server.cpp.
-    (void)data.SerializeWithCachedSizesToArray(reinterpret_cast<uint8_t *>(&wire[at + sizeof(uint64_t)]));
-    // col < fielddata_size, and a column takes at least 2 of the row's u16 row_length bytes: it fits column_idx.
-    const int tracked = std::min(static_cast<int>(tracked_column_count), data.fielddata_size());
+    const xstore::layout::PackResult result = layout->PackFromRowData(data, &wire[at + sizeof(uint64_t)]);
+    if (!result.Ok()) {
+        wire.resize(at);
+        return result;
+    }
+    ++row_count;
+    return result;
+}
+
+inline xstore::layout::PackResult XStore::WalRecord::AppendWireRow(uint64_t epoch, const char *wire_row, size_t length) {
+    const size_t at = wire.size();
+    wire.resize(at + RowStride());
+    std::memcpy(&wire[at], &epoch, sizeof(epoch));
+    const xstore::layout::PackResult result = layout->PackFromWire(wire_row, length, &wire[at + sizeof(uint64_t)]);
+    if (!result.Ok()) {
+        wire.resize(at);
+        return result;
+    }
+    ++row_count;
+    return result;
+}
+
+inline xstore::layout::PackResult XStore::WalRecord::AppendRowWithObs(uint64_t epoch, const XStore_Proto::RowData &data) {
+    const xstore::layout::PackResult result = AppendRow(epoch, data);
+    if (result.Ok()) ObserveLastRow();
+    return result;
+}
+
+inline xstore::layout::PackResult XStore::WalRecord::AppendWireRowWithObs(uint64_t epoch, const char *wire_row, size_t length) {
+    const xstore::layout::PackResult result = AppendWireRow(epoch, wire_row, length);
+    if (result.Ok()) ObserveLastRow();
+    return result;
+}
+
+// The observations come from the row just packed (L1-hot), through the same RowLayout calls the rebuild uses, so an insert-time
+// and a rebuild-time observation can never differ. An empty row (a hole) has no columns and adds nothing.
+inline void XStore::WalRecord::ObserveLastRow() {
+    const char *row = RowAt(row_count - 1);
+    const uint32_t columns = xstore::layout::RowLayout::IsLive(row) ? xstore::layout::RowLayout::ColumnCount(row) : 0;
+    const uint32_t tracked = std::min<uint32_t>(tracked_column_count, columns);
     CatIdxEncodeBuffer encoded;   // inline storage: no allocation, no out-of-line append per value
-    for (int col = 0; col < tracked; ++col) {
-        const XStore_Proto::FData &f_data = data.fielddata(col);
-        const ZoneMapObservation obs = ZoneMapObservationOf(f_data, static_cast<uint32_t>(col));
-        AddZoneMapObs(obs.value, obs.is_numeric);
-        if (f_data.oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
-            encoded.clear();
-            AppendFDataForCatIdx(encoded, f_data);
-            catidx_vals.push_back(BloomValueOfEncoded(static_cast<uint32_t>(col), encoded.data(), encoded.size()));
+    for (uint32_t col = 0; col < tracked; ++col) {
+        xstore::layout::Cell cell;
+        if (!layout->Load(row, col, &cell)) {
+            AddZoneMapObs(0.0, false);   // an unset column is a hole to the zone map and is skipped by the catalog index
+            continue;
         }
+        const xstore::layout::Observation obs = xstore::layout::RowLayout::ObservationOf(cell);
+        AddZoneMapObs(obs.value, obs.is_numeric);
+        encoded.clear();
+        xstore::layout::RowLayout::AppendCatIdxKey(encoded, cell);
+        catidx_vals.push_back(BloomValueOfEncoded(col, encoded.data(), encoded.size()));
     }
     obs_end.push_back({zmap_values.size(), catidx_vals.size()});
-    ++row_count;
 }
 
 // The rows of an insert request as MultiRowInsertRows consumes them. ParsedRows wraps the repeated field of a request that was
 // parsed into an object tree (the normal path); WireRows (XStore_BatchOps.cpp) reads them from the received bytes instead.
-// AppendTo returns false only for a row that cannot be read (never for ParsedRows).
+// AppendTo packs one row into the record and returns the pack result (kMalformed: bytes that are not RowData, WireRows only).
 template <typename Data>
 class ParsedRows {
 public:
@@ -226,7 +220,6 @@ public:
     int Size() const { return rows_.size(); }
     uint64_t Timestamp(int i) const { return rows_.Get(i).timestamp(); }
     int FieldCount(int i) const { return rows_.Get(i).data().fielddata_size(); }
-    size_t RowBytes(int i) const { return rows_.Get(i).data().ByteSizeLong(); }   // also caches the sizes AppendTo serializes with
     // STABLE on purpose: for duplicate timestamps the last occurrence in the request must win (it is applied last, as a series of
     // UnaryInserts would do). Sorts the field's element pointers (no message copies); serial, because without TBB par_unseq is
     // serial too. Physically reorders the caller's rows in place: an index array instead was benchmarked SLOWER (every per-row
@@ -235,11 +228,9 @@ public:
         std::stable_sort(rows_.pointer_begin(), rows_.pointer_end(), [](const Data *a, const Data *b) { return a->timestamp() < b->timestamp(); });
     }
     template <typename Record>
-    bool AppendTo(Record &record, int i) {
+    xstore::layout::PackResult AppendTo(Record &record, int i) {
         const Data &entry = rows_.Get(i);
-        if (record.has_obs) record.AppendRowWithObs(entry.timestamp(), entry.data());
-        else record.AppendRow(entry.timestamp(), entry.data());
-        return true;
+        return record.has_obs ? record.AppendRowWithObs(entry.timestamp(), entry.data()) : record.AppendRow(entry.timestamp(), entry.data());
     }
 
 private:
@@ -263,8 +254,9 @@ void XStore::MultiRowInsert(Req *proto_from_client, Rep *return_data, const char
 
 // The body of MultiRowInsert over any source of rows (ParsedRows above, or WireRows for a request still in its received bytes).
 // Every WalRecord is built BEFORE the index width is grown and before any record is enqueued: a request whose rows cannot all
-// be read (AppendTo false, WireRows only) has then had no effect at all and returns false, and the caller takes the parsed path,
-// which fails such a request when it parses it, before any effect, exactly as it always did. true = handled (the reply is set).
+// be read (AppendTo kMalformed, WireRows only) has then had no effect at all and returns false, and the caller takes the parsed path,
+// which fails such a request when it parses it (before any effect, exactly as it always did) or, for protobuf with fields this server
+// does not know, rejects those rows one by one. true = handled (the reply is set).
 template <typename Rows, typename Rep>
 bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name, XStore_Proto::WalDurabilityMode durability_mode,
                                 Rep *return_data, const char *op, xstore::MemoryPool::Clock::time_point deadline, size_t wire_bytes) {
@@ -283,7 +275,8 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
     // already applied to Unary ops.
     const uint32_t cfg_epoch = CfgEpoch(); // before the cfg read (see WalRecord::cfg_epoch)
     XStore_Proto::ConfigStruct cfg_struct;
-    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+    std::shared_ptr<const xstore::layout::RowLayout> layout;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct, &layout)) {
         std::string err_msg = fmt::format("[{}] [DB: {}] - DB does not exist", op, db_name);
         SetTaggedStatus(return_data->mutable_insertstatus(), "[WARNING] ", err_msg);
         spdlog::warn(err_msg);
@@ -295,7 +288,7 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
     // Memory guard (owner decision 2026-10-28): reserve an estimate of this request's in-flight memory from the
     // process-wide pool BEFORE building anything -- a request the pool has no room for (or whose client has
     // already given up, see `deadline`) is rejected/abandoned here instead of running the server out of memory.
-    // One pass over every row's field count and byte length also finds `widest` (the widest ACCEPTED row, used
+    // One pass over every row's field count and byte length also finds `widest` (the widest row that CAN FIT the slot, used
     // further down to grow the index width) and `total_fields`, so it is not a second scan later.
     // Estimate: rows * (8 [timestamp] + row_length [stored bytes]) + total_fields * 25 (zone-map value 8 B + 1 bit +
     // CatIdxBloomValue 16 B per observed column) + wire_bytes (the received message, or its parsed-tree
@@ -308,7 +301,7 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
     for (int i = 0; i < row_count; i++) {
         const int fields = rows.FieldCount(i);
         total_fields += static_cast<uint64_t>(fields);
-        if (fields > widest && rows.RowBytes(i) <= static_cast<size_t>(cfg_struct.rowlength())) {
+        if (fields > widest && layout->CanFit(static_cast<size_t>(fields))) {
             widest = fields;
         }
     }
@@ -383,12 +376,12 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
     // on BatchInsert_REQ / RangeInsert_REQ in XStore.proto.
     bool any_sync_failed = false;
     bool any_overloaded = false;   // a SYNC group failed because the WAL ring was full
-    // Rows dropped because they do not fit the DB's row length: counted so the reply can say so (it used to report them as inserted).
-    size_t rejected_oversized = 0;
+    // Rows the layout refused (too large, wrong kind, out of range, ...): counted so the reply can say so, with the first one's reason.
+    size_t rejected_rows = 0;
     unsigned long long int first_rejected_ts = 0;
-    size_t first_rejected_size = 0;
+    std::string first_rejected_why;
 
-    // `widest` (the widest ACCEPTED row of the whole request) was already found above, together with
+    // `widest` (the widest row of the whole request that can fit the slot; a row rejected later for another reason still counts) was already found above, together with
     // `total_fields` for the memory estimate -- not recomputed here. The index width is grown to it
     // (MaybeGrowColumnCount below) BEFORE any WalRecord/zone-map file is created for it -- i.e. before the first
     // record is enqueued -- so a fresh DB's first batch is born at its true width instead of staying at the floor
@@ -414,6 +407,7 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
         WalRecord record;
         record.db_name = db_name;
         record.db_base_path = db_base_path_str;
+        record.layout = layout;
         record.time_resolution = cfg_struct.timeresolution();
         record.row_length = cfg_struct.rowlength();
         record.cfg_epoch = cfg_epoch;
@@ -434,30 +428,28 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
                          !HandOffToPool(indices.size(), CountContiguousRuns(rows, indices), min_run_rows, durability_mode, hand_off_sync);
         if (record.has_obs) {
             record.zone_map_pad_to = record.tracked_column_count;
-            // widest is the widest ACCEPTED row, so a true bound on every appended row's columns.
+            // widest is the widest row that can fit, so a true bound on every appended (= packed, so fitting) row's columns.
             record.ReserveRowsWithObs(indices.size(), static_cast<size_t>(widest));
         } else {
             record.ReserveRows(indices.size());
         }
 
         for (unsigned long long int idx : indices) {
-            size_t serialized_size = rows.RowBytes(static_cast<int>(idx));
-            // Reject-not-truncate, same guarantee as UnaryInsert: a row
-            // that doesn't fit its slot is dropped rather than silently
-            // corrupting whatever follows it. Before AppendRow: a row once
-            // appended cannot be taken back.
-            if (serialized_size > static_cast<size_t>(cfg_struct.rowlength())) {
-                if (rejected_oversized++ == 0) {
+            const xstore::layout::PackResult packed = rows.AppendTo(record, static_cast<int>(idx));
+            // WireRows only: bytes the wire reader cannot take as RowData. Nothing is enqueued or grown yet, so the caller takes the
+            // parsed path: it fails the request when the bytes are not protobuf at all, exactly as it always did, and rejects the row
+            // (kUnknownField, below, like any other rejected row) when they are protobuf with a field this server does not know.
+            if (packed.status == xstore::layout::PackStatus::kMalformed) return false;
+            if (!packed.Ok()) {
+                if (rejected_rows++ == 0) {
                     first_rejected_ts = rows.Timestamp(static_cast<int>(idx));
-                    first_rejected_size = serialized_size;
+                    first_rejected_why = xstore::layout::DescribePackResult(packed);
                 }
-                continue;
             }
-            if (!rows.AppendTo(record, static_cast<int>(idx))) return false;   // WireRows only: nothing enqueued or grown yet
         }
 
         if (record.row_count == 0) {
-            // Every row in this year-group was rejected as oversized --
+            // Every row in this year-group was rejected --
             // nothing to write, not a failure of the write path itself.
             continue;
         }
@@ -498,20 +490,20 @@ bool XStore::MultiRowInsertRows(Rows &rows, const std::string &requested_db_name
     // the unconditional success message below -- no mode condition here.
     // The accepted rows were written; a rejected row is reported, not hidden, so the reply is an [ERROR] (SplitStatusTally and the
     // XBench loaders already treat any non-[INFO] reply as a failure) that still says how many rows went in.
-    const size_t accepted_rows = static_cast<size_t>(row_count) - rejected_oversized;
-    const std::string rejected_note = rejected_oversized == 0 ? std::string()
-        : fmt::format("{} row(s) rejected: serialized row larger than the DB's row length {} (first: timestamp {}, {} bytes)",
-                      rejected_oversized, cfg_struct.rowlength(), first_rejected_ts, first_rejected_size);
+    const size_t accepted_rows = static_cast<size_t>(row_count) - rejected_rows;
+    const std::string rejected_note = rejected_rows == 0 ? std::string()
+        : fmt::format("{} row(s) rejected: {} (first: timestamp {}; DB row length {})",
+                      rejected_rows, first_rejected_why, first_rejected_ts, cfg_struct.rowlength());
     if (any_sync_failed) {
         std::string err_msg = fmt::format("[{}] [DB: {}] - Inserted {} elements, but the write failed for at least one group",
                                            op, db_name, accepted_rows);
         if (any_overloaded) err_msg += std::string("; ") + kWalOverloadedText;
-        if (rejected_oversized != 0) err_msg += "; " + rejected_note;
+        if (rejected_rows != 0) err_msg += "; " + rejected_note;
         SetTaggedStatus(return_data->mutable_insertstatus(), "[ERROR] ", err_msg);
         spdlog::error(err_msg);
         return true;
     }
-    if (rejected_oversized != 0) {
+    if (rejected_rows != 0) {
         std::string err_msg = fmt::format("[{}] [DB: {}] - Inserted {} of {} elements; {}", op, db_name, accepted_rows, row_count, rejected_note);
         SetTaggedStatus(return_data->mutable_insertstatus(), "[ERROR] ", err_msg);
         spdlog::warn(err_msg);

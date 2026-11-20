@@ -37,6 +37,7 @@
 #include "include/XStore/XStore_IndexRun.h"
 #include "include/XStore/XStore_RebuildProgress.h"
 #include "include/XStore/XStore_MemoryPool.h"
+#include "include/XStore/XStore_RowLayout.h"
 
 // Length of msg header
 #define TRACE_LEN 8
@@ -76,6 +77,9 @@ class XStore {
         // own shared_mutex.
         struct CfgShard {
             std::unordered_map<std::string, XStore_Proto::ConfigStruct> map;
+            // One immutable RowLayout per cached cfg (built from its schema and rowLength), shared by every request of the DB.
+            // Kept in step with `map` by GetOrLoadCfg, PutCfg and EraseCfg, under the same shard lock.
+            std::unordered_map<std::string, std::shared_ptr<const xstore::layout::RowLayout>> layouts;
             // Per DB name ever removed in this process: the cfg epoch EraseCfg produced (the counter value after its
             // bump), set under this shard's lock and never erased (one small entry per removed name, bounded by the
             // number of distinct names removed). Only the slow path of CfgEpochCurrent (WAL apply, deletes) reads it,
@@ -277,13 +281,16 @@ class XStore {
         struct WalRecord {
             std::string db_name;               // already upper-cased
             std::string db_base_path;          // full path -- locates this DB's WAL subdir and, at apply time, its .XSTORE file
+            // The DB's row layout at the moment the record was built (shared, immutable). Set by every request-path producer;
+            // null for a replayed record (replay writes the stored bytes and rebuilds indexes through the cached layout).
+            std::shared_ptr<const xstore::layout::RowLayout> layout;
             XStore_Proto::TimeUnit time_resolution = XStore_Proto::SECOND;
             unsigned short row_length = 0;
             // The year of this record's rows (TimeStruct(EpochAt(0), time_resolution).year; a record is
             // always one (db, year)). Set by every producer; EnqueueWalRecord routes by (db_base_path, year) only.
             // Sits in what was struct padding after row_length, so sizeof(WalRecord) is unchanged.
             unsigned short year = 0;
-            // max(the DB's EffectiveTrackedColumnCount, this record's widest accepted row) as of the moment the
+            // max(the DB's EffectiveTrackedColumnCount, this record's widest row that can fit the slot) as of the moment the
             // record was built -- per RECORD, not per row: every row in a record shares one (db, year) and one cfg
             // snapshot. ApplyWalRecord opens this DB's zone map at exactly this width and folds the rows at it (the
             // zone map's pad_to), so a file it creates never claims columns no row was folded into (a header wider
@@ -379,27 +386,25 @@ class XStore {
             // for zmap_values, zmap_numeric and catidx_vals (only rejected, narrower or unset-column rows leave slack). Defined in
             // XStore_Internal.h.
             void ReserveRowsWithObs(size_t rows, size_t widest_fields);
-            // The has_obs producer step shared by UnaryInsert and MultiRowInsert: appends the row's zero-padded slot to
-            // wire (epoch in front, serialized with the sizes the caller's ByteSizeLong() cached), its zone-map
-            // observations, its catidx values and its obs_end entry. Preconditions: data.ByteSizeLong() was called
-            // and is <= row_length, and every rejection of the row happens BEFORE this call (an appended row cannot
-            // be taken back). Defined in XStore_Internal.h.
-            void AppendRowWithObs(uint64_t epoch, const XStore_Proto::RowData &data);
             // Reserves wire for `rows` rows (exact). Defined in XStore_Internal.h.
             void ReserveRows(size_t rows);
-            // The one producer step shared by UnaryInsert and MultiRowInsert: appends the row's zero-padded slot to
-            // wire (epoch in front, serialized with the sizes the caller's ByteSizeLong() cached). Rows only: the
-            // indexes are folded from the stored bytes (ApplyWalRecord or the indexer, FoldStoredRows). Preconditions:
-            // data.ByteSizeLong() was called and is <= row_length, and every rejection of the row happens BEFORE this
-            // call (an appended row cannot be taken back). Defined in XStore_Internal.h.
-            void AppendRow(uint64_t epoch, const XStore_Proto::RowData &data);
+            // Each packs one row into a new, zeroed slot at the end of `wire` and returns the pack result; on failure the slot is
+            // removed again (a row once appended cannot be taken back, so a rejected row must leave no trace). Precondition:
+            // layout is set. The *WithObs variants also append the row's observations (has_obs records). Defined in
+            // XStore_Internal.h.
+            [[nodiscard]] xstore::layout::PackResult AppendRow(uint64_t epoch, const XStore_Proto::RowData &data);
+            [[nodiscard]] xstore::layout::PackResult AppendRowWithObs(uint64_t epoch, const XStore_Proto::RowData &data);
+            [[nodiscard]] xstore::layout::PackResult AppendWireRow(uint64_t epoch, const char *wire_row, size_t length);
+            [[nodiscard]] xstore::layout::PackResult AppendWireRowWithObs(uint64_t epoch, const char *wire_row, size_t length);
+            // Appends the zone-map / catalog-index observations of the row just appended (has_obs records).
+            void ObserveLastRow();
         };
 #if defined(__GLIBCXX__) && defined(__x86_64__) && (!defined(_GLIBCXX_USE_CXX11_ABI) || _GLIBCXX_USE_CXX11_ABI)
-        // std::string is 32 bytes only in libstdc++ with the C++11 ABI; guard so a layout change is noticed. 248 = the
-        // two path strings (64 B), the scalars with their padding (32 B: zone_map_pad_to, replayed and has_obs fit
-        // beside row_count and durability_mode), wire (32 B), the observation arrays (4 x 24 B), completion (8 B)
+        // std::string is 32 bytes only in libstdc++ with the C++11 ABI; guard so a layout change is noticed. 264 = the
+        // two path strings (64 B), layout (16 B), the scalars with their padding (32 B: zone_map_pad_to, replayed and has_obs
+        // fit beside row_count and durability_mode), wire (32 B), the observation arrays (4 x 24 B), completion (8 B)
         // and memory_lease (16 B). Paid once per record (moved twice), not per row.
-        static_assert(sizeof(WalRecord) == 248, "WalRecord layout changed: update this check deliberately");
+        static_assert(sizeof(WalRecord) == 264, "WalRecord layout changed: update this check deliberately");
 #endif
 
         struct WalShard {
@@ -492,7 +497,8 @@ class XStore {
         // comment) -- never validated against row_length/column_count_seed,
         // never touches storage layout or zone-map internals.
         [[nodiscard]] XStore_Proto::CreateDB_REP CreateDB(std::string_view db_name, XStore_Proto::TimeUnit time_resolution, short int row_length, uint32_t column_count_seed = 0,
-                                                            const std::vector<std::string> &column_names = {});
+                                                            const std::vector<std::string> &column_names = {},
+                                                            const std::vector<xstore::layout::ColumnSpec> &schema = {});
 
         // The single place that decides "how many columns does this DB's
         // zone map track," consumed by WalRecord::AppendRow, every
@@ -637,6 +643,7 @@ class XStore {
             unsigned long long next_epoch = 0;
             uint32_t cfg_epoch = 0;
             XStore_Proto::ConfigStruct cfg_struct;
+            std::shared_ptr<const xstore::layout::RowLayout> layout;
             std::string chunk_buf;
             bool has_warning = false;
             std::string last_warning;
@@ -688,6 +695,7 @@ class XStore {
             unsigned long long next_epoch = 0;
             uint32_t cfg_epoch = 0;
             XStore_Proto::ConfigStruct cfg_struct;
+            std::shared_ptr<const xstore::layout::RowLayout> layout;
             std::string encoded_target;
             uint32_t tracked_column_count = 0;
             bool unindexed_notice_emitted = false;
@@ -733,6 +741,7 @@ class XStore {
             unsigned long long next_epoch = 0;
             uint32_t cfg_epoch = 0;
             XStore_Proto::ConfigStruct cfg_struct;
+            std::shared_ptr<const xstore::layout::RowLayout> layout;
             std::shared_ptr<PatternMatcher> matcher;
             std::string chunk_buf;
             unsigned long long total_emitted_bytes = 0;
@@ -758,6 +767,7 @@ class XStore {
             bool started = false;
             uint32_t cfg_epoch = 0;
             XStore_Proto::ConfigStruct cfg_struct;
+            std::shared_ptr<const xstore::layout::RowLayout> layout;
             std::vector<std::pair<unsigned short int, std::vector<unsigned long long int>>> year_groups;   // per year: indices into `timestamps`, in request order
             size_t group = 0;      // the year group being read
             size_t position = 0;   // the next index (into the group's list) to read
@@ -822,12 +832,8 @@ class XStore {
         // madvise(WILLNEED) per segment before calling the kernel, to prefetch
         // the queried span instead of relying on lazy per-page faulting).
         //
-        // Each row is extracted via ExtractColumnByIndexSkipParse (see the .cpp
-        // for the tag-walk mechanics) rather than a full RowData parse -- these
-        // kernels only ever want ONE column, so decoding every column in the
-        // row was pure waste. See the .cpp for how holes/wrong-type/corrupt
-        // columns are handled.
-        static bool ExtractColumnByIndexSkipParse(const char* row_ptr, size_t row_len, unsigned short column_idx, XStore_Proto::FData& out_data);
+        // Each kernel reads its one column at the cell's fixed offset through the layout (a bound ColumnReader, or
+        // ReadNumericExact for Min/Max); holes, nulls and non-numeric cells are skipped.
 
         // Folds the stored rows of `runs` (rows of the open year file `data_fd`) into zmap and catidx, deriving the
         // observations from the stored bytes (the rebuild's one-pass decoder, AppendRebuildObservations). The one
@@ -836,15 +842,14 @@ class XStore {
         // UpdateRows per index per slice of at most 1 MiB. The caller holds a range lock over the runs (READ for a
         // pass, the writer's own WRITE lock inline). `catidx_column_limit` is the catidx width the caller read (values
         // in later columns are not folded). false = a pread failed; nothing of that slice was folded.
-        // row_length must be non-zero.
-        static bool FoldStoredRows(int data_fd, uint16_t row_length, uint32_t tracked_column_count, uint32_t catidx_column_limit,
+        static bool FoldStoredRows(int data_fd, const xstore::layout::RowLayout &layout, uint32_t tracked_column_count, uint32_t catidx_column_limit,
                                    const std::vector<xstore::IndexRun> &runs, ZoneMapFile &zmap, CatIdxFile &catidx);
 
         // Select kernel: tracks the single winning row under comparator Cmp(candidate, currentBest).
         //  Cmp = std::less<long double>  -> MIN ;  Cmp = std::greater<long double> -> MAX
         template <typename Cmp>
         void ProcessFileRangeSelect(const char* rows_base, unsigned long long total_rows,
-                                     size_t row_len, unsigned short column_idx,
+                                     const xstore::layout::RowLayout &layout, unsigned short column_idx,
                                      ValueStruct& best_value, XStore_Proto::FData& best_data);
 
         // Accumulate kernel: running sum + valid-row count. Backs SUM directly, AVG divides after.
@@ -852,7 +857,7 @@ class XStore {
         // (Task 2) -- nullptr (the default) skips it entirely, so SUM/AVG's call
         // sites are untouched.
         void ProcessFileRangeAccumulate(const char* rows_base, unsigned long long total_rows,
-                                         size_t row_len, unsigned short column_idx,
+                                         const xstore::layout::RowLayout &layout, unsigned short column_idx,
                                          double& sum_out, unsigned long long& valid_count_out,
                                          double *sum_sq_out = nullptr);
 
@@ -869,7 +874,7 @@ class XStore {
         // zero because unset" from "genuinely zero" the same way
         // ValueStruct::is_initialized does for ProcessFileRangeSelect.
         void ProcessFileRangeOhlc(const char* rows_base, unsigned long long total_rows,
-                                   size_t row_len, unsigned short column_idx,
+                                   const xstore::layout::RowLayout &layout, unsigned short column_idx,
                                    double &open_out, bool &open_set_out,
                                    double &high_out, double &low_out, bool &high_low_set_out,
                                    double &close_out, bool &close_set_out);
@@ -889,7 +894,7 @@ class XStore {
         // version this deliberately is not (see TODO.md's zone-map
         // follow-on section) -- every call is a real, full scan.
         void ProcessFileRangeCollectValues(const char* rows_base, unsigned long long total_rows,
-                                            size_t row_len, unsigned short column_idx,
+                                            const xstore::layout::RowLayout &layout, unsigned short column_idx,
                                             std::vector<double> &values_out);
 
         // Shared by MinAggregate/MaxAggregate (Task 6): splits one
@@ -912,7 +917,7 @@ class XStore {
         // insert/WAL-apply for this DB uses, so no caller can leave a header
         // claiming columns that were never folded.
         template <typename Cmp, typename PruneCheck>
-        void ScanSegmentWithZoneMapPruning(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+        void ScanSegmentWithZoneMapPruning(const std::string &db_base_path, unsigned short year, const xstore::layout::RowLayout &layout,
                                             uint32_t tracked_column_count,
                                             const char *rows_base, unsigned long long rows_to_process,
                                             unsigned long long first_row_index, unsigned short column_idx,
@@ -936,7 +941,7 @@ class XStore {
         // tracked_column_count: same role as in ScanSegmentWithZoneMapPruning
         // above -- this DB's EffectiveTrackedColumnCount, forwarded to
         // GetOrOpenZoneMap.
-        void AccumulateSegmentWithZoneMapPushdown(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+        void AccumulateSegmentWithZoneMapPushdown(const std::string &db_base_path, unsigned short year, const xstore::layout::RowLayout &layout,
                                                    uint32_t tracked_column_count,
                                                    const char *rows_base, unsigned long long rows_to_process,
                                                    unsigned long long first_row_index, unsigned short column_idx,
@@ -972,7 +977,7 @@ class XStore {
         // scan (same kernel MinAggregate uses) and checks whether it found
         // anything. found_out is only ever set to true, never cleared --
         // callers pass a fresh false per segment.
-        void ScanSegmentForExistence(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+        void ScanSegmentForExistence(const std::string &db_base_path, unsigned short year, const xstore::layout::RowLayout &layout,
                                       uint32_t tracked_column_count,
                                       const char *rows_base, unsigned long long rows_to_process,
                                       unsigned long long first_row_index, unsigned short column_idx,
@@ -999,7 +1004,7 @@ class XStore {
         // wide-span parallel path) -- both reduce to "first open wins, last
         // close wins, running min/max" over a chronologically-ordered
         // sequence of contributions.
-        void ScanSegmentForOhlc(const std::string &db_base_path, unsigned short year, uint16_t row_length,
+        void ScanSegmentForOhlc(const std::string &db_base_path, unsigned short year, const xstore::layout::RowLayout &layout,
                                  uint32_t tracked_column_count,
                                  const char *rows_base, unsigned long long rows_to_process,
                                  unsigned long long first_row_index, unsigned short column_idx,
@@ -1257,7 +1262,7 @@ class XStore {
         // local XStore instance for its lifetime (this codebase's "one
         // XStore per worker thread" convention, see the data_store_dir
         // member comment above) so it can reach the non-static
-        // ExtractColumnByIndexSkipParse/BuildColdBitmapSectionsForAllDbs path.
+        // BuildColdBitmapSectionsForAllDbs path (it reads each DB's layout through the cfg cache).
         static void StartBitmapBuildThread(const std::string &data_store_dir);
         // Stops + joins the bitmap build thread (no-op if never started or
         // already stopped); the atexit hook runs the same code. main.cpp
@@ -1273,10 +1278,8 @@ class XStore {
         // finishes accumulating a disqualified column). Idempotent no-op if
         // this year's .catidx already has a bitmap section.
         //
-        // Deliberately a non-static instance method, unlike
-        // RebuildOneYearZoneMap below -- it must call the non-static
-        // ExtractColumnByIndexSkipParse, which needs an XStore instance. The
-        // background thread in StartBitmapBuildThread owns one such
+        // A non-static instance method: it reads the DB's layout through
+        // this instance's cfg cache (LayoutOfDbDir). The background thread in StartBitmapBuildThread owns one such
         // instance for its lifetime.
         //
         // Public (like GetOrOpenCatIdx/ClearCatIdxRegistryForTests above):
@@ -1503,8 +1506,8 @@ class XStore {
         [[nodiscard]] static bool StopBackgroundWorkForTests(const std::string &scope);
         static void ResumeBackgroundWorkForTests(const std::string &scope, bool cancelled);
 
-        // Ring-format (record v2: ParseWalRecord's layout plus a u64 LSN after
-        // the CRC; see XStore_WalRing.h) parser. kOk = real record (out_record
+        // Ring-format (record v2: [u32 recordLen][u32 crc32c] then a u64 LSN and the
+        // fixed fields; see XStore_Wal.cpp and XStore_WalRing.h) parser. kOk = real record (out_record
         // filled), kPad = PAD filler to skip (consumed set, no rows), kEnd =
         // torn/CRC-bad/LSN-mismatch (a stale lap's bytes carry a different
         // LSN) -- stop replay, consumed untouched.
@@ -1714,10 +1717,6 @@ class XStore {
         static CatIdxFile& GetOrOpenCatIdxLocked(std::string_view db_base_path, unsigned short year, uint16_t row_length,
                                                  uint32_t tracked_column_count);
 
-        // One column's zone-map observation, used by the rebuild's decoder (AppendRebuildObservations; see
-        // XStore_Internal.h for the definition and rationale).
-        static ZoneMapObservation ZoneMapObservationOf(const XStore_Proto::FData &f_data, uint32_t column_idx);
-
         // Shared body of BatchInsert and RangeInsert (identical semantics; the
         // two RPCs differ only in proto message types and the log/status tag
         // `op`, e.g. "BATCH INSERT"). Defined in XStore_Internal.h. `deadline`
@@ -1767,18 +1766,26 @@ class XStore {
         // does not exist. Thread-safe: shared lock on cache hit, exclusive lock
         // (with re-check) only on cache miss. A freshly-parsed .CFG passes
         // through ClampPersistedColumnCount before it is cached or returned.
-        bool GetOrLoadCfg(const std::string &db_name, const std::string &db_base_path, XStore_Proto::ConfigStruct &cfg_out);
+        bool GetOrLoadCfg(const std::string &db_name, const std::string &db_base_path, XStore_Proto::ConfigStruct &cfg_out,
+                          std::shared_ptr<const xstore::layout::RowLayout> *layout_out = nullptr);
+        // The cached layout of an already-loaded DB, or null. For paths that hold a name but not a layout.
+        [[nodiscard]] std::shared_ptr<const xstore::layout::RowLayout> GetLayout(const std::string &db_name);
+        // The layout of the DB stored in db_base_path (its name is the directory's name), loading its .CFG on first use; null
+        // if it has none. For the index builders, which are handed a directory, not a request's layout.
+        [[nodiscard]] std::shared_ptr<const xstore::layout::RowLayout> LayoutOfDbDir(const std::string &db_base_path);
 
         // Insert/overwrite dbName's ConfigStruct in CfgMap under exclusive
         // lock, after ClampPersistedColumnCount (the second chokepoint --
         // the cache must never hold an out-of-bound columnCount regardless
-        // of which path populated it).
-        void PutCfg(const std::string &db_name, const XStore_Proto::ConfigStruct &cfg);
+        // of which path populated it). false: the cfg's schema/row length do not form a valid layout; nothing is cached
+        // (a previous entry of that name is dropped too), so a cached cfg always has a layout.
+        [[nodiscard]] bool PutCfg(const std::string &db_name, const XStore_Proto::ConfigStruct &cfg);
 
-        // Remove dbName's ConfigStruct from CfgMap under exclusive lock, bump
-        // the cfg epoch and record it in erased_epoch (records built from the
-        // erased cfg are dropped at apply).
-        void EraseCfg(const std::string &db_name);
+        // Remove dbName's .CFG file (cfg_path) and its ConfigStruct from CfgMap under the shard's exclusive lock, bump
+        // the cfg epoch and record it in erased_epoch (records built from the erased cfg are dropped at apply). The file
+        // goes under the lock: a column-count grower rewrites the .CFG under the same lock (temp file + fsync + rename),
+        // so it can no longer put the old .CFG back after its removal for a cache miss to load with a current epoch.
+        void EraseCfg(const std::string &db_name, const std::string &cfg_path);
 
         // Fetch targetFile's cached read-only mapping, creating (and
         // ftruncate'ing to totalRows*rowLength if new) the file and mapping it
@@ -1843,14 +1850,6 @@ class XStore {
         // stayed full (kWalOverloadedText for clients); ASYNC records have no completion, so never report it.
         static bool EnqueueWalRecord(WalRecord record, bool *overloaded = nullptr);
 
-        // Parses the on-disk WAL wire format (see XStore_Wal.cpp's
-        // WalWriterLoop pwritev path and ParseWalRecord definition for the
-        // exact byte layout and CRC framing). ParseWalRecord is an
-        // XStore:: member so ReplayWal's crash-recovery path (a different
-        // translation unit) uses this exact implementation instead of an
-        // independently-maintained copy.
-        static bool ParseWalRecord(const char *data, size_t len, size_t &consumed, WalRecord &out_record);
-
         // Writes every row in recordToApply.wire to its actual .XSTORE data
         // file, at the offset each row's epoch (combined with
         // recordToApply's time_resolution/row_length) computes to -- the
@@ -1912,7 +1911,7 @@ class XStore {
         // "(db, year) pairs WAL replay actually touched during one
         // InitDB() call", keyed by already-upper-cased dbName.
         //
-        // Why this has to exist at all: ParseWalRecord rebuilds a WalRecord
+        // Why this has to exist at all: ParseWalRecordV2 rebuilds a WalRecord
         // from the WAL's own bytes, and the WAL format deliberately does
         // NOT carry a row's ZoneMapObservations (they are derived state),
         // and a replayed record folds nothing (WalRecord::replayed). Replay
@@ -1983,14 +1982,11 @@ class XStore {
         // ReplayedYearMap above for why that is a correctness requirement
         // and not an optimization.
         [[nodiscard]] ReplayedYearMap ReplayWal();
-        // ReplayWal's two per-shard-file bodies (see XStore_Management.cpp).
-        // Ring: replay [checkpoint_lsn, end) with the file's OWN ring_bytes, fdatasync
-        // the touched data files, and only then persist checkpoint_lsn = end.
-        // Legacy: the pre-ring parse, then (only if the touched data files synced) the
-        // file is recreated as a ring.
+        // ReplayWal's per-shard-file body (see XStore_Management.cpp): replay [checkpoint_lsn, end) with the file's OWN
+        // ring_bytes, fdatasync the touched data files, and only then persist checkpoint_lsn = end. A shard file that is not
+        // a version-2 ring is moved aside by ReplayWal itself, never replayed.
         void ReplayRingShard(const std::string &wal_path, size_t shard_idx, int fd, uint64_t ring_bytes,
                              uint64_t checkpoint_lsn, ReplayedYearMap &replayed_years);
-        void ReplayLegacyShard(const std::string &wal_path, size_t shard_idx, ReplayedYearMap &replayed_years);
 
         // Called once per DB from InitDB() (after WAL replay and after the DB's ConfigStruct is loaded), before any
         // worker thread sharing this data_store_dir can serve a request -- see design doc "Startup-time zone-map
@@ -2027,8 +2023,7 @@ class XStore {
             std::vector<char> scan_buffer;
             ZoneMapFoldBatch zmap;
             CatIdxFoldBatch catidx;
-            XStore_Proto::FData column;
-            XStore_Proto::RowData row; // only for a row the one-pass decoder declines (see AppendRebuildObservations)
+            const xstore::layout::RowLayout *layout = nullptr;   // the DB's layout; set by whoever creates the scratch
         };
         struct FoldResult {
             bool scan_complete = true;
@@ -2042,14 +2037,10 @@ class XStore {
         // [chunk_begin, chunk_end) around this call and both AdvanceFrontier calls.
         FoldResult FoldChunk(int data_fd, uint64_t chunk_begin, uint64_t chunk_end, uint16_t row_length,
                              uint32_t tracked_column_count, ZoneMapFile *zmap, CatIdxFile *catidx, RebuildScratch &scratch);
-        // Appends one row's zone-map observations and catidx values to the batches (either may be nullptr), parsing
-        // the row once: one tag walk, each column decoded once. The result is the same as the per-row rebuild's
-        // (RowData parse + ZoneMapObservationOf per column for the zone map; ExtractColumnByIndexSkipParse +
-        // EncodeFDataForCatIdx per column for the catidx); a row whose bytes are not a plain run of well-formed
-        // columns falls back to exactly those calls.
-        static void AppendRebuildObservations(uint64_t row_index, const char *row, uint16_t row_length,
-                                              uint32_t tracked_column_count, ZoneMapFoldBatch *zmap, CatIdxFoldBatch *catidx,
-                                              RebuildScratch &scratch);
+        // Appends one row's zone-map observations and catidx values to the batches (either may be nullptr), read through
+        // scratch.layout with the same RowLayout calls as the insert path (WalRecord::ObserveLastRow).
+        static void AppendRebuildObservations(uint64_t row_index, const char *row, uint32_t tracked_column_count,
+                                              ZoneMapFoldBatch *zmap, CatIdxFoldBatch *catidx, RebuildScratch &scratch);
 
         // One year of a RebuildYearsIndexes call (defined in XStore_Management.cpp): pins, data fd, group layout,
         // per-file contiguous watermark, shared failure state.

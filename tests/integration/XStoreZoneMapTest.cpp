@@ -806,10 +806,7 @@ TEST_F(XStoreZoneMapTest, InitDbRebuildsZoneMapForPreExistingDataWithNoSidecar) 
         for (size_t i = 0; i < values.size(); ++i) {
             XStore_Proto::RowData row;
             row.add_fielddata()->set_doubledata(values[i]);
-            size_t serialized_size = row.ByteSizeLong();
-            ASSERT_LE(serialized_size, kPreexistRowLength);
-            std::vector<char> row_buf(kPreexistRowLength, 0);
-            row.SerializeToArray(row_buf.data(), static_cast<int>(kPreexistRowLength));
+            const std::string row_buf = xstore_test::PackDynamicSlot(row, kPreexistRowLength);
             uint64_t row_index = first_row_index + i;
             ASSERT_EQ(pwrite(fd, row_buf.data(), kPreexistRowLength, static_cast<off_t>(row_index * kPreexistRowLength)),
                       static_cast<ssize_t>(kPreexistRowLength));
@@ -891,8 +888,7 @@ TEST_F(XStoreZoneMapTest, RebuiltZoneMapConvergesToPerDbTrackedColumnCountInstea
         ASSERT_EQ(ftruncate(fd, static_cast<off_t>((row_index + 1) * kPreexistRowLength)), 0);
         XStore_Proto::RowData row;
         row.add_fielddata()->set_doubledata(42.0);
-        std::vector<char> row_buf(kPreexistRowLength, 0);
-        row.SerializeToArray(row_buf.data(), static_cast<int>(kPreexistRowLength));
+        const std::string row_buf = xstore_test::PackDynamicSlot(row, kPreexistRowLength);
         ASSERT_EQ(pwrite(fd, row_buf.data(), kPreexistRowLength, static_cast<off_t>(row_index * kPreexistRowLength)),
                   static_cast<ssize_t>(kPreexistRowLength));
         close(fd);
@@ -1218,8 +1214,7 @@ TEST_F(XStoreZoneMapTest, RebuildOneYearZoneMapConcurrentAcrossYearsDoesNotCrash
         for (int i = 0; i < kRowsPerYear; ++i) {
             XStore_Proto::RowData row;
             row.add_fielddata()->set_doubledata(static_cast<double>(i));
-            std::vector<char> row_buf(kPreexistRowLength, 0);
-            row.SerializeToArray(row_buf.data(), static_cast<int>(kPreexistRowLength));
+            const std::string row_buf = xstore_test::PackDynamicSlot(row, kPreexistRowLength);
             uint64_t row_index = first_row_index + static_cast<uint64_t>(i);
             ASSERT_EQ(pwrite(fd, row_buf.data(), kPreexistRowLength, static_cast<off_t>(row_index * kPreexistRowLength)),
                       static_cast<ssize_t>(kPreexistRowLength));
@@ -1448,7 +1443,7 @@ TEST_F(XStoreZoneMapTest, SumAndVarianceOnColumnAboveGrownColumnCountReadRealDat
 // Scoped re-review of the C1/C2 fix wave, finding (a) -- a SILENT,
 // PERMANENT wrong answer on the normal restart path, with no self-healing.
 //
-// Mechanism: ParseWalRecord rebuilds a WalRecord out of the WAL's own bytes,
+// Mechanism: ParseWalRecordV2 (the ring replay) rebuilds a WalRecord out of the WAL's own bytes,
 // and the WAL format deliberately doesn't carry a row's
 // ZoneMapObservations (derived state -- see WalRecord::zmap_values in XStore.h). So
 // every WAL-replayed row reaches ApplyWalRecord with NO observations,
@@ -2364,8 +2359,7 @@ void LwBuildRows(ZoneMapFile &zmap, CatIdxFile *catidx, int fd, const std::strin
     const bool complete = ForEachDataRow(fd, to, row_length, [&](uint64_t r, const char *row_buf) {
         if (row_buf[0] == 0) return;
         XStore_Proto::RowData row;
-        const size_t real_len = XStoreWireEncode::RealRowDataLength(row_buf, row_length);
-        if (real_len > 0) (void)row.ParseFromArray(row_buf, static_cast<int>(real_len));
+        xstore_test::DecodeDynamicSlot(row_buf, row_length, &row);
         std::vector<ZoneMapObservation> zobs;
         std::vector<CatIdxObservation> cobs;
         const int n = std::min(static_cast<int>(width), row.fielddata_size());
@@ -3277,7 +3271,7 @@ TEST_F(XStoreZoneMapTest, LiveWidenUnderConcurrentWritesMatchesAFreshRebuild) {
         ASSERT_TRUE(ForEachDataRow(dfd, first_row + rows, kWideRowLength, [&](uint64_t r, const char *row_buf) {
             if (row_buf[0] == 0) return;
             XStore_Proto::RowData row;
-            (void)row.ParseFromArray(row_buf, static_cast<int>(XStoreWireEncode::RealRowDataLength(row_buf, kWideRowLength)));
+            xstore_test::DecodeDynamicSlot(row_buf, kWideRowLength, &row);
             ASSERT_GT(row.fielddata_size(), 0);
             ++present;
             EXPECT_TRUE(catidx.MightContain(BlockIndexForRow(r, rpb), 0, EncodeFDataForCatIdx(row.fielddata(0))))
@@ -3720,8 +3714,10 @@ TEST_F(XStoreZoneMapTest, RebuiltCatIdxBloomEqualsLiveBuiltBloomForRowsWithUnset
                                                           i % 3 == 0 ? unset : FInt64(i * 7), unset}),
                           "CATNULLBLOOM", &rep, XStore_Proto::SYNC);
     }
-    // One more row, then damaged after the live build (an unknown trailing field): the rebuild's one-pass decoder
-    // gives up on it and the per-row fallback must fold the same columns, unset one skipped.
+    // One more row, then damaged after the live build (garbage in the slot's padding): the rebuild must still read the
+    // same columns, the unset one skipped. (Weaker than the protobuf-era version of this test, whose damage was a foreign tag
+    // inside the row that forced the rebuild's slow fallback parse: a slot has no such parse, so the padding is what is left to
+    // damage, and the rebuild must read exactly the cells the live build saw.)
     {
         using xstore_test::FInt64;
         using xstore_test::FString;
@@ -3741,11 +3737,12 @@ TEST_F(XStoreZoneMapTest, RebuiltCatIdxBloomEqualsLiveBuiltBloomForRowsWithUnset
         std::string row(kRowLength, '\0');
         f.seekg(static_cast<std::streamoff>(row_start));
         ASSERT_TRUE(f.read(row.data(), kRowLength).good());
-        const size_t real_len = XStoreWireEncode::RealRowDataLength(row.data(), kRowLength);
-        ASSERT_GT(real_len, 0u);
-        ASSERT_LT(real_len + 2, static_cast<size_t>(kRowLength));
-        f.seekp(static_cast<std::streamoff>(row_start + real_len));
-        f.write("\x10\x01", 2); // field 2, varint 1: not a column tag
+        ASSERT_EQ(row[0], '\x01') << "the row is live";
+        // Past the last cell and its string tail, in what is padding: no column may change because of it.
+        const size_t last_cell_end = 3 + 4 * 9 + std::string("damaged").size();
+        ASSERT_LT(last_cell_end + 2, static_cast<size_t>(kRowLength));
+        f.seekp(static_cast<std::streamoff>(row_start + kRowLength - 2));
+        f.write("\x10\x01", 2); // garbage in the padding
         ASSERT_TRUE(f.good());
     }
     ASSERT_TRUE(std::filesystem::remove(catidx_path));

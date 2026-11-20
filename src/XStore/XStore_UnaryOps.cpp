@@ -27,19 +27,19 @@ void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::R
     // The cfg epoch is loaded BEFORE the cfg is read (see WalRecord::cfg_epoch).
     const uint32_t cfg_epoch = CfgEpoch();
     XStore_Proto::ConfigStruct cfg_struct;
-    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+    std::shared_ptr<const xstore::layout::RowLayout> layout;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct, &layout)) {
         std::string err_msg = fmt::format("[UNARY INSERT] [DB: {}] - DB does not exist", db_name);
         SetTaggedStatus(return_data->mutable_insertstatus(), "[WARNING] ", err_msg);
         spdlog::warn(err_msg);
         return;
     }
 
-    // A row that doesn't fit in the configured slot would otherwise silently
-    // truncate (SerializeToArray's return value was previously unchecked),
-    // corrupting whatever follows it in the file. Reject up front instead.
-    size_t serialized_size = data.ByteSizeLong();
-    if (serialized_size > static_cast<size_t>(cfg_struct.rowlength())) {
-        std::string err_msg = fmt::format("[UNARY INSERT] [DB: {}] - Row size {} exceeds configured row length {}", db_name, serialized_size, cfg_struct.rowlength());
+    // A row that cannot fit even before any string bytes is rejected up front, as the old size check did (before the index
+    // width is grown for it). Everything else (wrong kind, narrow overflow, a long string) is found by the packer below.
+    if (!layout->CanFit(static_cast<size_t>(data.fielddata_size()))) {
+        std::string err_msg = fmt::format("[UNARY INSERT] [DB: {}] - Row of {} columns exceeds configured row length {}", db_name,
+                                          data.fielddata_size(), cfg_struct.rowlength());
         SetTaggedStatus(return_data->mutable_insertstatus(), "[WARNING] ", err_msg);
         spdlog::warn(err_msg);
         return;
@@ -56,6 +56,7 @@ void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::R
     WalRecord record;
     record.db_name = db_name;
     record.db_base_path = db_base_path_str;
+    record.layout = layout;
     record.time_resolution = cfg_struct.timeresolution();
     record.row_length = cfg_struct.rowlength();
     record.cfg_epoch = cfg_epoch;
@@ -77,19 +78,26 @@ void XStore::UnaryInsert(unsigned long long int unix_time, const XStore_Proto::R
     // EffectiveTrackedColumnCount's pre-growth floor.
     record.tracked_column_count = std::max(EffectiveTrackedColumnCount(cfg_struct),
                                             std::min<uint32_t>(static_cast<uint32_t>(widest), XStoreTunables::MAX_TRACKED_COLUMN_COUNT));
-    // Serialized straight into the record's zero-filled slot, reusing the sizes ByteSizeLong() cached above: no
-    // scratch buffer, no copy.
+    // Packed straight into the record's zero-filled slot: no scratch buffer, no copy.
     // One row = a run of 1: below any threshold >= 2, so the request thread indexes, as the base build does; with threshold
     // 1 (tests) the pool is wanted. Production: !Active() || mode != ASYNC || MinRunRows() > 1 (HandOffToPool states it).
     const xstore::Indexer &indexer = xstore::Indexer::Instance();
     record.has_obs = !indexer.Active() || !HandOffToPool(1, 1, indexer.MinRunRows(), durability_mode, indexer.HandOffSync());
+    xstore::layout::PackResult packed;
     if (record.has_obs) {
         record.zone_map_pad_to = record.tracked_column_count;
         record.ReserveRowsWithObs(1, static_cast<size_t>(widest));
-        record.AppendRowWithObs(unix_time, data);
+        packed = record.AppendRowWithObs(unix_time, data);
     } else {
         record.ReserveRows(1);
-        record.AppendRow(unix_time, data);
+        packed = record.AppendRow(unix_time, data);
+    }
+    if (!packed.Ok()) {
+        std::string err_msg = fmt::format("[UNARY INSERT] [DB: {}] - Row rejected: {} (row length {})", db_name,
+                                          xstore::layout::DescribePackResult(packed), cfg_struct.rowlength());
+        SetTaggedStatus(return_data->mutable_insertstatus(), "[WARNING] ", err_msg);
+        spdlog::warn(err_msg);
+        return;
     }
 
     if (durability_mode == XStore_Proto::BYPASS) {
@@ -134,7 +142,8 @@ void XStore::UnaryQuery(unsigned long long int unix_time, std::string_view db_na
     // a cache miss, so a separate upfront is_directory() check on every call
     // (cache hit or not) would just be a redundant stat -- dropped.
     XStore_Proto::ConfigStruct cfg_struct;
-    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct)) {
+    std::shared_ptr<const xstore::layout::RowLayout> layout;
+    if (!GetOrLoadCfg(db_name, db_base_path_str, cfg_struct, &layout)) {
         std::string err_msg = fmt::format("[UNARY QUERY] [DB: {}] - DB does not exist", db_name);
         SetTaggedStatus(return_data->mutable_querystatus(), "[WARNING] ", err_msg);
         spdlog::warn(err_msg);
@@ -195,11 +204,14 @@ void XStore::UnaryQuery(unsigned long long int unix_time, std::string_view db_na
     {
         //  Lock range prior to reading
         FileRangeLockGuard guard(target_file_path, offset, cfg_struct.rowlength(), FileRangeLock::LockType::READ);
-        // (void) doesn't suppress __wur under _FORTIFY_SOURCE; short read is ignored on purpose.
-        [[maybe_unused]] ssize_t pread_ret = pread(fd, row_buf.data(), cfg_struct.rowlength(), static_cast<off_t>(offset));
+        // A short read (or an error) must not leave the previous call's row, possibly another DB's, in the scratch buffer: the
+        // unread bytes are zero, i.e. a hole.
+        const ssize_t pread_ret = pread(fd, row_buf.data(), cfg_struct.rowlength(), static_cast<off_t>(offset));
+        const size_t got = pread_ret > 0 ? static_cast<size_t>(pread_ret) : 0;
+        if (got < static_cast<size_t>(cfg_struct.rowlength())) std::memset(row_buf.data() + got, 0, static_cast<size_t>(cfg_struct.rowlength()) - got);
     }
 
-    return_data->mutable_data()->ParseFromArray(row_buf.data(), cfg_struct.rowlength());
+    layout->DecodeToRowData(row_buf.data(), return_data->mutable_data());
 }
 
 // UNARY DELETE

@@ -105,7 +105,7 @@ protected:
         const int fd = open(data_path.c_str(), O_RDONLY);
         ASSERT_GE(fd, 0) << data_path;
         const std::vector<xstore::IndexRun> own_runs = runs != nullptr ? std::vector<xstore::IndexRun>() : RunsOf(data_path, row_length);
-        ASSERT_TRUE(store.FoldStoredRows(fd, row_length, width, limit != 0 ? limit : catidx.TrackedColumnCount(),
+        ASSERT_TRUE(store.FoldStoredRows(fd, *DynamicLayout(row_length), width, limit != 0 ? limit : catidx.TrackedColumnCount(),
                                          runs != nullptr ? *runs : own_runs, zmap, catidx));
         close(fd);
         ASSERT_TRUE(zmap.MarkClean());
@@ -157,12 +157,12 @@ TEST_F(XStoreDeferredFoldTest, MatchesThePerRowReferenceOnEveryDataShape) {
     CleanRestartState();
     {
         const std::string path = YearPath(db, kDamaged, ".XSTORE");
-        PwriteRow(path, 10, kRowLength, DoubleColumn(1.5) + std::string("\x12\x01\x41", 3) + std::string("\x0a\x02\x20\x07", 4));
-        PwriteRow(path, 11, kRowLength, std::string("\x08\x05", 2) + DoubleColumn(2.5));
-        PwriteRow(path, 12, kRowLength, DoubleColumn(3.5) + std::string("\x0a\xff\x0f", 3));
-        PwriteRow(path, 14, kRowLength, std::string("\x0a\x03\x09\x01\x02", 5) + std::string("\x0a\x02\x20\x05", 4));
-        PwriteRow(path, 15, kRowLength, DoubleColumn(6.5) + std::string("\xff\x01", 2));
-        PwriteRow(path, 16, kRowLength, std::string("\x0a\x00\x0a\x00", 4) + DoubleColumn(7.5));
+        PwriteRow(path, 10, kRowLength, DamagedSlot(SlotDamage::kUnknownCellType, kRowLength, 1.5));
+        PwriteRow(path, 11, kRowLength, DamagedSlot(SlotDamage::kBadMarker, kRowLength, 2.5));
+        PwriteRow(path, 12, kRowLength, DamagedSlot(SlotDamage::kStringOutsideSlot, kRowLength, 3.5));
+        PwriteRow(path, 14, kRowLength, DamagedSlot(SlotDamage::kColumnCountPastSlot, kRowLength, 5.5));
+        PwriteRow(path, 15, kRowLength, DamagedSlot(SlotDamage::kGarbageInPadding, kRowLength, 6.5));
+        PwriteRow(path, 16, kRowLength, PackDynamicSlot(DoubleBitsRow({std::nullopt, std::nullopt, std::bit_cast<uint64_t>(7.5)}), kRowLength));   // empty columns (valid)
     }
     const uint32_t width = ReadHeader<ZoneMapFileHeader>(YearPath(db, kDense, ".zmap")).tracked_column_count;
     ASSERT_EQ(width, 80u) << "the DB grew to its widest row";
@@ -223,7 +223,7 @@ TEST_F(XStoreDeferredFoldTest, ReportsAReadFailure) {
     ASSERT_TRUE(zmap.Open((scratch->test_root / "bad.zmap").string(), kRowLength, 4));
     CatIdxFile catidx;
     ASSERT_TRUE(catidx.Open((scratch->test_root / "bad.catidx").string(), kRowLength, 4));
-    EXPECT_FALSE(store.FoldStoredRows(-1, kRowLength, 4, 4, {{0, 10}}, zmap, catidx));
+    EXPECT_FALSE(store.FoldStoredRows(-1, *DynamicLayout(kRowLength), 4, 4, {{0, 10}}, zmap, catidx));
 }
 
 // catidx_column_limit L: values in columns below L are folded, values at or above L are not (the bloom answers
@@ -340,12 +340,7 @@ TEST_F(XStoreDeferredFoldTest, AnAllEmptyRowIsAHoleOnTheLiveAndDeferredPaths) {
 // The double and empty-column fast paths of AppendRebuildObservations must give byte-identical sidecars to the
 // per-row reference for every double bit pattern, including the ones a long-double round trip could alter.
 namespace {
-std::string RawDoubleColumn(uint64_t bits) {
-    std::string out = "\x0a\x09\x09";
-    out.append(reinterpret_cast<const char *>(&bits), sizeof(bits));
-    return out;
-}
-const std::string kEmptyColumn("\x0a\x00", 2);   // an unset (null) column
+constexpr std::optional<uint64_t> kEmptyColumn = std::nullopt;   // an unset (null) column
 }  // namespace
 
 TEST_F(XStoreDeferredFoldTest, DoubleAndEmptyColumnsOfEveryBitPatternMatchTheReference) {
@@ -376,9 +371,9 @@ TEST_F(XStoreDeferredFoldTest, DoubleAndEmptyColumnsOfEveryBitPatternMatchTheRef
     uint64_t row = 100;
     for (size_t i = 0; i < patterns.size(); ++i) {
         // Each pattern in column 0, then alone in a later column behind empty columns, then repeated.
-        PwriteRow(path, row++, kRowLength, RawDoubleColumn(patterns[i]) + RawDoubleColumn(patterns[(i + 1) % patterns.size()]));
-        PwriteRow(path, row++, kRowLength, kEmptyColumn + kEmptyColumn + RawDoubleColumn(patterns[i]) + kEmptyColumn);
-        PwriteRow(path, row++, kRowLength, kEmptyColumn);   // an all-empty-columns row (non-zero first byte: 0x0a)
+        PwriteRow(path, row++, kRowLength, PackDynamicSlot(DoubleBitsRow({patterns[i], patterns[(i + 1) % patterns.size()]}), kRowLength));
+        PwriteRow(path, row++, kRowLength, PackDynamicSlot(DoubleBitsRow({kEmptyColumn, kEmptyColumn, patterns[i], kEmptyColumn}), kRowLength));
+        PwriteRow(path, row++, kRowLength, PackDynamicSlot(DoubleBitsRow({kEmptyColumn}), kRowLength));   // a live row whose only column is unset
     }
     const uint32_t width = ReadHeader<ZoneMapFileHeader>(YearPath(db, kYear, ".zmap")).tracked_column_count;
     const std::string ref_zmap = (scratch->test_root / "ref.zmap").string();
@@ -402,12 +397,12 @@ TEST_F(XStoreDeferredFoldTest, DoubleAndEmptyColumnsPastTheTrackedWidthMatchTheR
     const std::string path = YearPath(db, kYear, ".XSTORE");
     const uint32_t width = ReadHeader<ZoneMapFileHeader>(YearPath(db, kYear, ".zmap")).tracked_column_count;
     for (uint64_t r = 0; r < 50; ++r) {
-        std::string bytes;
+        std::vector<std::optional<uint64_t>> cells;
         for (uint32_t c = 0; c < width + 20; ++c) {   // 20 columns beyond the tracked width: two doubles, then one empty column, repeating
-            bytes += (c % 3 == 2) ? kEmptyColumn : RawDoubleColumn(0x4000000000000000ULL + r * 977 + c);
+            cells.push_back((c % 3 == 2) ? kEmptyColumn : std::optional<uint64_t>(0x4000000000000000ULL + r * 977 + c));
         }
-        ASSERT_LE(bytes.size(), static_cast<size_t>(kRowLength)) << "the crafted row (" << bytes.size() << " B for " << width + 20 << " columns at tracked width " << width << ") must fit its slot of " << kRowLength << " B";
-        PwriteRow(path, 10 + r, kRowLength, bytes);
+        ASSERT_LE(3 + 9 * cells.size(), static_cast<size_t>(kRowLength)) << "the crafted row (" << width + 20 << " dynamic columns at tracked width " << width << ") must fit its slot of " << kRowLength << " B";
+        PwriteRow(path, 10 + r, kRowLength, PackDynamicSlot(DoubleBitsRow(cells), kRowLength));
     }
     const std::string ref_zmap = (scratch->test_root / "ref.zmap").string();
     const std::string ref_catidx = (scratch->test_root / "ref.catidx").string();
@@ -434,12 +429,12 @@ TEST_F(XStoreDeferredFoldTest, DoubleAndEmptyColumnsPastTheCallersTrackedCountAr
     constexpr uint32_t kTracked = 40;
     ASSERT_GT(file_width, kTracked);
     for (uint64_t r = 0; r < 50; ++r) {
-        std::string bytes;
+        std::vector<std::optional<uint64_t>> cells;
         for (uint32_t c = 0; c < file_width; ++c) {
-            bytes += (c % 3 == 2) ? kEmptyColumn : RawDoubleColumn(0x4000000000000000ULL + r * 977 + c);
+            cells.push_back((c % 3 == 2) ? kEmptyColumn : std::optional<uint64_t>(0x4000000000000000ULL + r * 977 + c));
         }
-        ASSERT_LE(bytes.size(), static_cast<size_t>(kRowLength));
-        PwriteRow(path, 10 + r, kRowLength, bytes);
+        ASSERT_LE(3 + 9 * cells.size(), static_cast<size_t>(kRowLength));
+        PwriteRow(path, 10 + r, kRowLength, PackDynamicSlot(DoubleBitsRow(cells), kRowLength));
     }
     const std::string ref_zmap = (scratch->test_root / "ref.zmap").string();
     const std::string ref_catidx = (scratch->test_root / "ref.catidx").string();
@@ -456,15 +451,13 @@ TEST_F(XStoreDeferredFoldTest, DoubleAndEmptyColumnsPastTheCallersTrackedCountAr
         ASSERT_TRUE(ForEachDataRow(fd, total_rows, kRowLength, [&](uint64_t r, const char *buf) {
             if (buf[0] == 0) return;
             XStore_Proto::RowData row;
-            const size_t real_len = XStoreWireEncode::RealRowDataLength(buf, kRowLength);
-            if (real_len > 0) static_cast<void>(row.ParseFromArray(buf, static_cast<int>(real_len)));
+            DecodeDynamicSlot(buf, kRowLength, &row);
             zmap.UpdateRow(r, RefZoneMapObservations(row, kTracked), kTracked);
             std::vector<CatIdxObservation> observations;
             for (uint32_t c = 0; c < kTracked; ++c) {
-                XStore_Proto::FData f;
-                if (store.ExtractColumnByIndexSkipParse(buf, kRowLength, static_cast<unsigned short>(c), f) &&
-                    f.oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
-                    observations.push_back({c, EncodeFDataForCatIdx(f), true});
+                if (c < static_cast<uint32_t>(row.fielddata_size()) &&
+                    row.fielddata(static_cast<int>(c)).oneOfData_case() != XStore_Proto::FData::ONEOFDATA_NOT_SET) {
+                    observations.push_back({c, EncodeFDataForCatIdx(row.fielddata(static_cast<int>(c))), true});
                 } else {
                     observations.push_back({c, std::string(), false});
                 }
@@ -482,7 +475,7 @@ TEST_F(XStoreDeferredFoldTest, DoubleAndEmptyColumnsPastTheCallersTrackedCountAr
         ASSERT_TRUE(catidx.Open(got_catidx, kRowLength, file_width));
         const int fd = open(path.c_str(), O_RDONLY);
         ASSERT_GE(fd, 0);
-        ASSERT_TRUE(store.FoldStoredRows(fd, kRowLength, kTracked, kTracked, RunsOf(path, kRowLength), zmap, catidx));
+        ASSERT_TRUE(store.FoldStoredRows(fd, *DynamicLayout(kRowLength), kTracked, kTracked, RunsOf(path, kRowLength), zmap, catidx));
         close(fd);
         ASSERT_TRUE(zmap.MarkClean());
         ASSERT_TRUE(catidx.MarkClean());
@@ -492,7 +485,7 @@ TEST_F(XStoreDeferredFoldTest, DoubleAndEmptyColumnsPastTheCallersTrackedCountAr
 }
 
 // A signaling-NaN double must give the same zone map bytes as the live insert path (which quiets it through the
-// long double of ZoneMapObservationOf). ZoneMapFile does not skip NaN, so a NaN that is the first or last numeric
+// long double of the observation). ZoneMapFile does not skip NaN, so a NaN that is the first or last numeric
 // observation of a column in a block lands in min/max/first/last. Every NaN case sits in a block other than block 0
 // (2048 rows per block at kRowLength 1024) so that no earlier finite row masks it.
 TEST_F(XStoreDeferredFoldTest, SignalingNaNDoublesMatchTheLiveInsertPath) {

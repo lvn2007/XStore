@@ -84,6 +84,16 @@ enum WalDurabilityMode {
   BYPASS = 2;
 }
 
+// One declared column of a DB's optional schema. kind = the FData field number of the type the client sends and receives
+// (1 double, 2 float, 3 int32, 4 int64, 5 uint32, 6 uint64, 7 sint32, 8 sint64, 9 fixed32, 10 fixed64, 11 sfixed32,
+// 12 sfixed64, 13 bool, 14 string, 15 bytes). storage: 0 default (the kind's natural width), 1 INT8, 2 INT16, 3 UINT8,
+// 4 UINT16 (range-checked narrow integers), 5 INLINE_STRING (fixed capacity, no tail). capacity: INLINE_STRING only, 1..255.
+message ColumnSpec {
+  uint32 kind = 1;
+  uint32 storage = 2;
+  uint32 capacity = 3;
+}
+
 message ConfigStruct {
   string dbName = 1;
   TimeUnit timeResolution = 2;
@@ -102,6 +112,8 @@ message ConfigStruct {
   // rediscover the mapping via InfoRequest's DbStats, which mirrors this
   // field the same way it already mirrors rowLength.
   repeated string columnNames = 5;
+  // The DB's optional typed-column prefix (see ColumnSpec). Empty = every column is dynamic. Immutable after CreateDB.
+  repeated ColumnSpec schema = 6;
 }
 
 message FData {
@@ -151,6 +163,8 @@ message CreateDB_REQ {
   // Client-supplied names for the columns it plans to use, forwarded
   // as-is into ConfigStruct.columnNames -- see that field's comment.
   repeated string columnNames = 6;
+  // Optional typed-column prefix, copied into ConfigStruct.schema.
+  repeated ColumnSpec schema = 7;
 }
 
 // --- REMOVE DB request
@@ -505,6 +519,8 @@ message DbStats {
   // mapping via InfoRequest instead of only at CreateDB time. Empty if the
   // DB was created without names.
   repeated string columnNames = 6;
+  // Mirrors ConfigStruct.schema: lets a client discover the declared column types. Empty = all dynamic.
+  repeated ColumnSpec schema = 7;
 }
 
 // --- SYS INFO

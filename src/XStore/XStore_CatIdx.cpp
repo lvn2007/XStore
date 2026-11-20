@@ -741,6 +741,12 @@ bool XStore::BuildOneYearBitmapSection(const std::string &db_base_path, unsigned
                                    uint32_t tracked_column_count) {
     std::string data_path = fmt::format("{}/{}.XSTORE", db_base_path, year);
     if (!std::filesystem::exists(data_path)) return true;
+    const std::shared_ptr<const xstore::layout::RowLayout> layout = LayoutOfDbDir(db_base_path);
+    if (layout == nullptr || layout->RowLength() != row_length) {
+        // No readable .CFG (the DB is being removed) or a caller's row length that is not the DB's: nothing to build.
+        spdlog::warn("[CATIDX] - Bitmap build of {}/{} skipped: no layout of row length {} for the DB", db_base_path, year, row_length);
+        return true;
+    }
 
     // Pinned for the whole scan: the section is a snapshot of the rows as the scan reads them, so it must be committed
     // only if no bloom block was written meanwhile (a write into the year during the scan is in the bloom but not in the
@@ -809,18 +815,12 @@ bool XStore::BuildOneYearBitmapSection(const std::string &db_base_path, unsigned
         [[maybe_unused]] ssize_t row_read = pread(fd, row_buf.data(), row_length, static_cast<off_t>(r) * row_length);
         for (uint32_t c = 0; c < tracked_column_count; ++c) {
             if (abandoned_columns.count(c) > 0) continue;
-            XStore_Proto::FData f_data;
-            // Non-static member call, this XStore instance's own method --
-            // ExtractColumnByIndexSkipParse is non-static (needs `this`),
-            // which is exactly why BuildOneYearBitmapSection itself is a
-            // non-static instance method rather than the brief's original
-            // static sketch. Signature: (row_ptr, row_len, unsigned short
-            // column_idx, FData& out_data) -> bool.
-            if (!ExtractColumnByIndexSkipParse(row_buf.data(), row_length, static_cast<unsigned short>(c), f_data)) continue;
             // An unset (null) column is skipped, like the bloom (live inserts and rebuilds): it is not a value, and it
-            // does not count towards CATIDX_MAX_BITMAP_DISTINCT_VALUES.
-            if (f_data.oneOfData_case() == XStore_Proto::FData::ONEOFDATA_NOT_SET) continue;
-            std::string enc = EncodeFDataForCatIdx(f_data);
+            // does not count towards CATIDX_MAX_BITMAP_DISTINCT_VALUES. The key is the bloom's (AppendCatIdxKey).
+            xstore::layout::Cell cell;
+            if (!layout->Load(row_buf.data(), c, &cell)) continue;
+            std::string enc;
+            xstore::layout::RowLayout::AppendCatIdxKey(enc, cell);
             if (!reserve_row(c)) {
                 close(fd);
                 // The step the pool refused: what the accumulators would hold with it. The pass logs and schedules the retry.

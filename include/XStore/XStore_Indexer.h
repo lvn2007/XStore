@@ -14,6 +14,7 @@
 #include <vector>
 #include <blockingconcurrentqueue.h>
 #include "include/XStore/XStore_PendingMap.h"
+#include "include/XStore/XStore_RowLayout.h"
 #include "include/XStore/XStore_Tunables.h"
 
 namespace xstore {
@@ -44,6 +45,9 @@ struct IndexHint {
     std::string db_name;
     unsigned short year = 0;
     uint16_t row_length = 0;
+    // The DB's layout the writer packed the rows with (the fold reads them through it). Null: the pass folds nothing and
+    // treats the block as a failed read (dirty sidecars, rebuilt at the next start); every production hint carries one.
+    std::shared_ptr<const xstore::layout::RowLayout> layout;
     uint32_t tracked_column_count = 0;   // width the writer saw (the fold uses the file's current width)
     uint64_t block = 0;
     // Backlog bytes the writer reserved for this hint (TryReserve). Released exactly once, whatever becomes of the hint
