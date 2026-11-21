@@ -1927,6 +1927,87 @@ TEST_F(WalReplayTest, ReplayAppliesRecordsAfterCheckpointOnly) {
     EXPECT_EQ(ReadHeader(wal_path).checkpoint_lsn, head) << "replay checkpoints at the end of the log";
 }
 
+// A typed-schema DB (narrow int, bool, inline string, a null typed cell, a dynamic column past the schema) carries its rows
+// through the ring as fixed-layout slots. After a crash that lost the data pages, replay must restore every row (the same
+// query reply, byte for byte) and the WAL-forced rebuild must leave indexes that answer the aggregates as before.
+TEST_F(WalReplayTest, ATypedSchemaDbReplaysItsRowsAndRebuildsItsIndexes) {
+    using xstore::layout::ColumnSpec;
+    using xstore::layout::Kind;
+    using xstore::layout::Storage;
+    using namespace xstore_test;
+    row_length = 160;
+    walring::SetRingBytesForTests(256 << 10);
+    const std::vector<ColumnSpec> schema = {{Kind::kDouble, Storage::kDefault, 0},
+                                            {Kind::kInt32, Storage::kInt16, 0},
+                                            {Kind::kBool, Storage::kDefault, 0},
+                                            {Kind::kString, Storage::kInlineString, 12},
+                                            {Kind::kInt64, Storage::kDefault, 0}};
+    constexpr uint64_t kRows = 30;
+    auto sample = [](uint64_t i) {
+        std::vector<XStore_Proto::FData> f = {FDouble(static_cast<double>(i) * 1.5), FInt32(-static_cast<int32_t>(i)), FBool(i % 2 == 0),
+                                              FString("tick" + std::to_string(i % 7)), FInt64((1LL << 40) + static_cast<int64_t>(i))};
+        if (i % 5 == 0) f.push_back(FString("extra-" + std::to_string(i)));
+        if (i % 11 == 0) f[1] = XStore_Proto::FData();
+        return MakeRow(f);
+    };
+
+    XStore store;
+    ASSERT_EQ(store.CreateDB(db_name, XStore_Proto::SECOND, row_length, 0, {}, schema).createdbstatus(),
+              "[INFO] [CREATE DB] [DB: " + db_name + "] - Created DB");
+    for (uint64_t i = 0; i < 10; ++i) {   // unary, batch and range inserts all reach the ring
+        XStore_Proto::UnaryInsert_REP rep;
+        store.UnaryInsert(kEpoch0 + i, sample(i), db_name, &rep, XStore_Proto::SYNC);
+        ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+    }
+    XStore_Proto::BatchInsert_REQ batch;
+    batch.set_dbname(db_name);
+    batch.set_durabilitymode(XStore_Proto::SYNC);
+    for (uint64_t i = 10; i < 20; ++i) {
+        XStore_Proto::BatchInsert_DATA *d = batch.add_batchinsert_data();
+        d->set_timestamp(kEpoch0 + i);
+        *d->mutable_data() = sample(i);
+    }
+    XStore_Proto::BatchInsert_REP batch_rep;
+    store.BatchInsert(&batch, &batch_rep);
+    ASSERT_NE(batch_rep.insertstatus().find("[INFO]"), std::string::npos) << batch_rep.insertstatus();
+    XStore_Proto::RangeInsert_REQ range;
+    range.set_dbname(db_name);
+    range.set_durabilitymode(XStore_Proto::SYNC);
+    for (uint64_t i = 20; i < kRows; ++i) {
+        XStore_Proto::RangeInsert_DATA *d = range.add_rangeinsert_data();
+        d->set_timestamp(kEpoch0 + i);
+        *d->mutable_data() = sample(i);
+    }
+    XStore_Proto::RangeInsert_REP range_rep;
+    store.RangeInsert(&range, &range_rep);
+    ASSERT_NE(range_rep.insertstatus().find("[INFO]"), std::string::npos) << range_rep.insertstatus();
+
+    auto answers = [&] {   // the rows as a client sees them, then the aggregates of two typed numeric columns
+        std::string out = RangeQuery(store, kEpoch0, kEpoch0 + kRows - 1, db_name).SerializeAsString();
+        for (unsigned short column : {0, 4}) {
+            XStore_Proto::Min_REP min_rep;
+            store.MinAggregate(kEpoch0, kEpoch0 + kRows - 1, db_name, column, &min_rep);
+            XStore_Proto::Max_REP max_rep;
+            store.MaxAggregate(kEpoch0, kEpoch0 + kRows - 1, db_name, column, &max_rep);
+            XStore_Proto::Sum_REP sum_rep;
+            store.SumAggregate(kEpoch0, kEpoch0 + kRows - 1, db_name, column, &sum_rep);
+            EXPECT_EQ(min_rep.opstatus().find("No valid data"), std::string::npos) << column << " " << min_rep.opstatus();
+            out += min_rep.opresult().SerializeAsString() + max_rep.opresult().SerializeAsString() + std::to_string(sum_rep.opresult());
+        }
+        return out;
+    };
+    const std::string before = answers();
+    ShrinkDataFile(kRows);
+
+    Crash();
+    ZeroRows(0, kRows);   // lost page cache
+    for (uint64_t i = 0; i < kRows; ++i) ASSERT_FALSE(RowPresent(i)) << "setup: row " << i << " must be gone before the replay";
+    store.InitDB();
+
+    for (uint64_t i = 0; i < kRows; ++i) EXPECT_TRUE(RowPresent(i)) << "row " << i << " was not replayed";
+    EXPECT_TRUE(answers() == before) << "the replayed typed DB answers differently from before the crash";
+}
+
 // Natural stale-lap leftovers: the records of the previous lap that survive after the head of a wrapped
 // ring (contrast ReplayDoesNotTrustBytesPastTheLastLsnMatchingRecord, which plants a CRC-valid foreign-LSN record).
 TEST_F(WalReplayTest, ReplayStopsAtStaleLapRecord) {
