@@ -1,4 +1,5 @@
 #include "XStore/XStore_RowLayout.h"
+#include "XStore/XStore_WireEncode.h"
 
 #include <gtest/gtest.h>
 
@@ -53,6 +54,14 @@ TEST(RowLayoutPerf, ReadPackAndEncodeCostsPerRow) {
             layout.EncodeToWire(slots.data() + i * SLOT, out);
         }
         std::printf("[PERF] %s EncodeToWire: %6.0f ns/row\n", typed != 0 ? "typed  " : "dynamic", NsPerRow(start, ROWS));
+        // What a query reply pays per row: the framed entry, appended to a chunk buffer that is reset every 1000 rows.
+        std::string chunk;
+        start = std::chrono::steady_clock::now();
+        for (size_t i = 0; i < ROWS; ++i) {
+            if (i % 1000 == 0) chunk.clear();
+            XStoreWireEncode::EncodeQueryResponseEntry(chunk, 1700000000000ull + i, slots.data() + i * SLOT, layout);
+        }
+        std::printf("[PERF] %s EncodeQueryResponseEntry: %6.0f ns/row (%zu)\n", typed != 0 ? "typed  " : "dynamic", NsPerRow(start, ROWS), chunk.size());
         size_t encoded = 0;
         start = std::chrono::steady_clock::now();
         for (size_t i = 0; i < ROWS; ++i) encoded += layout.EncodedSize(slots.data() + i * SLOT);

@@ -781,6 +781,86 @@ TEST(RowLayoutReply, ReplyEntryEqualsAProtobufUnaryQueryReply) {
     EXPECT_EQ(hole_entry, hole_expected.SerializeAsString());
 }
 
+// The reply is encoded in 2 KB stack chunks and framed from a scratch string: rows that cross chunk edges, huge strings, typed and
+// dynamic doubles, nulls and every other kind must all come out byte-identical to what libprotobuf serializes.
+TEST(RowLayoutReply, ChunkedEncodeMatchesProtobufAcrossShapes) {
+    const std::vector<std::vector<ColumnSpec>> schemas = {
+        {},
+        std::vector<ColumnSpec>(200, ColumnSpec{Kind::kDouble, Storage::kDefault, 0}),
+        {{Kind::kDouble, Storage::kDefault, 0}, {Kind::kString, Storage::kInlineString, 12}, {Kind::kInt64, Storage::kInt16, 0},
+         {Kind::kString, Storage::kDefault, 0}, {Kind::kDouble, Storage::kDefault, 0}, {Kind::kBool, Storage::kDefault, 0}},
+    };
+    std::mt19937_64 rng(12345);
+    size_t checked = 0;
+    for (const std::vector<ColumnSpec> &schema : schemas) {
+        const RowLayout layout = MakeLayout(schema, 12000);
+        for (const size_t cells : {0u, 1u, 7u, 100u, 183u, 250u, 600u}) {
+            for (const size_t big_string : {0u, 5u, 2047u, 2048u, 2049u, 5000u}) {
+                XStore_Proto::RowData row;
+                for (size_t i = 0; i < cells; ++i) {
+                    XStore_Proto::FData *f = row.add_fielddata();
+                    const bool typed = i < schema.size();
+                    if (typed) {
+                        switch (schema[i].kind) {
+                            case Kind::kDouble: if (rng() % 5 != 0) f->set_doubledata(static_cast<double>(rng() % 1000) / 7.0); break;
+                            case Kind::kString: if (rng() % 4 != 0) f->set_stringdata(std::string(schema[i].storage == Storage::kInlineString ? 12 : (i == 3 ? big_string : 3), 's')); break;
+                            case Kind::kInt64: f->set_int64data(-static_cast<int64_t>(rng() % 30000)); break;
+                            default: f->set_booldata(rng() & 1); break;
+                        }
+                        continue;
+                    }
+                    switch (rng() % 6) {
+                        case 0: case 1: case 2: f->set_doubledata(static_cast<double>(rng()) / 3.0); break;
+                        case 3: f->set_int64data(-static_cast<int64_t>(rng())); break;
+                        case 4: f->set_sint32data(static_cast<int32_t>(rng())); break;
+                        default: break;   // unset: 0A 00
+                    }
+                }
+                if (schema.empty() && big_string > 0 && cells > 0) row.add_fielddata()->set_bytesdata(std::string(big_string, '\xAB'));
+                std::vector<char> slot = Slot(12000);
+                if (!layout.PackFromRowData(row, slot.data()).Ok()) continue;   // does not fit: not a shape under test
+                ++checked;
+                std::string wire = "prefix";   // EncodeToWire appends, whatever is already there stays
+                layout.EncodeToWire(slot.data(), wire);
+                ASSERT_EQ(wire, "prefix" + row.SerializeAsString()) << "cells " << cells << " string " << big_string;
+                std::string entry;
+                XStoreWireEncode::EncodeQueryResponseEntry(entry, 1700000000123ull + cells, slot.data(), layout);
+                XStore_Proto::RangeQuery_REP expected;
+                XStore_Proto::UnaryQuery_REP *one = expected.add_queryresponse();
+                one->set_timestamp(1700000000123ull + cells);
+                *one->mutable_data() = row;
+                ASSERT_EQ(entry, expected.SerializeAsString()) << "cells " << cells << " string " << big_string;
+            }
+        }
+    }
+    EXPECT_GT(checked, 60u);
+}
+
+// A damaged slot whose string references overlap would encode far past the bound: it is skipped whole (an empty row) and what the
+// caller's buffer already held is left alone, even though earlier cells had already been flushed into it.
+TEST(RowLayoutReply, OverlappingStringReferencesAreSkippedWholeAndLeaveThePrefix) {
+    const RowLayout layout = MakeLayout(NoSchema(), 2000);
+    XStore_Proto::RowData row;
+    for (int i = 0; i < 30; ++i) row.add_fielddata()->set_stringdata(std::string(10, 'x'));
+    std::vector<char> slot = Slot(2000);
+    ASSERT_TRUE(layout.PackFromRowData(row, slot.data()).Ok());
+    const uint32_t tail = static_cast<uint32_t>(layout.DynamicStart() + 30 * RowLayout::DYNAMIC_CELL_BYTES), len = 1500;
+    for (uint32_t c = 0; c < 30; ++c) {
+        char *cell = slot.data() + layout.DynamicStart() + c * RowLayout::DYNAMIC_CELL_BYTES;
+        std::memcpy(cell + 1, &tail, 4);
+        std::memcpy(cell + 5, &len, 4);
+    }
+    std::string wire = "keep";
+    layout.EncodeToWire(slot.data(), wire);
+    EXPECT_EQ(wire, "keep");
+    std::string entry;
+    XStoreWireEncode::EncodeQueryResponseEntry(entry, 9, slot.data(), layout);
+    XStore_Proto::RangeQuery_REP expected;
+    expected.add_queryresponse()->set_timestamp(9);
+    expected.mutable_queryresponse(0)->mutable_data();
+    EXPECT_EQ(entry, expected.SerializeAsString());
+}
+
 // The bound is the real worst case, not a loose multiple: every slot byte after the typed cells is either a 9-byte dynamic cell
 // (at most 13 encoded bytes) or a string tail byte (1:1).
 TEST(RowLayoutRead, MaxEncodedRowBytesIsTight) {

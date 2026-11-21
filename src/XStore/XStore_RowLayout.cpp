@@ -1,5 +1,6 @@
 #include "XStore/XStore_RowLayout.h"
 
+#include <algorithm>
 #include <atomic>
 #include <bit>
 #include <chrono>
@@ -149,39 +150,29 @@ size_t CellWireSize(const Cell &cell) {
     return 1 + VarintSize(inner) + inner;
 }
 
-void AppendCellWire(std::string &out, const Cell &cell) {
+// Room PutCellWire may need past the write position: 0A, length (5), tag, and for a string its length (5); every other cell is <= 13.
+constexpr size_t MAX_CELL_HEAD = 16;
+
+// Writes one cell as 0A <len> <FData bytes> at p and returns the end. A string/bytes cell is written up to its text, which the
+// caller appends (it may not fit the chunk).
+char *PutCellWire(char *p, const Cell &cell) {
     if (cell.kind == Kind::kUnset) {
-        out.append("\x0A\x00", 2);
-        return;
+        p[0] = '\x0A';
+        p[1] = '\x00';
+        return p + 2;
     }
-    char buf[16];
-    const size_t inner = 1 + FDataPayloadSize(cell);
-    out.push_back('\x0A');
-    char *p = PutVarint(buf, inner);
-    out.append(buf, static_cast<size_t>(p - buf));
-    out.push_back(static_cast<char>(TAG_OF[static_cast<unsigned>(cell.kind)]));
+    *p++ = '\x0A';
+    p = PutVarint(p, 1 + FDataPayloadSize(cell));
+    *p++ = static_cast<char>(TAG_OF[static_cast<unsigned>(cell.kind)]);
     switch (cell.kind) {
-        case Kind::kDouble: case Kind::kFixed64: case Kind::kSfixed64: out.append(reinterpret_cast<const char *>(&cell.raw), 8); break;
-        case Kind::kFloat: case Kind::kFixed32: case Kind::kSfixed32: out.append(reinterpret_cast<const char *>(&cell.raw), 4); break;
-        case Kind::kInt32: case Kind::kInt64: case Kind::kUint32: case Kind::kUint64:
-            p = PutVarint(buf, cell.raw);
-            out.append(buf, static_cast<size_t>(p - buf));
-            break;
-        case Kind::kSint32:
-            p = PutVarint(buf, ZigZagEncode32(static_cast<int32_t>(cell.raw)));
-            out.append(buf, static_cast<size_t>(p - buf));
-            break;
-        case Kind::kSint64:
-            p = PutVarint(buf, ZigZagEncode64(static_cast<int64_t>(cell.raw)));
-            out.append(buf, static_cast<size_t>(p - buf));
-            break;
-        case Kind::kBool: out.push_back(cell.raw != 0 ? 1 : 0); break;
-        case Kind::kString: case Kind::kBytes:
-            p = PutVarint(buf, cell.text.size());
-            out.append(buf, static_cast<size_t>(p - buf));
-            out.append(cell.text.data(), cell.text.size());
-            break;
-        default: break;
+        case Kind::kDouble: case Kind::kFixed64: case Kind::kSfixed64: std::memcpy(p, &cell.raw, 8); return p + 8;
+        case Kind::kFloat: case Kind::kFixed32: case Kind::kSfixed32: std::memcpy(p, &cell.raw, 4); return p + 4;
+        case Kind::kInt32: case Kind::kInt64: case Kind::kUint32: case Kind::kUint64: return PutVarint(p, cell.raw);
+        case Kind::kSint32: return PutVarint(p, ZigZagEncode32(static_cast<int32_t>(cell.raw)));
+        case Kind::kSint64: return PutVarint(p, ZigZagEncode64(static_cast<int64_t>(cell.raw)));
+        case Kind::kBool: *p = cell.raw != 0 ? 1 : 0; return p + 1;
+        case Kind::kString: case Kind::kBytes: return PutVarint(p, cell.text.size());
+        default: return p;
     }
 }
 
@@ -698,27 +689,76 @@ size_t RowLayout::EncodedSize(const char *row) const {
 void RowLayout::EncodeToWire(const char *row, std::string &out) const {
     if (!LiveAndSane(row)) return;
     const uint32_t n = ColumnCount(row);
+    const uint32_t typed = TypedColumns();
     const size_t start = out.size();
+    // Cells are written into a stack chunk and appended in a few big pieces; flushed = bytes already in out since start.
+    constexpr size_t CHUNK = 2048;
+    char chunk[CHUNK + MAX_CELL_HEAD];
+    char *p = chunk;
+    size_t flushed = 0;
+    const auto flush = [&] {
+        out.append(chunk, static_cast<size_t>(p - chunk));
+        flushed += static_cast<size_t>(p - chunk);
+        p = chunk;
+    };
+    bool oversized = false;
     Cell cell;
     for (uint32_t c = 0; c < n; ++c) {
-        // Fast path: a dynamic double cell is 0A 09 09 <the 8 payload bytes>.
-        if (c >= TypedColumns()) {
-            const size_t off = dyn_start_ + DYNAMIC_CELL_BYTES * (c - TypedColumns());
-            if (off + DYNAMIC_CELL_BYTES <= row_length_ && static_cast<uint8_t>(row[off]) == static_cast<uint8_t>(Kind::kDouble)) {
-                char buf[11] = {0x0A, 0x09, 0x09};
-                std::memcpy(buf + 3, row + off + 1, 8);
-                out.append(buf, sizeof(buf));
+        if (static_cast<size_t>(p - chunk) >= CHUNK) flush();
+        // A present double is always 0A 09 09 <8 payload bytes>. LiveAndSane already proved every dynamic cell lies inside the slot.
+        if (c < typed) {
+            if (typed_[c].cls == Cls::kF64) {
+                if ((static_cast<uint8_t>(row[HEADER_BYTES + c / 8]) >> (c % 8)) & 1u) {
+                    p[0] = '\x0A';
+                    p[1] = '\x09';
+                    p[2] = '\x09';
+                    std::memcpy(p + 3, row + typed_[c].offset, 8);
+                    p += 11;
+                } else {
+                    p[0] = '\x0A';
+                    p[1] = '\x00';
+                    p += 2;
+                }
+                continue;
+            }
+        } else {
+            const char *cellp = row + dyn_start_ + DYNAMIC_CELL_BYTES * (c - typed);
+            if (static_cast<uint8_t>(cellp[0]) == static_cast<uint8_t>(Kind::kDouble)) {
+                // A run of doubles (the common wide row): as many as the chunk has room for, with no per-cell room check.
+                uint32_t run = std::min<uint32_t>(n - c, static_cast<uint32_t>((CHUNK + MAX_CELL_HEAD - static_cast<size_t>(p - chunk)) / 11));
+                do {
+                    p[0] = '\x0A';
+                    p[1] = '\x09';
+                    p[2] = '\x09';
+                    std::memcpy(p + 3, cellp + 1, 8);
+                    p += 11;
+                    cellp += DYNAMIC_CELL_BYTES;
+                    ++c;
+                } while (--run != 0 && static_cast<uint8_t>(cellp[0]) == static_cast<uint8_t>(Kind::kDouble));
+                --c;   // the for loop's increment moves on to the first cell not yet written
                 continue;
             }
         }
         if (!Load(row, c, &cell)) cell = Cell{};
-        AppendCellWire(out, cell);
-        if (out.size() - start > max_encoded_) break;   // stops the growth at the first cell that crosses the bound, not at the last
+        p = PutCellWire(p, cell);
+        const bool text = IsString(cell.kind);
+        // String references of a damaged row may overlap, so the total is checked at every cell, before the text is copied.
+        if (flushed + static_cast<size_t>(p - chunk) + (text ? cell.text.size() : 0) > max_encoded_) {
+            oversized = true;
+            break;
+        }
+        if (text) {
+            flush();
+            out.append(cell.text.data(), cell.text.size());
+            flushed += cell.text.size();
+        }
     }
-    if (out.size() - start > max_encoded_) {
-        out.resize(start);
-        ReportOversizedRow();
+    if (!oversized) {
+        flush();
+        if (flushed <= max_encoded_) return;
     }
+    out.resize(start);
+    ReportOversizedRow();
 }
 
 void RowLayout::DecodeToRowData(const char *row, XStore_Proto::RowData *out) const {

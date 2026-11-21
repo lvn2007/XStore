@@ -40,9 +40,14 @@ inline void AppendVarint64(std::string &buf, uint64_t v) {
 // Appends one UnaryQuery_REP entry (field 1 of the reply, length-delimited: timestamp, then the row as RowData) straight
 // into the chunk buffer, without building a UnaryQuery_REP/RowData/FData. The row is encoded from its cells as canonical
 // protobuf (RowLayout::EncodeToWire), so a client parses it exactly as before. A hole encodes as an empty row.
+// The row is encoded once into a per-thread scratch string (its length is needed for the framing, with minimal varints),
+// then copied behind the header: one memcpy instead of a second sizing pass over every cell.
 inline void EncodeQueryResponseEntry(std::string &buf, uint64_t epoch_time, const char *row_ptr,
                                      const xstore::layout::RowLayout &layout) {
-    const size_t row_bytes = layout.EncodedSize(row_ptr);
+    thread_local std::string row_wire;
+    row_wire.clear();
+    layout.EncodeToWire(row_ptr, row_wire);
+    const size_t row_bytes = row_wire.size();
     const size_t inner_len = 1 + CodedOutputStream::VarintSize64(epoch_time)
                            + 1 + CodedOutputStream::VarintSize32(static_cast<uint32_t>(row_bytes)) + row_bytes;
     AppendTag(buf, /*queryresponse*/ 1, WireFormatLite::WIRETYPE_LENGTH_DELIMITED);
@@ -51,7 +56,7 @@ inline void EncodeQueryResponseEntry(std::string &buf, uint64_t epoch_time, cons
     AppendVarint64(buf, epoch_time);
     AppendTag(buf, /*UnaryQuery_REP.data*/ 2, WireFormatLite::WIRETYPE_LENGTH_DELIMITED);
     AppendVarint32(buf, static_cast<uint32_t>(row_bytes));
-    layout.EncodeToWire(row_ptr, buf);
+    buf.append(row_wire);
 }
 
 // Appends querystatus (field 3, length-delimited -- same field number in
