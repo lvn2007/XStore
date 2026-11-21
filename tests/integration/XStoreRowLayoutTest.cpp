@@ -836,6 +836,31 @@ TEST(RowLayoutReply, ChunkedEncodeMatchesProtobufAcrossShapes) {
     EXPECT_GT(checked, 60u);
 }
 
+// The entry header is reserved from the previous row's size and patched in place; rows of wildly different sizes in one buffer
+// (so nearly every guess is wrong, across 1-, 2- and 3-byte length varints, holes included) must still frame exactly.
+TEST(RowLayoutReply, MixedSizeEntriesInOneBufferFrameLikeProtobuf) {
+    const RowLayout layout = MakeLayout(NoSchema(), 30000);
+    std::mt19937_64 rng(777);
+    std::string buf = "head";   // the entries are appended behind whatever the buffer already holds
+    XStore_Proto::RangeQuery_REP expected;
+    for (int i = 0; i < 400; ++i) {
+        XStore_Proto::RowData row;
+        const size_t kind = rng() % 6;
+        const size_t cells = kind == 0 ? 0 : kind == 1 ? 1 : kind == 2 ? 3 : kind == 3 ? 12 : kind == 4 ? 140 : 1500;   // 1500 doubles: 16500 encoded bytes, a 3-byte length varint
+        for (size_t c = 0; c < cells; ++c) row.add_fielddata()->set_doubledata(static_cast<double>(rng() % 100000));
+        if (kind == 5 && i % 2 == 0) row.add_fielddata()->set_stringdata(std::string(4000, 'q'));
+        std::vector<char> slot = Slot(30000);
+        ASSERT_TRUE(layout.PackFromRowData(row, slot.data()).Ok());
+        // Timestamps of 1, 5 and 10 varint bytes.
+        const uint64_t ts = i % 3 == 0 ? 7 : i % 3 == 1 ? 1700000000000ull : ~0ull - static_cast<uint64_t>(i);
+        XStoreWireEncode::EncodeQueryResponseEntry(buf, ts, slot.data(), layout);
+        XStore_Proto::UnaryQuery_REP *one = expected.add_queryresponse();
+        one->set_timestamp(ts);
+        *one->mutable_data() = row;
+    }
+    EXPECT_EQ(buf, "head" + expected.SerializeAsString());
+}
+
 // A damaged slot whose string references overlap would encode far past the bound: it is skipped whole (an empty row) and what the
 // caller's buffer already held is left alone, even though earlier cells had already been flushed into it.
 TEST(RowLayoutReply, OverlappingStringReferencesAreSkippedWholeAndLeaveThePrefix) {

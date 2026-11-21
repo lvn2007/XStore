@@ -68,3 +68,26 @@ TEST(RowLayoutPerf, ReadPackAndEncodeCostsPerRow) {
         std::printf("[PERF] %s EncodedSize: %6.0f ns/row (%zu)\n", typed != 0 ? "typed  " : "dynamic", NsPerRow(start, ROWS), encoded);
     }
 }
+
+// The typical query shape: a few columns, so the per-row fixed cost of the framed entry dominates, not the per-cell loop.
+TEST(RowLayoutPerf, FramedEntryCostOnThreeColumnRows) {
+    constexpr size_t ROWS = 400000, SLOT = 96;
+    XStore_Proto::RowData row;
+    row.add_fielddata()->set_doubledata(101.25);
+    row.add_fielddata()->set_doubledata(7.5);
+    row.add_fielddata()->set_int64data(12345);
+    const std::string wire = row.SerializeAsString();
+    std::string error;
+    const RowLayout layout = *RowLayout::Make({}, SLOT, &error);
+    std::vector<char> slots(ROWS * SLOT, 0);
+    for (size_t r = 0; r < ROWS; ++r) ASSERT_TRUE(layout.PackFromWire(wire.data(), wire.size(), slots.data() + r * SLOT).Ok());
+    std::string chunk;
+    for (int rep = 0; rep < 3; ++rep) {
+        const auto start = std::chrono::steady_clock::now();
+        for (size_t i = 0; i < ROWS; ++i) {
+            if (i % 1000 == 0) chunk.clear();
+            XStoreWireEncode::EncodeQueryResponseEntry(chunk, 1700000000000ull + i, slots.data() + i * SLOT, layout);
+        }
+        std::printf("[PERF] 3-column EncodeQueryResponseEntry: %6.1f ns/row (%zu)\n", NsPerRow(start, ROWS), chunk.size());
+    }
+}

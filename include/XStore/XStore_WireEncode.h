@@ -37,26 +37,39 @@ inline void AppendVarint64(std::string &buf, uint64_t v) {
     buf.append(reinterpret_cast<char *>(tmp), end - tmp);
 }
 
+// Bytes of the entry header (everything before the row bytes) for a row of row_bytes: tag, entry length, timestamp field, data tag, row length.
+inline size_t EntryHeaderSize(uint64_t epoch_time, size_t row_bytes) {
+    const size_t ts = 1 + CodedOutputStream::VarintSize64(epoch_time);
+    const size_t data = 1 + CodedOutputStream::VarintSize32(static_cast<uint32_t>(row_bytes));
+    return 1 + CodedOutputStream::VarintSize32(static_cast<uint32_t>(ts + data + row_bytes)) + ts + data;
+}
+
 // Appends one UnaryQuery_REP entry (field 1 of the reply, length-delimited: timestamp, then the row as RowData) straight
 // into the chunk buffer, without building a UnaryQuery_REP/RowData/FData. The row is encoded from its cells as canonical
 // protobuf (RowLayout::EncodeToWire), so a client parses it exactly as before. A hole encodes as an empty row.
-// The row is encoded once into a per-thread scratch string (its length is needed for the framing, with minimal varints),
-// then copied behind the header: one memcpy instead of a second sizing pass over every cell.
+// The header carries the row's length, so its size is guessed from the previous row of this thread (rows of one reply are
+// near-equal in size), a slot of that size is reserved, the row is encoded straight behind it and the header is written in
+// place. Only a row whose size crosses a varint boundary (and the first row) moves its bytes: no scratch copy in the common case.
 inline void EncodeQueryResponseEntry(std::string &buf, uint64_t epoch_time, const char *row_ptr,
                                      const xstore::layout::RowLayout &layout) {
-    thread_local std::string row_wire;
-    row_wire.clear();
-    layout.EncodeToWire(row_ptr, row_wire);
-    const size_t row_bytes = row_wire.size();
-    const size_t inner_len = 1 + CodedOutputStream::VarintSize64(epoch_time)
-                           + 1 + CodedOutputStream::VarintSize32(static_cast<uint32_t>(row_bytes)) + row_bytes;
-    AppendTag(buf, /*queryresponse*/ 1, WireFormatLite::WIRETYPE_LENGTH_DELIMITED);
-    AppendVarint32(buf, static_cast<uint32_t>(inner_len));
-    AppendTag(buf, /*UnaryQuery_REP.timestamp*/ 1, WireFormatLite::WIRETYPE_VARINT);
-    AppendVarint64(buf, epoch_time);
-    AppendTag(buf, /*UnaryQuery_REP.data*/ 2, WireFormatLite::WIRETYPE_LENGTH_DELIMITED);
-    AppendVarint32(buf, static_cast<uint32_t>(row_bytes));
-    buf.append(row_wire);
+    thread_local size_t guess = 0;
+    const size_t at = buf.size();
+    const size_t slot = EntryHeaderSize(epoch_time, guess);
+    buf.resize(at + slot);
+    layout.EncodeToWire(row_ptr, buf);
+    const size_t row_bytes = buf.size() - at - slot;
+    const size_t header = EntryHeaderSize(epoch_time, row_bytes);
+    const size_t inner_len = 1 + CodedOutputStream::VarintSize64(epoch_time) + 1 + CodedOutputStream::VarintSize32(static_cast<uint32_t>(row_bytes)) + row_bytes;
+    if (header > slot) buf.insert(at + slot, header - slot, '\0');
+    else if (header < slot) buf.erase(at + header, slot - header);
+    uint8_t *p = reinterpret_cast<uint8_t *>(buf.data()) + at;
+    p = CodedOutputStream::WriteTagToArray(WireFormatLite::MakeTag(/*queryresponse*/ 1, WireFormatLite::WIRETYPE_LENGTH_DELIMITED), p);
+    p = CodedOutputStream::WriteVarint32ToArray(static_cast<uint32_t>(inner_len), p);
+    p = CodedOutputStream::WriteTagToArray(WireFormatLite::MakeTag(/*UnaryQuery_REP.timestamp*/ 1, WireFormatLite::WIRETYPE_VARINT), p);
+    p = CodedOutputStream::WriteVarint64ToArray(epoch_time, p);
+    p = CodedOutputStream::WriteTagToArray(WireFormatLite::MakeTag(/*UnaryQuery_REP.data*/ 2, WireFormatLite::WIRETYPE_LENGTH_DELIMITED), p);
+    CodedOutputStream::WriteVarint32ToArray(static_cast<uint32_t>(row_bytes), p);
+    if (row_bytes != 0) guess = row_bytes;
 }
 
 // Appends querystatus (field 3, length-delimited -- same field number in
