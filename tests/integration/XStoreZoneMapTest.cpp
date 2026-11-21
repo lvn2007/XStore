@@ -3172,6 +3172,11 @@ TEST_F(XStoreZoneMapTest, LiveWidenUnderConcurrentWritesMatchesAFreshRebuild) {
     std::atomic<int> writes{0};
     std::mutex fresh_mutex;
     std::unordered_set<uint64_t> fresh_used; // odd rows already written once: a second write would flag the block
+    // The last kProtectedBlocks blocks only ever get fresh rows, so they must end exact however many writes fit in the run
+    // (the more writes, the fewer other blocks stay exact: the guard below then depends on disk speed). The limit leaves
+    // room for the longest span an overwrite, run or delete below reaches past its start row.
+    constexpr uint64_t kProtectedBlocks = 4, kLongestSpan = 256;
+    const uint64_t flagging_limit = (kBlocks - kProtectedBlocks) * rpb - kLongestSpan;
     std::vector<std::thread> writers;
     for (int t = 0; t < 4; ++t) {
         writers.emplace_back([&, t] {
@@ -3187,6 +3192,7 @@ TEST_F(XStoreZoneMapTest, LiveWidenUnderConcurrentWritesMatchesAFreshRebuild) {
                 const XStore_Proto::WalDurabilityMode mode = (rng() % 3 == 0) ? XStore_Proto::BYPASS : XStore_Proto::SYNC;
                 const double v = static_cast<double>(rng() % 100000) / 7.0;
                 const unsigned op = static_cast<unsigned>(rng() % 40);
+                if (op >= 30 && (near >= flagging_limit || anywhere >= flagging_limit)) continue;   // would flag a protected block
                 if (op < 30) { // a fresh row in an odd hole near F (keeps its block exact)
                     const uint64_t row = near | 1;
                     bool fresh = false;
