@@ -146,6 +146,14 @@ bool Save(const std::string &path, const XStore_Proto::ConfigStruct &cfg, std::s
     };
     const std::string bytes = Serialize(cfg);
     const std::string tmp = path + ".tmp";
+    // A failed save must not leave a half-written temporary file next to the real one (the next save truncates it, but a failed
+    // DB removal or a directory listing would see it).
+    const auto fail_and_drop_tmp = [&](const char *what) {
+        const int saved = errno;
+        ::unlink(tmp.c_str());
+        errno = saved;
+        return fail(what);
+    };
     const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (fd < 0) return fail("open the temporary config file");
     size_t written = 0;
@@ -156,7 +164,7 @@ bool Save(const std::string &path, const XStore_Proto::ConfigStruct &cfg, std::s
             const int saved = errno;
             ::close(fd);
             errno = saved;
-            return fail("write the temporary config file");
+            return fail_and_drop_tmp("write the temporary config file");
         }
         written += static_cast<size_t>(n);
     }
@@ -164,10 +172,10 @@ bool Save(const std::string &path, const XStore_Proto::ConfigStruct &cfg, std::s
         const int saved = errno;
         ::close(fd);
         errno = saved;
-        return fail("fsync the temporary config file");
+        return fail_and_drop_tmp("fsync the temporary config file");
     }
     ::close(fd);
-    if (::rename(tmp.c_str(), path.c_str()) != 0) return fail("rename the temporary config file");
+    if (::rename(tmp.c_str(), path.c_str()) != 0) return fail_and_drop_tmp("rename the temporary config file");
     const size_t slash = path.find_last_of('/');
     const std::string dir = slash == std::string::npos ? std::string(".") : path.substr(0, slash);
     const int dir_fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);

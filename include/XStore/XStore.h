@@ -2160,9 +2160,6 @@ class XStore {
                 }
             }
         };
-
-        static void GetFDataValue(const XStore_Proto::FData *f_data_input, unsigned int column_idx, ValueStruct *value_struct);
-        static void GetFDataValue(const XStore_Proto::FData *f_data_input, ValueStruct *value_struct);
 };
 
 #endif //XSTORE_XSTORE_H

@@ -3102,6 +3102,28 @@ bool DbStillExists(const std::string &db_base_path, const std::string &db_name) 
 }
 }  // namespace
 
+namespace {
+// true: the bytes at the start of the ring region (right after the header region) hold a CRC-valid version-2 record or PAD. Used only
+// for a file whose header slots carry no ring magic at all: a version-2 ring whose header region was zeroed or overwritten still has
+// its records, and a pre-ring or version-1 file has no such record there (the chance of random bytes passing a CRC32C is 2^-32).
+bool RingRegionStartsWithAVersionTwoRecord(int fd, uintmax_t file_bytes) {
+    if (file_bytes < walring::HEADER_REGION_BYTES + walring::RECORD_FIXED_BYTES) return false;
+    const off_t base = static_cast<off_t>(walring::HEADER_REGION_BYTES);
+    uint32_t record_len = 0;
+    if (pread(fd, &record_len, sizeof record_len, base) != static_cast<ssize_t>(sizeof record_len)) return false;
+    const uintmax_t room = file_bytes - walring::HEADER_REGION_BYTES;
+    if (record_len < walring::RECORD_FIXED_BYTES - 4 || record_len > XStoreTunables::WAL_REPLAY_MAX_RECORD_BYTES || 4 + uintmax_t{record_len} > room) return false;
+    std::string record(4 + static_cast<size_t>(record_len), '\0');
+    if (pread(fd, record.data(), record.size(), base) != static_cast<ssize_t>(record.size())) return false;
+    uint64_t lsn = 0;
+    std::memcpy(&lsn, record.data() + 8, sizeof lsn);   // the LSN a lap left here is unknown: the CRC is the evidence, not the LSN
+    XStore::WalRecord parsed;
+    size_t consumed = 0;
+    const XStore::RingParse result = XStore::ParseWalRecordV2(record.data(), record.size(), lsn, consumed, parsed);
+    return result == XStore::RingParse::kOk || result == XStore::RingParse::kPad;
+}
+}  // namespace
+
 XStore::ReplayedYearMap XStore::ReplayWal() {
     // No idle-triggered checkpoint cycles while replay Notes files (see Checkpointer::HoldForBoot).
     const walring::BootHold boot_hold;
@@ -3150,14 +3172,19 @@ XStore::ReplayedYearMap XStore::ReplayWal() {
         do {
             got = pread(fd, head, sizeof head, 0);
         } while (got < 0 && errno == EINTR);
-        close(fd);
         bool old_format = got >= 0;
+        bool any_magic = false;
         for (size_t slot = 0; slot < 2 && old_format; ++slot) {
             uint32_t magic = 0, version = 0;
             std::memcpy(&magic, head + slot * walring::HEADER_SLOT_BYTES, sizeof magic);
             std::memcpy(&version, head + slot * walring::HEADER_SLOT_BYTES + sizeof magic, sizeof version);
+            if (magic == walring::RING_MAGIC) any_magic = true;
             if (magic == walring::RING_MAGIC && version != 1) old_format = false;
         }
+        // Both slots zeroed (or overwritten) by filesystem damage: no magic to go by, but a version-2 record at the start of the ring
+        // region still proves a version-2 ring whose acknowledged records must not be moved aside with the old-format files.
+        if (old_format && !any_magic && RingRegionStartsWithAVersionTwoRecord(fd, on_disk_bytes)) old_format = false;
+        close(fd);
         if (!old_format) {
             spdlog::error("[WAL REPLAY] - {} has no valid ring header but is a version-2 ring (or its header could not be read): both "
                           "header slots are damaged. NOT replayed, NOT moved, NOT wiped; inserts to this shard fail (fenced) until "

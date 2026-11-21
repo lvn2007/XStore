@@ -169,9 +169,10 @@ XStore::RangeQueryState XStore::RangeQueryRun(RangeQueryJob &job,
                     return false;
                 }
                 consumed_any = true;
+                const xstore::layout::RowLayout &row_layout = *job.layout;
+                const size_t row_len = row_layout.RowLength();
                 for (unsigned long long i = 0; i < rows; ++i) {
-                    EncodeQueryResponseEntry(chunk_buf, iter_epoch + row_offset + i, rows_base + i * cfg_struct.rowlength(),
-                                             *job.layout);
+                    EncodeQueryResponseEntry(chunk_buf, iter_epoch + row_offset + i, rows_base + i * row_len, row_layout);
 
                     // Flush whenever a completed row has pushed the buffer to
                     // (or past) the target -- never mid-row, so every emitted

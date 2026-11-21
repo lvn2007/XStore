@@ -38,7 +38,7 @@ TEST(EncodeFDataForCatIdxTest, DifferentInt64ValuesEncodeDifferently) {
 TEST(EncodeFDataForCatIdxTest, SameNumericMagnitudeDifferentOneofCaseEncodesDifferently) {
     // int64Data=5 and doubleData=5.0 are numerically equal but must be
     // treated as distinct keys -- this is exact-type equality, not
-    // aggregate-style numeric coercion (see GetFDataValue for that instead).
+    // aggregate-style numeric coercion.
     XStore_Proto::FData a;
     a.set_int64data(5);
     XStore_Proto::FData b;

@@ -12,7 +12,7 @@
 // bit set for a value at insert is found by the same value's lookup at
 // query time. Distinguishes oneof case explicitly (int64Data=5 and
 // doubleData=5.0 encode differently) -- this is exact-type equality, not
-// GetFDataValue's aggregate-style numeric coercion into one double.
+// the aggregates' numeric coercion into one double.
 // Appends the encoding to `out`: the insert path encodes into a reused
 // scratch buffer and hashes it there; EncodeFDataForCatIdx below wraps this one
 // implementation, so the two can never drift.

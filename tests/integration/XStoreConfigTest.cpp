@@ -101,6 +101,14 @@ TEST_F(ConfigFileTest, SaveFailsCleanlyWhenTheDirectoryIsMissing) {
     EXPECT_FALSE(error.empty());
 }
 
+TEST_F(ConfigFileTest, AFailedSaveLeavesNoTemporaryFileBehind) {
+    fs::create_directory(Path());   // a directory where the file goes: the temporary file is written, the rename onto it fails
+    std::string error;
+    EXPECT_FALSE(xstore::config::Save(Path(), Sample(), &error));
+    EXPECT_FALSE(error.empty());
+    EXPECT_FALSE(fs::exists(Path() + ".tmp"));
+}
+
 TEST_F(ConfigFileTest, MissingFile) {
     XStore_Proto::ConfigStruct back;
     EXPECT_EQ(xstore::config::Load(Path("NOPE.CFG"), &back), LoadStatus::kMissing);

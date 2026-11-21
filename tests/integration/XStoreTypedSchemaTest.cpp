@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cstring>
+
 #include "XStoreTestSupport.h"
 
 using namespace xstore_test;
@@ -125,6 +127,129 @@ TEST(TypedSchemaDifferential, EveryApiAnswersTheSameForATypedAndADynamicDb) {
     XStore_Proto::Max_REP max4;
     store.MaxAggregate(FIRST, FIRST + ROWS, "TYPED", 4, &max4);
     EXPECT_EQ(max4.opresult().int64data(), (1LL << 40) + ROWS - 1);
+}
+
+namespace {
+// Concatenated reply bytes of a find call: byte-equal for a typed and a dynamic DB when they answer the same.
+template <class Call>
+std::string Collect(Call &&call) {
+    std::string out;
+    call([&](std::string &&chunk, bool /*is_last*/) { out += chunk; });
+    return out;
+}
+}  // namespace
+
+// The rest of the read and delete surface (exact aggregates, bars, find, deletes) on a typed schema and on a dynamic one: every answer
+// must be the same bytes, and none of them may be vacuous.
+TEST(TypedSchemaDifferential, ExactAggregatesFindAndDeletesAnswerTheSameForATypedAndADynamicDb) {
+    ScratchDir scratch("typed_diff2");
+    XStore store;
+    ASSERT_EQ(store.CreateDB("TYPED", XStore_Proto::SECOND, 160, 0, {}, SCHEMA).createdbstatus(), "[INFO] [CREATE DB] [DB: TYPED] - Created DB");
+    CreateTestDb(store, "DYN", XStore_Proto::SECOND, 160);
+    for (const char *db : {"TYPED", "DYN"}) {
+        XStore_Proto::BatchInsert_REQ batch;
+        batch.set_dbname(db);
+        batch.set_durabilitymode(XStore_Proto::SYNC);
+        for (int i = 0; i < ROWS; ++i) {
+            XStore_Proto::BatchInsert_DATA *d = batch.add_batchinsert_data();
+            d->set_timestamp(FIRST + static_cast<unsigned>(i));
+            *d->mutable_data() = SampleRow(i);
+        }
+        XStore_Proto::BatchInsert_REP rep;
+        store.BatchInsert(&batch, &rep);
+        ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << db << " " << rep.insertstatus();
+    }
+    const unsigned long long lo = FIRST, hi = FIRST + ROWS;
+
+    for (unsigned short column : {0, 1, 4}) {
+        XStore_Proto::Avg_REP avg_t, avg_d;
+        store.AvgAggregate(lo, hi, "TYPED", column, &avg_t);
+        store.AvgAggregate(lo, hi, "DYN", column, &avg_d);
+        EXPECT_EQ(avg_t.SerializeAsString(), avg_d.SerializeAsString()) << column;
+        EXPECT_EQ(avg_d.opstatus().find("No valid data"), std::string::npos) << column << " " << avg_d.opstatus();
+        XStore_Proto::Variance_REP var_t, var_d;
+        store.VarianceAggregate(lo, hi, "TYPED", column, &var_t);
+        store.VarianceAggregate(lo, hi, "DYN", column, &var_d);
+        EXPECT_EQ(var_t.SerializeAsString(), var_d.SerializeAsString()) << column;
+        XStore_Proto::Ohlc_REP ohlc_t, ohlc_d;
+        store.OhlcAggregate(lo, hi, "TYPED", column, &ohlc_t);
+        store.OhlcAggregate(lo, hi, "DYN", column, &ohlc_d);
+        EXPECT_EQ(ohlc_t.SerializeAsString(), ohlc_d.SerializeAsString()) << column;
+        EXPECT_EQ(ohlc_d.opstatus(), "SUCCESS") << column;
+        XStore_Proto::Percentile_REP pct_t, pct_d;
+        store.PercentileAggregate(lo, hi, "TYPED", column, 0.5, &pct_t);
+        store.PercentileAggregate(lo, hi, "DYN", column, 0.5, &pct_d);
+        EXPECT_EQ(pct_t.SerializeAsString(), pct_d.SerializeAsString()) << column;
+        XStore_Proto::DistinctCount_REP dc_t, dc_d;
+        store.DistinctCountAggregate(lo, hi, "TYPED", column, &dc_t);
+        store.DistinctCountAggregate(lo, hi, "DYN", column, &dc_d);
+        EXPECT_EQ(dc_t.SerializeAsString(), dc_d.SerializeAsString()) << column;
+        EXPECT_GT(dc_d.count(), 1u) << column;
+        XStore_Proto::TopK_REP topk_t, topk_d;
+        store.TopKAggregate(lo, hi, "TYPED", column, 3, &topk_t);
+        store.TopKAggregate(lo, hi, "DYN", column, 3, &topk_d);
+        EXPECT_EQ(topk_t.SerializeAsString(), topk_d.SerializeAsString()) << column;
+        EXPECT_EQ(topk_d.entries_size(), 3) << column;
+    }
+    for (unsigned short column : {0, 1, 3, 5, 9}) {   // typed double, INT16 with nulls, inline string, the dynamic 6th (a string), a column no row has
+        XStore_Proto::Exists_REP ex_t, ex_d;
+        store.ExistsAggregate(lo, hi, "TYPED", column, &ex_t);
+        store.ExistsAggregate(lo, hi, "DYN", column, &ex_d);
+        EXPECT_EQ(ex_t.SerializeAsString(), ex_d.SerializeAsString()) << column;
+        EXPECT_EQ(ex_d.exists(), column == 0 || column == 1) << column;   // Exists is about numeric values: the string columns have none
+    }
+
+    const auto find_value = [&](const char *db, int column, const XStore_Proto::FData &target) {
+        return Collect([&](const auto &emit) { store.FindByValue(lo, hi, db, column, target, 1 << 20, emit); });
+    };
+    for (const auto &[column, target] : std::vector<std::pair<int, XStore_Proto::FData>>{
+             {0, FDouble(3 * 1.5)}, {3, FString("tick3")}, {4, FInt64((1LL << 40) + 7)}, {2, FBool(true)}}) {
+        const std::string typed = find_value("TYPED", column, target), dyn = find_value("DYN", column, target);
+        EXPECT_EQ(typed, dyn) << column;
+        EXPECT_FALSE(dyn.empty()) << column;
+    }
+    for (const auto &[pattern, mode] : std::vector<std::pair<std::string, XStore_Proto::PatternMode>>{
+             {"tick%", XStore_Proto::PATTERN_LIKE}, {"%ck3", XStore_Proto::PATTERN_LIKE}, {"^tick[24]$", XStore_Proto::PATTERN_REGEX}}) {
+        const auto find_pattern = [&](const char *db) {
+            return Collect([&](const auto &emit) { store.FindByPattern(lo, hi, db, 3, pattern, mode, false, 1 << 20, emit); });
+        };
+        const std::string typed = find_pattern("TYPED"), dyn = find_pattern("DYN");
+        EXPECT_EQ(typed, dyn) << pattern;
+        EXPECT_FALSE(dyn.empty()) << pattern;
+    }
+
+    // Deletes (a range, then scattered timestamps), then the same reads again: the holes read the same on both.
+    const auto same_status = [](std::string status, const char *db) {   // the status line names the DB: compare it with the name masked
+        const size_t at = status.find(db);
+        if (at != std::string::npos) status.replace(at, std::strlen(db), "<db>");
+        return status;
+    };
+    const XStore_Proto::RangeDelete_REP range_del_t = store.RangeDelete(FIRST + 10, FIRST + 19, "TYPED");
+    const XStore_Proto::RangeDelete_REP range_del_d = store.RangeDelete(FIRST + 10, FIRST + 19, "DYN");
+    EXPECT_EQ(same_status(range_del_t.deletestatus(), "TYPED"), same_status(range_del_d.deletestatus(), "DYN"));
+    EXPECT_NE(range_del_d.deletestatus().find("Deleted 10 items"), std::string::npos) << range_del_d.deletestatus();
+    XStore_Proto::BatchDelete_REQ del_t, del_d;
+    for (int i : {2, 40, 41, 77, 119, 500}) {   // 500 was never written
+        del_t.add_timestamp(FIRST + static_cast<unsigned>(i));
+        del_d.add_timestamp(FIRST + static_cast<unsigned>(i));
+    }
+    del_t.set_dbname("TYPED");
+    del_d.set_dbname("DYN");
+    const XStore_Proto::BatchDelete_REP batch_del_t = store.BatchDelete(&del_t);
+    const XStore_Proto::BatchDelete_REP batch_del_d = store.BatchDelete(&del_d);
+    EXPECT_EQ(same_status(batch_del_t.deletestatus(), "TYPED"), same_status(batch_del_d.deletestatus(), "DYN"));
+    EXPECT_NE(batch_del_d.deletestatus().find("Deleted 6 items"), std::string::npos) << batch_del_d.deletestatus();
+    for (bool streamed : {false, true}) {
+        const XStore_Proto::RangeQuery_REP dyn = RangeQuery(store, lo, hi, "DYN", streamed);
+        EXPECT_EQ(RangeQuery(store, lo, hi, "TYPED", streamed).SerializeAsString(), dyn.SerializeAsString());
+        int with_data = 0;
+        for (const XStore_Proto::UnaryQuery_REP &r : dyn.queryresponse()) with_data += r.data().fielddata_size() > 0 ? 1 : 0;
+        EXPECT_EQ(with_data, ROWS - 10 - 5) << streamed;   // 10..19 and 2, 40, 41, 77, 119 are gone
+    }
+    XStore_Proto::Sum_REP sum_t, sum_d;
+    store.SumAggregate(lo, hi, "TYPED", 0, &sum_t);
+    store.SumAggregate(lo, hi, "DYN", 0, &sum_d);
+    EXPECT_EQ(sum_t.SerializeAsString(), sum_d.SerializeAsString());
 }
 
 TEST(TypedSchemaDifferential, ATypedColumnRejectsTheWrongKindAndTheReplySaysWhy) {

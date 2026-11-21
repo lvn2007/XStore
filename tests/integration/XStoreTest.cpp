@@ -3642,6 +3642,22 @@ TEST_F(XStoreTest, OhlcAggregateMatchesHandComputedBar) {
     EXPECT_DOUBLE_EQ(ohlc_rep.close(), 5.0);
 }
 
+// open/close are the stored values as read: a signalling NaN comes back with its quiet bit set (what the long double path and the
+// zone map's observations always did), whichever of the two answers the bar.
+TEST_F(XStoreTest, OhlcAggregateReturnsASignalingNanQuieted) {
+    XStore store;
+    CreateTestDb(store, "OHLCSNAN", XStore_Proto::SECOND, 128);
+    constexpr uint64_t SIGNALING_NAN = 0x7FF4000000000000ULL;
+    XStore_Proto::UnaryInsert_REP insert_rep;
+    store.UnaryInsert(1000, DoubleBitsRow({SIGNALING_NAN}), "OHLCSNAN", &insert_rep);   // row 1000: a real scan, not a zone-map block
+    XStore_Proto::Ohlc_REP ohlc_rep;
+    store.OhlcAggregate(1000, 1000, "OHLCSNAN", 0, &ohlc_rep);
+    ASSERT_EQ(ohlc_rep.opstatus(), "SUCCESS");
+    EXPECT_TRUE(std::isnan(ohlc_rep.open()));
+    EXPECT_EQ(std::bit_cast<uint64_t>(ohlc_rep.open()), SIGNALING_NAN | 0x0008000000000000ULL);
+    EXPECT_EQ(std::bit_cast<uint64_t>(ohlc_rep.close()), SIGNALING_NAN | 0x0008000000000000ULL);
+}
+
 TEST_F(XStoreTest, OhlcAggregateOutOfOrderBackfillInsertStillPicksChronologicalOpenAndClose) {
     // Insert LATER timestamps first, then backfill an EARLIER one -- proves
     // open/close track row_index (chronological time), not insertion order.

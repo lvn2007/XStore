@@ -38,7 +38,7 @@ inline Header ReadHeader(const std::string &path) {
     return h;
 }
 
-// Independent of XStore::GetFDataValue: same "cases 1..12 are numeric" rule and the same value -> long double -> double
+// Independent of the production readers: same "cases 1..12 are numeric" rule and the same value -> long double -> double
 // path.
 inline std::vector<ZoneMapObservation> RefZoneMapObservations(const XStore_Proto::RowData &row, uint32_t width) {
     std::vector<ZoneMapObservation> out;

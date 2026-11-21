@@ -630,8 +630,7 @@ Observation RowLayout::ObservationOf(const Cell &cell) {
     obs.present = true;
     if (IsNumeric(cell.kind)) {
         obs.is_numeric = true;
-        obs.value = CellAsDouble(cell);
-        if (std::isnan(obs.value)) obs.value = std::bit_cast<double>(std::bit_cast<uint64_t>(obs.value) | 0x0008000000000000ull);
+        obs.value = QuietNaN(CellAsDouble(cell));
     }
     return obs;
 }

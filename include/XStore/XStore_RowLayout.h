@@ -12,6 +12,7 @@
 #include "XStore.pb.h"
 
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -87,6 +88,12 @@ struct Observation {
 [[nodiscard]] double CellAsDouble(const Cell &cell);
 // The same value without rounding to double (every int64/uint64 is exact): what Min/Max compare, as the protobuf path did.
 [[nodiscard]] long double CellAsLongDouble(const Cell &cell);
+
+// A NaN with its quiet bit set: what converting a signalling NaN through long double always produced, so the scan kernels and the
+// zone-map observations return the same bits for the same cell.
+[[nodiscard]] inline double QuietNaN(double value) {
+    return std::isnan(value) ? std::bit_cast<double>(std::bit_cast<uint64_t>(value) | 0x0008000000000000ull) : value;
+}
 
 class RowLayout {
 public:

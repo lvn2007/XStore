@@ -21,7 +21,7 @@ class DBInfo:
     files: List[FileInfo]
     rowLength: int          # configured per-row slot size (bytes); every row is zero-padded to this
     columnNames: List[str]  # optional per-index column names set at createDB time; [] if none were given
-    schema: List[tuple]     # (kind, storage, capacity) per declared column; [] if none
+    schema: List[tuple] = dataclasses.field(default_factory=list)   # (kind, storage, capacity) per declared column; [] if none
 
 
 @dataclasses.dataclass

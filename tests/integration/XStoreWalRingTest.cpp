@@ -203,6 +203,34 @@ TEST(WalRingFormat, ASecondMoveAsideNeverOverwritesAnEarlierOne) {
     EXPECT_FALSE(fs::exists(ShardPath(0)));
 }
 
+// A version-2 ring whose two header slots were zeroed (filesystem damage) still holds acknowledged records: the CRC-valid record at
+// the start of the ring region marks it as version 2, so the file is fenced in place, never moved aside as an old-format one.
+TEST(WalRingFormat, AZeroedHeaderOverACrcValidRecordIsFencedNotMovedAside) {
+    namespace fs = std::filesystem;
+    xstore_test::ScratchDir scratch("wal_zeroed_header");
+    fs::create_directories("DataStore/WAL");
+    std::string bytes(walring::HEADER_REGION_BYTES, '\0');
+    bytes += BuildRecordV2ForTest(/*lsn=*/0, "DB1", /*row_length=*/8, {{10, "AAAAAAAA"}});
+    bytes.append(1000, '\0');
+    WriteFileBytes(ShardPath(0), bytes);
+    XStore store;
+    store.InitDB();
+    EXPECT_EQ(ReadFileBytes(ShardPath(0)), bytes);   // untouched, in place
+    EXPECT_FALSE(fs::exists(ShardPath(0) + ".old-format"));
+}
+
+// ...while a zeroed header with nothing recognisable behind it is still an old-format (or empty-of-records) file and is moved aside.
+TEST(WalRingFormat, AZeroedHeaderWithNoRecordBehindItIsStillMovedAside) {
+    namespace fs = std::filesystem;
+    xstore_test::ScratchDir scratch("wal_zeroed_header_empty");
+    fs::create_directories("DataStore/WAL");
+    const std::string bytes(walring::HEADER_REGION_BYTES + 2000, '\0');
+    WriteFileBytes(ShardPath(0), bytes);
+    XStore store;
+    store.InitDB();
+    EXPECT_EQ(ReadFileBytes(ShardPath(0) + ".old-format"), bytes);
+}
+
 TEST(WalRingFormatTest, PlanAppendNeverStraddlesAndPadsOrSkips) {
     size_t pad = 99;
     EXPECT_EQ(walring::PlanAppend(1000, 4096, 100, pad), 1000u); EXPECT_EQ(pad, 0u);          // fits
