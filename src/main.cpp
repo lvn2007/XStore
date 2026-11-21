@@ -8,6 +8,7 @@
 #include "include/XStore/XStore_WalRing.h"
 #include "include/Networking/XStore_Curve.h"
 #include <argparse/argparse.hpp>
+#include <algorithm>
 #include <atomic>
 #include <csignal>
 #include <cerrno>
@@ -18,6 +19,7 @@
 #include <mutex>
 #include <optional>
 #include <pthread.h>
+#include <sys/resource.h>
 #include <thread>
 #include <unistd.h>
 
@@ -127,6 +129,20 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
     if (!dir_lock.warning.empty()) spdlog::warn("[BOOT] - {}", dir_lock.warning);
+
+    // Every cached (db, year) holds descriptors (data file, .zmap, .catidx; the registries cap at 256 each) and the default
+    // soft limit is 1024: a server that touches a few hundred DB-years would fail opens with EMFILE. Raise the soft limit
+    // toward the hard one; a failure only leaves the limit where it was.
+    constexpr rlim_t WANTED_OPEN_FILES = 65536;
+    if (rlimit nofile{}; getrlimit(RLIMIT_NOFILE, &nofile) == 0 && nofile.rlim_cur < WANTED_OPEN_FILES) {
+        const rlim_t before = nofile.rlim_cur;
+        nofile.rlim_cur = std::min(WANTED_OPEN_FILES, nofile.rlim_max);
+        if (nofile.rlim_cur > before && setrlimit(RLIMIT_NOFILE, &nofile) == 0) {
+            spdlog::info("[BOOT] - Open-files limit raised from {} to {}", before, nofile.rlim_cur);
+        } else if (before < 4096) {
+            spdlog::warn("[BOOT] - Open-files limit is {} (hard limit {}): a server with many DB-years may run out of descriptors", before, nofile.rlim_max);
+        }
+    }
 
     // Arguments parsing
     std::string host = program.get<std::string>("--host");
