@@ -2,6 +2,7 @@
 #include "include/XStore/XStore.h"
 #include "include/XStore/XStore_ZoneMap.h"
 #include "include/XStore/XStore_CatIdx.h"
+#include "include/XStore/XStore_Indexer.h"
 #include "include/XStore/XStore_RowScan.h"
 #include "include/XStore/XStore_WireEncode.h"
 #include "include/XStore/XStore_WalRing.h"
@@ -1626,6 +1627,9 @@ void SeedTwoBlocks(XStore &store, const std::string &db, uint64_t rows) {
     XStore_Proto::RangeInsert_REP rep;
     store.RangeInsert(&req, &rep);
     ASSERT_NE(rep.insertstatus().find("[INFO]"), std::string::npos) << rep.insertstatus();
+    // The overwrites that follow must find the originals folded: an overwrite of rows still waiting for the pool is
+    // folded in with them and correctly leaves the block exact.
+    xstore::Indexer::Instance().WaitIdle(std::chrono::seconds(30));
 }
 
 constexpr double kDeleted = std::numeric_limits<double>::quiet_NaN(); // marks a deleted row in a final-values vector
@@ -1703,7 +1707,10 @@ void ExpectAggregatesMatch(XStore &store, const std::string &db, const std::vect
 
 // Inexact bit of each block from kOverwriteBase's block on. The zone map's own sum/valid_count are NOT checked: an
 // inexact block keeps counting the replaced rows by design; the aggregates above prove it is not trusted.
+// A block with rows still waiting for the indexer pool reads as inexact (BlockInexact), and an acked insert may still be
+// waiting: let the pool finish first, so the flags checked are the ones the folds and overwrites left.
 void ExpectBlockFlags(const std::string &db_path, const std::vector<bool> &expected_inexact) {
+    xstore::Indexer::Instance().WaitIdle(std::chrono::seconds(30));
     ZoneMapFile &zmap = XStore::GetOrOpenZoneMap(db_path, 2023, kWideRowLength);
     const uint64_t first_block = BlockIndexForRow(kOverwriteBase - kYear2023StartEpoch, zmap.RowsPerBlockValue());
     for (size_t b = 0; b < expected_inexact.size(); ++b) {
