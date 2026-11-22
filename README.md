@@ -9,7 +9,27 @@ Source code for project XStore and its related work.
 Author: Lan Nguyen (Lnguyen18@hawk.illinoistech.edu)\
 Advisor: Ioan Raicu (iraicu@illinoistech.edu)
 
-This work has been published to:
+This work has been published to the venues below. If you find XStore helpful, please cite it.
+
+<details open><summary>XStore: A High-performance Lightweight Time-series Storage System:</summary>
+
+```
+Lan Nguyen, Ioan Raicu.
+“XStore: A High-performance Lightweight Time-series Storage System”,
+IEEE International Conference on Big Data (IEEE BigData 2026), December 14-17, 2026
+```
+
+```bibtex
+@inproceedings{nguyen2026xstore,
+  author    = {Nguyen, Lan and Raicu, Ioan},
+  title     = {{XStore}: A High-performance Lightweight Time-series Storage System},
+  booktitle = {2026 IEEE International Conference on Big Data (BigData)},
+  year      = {2026},
+  note      = {To appear}
+}
+```
+
+</details>
 
 <details open><summary>Accelerating CRUD with Chrono Dilation for Time-Series Storage Systems:</summary>
 
@@ -17,6 +37,15 @@ This work has been published to:
 Lan Nguyen, Ioan Raicu.
 “Accelerating CRUD with Chrono Dilation for Time-Series Storage Systems”,
 IEEE/ACM Supercomputing/SC 2023
+```
+
+```bibtex
+@misc{nguyen2023chrono,
+  author       = {Nguyen, Lan and Raicu, Ioan},
+  title        = {Accelerating {CRUD} with Chrono Dilation for Time-Series Storage Systems},
+  howpublished = {Poster, IEEE/ACM Supercomputing (SC23)},
+  year         = {2023}
+}
 ```
 
 * Poster: [Link to Poster](https://sc23.supercomputing.org/proceedings/src_poster/poster_files/spostg124s3-file1.pdf)
@@ -204,3 +233,7 @@ Performance evaluated across latency, throughput, aggregate/analytical queries, 
 ![XStore Backtesting](benchmark_artifact_91e167d0/XStore_Backtester.svg)
 
 </details>
+
+# License
+
+Copyright 2021-2026 Lan Nguyen. Licensed under the [Apache License 2.0](LICENSE). Third-party components keep their own licenses, see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
