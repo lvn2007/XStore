@@ -1,0 +1,5 @@
+[2026-11-08 23:47:38.847] [SERVER] [INFO] [SYSSTATS] - Broadcasting host stats on tcp://0.0.0.0:9496 every 2000ms
+[2026-11-08 23:47:38.847] [SERVER] [INFO] [SYSSTATS] - DataStore dir backed by /proc/diskstats device md0 (9:0) -- disk iops track that block device
+[2026-11-08 23:47:39.536] [SERVER] [INFO] [BOOT] - Bitmap build off (--bitmap-build)
+[2026-11-08 23:47:39.537] [SERVER] [INFO] [NETWORKING] - Listening on: tcp://0.0.0.0:9497
+[2026-11-08 23:47:39.540] [SERVER] [INFO] [NETWORKING] - Launched: 16 worker thread

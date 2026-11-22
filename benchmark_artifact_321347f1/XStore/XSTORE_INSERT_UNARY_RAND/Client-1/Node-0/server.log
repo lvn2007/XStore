@@ -1,0 +1,9 @@
+[2026-11-08 21:36:50.842] [SERVER] [INFO] [SYSSTATS] - Broadcasting host stats on tcp://0.0.0.0:9496 every 2000ms
+[2026-11-08 21:36:50.842] [SERVER] [INFO] [SYSSTATS] - DataStore dir backed by /proc/diskstats device md0 (9:0) -- disk iops track that block device
+[2026-11-08 21:36:51.909] [SERVER] [INFO] [BOOT] - Bitmap build off (--bitmap-build)
+[2026-11-08 21:36:51.910] [SERVER] [INFO] [NETWORKING] - Listening on: tcp://0.0.0.0:9497
+[2026-11-08 21:36:51.913] [SERVER] [INFO] [NETWORKING] - Launched: 16 worker thread
+[2026-11-08 21:37:35.008] [SERVER] [INFO] [CREATE DB] [DB: BENCH_DB] - Created DB
+[2026-11-08 21:37:35.010] [SERVER] [INFO] [COLUMN COUNT GROWTH] [DB: BENCH_DB] - columnCount grew to 128
+[2026-11-08 21:37:35.010] [SERVER] [WARNING] [ZONEMAP] [DB: BENCH_DB] - tracked column width grows 64 -> 128; existing year index files (if any) are widened in the background once the width has not grown for 30 s (queries on the new columns full-scan meanwhile)
+[2026-11-08 21:38:05.923] [SERVER] [INFO] [LIVE WIDEN] [DB: BENCH_DB] - Width stable for 30 s; widening its year index files, newest year first

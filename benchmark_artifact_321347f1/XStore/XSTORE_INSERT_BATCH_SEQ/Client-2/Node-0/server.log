@@ -1,0 +1,29 @@
+[2026-11-08 21:51:36.866] [SERVER] [INFO] [SYSSTATS] - Broadcasting host stats on tcp://0.0.0.0:9496 every 2000ms
+[2026-11-08 21:51:36.867] [SERVER] [INFO] [SYSSTATS] - DataStore dir backed by /proc/diskstats device md0 (9:0) -- disk iops track that block device
+[2026-11-08 21:51:37.918] [SERVER] [INFO] [BOOT] - Bitmap build off (--bitmap-build)
+[2026-11-08 21:51:37.919] [SERVER] [INFO] [NETWORKING] - Listening on: tcp://0.0.0.0:9497
+[2026-11-08 21:51:37.924] [SERVER] [INFO] [NETWORKING] - Launched: 16 worker thread
+[2026-11-08 21:52:21.011] [SERVER] [INFO] [CREATE DB] [DB: BENCH_DB] - Created DB
+[2026-11-08 21:52:21.776] [SERVER] [INFO] [COLUMN COUNT GROWTH] [DB: BENCH_DB] - columnCount grew to 128
+[2026-11-08 21:52:21.776] [SERVER] [WARNING] [ZONEMAP] [DB: BENCH_DB] - tracked column width grows 64 -> 128; existing year index files (if any) are widened in the background once the width has not grown for 30 s (queries on the new columns full-scan meanwhile)
+[2026-11-08 21:52:21.776] [SERVER] [INFO] [BATCH INSERT] [DB: BENCH_DB] - Inserted 10000 elements successfully
+[2026-11-08 21:52:21.814] [SERVER] [INFO] [BATCH INSERT] [DB: BENCH_DB] - Inserted 10000 elements successfully
+[2026-11-08 21:52:22.302] [SERVER] [INFO] [BATCH INSERT] [DB: BENCH_DB] - Inserted 10000 elements successfully
+[2026-11-08 21:52:22.355] [SERVER] [INFO] [BATCH INSERT] [DB: BENCH_DB] - Inserted 10000 elements successfully
+[2026-11-08 21:52:22.769] [SERVER] [INFO] [BATCH INSERT] [DB: BENCH_DB] - Inserted 10000 elements successfully
+[2026-11-08 21:52:22.813] [SERVER] [INFO] [BATCH INSERT] [DB: BENCH_DB] - Inserted 10000 elements successfully
+[2026-11-08 21:52:23.222] [SERVER] [INFO] [BATCH INSERT] [DB: BENCH_DB] - Inserted 10000 elements successfully
+[2026-11-08 21:52:23.285] [SERVER] [INFO] [BATCH INSERT] [DB: BENCH_DB] - Inserted 10000 elements successfully
+[2026-11-08 21:52:23.690] [SERVER] [INFO] [BATCH INSERT] [DB: BENCH_DB] - Inserted 10000 elements successfully
+[2026-11-08 21:52:23.740] [SERVER] [INFO] [BATCH INSERT] [DB: BENCH_DB] - Inserted 10000 elements successfully
+[2026-11-08 21:52:24.178] [SERVER] [INFO] [BATCH INSERT] [DB: BENCH_DB] - Inserted 10000 elements successfully
+[2026-11-08 21:52:24.254] [SERVER] [INFO] [BATCH INSERT] [DB: BENCH_DB] - Inserted 10000 elements successfully
+[2026-11-08 21:52:24.683] [SERVER] [INFO] [BATCH INSERT] [DB: BENCH_DB] - Inserted 10000 elements successfully
+[2026-11-08 21:52:24.718] [SERVER] [INFO] [BATCH INSERT] [DB: BENCH_DB] - Inserted 10000 elements successfully
+[2026-11-08 21:52:25.135] [SERVER] [INFO] [BATCH INSERT] [DB: BENCH_DB] - Inserted 10000 elements successfully
+[2026-11-08 21:52:25.189] [SERVER] [INFO] [BATCH INSERT] [DB: BENCH_DB] - Inserted 10000 elements successfully
+[2026-11-08 21:52:25.613] [SERVER] [INFO] [BATCH INSERT] [DB: BENCH_DB] - Inserted 10000 elements successfully
+[2026-11-08 21:52:25.670] [SERVER] [INFO] [BATCH INSERT] [DB: BENCH_DB] - Inserted 10000 elements successfully
+[2026-11-08 21:52:26.073] [SERVER] [INFO] [BATCH INSERT] [DB: BENCH_DB] - Inserted 10000 elements successfully
+[2026-11-08 21:52:26.152] [SERVER] [INFO] [BATCH INSERT] [DB: BENCH_DB] - Inserted 10000 elements successfully
+[2026-11-08 21:52:51.931] [SERVER] [INFO] [LIVE WIDEN] [DB: BENCH_DB] - Width stable for 30 s; widening its year index files, newest year first
