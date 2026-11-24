@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use XStore in your work, please cite the paper below."
+title: "XStore"
+type: software
+authors:
+  - family-names: Nguyen
+    given-names: Lan
+    affiliation: Illinois Institute of Technology
+  - family-names: Raicu
+    given-names: Ioan
+    affiliation: Illinois Institute of Technology
+repository-code: "https://gitlab.com/lvn2007/XStore"
+license: Apache-2.0
+preferred-citation:
+  type: conference-paper
+  title: "XStore: A High-performance Lightweight Time-series Storage System"
+  authors:
+    - family-names: Nguyen
+      given-names: Lan
+    - family-names: Raicu
+      given-names: Ioan
+  collection-title: "2026 IEEE International Conference on Big Data (BigData)"
+  year: 2026
+  notes: "To appear"
